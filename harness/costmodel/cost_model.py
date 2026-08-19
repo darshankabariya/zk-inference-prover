@@ -14,6 +14,7 @@ import sys
 
 OUT = pathlib.Path(__file__).parent / "out"
 B1 = pathlib.Path(__file__).parent.parent / "b1" / "out"
+B3 = pathlib.Path(__file__).parent.parent / "b3" / "out"
 
 
 def load(name, required=True):
@@ -80,6 +81,36 @@ LOGUP_NS = {
     for b in LOGUP_MARGINAL
 }
 
+# --- B3's two missing terms, measured ----------------------------------------
+# (1) the r^T W walk. Its three QM31 accumulator columns cost 12 M31 cells per
+#     trace row, and a row carries `p` weights, so the walk commits 12/p fresh
+#     cells per weight -- a knob, not a constant. B3's width sweep is read here
+#     and the design point is the one that minimises fresh cells subject to the
+#     proof staying small (b3/README.md section 2).
+# (2) the byte-range check on every committed int8 activation, which B2's model
+#     charged nothing for: one LogUp lookup per activation cell.
+def b3_constants():
+    f = B3 / "width.json"
+    if not f.exists():
+        return None
+    pts = json.loads(f.read_text())["result"]["points"]
+    best = min(pts, key=lambda p: (p["proof_bytes"], p["cells"]["fresh_per_token"]))
+    return dict(
+        cells_per_weight=best["cells"]["cells_per_weight"],
+        weights_per_row=best["layout_x"]["weights_per_row"],
+        proof_bytes=best["proof_bytes"],
+        shape=best["shape"], s=best["s"],
+        range_all=[(p["cells"]["cells_per_weight"], p["cells"]["fresh_per_token"])
+                   for p in pts],
+        # cells of *preprocessed* trace the walk reads per proof, per weight
+        preprocessed_per_weight=best["cells"]["preprocessed_per_weight"],
+    )
+
+
+B3C = b3_constants()
+WEIGHT_WALK_CELLS_PER_WEIGHT = B3C["cells_per_weight"] if B3C else 0.0
+PREPROCESSED_PER_WEIGHT = B3C["preprocessed_per_weight"] if B3C else 0.0
+
 # ---------------------------------------------------------------- the model --
 # Committed cells per decoded token, in the shape B1's witness actually has.
 #   acc   one int32 accumulator per matmul output              (B1: 45.5% of cells)
@@ -89,7 +120,7 @@ LOGUP_NS = {
 #   logup the LogUp interaction column each lookup drags along (B2, measured)
 
 
-def cells_per_token(cfg, ctx, batch):
+def cells_per_token(cfg, ctx, batch, seq=None):
     L, d, nh, nkv, hd, dff, vocab = cfg
     acc = L * ((nh + 2 * nkv) * hd + d + 2 * dff + d) + vocab
     act = L * (2 * d + nh * hd + dff) + d
@@ -97,14 +128,26 @@ def cells_per_token(cfg, ctx, batch):
     attn = 3 * L * nh * ctx
     n_lookups = L * nh * ctx + L * (2 * dff + 2 * (2 * d + 1)) + vocab
     logup = n_lookups * LOGUP_MARGINAL[batch]
+    # B3: the weight walk's accumulators, and a range check per int8 activation.
+    params = n_params(cfg)
+    walk = WEIGHT_WALK_CELLS_PER_WEIGHT * params / seq if seq else 0.0
+    rng = act * LOGUP_MARGINAL[batch] if seq else 0.0
+    total = acc + act + nl + attn + logup + walk + rng
     return dict(acc=acc, act=act, nl=nl, attn=attn, logup=logup, n_lookups=n_lookups,
-                flat=acc + act + nl, total=acc + act + nl + attn + logup)
+                walk=walk, range=rng, flat=acc + act + nl, total=total,
+                # committed offline, but read once per proof by the walk
+                preprocessed=PREPROCESSED_PER_WEIGHT * params / seq if seq else 0.0)
+
+
+def n_params(cfg):
+    L, d, nh, nkv, hd, dff, vocab = cfg
+    return vocab * d + L * (d * nh * hd + 2 * d * nkv * hd + nh * hd * d + 3 * d * dff)
 
 
 def ops_per_token(cfg, ctx, seq):
     """In-circuit M31 multiplies, the E6b Freivalds model (freivalds.py)."""
     L, d, nh, nkv, hd, dff, vocab = cfg
-    params = vocab * d + L * (d * nh * hd + 2 * d * nkv * hd + nh * hd * d + 3 * d * dff)
+    params = n_params(cfg)
     mats = [(d, (nh + 2 * nkv) * hd), (nh * hd, d), (d, 2 * dff), (dff, d)]
     io = sum(a + b for a, b in mats)
     ext = 4  # QM31 = 4 x M31
@@ -147,6 +190,13 @@ print(f"  QM31 mul      SIMD, {ENV['threads']} threads              {g(QM31_MUL_
 for b in sorted(LOGUP_MARGINAL):
     print(f"  LogUp batch {b} into 2^{logup['result']['log_table']} table      "
           f"{LOGUP_MARGINAL[b]:.0f} extra cells/lookup, {LOGUP_NS[b]:.0f} ns/lookup")
+if B3C:
+    print(f"  r^T W walk    B3, {B3C['weights_per_row']} weights/row     "
+          f"{WEIGHT_WALK_CELLS_PER_WEIGHT:.3f} fresh cells/weight "
+          f"(12/p; {PREPROCESSED_PER_WEIGHT:.2f} preprocessed cells/weight read per proof)")
+else:
+    print("  r^T W walk    NOT MEASURED -- run experiments/b3/run_all.sh; "
+          "the walk is charged 0 cells below")
 print()
 
 # --- validate the cells model against B1's actual witness ---------------------
@@ -166,7 +216,7 @@ BATCH = min(LOGUP_MARGINAL, key=LOGUP_MARGINAL.get)  # cheapest measured batchin
 print(f"Gemma-3-27B proxy, S={SEQ}, LogUp batch {BATCH} -- the largest blowup 2 allows, "
       f"since batch b needs degree-(b+1) constraints")
 for ctx in (4096, TARGET_CTX):
-    c = cells_per_token(GEMMA, ctx, BATCH)
+    c = cells_per_token(GEMMA, ctx, BATCH, SEQ)
     o = ops_per_token(GEMMA, ctx, SEQ)
     t_commit = c["total"] / COMMIT_CELLS_S
     t_e2e = c["total"] / E2E_CELLS_S
@@ -176,13 +226,17 @@ for ctx in (4096, TARGET_CTX):
     print(f"    committed cells/token  {g(c['total'])}  "
           f"(attention {c['attn'] / c['total'] * 100:.0f}%, "
           f"LogUp columns {c['logup'] / c['total'] * 100:.0f}%, "
-          f"layer I/O {c['flat'] / c['total'] * 100:.0f}%)")
+          f"layer I/O {c['flat'] / c['total'] * 100:.0f}%, "
+          f"weight walk {c['walk'] / c['total'] * 100:.0f}%, "
+          f"int8 range {c['range'] / c['total'] * 100:.0f}%)")
+    print(f"    + preprocessed         {g(c['preprocessed'])}cells/token of weight trace, "
+          f"committed offline but read once per proof (B3)")
     print(f"    in-circuit M31 mul/tok {g(o['total'])}  "
           f"(weight pass {o['weight_pass'] / o['total'] * 100:.0f}%)")
     print(f"    on this box            commit-limited {1 / (t_commit + t_field):5.2f} tok/s"
           f"   |  measured end-to-end rate {1 / (t_e2e + t_field):5.2f} tok/s")
 
-c = cells_per_token(GEMMA, TARGET_CTX, BATCH)
+c = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ)
 o = ops_per_token(GEMMA, TARGET_CTX, SEQ)
 need_cells = c["total"] * TARGET_TOKS
 need_ops = o["total"] * TARGET_TOKS
@@ -199,6 +253,23 @@ print(f"  in-circuit field   {g(need_ops)}M31 mul/s  "
          else f"already {M31_MUL_S / need_ops:,.1f}x headroom"))
 print(f"  commit-every-MAC   {g(o['naive_cells'] * TARGET_TOKS)}cells/s "
       f"= {o['naive_cells'] * TARGET_TOKS * 4 / 1e12:,.1f} TB/s of trace  ->  impossible")
+if B3C:
+    print()
+    print(f"B3's weight walk, folded in (measured on {B3C['shape']} at S={B3C['s']}):")
+    print(f"  {WEIGHT_WALK_CELLS_PER_WEIGHT:.3f} fresh cells/weight at "
+          f"{B3C['weights_per_row']} weights/row  ->  "
+          f"{g(c['walk'])}cells/token, {c['walk'] / c['total'] * 100:.1f}% of the total")
+    print("  the whole measured trade-off (cells/weight, fresh cells/token):")
+    print("    " + "  ".join(f"{cw:.3f}->{g(fpt)}" for cw, fpt in B3C["range_all"]))
+    print(f"  int8 byte-range checks add {g(c['range'])}cells/token "
+          f"({c['range'] / c['total'] * 100:.1f}%), also new")
+    print(f"  plan's threshold was 0.25 cells/weight for the 181 M picture to stand: "
+          f"{'stands' if WEIGHT_WALK_CELLS_PER_WEIGHT <= 0.25 else 'DOES NOT stand'}")
+    print(f"  on top, {g(c['preprocessed'])}cells/token of preprocessed weight trace are "
+          f"read per proof")
+    print(f"  ({(c['preprocessed'] + c['total']) / c['total'] - 1:.0%} more cells to walk than "
+          f"the fresh count if a preprocessed cell costs the same as a fresh one; its "
+          f"interpolate/LDE/Merkle share is offline, only quotients and OODS are not)")
 print()
 print("proof size / verification, measured at blowup 2 and "
       f"{SEC['n_queries']} queries:")
