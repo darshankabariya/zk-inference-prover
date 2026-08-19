@@ -10,6 +10,7 @@ b1/quant.py        bf16 rounding, int8 quantization, exact integer GEMM
 b1/model.py        the explicit forward pass (no transformers at inference time)
 b1/common.py       determinism setup, corpus slices, the spec table
 b1/selftest.py     faithfulness, H2 (M31 embedding), determinism
+b1/probe_order.py  §5 follow-up: divergence origin + schedule stress test
 b1/ppl.py          quality sweep over 20,480 tokens
 b1/outliers.py     why static per-tensor W8A8 loses
 b1/gen_witness.py  the witness dump + manifest ("circuit config")
@@ -151,23 +152,40 @@ Regenerating the witness in a fresh process reproduces it bit for bit
 The stronger check — batched vs token-at-a-time evaluation of the same sequence —
 exposes something worth carrying forward:
 
-| spec | residual stream L0 → L23 | logits | argmax | bit-identical |
+| spec | residual stream L0 → L23 | logits | argmax | bit-identical (this slice) |
 |---|---|---|---|---|
 | `fp32` | 1.95e-3 → 1.56e-2 | 2.90e-4 | 100% | no |
 | `dynamic-int8` | 0 → 3.00 | 2.25 | 96.9% | no |
-| `bf16-reduce` | 0 → 0 | 0 | 100% | **yes** |
-| `qk-int8` | 0 → 0 | 0 | 100% | **yes** |
+| `bf16-reduce` | 0 → 0 | 0 | 100% | yes — **false positive, see below** |
+| `qk-int8` | 0 → 0 | 0 | 100% | yes (empirically) |
 
 The int8 matmuls cannot differ — integer accumulation is order-independent. The
-culprit is the fp32 attention matmuls, Q·Kᵀ in particular: BLAS contracts it in a
-different order for a 1-row GEMV than for a 32-row GEMM, and under bf16 storage a
-1e-7 order difference crosses a rounding boundary and compounds through 24 layers
-(exactly 0 at layer 0, 3.0 by layer 23, flipping 1 of 32 predicted tokens). Make
-that matmul exact (`qk-int8`) or pin the reduction order (`bf16-reduce`) and the
-two evaluation paths become bit-identical.
+origin is the fp32-accumulated Q·Kᵀ: BLAS contracts it in a different order for a
+1-row GEMV than for a 32-row GEMM, and under bf16 storage a sub-ulp order
+difference occasionally crosses a rounding boundary and compounds through 24
+layers (exactly 0 at layer 0, 3.0 by layer 23, flipping 1 of 32 predicted
+tokens). `probe_order.py` localizes the first divergence to exactly that op
+(token 7, the layer-15 scores) and adds the test power this single-slice table
+lacks — 3 fresh 48-token slices × 3 schedules (full batch, two half-batches,
+token-at-a-time):
+
+* **`bf16-reduce`'s "yes" above is a false positive.** On fresh slices it
+  diverges every time (logit diffs up to 2.6). Pinning the RMSNorm/softmax
+  reductions does nothing for Q·Kᵀ; the selftest slice passed by luck, because
+  divergence needs a data-dependent rounding-boundary crossing.
+* `qk-int8` (alone or combined with `bf16-reduce`) is bit-identical on every
+  slice and schedule tried — but *empirically*, not by construction: A·V and the
+  fp32 reductions are still unpinned BLAS/torch ops that happen to be
+  schedule-invariant in torch-CPU at 4 threads. A GPU runtime (split-K kernels,
+  atomics) voids that.
+* Two half-batches always match the full batch; only the single-token path
+  diverges. The schedule mismatch is literally decode vs prefill.
 
 So a prover and a runtime that batch differently do not compute the same thing
-unless every reduction has a pinned order. That is a constraint on B6, not a detail.
+until **every** non-integer accumulation — attention matmuls included — is made
+exact or given a pinned, provable order by construction. "Bit-identical on a
+test run" is a necessary check, never the guarantee. That is a constraint on B5
+and B6, not a detail.
 
 ### 6. The witness
 
@@ -226,11 +244,17 @@ activations rather than by clipping.
   needs (`rsqrt`, `silu`, `exp`, `reciprocal`) with inputs and outputs.
 * **B5** — two warnings. Quantizing Q·Kᵀ to int8 costs **+4.8 points on top** of the
   attested spec (9.26% total), the most expensive single choice measured here — it
-  buys batching-invariance (§5) at a real quality price. And A·V has a structural
+  buys schedule-invariance for Q·Kᵀ (§5) at a real quality price. The untested
+  middle option is a pinned-order bf16 tree for the attention accumulations
+  themselves (B1 measured trees only for the norm/softmax reductions, where they
+  were quality-neutral). And A·V has a structural
   problem B1 could not paper over: its reduction runs along the *sequence* axis, so
   per-token V scales do not factor out of the sum the way per-token Q and K scales
   do out of Q·Kᵀ. B5 must choose per-channel-over-context or per-block V scales, and
   neither commits cleanly as the KV cache grows.
-* **B6** — batching must be pinned or prover and runtime disagree (§5).
+* **B6** — every non-integer accumulation (attention matmuls included) must be
+  exact or pinned by construction, or prover and runtime disagree; decode-vs-prefill
+  equivalence on ≥3 disjoint slices is the acceptance test, with `probe_order.py`
+  as the template (§5).
 * **B8** — the scheme to replicate at 8–9B, and the numbers to beat: +4.5% ppl at
   0.5B, with static W8A8 at +407% as the control.
