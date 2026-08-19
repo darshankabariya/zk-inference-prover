@@ -86,6 +86,15 @@ The numbers below therefore measure quantization, not a broken model.
 int8 weights, one calibrated activation scale per tensor); the rest hold one choice
 out of int8/bf16 at a time.
 
+B5 later added ten more rows to this table through the same harness — the integer
+softmax, `qk-int12`, power-of-two scales and their diagnostics. They are reported
+in `b5/README.md` rather than here, because they measure B5's design choices
+rather than B1's; `uv run python b1/ppl.py --b5 --markdown` prints them. The
+forward pass gained `Spec.int_softmax`, `qk_bits`, `pow2_scales` and
+`q_scale_mode` for them, and `ppl.py` gained an attention calibration pass
+(`out/attn_ranges.json`) alongside the static one. None of it changes any number
+above.
+
 * **The attested spec costs +4.5% perplexity** — it misses B1's +2% bar by ~2.2×.
 * **The standard baseline is 91× worse.** Static per-tensor W8A8 costs **+407%**.
   This is the leg of the theory that was actually in question, and it is confirmed
@@ -180,6 +189,12 @@ token-at-a-time):
   atomics) voids that.
 * Two half-batches always match the full batch; only the single-token path
   diverges. The schedule mismatch is literally decode vs prefill.
+* *(B5 note: this whole table is environment-dependent, and the divergence does
+  not reproduce inside B5's container — every spec, `dynamic-int8` included, comes
+  out bit-identical there, so the test discriminates nothing on its own. That is
+  the warning above, confirmed. `b5/schedule.py` replaces it with a probe that
+  does discriminate: re-associating the Q·Kᵀ contraction on the real RoPE outputs
+  changes the fp32 result by up to 4.6e-5 and leaves the integer one untouched.)*
 
 So a prover and a runtime that batch differently do not compute the same thing
 until **every** non-integer accumulation — attention matmuls included — is made
@@ -244,7 +259,10 @@ activations rather than by clipping.
   needs (`rsqrt`, `silu`, `exp`, `reciprocal`) with inputs and outputs.
 * **B5** — two warnings. Quantizing Q·Kᵀ to int8 costs **+4.8 points on top** of the
   attested spec (9.26% total), the most expensive single choice measured here — it
-  buys schedule-invariance for Q·Kᵀ (§5) at a real quality price. The untested
+  buys schedule-invariance for Q·Kᵀ (§5) at a real quality price. *(B5's answer:
+  the price is the 8 bits, not the quantization. Q·Kᵀ reduces over d_head = 64, so
+  int12 × int11 fits the same M31 window at the same one committed cell per value,
+  and `qk-int12` scores 22.734 — below the attested spec's own 22.835.)* The untested
   middle option is a pinned-order bf16 tree for the attention accumulations
   themselves (B1 measured trees only for the norm/softmax reductions, where they
   were quality-neutral). And A·V has a structural

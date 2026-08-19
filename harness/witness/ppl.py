@@ -14,12 +14,13 @@ import time
 
 import torch
 
-from common import MODEL, OUT, SPECS, chunks, setup, tokens
+from common import B5_SPECS, MODEL, OUT, SPECS, chunks, setup, tokens
 from model import Model
-from quant import INT8_MAX, bf16_ceil
+from quant import INT8_MAX, bf16_ceil, qscale
 
 RESULTS = os.path.join(OUT, "ppl.json")
 CALIB = os.path.join(OUT, "static_ranges.json")
+ACALIB = os.path.join(OUT, "attn_ranges.json")
 
 
 def calibration_scales():
@@ -41,11 +42,50 @@ def calibration_scales():
     return {k: bf16_ceil(torch.tensor(v) / INT8_MAX).view(1, 1) for k, v in ranges.items()}
 
 
+def attention_ranges():
+    """max|k| per (layer, head) and max|v| per (layer, head, channel).
+
+    B5: the integer softmax needs the K and V scales to be constant along the
+    context axis (the max shift and the A.V accumulator are integer statements
+    only then), and a scale that is recomputed as the cache grows would
+    re-quantize columns that are already committed.  So they are calibrated once,
+    on the same disjoint slice B1's static W8A8 baseline uses.
+    """
+    if not os.path.exists(ACALIB):
+        _, cal = tokens()
+        m = Model(MODEL, SPECS["bf16-only"])
+        m.attn_calib = {}
+        for c in chunks(cal):
+            m.forward(c)
+        ranges = {k: torch.stack(v).amax(0).tolist() for k, v in m.attn_calib.items()}
+        json.dump(ranges, open(ACALIB, "w"), indent=1, sort_keys=True)
+        del m
+    return json.load(open(ACALIB))
+
+
+def attention_scales(spec):
+    """Calibrated ranges -> the two scale tensors `Model.kv_scales` expects."""
+    qmax_k = (1 << (spec.qk_bits[1] - 1)) - 1
+    out = {}
+    for k, v in attention_ranges().items():
+        t = torch.tensor(v)
+        p2 = spec.pow2_scales in ("all", "attn")
+        if k.endswith(".k"):                       # (nh,) -> (nh, 1, 1)
+            out[k] = qscale(t.view(-1, 1, 1), -1, qmax_k, p2)
+        elif k.endswith(".q"):
+            qmax_q = (1 << (spec.qk_bits[0] - 1)) - 1
+            out[k] = qscale(t.view(-1, 1, 1), -1, qmax_q, p2)
+        else:                                      # (nh, hd) -> (nh, 1, hd)
+            out[k] = qscale(t.unsqueeze(1), 1, INT8_MAX, p2)
+    return out
+
+
 def run(name, n_chunks):
     spec = SPECS[name]
     scales = calibration_scales() if spec.linear == "static" else None
+    ascales = attention_scales(spec) if spec.int_softmax else None
     t0 = time.time()
-    m = Model(MODEL, spec, static_scales=scales)
+    m = Model(MODEL, spec, static_scales=scales, attn_scales=ascales)
     ev, _ = tokens()
     nll, cnt = 0.0, 0
     for i, c in enumerate(chunks(ev, n_chunks)):
@@ -59,15 +99,17 @@ def run(name, n_chunks):
                 tokens=cnt, chunks=n_chunks, seconds=round(time.time() - t0, 1))
 
 
-def markdown():
+def markdown(only=None):
     r = json.load(open(RESULTS))
-    base = r["fp32"]["ppl"]
-    print("| spec | ppl | vs fp32 |")
-    print("|---|---|---|")
-    for k in [s for s in SPECS if s in r]:
+    base, att = r["fp32"]["ppl"], r["dynamic-int8"]["ppl"]
+    keys = [s for s in SPECS if s in r and (only is None or s in only)]
+    print("| spec | ppl | vs fp32 | vs dynamic-int8 |")
+    print("|---|---|---|---|")
+    for k in keys:
         v = r[k]
         d = "--" if k == "fp32" else f"{(v['ppl'] / base - 1) * 100:+.2f}%"
-        print(f"| `{k}` | {v['ppl']:.3f} | {d} |")
+        a = "--" if k == "dynamic-int8" else f"{(v['ppl'] / att - 1) * 100:+.2f}%"
+        print(f"| `{k}` | {v['ppl']:.3f} | {d} | {a} |")
 
 
 def report():
@@ -92,17 +134,24 @@ if __name__ == "__main__":
     p.add_argument("--chunks", type=int, default=40)
     p.add_argument("--report", action="store_true")
     p.add_argument("--markdown", action="store_true")
+    p.add_argument("--b5", action="store_true", help="only B5's probes (with --markdown/--missing)")
+    p.add_argument("--no-save", action="store_true", help="smoke run: do not touch ppl.json")
     a = p.parse_args()
     setup()
     if a.report or a.markdown:
-        (markdown if a.markdown else report)()
+        if a.markdown:
+            markdown(B5_SPECS + ["fp32", "dynamic-int8", "qk-int8"] if a.b5 else None)
+        else:
+            report()
         raise SystemExit
     done = json.load(open(RESULTS)) if os.path.exists(RESULTS) else {}
-    todo = [s for s in SPECS if s not in done] if a.missing else (list(SPECS) if a.all else [a.spec])
+    pool = B5_SPECS if a.b5 else list(SPECS)
+    todo = [s for s in pool if s not in done] if a.missing else (pool if a.all else [a.spec])
     for name in todo:
         print(f"== {name}: {SPECS[name].asdict()}", flush=True)
         out = run(name, a.chunks)
-        all_r = json.load(open(RESULTS)) if os.path.exists(RESULTS) else {}
-        all_r[name] = out
-        json.dump(all_r, open(RESULTS, "w"), indent=1)
+        if not a.no_save:
+            all_r = json.load(open(RESULTS)) if os.path.exists(RESULTS) else {}
+            all_r[name] = out
+            json.dump(all_r, open(RESULTS, "w"), indent=1)
         print(f"   ppl = {out['ppl']:.4f}  ({out['seconds']}s)", flush=True)

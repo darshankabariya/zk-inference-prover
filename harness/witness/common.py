@@ -34,7 +34,40 @@ SPECS = {
     "bf16-norm":   Spec(linear="dynamic", nonlinear="bf16", reduce="bf16-norm"),
     "bf16-softmax": Spec(linear="dynamic", nonlinear="bf16", reduce="bf16-softmax"),
     "qk-int8":     Spec(linear="dynamic", nonlinear="bf16", qk_int8=True),
+    # --- B5 probes -----------------------------------------------------------
+    # the free knob: the M31 window is per matmul and Q.K^T reduces over hd = 64,
+    # so int12 x int11 costs the same committed cell as int8 x int8
+    "qk-int12":    Spec(linear="dynamic", nonlinear="bf16", qk_int8=True, qk_bits=(12, 11)),
+    # power-of-two scales everywhere: every dequant multiply becomes an exponent
+    # add, and the exp-table input becomes a bit window of the score
+    "pow2-scales": Spec(linear="dynamic", nonlinear="bf16", pow2_scales="all"),
+    # the integer softmax, in the shape the multiplicity ladder forces
+    "int-softmax":      Spec(linear="dynamic", nonlinear="bf16", int_softmax=True),
+    "int-softmax-pow2": Spec(linear="dynamic", nonlinear="bf16", int_softmax=True,
+                             pow2_scales="all"),
+    # the lever that matters: pow2 only in the attention path, which is what turns
+    # the exp-table input into a bit window of the score
+    "int-softmax-p2qk": Spec(linear="dynamic", nonlinear="bf16", int_softmax=True,
+                             pow2_scales="attn"),
+    "int-softmax-12p2": Spec(linear="dynamic", nonlinear="bf16", int_softmax=True,
+                             qk_bits=(12, 11), pow2_scales="attn"),
+    "int-softmax-12":   Spec(linear="dynamic", nonlinear="bf16", int_softmax=True,
+                             qk_bits=(12, 11)),
+    # diagnostics: is the loss the 8-bit numerator, or the calibrated K/V scales?
+    "int-softmax-n16":  Spec(linear="dynamic", nonlinear="bf16", int_softmax=True,
+                             num_bits=16),
+    "int-softmax-dyn":  Spec(linear="dynamic", nonlinear="bf16", int_softmax=True,
+                             attn_scale_mode="cache"),
+    # one Q scale per (layer, head) as well: the exp-table exponent becomes a
+    # public constant and the table can be indexed by the integer shift itself
+    "int-softmax-12sq": Spec(linear="dynamic", nonlinear="bf16", int_softmax=True,
+                             qk_bits=(12, 11), pow2_scales="attn", q_scale_mode="head"),
 }
+
+# B5's probes, kept apart so B1's own table stays what B1 measured
+B5_SPECS = ["qk-int12", "pow2-scales", "int-softmax", "int-softmax-12",
+            "int-softmax-p2qk", "int-softmax-12p2", "int-softmax-pow2",
+            "int-softmax-n16", "int-softmax-dyn", "int-softmax-12sq"]
 
 
 def setup():

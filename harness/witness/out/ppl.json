@@ -226,5 +226,236 @@
   "tokens": 20440,
   "chunks": 40,
   "seconds": 147.8
+ },
+ "qk-int12": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": true,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    12,
+    11
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static"
+  },
+  "ppl": 22.734128111155474,
+  "nll": 3.123867236471456,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 82.3
+ },
+ "pow2-scales": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "all",
+   "attn_scale_mode": "static"
+  },
+  "ppl": 23.357901037170837,
+  "nll": 3.150935301062179,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 79.6
+ },
+ "int-softmax": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": true,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static"
+  },
+  "ppl": 24.025207676350558,
+  "nll": 3.1791035989959178,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 85.0
+ },
+ "int-softmax-12": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    12,
+    11
+   ],
+   "int_softmax": true,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static"
+  },
+  "ppl": 22.74410200984024,
+  "nll": 3.124305859470554,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 89.2
+ },
+ "int-softmax-p2qk": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": true,
+   "num_bits": 8,
+   "pow2_scales": "attn",
+   "attn_scale_mode": "static"
+  },
+  "ppl": 24.54111726940993,
+  "nll": 3.200349966747187,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 102.8
+ },
+ "int-softmax-12p2": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    12,
+    11
+   ],
+   "int_softmax": true,
+   "num_bits": 8,
+   "pow2_scales": "attn",
+   "attn_scale_mode": "static"
+  },
+  "ppl": 22.779862942277784,
+  "nll": 3.1258769414196275,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 90.6
+ },
+ "int-softmax-pow2": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": true,
+   "num_bits": 8,
+   "pow2_scales": "all",
+   "attn_scale_mode": "static"
+  },
+  "ppl": 25.50659599777541,
+  "nll": 3.2389370852953765,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 85.5
+ },
+ "int-softmax-n16": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": true,
+   "num_bits": 16,
+   "pow2_scales": "",
+   "attn_scale_mode": "static"
+  },
+  "ppl": 24.024543365567336,
+  "nll": 3.1790759480396127,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 88.0
+ },
+ "int-softmax-dyn": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": true,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "cache"
+  },
+  "ppl": 23.964272387112548,
+  "nll": 3.176564070669872,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 86.9
+ },
+ "int-softmax-12sq": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    12,
+    11
+   ],
+   "int_softmax": true,
+   "num_bits": 8,
+   "pow2_scales": "attn",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "head"
+  },
+  "ppl": 22.696079304452468,
+  "nll": 3.1221921917043787,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 92.0
  }
 }

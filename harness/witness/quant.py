@@ -71,19 +71,19 @@ def reduce_sum(x, dim=-1, keepdim=False, mode="fp32"):
     return x.sum(dim=dim, keepdim=keepdim)
 
 
-def qscale_per_token(x, eps=1e-30):
+def qscale_per_token(x, pow2=False, eps=1e-30):
     """Dynamic symmetric activation scale, one per token (per row)."""
-    return bf16_ceil(x.abs().amax(dim=-1, keepdim=True).clamp_min(eps) / INT8_MAX)
+    return qscale(x, -1, INT8_MAX, pow2, eps)
 
 
-def qscale_per_channel(w, eps=1e-30):
+def qscale_per_channel(w, pow2=False, eps=1e-30):
     """Symmetric weight scale, one per output channel.  w is (n_in, n_out)."""
-    return bf16_ceil(w.abs().amax(dim=0, keepdim=True).clamp_min(eps) / INT8_MAX)
+    return qscale(w, 0, INT8_MAX, pow2, eps)
 
 
-def quantize(x, s):
-    """int8 values (held in fp32) for x under scale s."""
-    return round_hafz(x / s).clamp_(-INT8_MAX, INT8_MAX)
+def quantize(x, s, qmax=INT8_MAX):
+    """Integer values (held in fp32) for x under scale s."""
+    return round_hafz(x / s).clamp_(-qmax, qmax)
 
 
 def gemm_dtype(k):
@@ -98,3 +98,32 @@ def int_gemm(qx, qw):
     int64 matmul -- `selftest.py` checks that, and the M31 embedding, on real data.
     """
     return (qx.to(qw.dtype) @ qw).float()
+
+
+def pow2_ceil(x):
+    """Smallest power of two >= x, exactly (x > 0).
+
+    A power-of-two scale turns every dequant multiply into an exponent add, which
+    is what lets B5's exp-table input be read off a window of the score's limbs
+    instead of proven through a mantissa product (plan, B5 constraints).
+    """
+    m, e = torch.frexp(x)                       # x = m * 2^e, m in [0.5, 1)
+    e = torch.where(m == 0.5, e - 1, e)         # x already a power of two
+    return torch.ldexp(torch.ones_like(x), e)
+
+
+def qscale(x, dim=-1, qmax=INT8_MAX, pow2=False, eps=1e-30):
+    """Symmetric max-scale over `dim`, as a bf16 (or power-of-two) value."""
+    a = x.abs().amax(dim=dim, keepdim=True).clamp_min(eps) / qmax
+    return pow2_ceil(a) if pow2 else bf16_ceil(a)
+
+
+def int_gemm_exact(qa, qb, bound):
+    """Exact integer matmul whose partial sums are bounded by `bound`.
+
+    fp32 holds integers exactly below 2^24 and fp64 below 2^53, so the operand
+    dtype is chosen from the bound rather than from the reduction width alone --
+    B5's numerator matmul reaches 255 * 127 * C, not 127^2 * C.
+    """
+    dt = torch.float32 if bound < (1 << 24) else torch.float64
+    return (qa.to(dt) @ qb.to(dt)).float()

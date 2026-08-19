@@ -16,6 +16,7 @@ OUT = pathlib.Path(__file__).parent / "out"
 B1 = pathlib.Path(__file__).parent.parent / "b1" / "out"
 B3 = pathlib.Path(__file__).parent.parent / "b3" / "out"
 B4 = pathlib.Path(__file__).parent.parent / "b4" / "out"
+B5 = pathlib.Path(__file__).parent.parent / "b5" / "out"
 
 
 def load(name, required=True):
@@ -149,6 +150,45 @@ def b4_constants():
 B4C = b4_constants()
 LIMB_CELLS_PER_ACC = B4C["cells_per_acc"] if B4C else 0.0
 
+
+# --- B5's terms, measured ------------------------------------------------------
+# (1) alpha: committed cells per (layer, head, key) per decoded token.  B2's model
+#     charged 3 witness columns plus the exp lookup's 2 interaction cells = 5,
+#     which is exactly what B5's v1 layout measures.  The integer softmax commits
+#     the *shift* instead of the score and looks it up directly, so the same
+#     lookup is the range check and one column disappears: 4.
+# (2) the KV cache and the queries have to be committed as quantized integers --
+#     they are matmul outputs, so no column in B2's model held them -- and each
+#     needs a range check, at 2 cells for the wider Q/K and 1 for a packed int8 V.
+# (3) the per-token softmax scalars: the row maximum, the denominator, and the
+#     two-limb range check that makes the A.V window explicit.
+def b5_constants():
+    f = B5 / "block.json"
+    if not f.exists():
+        return None
+    try:
+        pts = json.loads(f.read_text())["result"]["points"]
+    except (ValueError, KeyError):        # a run in progress leaves it empty
+        return None
+    per = {}
+    for v in dict.fromkeys(p["variant"] for p in pts):
+        ps = sorted([p for p in pts if p["variant"] == v], key=lambda p: p["ctx"])
+        # marginal cells per (head, key) per token, from the largest two contexts
+        a, b = ps[-2], ps[-1]
+        per[v] = dict(
+            alpha_grid=b["alpha_grid"],
+            alpha_marginal=(b["cells"]["fresh_per_token"] - a["cells"]["fresh_per_token"])
+            / (b["ctx"] - a["ctx"]),
+            ctx=b["ctx"], s=b["s"], hd=b["hd"],
+        )
+    return per
+
+
+B5C = b5_constants()
+# the integer softmax is the design point; v1 is what B2's model already assumed
+ALPHA = (B5C["intexp"]["alpha_grid"] if B5C and "intexp" in B5C else 5.0)
+ALPHA_V1 = (B5C["bf16x"]["alpha_grid"] if B5C and "bf16x" in B5C else 5.0)
+
 # ---------------------------------------------------------------- the model --
 # Committed cells per decoded token, in the shape B1's witness actually has.
 #   acc   one int32 accumulator per matmul output              (B1: 45.5% of cells)
@@ -158,13 +198,14 @@ LIMB_CELLS_PER_ACC = B4C["cells_per_acc"] if B4C else 0.0
 #   logup the LogUp interaction column each lookup drags along (B2, measured)
 
 
-def cells_per_token(cfg, ctx, batch, seq=None):
+def cells_per_token(cfg, ctx, batch, seq=None, alpha=None):
     L, d, nh, nkv, hd, dff, vocab = cfg
     acc = L * ((nh + 2 * nkv) * hd + d + 2 * dff + d) + vocab
     act = L * (2 * d + nh * hd + dff) + d
     nl = L * (2 * dff + 4 * d)
-    attn = 3 * L * nh * ctx
-    n_lookups = L * nh * ctx + L * (2 * dff + 2 * (2 * d + 1)) + vocab
+    # B5: the whole (token, key) grid at the measured alpha, lookup included
+    attn = (alpha if alpha is not None else ALPHA) * L * nh * ctx
+    n_lookups = L * (2 * dff + 2 * (2 * d + 1)) + vocab
     logup = n_lookups * LOGUP_MARGINAL[batch]
     # B3: the weight walk's accumulators, and a range check per int8 activation.
     params = n_params(cfg)
@@ -174,9 +215,17 @@ def cells_per_token(cfg, ctx, batch, seq=None):
     rng = act * rng_cells if seq else 0.0
     # B4: every accumulator has to be decomposed before it can be dequantised
     limbs = acc * LIMB_CELLS_PER_ACC if seq else 0.0
-    total = acc + act + nl + attn + logup + walk + rng + limbs
+    # B5: the committed quantized KV cache and queries, and their range checks
+    # (2 cells for int11/int12 K and Q, 1 for a pair-packed int8 V), plus the
+    # per-token softmax scalars (max, denominator, its limb and two lookups)
+    kv_vals = 2.0 * L * nkv * hd * ctx / seq if seq else 0.0
+    q_vals = L * nh * hd
+    kv = kv_vals + q_vals + (1.5 * kv_vals + 2.0 * q_vals if seq else 0.0)
+    softmax_rows = 5.0 * L * nh
+    total = acc + act + nl + attn + logup + walk + rng + limbs + kv + softmax_rows
     return dict(acc=acc, act=act, nl=nl, attn=attn, logup=logup, n_lookups=n_lookups,
-                walk=walk, range=rng, limbs=limbs, flat=acc + act + nl, total=total,
+                walk=walk, range=rng, limbs=limbs, kv=kv, softmax_rows=softmax_rows,
+                flat=acc + act + nl, total=total,
                 # committed offline, but read once per proof by the walk
                 preprocessed=PREPROCESSED_PER_WEIGHT * params / seq if seq else 0.0)
 
@@ -252,6 +301,14 @@ if B4C:
 else:
     print("  limb decomp   NOT MEASURED -- run experiments/b4/run_all.sh; "
           "the dequant is charged 0 cells below")
+if B5C:
+    for v, c in sorted(B5C.items()):
+        print(f"  attention     B5, {v:<8}            "
+              f"{c['alpha_grid']:.2f} cells/(head,key,token) on the grid, "
+              f"{c['alpha_marginal']:.2f} marginal (one head, S={c['s']}, hd={c['hd']})")
+else:
+    print("  attention     NOT MEASURED -- run experiments/b5/run_all.sh; the model "
+          "charges B2's assumed 5 cells/key below")
 print()
 
 # --- validate the cells model against B1's actual witness ---------------------
@@ -284,7 +341,8 @@ for ctx in (4096, TARGET_CTX):
           f"layer I/O {c['flat'] / c['total'] * 100:.0f}%, "
           f"weight walk {c['walk'] / c['total'] * 100:.0f}%, "
           f"int8 range {c['range'] / c['total'] * 100:.0f}%, "
-          f"limbs {c['limbs'] / c['total'] * 100:.0f}%)")
+          f"limbs {c['limbs'] / c['total'] * 100:.0f}%, "
+          f"KV cache {c['kv'] / c['total'] * 100:.0f}%)")
     print(f"    + preprocessed         {g(c['preprocessed'])}cells/token of weight trace, "
           f"committed offline but read once per proof (B3)")
     print(f"    in-circuit M31 mul/tok {g(o['total'])}  "
@@ -338,6 +396,18 @@ if B4C:
     print(f"  ({(c['preprocessed'] + c['total']) / c['total'] - 1:.0%} more cells to walk than "
           f"the fresh count if a preprocessed cell costs the same as a fresh one; its "
           f"interpolate/LDE/Merkle share is offline, only quotients and OODS are not)")
+if B5C:
+    print()
+    print("B5's terms, folded in:")
+    v1 = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, alpha=ALPHA_V1)
+    print(f"  attention grid at {ALPHA:.2f} cells/(head,key,token) (integer softmax) "
+          f"-> {g(c['attn'])}cells/token, {c['attn'] / c['total'] * 100:.0f}% of the total")
+    print(f"  v1 (committed bf16 exp input) is {ALPHA_V1:.2f} -> {g(v1['attn'])}, "
+          f"i.e. {v1['total'] / c['total'] - 1:+.1%} on the whole per-token budget")
+    print(f"  committed KV cache + queries and their range checks: {g(c['kv'])}cells/token "
+          f"({c['kv'] / c['total'] * 100:.1f}%), a term no earlier model had")
+    print(f"  per-token softmax scalars (max, denominator, its limbs): "
+          f"{g(c['softmax_rows'])}cells/token")
 print()
 print("proof size / verification, measured at blowup 2 and "
       f"{SEC['n_queries']} queries:")
