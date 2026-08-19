@@ -15,6 +15,7 @@ import sys
 OUT = pathlib.Path(__file__).parent / "out"
 B1 = pathlib.Path(__file__).parent.parent / "b1" / "out"
 B3 = pathlib.Path(__file__).parent.parent / "b3" / "out"
+B4 = pathlib.Path(__file__).parent.parent / "b4" / "out"
 
 
 def load(name, required=True):
@@ -111,6 +112,43 @@ B3C = b3_constants()
 WEIGHT_WALK_CELLS_PER_WEIGHT = B3C["cells_per_weight"] if B3C else 0.0
 PREPROCESSED_PER_WEIGHT = B3C["preprocessed_per_weight"] if B3C else 0.0
 
+
+# --- B4's terms, measured -----------------------------------------------------
+# (1) the dequant's limb decomposition. B3 proves qY only modulo p; reading an
+#     accumulator as an integer costs one committed limb plus two range-check
+#     lookups per accumulator, in the cheapest *sound* variant (limb bound 2^30,
+#     below p, with the sign absorbed by a 2^29 offset).
+# (2) the int8 range check, again: B3 spent one lookup per activation, B4 checks
+#     two activations with one arity-2 lookup into a 2^16 pair table.
+def b4_constants():
+    fl, fr = B4 / "limbs.json", B4 / "range.json"
+    if not (fl.exists() and fr.exists()):
+        return None
+    limbs = json.loads(fl.read_text())["result"]["points"]
+    sound = [p for p in limbs if p["spec"]["sound"]
+             and p["spec"]["max_k"] >= 21504]          # 27B's widest matmul
+    best = min(sound, key=lambda p: (p["cells_per_acc_added"],
+                                     p["cells_per_acc_with_table"]))
+    rng = json.loads(fr.read_text())["result"]["points"]
+    per_mode = {}
+    for p in rng:
+        per_mode.setdefault(p["mode"], p["cells_per_byte_marginal"])
+    return dict(
+        cells_per_acc=best["cells_per_acc_added"],
+        limb_variant=best["spec"]["name"],
+        max_k=best["spec"]["max_k"],
+        range_marginal=per_mode.get("pair16", 2.0),
+        range_marginal_b3=per_mode.get("byte8", 2.0),
+        # measured cells per bf16 application, witness included
+        lookup_cells=min(p["cells_per_lookup"]
+                         for p in json.loads((B4 / "unary.json").read_text())
+                         ["result"]["points"]) if (B4 / "unary.json").exists() else None,
+    )
+
+
+B4C = b4_constants()
+LIMB_CELLS_PER_ACC = B4C["cells_per_acc"] if B4C else 0.0
+
 # ---------------------------------------------------------------- the model --
 # Committed cells per decoded token, in the shape B1's witness actually has.
 #   acc   one int32 accumulator per matmul output              (B1: 45.5% of cells)
@@ -131,10 +169,14 @@ def cells_per_token(cfg, ctx, batch, seq=None):
     # B3: the weight walk's accumulators, and a range check per int8 activation.
     params = n_params(cfg)
     walk = WEIGHT_WALK_CELLS_PER_WEIGHT * params / seq if seq else 0.0
-    rng = act * LOGUP_MARGINAL[batch] if seq else 0.0
-    total = acc + act + nl + attn + logup + walk + rng
+    # B4: the packed pair table halves B3's per-activation range check
+    rng_cells = B4C["range_marginal"] if B4C else LOGUP_MARGINAL[batch]
+    rng = act * rng_cells if seq else 0.0
+    # B4: every accumulator has to be decomposed before it can be dequantised
+    limbs = acc * LIMB_CELLS_PER_ACC if seq else 0.0
+    total = acc + act + nl + attn + logup + walk + rng + limbs
     return dict(acc=acc, act=act, nl=nl, attn=attn, logup=logup, n_lookups=n_lookups,
-                walk=walk, range=rng, flat=acc + act + nl, total=total,
+                walk=walk, range=rng, limbs=limbs, flat=acc + act + nl, total=total,
                 # committed offline, but read once per proof by the walk
                 preprocessed=PREPROCESSED_PER_WEIGHT * params / seq if seq else 0.0)
 
@@ -197,6 +239,19 @@ if B3C:
 else:
     print("  r^T W walk    NOT MEASURED -- run experiments/b3/run_all.sh; "
           "the walk is charged 0 cells below")
+if B4C:
+    print(f"  limb decomp   B4, variant {B4C['limb_variant']:<9}      "
+          f"{B4C['cells_per_acc']:.2f} cells/accumulator "
+          f"(sound up to K = {B4C['max_k']:,})")
+    print(f"  int8 range    B4, packed pair table    "
+          f"{B4C['range_marginal']:.2f} cells/activation "
+          f"(B3's one-lookup-per-byte: {B4C['range_marginal_b3']:.2f})")
+    if B4C["lookup_cells"]:
+        print(f"  bf16 lookup   B4, 2^16 table          "
+              f"{B4C['lookup_cells']:.2f} cells/application, witness included")
+else:
+    print("  limb decomp   NOT MEASURED -- run experiments/b4/run_all.sh; "
+          "the dequant is charged 0 cells below")
 print()
 
 # --- validate the cells model against B1's actual witness ---------------------
@@ -228,7 +283,8 @@ for ctx in (4096, TARGET_CTX):
           f"LogUp columns {c['logup'] / c['total'] * 100:.0f}%, "
           f"layer I/O {c['flat'] / c['total'] * 100:.0f}%, "
           f"weight walk {c['walk'] / c['total'] * 100:.0f}%, "
-          f"int8 range {c['range'] / c['total'] * 100:.0f}%)")
+          f"int8 range {c['range'] / c['total'] * 100:.0f}%, "
+          f"limbs {c['limbs'] / c['total'] * 100:.0f}%)")
     print(f"    + preprocessed         {g(c['preprocessed'])}cells/token of weight trace, "
           f"committed offline but read once per proof (B3)")
     print(f"    in-circuit M31 mul/tok {g(o['total'])}  "
@@ -263,6 +319,18 @@ if B3C:
     print("    " + "  ".join(f"{cw:.3f}->{g(fpt)}" for cw, fpt in B3C["range_all"]))
     print(f"  int8 byte-range checks add {g(c['range'])}cells/token "
           f"({c['range'] / c['total'] * 100:.1f}%), also new")
+if B4C:
+    print()
+    print(f"B4's terms, folded in:")
+    print(f"  limb decomposition {LIMB_CELLS_PER_ACC:.2f} cells/accumulator "
+          f"({B4C['limb_variant']})  ->  {g(c['limbs'])}cells/token, "
+          f"{c['limbs'] / c['total'] * 100:.1f}% of the total")
+    print(f"  packed int8 range check {B4C['range_marginal']:.0f} instead of "
+          f"{B4C['range_marginal_b3']:.0f} cells/activation  ->  {g(c['range'])}cells/token "
+          f"(B3 charged {g(c['act'] * B4C['range_marginal_b3'])})")
+    print(f"  the 2^30 limb bound caps a dot product at K = {B4C['max_k']:,} terms "
+          f"(p/2 alone would allow 66,572); this model's widest matmul is "
+          f"dff = {GEMMA[5]:,}")
     print(f"  plan's threshold was 0.25 cells/weight for the 181 M picture to stand: "
           f"{'stands' if WEIGHT_WALK_CELLS_PER_WEIGHT <= 0.25 else 'DOES NOT stand'}")
     print(f"  on top, {g(c['preprocessed'])}cells/token of preprocessed weight trace are "
