@@ -1,0 +1,54 @@
+{
+ "primitives": {
+  "round_hafz": true,
+  "scales_bf16": true,
+  "clamp_binds": false,
+  "nearest_scale_clipped": 0,
+  "min_row_peak": 126
+ },
+ "hf_max_abs_logit_diff": 4.5299530029296875e-05,
+ "hf_argmax_agreement": 1.0,
+ "int_exact": true,
+ "acc_max_by_kind": {
+  "q": 174814.0,
+  "k": 174058.0,
+  "v": 115840.0,
+  "o": 213819.0,
+  "gate": 234612.0,
+  "up": 189928.0,
+  "down": 342986.0,
+  "lm_head": 113801.0
+ },
+ "acc_max_overall": 342986.0,
+ "seq_vs_batched": {
+  "fp32": {
+   "bit_identical": false,
+   "logit_max_abs": 0.00028973817825317383,
+   "argmax_agreement": 1.0,
+   "layer0": 0.001953125,
+   "layer_last": 0.015625
+  },
+  "dynamic-int8": {
+   "bit_identical": false,
+   "logit_max_abs": 2.25,
+   "argmax_agreement": 0.96875,
+   "layer0": 0.0,
+   "layer_last": 3.0
+  },
+  "bf16-reduce": {
+   "bit_identical": true,
+   "logit_max_abs": 0.0,
+   "argmax_agreement": 1.0,
+   "layer0": 0.0,
+   "layer_last": 0.0
+  },
+  "qk-int8": {
+   "bit_identical": true,
+   "logit_max_abs": 0.0,
+   "argmax_agreement": 1.0,
+   "layer0": 0.0,
+   "layer_last": 0.0
+  }
+ },
+ "all_passed": true
+}

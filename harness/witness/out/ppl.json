@@ -1,0 +1,230 @@
+{
+ "fp32": {
+  "spec": {
+   "linear": "fp32",
+   "nonlinear": "fp32",
+   "reduce": "fp32",
+   "qk_int8": false
+  },
+  "ppl": 21.854747057974215,
+  "nll": 3.084418154602648,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 85.8
+ },
+ "dynamic-int8": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": []
+  },
+  "ppl": 22.834953100633154,
+  "nll": 3.128292392797899,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 92.4
+ },
+ "static": {
+  "spec": {
+   "linear": "static",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false
+  },
+  "ppl": 110.77714106883042,
+  "nll": 4.707520444985705,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 90.4
+ },
+ "bf16-only": {
+  "spec": {
+   "linear": "fp32",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false
+  },
+  "ppl": 21.913924242432447,
+  "nll": 3.0871222449375457,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 78.0
+ },
+ "bf16-reduce": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "bf16",
+   "qk_int8": false
+  },
+  "ppl": 22.758346008738613,
+  "nll": 3.124931935648162,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 94.5
+ },
+ "qk-int8": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": true
+  },
+  "ppl": 23.87903001684993,
+  "nll": 3.1730006686395393,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 93.2
+ },
+ "int8-only": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "fp32",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_head": false
+  },
+  "ppl": 22.629183475037514,
+  "nll": 3.119240377467206,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 84.6
+ },
+ "fp32-logits": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": true,
+   "fp32_matmuls": []
+  },
+  "ppl": 22.827569681403403,
+  "nll": 3.127969002023835,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 119.6
+ },
+ "keep-head": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [
+    "lm_head"
+   ]
+  },
+  "ppl": 22.60294716695621,
+  "nll": 3.118080303393698,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 90.4
+ },
+ "keep-down": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [
+    "down"
+   ]
+  },
+  "ppl": 22.506609171248158,
+  "nll": 3.1138090070213122,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 83.7
+ },
+ "keep-o": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [
+    "o"
+   ]
+  },
+  "ppl": 22.755503100168497,
+  "nll": 3.1248070106581,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 91.9
+ },
+ "keep-qkv": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [
+    "q",
+    "k",
+    "v"
+   ]
+  },
+  "ppl": 22.62376848155698,
+  "nll": 3.1190010563501405,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 91.6
+ },
+ "keep-gate-up": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [
+    "gate",
+    "up"
+   ]
+  },
+  "ppl": 22.55225627326097,
+  "nll": 3.1158351174072743,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 95.5
+ },
+ "bf16-norm": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "bf16-norm",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": []
+  },
+  "ppl": 22.78170900184741,
+  "nll": 3.1259579772352004,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 206.9
+ },
+ "bf16-softmax": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "bf16-softmax",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": []
+  },
+  "ppl": 22.6783072428405,
+  "nll": 3.121408839515044,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 147.8
+ }
+}
