@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from quant import (BF16, gemm_dtype, int_gemm, int_gemm_exact, qscale,
+from quant import (BF16, INT8_MAX, gemm_dtype, int_gemm, int_gemm_exact, qscale,
                    qscale_per_channel, qscale_per_token, quantize, reduce_sum,
                    round_hafz, store)
 
@@ -58,8 +58,23 @@ class Spec:
     q_scale_mode: str = "token"
     # "": none; "all": every quantization scale rounded up to a power of two;
     # "attn": only the Q/K/V scales, which is what makes the exp-table input a bit
-    # window of the score instead of a mantissa product
+    # window of the score instead of a mantissa product; "linear": only the weight
+    # and activation scales of the matmuls, which is what makes the *dequant*
+    # `bf16(acc s_x s_w)` a single rounding plus an exponent add instead of a chain
+    # of three roundings through two mantissa-product tables (B6's ladder)
     pow2_scales: str = ""
+    # How the dequant `acc s_x s_w -> bf16` is evaluated.  "fp32" is B1's original
+    # contract: accumulate the product in fp32 and round once at the end.
+    # "bf16-chain" is what a gadget can actually prove when the scales are general
+    # bf16 values -- bf16(bf16(bf16(acc) s_x) s_w), three correctly-rounded steps --
+    # so the difference between the two is the numeric price of the general-scale
+    # dequant.  With power-of-two scales the two coincide exactly.
+    dequant: str = "fp32"
+    # The attention output feeds `o_proj`, which quantizes it to int8 anyway, so
+    # `s_v/(Z s_o)` can be folded into a *single* rounding straight to int8 -- which
+    # deletes the bf16 waypoint, the reciprocal lookup and the requantize at every
+    # output element (B5 review; B6 prices the gadget at 9 cells against 15 + 4 + 15).
+    attn_out_int8: bool = False
     fp32_logits: bool = False  # leave the final dequant unrounded (see README: NLL
                                # measures the logits themselves, so rounding them
                                # to bf16 charges the scheme for a sampling-invisible
@@ -75,7 +90,8 @@ class Spec:
                 "qk_bits": list(self.qk_bits), "int_softmax": self.int_softmax,
                 "num_bits": self.num_bits, "pow2_scales": self.pow2_scales,
                 "attn_scale_mode": self.attn_scale_mode,
-                "q_scale_mode": self.q_scale_mode}
+                "q_scale_mode": self.q_scale_mode,
+                "dequant": self.dequant, "attn_out_int8": self.attn_out_int8}
 
 
 class Recorder:
@@ -106,23 +122,35 @@ class Linear:
         self.n_in, self.n_out = w.shape
         self.bias = None if bias is None else bias.clone().float()
         self.static_scale = static_scale
+        self.p2 = spec.pow2_scales in ("all", "linear")
         if spec.linear == "fp32":
             self.w, self.qw, self.s_w = w, None, None
         else:
-            self.s_w = qscale_per_channel(w, spec.pow2_scales == "all")
+            self.s_w = qscale_per_channel(w, self.p2)
             self.qw = quantize(w, self.s_w).to(gemm_dtype(self.n_in))
             self.w = None
 
-    def __call__(self, x, m, store_out=True):
-        if m.calib is not None:
+    def __call__(self, x, m, store_out=True, pre=None):
+        if m.calib is not None and x is not None:
             # per-token max|x|: its max over a calibration set is the static
             # per-tensor range, and its spread is what outliers.py reports.
             m.calib.setdefault(self.name, []).append(x.abs().amax(-1).clone())
         if self.qw is None:
             y = x @ self.w
+        elif pre is not None:
+            # the activation was quantized by its producer (the attention output's
+            # single rounding straight to int8), so there is nothing to requantize
+            qx, s_x = pre
+            acc = int_gemm(qx, self.qw)
+            m.note(self.name, acc)
+            if m.rec is not None:
+                m.rec.add(f"{self.name}/qx", qx.to(torch.int8))
+                m.rec.add(f"{self.name}/acc", acc.to(torch.int32))
+                m.rec.add(f"{self.name}/s_x", s_x.to(BF16).expand(qx.shape[0], 1))
+            y = m.dequant(acc, s_x, self.s_w)
         else:
             s_x = (self.static_scale if self.spec.linear == "static"
-                   else qscale_per_token(x, self.spec.pow2_scales == "all"))
+                   else qscale_per_token(x, self.p2))
             qx = quantize(x, s_x)
             acc = int_gemm(qx, self.qw)
             m.note(self.name, acc)
@@ -130,7 +158,7 @@ class Linear:
                 m.rec.add(f"{self.name}/qx", qx.to(torch.int8))
                 m.rec.add(f"{self.name}/acc", acc.to(torch.int32))
                 m.rec.add(f"{self.name}/s_x", s_x.to(BF16).expand(x.shape[0], 1))
-            y = acc * s_x * self.s_w
+            y = m.dequant(acc, s_x, self.s_w)
         if self.bias is not None:
             y = y + self.bias
         return m.store(y) if store_out else y
@@ -204,6 +232,21 @@ class Model:
 
     def store(self, x):
         return store(x, self.spec.nonlinear == "bf16")
+
+    def dequant(self, acc, s_x, s_w):
+        """`acc * s_x * s_w -> bf16`, per `Spec.dequant`.
+
+        "fp32" is B1's original contract: form the product in fp32 and let the
+        caller's `store()` round it once.  "bf16-chain" is what a gadget can prove
+        when the scales are general bf16 values -- `bf16(bf16(bf16(acc) s_x) s_w)`,
+        three correctly-rounded steps, two of them mantissa-product tables (B6
+        measures that at 26 cells per accumulator against 15 for power-of-two
+        scales).  When the scales *are* powers of two the two agree exactly, which
+        is why `pow2-dequant` needs no separate numeric probe.
+        """
+        if self.spec.dequant == "bf16-chain":
+            return self.store(self.store(self.store(acc) * s_x) * s_w)
+        return acc * s_x * s_w
 
     def note(self, name, acc):
         if self.acc_max is not None:
@@ -297,9 +340,30 @@ class Model:
         z = n.double().sum(-1, keepdim=True)                     # exact integer
         o = int_gemm_exact(n, qv, nmax * 127 * cc)               # exact integer
         self.note(f"L{li}.av", o)
+        if self.spec.attn_out_int8:
+            # One rounding, straight to int8.  `o_proj` requantizes its input
+            # anyway, so the softmax division, the value scale and that requantize
+            # fold into a single `round(O s_v / (Z s_o))` -- which deletes the
+            # reciprocal lookup, the bf16 waypoint and the requantize at every one
+            # of 254 k output elements per token at 27B (B5 review; B6 prices the
+            # gadget at 9 cells against 15 + 4 + 15).  The division is exact here
+            # because O, Z are integers and the rounding happens once, at the end.
+            real = o.double() * s_v.double() / z.double()
+            flat = real.transpose(0, 1).reshape(ss, self.nh * self.hd)
+            s_o = qscale(flat.abs().amax(-1, keepdim=True).float(), -1, INT8_MAX,
+                         self.spec.pow2_scales in ("all", "linear"))
+            q = round_hafz(flat / s_o.double()).clamp_(-INT8_MAX, INT8_MAX).float()
+            if self.clamped is not None:
+                self.tally("attnout", flat.float() / s_o, INT8_MAX)
+            if self.rec is not None:
+                self.rec.add(f"L{li}.attnq", q.to(torch.int8))
+                self.rec.add(f"L{li}.s_o", s_o.to(BF16))
+                self.rec.add(f"L{li}.zz", z.transpose(0, 1).reshape(ss, self.nh)
+                             .to(torch.int32))
+            return None, (q, s_o)
         rz = self.unary(f"L{li}.recip", self.store(z), torch.reciprocal)
         out = self.store(o * s_v * rz)
-        return out.transpose(0, 1).reshape(ss, self.nh * self.hd)
+        return out.transpose(0, 1).reshape(ss, self.nh * self.hd), None
 
     def kv_scales(self, li, k, v):
         """Context-axis-constant K and V scales, calibrated offline.
@@ -364,7 +428,7 @@ class Model:
         if self.rec is not None:
             self.rec.add(f"L{li}.probs", p.to(BF16))
         out = self.store(p @ v)
-        return out.transpose(0, 1).reshape(s, self.nh * self.hd)
+        return out.transpose(0, 1).reshape(s, self.nh * self.hd), None
 
     # -- forward ----------------------------------------------------------
     def forward(self, ids, cache=None):
@@ -380,7 +444,8 @@ class Model:
             q = self.rotate(q, cos.unsqueeze(1), sin.unsqueeze(1))
             k = self.rotate(k, cos.unsqueeze(1), sin.unsqueeze(1))
             kk, vv = cache.append(i, k, v)
-            x = self.store(x + l["o"](self.attention(q, kk, vv, pos, i), self))
+            a_out, a_pre = self.attention(q, kk, vv, pos, i)
+            x = self.store(x + l["o"](a_out, self, pre=a_pre))
             h = self.rmsnorm(x, l["norm2"], f"L{i}.norm2")
             g = self.unary(f"L{i}.silu", l["gate"](h, self), torch.nn.functional.silu)
             x = self.store(x + l["down"](self.store(g * l["up"](h, self)), self))

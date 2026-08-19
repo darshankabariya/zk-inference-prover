@@ -62,12 +62,40 @@ SPECS = {
     # public constant and the table can be indexed by the integer shift itself
     "int-softmax-12sq": Spec(linear="dynamic", nonlinear="bf16", int_softmax=True,
                              qk_bits=(12, 11), pow2_scales="attn", q_scale_mode="head"),
+    # --- B6 probes -----------------------------------------------------------
+    # The dequant's numeric price, isolated.  B1 forms `acc s_x s_w` in fp32 and
+    # rounds once; a gadget with general bf16 scales can only prove a chain of
+    # three correctly-rounded steps, so this is what the `chain` variant computes.
+    "bf16-dequant": Spec(linear="dynamic", nonlinear="bf16", dequant="bf16-chain"),
+    # Power-of-two weight and activation scales, which collapse the dequant to one
+    # rounding plus an exponent add: 15 cells per accumulator instead of 26, and
+    # numerically identical to B1's fp32-then-round because the scale is exact.
+    "pow2-dequant": Spec(linear="dynamic", nonlinear="bf16", pow2_scales="linear"),
+    # The attention output rounded straight to int8, on top of B5's design point:
+    # deletes the bf16 waypoint, the reciprocal lookup and the requantize.
+    "int-attnout":  Spec(linear="dynamic", nonlinear="bf16", int_softmax=True,
+                         qk_bits=(12, 11), pow2_scales="attn", q_scale_mode="head",
+                         attn_out_int8=True),
+    # Everything B6's AIR pins, in one spec: B5's integer softmax at int12 x int11,
+    # power-of-two scales everywhere (so every dequant is a single rounding), and
+    # the attention output straight to int8.
+    "b6-design":    Spec(linear="dynamic", nonlinear="bf16", int_softmax=True,
+                         qk_bits=(12, 11), pow2_scales="all", q_scale_mode="head",
+                         attn_out_int8=True),
+    # the same without power-of-two linear scales, i.e. paying the 26-cell chain
+    "b6-design-bf16": Spec(linear="dynamic", nonlinear="bf16", int_softmax=True,
+                           qk_bits=(12, 11), pow2_scales="attn", q_scale_mode="head",
+                           attn_out_int8=True, dequant="bf16-chain"),
 }
 
 # B5's probes, kept apart so B1's own table stays what B1 measured
 B5_SPECS = ["qk-int12", "pow2-scales", "int-softmax", "int-softmax-12",
             "int-softmax-p2qk", "int-softmax-12p2", "int-softmax-pow2",
             "int-softmax-n16", "int-softmax-dyn", "int-softmax-12sq"]
+
+# B6's probes, same discipline
+B6_SPECS = ["bf16-dequant", "pow2-dequant", "int-attnout", "b6-design",
+            "b6-design-bf16"]
 
 
 def setup():

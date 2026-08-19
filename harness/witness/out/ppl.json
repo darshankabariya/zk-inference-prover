@@ -457,5 +457,135 @@
   "tokens": 20440,
   "chunks": 40,
   "seconds": 92.0
+ },
+ "bf16-dequant": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "bf16-chain",
+   "attn_out_int8": false
+  },
+  "ppl": 22.72588802504074,
+  "nll": 3.1235047163095495,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 357.5
+ },
+ "pow2-dequant": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "linear",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "attn_out_int8": false
+  },
+  "ppl": 23.357901037170837,
+  "nll": 3.150935301062179,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 195.5
+ },
+ "int-attnout": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    12,
+    11
+   ],
+   "int_softmax": true,
+   "num_bits": 8,
+   "pow2_scales": "attn",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "head",
+   "dequant": "fp32",
+   "attn_out_int8": true
+  },
+  "ppl": 22.768272470857482,
+  "nll": 3.1253680085482665,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 340.5
+ },
+ "b6-design": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    12,
+    11
+   ],
+   "int_softmax": true,
+   "num_bits": 8,
+   "pow2_scales": "all",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "head",
+   "dequant": "fp32",
+   "attn_out_int8": true
+  },
+  "ppl": 23.701365415374834,
+  "nll": 3.1655326589446244,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 1225.9
+ },
+ "b6-design-bf16": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    12,
+    11
+   ],
+   "int_softmax": true,
+   "num_bits": 8,
+   "pow2_scales": "attn",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "head",
+   "dequant": "bf16-chain",
+   "attn_out_int8": true
+  },
+  "ppl": 22.786154362158427,
+  "nll": 3.1261530866828218,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 205.8
  }
 }

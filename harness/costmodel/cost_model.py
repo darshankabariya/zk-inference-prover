@@ -17,6 +17,7 @@ B1 = pathlib.Path(__file__).parent.parent / "b1" / "out"
 B3 = pathlib.Path(__file__).parent.parent / "b3" / "out"
 B4 = pathlib.Path(__file__).parent.parent / "b4" / "out"
 B5 = pathlib.Path(__file__).parent.parent / "b5" / "out"
+B6 = pathlib.Path(__file__).parent.parent / "b6" / "out"
 
 
 def load(name, required=True):
@@ -185,6 +186,77 @@ def b5_constants():
 
 
 B5C = b5_constants()
+
+
+# --- B6's terms, measured -----------------------------------------------------
+# (1) the dequant.  B4 stopped at the integer reading (5 cells/accumulator) and
+#     scoped `bf16(acc s_x s_w)` out; B6 builds it.  The normalisation table's own
+#     bound *is* an injective integer reading below 2^30, so the dequant
+#     **replaces** B4's limb decomposition rather than adding to it -- the model
+#     charges one or the other, never both.
+# (2) the attention output straight to int8.  Its consumer (`o_proj`) requantises
+#     anyway, so the scale, the softmax division and the requantize fold into one
+#     rounding: 9 cells against a bf16 dequant plus a reciprocal lookup plus a
+#     requantize.  B1 scores it at -0.29% perplexity, i.e. free.
+# (3) the packing.  Committed columns and proof size are ~independent of L*nh once
+#     instances share one column set, so the whole-model proof is bands x one
+#     band's columns, with popcount(L*nh) bands.
+def b6_constants():
+    fd, fp = B6 / "dequant.json", B6 / "pack.json"
+    if not fd.exists():
+        return None
+    try:
+        pts = json.loads(fd.read_text())["result"]["points"]
+    except (ValueError, KeyError):
+        return None
+    by = {}
+    for p in pts:
+        by[(p["spec"]["variant"], p["spec"]["round"])] = p["cells_per_acc_marginal"]
+    # Prefer the host sweep at the *design point* (`intexp`, the alpha = 4.00 variant
+    # the model charges) over the containerised `intsplit6` one, which exists only
+    # because one master exp table at 2^23 rows does not fit 7.7 GiB.
+    hp = B6 / "pack_intexp_host.json"
+    pack = None
+    for f, label in ((hp, "intexp (host)"), (fp, "intsplit6 (container)")):
+        if not f.exists():
+            continue
+        try:
+            pp = json.loads(f.read_text())["result"]["points"]
+        except (ValueError, KeyError, IndexError):
+            continue
+        extra = sorted(
+            (json.loads(g.read_text())["result"]["points"][0]
+             for g in B6.glob("pack_host_*.json")),
+            key=lambda p: p["insts"]) if label.endswith("(container)") else []
+        pp = pp + extra
+        pack = dict(
+            variant=label,
+            columns=pp[0]["columns"]["total"],
+            insts=[p["insts"] for p in pp],
+            proof_bytes=[p["proof_bytes"] for p in pp],
+            per_inst=[p["proof_bytes_per_instance"] for p in pp],
+            alpha_grid=pp[0]["alpha_grid"],
+            alpha_block=[p["alpha"] for p in pp],
+        )
+        break
+    return dict(
+        limbs=by.get(("limbs", "even")),
+        # the design point for a matmul whose consumer is a bf16 table or the
+        # residual stream: general bf16 scales, three roundings, no quality cost
+        chain=by.get(("chain", "even")),
+        # the cheaper alternative: power-of-two scales, one rounding, +2.29% ppl
+        pow2=by.get(("pow2", "even")),
+        int8=by.get(("int8", "even")),
+        pack=pack,
+    )
+
+
+B6C = b6_constants()
+# `dequant` is the per-accumulator cost of reading the integer *and* rounding it;
+# it subsumes B4's limb term, so `cells_per_token` charges this instead of that.
+DEQUANT_CELLS_PER_ACC = (B6C or {}).get("chain") or 0.0
+DEQUANT_POW2_PER_ACC = (B6C or {}).get("pow2") or 0.0
+ATTNOUT_CELLS_PER_ACC = (B6C or {}).get("int8") or 0.0
 # the integer softmax is the design point; v1 is what B2's model already assumed
 ALPHA = (B5C["intexp"]["alpha_grid"] if B5C and "intexp" in B5C else 5.0)
 ALPHA_V1 = (B5C["bf16x"]["alpha_grid"] if B5C and "bf16x" in B5C else 5.0)
@@ -198,7 +270,7 @@ ALPHA_V1 = (B5C["bf16x"]["alpha_grid"] if B5C and "bf16x" in B5C else 5.0)
 #   logup the LogUp interaction column each lookup drags along (B2, measured)
 
 
-def cells_per_token(cfg, ctx, batch, seq=None, alpha=None):
+def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None):
     L, d, nh, nkv, hd, dff, vocab = cfg
     acc = L * ((nh + 2 * nkv) * hd + d + 2 * dff + d) + vocab
     act = L * (2 * d + nh * hd + dff) + d
@@ -213,8 +285,17 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None):
     # B4: the packed pair table halves B3's per-activation range check
     rng_cells = B4C["range_marginal"] if B4C else LOGUP_MARGINAL[batch]
     rng = act * rng_cells if seq else 0.0
-    # B4: every accumulator has to be decomposed before it can be dequantised
-    limbs = acc * LIMB_CELLS_PER_ACC if seq else 0.0
+    # B4 read the accumulator as an integer and stopped there; B6 rounds it too, and
+    # its normalisation *is* the integer reading, so this replaces B4's limb term
+    # rather than adding to it.  `dequant` picks which rung of B6's ladder: the
+    # general-scale chain (no quality cost, 26 cells) or power-of-two scales
+    # (+2.29% perplexity, 15 cells).
+    per_acc = dequant if dequant is not None else (
+        DEQUANT_CELLS_PER_ACC or LIMB_CELLS_PER_ACC)
+    limbs = acc * per_acc if seq else 0.0
+    # B6: the attention output's own dequant, folded straight to int8 because
+    # `o_proj` requantises it anyway -- one rounding per output element
+    attn_out = L * nh * hd * (ATTNOUT_CELLS_PER_ACC or 0.0) if seq else 0.0
     # B5: the committed quantized KV cache and queries, and their range checks
     # (2 cells for int11/int12 K and Q, 1 for a pair-packed int8 V), plus the
     # per-token softmax scalars (max, denominator, its limb and two lookups)
@@ -222,9 +303,11 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None):
     q_vals = L * nh * hd
     kv = kv_vals + q_vals + (1.5 * kv_vals + 2.0 * q_vals if seq else 0.0)
     softmax_rows = 5.0 * L * nh
-    total = acc + act + nl + attn + logup + walk + rng + limbs + kv + softmax_rows
+    total = (acc + act + nl + attn + logup + walk + rng + limbs + kv + softmax_rows
+             + attn_out)
     return dict(acc=acc, act=act, nl=nl, attn=attn, logup=logup, n_lookups=n_lookups,
                 walk=walk, range=rng, limbs=limbs, kv=kv, softmax_rows=softmax_rows,
+                attn_out=attn_out, dequant_per_acc=per_acc, n_acc=acc,
                 flat=acc + act + nl, total=total,
                 # committed offline, but read once per proof by the walk
                 preprocessed=PREPROCESSED_PER_WEIGHT * params / seq if seq else 0.0)
@@ -309,6 +392,27 @@ if B5C:
 else:
     print("  attention     NOT MEASURED -- run experiments/b5/run_all.sh; the model "
           "charges B2's assumed 5 cells/key below")
+if B6C:
+    print(f"  dequant       B6, general bf16 scales  "
+          f"{B6C['chain']:.2f} cells/accumulator "
+          f"(power-of-two scales: {B6C['pow2']:.2f}; B4's integer reading alone: "
+          f"{B6C['limbs']:.2f})")
+    print(f"  attn output   B6, straight to int8     "
+          f"{B6C['int8']:.2f} cells/element "
+          f"(vs a bf16 dequant + reciprocal + requantize)")
+    if B6C["pack"]:
+        pk = B6C["pack"]
+        print(f"  packing       B6, {pk['insts'][0]}-{pk['insts'][-1]} instances, "
+              f"{pk['variant']}")
+        print(f"                {pk['columns']} committed columns, flat; proof "
+              f"{pk['proof_bytes'][0] / 1024:.0f}-{max(pk['proof_bytes']) / 1024:.0f} KiB, "
+              f"i.e. {pk['per_inst'][0] / 1024:.0f} -> {pk['per_inst'][-1] / 1024:.1f} KiB "
+              f"per instance; grid alpha {pk['alpha_grid']:.2f}, block alpha "
+              f"{pk['alpha_block'][0]:.2f} -> {pk['alpha_block'][-1]:.2f} as the shared "
+              f"tables amortise")
+else:
+    print("  dequant       NOT MEASURED -- run experiments/b6/run_all.sh; the model "
+          "falls back to B4's limb term")
 print()
 
 # --- validate the cells model against B1's actual witness ---------------------
@@ -341,7 +445,7 @@ for ctx in (4096, TARGET_CTX):
           f"layer I/O {c['flat'] / c['total'] * 100:.0f}%, "
           f"weight walk {c['walk'] / c['total'] * 100:.0f}%, "
           f"int8 range {c['range'] / c['total'] * 100:.0f}%, "
-          f"limbs {c['limbs'] / c['total'] * 100:.0f}%, "
+          f"dequant {c['limbs'] / c['total'] * 100:.0f}%, "
           f"KV cache {c['kv'] / c['total'] * 100:.0f}%)")
     print(f"    + preprocessed         {g(c['preprocessed'])}cells/token of weight trace, "
           f"committed offline but read once per proof (B3)")
@@ -380,15 +484,23 @@ if B3C:
 if B4C:
     print()
     print(f"B4's terms, folded in:")
+    # B4's own number, not the dequant that superseded it: the model charges one or
+    # the other, and `c` above already charges B6's.
+    b4c = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, dequant=LIMB_CELLS_PER_ACC)
     print(f"  limb decomposition {LIMB_CELLS_PER_ACC:.2f} cells/accumulator "
-          f"({B4C['limb_variant']})  ->  {g(c['limbs'])}cells/token, "
-          f"{c['limbs'] / c['total'] * 100:.1f}% of the total")
+          f"({B4C['limb_variant']})  ->  {g(b4c['limbs'])}cells/token, "
+          f"{b4c['limbs'] / b4c['total'] * 100:.1f}% of what the model was before B6"
+          + (f" -- superseded by B6's {DEQUANT_CELLS_PER_ACC:.2f}, which proves the "
+             f"rounding as well" if B6C else ""))
     print(f"  packed int8 range check {B4C['range_marginal']:.0f} instead of "
           f"{B4C['range_marginal_b3']:.0f} cells/activation  ->  {g(c['range'])}cells/token "
           f"(B3 charged {g(c['act'] * B4C['range_marginal_b3'])})")
     print(f"  the 2^30 limb bound caps a dot product at K = {B4C['max_k']:,} terms "
           f"(p/2 alone would allow 66,572); this model's widest matmul is "
           f"dff = {GEMMA[5]:,}")
+    if B6C:
+        print("  B6's normalisation recovers K <= 66,572 for free: the sign is an "
+              "explicit committed bit there, so the whole 2^30 window is magnitude")
     print(f"  plan's threshold was 0.25 cells/weight for the 181 M picture to stand: "
           f"{'stands' if WEIGHT_WALK_CELLS_PER_WEIGHT <= 0.25 else 'DOES NOT stand'}")
     print(f"  on top, {g(c['preprocessed'])}cells/token of preprocessed weight trace are "
@@ -396,6 +508,25 @@ if B4C:
     print(f"  ({(c['preprocessed'] + c['total']) / c['total'] - 1:.0%} more cells to walk than "
           f"the fresh count if a preprocessed cell costs the same as a fresh one; its "
           f"interpolate/LDE/Merkle share is offline, only quotients and OODS are not)")
+if B6C:
+    print()
+    print("B6's terms, folded in:")
+    ch = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, dequant=B6C["chain"])
+    p2 = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, dequant=B6C["pow2"])
+    b4 = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, dequant=B6C["limbs"])
+    print(f"  {ch['n_acc'] / 1e6:.2f} M accumulators/token, each one read as an integer "
+          f"*and* rounded to bf16")
+    print(f"    general bf16 scales  {B6C['chain']:.2f} cells/acc  ->  "
+          f"{g(ch['limbs'])}cells/token, {ch['limbs'] / ch['total'] * 100:.0f}% of "
+          f"{g(ch['total'])}  (B1: -0.48% perplexity, i.e. free)")
+    print(f"    power-of-two scales  {B6C['pow2']:.2f} cells/acc  ->  "
+          f"{g(p2['limbs'])}cells/token, {p2['limbs'] / p2['total'] * 100:.0f}% of "
+          f"{g(p2['total'])}  (B1: +2.29% perplexity)")
+    print(f"    B4's integer reading alone was {B6C['limbs']:.2f}  ->  {g(b4['total'])}, "
+          f"so the rounding B4 scoped out is {ch['total'] / b4['total'] - 1:+.0%} of the "
+          f"whole per-token budget")
+    print(f"  attention output straight to int8: {g(ch['attn_out'])}cells/token at "
+          f"{B6C['int8']:.2f} cells/element")
 if B5C:
     print()
     print("B5's terms, folded in:")
