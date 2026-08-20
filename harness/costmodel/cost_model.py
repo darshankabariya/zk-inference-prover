@@ -18,6 +18,7 @@ B3 = pathlib.Path(__file__).parent.parent / "b3" / "out"
 B4 = pathlib.Path(__file__).parent.parent / "b4" / "out"
 B5 = pathlib.Path(__file__).parent.parent / "b5" / "out"
 B6 = pathlib.Path(__file__).parent.parent / "b6" / "out"
+B65 = pathlib.Path(__file__).parent.parent / "b65" / "out"
 
 
 def load(name, required=True):
@@ -252,6 +253,50 @@ def b6_constants():
 
 
 B6C = b6_constants()
+
+
+# --- B6.5's terms, measured ----------------------------------------------------
+# The requantize `q = round(x / s_x)` and the scale argument `s_x = max|x|/127`
+# were the largest unmeasured per-token terms left (B4 section 8 named both; B6 gap 2).
+# B6.5 prices them as one gadget: a (q, nz) pair table, one division-table lookup
+# keyed by the exponent difference for q >= 1, one pattern comparison for q = 0,
+# and a committed max-pattern with a selector and a ceil-divide table for the
+# scale.  The marginal below includes the committed q cell, which `act` already
+# charges, so the model charges (marginal - 1) per distinct matmul input.
+def b65_constants():
+    pts = []
+    for f in ("requant_q", "requant_gate", "requant_down"):
+        p = B65 / f"{f}.json"
+        if p.exists():
+            try:
+                pts += json.loads(p.read_text())["result"]["points"]
+            except (ValueError, KeyError):
+                pass
+    if not pts:
+        return None
+    full = [p for p in pts if p["with_max"]]
+    out = dict(
+        requant_max=max(p["cells_per_value_marginal"] for p in full) if full else None,
+        requant_only=max(p["cells_per_value_marginal"] for p in pts if not p["with_max"]),
+        by_variant={(p["variant"], p["with_max"]): p["cells_per_value_marginal"]
+                    for p in pts},
+    )
+    c = B65 / "compose_host.json"
+    if not c.exists():
+        c = B65 / "compose.json"
+    if c.exists():
+        try:
+            pt = json.loads(c.read_text())["result"]["point"]
+            out["compose"] = dict(
+                fresh=pt["cells"]["fresh"], proof_bytes=pt["proof_bytes"],
+                columns=pt["columns"]["total"], accepts=pt["accepts"])
+        except (ValueError, KeyError):
+            pass
+    return out
+
+
+B65C = b65_constants()
+REQUANT_CELLS = (B65C["requant_max"] - 1.0) if B65C and B65C.get("requant_max") else 0.0
 # `dequant` is the per-accumulator cost of reading the integer *and* rounding it;
 # it subsumes B4's limb term, so `cells_per_token` charges this instead of that.
 DEQUANT_CELLS_PER_ACC = (B6C or {}).get("chain") or 0.0
@@ -296,6 +341,9 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None):
     # B6: the attention output's own dequant, folded straight to int8 because
     # `o_proj` requantises it anyway -- one rounding per output element
     attn_out = L * nh * hd * (ATTNOUT_CELLS_PER_ACC or 0.0) if seq else 0.0
+    # B6.5: the requantize + max argument, once per *distinct* matmul input
+    # (q/k/v share one, gate/up share one; o's input is already int8 via the fold)
+    requant = (L * (2 * d + dff) + d) * REQUANT_CELLS if seq else 0.0
     # B5: the committed quantized KV cache and queries, and their range checks
     # (2 cells for int11/int12 K and Q, 1 for a pair-packed int8 V), plus the
     # per-token softmax scalars (max, denominator, its limb and two lookups)
@@ -304,10 +352,10 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None):
     kv = kv_vals + q_vals + (1.5 * kv_vals + 2.0 * q_vals if seq else 0.0)
     softmax_rows = 5.0 * L * nh
     total = (acc + act + nl + attn + logup + walk + rng + limbs + kv + softmax_rows
-             + attn_out)
+             + attn_out + requant)
     return dict(acc=acc, act=act, nl=nl, attn=attn, logup=logup, n_lookups=n_lookups,
                 walk=walk, range=rng, limbs=limbs, kv=kv, softmax_rows=softmax_rows,
-                attn_out=attn_out, dequant_per_acc=per_acc, n_acc=acc,
+                attn_out=attn_out, requant=requant, dequant_per_acc=per_acc, n_acc=acc,
                 flat=acc + act + nl, total=total,
                 # committed offline, but read once per proof by the walk
                 preprocessed=PREPROCESSED_PER_WEIGHT * params / seq if seq else 0.0)
@@ -446,6 +494,7 @@ for ctx in (4096, TARGET_CTX):
           f"weight walk {c['walk'] / c['total'] * 100:.0f}%, "
           f"int8 range {c['range'] / c['total'] * 100:.0f}%, "
           f"dequant {c['limbs'] / c['total'] * 100:.0f}%, "
+          f"requant {c['requant'] / c['total'] * 100:.0f}%, "
           f"KV cache {c['kv'] / c['total'] * 100:.0f}%)")
     print(f"    + preprocessed         {g(c['preprocessed'])}cells/token of weight trace, "
           f"committed offline but read once per proof (B3)")
@@ -527,6 +576,22 @@ if B6C:
           f"whole per-token budget")
     print(f"  attention output straight to int8: {g(ch['attn_out'])}cells/token at "
           f"{B6C['int8']:.2f} cells/element")
+if B65C:
+    print()
+    print("B6.5's terms, folded in:")
+    print(f"  requantize + max argument: {B65C['requant_max']:.2f} cells/value measured "
+          f"({B65C['requant_only']:.2f} without the max argument), charged at "
+          f"{REQUANT_CELLS:.2f} (the committed q is already in `act`)")
+    print(f"    -> {g(c['requant'])}cells/token, "
+          f"{c['requant'] / c['total'] * 100:.1f}% of {g(c['total'])} "
+          f"-- inside the plan's +5-15% guess")
+    for (v, m), cells in sorted(B65C["by_variant"].items()):
+        print(f"    {v:<5} {'with' if m else 'no  '} max argument  {cells:.2f} cells/value")
+    if B65C.get("compose"):
+        cp = B65C["compose"]
+        print(f"  the composed layer proof: {g(cp['fresh'])}fresh cells, "
+              f"{cp['columns']} columns, {cp['proof_bytes'] / 2**20:.2f} MiB, "
+              f"accepted by the serialized-statement verifier alone")
 if B5C:
     print()
     print("B5's terms, folded in:")

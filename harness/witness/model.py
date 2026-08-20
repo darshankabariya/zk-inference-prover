@@ -172,6 +172,7 @@ class Linear:
             acc = int_gemm(qx, self.qw)
             m.note(self.name, acc)
             if m.rec is not None:
+                m.rec.add(f"{self.name}/x", x.to(BF16))
                 m.rec.add(f"{self.name}/qx", qx.to(torch.int8))
                 m.rec.add(f"{self.name}/acc", acc.to(torch.int32))
                 m.rec.add(f"{self.name}/s_x", s_x.to(BF16).expand(x.shape[0], 1))

@@ -1067,5 +1067,39 @@
   "tokens": 20440,
   "chunks": 40,
   "seconds": 24.9
+ },
+ "b65-design": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    12,
+    11
+   ],
+   "int_softmax": true,
+   "num_bits": 8,
+   "pow2_scales": "attn",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "head",
+   "dequant": "bf16-chain",
+   "dequant_round": "even",
+   "attn_out_int8": true,
+   "attn_out_pow2": true,
+   "pow2_matmuls": [
+    "q",
+    "k",
+    "v",
+    "o"
+   ]
+  },
+  "ppl": 22.831288499166096,
+  "nll": 3.1281318978087542,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 89.1
  }
 }

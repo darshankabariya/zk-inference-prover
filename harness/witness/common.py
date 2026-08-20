@@ -109,6 +109,17 @@ SPECS = {
                         pow2_matmuls=("gate", "up")),
     "pow2-down":   Spec(linear="dynamic", nonlinear="bf16", pow2_matmuls=("down",)),
     "pow2-head":   Spec(linear="dynamic", nonlinear="bf16", pow2_matmuls=("lm_head",)),
+    # --- B6.5: the composed layer's numeric spec -------------------------------
+    # The mixed dequant layout the B6 review's per-matmul attribution licenses:
+    # `b6-design-p2o` (integer softmax at int12 x int11, power-of-two attention
+    # scales, one Q scale per head, the attention output rounded straight to int8
+    # with a power-of-two `s_o`, the 26-cell chain elsewhere) plus power-of-two
+    # *linear* scales on exactly the matmuls where they are free (q/k/v/o, -0.43%),
+    # keeping general bf16 scales on gate/up/down where they are not.
+    "b65-design":  Spec(linear="dynamic", nonlinear="bf16", int_softmax=True,
+                        qk_bits=(12, 11), pow2_scales="attn", q_scale_mode="head",
+                        attn_out_int8=True, attn_out_pow2=True, dequant="bf16-chain",
+                        pow2_matmuls=("q", "k", "v", "o")),
 }
 
 # B5's probes, kept apart so B1's own table stays what B1 measured
@@ -120,9 +131,10 @@ B5_SPECS = ["qk-int12", "pow2-scales", "int-softmax", "int-softmax-12",
 B6_SPECS = ["bf16-dequant", "pow2-dequant", "int-attnout", "b6-design",
             "b6-design-bf16"]
 
-# the B6 review's probes, run before B6.5 freezes the composed layout
+# the B6 review's probes, run before B6.5 freezes the composed layout,
+# plus the composed layout's own spec (the one B6.5's AIR pins)
 B65_SPECS = ["b6-design-p2o", "bf16-dequant-away", "pow2-qkvo", "pow2-gateup",
-             "pow2-down", "pow2-head"]
+             "pow2-down", "pow2-head", "b65-design"]
 
 
 def setup():
