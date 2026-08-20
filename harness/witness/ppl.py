@@ -14,7 +14,7 @@ import time
 
 import torch
 
-from common import B5_SPECS, B6_SPECS, MODEL, OUT, SPECS, chunks, setup, tokens
+from common import B5_SPECS, B6_SPECS, B65_SPECS, MODEL, OUT, SPECS, chunks, setup, tokens
 from model import Model
 from quant import INT8_MAX, bf16_ceil, qscale
 
@@ -136,6 +136,8 @@ if __name__ == "__main__":
     p.add_argument("--markdown", action="store_true")
     p.add_argument("--b5", action="store_true", help="only B5's probes (with --markdown/--missing)")
     p.add_argument("--b6", action="store_true", help="only B6's probes (with --markdown/--missing)")
+    p.add_argument("--b65", action="store_true",
+                   help="only the B6 review's probes (with --markdown/--missing)")
     p.add_argument("--no-save", action="store_true", help="smoke run: do not touch ppl.json")
     a = p.parse_args()
     setup()
@@ -146,12 +148,16 @@ if __name__ == "__main__":
                 only = B5_SPECS + ["fp32", "dynamic-int8", "qk-int8"]
             if a.b6:
                 only = B6_SPECS + ["fp32", "dynamic-int8", "int-softmax-12sq"]
+            if a.b65:
+                only = B65_SPECS + ["fp32", "dynamic-int8", "bf16-dequant",
+                                    "pow2-dequant", "int-attnout", "b6-design-bf16"]
             markdown(only)
         else:
             report()
         raise SystemExit
     done = json.load(open(RESULTS)) if os.path.exists(RESULTS) else {}
-    pool = B5_SPECS if a.b5 else (B6_SPECS if a.b6 else list(SPECS))
+    pool = (B5_SPECS if a.b5 else
+            (B6_SPECS if a.b6 else (B65_SPECS if a.b65 else list(SPECS))))
     todo = [s for s in pool if s not in done] if a.missing else (pool if a.all else [a.spec])
     for name in todo:
         print(f"== {name}: {SPECS[name].asdict()}", flush=True)

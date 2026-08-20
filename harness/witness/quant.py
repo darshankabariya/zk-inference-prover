@@ -46,6 +46,17 @@ def round_hafz(x):
     return torch.sign(x) * torch.floor(x.abs() + 0.5)
 
 
+def bf16_away(x):
+    """Round to bf16 with ties away from zero (the gadget's `Round::Away`).
+
+    `.to(BF16)` is round-to-nearest-even; this keeps the 8-bit significand and
+    breaks ties on magnitude upward -- the mode that needs no sticky bit, one
+    fewer witness column and half the table rows in B6's dequant gadget.
+    """
+    m, e = torch.frexp(x.double())        # x = m * 2^e, |m| in [0.5, 1)
+    return torch.ldexp(round_hafz(m * 256), e - 8).float()
+
+
 def tree_sum(x, dim=-1):
     """Balanced-tree sum with every partial sum rounded to bf16.
 

@@ -86,6 +86,29 @@ SPECS = {
     "b6-design-bf16": Spec(linear="dynamic", nonlinear="bf16", int_softmax=True,
                            qk_bits=(12, 11), pow2_scales="attn", q_scale_mode="head",
                            attn_out_int8=True, dequant="bf16-chain"),
+    # --- B6.5 probes (B6 review) ----------------------------------------------
+    # The int8 attention-output gadget's no-wrap window needs `den = Z`, i.e. a
+    # power-of-two output scale; `int-attnout` and `b6-design-bf16` measured a
+    # general bf16 `s_o` the 9-cell gadget cannot prove at C = 16K.  This is the
+    # provable spec: `b6-design-bf16` with `s_o` rounded up to a power of two.
+    "b6-design-p2o": Spec(linear="dynamic", nonlinear="bf16", int_softmax=True,
+                          qk_bits=(12, 11), pow2_scales="attn", q_scale_mode="head",
+                          attn_out_int8=True, dequant="bf16-chain",
+                          attn_out_pow2=True),
+    # Round::Away on the chain: no sticky bit, one fewer witness column and half
+    # the table rows (25.12 against 26.12 cells) -- open gap 5's missing number.
+    "bf16-dequant-away": Spec(linear="dynamic", nonlinear="bf16",
+                              dequant="bf16-chain", dequant_round="away"),
+    # Where does pow2-dequant's +2.29% live?  Power-of-two linear scales for one
+    # matmul group at a time; the union of the four is `pow2-dequant`.  Whichever
+    # groups come out free can take the 15-cell dequant instead of the 26-cell
+    # chain in the composed layer.
+    "pow2-qkvo":   Spec(linear="dynamic", nonlinear="bf16",
+                        pow2_matmuls=("q", "k", "v", "o")),
+    "pow2-gateup": Spec(linear="dynamic", nonlinear="bf16",
+                        pow2_matmuls=("gate", "up")),
+    "pow2-down":   Spec(linear="dynamic", nonlinear="bf16", pow2_matmuls=("down",)),
+    "pow2-head":   Spec(linear="dynamic", nonlinear="bf16", pow2_matmuls=("lm_head",)),
 }
 
 # B5's probes, kept apart so B1's own table stays what B1 measured
@@ -96,6 +119,10 @@ B5_SPECS = ["qk-int12", "pow2-scales", "int-softmax", "int-softmax-12",
 # B6's probes, same discipline
 B6_SPECS = ["bf16-dequant", "pow2-dequant", "int-attnout", "b6-design",
             "b6-design-bf16"]
+
+# the B6 review's probes, run before B6.5 freezes the composed layout
+B65_SPECS = ["b6-design-p2o", "bf16-dequant-away", "pow2-qkvo", "pow2-gateup",
+             "pow2-down", "pow2-head"]
 
 
 def setup():

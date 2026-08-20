@@ -4,13 +4,29 @@
    "linear": "fp32",
    "nonlinear": "fp32",
    "reduce": "fp32",
-   "qk_int8": false
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
-  "ppl": 21.854747057974215,
-  "nll": 3.084418154602648,
+  "ppl": 21.852963714146885,
+  "nll": 3.08433655143484,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 85.8
+  "seconds": 12.6
  },
  "dynamic-int8": {
   "spec": {
@@ -19,65 +35,143 @@
    "reduce": "fp32",
    "qk_int8": false,
    "fp32_logits": false,
-   "fp32_matmuls": []
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
-  "ppl": 22.834953100633154,
-  "nll": 3.128292392797899,
+  "ppl": 22.78515581543407,
+  "nll": 3.126109263201749,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 92.4
+  "seconds": 25.5
  },
  "static": {
   "spec": {
    "linear": "static",
    "nonlinear": "bf16",
    "reduce": "fp32",
-   "qk_int8": false
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
-  "ppl": 110.77714106883042,
-  "nll": 4.707520444985705,
+  "ppl": 111.22761946593317,
+  "nll": 4.7115787274683525,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 90.4
+  "seconds": 24.5
  },
  "bf16-only": {
   "spec": {
    "linear": "fp32",
    "nonlinear": "bf16",
    "reduce": "fp32",
-   "qk_int8": false
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
-  "ppl": 21.913924242432447,
-  "nll": 3.0871222449375457,
+  "ppl": 21.924093191110867,
+  "nll": 3.0875861778184626,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 78.0
+  "seconds": 17.8
  },
  "bf16-reduce": {
   "spec": {
    "linear": "dynamic",
    "nonlinear": "bf16",
    "reduce": "bf16",
-   "qk_int8": false
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
-  "ppl": 22.758346008738613,
-  "nll": 3.124931935648162,
+  "ppl": 22.788240320206146,
+  "nll": 3.126244627472939,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 94.5
+  "seconds": 27.5
  },
  "qk-int8": {
   "spec": {
    "linear": "dynamic",
    "nonlinear": "bf16",
    "reduce": "fp32",
-   "qk_int8": true
+   "qk_int8": true,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
-  "ppl": 23.87903001684993,
-  "nll": 3.1730006686395393,
+  "ppl": 23.85732486939567,
+  "nll": 3.172091292588445,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 93.2
+  "seconds": 25.8
  },
  "int8-only": {
   "spec": {
@@ -86,13 +180,27 @@
    "reduce": "fp32",
    "qk_int8": false,
    "fp32_logits": false,
-   "fp32_head": false
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
-  "ppl": 22.629183475037514,
-  "nll": 3.119240377467206,
+  "ppl": 22.630289523821407,
+  "nll": 3.119289253369236,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 84.6
+  "seconds": 19.9
  },
  "fp32-logits": {
   "spec": {
@@ -101,13 +209,27 @@
    "reduce": "fp32",
    "qk_int8": false,
    "fp32_logits": true,
-   "fp32_matmuls": []
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
-  "ppl": 22.827569681403403,
-  "nll": 3.127969002023835,
+  "ppl": 22.782544124586785,
+  "nll": 3.1259946341617235,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 119.6
+  "seconds": 25.5
  },
  "keep-head": {
   "spec": {
@@ -118,13 +240,27 @@
    "fp32_logits": false,
    "fp32_matmuls": [
     "lm_head"
-   ]
+   ],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
-  "ppl": 22.60294716695621,
-  "nll": 3.118080303393698,
+  "ppl": 22.54469147890894,
+  "nll": 3.115499627100278,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 90.4
+  "seconds": 24.8
  },
  "keep-down": {
   "spec": {
@@ -135,13 +271,27 @@
    "fp32_logits": false,
    "fp32_matmuls": [
     "down"
-   ]
+   ],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
-  "ppl": 22.506609171248158,
-  "nll": 3.1138090070213122,
+  "ppl": 22.423483975302805,
+  "nll": 3.110108801436751,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 83.7
+  "seconds": 21.8
  },
  "keep-o": {
   "spec": {
@@ -152,13 +302,27 @@
    "fp32_logits": false,
    "fp32_matmuls": [
     "o"
-   ]
+   ],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
-  "ppl": 22.755503100168497,
-  "nll": 3.1248070106581,
+  "ppl": 22.743434955022973,
+  "nll": 3.1242765303460587,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 91.9
+  "seconds": 24.6
  },
  "keep-qkv": {
   "spec": {
@@ -171,13 +335,27 @@
     "q",
     "k",
     "v"
-   ]
+   ],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
-  "ppl": 22.62376848155698,
-  "nll": 3.1190010563501405,
+  "ppl": 22.5851490288623,
+  "nll": 3.1172925676618304,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 91.6
+  "seconds": 24.4
  },
  "keep-gate-up": {
   "spec": {
@@ -189,13 +367,27 @@
    "fp32_matmuls": [
     "gate",
     "up"
-   ]
+   ],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
-  "ppl": 22.55225627326097,
-  "nll": 3.1158351174072743,
+  "ppl": 22.533578222295766,
+  "nll": 3.1150065621751164,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 95.5
+  "seconds": 23.9
  },
  "bf16-norm": {
   "spec": {
@@ -204,13 +396,27 @@
    "reduce": "bf16-norm",
    "qk_int8": false,
    "fp32_logits": false,
-   "fp32_matmuls": []
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
-  "ppl": 22.78170900184741,
-  "nll": 3.1259579772352004,
+  "ppl": 22.697273884356086,
+  "nll": 3.122244824075419,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 206.9
+  "seconds": 25.8
  },
  "bf16-softmax": {
   "spec": {
@@ -219,13 +425,27 @@
    "reduce": "bf16-softmax",
    "qk_int8": false,
    "fp32_logits": false,
-   "fp32_matmuls": []
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
-  "ppl": 22.6783072428405,
-  "nll": 3.121408839515044,
+  "ppl": 22.678078895907152,
+  "nll": 3.1213987705059014,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 147.8
+  "seconds": 26.8
  },
  "qk-int12": {
   "spec": {
@@ -242,13 +462,19 @@
    "int_softmax": false,
    "num_bits": 8,
    "pow2_scales": "",
-   "attn_scale_mode": "static"
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
   "ppl": 22.734128111155474,
   "nll": 3.123867236471456,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 82.3
+  "seconds": 27.2
  },
  "pow2-scales": {
   "spec": {
@@ -265,13 +491,19 @@
    "int_softmax": false,
    "num_bits": 8,
    "pow2_scales": "all",
-   "attn_scale_mode": "static"
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
   "ppl": 23.357901037170837,
   "nll": 3.150935301062179,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 79.6
+  "seconds": 25.5
  },
  "int-softmax": {
   "spec": {
@@ -288,13 +520,19 @@
    "int_softmax": true,
    "num_bits": 8,
    "pow2_scales": "",
-   "attn_scale_mode": "static"
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
   "ppl": 24.025207676350558,
   "nll": 3.1791035989959178,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 85.0
+  "seconds": 28.1
  },
  "int-softmax-12": {
   "spec": {
@@ -311,13 +549,19 @@
    "int_softmax": true,
    "num_bits": 8,
    "pow2_scales": "",
-   "attn_scale_mode": "static"
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
   "ppl": 22.74410200984024,
   "nll": 3.124305859470554,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 89.2
+  "seconds": 29.6
  },
  "int-softmax-p2qk": {
   "spec": {
@@ -334,13 +578,19 @@
    "int_softmax": true,
    "num_bits": 8,
    "pow2_scales": "attn",
-   "attn_scale_mode": "static"
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
   "ppl": 24.54111726940993,
   "nll": 3.200349966747187,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 102.8
+  "seconds": 29.3
  },
  "int-softmax-12p2": {
   "spec": {
@@ -357,13 +607,19 @@
    "int_softmax": true,
    "num_bits": 8,
    "pow2_scales": "attn",
-   "attn_scale_mode": "static"
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
   "ppl": 22.779862942277784,
   "nll": 3.1258769414196275,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 90.6
+  "seconds": 31.2
  },
  "int-softmax-pow2": {
   "spec": {
@@ -380,13 +636,19 @@
    "int_softmax": true,
    "num_bits": 8,
    "pow2_scales": "all",
-   "attn_scale_mode": "static"
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
   "ppl": 25.50659599777541,
   "nll": 3.2389370852953765,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 85.5
+  "seconds": 30.8
  },
  "int-softmax-n16": {
   "spec": {
@@ -403,13 +665,19 @@
    "int_softmax": true,
    "num_bits": 16,
    "pow2_scales": "",
-   "attn_scale_mode": "static"
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
   "ppl": 24.024543365567336,
   "nll": 3.1790759480396127,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 88.0
+  "seconds": 30.9
  },
  "int-softmax-dyn": {
   "spec": {
@@ -426,13 +694,19 @@
    "int_softmax": true,
    "num_bits": 8,
    "pow2_scales": "",
-   "attn_scale_mode": "cache"
+   "attn_scale_mode": "cache",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
   "ppl": 23.964272387112548,
   "nll": 3.176564070669872,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 86.9
+  "seconds": 29.9
  },
  "int-softmax-12sq": {
   "spec": {
@@ -450,13 +724,18 @@
    "num_bits": 8,
    "pow2_scales": "attn",
    "attn_scale_mode": "static",
-   "q_scale_mode": "head"
+   "q_scale_mode": "head",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
   "ppl": 22.696079304452468,
   "nll": 3.1221921917043787,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 92.0
+  "seconds": 31.9
  },
  "bf16-dequant": {
   "spec": {
@@ -476,13 +755,16 @@
    "attn_scale_mode": "static",
    "q_scale_mode": "token",
    "dequant": "bf16-chain",
-   "attn_out_int8": false
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
   "ppl": 22.72588802504074,
   "nll": 3.1235047163095495,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 357.5
+  "seconds": 30.5
  },
  "pow2-dequant": {
   "spec": {
@@ -502,13 +784,16 @@
    "attn_scale_mode": "static",
    "q_scale_mode": "token",
    "dequant": "fp32",
-   "attn_out_int8": false
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
   "ppl": 23.357901037170837,
   "nll": 3.150935301062179,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 195.5
+  "seconds": 25.4
  },
  "int-attnout": {
   "spec": {
@@ -528,13 +813,16 @@
    "attn_scale_mode": "static",
    "q_scale_mode": "head",
    "dequant": "fp32",
-   "attn_out_int8": true
+   "dequant_round": "even",
+   "attn_out_int8": true,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
   "ppl": 22.768272470857482,
   "nll": 3.1253680085482665,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 340.5
+  "seconds": 30.3
  },
  "b6-design": {
   "spec": {
@@ -554,13 +842,16 @@
    "attn_scale_mode": "static",
    "q_scale_mode": "head",
    "dequant": "fp32",
-   "attn_out_int8": true
+   "dequant_round": "even",
+   "attn_out_int8": true,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
   "ppl": 23.701365415374834,
   "nll": 3.1655326589446244,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 1225.9
+  "seconds": 30.3
  },
  "b6-design-bf16": {
   "spec": {
@@ -580,12 +871,201 @@
    "attn_scale_mode": "static",
    "q_scale_mode": "head",
    "dequant": "bf16-chain",
-   "attn_out_int8": true
+   "dequant_round": "even",
+   "attn_out_int8": true,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
   },
   "ppl": 22.786154362158427,
   "nll": 3.1261530866828218,
   "tokens": 20440,
   "chunks": 40,
-  "seconds": 205.8
+  "seconds": 34.3
+ },
+ "b6-design-p2o": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    12,
+    11
+   ],
+   "int_softmax": true,
+   "num_bits": 8,
+   "pow2_scales": "attn",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "head",
+   "dequant": "bf16-chain",
+   "dequant_round": "even",
+   "attn_out_int8": true,
+   "attn_out_pow2": true,
+   "pow2_matmuls": []
+  },
+  "ppl": 22.83752497278624,
+  "nll": 3.128405015202651,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 33.7
+ },
+ "bf16-dequant-away": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "bf16-chain",
+   "dequant_round": "away",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": []
+  },
+  "ppl": 22.7763486455753,
+  "nll": 3.1257226574444257,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 68.3
+ },
+ "pow2-qkvo": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": [
+    "q",
+    "k",
+    "v",
+    "o"
+   ]
+  },
+  "ppl": 22.686685480818443,
+  "nll": 3.121778209708675,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 24.5
+ },
+ "pow2-gateup": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": [
+    "gate",
+    "up"
+   ]
+  },
+  "ppl": 22.8761928909881,
+  "nll": 3.1300967580418297,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 24.4
+ },
+ "pow2-down": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": [
+    "down"
+   ]
+  },
+  "ppl": 23.091593248983248,
+  "nll": 3.1394686226742143,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 24.4
+ },
+ "pow2-head": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": [
+    "lm_head"
+   ]
+  },
+  "ppl": 23.036814638839896,
+  "nll": 3.1370935727472173,
+  "tokens": 20440,
+  "chunks": 40,
+  "seconds": 24.9
  }
 }

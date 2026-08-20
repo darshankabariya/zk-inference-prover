@@ -95,6 +95,18 @@ forward pass gained `Spec.int_softmax`, `qk_bits`, `pow2_scales` and
 (`out/attn_ranges.json`) alongside the static one. None of it changes any number
 above.
 
+**Review note (B6 review).** The table above was produced on a different machine
+than every later block: its fp32 BLAS differs, and the dynamic max-scales amplify
+the drift by flipping `bf16_ceil` thresholds, so none of these rows reproduced on
+the current one while every B5/B6-era row reproduces bit-identically. All 15 rows
+were re-run on the current lineage and `ppl.json` refreshed (`fp32` 21.8530,
+`dynamic-int8` **22.7852** → +4.27% over fp32, `static` 111.228, shifts of
+−0.37%…+0.41% elsewhere). No conclusion here changes — the `keep-*` ordering,
+the ~91× static gap and the additivity story all hold — but quote deltas from
+`ppl.json`, not from this table, and read sub-±0.4% differences as noise: that is
+the demonstrated size of environment drift alone. The B6 review notes in
+`experiment-plan.md` carry the full old→new table.
+
 * **The attested spec costs +4.5% perplexity** — it misses B1's +2% bar by ~2.2×.
 * **The standard baseline is 91× worse.** Static per-tensor W8A8 costs **+407%**.
   This is the leg of the theory that was actually in question, and it is confirmed

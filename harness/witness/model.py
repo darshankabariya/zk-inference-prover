@@ -22,9 +22,9 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from quant import (BF16, INT8_MAX, gemm_dtype, int_gemm, int_gemm_exact, qscale,
-                   qscale_per_channel, qscale_per_token, quantize, reduce_sum,
-                   round_hafz, store)
+from quant import (BF16, INT8_MAX, bf16_away, gemm_dtype, int_gemm, int_gemm_exact,
+                   qscale, qscale_per_channel, qscale_per_token, quantize,
+                   reduce_sum, round_hafz, store)
 
 
 @dataclass
@@ -70,11 +70,25 @@ class Spec:
     # so the difference between the two is the numeric price of the general-scale
     # dequant.  With power-of-two scales the two coincide exactly.
     dequant: str = "fp32"
+    # The chain's bf16 rounding mode: "even" is B1's contract (`.to(bfloat16)`);
+    # "away" (ties away from zero) needs no sticky bit -- one fewer witness column
+    # and half the table rows in B6's gadget (25.12 against 26.12 cells) -- but had
+    # no perplexity number until the B6 review (b6/README, open gap 5).
+    dequant_round: str = "even"
     # The attention output feeds `o_proj`, which quantizes it to int8 anyway, so
     # `s_v/(Z s_o)` can be folded into a *single* rounding straight to int8 -- which
     # deletes the bf16 waypoint, the reciprocal lookup and the requantize at every
     # output element (B5 review; B6 prices the gadget at 9 cells against 15 + 4 + 15).
     attn_out_int8: bool = False
+    # B6 review: the int8 gadget's no-wrap argument needs `den = Z`, i.e. a
+    # power-of-two output scale -- a general bf16 `s_o` puts its mantissa into the
+    # denominator and `q den` outgrows p at C = 16K.  B6's probes measured a bf16
+    # `s_o`; this knob makes the output scale the one the gadget can prove.
+    attn_out_pow2: bool = False
+    # power-of-two weight and activation scales for *these* matmul kinds only,
+    # whatever `pow2_scales` says: attributes `pow2-dequant`'s +2.29% to the
+    # matmul groups it comes from (B6 review)
+    pow2_matmuls: tuple = ()
     fp32_logits: bool = False  # leave the final dequant unrounded (see README: NLL
                                # measures the logits themselves, so rounding them
                                # to bf16 charges the scheme for a sampling-invisible
@@ -91,7 +105,10 @@ class Spec:
                 "num_bits": self.num_bits, "pow2_scales": self.pow2_scales,
                 "attn_scale_mode": self.attn_scale_mode,
                 "q_scale_mode": self.q_scale_mode,
-                "dequant": self.dequant, "attn_out_int8": self.attn_out_int8}
+                "dequant": self.dequant, "dequant_round": self.dequant_round,
+                "attn_out_int8": self.attn_out_int8,
+                "attn_out_pow2": self.attn_out_pow2,
+                "pow2_matmuls": list(self.pow2_matmuls)}
 
 
 class Recorder:
@@ -228,7 +245,11 @@ class Model:
 
     # -- primitives -------------------------------------------------------
     def spec_for(self, kind):
-        return replace(self.spec, linear="fp32") if kind in self.spec.fp32_matmuls else self.spec
+        if kind in self.spec.fp32_matmuls:
+            return replace(self.spec, linear="fp32")
+        if kind in self.spec.pow2_matmuls:
+            return replace(self.spec, pow2_scales="linear")
+        return self.spec
 
     def store(self, x):
         return store(x, self.spec.nonlinear == "bf16")
@@ -245,7 +266,8 @@ class Model:
         is why `pow2-dequant` needs no separate numeric probe.
         """
         if self.spec.dequant == "bf16-chain":
-            return self.store(self.store(self.store(acc) * s_x) * s_w)
+            rnd = bf16_away if self.spec.dequant_round == "away" else self.store
+            return rnd(rnd(rnd(acc) * s_x) * s_w)
         return acc * s_x * s_w
 
     def note(self, name, acc):
@@ -351,7 +373,8 @@ class Model:
             real = o.double() * s_v.double() / z.double()
             flat = real.transpose(0, 1).reshape(ss, self.nh * self.hd)
             s_o = qscale(flat.abs().amax(-1, keepdim=True).float(), -1, INT8_MAX,
-                         self.spec.pow2_scales in ("all", "linear"))
+                         self.spec.pow2_scales in ("all", "linear")
+                         or self.spec.attn_out_pow2)
             q = round_hafz(flat / s_o.double()).clamp_(-INT8_MAX, INT8_MAX).float()
             if self.clamped is not None:
                 self.tally("attnout", flat.float() / s_o, INT8_MAX)
