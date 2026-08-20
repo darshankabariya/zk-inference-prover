@@ -205,9 +205,17 @@ pub fn logup_cols_dev_to_host(
     let up = |cols: &[Eval]| -> Vec<BaseFieldVec> {
         cols.iter().map(|e| BaseFieldVec::from_vec(e.values.to_cpu())).collect()
     };
+    // The three costs, apart, because only the middle one is the milestone's:
+    // the upload is here because the *fills* are still on the host (18.7's row
+    // 1, still open) and the download is the check's alone.
+    let t = std::time::Instant::now();
     let dpre = up(pre);
     let dbase = up(base);
+    let t_up = t.elapsed().as_secs_f64();
+    let t = std::time::Instant::now();
     let (out, sum) = logup_cols_dev(ir, family, shape, log_rows, &dpre, &dbase);
+    let t_dev = t.elapsed().as_secs_f64();
+    let t = std::time::Instant::now();
     let domain = stwo::core::poly::circle::CanonicCoset::new(log_rows).circle_domain();
     let cols = out
         .iter()
@@ -219,5 +227,13 @@ pub fn logup_cols_dev_to_host(
             )
         })
         .collect();
+    eprintln!(
+        "logup-dev: {family} shape {shape} 2^{log_rows} x {} lookups -- \
+         kernels {:.4} s, upload {:.4} s, download {:.4} s",
+        ir.fracs.len(),
+        t_dev,
+        t_up,
+        t.elapsed().as_secs_f64()
+    );
     (cols, sum)
 }
