@@ -90,15 +90,34 @@ pub fn logup_cols_dev(
     pre: &[BaseFieldVec],
     base: &[BaseFieldVec],
 ) -> (Vec<BaseFieldVec>, SecureField) {
+    let pre_ptrs: Vec<*const u32> = pre.iter().map(|c| c.device_ptr).collect();
+    let base_ptrs: Vec<*const u32> = base.iter().map(|c| c.device_ptr).collect();
+    logup_cols_dev_ptrs(ir, family, shape, log_rows, &pre_ptrs, &base_ptrs)
+}
+
+/// The same, taking the columns as device pointers.
+///
+/// B7a milestone 4 (section 3 row 1): a family whose fraction IR loads no
+/// preprocessed column still declares them, and the kernel still checks the
+/// count -- so the caller passes a null for each one it does not supply and
+/// `devfrac` asserts that no *loaded* column is null. That is what lets the
+/// bands' interactions run without their preprocessed columns being uploaded,
+/// which would put back exactly the 4a bytes this row is removing.
+pub fn logup_cols_dev_ptrs(
+    ir: &Ir,
+    family: &str,
+    shape: usize,
+    log_rows: u32,
+    pre_ptrs: &[*const u32],
+    base_ptrs: &[*const u32],
+) -> (Vec<BaseFieldVec>, SecureField) {
     let n_rows = 1usize << log_rows;
     let n_looks = ir.fracs.len();
     let n_cols = n_looks.div_ceil(2);
     assert!(n_cols > 0, "a component with no lookups has no LogUp columns");
-    assert_eq!(pre.len(), ir.cols[0], "{family}: preprocessed column count");
-    assert_eq!(base.len(), ir.cols[1], "{family}: base column count");
+    assert_eq!(pre_ptrs.len(), ir.cols[0], "{family}: preprocessed column count");
+    assert_eq!(base_ptrs.len(), ir.cols[1], "{family}: base column count");
 
-    let pre_ptrs: Vec<*const u32> = pre.iter().map(|c| c.device_ptr).collect();
-    let base_ptrs: Vec<*const u32> = base.iter().map(|c| c.device_ptr).collect();
     // the relation elements, flattened the way `qm31` is laid out on the device
     let sc: Vec<u32> = ir
         .scalars
