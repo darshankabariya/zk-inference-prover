@@ -277,8 +277,23 @@ boundary, so the headline moves: **4.85 → 4.24 tok/s at 27B/16K, ×11 → ×12
 53**. The verdicts are unchanged in kind — the commit path is still ≤5×
 (**×4.2**, confirmed) and the whole wall still inside 5–100× (an engineering gap)
 — with one exception worth naming: **stwo total is no longer at the 5× line**
-(×5.5 on the proxy, **×7.2** on the real chunk). This row replaces the synthetic
-proxy in every later tok/s statement.
+(×5.5 on the proxy, **×7.2** on the real chunk).
+
+> **Amended by B10 step 0 (2026-08-22).** ~~This row replaces the synthetic proxy
+> in every later tok/s statement.~~ **This chunk is not the spec this project
+> scores.** L16 was extracted under `b65-design` — B6.5's *mixed* dequant layout,
+> the power-of-two dequant on q/k/v/o — and proved at `round = even` with an
+> 8-bit numerator; B8 retired that layout (+11.69% perplexity at 8B against
+> `b6-design-p2o`'s +8.81%) and the denominator charges the bf16 chain on all
+> seven. So the quality row and the throughput row above belong to two different
+> systems. B10 step 0 freezes one spec, `b10-design`, and re-runs this table on
+> it (`b10/README.md` 1.3–1.5): **2.451 G fresh cells (+1.49%), 5.16 MiB, digest
+> `6c3fb61524dee2ec` CUDA = SIMD, commit ×4.25, stwo ×7.22, whole wall ×12.32 =
+> 4.30 tok/s at 27B/16K and 6.88 at 4K**, rungs 1–3 green. **That is the row
+> later statements carry**, and unlike this one it is the same system as the
+> perplexity row. The verdicts do not move.
+
+
 
 ### 1.7 Step 2, probe 1 — the naive baseline
 
@@ -448,10 +463,32 @@ prefill:
 | 4,096 | 188.22 M | 172.22 M | 147 ms, ×436 | 135 ms, ×399 |
 | 16,384 | 300.97 M | 236.21 M | 235 ms, ×697 | 185 ms, **×547** |
 
-**It does not land in E6c's 50–150× band.** Against B1's own forward pass on this
-box it is ~60× at 8B, inside the band; against a production prefill it is ~440×
-at 8B and **~550–700×** at 27B, three to five times above it. **The term that
-moved is not attention.** It is that prefill in this scheme costs a full
+**At the measured rate it does not land in E6c's 50–150× band.** Against B1's own
+forward pass on this box it is ~60× at 8B, inside the band; against a production
+prefill it is ~440× at 8B and **~550–700×** at 27B, three to five times above it.
+
+> **Amended by B10 step 0 (2026-08-22).** That reading charges the decode
+> throughput gap twice. The rate above is B9's *measured* 1.28 G cells/s, which
+> is ×12.5 off the denominator's own 15.95 G — and that ×12.5 is exactly what
+> H4's **first** face already reports. H4's second face is about prefill's own
+> structure, so the same cell counts belong at the target rate:
+>
+> | S = C, 27B | at 15.95 G cells/s | vs 0.338 ms/token (40% MFU) | vs 0.054 ms/token (E6c's 1 POPS) |
+> |---|---|---|---|
+> | 4,096, naive | 11.8 ms | **×35** | ×219 |
+> | 16,384, split | 14.8 ms | **×44** | ×274 |
+> | 16,384, naive | 18.9 ms | **×56** | ×349 |
+>
+> ×35–×56 is *at or below* the low end of E6c's 50–150. And the baseline itself
+> is half the remaining distance: E6c's own was 2N / 1 POPS = **0.054 ms/token**
+> for 27B, ×6.3 cheaper than the 40%-MFU one used above (`freivalds.py`), which
+> puts the same numbers back above the band. So the absolute overhead is a
+> baseline choice plus the decode gap. What survives either baseline is the
+> **ratio**, prefill *k* / decode *k* ≈ 0.8–1.0 — and that is E6c's flat-*k*
+> assumption **confirmed**, not a term E6c missed. It is reached iff the decode
+> target is. `b9/prefill.py` prints both readings.
+
+**The term that moved is not attention.** It is that prefill in this scheme costs a full
 decode-token's trace *per token*: the weight walk amortises over the batch —
 which is what "×100 on input" assumed — but the per-token terms (the dequant at
 33% of the budget, the accumulators, the requantize) do not amortise at all, and
