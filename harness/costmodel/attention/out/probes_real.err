@@ -1,0 +1,116 @@
+fill-dev: q pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0002 s
+fill-dev: k pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: v pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: o pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: gate chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0006 s
+fill-dev: up chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0006 s
+fill-dev: down chain shape 2^15 x 14 slots -- 212 base and 33 pre columns, kernel 0.0001 s
+tab-dev: 2^17 -- x, y, m_exp from 3 exp counters, patch 0 rows, kernel 0.0001 s
+pre-dev: 10 shared tables -- 21 preprocessed and 10 multiplicity columns, patch 0 rows, kernels 0.0003 s
+[PROFILE]   prove_ex: composition gen:    11ms
+[PROFILE]   prove_ex: composition commit: 2ms
+[PROFILE]   prove_ex: prove_values:       58ms
+compose probe corrupted accumulator (down)
+fill-dev: q pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: k pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: v pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: o pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: gate chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0005 s
+fill-dev: up chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0005 s
+fill-dev: down chain shape 2^15 x 14 slots -- 212 base and 33 pre columns, kernel 0.0001 s
+tab-dev: 2^17 -- x, y, m_exp from 3 exp counters, patch 0 rows, kernel 0.0000 s
+pre-dev: 10 shared tables -- 21 preprocessed and 10 multiplicity columns, patch 0 rows, kernels 0.0002 s
+[PROFILE]   prove_ex: composition gen:    1ms
+[PROFILE]   prove_ex: composition commit: 11ms
+[PROFILE]   prove_ex: prove_values:       55ms
+compose probe corrupted activation (qkv)
+fill-dev: q pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: k pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: v pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: o pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: gate chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0005 s
+fill-dev: up chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0005 s
+fill-dev: down chain shape 2^15 x 14 slots -- 212 base and 33 pre columns, kernel 0.0001 s
+tab-dev: 2^17 -- x, y, m_exp from 3 exp counters, patch 0 rows, kernel 0.0000 s
+pre-dev: 10 shared tables -- 21 preprocessed and 10 multiplicity columns, patch 0 rows, kernels 0.0002 s
+[PROFILE]   prove_ex: composition gen:    4ms
+[PROFILE]   prove_ex: composition commit: 10ms
+[PROFILE]   prove_ex: prove_values:       53ms
+compose probe corrupted key (band 0)
+fill-dev: q pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: k pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: v pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: o pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: gate chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0006 s
+fill-dev: up chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0006 s
+fill-dev: down chain shape 2^15 x 14 slots -- 212 base and 33 pre columns, kernel 0.0001 s
+tab-dev: 2^17 -- x, y, m_exp from 3 exp counters, patch 0 rows, kernel 0.0000 s
+pre-dev: 10 shared tables -- 21 preprocessed and 10 multiplicity columns, patch 0 rows, kernels 0.0002 s
+[PROFILE]   prove_ex: composition gen:    1ms
+[PROFILE]   prove_ex: composition commit: 11ms
+[PROFILE]   prove_ex: prove_values:       53ms
+compose probe corrupted attention output
+fill-dev: q pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: k pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: v pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: o pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: gate chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0005 s
+fill-dev: up chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0006 s
+fill-dev: down chain shape 2^15 x 14 slots -- 212 base and 33 pre columns, kernel 0.0001 s
+tab-dev: 2^17 -- x, y, m_exp from 3 exp counters, patch 0 rows, kernel 0.0000 s
+pre-dev: 10 shared tables -- 21 preprocessed and 10 multiplicity columns, patch 0 rows, kernels 0.0002 s
+[PROFILE]   prove_ex: composition gen:    1ms
+[PROFILE]   prove_ex: composition commit: 11ms
+[PROFILE]   prove_ex: prove_values:       52ms
+compose probe corrupted attnout denominator
+fill-dev: q pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: k pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: v pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: o pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: gate chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0006 s
+fill-dev: up chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0006 s
+fill-dev: down chain shape 2^15 x 14 slots -- 212 base and 33 pre columns, kernel 0.0001 s
+tab-dev: 2^17 -- x, y, m_exp from 3 exp counters, patch 0 rows, kernel 0.0000 s
+pre-dev: 10 shared tables -- 21 preprocessed and 10 multiplicity columns, patch 0 rows, kernels 0.0002 s
+[PROFILE]   prove_ex: composition gen:    1ms
+[PROFILE]   prove_ex: composition commit: 11ms
+[PROFILE]   prove_ex: prove_values:       53ms
+compose probe corrupted exp table, witness rebuilt
+fill-dev: q pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: k pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: v pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: o pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: gate chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0005 s
+fill-dev: up chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0005 s
+fill-dev: down chain shape 2^15 x 14 slots -- 212 base and 33 pre columns, kernel 0.0001 s
+tab-dev: 2^17 -- x, y, m_exp from 3 exp counters, patch 1 rows, kernel 0.0009 s
+pre-dev: 10 shared tables -- 21 preprocessed and 10 multiplicity columns, patch 0 rows, kernels 0.0002 s
+[PROFILE]   prove_ex: composition gen:    1ms
+[PROFILE]   prove_ex: composition commit: 12ms
+[PROFILE]   prove_ex: prove_values:       53ms
+compose probe corrupted norm table, witness rebuilt
+fill-dev: q pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: k pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: v pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: o pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: gate chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0005 s
+fill-dev: up chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0005 s
+fill-dev: down chain shape 2^15 x 14 slots -- 212 base and 33 pre columns, kernel 0.0001 s
+tab-dev: 2^17 -- x, y, m_exp from 3 exp counters, patch 0 rows, kernel 0.0000 s
+pre-dev: 10 shared tables -- 21 preprocessed and 10 multiplicity columns, patch 1 rows, kernels 0.0004 s
+[PROFILE]   prove_ex: composition gen:    1ms
+[PROFILE]   prove_ex: composition commit: 11ms
+[PROFILE]   prove_ex: prove_values:       54ms
+compose probe tampered claim
+fill-dev: q pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: k pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: v pow2 shape 2^12 x 16 slots -- 161 base and 21 pre columns, kernel 0.0000 s
+fill-dev: o pow2 shape 2^15 x 14 slots -- 141 base and 19 pre columns, kernel 0.0001 s
+fill-dev: gate chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0007 s
+fill-dev: up chain shape 2^17 x 19 slots -- 287 base and 43 pre columns, kernel 0.0005 s
+fill-dev: down chain shape 2^15 x 14 slots -- 212 base and 33 pre columns, kernel 0.0001 s
+tab-dev: 2^17 -- x, y, m_exp from 3 exp counters, patch 0 rows, kernel 0.0000 s
+pre-dev: 10 shared tables -- 21 preprocessed and 10 multiplicity columns, patch 0 rows, kernels 0.0002 s
+[PROFILE]   prove_ex: composition gen:    1ms
+[PROFILE]   prove_ex: composition commit: 12ms
+[PROFILE]   prove_ex: prove_values:       53ms
