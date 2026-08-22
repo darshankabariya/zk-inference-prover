@@ -8,6 +8,8 @@ block first, tables over prose.
 
 ```
 b9/naive.py      probe 1: the naive baseline, closed on measured constants
+b9/moe.py        probe 2: the MoE negative control (H6)
+b9/prefill.py    probe 3: the prefill probe (H4's second face)
 b9/gpu/b9_patch.py  the two layer fixes, as an asserted patch for the derived trees
 b9/gpu/b9_diag.py   `off_table` attributed to the table that lost the row
 b9/gpu/b9_run.sh    the steps on the box
@@ -20,12 +22,13 @@ b2/cost_model.py the denominator (step 0); b8/ the W8A16 rider (step 3)
 
 state of B9: **done** — step 0 (the denominator, the numerator's price in the AIR,
 B7b's ladder re-read); step 1 (both failure modes fixed, **all 24 Qwen-0.5B layers
-accept**, rungs 1–2 green, the master table priced per spread, **a real
-Llama-3.1-8B layer at S=512 C=16K proved at a 2.415 G chunk**); step 2's naive
-baseline; step 3's W8A16 rider (ppl + GPQA-D + MMLU-Pro + IFEval at 8B).
+accept**, rungs 1–3 green, the master table priced per spread, **a real
+Llama-3.1-8B layer at S=512 C=16K proved at a 2.415 G chunk**); step 2's three
+probes (naive baseline, MoE, prefill); step 3's W8A16 rider (ppl + GPQA-D +
+MMLU-Pro + IFEval at 8B).
 
-state of B9: **remaining** — step 2's MoE probe (H6) and prefill probe (H4's second
-face); rung 3 on the new witnesses.
+state of B9: **remaining** — nothing of the brief. Open for a next session: the 8B
+layer is layer 16 alone (1.6), and a mask-aware grid is unbuilt (1.10).
 
 state of B9: **headline** — the plan's step-1 diagnosis was **half right**: the
 master exponent is a band-wide constant where it must be layer-wide (12 of 24
@@ -179,6 +182,10 @@ Rung 2 holds on every one (`root_ok`, `stark_ok`, `sums_cancel` and all five
 identities true, `ref_mismatch` 0). **Rung 1** holds across the whole spread range
 — the SIMD reference's `sha256(proof_bytes)` equals the CUDA tree's on L4
 (spread 0), L12 (1), L9 (2), L0 (3) and L1 (5), with the same fresh cell counts.
+**Rung 3** holds on the re-extracted witness at B7b's `intsplit6` probe point
+(2¹⁷ rows), with both caches on: **8 of 8** corruptions rejected — accumulator,
+activation, key, attention output, attnout denominator, both rebuilt-table probes
+(which move the root, as they should) and the tampered claim.
 
 The master table's price is exactly linear in its rows, and the rows are
 exponential in the spread. Across the 24 layers (same shape otherwise):
@@ -209,10 +216,14 @@ shape — Qwen-0.5B's model-wide worst case is `--table-bits 26 --ao-rem-bits 18
 
 The plan's "a few table rows against one emit chain" holds only where the spread
 is uniform. Here the spread runs 0–5 and the table is exponential in it, so the
-one-shape choice costs **+97% of the model's whole trace** and per-layer shapes
-(a second emit chain) are the right call. A model whose spread is uniform — and
-B8 measures Llama-3.1-8B at spread 1: 15, 2: 12, 3: 5, a range of 2 rather than 5
-— pays ×2² = ×4 on the table alone, which on the 8B layer below is 6.9% → ~24%.
+one-shape choice costs **+97% of the model's whole trace**, and per-layer shapes
+(a second emit chain) are the right call. Llama-3.1-8B is milder — B8 measures
+its 32 layers at spread 1: 15, 2: 12, 3: 5, a range of 2 rather than 5 — so a
+model-wide table would be `d_bits + 3` and each layer would pay ×2^(3−spread) on
+its table alone: ×4 for the 15 spread-1 layers, ×2 for the 12 at spread 2, free
+for the 5 at spread 3. On the measured 8B layer (spread 2, 2²⁵ rows, 6.9% of a
+2.415 G chunk) that is 6.9% → 13%. Cheaper than Qwen's ×1.97, and still not
+free.
 
 ### 1.6 A real Llama-3.1-8B layer, S=512, C=16K
 
@@ -319,7 +330,145 @@ strawman. Static W8A8's ×15 collapse says nothing about INT8; it says the
 per-token dynamic scale is load-bearing, as B1 §3 said. `b8/README.md` §2 carries
 the paragraph.
 
-### 1.9 What this session changed, and where
+### 1.9 Step 2, probe 2 — the MoE negative control (H6)
+
+E synthetic experts, top-2 routing, the FFN of the 8B shape (gate/up 4096×14336,
+down 14336×4096 = 176.16 M weights per expert). H6 is confirmed if the per-proof
+weight cost is ×E and/or a routing argument is needed; falsified if MoE proves as
+cheaply as dense. The measurement (`b9/moe.py`, `b9/out/moe_s*.json`, SIMD
+reference so no emitted shape is needed) is the **walk region at the token batch
+a top-2 router leaves each expert**, `S·k/E`:
+
+| per-expert tokens | = S·k/E for E | walk **fresh** | FFN walk **preprocessed** | FFN accumulators |
+|---|---|---|---|---|
+| 512 | 2 | 16.78 M | 218.63 M | 254.02 M |
+| 256 | 4 | 8.65 M | 218.63 M | 127.01 M |
+| 128 | 8 | 4.98 M | 218.63 M | 63.50 M |
+| 64 | 16 | 2.88 M | **218.63 M** | 31.75 M |
+
+That is the whole probe. Falling 512 → 64 tokens (8×), the walk's *fresh* cells
+drop 82.8% — they are laid over rows the token batch chunks — while its
+**preprocessed weight trace moves +0.0%**: 218.63 M cells either way, **13× the
+fresh side**. The invariant term is the weights themselves, read once per proof.
+An expert whose batch shrinks does not get cheaper to walk; it gets *more*
+expensive per token it serves.
+
+A 512-token sequence with top-2 routing touches every expert a layer would use,
+so the proof walks all E weight matrices in full — the weight term is ×E — while
+the accumulators grow only ×k, because each token still passes through k experts:
+
+| E | per-expert tokens | walk fresh | walk preprocessed | FFN accs | FFN cells/token | vs dense |
+|---|---|---|---|---|---|---|
+| 1 | 512 | 16.78 M | 218.63 M | 254.02 M | 955.90 k | 1.00× |
+| 2 | 512 | 33.55 M | 437.26 M | 508.04 M | 1.91 M | 2.00× |
+| 4 | 256 | 34.60 M | 874.51 M | 508.04 M | 2.77 M | 2.90× |
+| 8 | 128 | 39.85 M | **1.75 G** | 508.04 M | **4.49 M** | **4.69×** |
+
+**The routing-selection argument**, which nobody has built, priced by analogy:
+a LogUp multiset tying each token's FFN rows to its expert's instance at ~3 cells
+per (token, chosen expert) — B4's packed pair table, 2 cells per lookup, plus the
+committed expert id — and a top-k argmax over the router's E logits at ~3.36
+cells per comparison, which is B6.5's max argument measured (11.57 − 8.21). At
+E=8 that is 16.8 k cells per proof, 32.9 cells/token, **0.0034%** of the dense
+FFN. Cheap — and the point is that it is a *new gadget*: **no AIR in this project
+ties a committed row to a routed instance.**
+
+**H6, in one paragraph. Confirmed, on its own clause.** What a Freivalds proof
+pays for a matmul is dominated by the weight trace it walks, and that term is per
+*weight*, so it is exactly invariant when an expert's token batch shrinks. A
+sequence touching E experts therefore pays E full weight walks: the per-proof
+weight cost is ×E, which is H6's confirmation criterion verbatim. Per token at
+S=512 the FFN costs ×2.00 (E=2), ×2.90 (E=4), ×4.69 (E=8) against dense — and the
+comparison that matters is against a **dense model with the same active
+parameters**, which pays ×k = ×2: at E=8 the MoE variant pays ×4.69, i.e.
+**×2.35 of pure proving overhead for the same FLOPs per token**. On top of that
+the scheme lacks the selection gadget entirely. MoE does not prove as cheaply as
+dense: the batching that makes the dense scheme work — one weight pass amortised
+over S tokens — is exactly what expert partitioning takes away.
+
+### 1.10 Step 2, probe 3 — the prefill probe (H4's second face)
+
+Decode proves one token against C cached keys; prefill proves S tokens against S
+keys with a causal mask, and **the mask is the term no AIR here has**. The grid's
+row axis runs over `(instance, key)` and its columns over tokens, exactly tiled,
+so a mask that is a function of `(instance, key, token)` is not expressible by
+the tiling: the AIR proves the whole `S × C` rectangle and a masked entry is an
+honest zero that still costs a committed cell. At `C = S` that is half of it.
+(1.4 is the same absence showing up somewhere else: the fold's scale was cut on a
+forward pass that attended to the corner, and the rectangle-only witness then
+overflowed it.)
+
+Measured on the SIMD reference, one layer of the 8B shape at `C = S`
+(`b9/prefill.py`, `b9/out/prefill_s*.json`):
+
+| S = C | chunk (fresh) | grid | grid share | dequant | lead rows | accepts |
+|---|---|---|---|---|---|---|
+| 512 | 1.050 G | 23.13 M | 2.2% | 306.8 M | 0/0/0 | True |
+| 1024 | **1.807 G** | 79.82 M | **4.4%** | 613.5 M | 0/0/0 | True |
+| 2048 | — | — | — | — | — | **killed at 133.8 GB RSS** |
+
+S=2048 does not fit: the box holds a 128 GiB host cap (b7/README §4), and the
+SIMD reference reached it. The plan's "S=2,048 only if it fits" is answered: it
+does not, on the host side, before the 80 GB device side is even reached.
+
+**The corner in both layouts.** The split puts tokens in blocks of B (the grid's
+own tiling granularity, `--scores-per-row` = 64): keys below a block are a
+mask-free rectangle, keys inside it are a B×B diagonal block proven whole, keys
+above it are never committed. That is `1/2 + B/2S` of the naive rectangle.
+
+| S = C | naive, per (head,key,token) of the rectangle | naive, per **useful** entry | split, per useful entry | split/naive | grid saved | of the chunk |
+|---|---|---|---|---|---|---|
+| 512 | 2.76 | 5.50 | 3.10 | 0.562 | 10.12 M | 1.0% |
+| 1024 | 2.38 | 4.75 | 2.53 | **0.531** | 37.42 M | **2.1%** |
+
+The marginal grid cost is **2.25 committed cells per (head, key, token)** (the
+cost model charges 4.00, which also counts the exp lookup's interaction cells).
+
+**The corner is a correctness gap, not a cost gap, at these S.** At C = S = 1024
+the grid is 4.4% of the chunk, so halving it is worth **2.1%**. A prefill chunk
+is dominated by the per-token matmul work, not by attention: fitting the two
+points gives `fresh = 326 M + 1.37 M·S + 72.1·S²`, so the grid passes half the
+chunk only at **S ≈ 19 k** — the context the *decode* path already runs at. The
+mask has to be built for soundness and completeness; it will not buy throughput
+at any prefill length anyone uses.
+
+**The overhead ratio.** A chunk is one layer, so a model token is ×32.
+
+| baseline | 8B, S=1024 | |
+|---|---|---|
+| proven prefill | 56.46 M cells/token → **44.1 ms/token** at B9's measured 1.28 G cells/s | |
+| B1's forward pass on this H100 (no recorder, `b8/out/ppl.log`) | 1,296 tok/s = 0.77 ms/token | **×57** |
+| a production prefill at 40% MFU of an H100 | 0.100 ms/token | **×439** |
+
+Extrapolated to 27B on B9's own denominator, against a 0.338 ms/token production
+prefill:
+
+| S = C | naive cells/token | with the split | naive | split |
+|---|---|---|---|---|
+| 4,096 | 191.02 M | 175.02 M | 149 ms, ×442 | 137 ms, ×405 |
+| 16,384 | 300.97 M | 236.21 M | 235 ms, ×697 | 185 ms, **×547** |
+
+**It does not land in E6c's 50–150× band.** Against B1's own forward pass on this
+box it is ~60× at 8B, inside the band; against a production prefill it is ~440×
+at 8B and **~550–700×** at 27B, three to five times above it. **The term that
+moved is not attention.** It is that prefill in this scheme costs a full
+decode-token's trace *per token*: the weight walk amortises over the batch —
+which is what "×100 on input" assumed — but the per-token terms (the dequant at
+33% of the budget, the accumulators, the requantize) do not amortise at all, and
+they *are* the budget. Prefill is not cheap here because prefill was never the
+expensive half. The one thing that does help is chunk size: the shared tables are
+a fixed 326 M cells, so per-token cost falls 65.6 M → 56.5 M from S=512 to
+S=1024, and a larger prefill chunk is strictly cheaper per token until the host
+cap stops it.
+
+**Rule 13 did not fire.** Every grid tiles exactly at both S (lead rows `0/0/0`),
+so the inert-lead-row paths stay unexercised and no `nomask`/`noactive`/`noident`
+control was needed. No GPU throughput is quoted for a C = S shape — it has not
+been through the emit chain; the prover rate above is 1.6's measured whole wall
+on the real 8B decode chunk applied to a prefill cell count, and it is labelled
+that way everywhere it appears.
+
+### 1.11 What this session changed, and where
 
 | change | file | why |
 |---|---|---|
