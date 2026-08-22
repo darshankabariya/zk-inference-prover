@@ -56,7 +56,7 @@ are free on q/k/v/o at 0.5B (−0.43%) and cost **+3.67%** perplexity at 8B, whi
 | | cells/token, 27B | for 53 tok/s |
 |---|---|---|
 | B6.5's mixed-layout planning range | 262.32 – 307.71 M | 13.90 – 16.31 G cells/s |
-| **B8's layout, the default** | **300.97 M** (191.02 M at C=4K) | **15.95 G cells/s** |
+| **B8's layout, the default** | **300.97 M** (188.22 M at C=4K) | **15.95 G cells/s** |
 
 The range is retired: there is one layout, not a band. The dequant is 33% of the
 per-token budget, the attention grid 43%.
@@ -445,7 +445,7 @@ prefill:
 
 | S = C | naive cells/token | with the split | naive | split |
 |---|---|---|---|---|
-| 4,096 | 191.02 M | 175.02 M | 149 ms, ×442 | 137 ms, ×405 |
+| 4,096 | 188.22 M | 172.22 M | 147 ms, ×436 | 135 ms, ×399 |
 | 16,384 | 300.97 M | 236.21 M | 235 ms, ×697 | 185 ms, **×547** |
 
 **It does not land in E6c's 50–150× band.** Against B1's own forward pass on this
