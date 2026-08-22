@@ -101,13 +101,32 @@ def gemm_dtype(k):
     return torch.float32 if k <= SGEMM_MAX_K else torch.float64
 
 
+# cuBLASLt's int8 GEMM (`torch._int_mm`) refuses fewer than 17 rows
+INT_MM_MIN_ROWS = 17
+
+
+def weight_dtype(k, device):
+    """Storage dtype of a quantized weight: the float width its reduction needs
+    on the CPU, int8 on a GPU (B8: an 8B model's int8 weights held as fp64 would
+    be 64 GB; `torch._int_mm` accumulates int8 x int8 in int32 exactly)."""
+    return torch.int8 if torch.device(device).type == "cuda" else gemm_dtype(k)
+
+
 def int_gemm(qx, qw):
     """Exact integer matmul of int8-valued operands via BLAS.
 
     Every partial sum is an integer bounded by 127^2*K, which the operand dtype
     (chosen by `gemm_dtype`) represents exactly, so this is bit-identical to an
     int64 matmul -- `selftest.py` checks that, and the M31 embedding, on real data.
+    With int8 weights (GPU) the accumulation is a true int32 one; the result is
+    rounded to fp32 exactly as the float path's, so the two agree bit for bit.
     """
+    if qw.dtype == torch.int8:
+        rows = qx.shape[0]
+        a = qx.to(torch.int8)
+        if rows < INT_MM_MIN_ROWS:
+            a = torch.nn.functional.pad(a, (0, 0, 0, INT_MM_MIN_ROWS - rows))
+        return torch._int_mm(a, qw)[:rows].float()
     return (qx.to(qw.dtype) @ qw).float()
 
 

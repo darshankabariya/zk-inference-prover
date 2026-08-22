@@ -12,9 +12,11 @@ import math
 import os
 import time
 
+import numpy as np
 import torch
 
-from common import B5_SPECS, B6_SPECS, B65_SPECS, MODEL, OUT, SPECS, chunks, setup, tokens
+from common import (B5_SPECS, B6_SPECS, B65_SPECS, B8_SPECS, MODEL, OUT, SPECS, chunks,
+                    setup, tokens)
 from model import Model
 from quant import INT8_MAX, bf16_ceil, qscale
 
@@ -80,23 +82,39 @@ def attention_scales(spec):
     return out
 
 
-def run(name, n_chunks):
+def run(name, n_chunks, save=True):
     spec = SPECS[name]
     scales = calibration_scales() if spec.linear == "static" else None
     ascales = attention_scales(spec) if spec.int_softmax else None
     t0 = time.time()
     m = Model(MODEL, spec, static_scales=scales, attn_scales=ascales)
     ev, _ = tokens()
-    nll, cnt = 0.0, 0
+    nll, cnt, per_token = 0.0, 0, []
     for i, c in enumerate(chunks(ev, n_chunks)):
         logits, _ = m.forward(c)
         lp = torch.log_softmax(logits[:-1].float(), dim=-1)
-        nll += -lp.gather(1, c[1:, None]).sum().item()
+        t = -lp.gather(1, c[1:, None].to(lp.device)).squeeze(1)
+        per_token.append(t.cpu())
+        nll += t.sum().item()
         cnt += len(c) - 1
         print(f"  chunk {i + 1:>3}: ppl {math.exp(nll / cnt):8.4f}  ({time.time() - t0:5.1f}s)", flush=True)
     del m
+    if save:
+        # B8: the per-token NLLs, so a difference between two specs gets a paired
+        # standard error (the statistical floor under a ppl delta)
+        os.makedirs(os.path.join(OUT, "nll"), exist_ok=True)
+        np.save(os.path.join(OUT, "nll", f"{name}.npy"), torch.cat(per_token).numpy())
     return dict(spec=spec.asdict(), ppl=math.exp(nll / cnt), nll=nll / cnt,
                 tokens=cnt, chunks=n_chunks, seconds=round(time.time() - t0, 1))
+
+
+def paired(a, b):
+    """ppl(b)/ppl(a) - 1 with its paired standard error, from the per-token NLLs."""
+    x = np.load(os.path.join(OUT, "nll", f"{a}.npy")).astype(np.float64)
+    y = np.load(os.path.join(OUT, "nll", f"{b}.npy")).astype(np.float64)
+    d = y - x
+    se = d.std(ddof=1) / math.sqrt(len(d))
+    return math.exp(d.mean()) - 1, se      # se is on the mean NLL difference (nats)
 
 
 def markdown(only=None):
@@ -138,6 +156,8 @@ if __name__ == "__main__":
     p.add_argument("--b6", action="store_true", help="only B6's probes (with --markdown/--missing)")
     p.add_argument("--b65", action="store_true",
                    help="only the B6 review's probes (with --markdown/--missing)")
+    p.add_argument("--b8", action="store_true",
+                   help="only the rows B8 re-measures at 8B (with --markdown/--missing)")
     p.add_argument("--no-save", action="store_true", help="smoke run: do not touch ppl.json")
     a = p.parse_args()
     setup()
@@ -151,17 +171,20 @@ if __name__ == "__main__":
             if a.b65:
                 only = B65_SPECS + ["fp32", "dynamic-int8", "bf16-dequant",
                                     "pow2-dequant", "int-attnout", "b6-design-bf16"]
+            if a.b8:
+                only = B8_SPECS
             markdown(only)
         else:
             report()
         raise SystemExit
     done = json.load(open(RESULTS)) if os.path.exists(RESULTS) else {}
     pool = (B5_SPECS if a.b5 else
-            (B6_SPECS if a.b6 else (B65_SPECS if a.b65 else list(SPECS))))
+            (B6_SPECS if a.b6 else
+             (B65_SPECS if a.b65 else (B8_SPECS if a.b8 else list(SPECS)))))
     todo = [s for s in pool if s not in done] if a.missing else (pool if a.all else [a.spec])
     for name in todo:
         print(f"== {name}: {SPECS[name].asdict()}", flush=True)
-        out = run(name, a.chunks)
+        out = run(name, a.chunks, save=not a.no_save)
         if not a.no_save:
             all_r = json.load(open(RESULTS)) if os.path.exists(RESULTS) else {}
             all_r[name] = out

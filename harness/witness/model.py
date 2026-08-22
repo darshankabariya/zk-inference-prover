@@ -18,13 +18,15 @@ accumulation is separate: the int8 matmuls accumulate integers, exact by
 construction, while the two bf16 attention matmuls accumulate in fp32 and round
 once -- a v1 gap B5 closes by quantizing them too (`Spec.qk_int8` is half of it).
 """
+import math
+import os
 from dataclasses import dataclass, replace
 
 import torch
 
-from quant import (BF16, INT8_MAX, bf16_away, gemm_dtype, int_gemm, int_gemm_exact,
+from quant import (BF16, INT8_MAX, bf16_away, int_gemm, int_gemm_exact,
                    qscale, qscale_per_channel, qscale_per_token, quantize,
-                   reduce_sum, round_hafz, store)
+                   reduce_sum, round_hafz, store, weight_dtype)
 
 
 @dataclass
@@ -118,7 +120,7 @@ class Recorder:
         self.cols = {}
 
     def add(self, key, t):
-        self.cols.setdefault(key, []).append(t.detach().clone())
+        self.cols.setdefault(key, []).append(t.detach().cpu().clone())
 
     def stack(self):
         return {k: torch.stack(v) if v[0].shape == v[-1].shape else v
@@ -133,18 +135,18 @@ class Linear:
     held in the float dtype their reduction width needs, so BLAS is still exact.
     """
 
-    def __init__(self, w, bias, name, spec, static_scale=None):
-        w = w.t().contiguous().float()
+    def __init__(self, w, bias, name, spec, static_scale=None, device="cpu"):
+        w = w.to(device).t().contiguous().float()
         self.name, self.spec = name, spec
         self.n_in, self.n_out = w.shape
-        self.bias = None if bias is None else bias.clone().float()
-        self.static_scale = static_scale
+        self.bias = None if bias is None else bias.to(device).clone().float()
+        self.static_scale = None if static_scale is None else static_scale.to(device)
         self.p2 = spec.pow2_scales in ("all", "linear")
         if spec.linear == "fp32":
             self.w, self.qw, self.s_w = w, None, None
         else:
             self.s_w = qscale_per_channel(w, self.p2)
-            self.qw = quantize(w, self.s_w).to(gemm_dtype(self.n_in))
+            self.qw = quantize(w, self.s_w).to(weight_dtype(self.n_in, device))
             self.w = None
 
     def __call__(self, x, m, store_out=True, pre=None):
@@ -183,66 +185,140 @@ class Linear:
 
 
 class Cache:
-    """Per-layer KV cache; keys/values are appended in token order."""
+    """Per-layer KV cache; keys/values are appended in token order.
+
+    B8: a cache may hold several sequences at once (packed decode).  Every cached
+    key carries its sequence id and position; a query attends to a key iff they
+    share the sequence and the key's position is not past the query's.  With one
+    sequence that is exactly the causal mask, and since every other op in the
+    forward pass is per token, packing B sequences is bit-identical to running
+    them one at a time -- for the integer attention, masked keys contribute 0 to
+    the numerator sum and to A.V.
+    """
 
     def __init__(self, n_layers):
         self.k = [None] * n_layers
         self.v = [None] * n_layers
         self.n = 0
+        self.pos = None     # (C,) position of every cached key within its sequence
+        self.seq = None     # (C,) sequence id of every cached key
 
     def append(self, i, k, v):
         self.k[i] = k if self.k[i] is None else torch.cat([self.k[i], k], 0)
         self.v[i] = v if self.v[i] is None else torch.cat([self.v[i], v], 0)
         return self.k[i], self.v[i]
 
+    def append_meta(self, pos, seq):
+        self.pos = pos if self.pos is None else torch.cat([self.pos, pos])
+        self.seq = seq if self.seq is None else torch.cat([self.seq, seq])
+        self.n += len(pos)
+
+    def keep(self, seq_ids):
+        """Drop every key whose sequence is not in `seq_ids` (finished sequences)."""
+        m = torch.isin(self.seq, torch.as_tensor(list(seq_ids), device=self.seq.device))
+        self.k = [None if t is None else t[m] for t in self.k]
+        self.v = [None if t is None else t[m] for t in self.v]
+        self.pos, self.seq = self.pos[m], self.seq[m]
+        self.n = len(self.pos)
+
+    def merge(self, other, seq_id):
+        """Take a single-sequence cache (a prompt prefilled on its own) in as `seq_id`."""
+        for i in range(len(self.k)):
+            self.append(i, other.k[i], other.v[i])
+        self.append_meta(other.pos, torch.full_like(other.pos, seq_id))
+
+
+def llama3_inv_freq(inv, rp):
+    """Llama-3's frequency scaling (transformers' `_compute_llama3_parameters`),
+    evaluated in fp64 like the rest of the RoPE constants."""
+    factor, lo, hi = float(rp["factor"]), float(rp["low_freq_factor"]), float(rp["high_freq_factor"])
+    old = float(rp["original_max_position_embeddings"])
+    wavelen = 2 * math.pi / inv
+    scaled = torch.where(wavelen > old / lo, inv / factor, inv)
+    smooth = (old / wavelen - lo) / (hi - lo)
+    mid = (wavelen >= old / hi) & (wavelen <= old / lo)
+    return torch.where(mid, (1 - smooth) * scaled / factor + smooth * scaled, scaled)
+
 
 class Model:
-    def __init__(self, path, spec, static_scales=None, track_acc=False, attn_scales=None):
+    def __init__(self, path, spec, static_scales=None, track_acc=False, attn_scales=None,
+                 device=None):
         from transformers import AutoModelForCausalLM
 
+        device = device or os.environ.get("B1_DEVICE", "cpu")
         # the checkpoint is bf16, so loading it as bf16 and widening one tensor at a
         # time in Linear is value-identical to loading fp32 and halves peak RAM
         hf = AutoModelForCausalLM.from_pretrained(path, dtype=torch.bfloat16)
         hf.eval()
         c = hf.config
-        self.spec, self.cfg = spec, c
+        self.spec, self.cfg, self.device = spec, c, device
         self.d, self.L = c.hidden_size, c.num_hidden_layers
         self.nh, self.nkv = c.num_attention_heads, c.num_key_value_heads
-        self.hd = c.hidden_size // c.num_attention_heads
+        self.hd = getattr(c, "head_dim", None) or c.hidden_size // c.num_attention_heads
         self.rep = self.nh // self.nkv
         self.rec, self.calib, self.acc_max = None, None, ({} if track_acc else None)
         # B5: per-(layer, head) max|k| and per-(layer, head, channel) max|v|, the
         # two things the integer softmax needs to be constant along the context
         # axis.  Set to {} to record them (ppl.py's calibration pass).
         self.attn_calib = None
-        self.attn_scales = attn_scales
+        self.attn_scales = (None if attn_scales is None else
+                            {k: v.to(device) for k, v in attn_scales.items()})
         self.clamped = None
 
+        # 1/sqrt(hd) is an exact power of two for hd = 64 (Qwen2.5-0.5B).  For
+        # hd = 128 (Llama-3) it is 2^-3.5, and the integer softmax's exp-table
+        # argument is a bit window of the score only while `s_q s_k a` is a power
+        # of two -- so the scale is folded into W_q before quantization, as a
+        # deployment would carry it, and the attention scale becomes 1.
+        log2_hd = self.hd.bit_length() - 1
+        assert 1 << log2_hd == self.hd, self.hd
+        self.q_fold = self.hd ** -0.5 if log2_hd % 2 else None
+        self.attn_scale = 1.0 if self.q_fold else self.hd ** -0.5
+
         ss = static_scales or {}
-        self.emb = hf.model.embed_tokens.weight.data.clone()   # kept bf16
+        self.emb = hf.model.embed_tokens.weight.data.to(device).clone()   # kept bf16
         self.layers = []
         for i in range(self.L):
             b = hf.model.layers[i]
             a, mlp = b.self_attn, b.mlp
-            lin = lambda mod, n: Linear(mod.weight.data, None if mod.bias is None else mod.bias.data,
-                                        f"L{i}.{n}", self.spec_for(n), ss.get(f"L{i}.{n}"))
+            lin = lambda w, mod, n: Linear(w, None if mod.bias is None else mod.bias.data,
+                                           f"L{i}.{n}", self.spec_for(n), ss.get(f"L{i}.{n}"),
+                                           device)
+            qw = a.q_proj.weight.data
+            if self.q_fold:
+                qw = qw.to(device).float() * self.q_fold
             self.layers.append(dict(
-                norm1=b.input_layernorm.weight.data.clone().float(),
-                norm2=b.post_attention_layernorm.weight.data.clone().float(),
-                q=lin(a.q_proj, "q"), k=lin(a.k_proj, "k"), v=lin(a.v_proj, "v"),
-                o=lin(a.o_proj, "o"), gate=lin(mlp.gate_proj, "gate"),
-                up=lin(mlp.up_proj, "up"), down=lin(mlp.down_proj, "down")))
+                norm1=b.input_layernorm.weight.data.to(device).clone().float(),
+                norm2=b.post_attention_layernorm.weight.data.to(device).clone().float(),
+                q=lin(qw, a.q_proj, "q"), k=lin(a.k_proj.weight.data, a.k_proj, "k"),
+                v=lin(a.v_proj.weight.data, a.v_proj, "v"),
+                o=lin(a.o_proj.weight.data, a.o_proj, "o"),
+                gate=lin(mlp.gate_proj.weight.data, mlp.gate_proj, "gate"),
+                up=lin(mlp.up_proj.weight.data, mlp.up_proj, "up"),
+                down=lin(mlp.down_proj.weight.data, mlp.down_proj, "down")))
             hf.model.layers[i] = torch.nn.Identity()   # release the checkpoint copy as we go
-        self.final_norm = hf.model.norm.weight.data.clone().float()
-        self.head = Linear(self.emb, None, "lm_head", self.spec_for("lm_head"), ss.get("lm_head"))
+        self.final_norm = hf.model.norm.weight.data.to(device).clone().float()
+        self.tied = bool(getattr(c, "tie_word_embeddings", True))
+        head_w = self.emb if self.tied else hf.lm_head.weight.data
+        self.head = Linear(head_w, None, "lm_head", self.spec_for("lm_head"), ss.get("lm_head"),
+                           device)
         del hf
 
-        self.eps = self.store(torch.tensor(float(c.rms_norm_eps)))
-        self.inv_d = self.store(torch.tensor(1.0 / self.d))
-        self.attn_scale = self.hd ** -0.5       # exact power of two for hd=64
-        theta = float(c.rope_parameters["rope_theta"])
+        self.eps = self.store(torch.tensor(float(c.rms_norm_eps), device=device))
+        self.inv_d = self.store(torch.tensor(1.0 / self.d, device=device))
+        rp = dict(c.rope_parameters)
+        theta = float(rp["rope_theta"])
         inv = 1.0 / (theta ** (torch.arange(0, self.hd, 2, dtype=torch.float64) / self.hd))
-        self.inv_freq = inv
+        rope_type = rp.get("rope_type", "default")
+        if rope_type == "llama3":
+            inv = llama3_inv_freq(inv, rp)
+        elif rope_type != "default":
+            raise NotImplementedError(f"rope_type {rope_type}")
+        self.inv_freq = inv.to(device)
+        if torch.device(device).type == "cuda":
+            # the fp32 copies made while quantizing are freed; give the allocator's
+            # reserve back so several models can share the GPU (B8's task lanes)
+            torch.cuda.empty_cache()
 
     # -- primitives -------------------------------------------------------
     def spec_for(self, kind):
@@ -300,7 +376,7 @@ class Model:
         r = torch.cat([-t[..., h:], t[..., :h]], dim=-1)
         return self.store(self.store(t * cos) + self.store(r * sin))
 
-    def attention_int(self, q, k, v, pos, li):
+    def attention_int(self, q, k, v, mask, li):
         """The integer softmax (plan, B5 constraints from the B4 review).
 
         Every step on the probs multiplicity rung is an integer op or a table
@@ -345,8 +421,7 @@ class Model:
             self.rec.add(f"L{li}.kk", qk.to(torch.int16))
             self.rec.add(f"L{li}.vv", qv.to(torch.int8))
             self.rec.add(f"L{li}.qkacc", sc.to(torch.int32))
-        mask = torch.arange(cc).unsqueeze(0) > pos.unsqueeze(1)  # causal
-        sc = sc.masked_fill(mask.unsqueeze(0), -float(bound + 1))
+        sc = sc.masked_fill(mask.unsqueeze(0), -float(bound + 1))     # causal (and packing)
         m = sc.amax(-1, keepdim=True)                            # integer row max
         d = m - sc                                               # >= 0, integer
         # the one dynamic-scale product left on this rung: B5 commits its result
@@ -410,7 +485,7 @@ class Model:
         t[0] += int((scaled.abs() > qmax + 0.5).sum())
         t[1] += scaled.numel()
 
-    def attention(self, q, k, v, pos, li):
+    def attention(self, q, k, v, mask, li):
         s, c = q.shape[0], k.shape[0]
         q = q.transpose(0, 1)                                    # (nh, S, hd)
         k = k.permute(1, 0, 2).repeat_interleave(self.rep, 0)    # (nh, C, hd)
@@ -427,7 +502,7 @@ class Model:
             self.attn_calib.setdefault(f"L{li}.v", []).append(v.abs().amax(1))
             self.attn_calib.setdefault(f"L{li}.q", []).append(q.abs().amax((1, 2)))
         if self.spec.int_softmax:
-            return self.attention_int(q, k, v, pos, li)
+            return self.attention_int(q, k, v, mask, li)
         if self.spec.qk_int8:
             qb, kb = self.spec.qk_bits
             qmax_q, qmax_k = (1 << (qb - 1)) - 1, (1 << (kb - 1)) - 1
@@ -442,8 +517,7 @@ class Model:
         else:
             sc = self.store(q @ k.transpose(1, 2))
         sc = self.store(sc * self.attn_scale)
-        mask = torch.arange(c).unsqueeze(0) > pos.unsqueeze(1)   # causal, absolute positions
-        sc = sc.masked_fill(mask.unsqueeze(0), float("-inf"))
+        sc = sc.masked_fill(mask.unsqueeze(0), float("-inf"))      # causal (and packing)
         if self.rec is not None:
             self.rec.add(f"L{li}.scores", sc.to(BF16))
         e = self.unary(f"L{li}.exp", self.store(sc - sc.amax(-1, keepdim=True)), torch.exp)
@@ -455,9 +529,24 @@ class Model:
         return out.transpose(0, 1).reshape(s, self.nh * self.hd), None
 
     # -- forward ----------------------------------------------------------
-    def forward(self, ids, cache=None):
+    def forward(self, ids, cache=None, pos=None, seq=None):
+        """Logits for `ids`, appended to `cache`.
+
+        By default the tokens continue the cache's single sequence.  `pos` and
+        `seq` (one per token) place each token in its own sequence instead --
+        B8's packed decode, one step of B sequences in one call (see `Cache`).
+        """
         cache = cache or Cache(self.L)
-        pos = torch.arange(cache.n, cache.n + len(ids))
+        ids = ids.to(self.emb.device)
+        if pos is None:
+            pos = torch.arange(cache.n, cache.n + len(ids), device=ids.device)
+            seq = torch.zeros(len(ids), dtype=torch.int64, device=ids.device)
+        pos, seq = pos.to(ids.device), seq.to(ids.device)
+        all_pos = pos if cache.pos is None else torch.cat([cache.pos, pos])
+        all_seq = seq if cache.seq is None else torch.cat([cache.seq, seq])
+        # (S, C): True where a key is hidden from a query -- another sequence, or
+        # a later position (causal, absolute positions)
+        mask = (all_seq.unsqueeze(0) != seq.unsqueeze(1)) | (all_pos.unsqueeze(0) > pos.unsqueeze(1))
         cos, sin = self.rope(pos)
         x = self.emb[ids].float()
         for i, l in enumerate(self.layers):
@@ -468,13 +557,13 @@ class Model:
             q = self.rotate(q, cos.unsqueeze(1), sin.unsqueeze(1))
             k = self.rotate(k, cos.unsqueeze(1), sin.unsqueeze(1))
             kk, vv = cache.append(i, k, v)
-            a_out, a_pre = self.attention(q, kk, vv, pos, i)
+            a_out, a_pre = self.attention(q, kk, vv, mask, i)
             x = self.store(x + l["o"](a_out, self, pre=a_pre))
             h = self.rmsnorm(x, l["norm2"], f"L{i}.norm2")
             g = self.unary(f"L{i}.silu", l["gate"](h, self), torch.nn.functional.silu)
             x = self.store(x + l["down"](self.store(g * l["up"](h, self)), self))
             if self.rec is not None:
                 self.rec.add(f"L{i}.x", x.to(BF16))     # committed residual stream
-        cache.n += len(ids)
+        cache.append_meta(pos, seq)
         h = self.rmsnorm(x, self.final_norm, "final_norm")
         return self.head(h, self, store_out=not self.spec.fp32_logits), cache

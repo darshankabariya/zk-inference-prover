@@ -1,17 +1,21 @@
 """Shared setup for B1: determinism, corpus slices, spec presets."""
 import hashlib
 import os
+from dataclasses import replace
 
 import numpy as np
 import torch
 
 from model import Spec
 
-MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, "out")
+# B8 points the same code at an 8B model on a GPU: the model, the output
+# directory and the device come from the environment, with B1's defaults.
+MODEL = os.environ.get("B1_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+OUT = os.environ.get("B1_OUT", os.path.join(HERE, "out"))
+DEVICE = os.environ.get("B1_DEVICE", "cpu")
 TEXT = os.path.join(HERE, os.pardir, "text.txt")
-THREADS = 4
+THREADS = int(os.environ.get("B1_THREADS", 4))
 CHUNK = 512
 
 # The three specs B1 has to compare, plus probes that isolate one choice each.
@@ -122,6 +126,14 @@ SPECS = {
                         pow2_matmuls=("q", "k", "v", "o")),
 }
 
+# --- B8 probes ---------------------------------------------------------------
+# At 8B the 8-bit numerator is the largest single term in `b6-design-p2o`'s cost
+# (`int-softmax-n16` erases it), so the design point with a wider numerator.  The
+# width is pinned by the M31 window on the A.V accumulator, n_bits + 7 + log2(C)
+# <= 30: 9 bits at C = 16K, 11 at 4K, 13 at 1K.
+for _n in (9, 10, 12, 16):
+    SPECS[f"b6-design-p2o-n{_n}"] = replace(SPECS["b6-design-p2o"], num_bits=_n)
+
 # B5's probes, kept apart so B1's own table stays what B1 measured
 B5_SPECS = ["qk-int12", "pow2-scales", "int-softmax", "int-softmax-12",
             "int-softmax-p2qk", "int-softmax-12p2", "int-softmax-pow2",
@@ -136,8 +148,22 @@ B6_SPECS = ["bf16-dequant", "pow2-dequant", "int-attnout", "b6-design",
 B65_SPECS = ["b6-design-p2o", "bf16-dequant-away", "pow2-qkvo", "pow2-gateup",
              "pow2-down", "pow2-head", "b65-design"]
 
+# B8: the rows re-measured at 8B -- the three the plan names, the decomposition
+# of the attested spec, the B6 ladder around `b6-design-p2o`, and the two riders
+B8_SPECS = ["fp32", "dynamic-int8", "static", "int8-only", "bf16-only",
+            "bf16-dequant", "bf16-dequant-away", "pow2-dequant",
+            "b6-design", "b6-design-bf16", "b6-design-p2o", "b65-design",
+            "pow2-qkvo", "pow2-gateup", "pow2-down", "pow2-head",
+            "b6-design-p2o-n9", "b6-design-p2o-n10", "b6-design-p2o-n12", "b6-design-p2o-n16"]
+
 
 def setup():
+    if DEVICE.startswith("cuda"):
+        # deterministic cuBLAS needs a fixed workspace; and the fp32 matmuls
+        # must stay fp32 (the exact-integer paths rely on it)
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
     torch.use_deterministic_algorithms(True)
     torch.set_num_threads(THREADS)
     torch.manual_seed(0)
