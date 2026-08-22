@@ -49,7 +49,10 @@ class LastChunk(Recorder):
 
     def add(self, key, t):
         if key in self.keep:
-            self.cols[key] = t.detach().clone()
+            # B9: B8 runs the forward pass on the GPU, so a recorded column is a
+            # cuda tensor and every `.numpy()` below would fail; the dump is host
+            # bytes either way, so it comes across here, once, per chunk.
+            self.cols[key] = t.detach().to("cpu").clone()
 
 
 def write(name, arr, digests):
@@ -66,13 +69,14 @@ def bits_for(v):
 
 def bf16_parts(t):
     """(mantissa field, biased exponent) of a bf16-valued tensor."""
-    bits = t.to(BF16).view(torch.int16).numpy().astype(np.uint16)
+    # B9: on the B8 path the model's own tensors live on the GPU
+    bits = t.detach().to("cpu").to(BF16).view(torch.int16).numpy().astype(np.uint16)
     return (bits & 0x7F).astype(np.int32), ((bits >> 7) & 0xFF).astype(np.int32)
 
 
 def pow2_exponent(t):
     """`j` such that the value is exactly `2^j`; NaN-safe, and -1000 if it is not."""
-    v = t.double().numpy()
+    v = t.detach().to("cpu").double().numpy()
     with np.errstate(divide="ignore"):
         j = np.log2(np.abs(v))
     exact = np.isfinite(j) & (np.abs(j - np.round(j)) < 1e-9)
@@ -212,7 +216,8 @@ if __name__ == "__main__":
             write(f"acc_{name}.i32", acc.numpy().astype(np.int32), digests)
             write(f"qx_{name}.i8", m.rec.cols[f"L{L}.{name}/qx"].numpy().astype(np.int8),
                   digests)
-            write(f"qw_{name}.i8", lin.qw.numpy().astype(np.int8), digests)
+            write(f"qw_{name}.i8", lin.qw.detach().to("cpu").numpy().astype(np.int8),
+                  digests)
             if f"L{L}.{name}/x" in m.rec.cols:
                 write(f"x_{name}.u16",
                       m.rec.cols[f"L{L}.{name}/x"].contiguous().view(torch.int16)
