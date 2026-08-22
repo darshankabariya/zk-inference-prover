@@ -1,0 +1,540 @@
+{
+  "bench": "compose",
+  "env": {
+    "arch": "x86_64",
+    "mem_total_bytes": 1623329595392,
+    "os": "linux",
+    "simd_n_lanes": 16,
+    "threads": 16
+  },
+  "result": {
+    "point": {
+      "accepts": true,
+      "blob": {
+        "cache_hits": 0,
+        "lower_secs": 0.0,
+        "lowerings": 0
+      },
+      "cells": {
+        "base": 427792832,
+        "fresh": 1049829568,
+        "interaction": 622036736,
+        "preprocessed": 481683008
+      },
+      "columns": {
+        "base": 2869,
+        "interaction": 3844,
+        "preprocessed": 1269,
+        "total": 7982
+      },
+      "family_cells": {
+        "attnout": 12713984,
+        "attnout_stats": {
+          "clamp_edge_count": 11,
+          "lead_rows": 0,
+          "log_rows": 17,
+          "n": 2097152,
+          "per_row": 16,
+          "q_bits": 7,
+          "rem_bits": 17
+        },
+        "band_leads": [
+          {
+            "chan": 0,
+            "key": 0,
+            "out": 0
+          },
+          {
+            "chan": 0,
+            "key": 0,
+            "out": 0
+          },
+          {
+            "chan": 0,
+            "key": 0,
+            "out": 0
+          }
+        ],
+        "bands": 23134208,
+        "dequant": 306774016,
+        "interaction": 622036736,
+        "mats": [
+          {
+            "cells": 21102592,
+            "kmax_blind": 17,
+            "kmax_needed": 12,
+            "lead": 0,
+            "log_rows": 17,
+            "n": 2097152,
+            "name": "q",
+            "per_row": 16,
+            "variant": "pow2"
+          },
+          {
+            "cells": 5275648,
+            "kmax_blind": 17,
+            "kmax_needed": 12,
+            "lead": 0,
+            "log_rows": 15,
+            "n": 524288,
+            "name": "k",
+            "per_row": 16,
+            "variant": "pow2"
+          },
+          {
+            "cells": 5275648,
+            "kmax_blind": 17,
+            "kmax_needed": 12,
+            "lead": 0,
+            "log_rows": 15,
+            "n": 524288,
+            "name": "v",
+            "per_row": 16,
+            "variant": "pow2"
+          },
+          {
+            "cells": 21102592,
+            "kmax_blind": 17,
+            "kmax_needed": 12,
+            "lead": 0,
+            "log_rows": 17,
+            "n": 2097152,
+            "name": "o",
+            "per_row": 16,
+            "variant": "pow2"
+          },
+          {
+            "cells": 111149056,
+            "kmax_blind": 17,
+            "kmax_needed": 12,
+            "lead": 0,
+            "log_rows": 19,
+            "n": 7340032,
+            "name": "gate",
+            "per_row": 14,
+            "variant": "chain"
+          },
+          {
+            "cells": 111149056,
+            "kmax_blind": 17,
+            "kmax_needed": 12,
+            "lead": 0,
+            "log_rows": 19,
+            "n": 7340032,
+            "name": "up",
+            "per_row": 14,
+            "variant": "chain"
+          },
+          {
+            "cells": 31719424,
+            "kmax_blind": 19,
+            "kmax_needed": 13,
+            "lead": 0,
+            "log_rows": 17,
+            "n": 2097152,
+            "name": "down",
+            "per_row": 16,
+            "variant": "chain"
+          }
+        ],
+        "preprocessed": 481683008,
+        "walk_weights": [
+          {
+            "group": "qkv",
+            "lead": 8192,
+            "log_rows": 17,
+            "pk": 137,
+            "pq": 18,
+            "pre_cells": 54394880,
+            "weights": 25165824
+          },
+          {
+            "group": "o",
+            "lead": 8192,
+            "log_rows": 17,
+            "pk": 137,
+            "pq": 18,
+            "pre_cells": 18481152,
+            "weights": 16777216
+          },
+          {
+            "group": "gateup",
+            "lead": 90112,
+            "log_rows": 19,
+            "pk": 136,
+            "pq": 5,
+            "pre_cells": 144703488,
+            "weights": 117440512
+          },
+          {
+            "group": "down",
+            "lead": 94208,
+            "log_rows": 19,
+            "pk": 137,
+            "pq": 18,
+            "pre_cells": 73924608,
+            "weights": 58720256
+          }
+        ],
+        "walks": 16777216
+      },
+      "host_phases": {
+        "evalof/bitrev": {
+          "calls": 1897,
+          "secs": 0.06312742799999989
+        },
+        "evalof/fused": {
+          "calls": 2616,
+          "secs": 1.542848930000002
+        },
+        "evalof/pack": {
+          "calls": 1897,
+          "secs": 0.029773517000000006
+        },
+        "gen/attnout": {
+          "calls": 1,
+          "secs": 0.156058439
+        },
+        "gen/bands": {
+          "calls": 1,
+          "secs": 0.528404448
+        },
+        "gen/dequant": {
+          "calls": 1,
+          "secs": 1.805463018
+        },
+        "gen/pre_bands": {
+          "calls": 1,
+          "secs": 1.06e-6
+        },
+        "gen/refs": {
+          "calls": 1,
+          "secs": 0.00006761
+        },
+        "gen/tables": {
+          "calls": 1,
+          "secs": 1.001657975
+        },
+        "gen/tables_up": {
+          "calls": 1,
+          "secs": 2.888e-6
+        },
+        "gen/walks": {
+          "calls": 1,
+          "secs": 3.471790337
+        },
+        "int/air": {
+          "calls": 1,
+          "secs": 0.004461301
+        },
+        "int/attnout": {
+          "calls": 1,
+          "secs": 0.051740077
+        },
+        "int/bands": {
+          "calls": 1,
+          "secs": 0.233400622
+        },
+        "int/deq_carry": {
+          "calls": 7,
+          "secs": 0.010870057
+        },
+        "int/deq_cols": {
+          "calls": 7,
+          "secs": 0.016718654
+        },
+        "int/deq_inner": {
+          "calls": 7,
+          "secs": 0.049598578000000004
+        },
+        "int/deq_logup": {
+          "calls": 7,
+          "secs": 0.739332423
+        },
+        "int/dequant": {
+          "calls": 1,
+          "secs": 0.816632272
+        },
+        "int/tables": {
+          "calls": 1,
+          "secs": 1.455614395
+        },
+        "int/walks": {
+          "calls": 1,
+          "secs": 0.768337062
+        },
+        "wall/build_components": {
+          "calls": 1,
+          "secs": 0.003122691
+        },
+        "wall/commit_base": {
+          "calls": 1,
+          "secs": 8.66550583
+        },
+        "wall/commit_inter": {
+          "calls": 1,
+          "secs": 8.366748423
+        },
+        "wall/commit_pre": {
+          "calls": 1,
+          "secs": 9.000406497
+        },
+        "wall/cuda_init": {
+          "calls": 2,
+          "secs": 1.3900000000000001e-7
+        },
+        "wall/prove_raw": {
+          "calls": 1,
+          "secs": 47.741603802
+        },
+        "wall/ser_proof": {
+          "calls": 1,
+          "secs": 0.023692478
+        },
+        "wall/ser_statement": {
+          "calls": 1,
+          "secs": 0.000111505
+        },
+        "wall/session_new": {
+          "calls": 1,
+          "secs": 6.348e-6
+        },
+        "wall/twiddles": {
+          "calls": 1,
+          "secs": 0.995915027
+        }
+      },
+      "interaction_secs": 3.325732932,
+      "off_table": 0,
+      "params": {
+        "ao_q_bits": 7,
+        "ao_rem_bits": 17,
+        "ao_target": 16,
+        "bands": [
+          16,
+          8,
+          8
+        ],
+        "c": 512,
+        "chan_target": 128,
+        "deq_target": 16,
+        "grid_target": 64,
+        "hd": 128,
+        "k_bits": 11,
+        "kmax": 19,
+        "log_table": 26,
+        "mats": [
+          {
+            "n_in": 4096,
+            "n_out": 4096,
+            "name": "q",
+            "tokens": 512,
+            "variant": "pow2"
+          },
+          {
+            "n_in": 4096,
+            "n_out": 1024,
+            "name": "k",
+            "tokens": 512,
+            "variant": "pow2"
+          },
+          {
+            "n_in": 4096,
+            "n_out": 1024,
+            "name": "v",
+            "tokens": 512,
+            "variant": "pow2"
+          },
+          {
+            "n_in": 4096,
+            "n_out": 4096,
+            "name": "o",
+            "tokens": 512,
+            "variant": "pow2"
+          },
+          {
+            "n_in": 4096,
+            "n_out": 14336,
+            "name": "gate",
+            "tokens": 512,
+            "variant": "chain"
+          },
+          {
+            "n_in": 4096,
+            "n_out": 14336,
+            "name": "up",
+            "tokens": 512,
+            "variant": "chain"
+          },
+          {
+            "n_in": 14336,
+            "n_out": 4096,
+            "name": "down",
+            "tokens": 512,
+            "variant": "chain"
+          }
+        ],
+        "nh": 32,
+        "nmax": 255,
+        "q_bits": 12,
+        "round": "even",
+        "rw": 16,
+        "s": 512,
+        "variant": "intexp",
+        "walk_p": 136,
+        "z_hi_bits": 6,
+        "z_lo_bits": 16,
+        "z_min": 255
+      },
+      "peak_rss_bytes": 101319155712,
+      "phases": {
+        "commit_plus_fri_frac": 0.7791040026402756,
+        "commit_secs": 31.596225197000003,
+        "detail": {
+          "constraint_eval_cpu_autofallback": {
+            "calls": 0,
+            "secs": 0.0
+          },
+          "constraint_eval_cpu_fallback": {
+            "calls": 0,
+            "secs": 0.0
+          },
+          "constraint_eval_denom_inv": {
+            "calls": 0,
+            "secs": 0.0
+          },
+          "constraint_eval_gpu": {
+            "calls": 0,
+            "secs": 0.0
+          },
+          "constraint_eval_polys": {
+            "calls": 0,
+            "secs": 0.0
+          }
+        },
+        "fri_secs": 28.500825357,
+        "phases": {
+          "constraint_eval": {
+            "calls": 32,
+            "secs": 3.9112849859999996
+          },
+          "constraint_extension": {
+            "calls": 0,
+            "secs": 0.0
+          },
+          "fri_commit": {
+            "calls": 1,
+            "secs": 14.82076086
+          },
+          "fri_quotients": {
+            "calls": 1,
+            "secs": 13.679958574
+          },
+          "grind": {
+            "calls": 1,
+            "secs": 0.000105923
+          },
+          "interpolate": {
+            "calls": 3,
+            "secs": 1.533213211
+          },
+          "lde_extend": {
+            "calls": 4,
+            "secs": 4.441408166
+          },
+          "merkle": {
+            "calls": 4,
+            "secs": 25.62160382
+          },
+          "oods_eval": {
+            "calls": 1,
+            "secs": 1.429308378
+          },
+          "other": {
+            "calls": 0,
+            "secs": 11.698464162999983
+          }
+        },
+        "prove_call_secs": 47.741388686,
+        "wall_secs": 77.136108081
+      },
+      "pre_root": "0f77df2254f4512e484be944c10a8c5aebce67464b51f8421d18a302bc4a4576",
+      "preprocessed_is_widest": true,
+      "proof_bytes": 5822796,
+      "proof_ser_bytes": 16013580,
+      "proof_sha256": "25fb7261cee84df2c213f538fa471bbf7694458e69094a4e0f38ca9f5e05f450",
+      "prove_error": null,
+      "prove_secs": 77.136108081,
+      "ref_mismatch": 0,
+      "statement_bytes": {
+        "claims": 2987,
+        "fixed": 24269
+      },
+      "trace_secs": 7.178079663,
+      "upload": {
+        "bytes": 0,
+        "columns": 0,
+        "devcopy_bytes": 0,
+        "devcopy_columns": 0,
+        "devcopy_secs": 0.0,
+        "gb_per_s": 0.0,
+        "mirror_batches": 0,
+        "mirror_bytes": 0,
+        "mirror_secs": 0.0,
+        "secs": 0.0,
+        "witness_bytes": 0,
+        "witness_secs": 0.0,
+        "witness_uploads": 0
+      },
+      "verdict": {
+        "av_ok": true,
+        "den_link_ok": true,
+        "den_ok": [
+          true,
+          true,
+          true
+        ],
+        "error": null,
+        "qk_ok": [
+          true,
+          true,
+          true
+        ],
+        "root_ok": true,
+        "sizes_ok": true,
+        "stark_ok": true,
+        "sums_cancel": true,
+        "verify_secs": 0.078081237,
+        "walk_ok": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "verify_secs": 0.078081237
+    },
+    "source": "synthetic layer (seed=7)"
+  },
+  "security": {
+    "blowup_factor": 2,
+    "fold_step": 1,
+    "hash": "Blake2s (Blake2sM31MerkleChannel)",
+    "log_blowup_factor": 1,
+    "log_last_layer_degree_bound": 0,
+    "m3": {
+      "device_merkle_reduce": true,
+      "fri_gather": true,
+      "launch_sync": false,
+      "merkle_mode": "1",
+      "prewarm": true,
+      "store_coeffs": true
+    },
+    "n_queries": 100,
+    "pow_bits": 0,
+    "security_bits_conjectured": 100
+  }
+}
