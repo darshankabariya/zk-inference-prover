@@ -1,0 +1,849 @@
+{
+  "bench": "cudaemit",
+  "env": {
+    "arch": "x86_64",
+    "mem_total_bytes": 1623329595392,
+    "os": "linux",
+    "simd_n_lanes": 16,
+    "threads": 16
+  },
+  "result": {
+    "components": [
+      {
+        "component": "chan_band0",
+        "constraints": 70,
+        "eval_log_size": 19,
+        "family": "b65_chan_eval",
+        "fingerprint": "0x8639871b",
+        "instructions": 1384,
+        "loads_per_row": 429,
+        "log_size": 18,
+        "m31_muls_per_row": 2716,
+        "scalars": 140,
+        "shape": 4
+      },
+      {
+        "component": "key_band0",
+        "constraints": 49,
+        "eval_log_size": 22,
+        "family": "b65_key_eval",
+        "fingerprint": "0x39a41781",
+        "instructions": 1302,
+        "loads_per_row": 364,
+        "log_size": 21,
+        "m31_muls_per_row": 2324,
+        "scalars": 92,
+        "shape": 4
+      },
+      {
+        "component": "row_band0",
+        "constraints": 36,
+        "eval_log_size": 10,
+        "family": "b65_row_eval",
+        "fingerprint": "0x50665b77",
+        "instructions": 655,
+        "loads_per_row": 215,
+        "log_size": 9,
+        "m31_muls_per_row": 1224,
+        "scalars": 23,
+        "shape": 0
+      },
+      {
+        "component": "chan_band1",
+        "constraints": 70,
+        "eval_log_size": 18,
+        "family": "b65_chan_eval",
+        "fingerprint": "0x8639871b",
+        "instructions": 1384,
+        "loads_per_row": 429,
+        "log_size": 17,
+        "m31_muls_per_row": 2716,
+        "scalars": 140,
+        "shape": 4
+      },
+      {
+        "component": "key_band1",
+        "constraints": 49,
+        "eval_log_size": 21,
+        "family": "b65_key_eval",
+        "fingerprint": "0x39a41781",
+        "instructions": 1302,
+        "loads_per_row": 364,
+        "log_size": 20,
+        "m31_muls_per_row": 2324,
+        "scalars": 92,
+        "shape": 4
+      },
+      {
+        "component": "row_band1",
+        "constraints": 36,
+        "eval_log_size": 9,
+        "family": "b65_row_eval",
+        "fingerprint": "0x50665b77",
+        "instructions": 655,
+        "loads_per_row": 215,
+        "log_size": 8,
+        "m31_muls_per_row": 1224,
+        "scalars": 23,
+        "shape": 0
+      },
+      {
+        "component": "chan_band2",
+        "constraints": 70,
+        "eval_log_size": 18,
+        "family": "b65_chan_eval",
+        "fingerprint": "0x8639871b",
+        "instructions": 1384,
+        "loads_per_row": 429,
+        "log_size": 17,
+        "m31_muls_per_row": 2716,
+        "scalars": 140,
+        "shape": 4
+      },
+      {
+        "component": "key_band2",
+        "constraints": 49,
+        "eval_log_size": 21,
+        "family": "b65_key_eval",
+        "fingerprint": "0x39a41781",
+        "instructions": 1302,
+        "loads_per_row": 364,
+        "log_size": 20,
+        "m31_muls_per_row": 2324,
+        "scalars": 92,
+        "shape": 4
+      },
+      {
+        "component": "row_band2",
+        "constraints": 36,
+        "eval_log_size": 9,
+        "family": "b65_row_eval",
+        "fingerprint": "0x50665b77",
+        "instructions": 655,
+        "loads_per_row": 215,
+        "log_size": 8,
+        "m31_muls_per_row": 1224,
+        "scalars": 23,
+        "shape": 0
+      },
+      {
+        "component": "attnout",
+        "constraints": 93,
+        "eval_log_size": 18,
+        "family": "b65_attn_out_eval",
+        "fingerprint": "0xd885029a",
+        "instructions": 874,
+        "loads_per_row": 259,
+        "log_size": 17,
+        "m31_muls_per_row": 1129,
+        "scalars": 26,
+        "shape": 0
+      },
+      {
+        "component": "dequant0",
+        "constraints": 91,
+        "eval_log_size": 18,
+        "family": "b65_dequant_eval",
+        "fingerprint": "0x5bfe8442",
+        "instructions": 1016,
+        "loads_per_row": 298,
+        "log_size": 17,
+        "m31_muls_per_row": 1420,
+        "scalars": 30,
+        "shape": 4
+      },
+      {
+        "component": "dequant1",
+        "constraints": 91,
+        "eval_log_size": 16,
+        "family": "b65_dequant_eval",
+        "fingerprint": "0x5bfe8442",
+        "instructions": 1016,
+        "loads_per_row": 298,
+        "log_size": 15,
+        "m31_muls_per_row": 1420,
+        "scalars": 30,
+        "shape": 4
+      },
+      {
+        "component": "dequant2",
+        "constraints": 91,
+        "eval_log_size": 16,
+        "family": "b65_dequant_eval",
+        "fingerprint": "0x5bfe8442",
+        "instructions": 1016,
+        "loads_per_row": 298,
+        "log_size": 15,
+        "m31_muls_per_row": 1420,
+        "scalars": 30,
+        "shape": 4
+      },
+      {
+        "component": "dequant3",
+        "constraints": 91,
+        "eval_log_size": 18,
+        "family": "b65_dequant_eval",
+        "fingerprint": "0x5bfe8442",
+        "instructions": 1016,
+        "loads_per_row": 298,
+        "log_size": 17,
+        "m31_muls_per_row": 1420,
+        "scalars": 30,
+        "shape": 4
+      },
+      {
+        "component": "dequant4",
+        "constraints": 143,
+        "eval_log_size": 20,
+        "family": "b65_dequant_eval",
+        "fingerprint": "0xf695f9d9",
+        "instructions": 1561,
+        "loads_per_row": 433,
+        "log_size": 19,
+        "m31_muls_per_row": 2358,
+        "scalars": 32,
+        "shape": 2
+      },
+      {
+        "component": "dequant5",
+        "constraints": 143,
+        "eval_log_size": 20,
+        "family": "b65_dequant_eval",
+        "fingerprint": "0xf695f9d9",
+        "instructions": 1561,
+        "loads_per_row": 433,
+        "log_size": 19,
+        "m31_muls_per_row": 2358,
+        "scalars": 32,
+        "shape": 2
+      },
+      {
+        "component": "dequant6",
+        "constraints": 163,
+        "eval_log_size": 18,
+        "family": "b65_dequant_eval",
+        "fingerprint": "0xe666ca5d",
+        "instructions": 1775,
+        "loads_per_row": 491,
+        "log_size": 17,
+        "m31_muls_per_row": 2688,
+        "scalars": 34,
+        "shape": 6
+      },
+      {
+        "component": "walk0",
+        "constraints": 19,
+        "eval_log_size": 18,
+        "family": "b65_walk_eval",
+        "fingerprint": "0x52f73e3b",
+        "instructions": 1666,
+        "loads_per_row": 529,
+        "log_size": 17,
+        "m31_muls_per_row": 2152,
+        "scalars": 162,
+        "shape": 21
+      },
+      {
+        "component": "walk1",
+        "constraints": 13,
+        "eval_log_size": 18,
+        "family": "b65_walk_eval",
+        "fingerprint": "0x54049292",
+        "instructions": 784,
+        "loads_per_row": 223,
+        "log_size": 17,
+        "m31_muls_per_row": 968,
+        "scalars": 160,
+        "shape": 22
+      },
+      {
+        "component": "walk2",
+        "constraints": 10,
+        "eval_log_size": 20,
+        "family": "b65_walk_eval",
+        "fingerprint": "0x4eaaac9d",
+        "instructions": 1092,
+        "loads_per_row": 337,
+        "log_size": 19,
+        "m31_muls_per_row": 1292,
+        "scalars": 147,
+        "shape": 23
+      },
+      {
+        "component": "walk3",
+        "constraints": 13,
+        "eval_log_size": 20,
+        "family": "b65_walk_eval",
+        "fingerprint": "0x54049292",
+        "instructions": 784,
+        "loads_per_row": 223,
+        "log_size": 19,
+        "m31_muls_per_row": 968,
+        "scalars": 160,
+        "shape": 22
+      },
+      {
+        "component": "exp_table",
+        "constraints": 1,
+        "eval_log_size": 26,
+        "family": "b65_exp_table_eval",
+        "fingerprint": "0xa7d66c67",
+        "instructions": 24,
+        "loads_per_row": 11,
+        "log_size": 25,
+        "m31_muls_per_row": 20,
+        "scalars": 4,
+        "shape": 0
+      },
+      {
+        "component": "table0",
+        "constraints": 1,
+        "eval_log_size": 15,
+        "family": "b65_table_eval",
+        "fingerprint": "0xc0a8b1f3",
+        "instructions": 40,
+        "loads_per_row": 15,
+        "log_size": 14,
+        "m31_muls_per_row": 36,
+        "scalars": 8,
+        "shape": 0
+      },
+      {
+        "component": "table1",
+        "constraints": 1,
+        "eval_log_size": 21,
+        "family": "b65_table_eval",
+        "fingerprint": "0xff83a615",
+        "instructions": 28,
+        "loads_per_row": 12,
+        "log_size": 20,
+        "m31_muls_per_row": 24,
+        "scalars": 5,
+        "shape": 1
+      },
+      {
+        "component": "table2",
+        "constraints": 1,
+        "eval_log_size": 15,
+        "family": "b65_table_eval",
+        "fingerprint": "0x0cb71ac1",
+        "instructions": 32,
+        "loads_per_row": 13,
+        "log_size": 14,
+        "m31_muls_per_row": 28,
+        "scalars": 6,
+        "shape": 2
+      },
+      {
+        "component": "table3",
+        "constraints": 1,
+        "eval_log_size": 8,
+        "family": "b65_table_eval",
+        "fingerprint": "0xa7d66c67",
+        "instructions": 24,
+        "loads_per_row": 11,
+        "log_size": 7,
+        "m31_muls_per_row": 20,
+        "scalars": 4,
+        "shape": 3
+      },
+      {
+        "component": "table4",
+        "constraints": 1,
+        "eval_log_size": 7,
+        "family": "b65_table_eval",
+        "fingerprint": "0xbfb32905",
+        "instructions": 20,
+        "loads_per_row": 10,
+        "log_size": 6,
+        "m31_muls_per_row": 16,
+        "scalars": 3,
+        "shape": 4
+      },
+      {
+        "component": "table5",
+        "constraints": 1,
+        "eval_log_size": 9,
+        "family": "b65_table_eval",
+        "fingerprint": "0xbfb32905",
+        "instructions": 20,
+        "loads_per_row": 10,
+        "log_size": 8,
+        "m31_muls_per_row": 16,
+        "scalars": 3,
+        "shape": 4
+      },
+      {
+        "component": "table6",
+        "constraints": 1,
+        "eval_log_size": 12,
+        "family": "b65_table_eval",
+        "fingerprint": "0xbfb32905",
+        "instructions": 20,
+        "loads_per_row": 10,
+        "log_size": 11,
+        "m31_muls_per_row": 16,
+        "scalars": 3,
+        "shape": 4
+      },
+      {
+        "component": "table7",
+        "constraints": 1,
+        "eval_log_size": 13,
+        "family": "b65_table_eval",
+        "fingerprint": "0xbfb32905",
+        "instructions": 20,
+        "loads_per_row": 10,
+        "log_size": 12,
+        "m31_muls_per_row": 16,
+        "scalars": 3,
+        "shape": 4
+      },
+      {
+        "component": "table8",
+        "constraints": 1,
+        "eval_log_size": 17,
+        "family": "b65_table_eval",
+        "fingerprint": "0xbfb32905",
+        "instructions": 20,
+        "loads_per_row": 10,
+        "log_size": 16,
+        "m31_muls_per_row": 16,
+        "scalars": 3,
+        "shape": 4
+      },
+      {
+        "component": "table9",
+        "constraints": 1,
+        "eval_log_size": 23,
+        "family": "b65_table_eval",
+        "fingerprint": "0xbfb32905",
+        "instructions": 20,
+        "loads_per_row": 10,
+        "log_size": 22,
+        "m31_muls_per_row": 16,
+        "scalars": 3,
+        "shape": 4
+      }
+    ],
+    "families": [
+      {
+        "cu": "evaluate_b65_chan_eval.cu",
+        "cu_lines": 12223,
+        "family": "b65_chan_eval",
+        "shapes": [
+          {
+            "example": "chan_band0",
+            "fingerprint": "0x5c757220",
+            "id": 0,
+            "instructions": 1984,
+            "scalars": 200
+          },
+          {
+            "example": "chan_band0",
+            "fingerprint": "0xea51e599",
+            "id": 1,
+            "instructions": 2624,
+            "scalars": 264
+          },
+          {
+            "example": "chan_band0",
+            "fingerprint": "0xa6988607",
+            "id": 2,
+            "instructions": 3904,
+            "scalars": 392
+          },
+          {
+            "example": "chan_band0",
+            "fingerprint": "0x06b92a3e",
+            "id": 3,
+            "instructions": 1504,
+            "scalars": 152
+          },
+          {
+            "example": "chan_band0",
+            "fingerprint": "0x8639871b",
+            "id": 4,
+            "instructions": 1384,
+            "scalars": 140
+          }
+        ]
+      },
+      {
+        "cu": "evaluate_b65_key_eval.cu",
+        "cu_lines": 7173,
+        "family": "b65_key_eval",
+        "shapes": [
+          {
+            "example": "key_band0",
+            "fingerprint": "0x284f49a6",
+            "id": 0,
+            "instructions": 1222,
+            "scalars": 84
+          },
+          {
+            "example": "key_band0",
+            "fingerprint": "0x57c163b5",
+            "id": 1,
+            "instructions": 1800,
+            "scalars": 85
+          },
+          {
+            "example": "key_band0",
+            "fingerprint": "0xa791bd98",
+            "id": 2,
+            "instructions": 1182,
+            "scalars": 80
+          },
+          {
+            "example": "key_band0",
+            "fingerprint": "0x6a17a561",
+            "id": 3,
+            "instructions": 1162,
+            "scalars": 78
+          },
+          {
+            "example": "key_band0",
+            "fingerprint": "0x39a41781",
+            "id": 4,
+            "instructions": 1302,
+            "scalars": 92
+          }
+        ]
+      },
+      {
+        "cu": "evaluate_b65_row_eval.cu",
+        "cu_lines": 788,
+        "family": "b65_row_eval",
+        "shapes": [
+          {
+            "example": "row_band0",
+            "fingerprint": "0x50665b77",
+            "id": 0,
+            "instructions": 655,
+            "scalars": 23
+          }
+        ]
+      },
+      {
+        "cu": "evaluate_b65_attn_out_eval.cu",
+        "cu_lines": 1064,
+        "family": "b65_attn_out_eval",
+        "shapes": [
+          {
+            "example": "attnout",
+            "fingerprint": "0xd885029a",
+            "id": 0,
+            "instructions": 874,
+            "scalars": 26
+          }
+        ]
+      },
+      {
+        "cu": "evaluate_b65_dequant_eval.cu",
+        "cu_lines": 14042,
+        "family": "b65_dequant_eval",
+        "shapes": [
+          {
+            "example": "dequant0",
+            "fingerprint": "0x03d3e5dc",
+            "id": 0,
+            "instructions": 1200,
+            "scalars": 33
+          },
+          {
+            "example": "dequant4",
+            "fingerprint": "0x0a67dee4",
+            "id": 1,
+            "instructions": 2096,
+            "scalars": 37
+          },
+          {
+            "example": "dequant6",
+            "fingerprint": "0xf695f9d9",
+            "id": 2,
+            "instructions": 1561,
+            "scalars": 32
+          },
+          {
+            "example": "dequant0",
+            "fingerprint": "0x39bbfd2a",
+            "id": 3,
+            "instructions": 896,
+            "scalars": 28
+          },
+          {
+            "example": "dequant1",
+            "fingerprint": "0x5bfe8442",
+            "id": 4,
+            "instructions": 1016,
+            "scalars": 30
+          },
+          {
+            "example": "dequant4",
+            "fingerprint": "0xec6993aa",
+            "id": 5,
+            "instructions": 4022,
+            "scalars": 55
+          },
+          {
+            "example": "dequant6",
+            "fingerprint": "0xe666ca5d",
+            "id": 6,
+            "instructions": 1775,
+            "scalars": 34
+          }
+        ]
+      },
+      {
+        "cu": "evaluate_b65_walk_eval.cu",
+        "cu_lines": 37985,
+        "family": "b65_walk_eval",
+        "shapes": [
+          {
+            "example": "walk0",
+            "fingerprint": "0x32f19950",
+            "id": 0,
+            "instructions": 1630,
+            "scalars": 158
+          },
+          {
+            "example": "walk1",
+            "fingerprint": "0xb080a9c7",
+            "id": 1,
+            "instructions": 754,
+            "scalars": 156
+          },
+          {
+            "example": "walk2",
+            "fingerprint": "0xfc285c06",
+            "id": 2,
+            "instructions": 1192,
+            "scalars": 157
+          },
+          {
+            "example": "walk3",
+            "fingerprint": "0xc4312e02",
+            "id": 3,
+            "instructions": 1308,
+            "scalars": 207
+          },
+          {
+            "example": "walk0",
+            "fingerprint": "0xd66f156c",
+            "id": 4,
+            "instructions": 2136,
+            "scalars": 209
+          },
+          {
+            "example": "walk0",
+            "fingerprint": "0x506499eb",
+            "id": 5,
+            "instructions": 1896,
+            "scalars": 185
+          },
+          {
+            "example": "walk1",
+            "fingerprint": "0x15aafa11",
+            "id": 6,
+            "instructions": 1008,
+            "scalars": 183
+          },
+          {
+            "example": "walk2",
+            "fingerprint": "0x8a565faf",
+            "id": 7,
+            "instructions": 1118,
+            "scalars": 150
+          },
+          {
+            "example": "walk0",
+            "fingerprint": "0x33dc0947",
+            "id": 8,
+            "instructions": 2290,
+            "scalars": 224
+          },
+          {
+            "example": "walk1",
+            "fingerprint": "0x1fb85468",
+            "id": 9,
+            "instructions": 1402,
+            "scalars": 222
+          },
+          {
+            "example": "walk0",
+            "fingerprint": "0x5c058a32",
+            "id": 10,
+            "instructions": 1696,
+            "scalars": 165
+          },
+          {
+            "example": "walk1",
+            "fingerprint": "0xeb9306a5",
+            "id": 11,
+            "instructions": 808,
+            "scalars": 163
+          },
+          {
+            "example": "walk2",
+            "fingerprint": "0x1d535f1f",
+            "id": 12,
+            "instructions": 1078,
+            "scalars": 146
+          },
+          {
+            "example": "walk0",
+            "fingerprint": "0xc17fb9ac",
+            "id": 13,
+            "instructions": 1770,
+            "scalars": 172
+          },
+          {
+            "example": "walk1",
+            "fingerprint": "0x3a928d0d",
+            "id": 14,
+            "instructions": 894,
+            "scalars": 170
+          },
+          {
+            "example": "walk2",
+            "fingerprint": "0x028e6c0d",
+            "id": 15,
+            "instructions": 1332,
+            "scalars": 171
+          },
+          {
+            "example": "walk3",
+            "fingerprint": "0x7a108a23",
+            "id": 16,
+            "instructions": 2042,
+            "scalars": 280
+          },
+          {
+            "example": "walk0",
+            "fingerprint": "0x9dc1147b",
+            "id": 17,
+            "instructions": 2050,
+            "scalars": 200
+          },
+          {
+            "example": "walk1",
+            "fingerprint": "0xb5522b83",
+            "id": 18,
+            "instructions": 1174,
+            "scalars": 198
+          },
+          {
+            "example": "walk2",
+            "fingerprint": "0xcdbb19ee",
+            "id": 19,
+            "instructions": 1612,
+            "scalars": 199
+          },
+          {
+            "example": "walk3",
+            "fingerprint": "0x7cbe4432",
+            "id": 20,
+            "instructions": 3502,
+            "scalars": 426
+          },
+          {
+            "example": "walk0",
+            "fingerprint": "0x52f73e3b",
+            "id": 21,
+            "instructions": 1666,
+            "scalars": 162
+          },
+          {
+            "example": "walk1",
+            "fingerprint": "0x54049292",
+            "id": 22,
+            "instructions": 784,
+            "scalars": 160
+          },
+          {
+            "example": "walk2",
+            "fingerprint": "0x4eaaac9d",
+            "id": 23,
+            "instructions": 1092,
+            "scalars": 147
+          }
+        ]
+      },
+      {
+        "cu": "evaluate_b65_exp_table_eval.cu",
+        "cu_lines": 122,
+        "family": "b65_exp_table_eval",
+        "shapes": [
+          {
+            "example": "exp_table",
+            "fingerprint": "0xa7d66c67",
+            "id": 0,
+            "instructions": 24,
+            "scalars": 4
+          }
+        ]
+      },
+      {
+        "cu": "evaluate_b65_table_eval.cu",
+        "cu_lines": 398,
+        "family": "b65_table_eval",
+        "shapes": [
+          {
+            "example": "table0",
+            "fingerprint": "0xc0a8b1f3",
+            "id": 0,
+            "instructions": 40,
+            "scalars": 8
+          },
+          {
+            "example": "table1",
+            "fingerprint": "0xff83a615",
+            "id": 1,
+            "instructions": 28,
+            "scalars": 5
+          },
+          {
+            "example": "table2",
+            "fingerprint": "0x0cb71ac1",
+            "id": 2,
+            "instructions": 32,
+            "scalars": 6
+          },
+          {
+            "example": "table3",
+            "fingerprint": "0xa7d66c67",
+            "id": 3,
+            "instructions": 24,
+            "scalars": 4
+          },
+          {
+            "example": "table4",
+            "fingerprint": "0xbfb32905",
+            "id": 4,
+            "instructions": 20,
+            "scalars": 3
+          }
+        ]
+      }
+    ],
+    "instructions": 68565,
+    "kernels": 49,
+    "kernels_new_this_run": 4,
+    "launch": {
+      "block": 256,
+      "min_blocks": 2
+    },
+    "source": "synthetic layer (seed=7)"
+  },
+  "security": {
+    "blowup_factor": 2,
+    "fold_step": 1,
+    "hash": "Blake2s (Blake2sM31MerkleChannel)",
+    "log_blowup_factor": 1,
+    "log_last_layer_degree_bound": 0,
+    "n_queries": 100,
+    "pow_bits": 0,
+    "security_bits_conjectured": 100
+  }
+}

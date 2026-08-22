@@ -1,0 +1,5575 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/290 [00:00<?, ?it/s]Loading weights: 100%|██████████| 290/290 [00:00<00:00, 6456.34it/s]
+  prefilled 512/1536 (4s)
+  prefilled 1024/1536 (10s)
+  prefilled 1536/1536 (19s)
+layer 0 -> /root/b7/py/b65/out/witness_L0
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=      171,713 (18 bits) kmax 9 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=      164,584 (18 bits) kmax 9 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       50,766 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=       99,678 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=      154,233 (18 bits) kmax 9 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=      173,969 (18 bits) kmax 9 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      219,258 (18 bits) kmax 9 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 0,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 852723,
+ "d_bits": 20,
+ "d_fits_16bit": false,
+ "z_max": 27784,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.6624397550310407,
+ "frac_per_head": [
+  10.0,
+  11.0,
+  10.0,
+  11.0,
+  12.0,
+  12.0,
+  10.0,
+  13.0,
+  10.0,
+  11.0,
+  12.0,
+  11.0,
+  11.0,
+  11.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 3.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 23,
+ "attn_out": {
+  "jo_min": -10,
+  "jo_max": -8,
+  "jv_min": -11,
+  "jv_max": -8,
+  "e_min": -3,
+  "e_max": 2,
+  "jo_fwd_min": -10,
+  "jo_fwd_max": -8,
+  "jo_tokens_bumped": 197,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 171713,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 2.6157924107142856e-05
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 164584,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.0
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 50766,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.00018310546875
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 99678,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.00010463169642857142
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 154233,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 3.734387849506579e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 173969,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 6.665681537828947e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 219258,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 6.539481026785714e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 1 -> /root/b7/py/b65/out/witness_L1
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=      103,832 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       88,333 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       67,164 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=       43,608 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=      156,552 (18 bits) kmax 9 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=      161,376 (18 bits) kmax 9 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      124,563 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 1,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1114363,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 24326,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.47253595079694477,
+ "frac_per_head": [
+  15.0,
+  16.0,
+  15.0,
+  16.0,
+  15.0,
+  15.0,
+  15.0,
+  12.0,
+  12.0,
+  11.0,
+  12.0,
+  13.0,
+  12.0,
+  12.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 5.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 26,
+ "attn_out": {
+  "jo_min": -5,
+  "jo_max": -5,
+  "jv_min": -7,
+  "jv_max": -5,
+  "e_min": -2,
+  "e_max": 0,
+  "jo_fwd_min": -5,
+  "jo_fwd_max": -5,
+  "jo_tokens_bumped": 0,
+  "jo_tokens": 512,
+  "fold_q_max": 88
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 103832,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 6.757463727678572e-05
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 88333,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 4.57763671875e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 67164,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.0001373291015625
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 43608,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.00012425013950892856
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 156552,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 2.3289730674342107e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 161376,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 4.8587196751644735e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 124563,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 4.141671316964286e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 2 -> /root/b7/py/b65/out/witness_L2
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       92,162 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       78,712 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       41,986 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=      107,977 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=      131,882 (18 bits) kmax 9 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=      141,956 (18 bits) kmax 9 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      152,747 (18 bits) kmax 9 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 2,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1133599,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 26468,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.6503072466169085,
+ "frac_per_head": [
+  14.0,
+  15.0,
+  14.0,
+  15.0,
+  15.0,
+  14.0,
+  15.0,
+  15.0,
+  14.0,
+  14.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 1.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 22,
+ "attn_out": {
+  "jo_min": -8,
+  "jo_max": -5,
+  "jv_min": -7,
+  "jv_max": -5,
+  "e_min": -2,
+  "e_max": 3,
+  "jo_fwd_min": -7,
+  "jo_fwd_max": -5,
+  "jo_tokens_bumped": 345,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 92162,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 6.975446428571428e-05
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 78712,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 9.1552734375e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 41986,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 9.1552734375e-05
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 107977,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 4.141671316964286e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 131882,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 3.0517578125e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 141956,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 4.53748201069079e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 152747,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 2.833775111607143e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 3 -> /root/b7/py/b65/out/witness_L3
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       62,841 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       68,248 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       45,131 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=       74,772 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=      112,481 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=      137,417 (18 bits) kmax 9 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      132,606 (18 bits) kmax 9 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 3,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1898343,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 5561,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.9518168313162667,
+ "frac_per_head": [
+  15.0,
+  16.0,
+  16.0,
+  16.0,
+  15.0,
+  15.0,
+  16.0,
+  15.0,
+  15.0,
+  16.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 1.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 22,
+ "attn_out": {
+  "jo_min": -7,
+  "jo_max": -5,
+  "jv_min": -7,
+  "jv_max": -5,
+  "e_min": -2,
+  "e_max": 2,
+  "jo_fwd_min": -6,
+  "jo_fwd_max": -5,
+  "jo_tokens_bumped": 408,
+  "jo_tokens": 512,
+  "fold_q_max": 126
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 62841,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 7.847377232142858e-05
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 68248,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 3.0517578125e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 45131,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 4.57763671875e-05
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 74772,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.0001068115234375
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 112481,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 2.0478901110197368e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 137417,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 5.139802631578947e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 132606,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 3.705705915178571e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 4 -> /root/b7/py/b65/out/witness_L4
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       50,669 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       60,131 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       45,679 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=       82,817 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=      132,672 (18 bits) kmax 9 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=      112,162 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      106,335 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 4,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1210568,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 19743,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.8370868137904576,
+ "frac_per_head": [
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 0.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 21,
+ "attn_out": {
+  "jo_min": -7,
+  "jo_max": -5,
+  "jv_min": -6,
+  "jv_max": -5,
+  "e_min": -1,
+  "e_max": 2,
+  "jo_fwd_min": -7,
+  "jo_fwd_max": -5,
+  "jo_tokens_bumped": 109,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 50669,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 7.62939453125e-05
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 60131,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 4.57763671875e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 45679,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.0001220703125
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 82817,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 6.539481026785714e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 132672,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 2.690365439967105e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 112162,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 4.818564967105263e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 106335,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 4.141671316964286e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 5 -> /root/b7/py/b65/out/witness_L5
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       52,917 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       58,405 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       47,424 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=      106,113 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=      113,055 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=       75,887 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      123,191 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 5,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1180950,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 19584,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.8599864414760044,
+ "frac_per_head": [
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  16.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 1.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 22,
+ "attn_out": {
+  "jo_min": -7,
+  "jo_max": -5,
+  "jv_min": -6,
+  "jv_max": -4,
+  "e_min": -1,
+  "e_max": 3,
+  "jo_fwd_min": -7,
+  "jo_fwd_max": -5,
+  "jo_tokens_bumped": 189,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 52917,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 7.62939453125e-05
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 58405,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 9.1552734375e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 47424,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 6.103515625e-05
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 106113,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 7.62939453125e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 113055,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 1.8471165707236842e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 75887,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 6.304289165296053e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 123191,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 3.923688616071429e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 6 -> /root/b7/py/b65/out/witness_L6
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       57,080 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       59,796 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       48,370 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=       93,824 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=       91,426 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=       89,662 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      117,645 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 6,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1845586,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 8132,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.8731573649815151,
+ "frac_per_head": [
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  15.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  15.0,
+  15.0,
+  16.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 1.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 22,
+ "attn_out": {
+  "jo_min": -6,
+  "jo_max": -5,
+  "jv_min": -7,
+  "jv_max": -5,
+  "e_min": -2,
+  "e_max": 1,
+  "jo_fwd_min": -7,
+  "jo_fwd_max": -5,
+  "jo_tokens_bumped": 70,
+  "jo_tokens": 512,
+  "fold_q_max": 126
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 57080,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 8.937290736607142e-05
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 59796,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 1.52587890625e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 48370,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 1.52587890625e-05
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 93824,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 6.103515625e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 91426,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 2.0478901110197368e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 89662,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 5.30042146381579e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 117645,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 3.705705915178571e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 7 -> /root/b7/py/b65/out/witness_L7
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       59,339 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       53,772 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       31,970 (15 bits) kmax 6 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=       68,673 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=       84,387 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=       83,579 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      122,535 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 7,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1358671,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 5493,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.9834831782749721,
+ "frac_per_head": [
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 0.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 21,
+ "attn_out": {
+  "jo_min": -7,
+  "jo_max": -5,
+  "jv_min": -6,
+  "jv_max": -4,
+  "e_min": -1,
+  "e_max": 3,
+  "jo_fwd_min": -7,
+  "jo_fwd_max": -4,
+  "jo_tokens_bumped": 211,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 59339,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.0001068115234375
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 53772,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 7.62939453125e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 31970,
+   "bits": 15,
+   "kmax_needed": 6,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.0001373291015625
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 68673,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 4.795619419642857e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 84387,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 2.5699013157894735e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 83579,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 5.420885587993421e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 122535,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 4.141671316964286e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 8 -> /root/b7/py/b65/out/witness_L8
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       54,256 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       61,356 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       59,618 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=      103,170 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=       91,596 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=       78,164 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      244,620 (18 bits) kmax 9 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 8,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1703385,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 7701,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.947545051574707,
+ "frac_per_head": [
+  13.0,
+  12.0,
+  13.0,
+  10.0,
+  12.0,
+  13.0,
+  13.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 5.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 26,
+ "attn_out": {
+  "jo_min": -7,
+  "jo_max": -5,
+  "jv_min": -6,
+  "jv_max": -5,
+  "e_min": -1,
+  "e_max": 2,
+  "jo_fwd_min": -6,
+  "jo_fwd_max": -5,
+  "jo_tokens_bumped": 292,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 54256,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.00011553083147321428
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 61356,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 4.57763671875e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 59618,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 7.62939453125e-05
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 103170,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 6.103515625e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 91596,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 3.132067228618421e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 78164,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 4.939029091282895e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 244620,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 2.833775111607143e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 9 -> /root/b7/py/b65/out/witness_L9
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       56,604 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       83,050 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       57,769 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=       54,659 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=       93,309 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=       77,579 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      140,481 (18 bits) kmax 9 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 9,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1196238,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 3807,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.9708875928606305,
+ "frac_per_head": [
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  13.0,
+  14.0,
+  14.0,
+  14.0,
+  14.0,
+  14.0,
+  14.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 2.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 23,
+ "attn_out": {
+  "jo_min": -6,
+  "jo_max": -4,
+  "jv_min": -6,
+  "jv_max": -4,
+  "e_min": -2,
+  "e_max": 2,
+  "jo_fwd_min": -6,
+  "jo_fwd_max": -4,
+  "jo_tokens_bumped": 151,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 56604,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.00010899135044642858
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 83050,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.0001068115234375
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 57769,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.0001220703125
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 54659,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.00010463169642857142
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 93309,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 2.6100560238486842e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 77579,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 5.581504420230263e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 140481,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 4.141671316964286e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 10 -> /root/b7/py/b65/out/witness_L10
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       55,509 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       58,854 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       36,767 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=       95,068 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=       94,198 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=       81,386 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      170,525 (18 bits) kmax 9 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 10,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1189469,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 10148,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.8520634514944894,
+ "frac_per_head": [
+  15.0,
+  16.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  14.0,
+  14.0,
+  15.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 2.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 23,
+ "attn_out": {
+  "jo_min": -6,
+  "jo_max": -5,
+  "jv_min": -6,
+  "jv_max": -4,
+  "e_min": -1,
+  "e_max": 2,
+  "jo_fwd_min": -6,
+  "jo_fwd_max": -5,
+  "jo_tokens_bumped": 212,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 55509,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 7.847377232142858e-05
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 58854,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 3.0517578125e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 36767,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 6.103515625e-05
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 95068,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 7.62939453125e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 94198,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 3.252531352796053e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 81386,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 5.862587376644737e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 170525,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 3.269740513392857e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 11 -> /root/b7/py/b65/out/witness_L11
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       62,027 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       67,090 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       56,889 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=      103,894 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=       89,979 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=       84,495 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      101,350 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 11,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 2075314,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 4958,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.9440689086914062,
+ "frac_per_head": [
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  14.0,
+  15.0,
+  15.0,
+  15.0,
+  14.0,
+  15.0,
+  14.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 1.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 22,
+ "attn_out": {
+  "jo_min": -6,
+  "jo_max": -4,
+  "jv_min": -6,
+  "jv_max": -4,
+  "e_min": -2,
+  "e_max": 2,
+  "jo_fwd_min": -7,
+  "jo_fwd_max": -4,
+  "jo_tokens_bumped": 296,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 62027,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.00010463169642857142
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 67090,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 6.103515625e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 56889,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 9.1552734375e-05
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 103894,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 9.1552734375e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 89979,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 3.09191252055921e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 84495,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 4.8988743832236845e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 101350,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 4.141671316964286e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 12 -> /root/b7/py/b65/out/witness_L12
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       57,290 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       60,484 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       52,096 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=       71,966 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=       80,898 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=       95,343 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      126,526 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 12,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 2106467,
+ "d_bits": 22,
+ "d_fits_16bit": false,
+ "z_max": 36997,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.8283901214599609,
+ "frac_per_head": [
+  15.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  15.0,
+  16.0,
+  16.0,
+  16.0,
+  15.0,
+  16.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 1.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 23,
+ "attn_out": {
+  "jo_min": -7,
+  "jo_max": -6,
+  "jv_min": -6,
+  "jv_max": -4,
+  "e_min": 0,
+  "e_max": 3,
+  "jo_fwd_min": -7,
+  "jo_fwd_max": -4,
+  "jo_tokens_bumped": 481,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 57290,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 8.501325334821428e-05
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 60484,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 4.57763671875e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 52096,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 7.62939453125e-05
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 71966,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 5.885532924107143e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 80898,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 2.8108295641447368e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 95343,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 5.0594932154605265e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 126526,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 2.3978097098214285e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 13 -> /root/b7/py/b65/out/witness_L13
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       57,442 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       60,594 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       47,366 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=       83,048 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=       77,595 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=       78,802 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      125,839 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 13,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1718337,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 6033,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.9341320310320173,
+ "frac_per_head": [
+  15.0,
+  15.0,
+  15.0,
+  16.0,
+  15.0,
+  15.0,
+  15.0,
+  16.0,
+  15.0,
+  15.0,
+  15.0,
+  16.0,
+  15.0,
+  15.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 1.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 22,
+ "attn_out": {
+  "jo_min": -6,
+  "jo_max": -5,
+  "jv_min": -6,
+  "jv_max": -5,
+  "e_min": -1,
+  "e_max": 1,
+  "jo_fwd_min": -7,
+  "jo_fwd_max": -5,
+  "jo_tokens_bumped": 168,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 57442,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 9.1552734375e-05
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 60594,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 3.0517578125e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 47366,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 3.0517578125e-05
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 83048,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 8.719308035714286e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 77595,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 3.573769017269737e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 78802,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 5.501195004111842e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 125839,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 2.833775111607143e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 14 -> /root/b7/py/b65/out/witness_L14
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       54,145 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       52,801 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       43,103 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=      103,495 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=       70,443 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=       80,062 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      128,880 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 14,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1691637,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 7205,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.9151645387922015,
+ "frac_per_head": [
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  16.0,
+  15.0,
+  15.0,
+  16.0,
+  15.0,
+  15.0,
+  15.0,
+  16.0,
+  16.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 1.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 22,
+ "attn_out": {
+  "jo_min": -7,
+  "jo_max": -5,
+  "jv_min": -6,
+  "jv_max": -4,
+  "e_min": -1,
+  "e_max": 3,
+  "jo_fwd_min": -6,
+  "jo_fwd_max": -5,
+  "jo_tokens_bumped": 178,
+  "jo_tokens": 512,
+  "fold_q_max": 124
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 54145,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 7.411411830357142e-05
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 52801,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 3.0517578125e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 43103,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.0002288818359375
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 103495,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 4.795619419642857e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 70443,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 3.77454255756579e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 80062,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 5.9830515008223684e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 128880,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 3.0517578125e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 15 -> /root/b7/py/b65/out/witness_L15
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       56,528 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       63,528 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       58,208 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=      120,925 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=       75,572 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=       75,223 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      108,398 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 15,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1418542,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 5013,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.9216220038277763,
+ "frac_per_head": [
+  15.0,
+  16.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  16.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 1.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 22,
+ "attn_out": {
+  "jo_min": -7,
+  "jo_max": -5,
+  "jv_min": -6,
+  "jv_max": -4,
+  "e_min": -1,
+  "e_max": 3,
+  "jo_fwd_min": -6,
+  "jo_fwd_max": -5,
+  "jo_tokens_bumped": 279,
+  "jo_tokens": 512,
+  "fold_q_max": 126
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 56528,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 6.539481026785714e-05
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 63528,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 7.62939453125e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 58208,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 9.1552734375e-05
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 120925,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 5.667550223214286e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 75572,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 3.292686060855263e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 75223,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 7.268002158717106e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 108398,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 2.3978097098214285e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 16 -> /root/b7/py/b65/out/witness_L16
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       62,787 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       70,015 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       52,291 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=       94,735 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=       69,154 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=       78,942 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      106,059 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 16,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1872792,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 4573,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.9706460407802037,
+ "frac_per_head": [
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  16.0,
+  15.0,
+  15.0,
+  16.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 1.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 22,
+ "attn_out": {
+  "jo_min": -9,
+  "jo_max": -5,
+  "jv_min": -6,
+  "jv_max": -4,
+  "e_min": -1,
+  "e_max": 5,
+  "jo_fwd_min": -8,
+  "jo_fwd_max": -5,
+  "jo_tokens_bumped": 233,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 62787,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.00013078962053571428
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 70015,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 6.103515625e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 52291,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.0001983642578125
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 94735,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 6.321498325892858e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 69154,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 3.212376644736842e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 78942,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 7.147538034539474e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 106059,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 4.359654017857143e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 17 -> /root/b7/py/b65/out/witness_L17
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       64,869 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       59,896 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       44,880 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=       87,480 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=       67,217 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=       76,297 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=       99,052 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 17,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1298449,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 10710,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.8623514175415039,
+ "frac_per_head": [
+  15.0,
+  16.0,
+  16.0,
+  16.0,
+  15.0,
+  15.0,
+  15.0,
+  16.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  16.0,
+  15.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 1.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 22,
+ "attn_out": {
+  "jo_min": -5,
+  "jo_max": -5,
+  "jv_min": -6,
+  "jv_max": -4,
+  "e_min": -1,
+  "e_max": 1,
+  "jo_fwd_min": -5,
+  "jo_fwd_max": -4,
+  "jo_tokens_bumped": 42,
+  "jo_tokens": 512,
+  "fold_q_max": 123
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 64869,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.00010245186941964286
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 59896,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 6.103515625e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 44880,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.0001220703125
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 87480,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 7.411411830357142e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 67217,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 3.292686060855263e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 76297,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 9.1552734375e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 99052,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 4.141671316964286e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 18 -> /root/b7/py/b65/out/witness_L18
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       50,526 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       59,915 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       37,844 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=       89,947 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=       83,602 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=       90,379 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      119,340 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 18,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1653557,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 5317,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.9718467167445591,
+ "frac_per_head": [
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  16.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 1.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 22,
+ "attn_out": {
+  "jo_min": -7,
+  "jo_max": -5,
+  "jv_min": -6,
+  "jv_max": -4,
+  "e_min": -1,
+  "e_max": 3,
+  "jo_fwd_min": -7,
+  "jo_fwd_max": -5,
+  "jo_tokens_bumped": 394,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 50526,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.00011771065848214286
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 59915,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 9.1552734375e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 37844,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.000152587890625
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 89947,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 6.757463727678572e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 83602,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 2.7706748560855265e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 90379,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 5.6216591282894735e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 119340,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 2.3978097098214285e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 19 -> /root/b7/py/b65/out/witness_L19
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       43,660 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       69,623 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       38,621 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=      110,784 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=       79,888 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=       83,288 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      104,413 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 19,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 1374523,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 3356,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.9653953824724469,
+ "frac_per_head": [
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0,
+  15.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 0.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 21,
+ "attn_out": {
+  "jo_min": -6,
+  "jo_max": -5,
+  "jv_min": -6,
+  "jv_max": -4,
+  "e_min": -1,
+  "e_max": 2,
+  "jo_fwd_min": -6,
+  "jo_fwd_max": -4,
+  "jo_tokens_bumped": 408,
+  "jo_tokens": 512,
+  "fold_q_max": 126
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 43660,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 9.1552734375e-05
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 69623,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 4.57763671875e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 38621,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.0001220703125
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 110784,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 5.449567522321429e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 79888,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 3.292686060855263e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 83288,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 7.227847450657894e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 104413,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 4.141671316964286e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 20 -> /root/b7/py/b65/out/witness_L20
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       60,830 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       50,722 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       45,199 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=       40,831 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=      105,057 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=      119,021 (17 bits) kmax 8 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      113,392 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 20,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 2130189,
+ "d_bits": 22,
+ "d_fits_16bit": false,
+ "z_max": 6842,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.9419473920549665,
+ "frac_per_head": [
+  15.0,
+  15.0,
+  15.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 1.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 23,
+ "attn_out": {
+  "jo_min": -4,
+  "jo_max": -4,
+  "jv_min": -5,
+  "jv_max": -3,
+  "e_min": -1,
+  "e_max": 1,
+  "jo_fwd_min": -4,
+  "jo_fwd_max": -4,
+  "jo_tokens_bumped": 0,
+  "jo_tokens": 512,
+  "fold_q_max": 99
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 60830,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.00013296944754464285
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 50722,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 4.57763671875e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 45199,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.0002899169921875
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 40831,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.00011335100446428572
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 105057,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 3.0517578125e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 119021,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 6.545217413651316e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 113392,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 5.449567522321429e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 21 -> /root/b7/py/b65/out/witness_L21
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       54,854 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       54,100 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       70,773 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=       88,196 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=      158,745 (18 bits) kmax 9 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=      211,906 (18 bits) kmax 9 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      102,778 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 21,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 2060340,
+ "d_bits": 21,
+ "d_fits_16bit": false,
+ "z_max": 2789,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.9497085298810687,
+ "frac_per_head": [
+  16.0,
+  16.0,
+  15.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  15.0,
+  16.0,
+  16.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 1.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 22,
+ "attn_out": {
+  "jo_min": -4,
+  "jo_max": -3,
+  "jv_min": -4,
+  "jv_max": -3,
+  "e_min": -1,
+  "e_max": 1,
+  "jo_fwd_min": -4,
+  "jo_fwd_max": -3,
+  "jo_tokens_bumped": 166,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 54854,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.00011771065848214286
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 54100,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 9.1552734375e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 70773,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.0002288818359375
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 88196,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.00010463169642857142
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 158745,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 1.8471165707236842e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 211906,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 3.1722219366776316e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 102778,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 5.449567522321429e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 22 -> /root/b7/py/b65/out/witness_L22
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       72,752 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       56,079 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       57,229 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=      171,841 (18 bits) kmax 9 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=      232,754 (18 bits) kmax 9 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=      175,837 (18 bits) kmax 9 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=       73,356 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 22,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 2455633,
+ "d_bits": 22,
+ "d_fits_16bit": false,
+ "z_max": 23212,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.4159942354474749,
+ "frac_per_head": [
+  17.0,
+  16.0,
+  16.0,
+  16.0,
+  17.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0,
+  16.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 1.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 23,
+ "attn_out": {
+  "jo_min": -7,
+  "jo_max": -4,
+  "jv_min": -4,
+  "jv_max": -2,
+  "e_min": 0,
+  "e_max": 5,
+  "jo_fwd_min": -7,
+  "jo_fwd_max": -4,
+  "jo_tokens_bumped": 92,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 72752,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 0.00014168875558035715
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 56079,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 7.62939453125e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 57229,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 4.57763671875e-05
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 171841,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 8.065359933035714e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 232754,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 1.7668071546052632e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 175837,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 3.0517578125e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 73356,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 5.449567522321429e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+layer 23 -> /root/b7/py/b65/out/witness_L23
+  qq.i16              458,752 values (   0.9 MiB)  (14, 512, 64)
+  kk.i16              917,504 values (   1.8 MiB)  (14, 1024, 64)
+  vv.i8               917,504 values (   0.9 MiB)  (14, 1024, 64)
+  sc.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  dd.i32            7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  num.i32           7,340,032 values (  28.0 MiB)  (14, 512, 1024)
+  xx.u16            7,340,032 values (  14.0 MiB)  (14, 512, 1024)
+  mm.i32                7,168 values (   0.0 MiB)  (14, 512)
+  zz.i32                7,168 values (   0.0 MiB)  (14, 512)
+  jv.i32                  896 values (   0.0 MiB)  (896,)
+  jo.i32                  512 values (   0.0 MiB)  (512,)
+  acc_q.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_q.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_q.i8             802,816 values (   0.8 MiB)  (896, 896)
+  x_q.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_q.i32                512 values (   0.0 MiB)  (512,)
+  jw_q.i32                896 values (   0.0 MiB)  (896,)
+  sx_q.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_q.i32              1,792 values (   0.0 MiB)  (896, 2)
+  q     |acc| <=       60,363 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_k.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_k.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_k.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_k.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_k.i32                512 values (   0.0 MiB)  (512,)
+  jw_k.i32                128 values (   0.0 MiB)  (128,)
+  sx_k.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_k.i32                256 values (   0.0 MiB)  (128, 2)
+  k     |acc| <=       75,647 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_v.i32            65,536 values (   0.2 MiB)  (512, 128)
+  qx_v.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_v.i8             114,688 values (   0.1 MiB)  (896, 128)
+  x_v.u16             458,752 values (   0.9 MiB)  (512, 896)
+  jx_v.i32                512 values (   0.0 MiB)  (512,)
+  jw_v.i32                128 values (   0.0 MiB)  (128,)
+  sx_v.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_v.i32                256 values (   0.0 MiB)  (128, 2)
+  v     |acc| <=       65,160 (16 bits) kmax 7 (worst case 15), pow2 scales True
+  acc_o.i32           458,752 values (   1.8 MiB)  (512, 896)
+  qx_o.i8             458,752 values (   0.4 MiB)  (512, 896)
+  qw_o.i8             802,816 values (   0.8 MiB)  (896, 896)
+  jx_o.i32                512 values (   0.0 MiB)  (512,)
+  jw_o.i32                896 values (   0.0 MiB)  (896,)
+  sx_o.i32              1,024 values (   0.0 MiB)  (512, 2)
+  sw_o.i32              1,792 values (   0.0 MiB)  (896, 2)
+  o     |acc| <=      123,341 (17 bits) kmax 8 (worst case 15), pow2 scales True
+  acc_gate.i32      2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_gate.i8          458,752 values (   0.4 MiB)  (512, 896)
+  qw_gate.i8        4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_gate.u16          458,752 values (   0.9 MiB)  (512, 896)
+  jx_gate.i32             512 values (   0.0 MiB)  (512,)
+  jw_gate.i32           4,864 values (   0.0 MiB)  (4864,)
+  sx_gate.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_gate.i32           9,728 values (   0.0 MiB)  (4864, 2)
+  gate  |acc| <=      226,120 (18 bits) kmax 9 (worst case 15), pow2 scales False
+  acc_up.i32        2,490,368 values (   9.5 MiB)  (512, 4864)
+  qx_up.i8            458,752 values (   0.4 MiB)  (512, 896)
+  qw_up.i8          4,358,144 values (   4.2 MiB)  (896, 4864)
+  x_up.u16            458,752 values (   0.9 MiB)  (512, 896)
+  jx_up.i32               512 values (   0.0 MiB)  (512,)
+  jw_up.i32             4,864 values (   0.0 MiB)  (4864,)
+  sx_up.i32             1,024 values (   0.0 MiB)  (512, 2)
+  sw_up.i32             9,728 values (   0.0 MiB)  (4864, 2)
+  up    |acc| <=      207,716 (18 bits) kmax 9 (worst case 15), pow2 scales False
+  acc_down.i32        458,752 values (   1.8 MiB)  (512, 896)
+  qx_down.i8        2,490,368 values (   2.4 MiB)  (512, 4864)
+  qw_down.i8        4,358,144 values (   4.2 MiB)  (4864, 896)
+  x_down.u16        2,490,368 values (   4.8 MiB)  (512, 4864)
+  jx_down.i32             512 values (   0.0 MiB)  (512,)
+  jw_down.i32             896 values (   0.0 MiB)  (896,)
+  sx_down.i32           1,024 values (   0.0 MiB)  (512, 2)
+  sw_down.i32           1,792 values (   0.0 MiB)  (896, 2)
+  down  |acc| <=      104,994 (17 bits) kmax 8 (worst case 18), pow2 scales False
+{
+ "heads": 14,
+ "s": 512,
+ "c": 1024,
+ "hd": 64,
+ "layer": 23,
+ "spec": "b65-design",
+ "qk_bits": [
+  12,
+  11
+ ],
+ "num_bits": 8,
+ "model": "Qwen/Qwen2.5-0.5B-Instruct",
+ "d_max": 2315158,
+ "d_bits": 22,
+ "d_fits_16bit": false,
+ "z_max": 23301,
+ "z_worst_case": 261120,
+ "numerator_zero_frac": 0.4210243225097656,
+ "frac_per_head": [
+  16.0,
+  15.0,
+  16.0,
+  17.0,
+  16.0,
+  16.0,
+  16.0,
+  17.0,
+  17.0,
+  17.0,
+  17.0,
+  17.0,
+  16.0,
+  17.0
+ ],
+ "frac_shared_per_head": true,
+ "frac_is_integer": true,
+ "frac_spread": 2.0,
+ "frac_integer_separated": true,
+ "master_table_bits": 24,
+ "attn_out": {
+  "jo_min": -6,
+  "jo_max": -4,
+  "jv_min": -4,
+  "jv_max": -3,
+  "e_min": 0,
+  "e_max": 3,
+  "jo_fwd_min": -5,
+  "jo_fwd_max": -3,
+  "jo_tokens_bumped": 243,
+  "jo_tokens": 512,
+  "fold_q_max": 127
+ },
+ "accumulators": {
+  "q": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 60363,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 6.757463727678572e-05
+  },
+  "k": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 75647,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 3.0517578125e-05
+  },
+  "v": {
+   "n_in": 896,
+   "n_out": 128,
+   "tokens": 512,
+   "abs_max": 65160,
+   "bits": 16,
+   "kmax_needed": 7,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 3.0517578125e-05
+  },
+  "o": {
+   "n_in": 896,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 123341,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": true,
+   "zero_frac": 7.62939453125e-05
+  },
+  "gate": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 226120,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 1.5660336143092107e-05
+  },
+  "up": {
+   "n_in": 896,
+   "n_out": 4864,
+   "tokens": 512,
+   "abs_max": 207716,
+   "bits": 18,
+   "kmax_needed": 9,
+   "worst_case": 14451584,
+   "kmax_worst_case": 15,
+   "scales_pow2": false,
+   "zero_frac": 3.85485197368421e-05
+  },
+  "down": {
+   "n_in": 4864,
+   "n_out": 896,
+   "tokens": 512,
+   "abs_max": 104994,
+   "bits": 17,
+   "kmax_needed": 8,
+   "worst_case": 78451456,
+   "kmax_worst_case": 18,
+   "scales_pow2": false,
+   "zero_frac": 8.937290736607142e-05
+  }
+ },
+ "clamped": {
+  "k": {
+   "over": 42,
+   "total": 66060288,
+   "frac": 6.357828776041666e-07
+  },
+  "v": {
+   "over": 8407,
+   "total": 66060288,
+   "frac": 0.00012726253933376737
+  },
+  "attnout": {
+   "over": 0,
+   "total": 33030144,
+   "frac": 0.0
+  }
+ },
+ "torch": "2.11.0+cu128"
+}
+wrote /root/b7/py/b65/out/witness_L23 in 29s
+EXTRACT_EXIT=0

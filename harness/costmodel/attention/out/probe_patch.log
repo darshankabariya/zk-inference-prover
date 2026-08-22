@@ -1,0 +1,15 @@
+  layer.rs: B7_SYNTH_DIMS: per-matmul dimensions for the synthetic layer -- already applied
+  layer.rs: the synthetic accumulators in parallel -- already applied
+m5_probe: done
+b9_patch.py -> /root/b7/b65_probe
+  attn_witness.rs: the master exponent is an argument
+  attn_witness.rs: build() takes `master`
+  attn_witness.rs: synthetic() passes `master`
+  attn_witness.rs: load() passes `master`
+  attn_witness.rs: synthetic_shared() passes `master`
+  attn_witness.rs: corrupted() passes `master`
+  attn_witness.rs: load() takes `master`
+  attn_witness.rs: get() keeps the band-wide exponent
+  layer.rs: the layer-wide master exponent
+  main.rs: --ao-rem-bits
+b9_patch.py done

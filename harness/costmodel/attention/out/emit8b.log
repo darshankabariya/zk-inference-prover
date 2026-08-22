@@ -1,0 +1,12 @@
+cudaemit: carrying 45 shapes forward from /root/b7/gen/shapes.json
+cudaemit: 8 families, 49 kernels (4 new this run), 68565 instructions -> /root/b7/gen
+  b65_chan_eval          5 shape(s): chan_band0(1984 instr), chan_band0(2624 instr), chan_band0(3904 instr), chan_band0(1504 instr), chan_band0(1384 instr)
+  b65_key_eval           5 shape(s): key_band0(1222 instr), key_band0(1800 instr), key_band0(1182 instr), key_band0(1162 instr), key_band0(1302 instr)
+  b65_row_eval           1 shape(s): row_band0(655 instr)
+  b65_attn_out_eval      1 shape(s): attnout(874 instr)
+  b65_dequant_eval       7 shape(s): dequant0(1200 instr), dequant4(2096 instr), dequant6(1561 instr), dequant0(896 instr), dequant1(1016 instr), dequant4(4022 instr), dequant6(1775 instr)
+  b65_walk_eval          24 shape(s): walk0(1630 instr), walk1(754 instr), walk2(1192 instr), walk3(1308 instr), walk0(2136 instr), walk0(1896 instr), walk1(1008 instr), walk2(1118 instr), walk0(2290 instr), walk1(1402 instr), walk0(1696 instr), walk1(808 instr), walk2(1078 instr), walk0(1770 instr), walk1(894 instr), walk2(1332 instr), walk3(2042 instr), walk0(2050 instr), walk1(1174 instr), walk2(1612 instr), walk3(3502 instr), walk0(1666 instr), walk1(784 instr), walk2(1092 instr)
+  b65_exp_table_eval     1 shape(s): exp_table(24 instr)
+  b65_table_eval         5 shape(s): table0(40 instr), table1(28 instr), table2(32 instr), table3(24 instr), table4(20 instr)
+genemit: carrying 35 shapes forward from /root/b7/gen/gen_shapes.json
+genemit: 8 families, 38 fraction shapes (3 new) -> /root/b7/gen

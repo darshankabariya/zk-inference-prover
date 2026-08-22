@@ -1,0 +1,76 @@
+{
+ "constants": {
+  "gpu_commit_cells_s": 4450000000.0,
+  "gpu_wall_cells_s": 1460000000.0,
+  "cpu_commit_cells_s": 506144403.68546635,
+  "hbm_bytes_s": 3350000000000.0,
+  "bytes_per_cell": 60.0,
+  "target_toks": 53.0
+ },
+ "ours_per_token_27b": {
+  "4096": 191020000.0,
+  "16384": 300970000.0
+ },
+ "rows": [
+  {
+   "shape": "Llama-3.1-8B",
+   "params": 7504658432,
+   "ctx": 4096,
+   "naive_cells_per_token": 8578400256,
+   "trace_gb_per_token": 34.313601024,
+   "touched_gb_per_token": 514.70401536,
+   "cells_s_for_53": 454655213568.0,
+   "bytes_s_for_53": 27279312814080.0,
+   "x_hbm": 8.143078451964179,
+   "x_gpu_commit": 102.1697109141573,
+   "x_gpu_wall": 311.4076805260274,
+   "x_cpu_commit": 898.2717387714845,
+   "tok_s_on_h100": 0.17019490306235485
+  },
+  {
+   "shape": "Llama-3.1-8B",
+   "params": 7504658432,
+   "ctx": 16384,
+   "naive_cells_per_token": 11799625728,
+   "trace_gb_per_token": 47.198502912,
+   "touched_gb_per_token": 707.97754368,
+   "cells_s_for_53": 625380163584.0,
+   "bytes_s_for_53": 37522809815040.0,
+   "x_hbm": 11.200838750758209,
+   "x_gpu_commit": 140.5348682211236,
+   "x_gpu_wall": 428.3425777972603,
+   "x_cpu_commit": 1235.5765647714845,
+   "tok_s_on_h100": 0.12373273811011508
+  },
+  {
+   "shape": "Gemma-3-27B (the 27B proxy shape)",
+   "params": 27007647744,
+   "ctx": 4096,
+   "naive_cells_per_token": 29088022528,
+   "trace_gb_per_token": 116.352090112,
+   "touched_gb_per_token": 1745.28135168,
+   "cells_s_for_53": 1541665193984.0,
+   "bytes_s_for_53": 92499911639040.0,
+   "x_hbm": 27.611913922101493,
+   "x_gpu_commit": 346.441616625618,
+   "x_gpu_wall": 1055.9350643726027,
+   "x_cpu_commit": 3045.899910694336,
+   "tok_s_on_h100": 0.050192480378981094
+  },
+  {
+   "shape": "Gemma-3-27B (the 27B proxy shape)",
+   "params": 27007647744,
+   "ctx": 16384,
+   "naive_cells_per_token": 35329146880,
+   "trace_gb_per_token": 141.31658752,
+   "touched_gb_per_token": 2119.7488128,
+   "cells_s_for_53": 1872444784640.0,
+   "bytes_s_for_53": 112346687078400.0,
+   "x_hbm": 33.536324501014924,
+   "x_gpu_commit": 420.7741089078652,
+   "x_gpu_wall": 1282.4964278356165,
+   "x_cpu_commit": 3699.428011069336,
+   "tok_s_on_h100": 0.041325651167266456
+  }
+ ]
+}

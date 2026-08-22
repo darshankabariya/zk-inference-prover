@@ -1,0 +1,86 @@
+compose-chunks: 3 chunks over 1 layer(s) [B6.5 layer witness [/root/b8/witness8b/witness]], variant=intexp pipe=false ircache=1 precache=1; layers built in 15.2 s
+fill-dev: q pow2 shape 2^17 x 16 slots -- 161 base and 21 pre columns, kernel 0.0006 s
+fill-dev: k pow2 shape 2^15 x 16 slots -- 161 base and 21 pre columns, kernel 0.0001 s
+fill-dev: v pow2 shape 2^15 x 16 slots -- 161 base and 21 pre columns, kernel 0.0001 s
+fill-dev: o pow2 shape 2^17 x 16 slots -- 161 base and 21 pre columns, kernel 0.0004 s
+fill-dev: gate chain shape 2^19 x 14 slots -- 212 base and 33 pre columns, kernel 0.0014 s
+fill-dev: up chain shape 2^19 x 14 slots -- 212 base and 33 pre columns, kernel 0.0015 s
+fill-dev: down chain shape 2^17 x 16 slots -- 242 base and 37 pre columns, kernel 0.0004 s
+tab-dev: 2^25 -- x, y, m_exp from 3 exp counters, patch 0 rows, kernel 0.0035 s
+pre-dev: 10 shared tables -- 21 preprocessed and 10 multiplicity columns, patch 0 rows, kernels 0.0004 s
+[PROFILE]   prove_ex: composition gen:    70ms
+[PROFILE]   prove_ex: composition commit: 93ms
+[PROFILE]   prove_ex: prove_values:       294ms
+compose-chunks: chunk 0 (layer 0) 2.787 s, generate 1.349 s
+fill-dev: q pow2 shape 2^17 x 16 slots -- 161 base and 21 pre columns, kernel 0.0004 s
+fill-dev: k pow2 shape 2^15 x 16 slots -- 161 base and 21 pre columns, kernel 0.0001 s
+fill-dev: v pow2 shape 2^15 x 16 slots -- 161 base and 21 pre columns, kernel 0.0001 s
+fill-dev: o pow2 shape 2^17 x 16 slots -- 161 base and 21 pre columns, kernel 0.0004 s
+fill-dev: gate chain shape 2^19 x 14 slots -- 212 base and 33 pre columns, kernel 0.0017 s
+fill-dev: up chain shape 2^19 x 14 slots -- 212 base and 33 pre columns, kernel 0.0018 s
+fill-dev: down chain shape 2^17 x 16 slots -- 242 base and 37 pre columns, kernel 0.0006 s
+tab-dev: 2^25 -- x, y, m_exp from 3 exp counters, patch 0 rows, kernel 0.0034 s
+pre-dev: 10 shared tables -- 21 preprocessed and 10 multiplicity columns, patch 0 rows, kernels 0.0002 s
+[PROFILE]   prove_ex: composition gen:    1ms
+[PROFILE]   prove_ex: composition commit: 160ms
+[PROFILE]   prove_ex: prove_values:       287ms
+compose-chunks: chunk 1 (layer 0) 1.919 s, generate 0.729 s
+fill-dev: q pow2 shape 2^17 x 16 slots -- 161 base and 21 pre columns, kernel 0.0004 s
+fill-dev: k pow2 shape 2^15 x 16 slots -- 161 base and 21 pre columns, kernel 0.0001 s
+fill-dev: v pow2 shape 2^15 x 16 slots -- 161 base and 21 pre columns, kernel 0.0001 s
+fill-dev: o pow2 shape 2^17 x 16 slots -- 161 base and 21 pre columns, kernel 0.0004 s
+fill-dev: gate chain shape 2^19 x 14 slots -- 212 base and 33 pre columns, kernel 0.0018 s
+fill-dev: up chain shape 2^19 x 14 slots -- 212 base and 33 pre columns, kernel 0.0019 s
+fill-dev: down chain shape 2^17 x 16 slots -- 242 base and 37 pre columns, kernel 0.0005 s
+tab-dev: 2^25 -- x, y, m_exp from 3 exp counters, patch 0 rows, kernel 0.0035 s
+pre-dev: 10 shared tables -- 21 preprocessed and 10 multiplicity columns, patch 0 rows, kernels 0.0003 s
+[PROFILE]   prove_ex: composition gen:    1ms
+[PROFILE]   prove_ex: composition commit: 160ms
+[PROFILE]   prove_ex: prove_values:       288ms
+compose-chunks: chunk 2 (layer 0) 1.890 s, generate 0.694 s
+compose-chunks: {
+  "blob": {
+    "cache_hits": 96,
+    "lower_secs": 0.130739518,
+    "lowerings": 96
+  },
+  "chunk0_whole": 2.7768160870000003,
+  "commit_median_rest": 0.6363794859999999,
+  "digests": [
+    "6ad759f57e4b97bc67abe790311a89d4bf107ee4a4c154f385df0c6656835110",
+    "6ad759f57e4b97bc67abe790311a89d4bf107ee4a4c154f385df0c6656835110",
+    "6ad759f57e4b97bc67abe790311a89d4bf107ee4a4c154f385df0c6656835110"
+  ],
+  "fresh_cells": 2415354048.0,
+  "gen_median_rest": 0.8181581709999999,
+  "ircache": {
+    "checked": 0,
+    "entries": 57,
+    "fill_secs": 0.138160991,
+    "hit_secs": 0.012903129,
+    "hits": 114,
+    "misses": 57,
+    "uncacheable": 0
+  },
+  "layers": 1,
+  "loop_secs": 6.596883332,
+  "m_cells_per_s": {
+    "commit_rest": 3795.461829201704,
+    "loop": 1098.406896003599,
+    "stwo_rest": 2221.3340346680156,
+    "whole_rest": 1267.5683036394387
+  },
+  "n": 3,
+  "per_chunk_loop_secs": 2.1989611106666667,
+  "pipe": false,
+  "precache": {
+    "checked": 0,
+    "clone_secs": 0.031736797,
+    "entries": 1,
+    "hits": 2,
+    "misses": 1
+  },
+  "setup_secs": 15.181408295,
+  "stwo_median_rest": 1.087343916,
+  "whole_median_rest": 1.905502087
+}
