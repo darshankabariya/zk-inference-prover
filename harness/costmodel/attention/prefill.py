@@ -30,12 +30,24 @@ GRID_TARGET = 64          # `--scores-per-row`, the tiling granularity of the gr
 
 # B9 1.6, measured: the whole wall on the real 8B chunk (2.415 G cells, C=16K)
 GPU_WALL_CELLS_S = 1.28e9
+# B10 step 0, amendment to this probe: the *target* rate, i.e. what 53 tok/s at
+# 27B/16K needs (B9 1.1).  Reading the overhead ratio at the measured rate mixes
+# two different misses into one number -- the decode throughput gap, which H4's
+# first face already counts, and prefill's own structure.  At the target rate the
+# same cell counts give prefill's own ratio, which is what H4's second face is
+# about: prefill k / decode k.
+TARGET_CELLS_S = 15.95e9
 # B1's forward pass under `b65-design` on this H100, no recorder: b8's ppl run
 # does 40 chunks of 512 in 15.8 s (b8/out/ppl.log).  Slow -- it is a Python loop
 # over layers -- but it is the same code every other number in this project uses.
 B1_PREFILL_TOK_S = 40 * 512 / 15.8
 # a production prefill: 2 N FLOPs per token at 40% MFU of an H100's ~400 TFLOP/s
 MFU_FLOPS = 0.40 * 400e12
+# B10 step 0: E6c's own baseline was 2 N / 1 POPS -- a full petaop of dense int8,
+# no MFU discount -- which is x6.3 cheaper per token than the 40%-MFU one above.
+# Half the distance between this probe's ratio and E6c's 50-150x band is that
+# choice, and it belongs beside the ratio.
+E6C_OPS = 1e15
 # B9 step 0's denominator, printed by b2/cost_model.py
 CM27 = {4096: 188.22e6, 16384: 300.97e6}
 L27, NH27 = 62, 32
@@ -168,6 +180,39 @@ for S, tot in sorted(CM27.items()):
     print(f"  {S:>6} {g(tot):>18} {g(split):>10} {n_ms:>9.0f}m {s_ms:>9.0f}m "
           f"{n_ms / prod27_ms:>8,.0f}x {s_ms / prod27_ms:>8,.0f}x")
 
+# --- B10 step 0: the same counts at the target rate ---------------------------
+print()
+print("the same cell counts at the *target* rate (15.95 G cells/s = 53 tok/s at 27B/16K)")
+print("  -- i.e. prefill's own overhead, with the decode throughput gap taken out.  H4's")
+print("  first face already counts that gap; charging it twice is what puts this probe")
+print("  three to five times above E6c's band.")
+e6c27_ms = 2 * 27e9 / E6C_OPS * 1e3
+print(f"  a production 27B prefill: {prod27_ms:.3f} ms/token at 40% MFU of 400 TFLOP/s,")
+print(f"                            {e6c27_ms:.3f} ms/token at E6c's own 1 POPS "
+      f"(x{prod27_ms / e6c27_ms:.1f} cheaper)")
+print()
+print(f"  {'S = C':>6} {'naive ms':>10} {'split ms':>10} {'naive x':>9} {'split x':>9} "
+      f"{'naive x (E6c base)':>19}")
+target27 = {}
+for S, tot in sorted(CM27.items()):
+    grid = ALPHA_CM * L27 * NH27 * S
+    B = min(GRID_TARGET, S)
+    split = tot - grid * (1 - (0.5 + B / (2 * S)))
+    n_ms, s_ms = tot / TARGET_CELLS_S * 1e3, split / TARGET_CELLS_S * 1e3
+    target27[S] = dict(naive_ms=n_ms, split_ms=s_ms, naive_x=n_ms / prod27_ms,
+                       split_x=s_ms / prod27_ms, naive_x_e6c=n_ms / e6c27_ms)
+    print(f"  {S:>6} {n_ms:>9.1f}m {s_ms:>9.1f}m {n_ms / prod27_ms:>8,.0f}x "
+          f"{s_ms / prod27_ms:>8,.0f}x {n_ms / e6c27_ms:>18,.0f}x")
+print()
+print("  Read this way the structural claim is the opposite of a miss: at the rate the")
+print("  scheme is aimed at, proven 27B prefill is x35 (4K) to x56 (16K) a production")
+print("  prefill -- at or below the low end of E6c's 50-150 -- and E6c's own, cheaper")
+print("  baseline puts it above the band again.  What survives either baseline is the")
+print("  *ratio*: prefill k / decode k ~ 0.8-1.0, because prefill costs a full decode")
+print("  token's trace per token.  That is E6c's flat-k assumption **confirmed**, not a")
+print("  term E6c missed; the absolute overhead is the decode gap H4's first face")
+print("  already reports, and it is reached iff the decode target is.")
+
 print()
 print("the verdict, in one paragraph.")
 print("The corner's price is settled and it is small: at C = S the attention grid is")
@@ -176,11 +221,16 @@ print(f"B x B diagonal block, {0.5 + GRID_TARGET / (2 * rows[-1]['s']):.3f} of t
 print(f"{(1 - (0.5 + GRID_TARGET / (2 * rows[-1]['s']))) * rows[-1]['bands'] / rows[-1]['fresh'] * 100:.1f}% of the chunk.  The mask is a **soundness and completeness** gap (no AIR")
 print("here has it, and 1.4 shows its absence already leaking into the fold's scale),")
 print("not a throughput one, until S reaches the context where the grid dominates.")
-print("**The overhead ratio does not land in E6c's 50-150x band.**  Against B1's own")
-print("forward pass on this box it is ~60x at 8B, inside the band; against a production")
-print("prefill at 40% MFU it is ~450x at 8B and ~550-700x extrapolated to 27B, three to")
-print("five times above it.  The term that moved is not attention: it is that **prefill")
-print("in this scheme costs a full decode-token's trace per token**.  The weight walk")
+print("**At the measured rate the overhead ratio does not land in E6c's 50-150x band.**")
+print("Against B1's own forward pass on this box it is ~60x at 8B, inside the band;")
+print("against a production prefill at 40% MFU it is ~450x at 8B and ~550-700x")
+print("extrapolated to 27B, three to five times above it.  B10 step 0's amendment:")
+print("that number charges the decode throughput gap (x12.5, H4's first face) a second")
+print("time.  At the target rate the same counts give x35-x56 at 27B, at or below the")
+print("band's low end, and E6c's own 1-POPS baseline moves it back above -- so the")
+print("absolute ratio is a baseline choice.  The term that moved is not attention: it")
+print("is that **prefill in this scheme costs a full decode-token's trace per token**.")
+print("The weight walk")
 print("amortises over the batch, which is what 'x100 on input' assumed; the per-token")
 print("terms -- the dequant at 33% of the budget, the accumulators, the requantize -- do")
 print("not amortise at all, and they are the budget.  Prefill is not cheap here because")
@@ -196,6 +246,11 @@ OUT.mkdir(exist_ok=True)
 (OUT / "prefill.json").write_text(json.dumps(dict(
     nh=NH, hd=HD, layers_8b=L8B, grid_target=GRID_TARGET,
     gpu_wall_cells_s=GPU_WALL_CELLS_S, b1_prefill_tok_s=B1_PREFILL_TOK_S,
-    mfu_flops=MFU_FLOPS, cost_model_27b=CM27, missing=missing, rows=rows), indent=1))
+    mfu_flops=MFU_FLOPS, cost_model_27b=CM27, missing=missing, rows=rows,
+    # B10 step 0: the ratio reading -- the same counts at the rate the
+    # denominator is defined at, and E6c's own baseline beside the MFU one
+    target_cells_s=TARGET_CELLS_S, e6c_ops=E6C_OPS,
+    e6c_prod27_ms=2 * 27e9 / E6C_OPS * 1e3, prod27_ms=prod27_ms,
+    target_27b=target27), indent=1))
 print()
 print(f"wrote {OUT / 'prefill.json'}")

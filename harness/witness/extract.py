@@ -74,6 +74,11 @@ def bf16_parts(t):
     return (bits & 0x7F).astype(np.int32), ((bits >> 7) & 0xFF).astype(np.int32)
 
 
+def _pow2_mat(spec, name):
+    """Does this spec quantize `name` with power-of-two scales? (`model.py`'s rule)"""
+    return spec.pow2_scales in ("all", "linear") or name in spec.pow2_matmuls
+
+
 def pow2_exponent(t):
     """`j` such that the value is exactly `2^j`; NaN-safe, and -1000 if it is not."""
     v = t.detach().to("cpu").double().numpy()
@@ -270,6 +275,16 @@ if __name__ == "__main__":
                           jo_tokens_bumped=jo_bumped, jo_tokens=int(S),
                           fold_q_max=int(q_rect.max())),
             accumulators=accs,
+            # B10 step 0: which dequant gadget each matmul needs is a property of
+            # the *spec*, not of the prover's build.  `b65-design` puts the
+            # power-of-two dequant on q/k/v/o and the bf16 chain on gate/up/down;
+            # `b10-design` (= `b6-design-p2o` + away + 9 bits) puts the chain on
+            # all seven, which is the layout B8 licensed and the denominator
+            # charges.  The witness says so, so a prover cannot compose it under
+            # the other layout by accident.
+            deq_variants={n: ("pow2" if _pow2_mat(spec, n) else "chain")
+                          for n in mats},
+            dequant_round=spec.dequant_round,
             clamped={k: dict(over=v[0], total=v[1], frac=v[0] / v[1])
                      for k, v in (m.clamped or {}).items()},
             torch=torch.__version__, files=digests,

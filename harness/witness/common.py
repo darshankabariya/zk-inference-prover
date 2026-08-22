@@ -139,6 +139,21 @@ SPECS = {
 for _n in (9, 10, 12, 16):
     SPECS[f"b6-design-p2o-n{_n}"] = replace(SPECS["b6-design-p2o"], num_bits=_n)
 
+# --- B10: the one spec that is both scored and proved ------------------------
+# B9 left the quality row and the throughput row on two different systems: the
+# chunk that proved was extracted under `b65-design` (B6.5's mixed layout, the
+# power-of-two dequant on q/k/v/o) while the layout B8 licensed and the
+# denominator charges is the bf16 chain on all seven layer matmuls.  `b10-design`
+# is that layout, frozen with the two knobs B9 priced: ties-away rounding on the
+# chain (one fewer witness column, half the table rows) and the 9-bit numerator
+# (0 cells per accumulator, a few shared-table rows).  Everything B10 proves and
+# everything B10 scores is this spec.
+SPECS["b10-design"] = replace(SPECS["b6-design-p2o"],
+                              dequant_round="away", num_bits=9)
+
+# B10's own list: one spec, scored against B8's fp32 and `b6-design-p2o` rows
+B10_SPECS = ["b10-design"]
+
 # B5's probes, kept apart so B1's own table stays what B1 measured
 B5_SPECS = ["qk-int12", "pow2-scales", "int-softmax", "int-softmax-12",
             "int-softmax-p2qk", "int-softmax-12p2", "int-softmax-pow2",
