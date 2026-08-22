@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.join(HERE, os.pardir, "b1"))
 
 from common import MODEL, SPECS, setup, tokens  # noqa: E402
 from model import BF16, Cache, Model, Recorder  # noqa: E402
-from quant import round_hafz  # noqa: E402
+from quant import pow2_ceil, round_hafz  # noqa: E402
 
 OUT = os.path.join(HERE, "out", "witness")
 MATS = ["q", "k", "v", "o", "gate", "up", "down"]
@@ -159,16 +159,41 @@ if __name__ == "__main__":
         # The composed attnout region proves the *rectangle* sub-computation (the
         # same statement the bands prove; the causal corner stays outside every AIR
         # in the project, B9's job), so its accumulators and denominators are the
-        # recomputed `out`/`zz` above.  The scales are the forward pass's: a
-        # power-of-two `s_o` per token and power-of-two V scales per (head, channel).
-        s_o = m.rec.cols[f"L{L}.s_o"].float()                    # (S, 1)
-        jo = pow2_exponent(s_o.reshape(-1))
-        assert (jo != -1000).all(), "s_o is not a power of two -- wrong spec?"
-        write("jo.i32", jo, digests)
+        # recomputed `out`/`zz` above.  The V scales are the forward pass's,
+        # power-of-two per (head, channel).
         s_v = attention_scales(spec)[f"L{L}.v"]                  # (nh, 1, hd)
         jv = pow2_exponent(s_v.reshape(nh, hd))
         assert (jv != -1000).all(), "V scales are not powers of two -- wrong spec?"
         write("jv.i32", jv.reshape(-1), digests)
+
+        # B9 step 1b: so must the *output* scale be the rectangle's.  Taking `s_o`
+        # from the forward pass -- which attended to the prefix *and* the causal
+        # corner -- calibrates it on a different quantity: the corner's numerators
+        # enlarge `Z` more than they enlarge `A.V` on some rows, so dropping them
+        # makes `A.V s_v / Z` *larger* than the scale was cut for, the quotient
+        # leaves the fold's 2^`ao_q_bits` (q, nz) table, its LogUp sum does not
+        # cancel and the honest proof is rejected.  That is 1 to 662 outputs of
+        # ~33 M on 14 of Qwen-0.5B's 24 layers, with quotients up to 370 against a
+        # 127 window.  The gadget's completeness precondition is
+        # `max |A.V s_v / Z| <= 127 s_o` over the rows it proves, so the scale is
+        # recalibrated on those rows here.  `s_o_fwd` is kept in the manifest so
+        # the two are comparable; nothing else in the dump moves.
+        out_rect = torch.einsum("hsc,hcd->hsd", num.double(),
+                                m.rec.cols[f"L{L}.vv"][:, :P].double())
+        real_rect = out_rect * s_v.double().reshape(nh, 1, hd) / zz.double().unsqueeze(-1)
+        flat_rect = real_rect.transpose(0, 1).reshape(S, nh * hd)
+        s_o_rect = pow2_ceil(flat_rect.abs().amax(-1, keepdim=True).clamp_min(1e-30) / 127.0)
+        s_o_fwd = m.rec.cols[f"L{L}.s_o"].float()                # (S, 1)
+        jo = pow2_exponent(s_o_rect.reshape(-1).float())
+        jo_fwd = pow2_exponent(s_o_fwd.reshape(-1))
+        assert (jo != -1000).all(), "the rectangle's s_o is not a power of two"
+        assert (jo_fwd != -1000).all(), "s_o is not a power of two -- wrong spec?"
+        write("jo.i32", jo, digests)
+        # the quotient the fold will build, so the precondition is checked here and
+        # not four hours later inside a prover
+        q_rect = round_hafz(flat_rect.abs() / s_o_rect.double())
+        assert int(q_rect.max()) <= 127, f"fold quotient {int(q_rect.max())} > 127"
+        jo_bumped = int((jo != jo_fwd).sum())
         # the fold's exponent e = jv[h, ch] - jo[t]: its range decides the int8
         # gadget's num/den split (num = 2^max(e,0), den = Z * 2^max(-e,0))
         e_min = int(jv.min()) - int(jo.max())
@@ -232,7 +257,13 @@ if __name__ == "__main__":
             master_table_bits=int(bits_for(dd.max()) + round(max(fpi) - min(fpi))),
             attn_out=dict(jo_min=int(jo.min()), jo_max=int(jo.max()),
                           jv_min=int(jv.min()), jv_max=int(jv.max()),
-                          e_min=e_min, e_max=e_max),
+                          e_min=e_min, e_max=e_max,
+                          # B9 step 1b: the fold's scale, calibrated on the
+                          # rectangle the AIR proves rather than on the forward
+                          # pass's masked output
+                          jo_fwd_min=int(jo_fwd.min()), jo_fwd_max=int(jo_fwd.max()),
+                          jo_tokens_bumped=jo_bumped, jo_tokens=int(S),
+                          fold_q_max=int(q_rect.max())),
             accumulators=accs,
             clamped={k: dict(over=v[0], total=v[1], frac=v[0] / v[1])
                      for k, v in (m.clamped or {}).items()},
