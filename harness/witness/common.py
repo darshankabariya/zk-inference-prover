@@ -23,6 +23,11 @@ SPECS = {
     "fp32":        Spec(linear="fp32",    nonlinear="fp32"),
     "dynamic-int8":  Spec(linear="dynamic", nonlinear="bf16"),
     "static":      Spec(linear="static",  nonlinear="bf16"),
+    # B9's rider: the INT8 baseline that is actually deployed.  Static per-tensor
+    # W8A8 (`static`) is the weakest INT8 there is; weight-only per-channel int8
+    # with float activations is what a "public INT8 variant" normally means, and
+    # it is the row the claim "beats a public INT8 variant" has to be read against.
+    "w8a16":       Spec(linear="w8a16",   nonlinear="bf16"),
     # decomposition of the dynamic-int8 spec's cost
     "int8-only":   Spec(linear="dynamic", nonlinear="fp32"),
     "bf16-only":   Spec(linear="fp32",    nonlinear="bf16"),
@@ -154,7 +159,9 @@ B8_SPECS = ["fp32", "dynamic-int8", "static", "int8-only", "bf16-only",
             "bf16-dequant", "bf16-dequant-away", "pow2-dequant",
             "b6-design", "b6-design-bf16", "b6-design-p2o", "b65-design",
             "pow2-qkvo", "pow2-gateup", "pow2-down", "pow2-head",
-            "b6-design-p2o-n9", "b6-design-p2o-n10", "b6-design-p2o-n12", "b6-design-p2o-n16"]
+            "b6-design-p2o-n9", "b6-design-p2o-n10", "b6-design-p2o-n12", "b6-design-p2o-n16",
+            # B9's rider (plan, B9 step 3): the strong INT8 comparator
+            "w8a16"]
 
 
 def setup():

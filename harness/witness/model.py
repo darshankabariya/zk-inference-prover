@@ -32,7 +32,9 @@ from quant import (BF16, INT8_MAX, bf16_away, int_gemm, int_gemm_exact,
 @dataclass
 class Spec:
     """Which parts of the computation are quantized."""
-    linear: str = "dynamic"   # fp32 | dynamic (per-token) | static (per-tensor, calibrated)
+    # fp32 | dynamic (per-token) | static (per-tensor, calibrated)
+    # | w8a16 (per-channel int8 weights, float activations -- B9's comparator)
+    linear: str = "dynamic"
     nonlinear: str = "bf16"   # fp32 | bf16   -- dtype of every value between ops
     # accumulation for the two reductions, either fp32 or a correctly-rounded bf16
     # tree: fp32 | bf16 | bf16-norm (RMSNorm only) | bf16-softmax (denominator only)
@@ -144,6 +146,15 @@ class Linear:
         self.p2 = spec.pow2_scales in ("all", "linear")
         if spec.linear == "fp32":
             self.w, self.qw, self.s_w = w, None, None
+        elif spec.linear == "w8a16":
+            # B9's comparator: per-channel int8 weights, float activations.  The
+            # weight is quantized and dequantized once, at load, so the matmul is
+            # the float one and no activation is ever quantized -- weight-only
+            # int8, the strong baseline against which "beats a public INT8
+            # variant" has to be read.
+            self.s_w = qscale_per_channel(w, self.p2)
+            self.w = quantize(w, self.s_w) * self.s_w
+            self.qw = None
         else:
             self.s_w = qscale_per_channel(w, self.p2)
             self.qw = quantize(w, self.s_w).to(weight_dtype(self.n_in, device))
