@@ -37,7 +37,7 @@ B1_PREFILL_TOK_S = 40 * 512 / 15.8
 # a production prefill: 2 N FLOPs per token at 40% MFU of an H100's ~400 TFLOP/s
 MFU_FLOPS = 0.40 * 400e12
 # B9 step 0's denominator, printed by b2/cost_model.py
-CM27 = {4096: 191.02e6, 16384: 300.97e6}
+CM27 = {4096: 188.22e6, 16384: 300.97e6}
 L27, NH27 = 62, 32
 ALPHA_CM = 4.0            # the cost model's cells per (head, key, token)
 

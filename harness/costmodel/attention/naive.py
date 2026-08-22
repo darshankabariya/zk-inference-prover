@@ -39,7 +39,7 @@ HBM_BYTES_S = 3.35e12
 BYTES_PER_CELL = 60.0
 M31_BYTES = 4.0
 # B9 step 0: our own committed cells per token, the model's default layout
-OURS_PER_TOKEN = {4096: 191.02e6, 16384: 300.97e6}      # 27B; printed by b2/cost_model.py
+OURS_PER_TOKEN = {4096: 188.22e6, 16384: 300.97e6}      # 27B; printed by b2/cost_model.py
 
 
 def n_params(cfg):
