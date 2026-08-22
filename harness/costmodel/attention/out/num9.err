@@ -1,0 +1,4 @@
+compose: B6.5 layer witness [/root/b7/py/b65/out/witness] bands=[8, 4, 2] variant=intexp kmax=18 rem=19 p=136
+[PROFILE]   prove_ex: composition gen:    1210ms
+[PROFILE]   prove_ex: composition commit: 1029ms
+[PROFILE]   prove_ex: prove_values:       4985ms
