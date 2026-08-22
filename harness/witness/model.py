@@ -561,6 +561,12 @@ class Model:
         cos, sin = self.rope(pos)
         x = self.emb[ids].float()
         for i, l in enumerate(self.layers):
+            # B10 step 2: the glue's witness is the residual stream at the three
+            # points the two adds join, plus each add's second operand.  Nothing
+            # numeric moves -- these are recordings of values the forward pass
+            # already forms (`rec` is None outside an extract).
+            if self.rec is not None:
+                self.rec.add(f"L{i}.xin", x.to(BF16))
             h = self.rmsnorm(x, l["norm1"], f"L{i}.norm1")
             q = l["q"](h, self).view(-1, self.nh, self.hd)
             k = l["k"](h, self).view(-1, self.nkv, self.hd)
@@ -569,11 +575,17 @@ class Model:
             k = self.rotate(k, cos.unsqueeze(1), sin.unsqueeze(1))
             kk, vv = cache.append(i, k, v)
             a_out, a_pre = self.attention(q, kk, vv, mask, i)
-            x = self.store(x + l["o"](a_out, self, pre=a_pre))
+            o_out = l["o"](a_out, self, pre=a_pre)
+            x = self.store(x + o_out)
+            if self.rec is not None:
+                self.rec.add(f"L{i}.o_out", o_out.to(BF16))
+                self.rec.add(f"L{i}.xmid", x.to(BF16))
             h = self.rmsnorm(x, l["norm2"], f"L{i}.norm2")
             g = self.unary(f"L{i}.silu", l["gate"](h, self), torch.nn.functional.silu)
-            x = self.store(x + l["down"](self.store(g * l["up"](h, self)), self))
+            d_out = l["down"](self.store(g * l["up"](h, self)), self)
+            x = self.store(x + d_out)
             if self.rec is not None:
+                self.rec.add(f"L{i}.d_out", d_out.to(BF16))
                 self.rec.add(f"L{i}.x", x.to(BF16))     # committed residual stream
         cache.append_meta(pos, seq)
         h = self.rmsnorm(x, self.final_norm, "final_norm")

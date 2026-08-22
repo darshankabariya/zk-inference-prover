@@ -125,6 +125,9 @@ if __name__ == "__main__":
                    help="token ids (.npy) to run instead of the corpus's first --tokens")
     p.add_argument("--slim", action="store_true",
                    help="hash the derived attention columns into the manifest, do not write them")
+    p.add_argument("--glue", action="store_true",
+                   help="also dump B10 step 2's wiring columns (residual stream, "
+                        "norm weights and rsqrt/silu lookups)")
     a = p.parse_args()
     SLIM = a.slim
     setup()
@@ -150,6 +153,16 @@ if __name__ == "__main__":
                  f"L{L}.attnq", f"L{L}.s_o", f"L{L}.zz"}
         keep |= {f"L{L}.{n}/acc" for n in mats} | {f"L{L}.{n}/s_x" for n in mats}
         keep |= {f"L{L}.{n}/qx" for n in mats} | {f"L{L}.{n}/x" for n in mats}
+        # B10 step 2: the glue's own columns -- the residual stream at the three
+        # points the two adds join, each add's second operand, the two norms'
+        # rsqrt lookups and the SwiGLU's.  `--glue` gates them because they are
+        # 5 (S, d) + 2 (S, dff) bf16 columns, which at C=16K is another 1.2 GB a
+        # layer and nothing in steps 0-1 reads them.
+        if a.glue:
+            keep |= {f"L{L}.xin", f"L{L}.xmid", f"L{L}.x", f"L{L}.o_out", f"L{L}.d_out",
+                     f"L{L}.norm1.rsqrt/in", f"L{L}.norm1.rsqrt/out",
+                     f"L{L}.norm2.rsqrt/in", f"L{L}.norm2.rsqrt/out",
+                     f"L{L}.silu/in", f"L{L}.silu/out"}
     m.rec = LastChunk(keep)
     if a.ids:
         ids = torch.from_numpy(np.load(a.ids).astype(np.int64))
@@ -283,6 +296,31 @@ if __name__ == "__main__":
                   f"(worst case {accs[name]['kmax_worst_case']}), "
                   f"pow2 scales {accs[name]['scales_pow2']}")
 
+        # ---- B10 step 2: the glue's columns -------------------------------------
+        # Every one is a bf16 *pattern* column, which is what the wiring family
+        # commits: the residual stream in, mid and out, the two adds' second
+        # operands, the two norm weights (preprocessed -- they are weights), the
+        # two rsqrt lookups and the SwiGLU's.  `eps` and `1/d` are bf16 scalars and
+        # go in the manifest.
+        glue = {}
+        if a.glue:
+            def pat(t):
+                return (t.detach().to("cpu").contiguous().to(BF16)
+                        .view(torch.int16).numpy().view(np.uint16))
+
+            for key, name in (("xin", "xin"), ("xmid", "xmid"), ("x", "xout"),
+                              ("o_out", "o_out"), ("d_out", "d_out"),
+                              ("norm1.rsqrt/in", "n1_in"), ("norm1.rsqrt/out", "n1_out"),
+                              ("norm2.rsqrt/in", "n2_in"), ("norm2.rsqrt/out", "n2_out"),
+                              ("silu/in", "silu_in"), ("silu/out", "silu_out")):
+                write(f"{name}.u16", pat(m.rec.cols[f"L{L}.{key}"]), digests)
+            write("w1.u16", pat(m.layers[L]["norm1"]), digests)
+            write("w2.u16", pat(m.layers[L]["norm2"]), digests)
+            glue = dict(d=int(m.d), dff=int(m.layers[L]["gate"].n_out),
+                        eps=int(pat(m.eps.reshape(1))[0]),
+                        inv_d=int(pat(m.inv_d.reshape(1))[0]),
+                        reduce=spec.reduce, rms_norm_eps=float(m.eps.item()))
+
         frac = (-torch.log2(sqk)).reshape(nh, -1)
         fpi = frac[:, 0].tolist()
         stats = dict(
@@ -322,6 +360,7 @@ if __name__ == "__main__":
             clamped={k: dict(over=v[0], total=v[1], frac=v[0] / v[1])
                      for k, v in (m.clamped or {}).items()},
             ids_from=a.ids, slim=bool(SLIM),
+            glue=glue,
             torch=torch.__version__, files=digests,
         )
         json.dump(stats, open(os.path.join(OUT, "manifest.json"), "w"), indent=1)
@@ -329,7 +368,7 @@ if __name__ == "__main__":
         # B10 step 1: a layer's recorded columns are ~1.4 GB at C=16K and its
         # working set another ~10 GB, so both go before the next layer starts --
         # 32 layers out of one forward pass against a 128 GiB cgroup.
-        del sc, dd, num, xx, mm, zz, out_rect, real_rect, flat_rect
+        del sc, dd, num, xx, mm, zz, out_rect, real_rect, flat_rect, glue
         for key in [k for k in m.rec.cols if k.startswith(f"L{L}.")]:
             del m.rec.cols[key]
     print(f"wrote {OUT} in {time.time() - t0:.0f}s")

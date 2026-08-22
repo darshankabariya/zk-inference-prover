@@ -19,6 +19,7 @@ B4 = pathlib.Path(__file__).parent.parent / "b4" / "out"
 B5 = pathlib.Path(__file__).parent.parent / "b5" / "out"
 B6 = pathlib.Path(__file__).parent.parent / "b6" / "out"
 B65 = pathlib.Path(__file__).parent.parent / "b65" / "out"
+B10 = pathlib.Path(__file__).parent.parent / "b10" / "out"
 
 
 def load(name, required=True):
@@ -248,8 +249,12 @@ def b6_constants():
         # B8 blessed `Round::Away` (-0.45% +- 0.26 at 8B): no sticky bit, one
         # fewer witness column and half the table rows
         chain_away=by.get(("chain", "away")),
+        # the normalisation alone -- `y = bf16(acc)`, no scale.  B10's bf16 add
+        # reuses exactly this half, so the model reads it rather than guessing.
+        round_away=by.get(("round", "away")),
         # the cheaper alternative: power-of-two scales, one rounding, +2.29% ppl
         pow2=by.get(("pow2", "even")),
+        pow2_away=by.get(("pow2", "away")),
         int8=by.get(("int8", "even")),
         pack=pack,
     )
@@ -307,6 +312,83 @@ DEQUANT_AWAY_PER_ACC = (B6C or {}).get("chain_away") or DEQUANT_CELLS_PER_ACC
 DEQUANT_POW2_PER_ACC = (B6C or {}).get("pow2") or 0.0
 ATTNOUT_CELLS_PER_ACC = (B6C or {}).get("int8") or 0.0
 
+# --- B10 step 2: the glue between the regions ---------------------------------
+# B6.5 open gap 1: the composition ties every matmul's accumulators to its own
+# committed activations, and nothing ties one region's output to the next
+# region's input.  The wiring is four gadgets, and every one of them is bf16
+# elementwise arithmetic:
+#
+#   (a) RMSNorm      square (unary), the sum over `d`, `* 1/d`, `+ eps`,
+#                    `rsqrt` (unary), `* r`, `* w`
+#   (b) SwiGLU       one `silu` unary table and one bf16 product per `dff` channel
+#   (c) two residual adds, `d` bf16 adds each
+#   (d) the requantize's placement -- B6.5's gadget, already charged as `requant`;
+#       wiring it between a dequant's output and a walk's input adds no cell.
+#
+# Three primitives price all four, and two of the three are already measured:
+#
+#   * a **unary** bf16 op is exactly a 2^16-entry table -- B4's `silu`/`exp`
+#     points, 4.00 cells per application packed 4+ per row;
+#   * a **bf16 multiply** is B6's mantissa-product table plus an exponent add:
+#     the chain dequant is the pow2 one plus exactly two of them, so the model
+#     reads (chain - pow2) / 2 rather than assuming a number;
+#   * a **bf16 add** is the gadget B4 section 9 scoped and refused to improvise
+#     (it guessed 12-15 cells).  B10 builds it: the operands are ordered by
+#     magnitude pattern (B6.5's max argument, one 15-bit range lookup and a
+#     selector), aligned by the exponent difference into one integer, and that
+#     integer is normalised by the *same* `NORM`/`FRAC` tables the dequant
+#     already commits -- so the add is B6's `round` variant plus an alignment.
+#     `b65/out/glue.json` carries the measured marginal; until it exists the
+#     model prints the construction's own column count and says so.
+def b10_glue_constants():
+    f = B65 / "glue.json"
+    if not f.exists():
+        return None
+    try:
+        pts = json.loads(f.read_text())["result"]["points"]
+    except (ValueError, KeyError):
+        return None
+    res = json.loads(f.read_text())["result"]
+    prim = res.get("primitives", {})
+    return dict(
+        add=prim.get("add"), mul=prim.get("mul"), unary=prim.get("unary"),
+        value=prim.get("value", 2.0),
+        drift=res.get("norm_reduction_drift"),
+        by_gadget={p["gadget"]: p for p in pts},
+    )
+
+
+B10G = b10_glue_constants()
+DEQUANT_POW2_AWAY_PER_ACC = (B6C or {}).get("pow2_away") or DEQUANT_POW2_PER_ACC
+# the bf16 multiply, read off B6's ladder: `chain` is `pow2` plus two of them
+MUL_CELLS = ((DEQUANT_AWAY_PER_ACC - DEQUANT_POW2_AWAY_PER_ACC) / 2.0
+             if DEQUANT_AWAY_PER_ACC and DEQUANT_POW2_AWAY_PER_ACC else 0.0)
+UNARY_CELLS = (B4C or {}).get("lookup_cells") or 0.0
+# the add, from its construction: B6's `round` variant (the normalisation, one
+# `NORM` and one `FRAC` lookup, 11.06 cells/away) minus the committed integer it
+# no longer needs (the aligned sum is an expression, not a column), plus the
+# alignment -- the order selector, the 15-bit magnitude compare, the committed
+# `2^Delta` and its pair-table lookup, and the far-branch selector and range
+# lookup that make the gadget complete when the exponents are further apart than
+# the round bit can see.
+ROUND_CELLS = (B6C or {}).get("round_away") or 0.0
+# `round/away` is 8 committed columns (acc, sg, m2, ph, r, m7, ef, nz) and two
+# lookups, so the LogUp share a gadget of this shape actually realises is
+# (11.06 - 8) / 2 = 1.53 cells per lookup -- the number to price the add's extra
+# lookups with, not the standalone 2.00.
+ROUND_COLS = 8.0
+LOGUP_IN_GADGET = (ROUND_CELLS - ROUND_COLS) / 2.0 if ROUND_CELLS else 0.0
+# the add against `round`: -1 column (the aligned sum is an expression, not a
+# committed integer), +3 columns (the order selector, the committed 2^Delta, the
+# far-branch selector) and +3 lookups (the 15-bit magnitude compare that orders
+# the operands, the (Delta, 2^Delta) pair table, and the far-branch range check)
+ADD_CELLS_MODEL = (ROUND_CELLS - 1.0) + 3.0 + 3.0 * LOGUP_IN_GADGET
+ADD_CELLS = (B10G or {}).get("add") or ADD_CELLS_MODEL
+if B10G and B10G.get("mul"):
+    MUL_CELLS = B10G["mul"]
+if B10G and B10G.get("unary"):
+    UNARY_CELLS = B10G["unary"]
+
 # --- B8's layout, the default since B9 step 0 ---------------------------------
 # B6.5's mixed layout rested on a 0.5B attribution that **inverts** at 8B
 # (b8/B8.md section 2 item 1): power-of-two linear scales are free on q/k/v/o at
@@ -356,6 +438,65 @@ ALPHA_V1 = (B5C["bf16x"]["alpha_grid"] if B5C and "bf16x" in B5C else 5.0)
 #   nl    bf16 lookup in/out for SiLU and the two norms        (B1: 25.5%)
 #   attn  3 columns per (layer, head, key): score, exp, prob   (B1: alpha = 3-4)
 #   logup the LogUp interaction column each lookup drags along (B2, measured)
+
+
+# --- B10 step 2: the glue, priced ---------------------------------------------
+# The reduction is the whole question.  B1 accumulates the RMSNorm mean in fp32
+# and rounds once (`reduce="fp32"`), an order no bf16-add gadget reproduces, so
+# proving the norm *pins the reduction's order* -- a spec change with a quality
+# row behind it, and B1 already carries the tree (`reduce="bf16-norm"`).  All
+# three candidate orders are the same `n - 1` correctly-rounded adds and so cost
+# the same cells; they differ in how many chained regions the AIR needs and in
+# how far the result can drift from the exact sum.  A chained region is a running
+# sum with a reset selector (the requantize's `nofirst`/`last` shape), so every
+# order below is mask-addressed -- no wiring lookup, which is what a general tree
+# would cost (+3 lookups per node).
+def sum_order(n, order):
+    pad = 1 << (n - 1).bit_length()
+    if order == "tree":            # B1's `tree_sum`: pad with +0, log2 levels
+        return dict(adds=pad - 1, regions=pad.bit_length() - 1, err_ulps=pad.bit_length() - 1)
+    if order == "two-level":       # blocks of ~sqrt(n), then the block sums
+        b = 1 << ((n - 1).bit_length() // 2)
+        c = -(-n // b)
+        return dict(adds=n - 1, regions=2, err_ulps=b + c - 2)
+    if order == "running":         # one region, one chain
+        return dict(adds=n - 1, regions=1, err_ulps=n - 1)
+    raise SystemExit(f"unknown sum order {order}")
+
+
+def glue_cells(cfg, order="tree"):
+    """B6.5 open gap 1, per decoded token: what the wiring between the regions
+    costs, per gadget.  `d`-wide terms are the residual stream's width, `dff`-wide
+    the SwiGLU's."""
+    L, d, nh, nkv, hd, dff, vocab = cfg
+    so = sum_order(d, order)
+    # (a) RMSNorm, twice per layer plus the final one.  Per channel: the square
+    # (one unary table), its share of the reduction, and the two multiplies
+    # (`x * r`, then `* w`).  Per token: `* 1/d`, `+ eps`, `rsqrt`.
+    norms = 2 * L + 1
+    sq = norms * d * UNARY_CELLS
+    red = norms * so["adds"] * ADD_CELLS
+    scale = norms * 2 * d * MUL_CELLS
+    scalars = norms * (MUL_CELLS + ADD_CELLS + UNARY_CELLS)
+    # (b) SwiGLU: one `silu` table and one bf16 product per dff channel
+    swiglu = L * dff * (UNARY_CELLS + MUL_CELLS)
+    # (c) the two residual adds
+    resid = L * 2 * d * ADD_CELLS
+    # (d) the requantize's placement.  B6.5 priced the gadget and `cells_per_token`
+    # already charges it on every distinct matmul input; wiring it between a
+    # dequant's output and a walk's input is AIR work at zero marginal cell.
+    requant_place = 0.0
+    total = sq + red + scale + scalars + swiglu + resid + requant_place
+    # what the stub this replaces charged: B1's witness columns for the two norms
+    # and the SiLU, plus their lookups' LogUp share
+    stub = (L * (2 * dff + 4 * d)
+            + (L * (2 * dff + 2 * (2 * d + 1))) * LOGUP_MARGINAL[min(LOGUP_MARGINAL)])
+    return dict(order=order, adds=so["adds"], regions=so["regions"],
+                err_ulps=so["err_ulps"],
+                norm_square=sq, norm_reduce=red, norm_scale=scale,
+                norm_scalars=scalars, norm=sq + red + scale + scalars,
+                swiglu=swiglu, resid=resid, requant_place=requant_place,
+                total=total, stub=stub, net=total - stub)
 
 
 def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
@@ -432,6 +573,7 @@ def ops_per_token(cfg, ctx, seq):
 
 
 QWEN = (24, 896, 14, 2, 64, 4864, 151936)      # B1's model
+LLAMA8B = (32, 4096, 32, 8, 128, 14336, 128256)  # B8/B9/B10's rung
 GEMMA = (62, 5376, 32, 16, 128, 21504, 262144)  # the 27B proxy shape
 TARGET_TOKS, TARGET_CTX, SEQ = 53.0, 16384, 512
 
@@ -671,6 +813,85 @@ if B65C:
         print(f"  the composed layer proof: {g(cp['fresh'])}fresh cells, "
               f"{cp['columns']} columns, {cp['proof_bytes'] / 2**20:.2f} MiB, "
               f"accepted by the serialized-statement verifier alone")
+
+# --- B10 step 2: the glue's price table ----------------------------------------
+print()
+print("B10 step 2 -- the glue between the regions (B6.5 open gap 1), priced")
+SRC = "b65/out/glue.json, measured" if B10G and B10G.get("add") else "from the construction"
+print(f"  bf16 unary (2^16 table)  {UNARY_CELLS:.2f} cells/application  ({SRC}; B4's "
+      f"packed {(B4C or {}).get('lookup_cells', 0):.2f} in a pattern layout)")
+print(f"  bf16 multiply            {MUL_CELLS:.2f} cells/product       ({SRC}; B6's "
+      f"ladder implies (chain {DEQUANT_AWAY_PER_ACC:.2f} - pow2 "
+      f"{DEQUANT_POW2_AWAY_PER_ACC:.2f}) / 2 = "
+      f"{(DEQUANT_AWAY_PER_ACC - DEQUANT_POW2_AWAY_PER_ACC) / 2:.2f})")
+print(f"  bf16 add                 {ADD_CELLS:.2f} cells/add           ({SRC}; the "
+      f"construction says {ADD_CELLS_MODEL:.2f}, B4 section 9 guessed 12-15 and built none)")
+if B10G and B10G.get("value"):
+    print(f"  one committed bf16 value {B10G['value']:.2f} cells                (`sm`, `ef`: "
+          "two columns, which is what keeps every constraint degree 2)")
+print()
+print("  the RMSNorm reduction: three orders, the same adds, different shapes")
+print(f"  {'order':<11} {'adds (d=4096)':>14} {'regions':>8} {'worst drift':>12}")
+for o in ("tree", "two-level", "running"):
+    so = sum_order(4096, o)
+    print(f"  {o:<11} {so['adds']:>14,} {so['regions']:>8} "
+          f"{so['err_ulps'] / 512.0:>11.1%}")
+print("  (drift = worst-case relative error of the reduction, err_ulps x 2^-9; B1's")
+print("   `reduce=\"bf16-norm\"` is the tree, and B1 scores it at 22.758 against the")
+print("   base spec's 22.835 at 0.5B -- the fp32 sum `b10-design` specifies is not")
+print("   reproducible by any bf16-add gadget, so proving the norm pins the order)")
+if B10G and B10G.get("drift"):
+    dr = B10G["drift"]
+    print(f"  measured on Qwen-0.5B layer 12, d={dr['d']}: of {dr['tokens']} real tokens the "
+          f"tree's `ms + eps`")
+    print(f"  is bit-identical to B1's fp32 reduction on {dr['identical']} and differs on "
+          f"{dr['differ']}, by at most")
+    print(f"  {dr['worst_ulps']} ulp ({dr['worst_relative']:.2%} relative) -- the whole "
+          "numeric content of the spec change")
+print()
+CHUNKS = {}
+if (B10 / "prove8b.json").exists():
+    try:
+        pt = json.loads((B10 / "prove8b.json").read_text())["result"]["point"]
+        CHUNKS["Llama-3.1-8B"] = (pt["cells"]["fresh"], pt["params"]["s"], pt["params"]["c"])
+    except (ValueError, KeyError):
+        pass
+if B65C and B65C.get("compose"):
+    CHUNKS["Qwen2.5-0.5B"] = (B65C["compose"]["fresh"], SEQ, 1024)
+GLUE_MODELS = [("Qwen2.5-0.5B", QWEN), ("Llama-3.1-8B", LLAMA8B), ("Gemma-3-27B", GEMMA)]
+print("  cells per decoded token, per gadget (the tree order), and per layer chunk")
+print(f"  {'model':<13} {'gadget':<21} {'cells/token':>12} {'per layer':>11} "
+      f"{'chunk S=512':>12} {'% of chunk':>10}")
+for name, cfg in GLUE_MODELS:
+    gl = glue_cells(cfg, "tree")
+    L, d, dff = cfg[0], cfg[1], cfg[5]
+    chunk = CHUNKS.get(name)
+    rows = [("(a) RMSNorm x2", gl["norm"]), ("      of it, the sum", gl["norm_reduce"]),
+            ("(b) SwiGLU", gl["swiglu"]), ("(c) residual adds", gl["resid"]),
+            ("(d) requantize place", gl["requant_place"]),
+            ("glue, total", gl["total"]), ("the stub it replaces", gl["stub"]),
+            ("glue, net", gl["net"])]
+    print(f"  {name:<13} {f'L={L} d={d} dff={dff}':<21}"
+          + (f" {'':>12} {'':>11} {g(chunk[0]):>12}   the chunk, S={chunk[1]} C={chunk[2]}"
+             if chunk else ""))
+    for label, v in rows:
+        per_layer = v / L
+        per_chunk = per_layer * SEQ
+        pc = f"{per_chunk / chunk[0] * 100:9.1f}%" if chunk else f"{'--':>10}"
+        print(f"  {'':<13} {label:<21} {g(v):>12} {g(per_layer):>11} "
+              f"{g(per_chunk):>12} {pc:>10}")
+gl27 = glue_cells(GEMMA, "tree")
+print()
+print(f"  at 27B the glue is {g(gl27['net'])}cells/token net of the stub, i.e. "
+      f"{gl27['net'] / c['total']:+.1%} on {g(c['total'])} -> {g(c['total'] + gl27['net'])}, "
+      f"and {TARGET_TOKS:.0f} tok/s needs "
+      f"{g((c['total'] + gl27['net']) * TARGET_TOKS)}cells/s")
+print("  the requantize's placement is the one gadget with no cell of its own: "
+      f"{g(c['requant'])}cells/token")
+print(f"  are already charged for it ({REQUANT_CELLS:.2f}/value on every distinct matmul "
+      "input), and wiring it")
+print("  between a dequant's output and a walk's input is AIR work, not trace")
+
 if B5C:
     print()
     print("B5's terms, folded in:")
