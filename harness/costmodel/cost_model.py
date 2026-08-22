@@ -245,6 +245,9 @@ def b6_constants():
         # the design point for a matmul whose consumer is a bf16 table or the
         # residual stream: general bf16 scales, three roundings, no quality cost
         chain=by.get(("chain", "even")),
+        # B8 blessed `Round::Away` (-0.45% +- 0.26 at 8B): no sticky bit, one
+        # fewer witness column and half the table rows
+        chain_away=by.get(("chain", "away")),
         # the cheaper alternative: power-of-two scales, one rounding, +2.29% ppl
         pow2=by.get(("pow2", "even")),
         int8=by.get(("int8", "even")),
@@ -300,8 +303,48 @@ REQUANT_CELLS = (B65C["requant_max"] - 1.0) if B65C and B65C.get("requant_max") 
 # `dequant` is the per-accumulator cost of reading the integer *and* rounding it;
 # it subsumes B4's limb term, so `cells_per_token` charges this instead of that.
 DEQUANT_CELLS_PER_ACC = (B6C or {}).get("chain") or 0.0
+DEQUANT_AWAY_PER_ACC = (B6C or {}).get("chain_away") or DEQUANT_CELLS_PER_ACC
 DEQUANT_POW2_PER_ACC = (B6C or {}).get("pow2") or 0.0
 ATTNOUT_CELLS_PER_ACC = (B6C or {}).get("int8") or 0.0
+
+# --- B8's layout, the default since B9 step 0 ---------------------------------
+# B6.5's mixed layout rested on a 0.5B attribution that **inverts** at 8B
+# (b8/B8.md section 2 item 1): power-of-two linear scales are free on q/k/v/o at
+# 0.5B (-0.43%) and cost +3.67% at 8B, while `lm_head` goes the other way (+1.10%
+# -> +0.02%).  So the chain runs on all seven *layer* matmuls and the 15-cell
+# power-of-two dequant is charged on `lm_head` alone -- which sits outside the
+# layer proof anyway.  `Round::Away` is blessed (-0.45% +- 0.26 at 8B), so the
+# chain is 25.12 cells, not 26.12.  The mixed-layout planning range this replaced
+# (270-308 M cells/token, 14.3-15.8 G cells/s -- b7/README section 3) is retired:
+# the model prints one number.
+LAYER_DEQUANT_PER_ACC = DEQUANT_AWAY_PER_ACC
+HEAD_DEQUANT_PER_ACC = DEQUANT_POW2_PER_ACC
+
+# --- the numerator width, and what the AIR as built can carry ------------------
+# B5's AIR range-checks V into [-128, 127] and the committed denominator Z into
+# `z_lo_bits + z_hi_bits` (b5/README section 4; `attn_air.rs` RowEval), so the
+# circuit certifies |A.V| < 128 * 2^z_bits.  The numerator width sets Z's blind
+# worst case (`nmax * C`) and therefore both bounds.  Two ceilings sit above it:
+#   * 2^29 -- B4's *offset* limb variant, whose 2^30 window is split by a +2^29
+#     offset and so carries only 2^29 of magnitude;
+#   * 2^30 -- M31's own injectivity edge, floor(p/2) = 2^30 - 1, which B6's chain
+#     and the attention-output fold both reach because each commits an explicit
+#     sign bit and reads the magnitude (`walk_air.rs`: `mag = acc - 2 acc sg`).
+# So a numerator wider than 8 bits at C = 16K is not a layout change and costs no
+# cell per accumulator; it is a *bound* change that leaves B4's window and lands
+# in the sign-bit one.
+Z_LO_BITS = 16
+
+
+def attn_window(num_bits, ctx, z_lo_bits=Z_LO_BITS):
+    nmax = (1 << num_bits) - 1
+    z_bits = (nmax * ctx).bit_length()          # the AIR's range check on Z
+    av = 128 << z_bits                          # |A.V| < 128 * 2^z_bits
+    return dict(num_bits=num_bits, nmax=nmax, ctx=ctx, z_bits=z_bits,
+                z_hi_bits=max(0, z_bits - z_lo_bits), av_bound=av,
+                fits_limb_2p29=av <= 1 << 29,   # B4's offset variant
+                fits_sign_2p30=av <= 1 << 30,   # the sign-bit reading, floor(p/2)
+                blind_sum=nmax * ctx)
 # the integer softmax is the design point; v1 is what B2's model already assumed
 ALPHA = (B5C["intexp"]["alpha_grid"] if B5C and "intexp" in B5C else 5.0)
 ALPHA_V1 = (B5C["bf16x"]["alpha_grid"] if B5C and "bf16x" in B5C else 5.0)
@@ -315,9 +358,11 @@ ALPHA_V1 = (B5C["bf16x"]["alpha_grid"] if B5C and "bf16x" in B5C else 5.0)
 #   logup the LogUp interaction column each lookup drags along (B2, measured)
 
 
-def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None):
+def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
+                    head_dequant=None):
     L, d, nh, nkv, hd, dff, vocab = cfg
-    acc = L * ((nh + 2 * nkv) * hd + d + 2 * dff + d) + vocab
+    acc_layer = L * ((nh + 2 * nkv) * hd + d + 2 * dff + d)
+    acc = acc_layer + vocab
     act = L * (2 * d + nh * hd + dff) + d
     nl = L * (2 * dff + 4 * d)
     # B5: the whole (token, key) grid at the measured alpha, lookup included
@@ -335,9 +380,13 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None):
     # rather than adding to it.  `dequant` picks which rung of B6's ladder: the
     # general-scale chain (no quality cost, 26 cells) or power-of-two scales
     # (+2.29% perplexity, 15 cells).
+    # B8's layout (B9 step 0): the chain on every layer matmul, the power-of-two
+    # dequant on `lm_head` alone.  `dequant`/`head_dequant` override either rung.
     per_acc = dequant if dequant is not None else (
-        DEQUANT_CELLS_PER_ACC or LIMB_CELLS_PER_ACC)
-    limbs = acc * per_acc if seq else 0.0
+        LAYER_DEQUANT_PER_ACC or LIMB_CELLS_PER_ACC)
+    head_acc = head_dequant if head_dequant is not None else (
+        per_acc if dequant is not None else (HEAD_DEQUANT_PER_ACC or per_acc))
+    limbs = (acc_layer * per_acc + vocab * head_acc) if seq else 0.0
     # B6: the attention output's own dequant, folded straight to int8 because
     # `o_proj` requantises it anyway -- one rounding per output element
     attn_out = L * nh * hd * (ATTNOUT_CELLS_PER_ACC or 0.0) if seq else 0.0
@@ -355,7 +404,8 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None):
              + attn_out + requant)
     return dict(acc=acc, act=act, nl=nl, attn=attn, logup=logup, n_lookups=n_lookups,
                 walk=walk, range=rng, limbs=limbs, kv=kv, softmax_rows=softmax_rows,
-                attn_out=attn_out, requant=requant, dequant_per_acc=per_acc, n_acc=acc,
+                attn_out=attn_out, requant=requant, dequant_per_acc=per_acc,
+                head_per_acc=head_acc, n_acc=acc, n_acc_layer=acc_layer,
                 flat=acc + act + nl, total=total,
                 # committed offline, but read once per proof by the walk
                 preprocessed=PREPROCESSED_PER_WEIGHT * params / seq if seq else 0.0)
@@ -576,6 +626,35 @@ if B6C:
           f"whole per-token budget")
     print(f"  attention output straight to int8: {g(ch['attn_out'])}cells/token at "
           f"{B6C['int8']:.2f} cells/element")
+    print()
+    print("B8's layout, the default above (B9 step 0):")
+    print(f"  {c['n_acc_layer'] / 1e6:.2f} M layer accumulators at "
+          f"{c['dequant_per_acc']:.2f} cells (the chain, Round::Away) and "
+          f"{GEMMA[6] / 1e3:.0f} k `lm_head` accumulators at {c['head_per_acc']:.2f} "
+          f"(power-of-two)")
+    print(f"    -> {g(c['limbs'])}cells/token against {g(ch['limbs'])} chain-everywhere: "
+          f"{g(c['total'])} per token, {c['total'] / ch['total'] - 1:+.1%}")
+    mix = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, dequant=B6C["pow2"],
+                          head_dequant=B6C["pow2"])
+    print(f"    B6.5's mixed layout spanned {g(mix['total'])}-{g(ch['total'])} per token "
+          f"({g(mix['total'] * TARGET_TOKS)}-{g(ch['total'] * TARGET_TOKS)}cells/s for "
+          f"{TARGET_TOKS:.0f} tok/s); B8's attribution retires that range -- pow2 on the "
+          f"layer costs +3.67% perplexity at 8B, so there is one layout, not a band")
+    print()
+    print("the numerator width, and the window the AIR as built certifies:")
+    print(f"  {'bits':>4} {'nmax':>5} {'Z bits':>7} {'z_hi':>5} {'|A.V| <':>10}  "
+          f"B4 limb 2^29   sign-bit 2^30")
+    for nb in (8, 9, 10, 11):
+        w = attn_window(nb, TARGET_CTX)
+        print(f"  {nb:>4} {w['nmax']:>5} {w['z_bits']:>7} {w['z_hi_bits']:>5} "
+              f"{'2^' + str(w['av_bound'].bit_length() - 1):>10}  "
+              f"{'fits' if w['fits_limb_2p29'] else 'OVER':>12}   "
+              f"{'fits' if w['fits_sign_2p30'] else 'OVER':>13}")
+    print("  8 bits is the last width B4's offset limb variant covers; 9 fits only the")
+    print("  sign-bit reading (B6's chain, and the fold's committed `sg`), and 10 leaves")
+    print("  M31 altogether at C = 16K.  The cell price of the extra bit is zero per")
+    print("  accumulator: no column moves, only two shared range tables widen by one bit")
+    print("  (the denominator's high limb 2^6 -> 2^7 rows, the fold's remainder table x2).")
 if B65C:
     print()
     print("B6.5's terms, folded in:")
@@ -630,3 +709,20 @@ if commit_host:
                   for d, h in same]
         print(f"  VM overhead on the {len(same)} overlapping points: host is "
               f"{min(ratios):.2f}-{max(ratios):.2f}x the container")
+
+# --- B7b's ladder, re-read against this denominator (B9 step 0) ----------------
+# The three boundaries B7a section 5 defines, measured on the H100 at B7b's
+# largest chunk (2.217 G cells, the 7B shape at C = 16K; b7/README 26.5).  They
+# are constants of that run, not of this model -- what moves here is the
+# denominator they are divided into.
+B7B_CHUNK_CELLS = 2.217e9
+B7B = [("commit path", 4.45e9), ("stwo total (commit + prove_ex)", 2.89e9),
+       ("whole wall (generation + stwo + serialize)", 1.46e9)]
+print()
+print(f"B7b's ladder at 27B/ctx={TARGET_CTX}, re-read against {g(c['total'])}cells/token")
+print(f"({g(need_cells)}cells/s for {TARGET_TOKS:.0f} tok/s, measured at B7b's "
+      f"{B7B_CHUNK_CELLS / 1e9:.3f} G chunk):")
+for name, rate_ in B7B:
+    print(f"  {name:<42} {rate_ / 1e9:.2f} G cells/s   x{need_cells / rate_:.1f}   "
+          f"{rate_ / c['total']:5.2f} tok/s  (x{TARGET_TOKS / (rate_ / c['total']):.0f} "
+          f"off {TARGET_TOKS:.0f})")
