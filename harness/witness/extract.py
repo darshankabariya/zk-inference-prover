@@ -39,6 +39,18 @@ from quant import pow2_ceil, round_hafz  # noqa: E402
 OUT = os.path.join(HERE, "out", "witness")
 MATS = ["q", "k", "v", "o", "gate", "up", "down"]
 
+# B10 step 1: the attention block's three *derived* (nh, S, C) columns.
+# `AttnWitness::load` reads only `qq.i16`, `kk.i16`, `vv.i8` and `num.i32` from a
+# dump -- the scores, the `d = max - sc` gaps and the bf16 exp-table inputs are
+# what the AIR recomputes and commits itself, and nothing in the prover opens
+# them.  They are kept for diagnosis, and at C=16K they are 2.50 GB of a 4.03 GB
+# witness, which is the difference between the model's 32 layers fitting on a
+# disk and not.  `--slim` hashes them into the manifest and does not write them.
+# `mm` and `zz` stay: they are (nh, S), 64 KiB, and the model-wide shape table
+# reads `zz` (`b10/gpu/shapes32.py` computes `ao_rem_bits` from it).
+DERIVED = ("sc.i32", "dd.i32", "xx.u16")
+SLIM = False
+
 
 class LastChunk(Recorder):
     """Keep only the newest value of each column: the last prefill chunk."""
@@ -57,10 +69,15 @@ class LastChunk(Recorder):
 
 def write(name, arr, digests):
     arr = np.ascontiguousarray(arr)
-    arr.tofile(os.path.join(OUT, name))
+    held = SLIM and name in DERIVED
+    if not held:
+        arr.tofile(os.path.join(OUT, name))
     digests[name] = dict(values=int(arr.size), dtype=str(arr.dtype), shape=list(arr.shape),
                          sha256=hashlib.sha256(arr.tobytes()).hexdigest()[:16])
-    print(f"  {name:<14} {arr.size:>12,} values ({arr.nbytes / 2 ** 20:6.1f} MiB)  {arr.shape}")
+    if held:
+        digests[name]["written"] = False
+    print(f"  {name:<14} {arr.size:>12,} values ({arr.nbytes / 2 ** 20:6.1f} MiB)  {arr.shape}"
+          f"{'  [derived, hashed only]' if held else ''}")
 
 
 def bits_for(v):
@@ -100,7 +117,16 @@ if __name__ == "__main__":
     p.add_argument("--out", default=OUT, help="output directory (base, for --layers)")
     p.add_argument("--spec", default="b65-design")
     p.add_argument("--mats", default=",".join(MATS))
+    # B10 step 1: the sequence's witness is a real *decode*, so the ids are the
+    # prompt plus `b10/gpu/gen_ids.py`'s greedy continuation rather than the
+    # eval corpus's next 512 tokens (B8 step 1: decode is bit-identical to
+    # prefill, so the extractor still prefills the concatenation).
+    p.add_argument("--ids", default=None,
+                   help="token ids (.npy) to run instead of the corpus's first --tokens")
+    p.add_argument("--slim", action="store_true",
+                   help="hash the derived attention columns into the manifest, do not write them")
     a = p.parse_args()
+    SLIM = a.slim
     setup()
     layers = [int(x) for x in a.layers.split(",")] if a.layers else [a.layer]
     OUT_BASE = a.out
@@ -116,14 +142,22 @@ if __name__ == "__main__":
     m.clamped = {}
     keep = set()
     for L in layers:
-        keep |= {f"L{L}.qq", f"L{L}.kk", f"L{L}.vv", f"L{L}.qkacc",
-                 f"L{L}.expnum/in", f"L{L}.expnum/out", f"L{L}.sqk",
+        # B10 step 1: `expnum/in` and `expnum/out` are (nh, S, C) and nothing
+        # below reads them -- `num` is recomputed from `xx` here.  At C=16K they
+        # are 1.5 GB of host memory per layer, and holding 32 layers from one
+        # forward pass is what makes the model's 32 dumps one pass and not eight.
+        keep |= {f"L{L}.qq", f"L{L}.kk", f"L{L}.vv", f"L{L}.qkacc", f"L{L}.sqk",
                  f"L{L}.attnq", f"L{L}.s_o", f"L{L}.zz"}
         keep |= {f"L{L}.{n}/acc" for n in mats} | {f"L{L}.{n}/s_x" for n in mats}
         keep |= {f"L{L}.{n}/qx" for n in mats} | {f"L{L}.{n}/x" for n in mats}
     m.rec = LastChunk(keep)
-    ev, _ = tokens()
-    ids = ev[: a.tokens]
+    if a.ids:
+        ids = torch.from_numpy(np.load(a.ids).astype(np.int64))
+        assert len(ids) == a.tokens, f"--ids has {len(ids)} tokens, --tokens says {a.tokens}"
+        print(f"  ids from {a.ids}: {len(ids)} tokens, the last {a.chunk} decoded")
+    else:
+        ev, _ = tokens()
+        ids = ev[: a.tokens]
     cache = Cache(m.L)
     t0 = time.time()
     for i in range(0, len(ids), a.chunk):
@@ -287,8 +321,15 @@ if __name__ == "__main__":
             dequant_round=spec.dequant_round,
             clamped={k: dict(over=v[0], total=v[1], frac=v[0] / v[1])
                      for k, v in (m.clamped or {}).items()},
+            ids_from=a.ids, slim=bool(SLIM),
             torch=torch.__version__, files=digests,
         )
         json.dump(stats, open(os.path.join(OUT, "manifest.json"), "w"), indent=1)
         print(json.dumps({k: v for k, v in stats.items() if k != "files"}, indent=1))
+        # B10 step 1: a layer's recorded columns are ~1.4 GB at C=16K and its
+        # working set another ~10 GB, so both go before the next layer starts --
+        # 32 layers out of one forward pass against a 128 GiB cgroup.
+        del sc, dd, num, xx, mm, zz, out_rect, real_rect, flat_rect
+        for key in [k for k in m.rec.cols if k.startswith(f"L{L}.")]:
+            del m.rec.cols[key]
     print(f"wrote {OUT} in {time.time() - t0:.0f}s")
