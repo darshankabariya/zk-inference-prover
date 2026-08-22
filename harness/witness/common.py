@@ -151,8 +151,19 @@ for _n in (9, 10, 12, 16):
 SPECS["b10-design"] = replace(SPECS["b6-design-p2o"],
                               dequant_round="away", num_bits=9)
 
+# B10 step 2: the two knobs the *glue* decides, and owes a row for.  Proving the
+# RMSNorm pins both.  The layer's rounding mode stops being the dequant's choice
+# -- `store()` is ties-to-even and one shared `NORM` table is built in one mode,
+# so the whole layer rounds even -- and the reduction's *order* stops being B1's
+# fp32 accumulation, which no bf16-add gadget reproduces, in favour of B1's own
+# balanced tree.  `b10-glue` is `b10-design` with both, i.e. the spec the AIR
+# actually proves; `b10-design-even` isolates the mode so the two are separable.
+SPECS["b10-design-even"] = replace(SPECS["b10-design"], dequant_round="even")
+SPECS["b10-glue"] = replace(SPECS["b10-design"], dequant_round="even",
+                            reduce="bf16-norm")
+
 # B10's own list: one spec, scored against B8's fp32 and `b6-design-p2o` rows
-B10_SPECS = ["b10-design"]
+B10_SPECS = ["b10-design", "b10-design-even", "b10-glue"]
 
 # B5's probes, kept apart so B1's own table stays what B1 measured
 B5_SPECS = ["qk-int12", "pow2-scales", "int-softmax", "int-softmax-12",

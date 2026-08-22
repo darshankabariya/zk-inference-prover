@@ -339,7 +339,10 @@ ATTNOUT_CELLS_PER_ACC = (B6C or {}).get("int8") or 0.0
 #     integer is normalised by the *same* `NORM`/`FRAC` tables the dequant
 #     already commits -- so the add is B6's `round` variant plus an alignment.
 #     `b65/out/glue.json` carries the measured marginal; until it exists the
-#     model prints the construction's own column count and says so.
+#     model prints the construction's own column count and says so.  Both the add
+#     and the multiply range-check their own output against `VAL` (README 3.7's
+#     named gap: without it the gadget can prove a value bf16 cannot represent),
+#     which is +2 cells on each and is in the measured numbers below.
 def b10_glue_constants():
     f = B65 / "glue.json"
     if not f.exists():
@@ -454,7 +457,10 @@ ALPHA_V1 = (B5C["bf16x"]["alpha_grid"] if B5C and "bf16x" in B5C else 5.0)
 def sum_order(n, order):
     pad = 1 << (n - 1).bit_length()
     if order == "tree":            # B1's `tree_sum`: pad with +0, log2 levels
-        return dict(adds=pad - 1, regions=pad.bit_length() - 1, err_ulps=pad.bit_length() - 1)
+        # `x + 0` is exact, so the AIR prunes every slot the pad would fill and
+        # proves `n - 1` adds however far `pad` reaches past `n` (B10 step 2);
+        # the *depth*, and so the drift, is still the padded tree's
+        return dict(adds=n - 1, regions=pad.bit_length() - 1, err_ulps=pad.bit_length() - 1)
     if order == "two-level":       # blocks of ~sqrt(n), then the block sums
         b = 1 << ((n - 1).bit_length() // 2)
         c = -(-n // b)
@@ -473,6 +479,10 @@ def glue_cells(cfg, order="tree"):
     # (a) RMSNorm, twice per layer plus the final one.  Per channel: the square
     # (one unary table), its share of the reduction, and the two multiplies
     # (`x * r`, then `* w`).  Per token: `* 1/d`, `+ eps`, `rsqrt`.
+    # The composed AIR merges the reduction's first levels with the residual add
+    # into one region per `(residue, token)` row, so the stream is committed once
+    # and read by both -- which is a saving on the *leaves*, not on the ops, and
+    # the table below counts ops.
     norms = 2 * L + 1
     sq = norms * d * UNARY_CELLS
     red = norms * so["adds"] * ADD_CELLS
@@ -840,14 +850,15 @@ print("  (drift = worst-case relative error of the reduction, err_ulps x 2^-9; B
 print("   `reduce=\"bf16-norm\"` is the tree, and B1 scores it at 22.758 against the")
 print("   base spec's 22.835 at 0.5B -- the fp32 sum `b10-design` specifies is not")
 print("   reproducible by any bf16-add gadget, so proving the norm pins the order)")
-if B10G and B10G.get("drift"):
-    dr = B10G["drift"]
-    print(f"  measured on Qwen-0.5B layer 12, d={dr['d']}: of {dr['tokens']} real tokens the "
-          f"tree's `ms + eps`")
+for dr in (B10G or {}).get("drift") or []:
+    print(f"  measured on Qwen-0.5B layer 12, {dr['norm']}, d={dr['d']}: of {dr['tokens']} "
+          f"real tokens the tree's `ms + eps`")
     print(f"  is bit-identical to B1's fp32 reduction on {dr['identical']} and differs on "
           f"{dr['differ']}, by at most")
     print(f"  {dr['worst_ulps']} ulp ({dr['worst_relative']:.2%} relative) -- the whole "
-          "numeric content of the spec change")
+          "numeric content of the spec change;")
+    print(f"  and the composed two-level regions reproduce `tree_sum`'s own root on "
+          f"{dr['two_level_matches_tree_sum']} of {dr['two_level_checked']}")
 print()
 CHUNKS = {}
 if (B10 / "prove8b.json").exists():
