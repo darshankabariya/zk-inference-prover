@@ -316,8 +316,44 @@ REQUANT_CELLS = (B65C["requant_max"] - 1.0) if B65C and B65C.get("requant_max") 
 # the committed next token, which is one accumulator over a column the argument
 # already commits and costs no cell per vocabulary entry.  So the whole token tie
 # is priced by this one number.
-MAXARG_CELLS = ((B65C["requant_max"] - B65C["requant_only"])
-                if B65C and B65C.get("requant_max") else 0.0)
+#
+# Two numbers price this gadget and they disagree, so the model carries both.
+# The B6.5 *inference* above (3.36) reads the argument's price off a requantize
+# it was measured inside; the gadget B10 actually built and proved is dumped in
+# `b10/out/argmax_v8k.json` and costs more.  The projection uses the built one:
+# an inference from a neighbouring gadget is not a measurement of this one.
+def b10_argmax_constants():
+    """The built argmax gadget, per comparison, from `b10/out/argmax_v8k.json`."""
+    f = B10 / "argmax_v8k.json"
+    if not f.exists():
+        return None
+    try:
+        res = json.loads(f.read_text())["result"]
+    except (ValueError, KeyError):
+        return None
+    # the strict point; `lax` drops a constraint and is not what the model prices
+    pts = [p for p in res["points"] if not p.get("lax")]
+    if not pts:
+        return None
+    p = pts[0]
+    cmps = p["vocab"] * p["tokens"]
+    # the gadget's own fixed side: 10 QM31 interaction columns at its 2^13 rows,
+    # i.e. the table half of its LogUp batches, which does not grow with the
+    # vocabulary.  This one shape cannot *prove* that split -- it is the residual
+    # that reconciles the file's whole-gadget figure with the marginal the B10
+    # review quotes -- and `argmax_v16k.json` / `argmax_vqwen.json` would pin it.
+    fixed = 10 * 4 * (1 << p["layout"]["log_rows"])
+    return dict(total=p["cells_per_comparison"],
+                base=p["base_per_comparison"],
+                marginal=(p["cells"]["fresh"] - fixed) / cmps,
+                fixed=fixed, comparisons=cmps, vocab=p["vocab"])
+
+
+B10A = b10_argmax_constants()
+MAXARG_CELLS_B65 = ((B65C["requant_max"] - B65C["requant_only"])
+                    if B65C and B65C.get("requant_max") else 0.0)
+MAXARG_CELLS_BUILT = B10A["marginal"] if B10A else 0.0
+MAXARG_CELLS = MAXARG_CELLS_BUILT or MAXARG_CELLS_B65
 # `dequant` is the per-accumulator cost of reading the integer *and* rounding it;
 # it subsumes B4's limb term, so `cells_per_token` charges this instead of that.
 DEQUANT_CELLS_PER_ACC = (B6C or {}).get("chain") or 0.0
@@ -376,7 +412,6 @@ def b10_glue_constants():
 
 
 B10G = b10_glue_constants()
-DEQUANT_POW2_AWAY_PER_ACC = (B6C or {}).get("pow2_away") or DEQUANT_POW2_PER_ACC
 # the bf16 multiply, read off B6's ladder: `chain` is `pow2` plus two of them
 MUL_CELLS = ((DEQUANT_AWAY_PER_ACC - DEQUANT_POW2_AWAY_PER_ACC) / 2.0
              if DEQUANT_AWAY_PER_ACC and DEQUANT_POW2_AWAY_PER_ACC else 0.0)
@@ -596,10 +631,19 @@ def lm_head_chunk(cfg, seq):
 
       * the **walk** over `vocab x d` weights -- once per chunk, not per token,
         which is the whole reason the head is its own chunk;
-      * the **dequant** of `vocab x seq` accumulators, at the power-of-two rung
-        (the head is the one matmul B8 left on `Pow2`);
-      * the **argmax**, one comparison per vocabulary entry per token, which is
-        B6.5's max argument at its measured marginal;
+      * the **dequant** of `vocab x seq` accumulators, at whichever rung the head
+        ends up on -- `HEAD_DEQUANT_PER_ACC`, a knob, not a settled number.  B8's
+        attribution puts the head on `Pow2` and every layer matmul on the chain;
+        the dumps declare something else and disagree with each other
+        (`b9/out/prove8b.json` has q/k/v/o on `pow2` and gate/up/down on `chain`,
+        `b10/out/loop32_*.json` has all seven on `chain`), and neither declares
+        the head at all -- it is not in either chunk.  So this docstring asserts
+        no rung: the spec decision is pending, and until it lands the number here
+        is whatever `HEAD_DEQUANT_PER_ACC` is set to.  The whole span is one cell
+        per accumulator between the two `Pow2` roundings and 11.06 between `Pow2`
+        and the chain -- at 27B, 0.26 M and 2.90 Mcells/token respectively;
+      * the **argmax**, one comparison per vocabulary entry per token, at the
+        built gadget's measured marginal (`MAXARG_CELLS`);
       * the **token tie** itself, `sum_i sel_i * i` against the committed next
         token -- one accumulator over a column the argmax already commits, so it
         is free per entry and is not a line here.
@@ -963,13 +1007,19 @@ print("  between a dequant's output and a walk's input is AIR work, not trace")
 # --- B10 step 4: the `lm_head` chunk and the token tie -------------------------
 print()
 print("B10 step 4 -- the `lm_head` chunk, one per 512-token continuation:")
-print(f"  the argmax is B6.5's max argument at its measured marginal, "
-      f"{MAXARG_CELLS:.3f} cells/comparison")
-print("  (requant_max - requant_only, b65/out/requant_*.json -- the same gadget, "
-      "run over the")
-print("  vocabulary instead of a matmul input's row; the tie `sum_i sel_i * i` "
-      "rides free on")
-print("  a column it already commits)")
+print(f"  the argmax is priced at {MAXARG_CELLS:.3f} cells/comparison -- the gadget B10 "
+      f"built and proved")
+if B10A:
+    print(f"  (b10/out/argmax_v8k.json, vocab {B10A['vocab']:,}: {B10A['total']:.3f} "
+          f"fresh cells/comparison whole,")
+    print(f"   {MAXARG_CELLS_BUILT:.3f} net of the gadget's own fixed table side, "
+          f"{B10A['base']:.3f} of it base)")
+print(f"  the other candidate, not used: {MAXARG_CELLS_B65:.3f} cells/comparison, inferred "
+      f"from B6.5's")
+print("  requant_max - requant_only (b65/out/requant_*.json) -- the same *shape* of gadget,"
+      " run over")
+print("  the vocabulary instead of a matmul input's row, but not this build of it")
+print("  (the tie `sum_i sel_i * i` rides free on a column the argument already commits)")
 print()
 print(f"  {'model':<10} {'vocab':>9} {'walk':>10} {'dequant':>10} {'argmax':>10} "
       f"{'fresh':>10} {'preproc':>10}")
