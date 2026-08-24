@@ -1,0 +1,494 @@
+use hashbrown::HashMap;
+use itertools::Itertools;
+use num_traits::Zero;
+#[cfg(feature = "parallel")]
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use tracing::{info, span, Level};
+
+use crate::core::channel::{Channel, MerkleChannel};
+use crate::core::circle::CirclePoint;
+use crate::core::fields::m31::BaseField;
+use crate::core::fields::qm31::SecureField;
+use crate::core::pcs::quotients::{
+    CommitmentSchemeProof, CommitmentSchemeProofAux, ExtendedCommitmentSchemeProof, PointSample,
+};
+use crate::core::pcs::utils::prepare_preprocessed_query_positions;
+use crate::core::pcs::{PcsConfig, TreeSubspan, TreeVec};
+use crate::core::poly::circle::CanonicCoset;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::core::vcs::MerkleHasher;
+use crate::core::vcs::verifier::ExtendedMerkleDecommitment;
+use crate::core::ColumnVec;
+use crate::prover::air::component_prover::{Poly, Trace, WeightsHashMap};
+use crate::prover::backend::{BackendForChannel, Col};
+use crate::prover::fri::{FriDecommitResult, FriProver};
+use crate::prover::pcs::quotient_ops::compute_fri_quotients;
+use crate::prover::poly::circle::{CircleCoefficients, CircleEvaluation, PolyOps};
+use crate::prover::poly::twiddles::TwiddleTree;
+use crate::prover::poly::BitReversedOrder;
+use crate::prover::vcs::prover::MerkleProver;
+
+pub mod quotient_ops;
+
+/// The prover side of a FRI polynomial commitment scheme. See [super].
+pub struct CommitmentSchemeProver<'a, B: BackendForChannel<MC>, MC: MerkleChannel> {
+    pub trees: TreeVec<CommitmentTreeProver<B, MC>>,
+    pub config: PcsConfig,
+    twiddles: &'a TwiddleTree<B>,
+    pub store_polynomials_coefficients: bool,
+}
+impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a, B, MC> {
+    /// Creates a new empty commitment scheme prover with the given configuration and twiddles. The
+    /// commitment scheme does not store the polynomials coefficients by default.
+    pub fn new(config: PcsConfig, twiddles: &'a TwiddleTree<B>) -> Self {
+        CommitmentSchemeProver {
+            trees: TreeVec::default(),
+            config,
+            twiddles,
+            store_polynomials_coefficients: false,
+        }
+    }
+
+    /// Sets the commitment scheme to store the polynomials coefficients starting from the next
+    /// commit.
+    pub const fn set_store_polynomials_coefficients(&mut self) {
+        self.store_polynomials_coefficients = true;
+    }
+
+    fn commit(&mut self, polynomials: ColumnVec<CircleCoefficients<B>>, channel: &mut MC::C) {
+        let _span = span!(Level::INFO, "Commitment").entered();
+        let tree = CommitmentTreeProver::new(
+            polynomials,
+            self.config.fri_config.log_blowup_factor,
+            channel,
+            self.twiddles,
+            self.store_polynomials_coefficients,
+            self.config.lifting_log_size,
+        );
+        self.trees.push(tree);
+    }
+
+    /// Push a pre-built commitment tree (cloned from cache) and mix its root.
+    pub fn push_cached_tree(&mut self, tree: CommitmentTreeProver<B, MC>, channel: &mut MC::C) {
+        MC::mix_root(channel, tree.commitment.root());
+        self.trees.push(tree);
+    }
+
+    pub fn tree_builder(&mut self) -> TreeBuilder<'_, 'a, B, MC> {
+        TreeBuilder {
+            tree_index: self.trees.len(),
+            commitment_scheme: self,
+            polys: Vec::default(),
+        }
+    }
+
+    pub fn roots(&self) -> TreeVec<<MC::H as MerkleHasher>::Hash> {
+        self.trees.as_ref().map(|tree| tree.commitment.root())
+    }
+
+    pub fn polynomials(&self) -> TreeVec<ColumnVec<&Poly<B>>> {
+        self.trees
+            .as_ref()
+            .map(|tree| tree.polynomials.iter().collect())
+    }
+
+    pub fn evaluations(
+        &self,
+    ) -> TreeVec<ColumnVec<&CircleEvaluation<B, BaseField, BitReversedOrder>>> {
+        self.trees
+            .as_ref()
+            .map(|tree| tree.polynomials.iter().map(|poly| &poly.evals).collect())
+    }
+
+    pub fn trace(&self) -> Trace<'_, B> {
+        let polys = self.polynomials();
+        Trace { polys }
+    }
+
+    pub fn build_weights_hash_map(
+        &self,
+        sampled_points: &TreeVec<ColumnVec<Vec<CirclePoint<SecureField>>>>,
+        max_log_size: u32,
+    ) -> WeightsHashMap<B>
+    where
+        Col<B, SecureField>: Send + Sync,
+    {
+        let weights_dashmap = WeightsHashMap::<B>::new();
+
+        self.polynomials()
+            .zip_cols(sampled_points)
+            .map_cols(|(poly, points)| {
+                let compute_weights = |(log_size, point): (u32, CirclePoint<SecureField>)| {
+                    weights_dashmap.entry((log_size, point)).or_insert_with(|| {
+                        CircleEvaluation::<B, BaseField, BitReversedOrder>::barycentric_weights(
+                            CanonicCoset::new(log_size),
+                            point,
+                        )
+                    });
+                };
+
+                let log_size = poly.evals.domain.log_size();
+                // For each sample point, compute the weights needed to evaluate the polynomial at
+                // the folded sample point.
+                // TODO(Leo): the computation `point.repeated_double(max_log_size - log_size)` is
+                // likely repeated a bunch of times in a typical flat air. Consider moving it
+                // outside the loop.
+                #[cfg(not(feature = "parallel"))]
+                points.iter().for_each(|&point| {
+                    compute_weights((log_size, point.repeated_double(max_log_size - log_size)))
+                });
+
+                #[cfg(feature = "parallel")]
+                points.par_iter().for_each(|&point| {
+                    compute_weights((log_size, point.repeated_double(max_log_size - log_size)))
+                });
+            });
+
+        weights_dashmap
+    }
+
+    pub fn prove_values(
+        self,
+        sampled_points: TreeVec<ColumnVec<Vec<CirclePoint<SecureField>>>>,
+        channel: &mut MC::C,
+    ) -> ExtendedCommitmentSchemeProof<MC::H> {
+        let span = span!(
+            Level::INFO,
+            "Evaluate columns out of domain",
+            class = "EvaluateOutOfDomain"
+        )
+        .entered();
+
+        let lifting_log_size = self.trees.last().unwrap().commitment.layers.len() as u32 - 1;
+        let weights_hash_map = if self.store_polynomials_coefficients {
+            None
+        } else {
+            Some(self.build_weights_hash_map(&sampled_points, lifting_log_size))
+        };
+
+        let samples: TreeVec<Vec<Vec<PointSample>>> = if self.store_polynomials_coefficients {
+            // Batch OODS evaluation: group polynomials by coefficient log_size,
+            // then batch-evaluate each group at each unique transformed point.
+            // Reduces ~400 individual GPU kernel launches to ~15 batched calls.
+            let polys = self.polynomials();
+
+            // Initialize result structure with placeholder values.
+            let mut samples = TreeVec::new(
+                sampled_points
+                    .iter()
+                    .map(|tree_points| {
+                        tree_points
+                            .iter()
+                            .map(|col_points| {
+                                col_points
+                                    .iter()
+                                    .map(|&p| PointSample {
+                                        point: p,
+                                        value: SecureField::zero(),
+                                    })
+                                    .collect_vec()
+                            })
+                            .collect_vec()
+                    })
+                    .collect_vec(),
+            );
+
+            // Collect evaluation tasks grouped by (coeffs_log_size, transformed_point).
+            let mut groups: HashMap<
+                u32,
+                Vec<(
+                    CirclePoint<SecureField>,
+                    Vec<(usize, usize, usize)>,
+                    Vec<&CircleCoefficients<B>>,
+                )>,
+            > = HashMap::new();
+
+            for (tree_idx, (tree_polys, tree_points)) in
+                polys.iter().zip(sampled_points.iter()).enumerate()
+            {
+                for (col_idx, (poly, col_points)) in
+                    tree_polys.iter().zip(tree_points.iter()).enumerate()
+                {
+                    let coeffs = poly.coeffs.as_ref().unwrap();
+                    let log_size = coeffs.log_size();
+                    let n_doubles = lifting_log_size - poly.evals.domain.log_size();
+
+                    for (point_idx, &point) in col_points.iter().enumerate() {
+                        let transformed = point.repeated_double(n_doubles);
+                        let group = groups.entry(log_size).or_default();
+                        if let Some(entry) =
+                            group.iter_mut().find(|(p, _, _)| *p == transformed)
+                        {
+                            entry.1.push((tree_idx, col_idx, point_idx));
+                            entry.2.push(coeffs);
+                        } else {
+                            group.push((
+                                transformed,
+                                vec![(tree_idx, col_idx, point_idx)],
+                                vec![coeffs],
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Batch evaluate each group using B::batch_eval_at_point().
+            for (_, point_groups) in groups {
+                for (transformed_point, positions, coeffs_refs) in point_groups {
+                    let results = B::batch_eval_at_point(&coeffs_refs, transformed_point);
+                    for ((tree_idx, col_idx, point_idx), value) in
+                        positions.into_iter().zip(results)
+                    {
+                        samples.0[tree_idx][col_idx][point_idx].value = value;
+                    }
+                }
+            }
+
+            samples
+        } else {
+            // Fallback: per-polynomial evaluation using barycentric weights.
+            let eval_at_points =
+                |(poly, points): (&Poly<B>, &Vec<CirclePoint<SecureField>>)| {
+                    points
+                        .iter()
+                        .map(|&point| PointSample {
+                            point,
+                            value: poly.eval_at_point(
+                                point.repeated_double(
+                                    lifting_log_size - poly.evals.domain.log_size(),
+                                ),
+                                weights_hash_map.as_ref(),
+                            ),
+                        })
+                        .collect_vec()
+                };
+
+            #[cfg(not(feature = "parallel"))]
+            {
+                self.polynomials()
+                    .zip_cols(&sampled_points)
+                    .map_cols(eval_at_points)
+            }
+            #[cfg(feature = "parallel")]
+            {
+                self.polynomials()
+                    .zip_cols(&sampled_points)
+                    .par_map_cols(eval_at_points)
+            }
+        };
+
+        span.exit();
+
+        let sampled_values = samples
+            .as_cols_ref()
+            .map_cols(|x| x.iter().map(|o| o.value).collect());
+        channel.mix_felts(&sampled_values.clone().flatten_cols());
+
+        let columns = self.evaluations();
+        // Compute oods quotients for boundary constraints on the sampled points.
+        let quotients = compute_fri_quotients(
+            &columns,
+            &samples,
+            channel.draw_secure_felt(),
+            lifting_log_size,
+            self.config.fri_config.log_blowup_factor,
+        );
+        // Run FRI commitment phase on the oods quotients.
+        let fri_prover =
+            FriProver::<B, MC>::commit(channel, self.config.fri_config, &quotients, self.twiddles);
+
+        // Proof of work.
+        let span1 = span!(Level::INFO, "Grind", class = "Queries POW").entered();
+        let proof_of_work = B::grind(channel, self.config.pow_bits);
+        span1.exit();
+        channel.mix_u64(proof_of_work);
+
+        // FRI decommitment phase.
+        let FriDecommitResult {
+            fri_proof,
+            query_positions,
+            unsorted_query_locations,
+        } = fri_prover.decommit(channel);
+        // Build the query position tree.
+        let preprocessed_query_positions = prepare_preprocessed_query_positions(
+            &query_positions,
+            lifting_log_size,
+            self.trees[0].commitment.layers.len() as u32 - 1,
+        );
+        let query_positions_tree = TreeVec::new(
+            self.trees
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    if i == 0 {
+                        preprocessed_query_positions.as_slice()
+                    } else {
+                        query_positions.as_slice()
+                    }
+                })
+                .collect::<Vec<_>>(),
+        );
+        let (queried_values, decommitments, aux): (Vec<_>, Vec<_>, Vec<_>) = self
+            .trees
+            .as_ref()
+            .zip_eq(query_positions_tree)
+            .map(|(tree, query_positions)| tree.decommit(query_positions))
+            .0
+            .into_iter()
+            .map(|(v, x)| (v, x.decommitment, x.aux))
+            .multiunzip();
+        ExtendedCommitmentSchemeProof {
+            proof: CommitmentSchemeProof {
+                commitments: self.roots(),
+                sampled_values,
+                decommitments: TreeVec(decommitments),
+                queried_values: TreeVec(queried_values),
+                proof_of_work,
+                fri_proof: fri_proof.proof,
+                config: self.config,
+            },
+            aux: CommitmentSchemeProofAux {
+                unsorted_query_locations,
+                trace_decommitment: TreeVec(aux),
+                fri: fri_proof.aux,
+            },
+        }
+    }
+}
+
+/// Helper struct for aggregating polynomials and evaluations for a commitment tree.
+pub struct TreeBuilder<'a, 'b, B: BackendForChannel<MC>, MC: MerkleChannel> {
+    tree_index: usize,
+    commitment_scheme: &'a mut CommitmentSchemeProver<'b, B, MC>,
+    polys: ColumnVec<CircleCoefficients<B>>,
+}
+impl<B: BackendForChannel<MC>, MC: MerkleChannel> TreeBuilder<'_, '_, B, MC> {
+    pub fn extend_evals(
+        &mut self,
+        columns: Vec<CircleEvaluation<B, BaseField, BitReversedOrder>>,
+    ) -> TreeSubspan {
+        let span = span!(Level::INFO, "Interpolation for commitment").entered();
+        let polys = B::interpolate_columns(columns, self.commitment_scheme.twiddles);
+        span.exit();
+
+        self.extend_polys(polys)
+    }
+
+    pub fn extend_polys(
+        &mut self,
+        columns: impl IntoIterator<Item = CircleCoefficients<B>>,
+    ) -> TreeSubspan {
+        let col_start = self.polys.len();
+        self.polys.extend(columns);
+        let col_end = self.polys.len();
+        TreeSubspan {
+            tree_index: self.tree_index,
+            col_start,
+            col_end,
+        }
+    }
+
+    pub fn commit(self, channel: &mut MC::C) {
+        let _span = span!(Level::INFO, "Commitment").entered();
+        self.commitment_scheme.commit(self.polys, channel);
+    }
+}
+
+/// Prover data for a single commitment tree in a commitment scheme. The commitment scheme allows to
+/// commit on a set of polynomials at a time. This corresponds to such a set.
+pub struct CommitmentTreeProver<B: BackendForChannel<MC>, MC: MerkleChannel> {
+    pub polynomials: ColumnVec<Poly<B>>,
+    pub commitment: MerkleProver<B, MC::H>,
+}
+
+impl<B: BackendForChannel<MC>, MC: MerkleChannel> Clone for CommitmentTreeProver<B, MC>
+where
+    Poly<B>: Clone,
+    MerkleProver<B, MC::H>: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            polynomials: self.polynomials.clone(),
+            commitment: self.commitment.clone(),
+        }
+    }
+}
+
+impl<B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentTreeProver<B, MC> {
+    pub fn new(
+        polynomials: ColumnVec<CircleCoefficients<B>>,
+        log_blowup_factor: u32,
+        channel: &mut MC::C,
+        twiddles: &TwiddleTree<B>,
+        store_polynomials_coefficients: bool,
+        lifting_log_size: Option<u32>,
+    ) -> Self {
+        let span = span!(Level::INFO, "Extension").entered();
+        let polynomials = B::evaluate_polynomials(
+            polynomials,
+            log_blowup_factor,
+            twiddles,
+            store_polynomials_coefficients,
+        );
+        span.exit();
+
+        let max_log_domain_size = polynomials
+            .iter()
+            .map(|poly| poly.evals.domain.log_size())
+            .max()
+            .unwrap_or_default();
+        let _span = span!(Level::INFO, "Merkle",
+            n_polys = polynomials.len(),
+            max_log_domain_size = max_log_domain_size,
+        ).entered();
+        let tree = MerkleProver::commit(
+            polynomials
+                .iter()
+                .map(|poly: &Poly<B>| &poly.evals.values)
+                .collect(),
+        );
+        MC::mix_root(channel, tree.root());
+
+        CommitmentTreeProver {
+            polynomials,
+            commitment: tree,
+        }
+    }
+
+    /// Decommits the merkle tree on the given query positions.
+    /// Returns the flat values at the queried positions and the decommitment.
+    fn decommit(
+        &self,
+        queries: &[usize],
+    ) -> (
+        Vec<BaseField>,
+        ExtendedMerkleDecommitment<MC::H>,
+    ) {
+        // Build queries_per_log_size from flat positions.
+        let column_log_sizes: BTreeSet<u32> = self
+            .polynomials
+            .iter()
+            .map(|p| p.evals.domain.log_size())
+            .collect();
+        let max_log_size = self.commitment.layers.len() as u32 - 1;
+        let mut queries_per_log_size = BTreeMap::new();
+        for &log_size in &column_log_sizes {
+            let shift = max_log_size - log_size;
+            let positions: Vec<usize> = queries
+                .iter()
+                .map(|&pos| (pos >> (shift + 1) << 1) + (pos & 1))
+                .sorted()
+                .dedup()
+                .collect();
+            queries_per_log_size.insert(log_size, positions);
+        }
+
+        let eval_vec = self
+            .polynomials
+            .iter()
+            .map(|poly| &poly.evals.values)
+            .collect_vec();
+        self.commitment.decommit(&queries_per_log_size, eval_vec)
+    }
+}
