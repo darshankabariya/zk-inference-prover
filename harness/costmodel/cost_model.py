@@ -305,11 +305,25 @@ def b65_constants():
 
 B65C = b65_constants()
 REQUANT_CELLS = (B65C["requant_max"] - 1.0) if B65C and B65C.get("requant_max") else 0.0
+# B10 step 4: greedy decoding's argmax is B6.5's **max argument** run over the
+# vocabulary instead of over a matmul input's row -- the same gadget, the same
+# per-value price.  `requant_max - requant_only` is what the argument costs on
+# top of the requantize it was measured inside (b65/out/requant_*.json): one
+# 15-bit range lookup on `pm - pat_i`, one selector bit, and the constraint
+# `sel_i (pm - pat_i) = 0` that pins the maximum to an attained element.
+#
+# What step 4 adds on top of the gadget is the *tie*: `sum_i sel_i * i` against
+# the committed next token, which is one accumulator over a column the argument
+# already commits and costs no cell per vocabulary entry.  So the whole token tie
+# is priced by this one number.
+MAXARG_CELLS = ((B65C["requant_max"] - B65C["requant_only"])
+                if B65C and B65C.get("requant_max") else 0.0)
 # `dequant` is the per-accumulator cost of reading the integer *and* rounding it;
 # it subsumes B4's limb term, so `cells_per_token` charges this instead of that.
 DEQUANT_CELLS_PER_ACC = (B6C or {}).get("chain") or 0.0
 DEQUANT_AWAY_PER_ACC = (B6C or {}).get("chain_away") or DEQUANT_CELLS_PER_ACC
 DEQUANT_POW2_PER_ACC = (B6C or {}).get("pow2") or 0.0
+DEQUANT_POW2_AWAY_PER_ACC = (B6C or {}).get("pow2_away") or DEQUANT_POW2_PER_ACC
 ATTNOUT_CELLS_PER_ACC = (B6C or {}).get("int8") or 0.0
 
 # --- B10 step 2: the glue between the regions ---------------------------------
@@ -403,7 +417,13 @@ if B10G and B10G.get("unary"):
 # (270-308 M cells/token, 14.3-15.8 G cells/s -- b7/README section 3) is retired:
 # the model prints one number.
 LAYER_DEQUANT_PER_ACC = DEQUANT_AWAY_PER_ACC
-HEAD_DEQUANT_PER_ACC = DEQUANT_POW2_PER_ACC
+# B10 step 4: at the spec's *rounding*, not at ties-to-even.  `b10-design` rounds
+# away, and B6 measured every rung at both modes -- the power-of-two one is
+# **14.0625** away against 15.0625 even, exactly as the chain is 25.125 against
+# 26.125.  Charging the head at the even figure was a cell per accumulator too
+# many, and on the head chunk that is 65.7 M cells at 8B.  Confirmed on the real
+# head accumulators, `b10/out/head_deq_*.json`.
+HEAD_DEQUANT_PER_ACC = DEQUANT_POW2_AWAY_PER_ACC
 
 # --- the numerator width, and what the AIR as built can carry ------------------
 # B5's AIR range-checks V into [-128, 127] and the committed denominator Z into
@@ -544,6 +564,13 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     # B6.5: the requantize + max argument, once per *distinct* matmul input
     # (q/k/v share one, gate/up share one; o's input is already int8 via the fold)
     requant = (L * (2 * d + dff) + d) * REQUANT_CELLS if seq else 0.0
+    # B10 step 4: the token tie.  Proving that the emitted token *is* the argmax
+    # means showing no other logit is larger, which is one comparison per
+    # vocabulary entry per token -- the max argument's own per-value price.  The
+    # `lm_head` walk and its dequant are already charged (`walk` counts
+    # `vocab * d` weights through `n_params`, `limbs` counts `vocab`
+    # accumulators); this is the term neither of them covers.
+    argmax = vocab * MAXARG_CELLS if seq else 0.0
     # B5: the committed quantized KV cache and queries, and their range checks
     # (2 cells for int11/int12 K and Q, 1 for a pair-packed int8 V), plus the
     # per-token softmax scalars (max, denominator, its limb and two lookups)
@@ -552,14 +579,44 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     kv = kv_vals + q_vals + (1.5 * kv_vals + 2.0 * q_vals if seq else 0.0)
     softmax_rows = 5.0 * L * nh
     total = (acc + act + nl + attn + logup + walk + rng + limbs + kv + softmax_rows
-             + attn_out + requant)
+             + attn_out + requant + argmax)
     return dict(acc=acc, act=act, nl=nl, attn=attn, logup=logup, n_lookups=n_lookups,
                 walk=walk, range=rng, limbs=limbs, kv=kv, softmax_rows=softmax_rows,
-                attn_out=attn_out, requant=requant, dequant_per_acc=per_acc,
+                attn_out=attn_out, requant=requant, argmax=argmax, dequant_per_acc=per_acc,
                 head_per_acc=head_acc, n_acc=acc, n_acc_layer=acc_layer,
                 flat=acc + act + nl, total=total,
                 # committed offline, but read once per proof by the walk
                 preprocessed=PREPROCESSED_PER_WEIGHT * params / seq if seq else 0.0)
+
+
+def lm_head_chunk(cfg, seq):
+    """B10 step 4: what the `lm_head` chunk costs, split the way it is built.
+
+    One chunk after the final norm, covering `seq` decoded tokens:
+
+      * the **walk** over `vocab x d` weights -- once per chunk, not per token,
+        which is the whole reason the head is its own chunk;
+      * the **dequant** of `vocab x seq` accumulators, at the power-of-two rung
+        (the head is the one matmul B8 left on `Pow2`);
+      * the **argmax**, one comparison per vocabulary entry per token, which is
+        B6.5's max argument at its measured marginal;
+      * the **token tie** itself, `sum_i sel_i * i` against the committed next
+        token -- one accumulator over a column the argmax already commits, so it
+        is free per entry and is not a line here.
+
+    Returned per chunk, not per token: the head is amortised over `seq` and
+    reading it per token is how the walk term gets mis-stated.
+    """
+    _, d, _, _, _, _, vocab = cfg
+    weights = vocab * d
+    accs = vocab * seq
+    walk = weights * WEIGHT_WALK_CELLS_PER_WEIGHT
+    pre = weights * PREPROCESSED_PER_WEIGHT
+    deq = accs * HEAD_DEQUANT_PER_ACC
+    arg = accs * MAXARG_CELLS
+    return dict(weights=weights, accumulators=accs, walk=walk, preprocessed=pre,
+                dequant=deq, argmax=arg, fresh=walk + deq + arg,
+                per_token=(walk + deq + arg) / seq)
 
 
 def n_params(cfg):
@@ -902,6 +959,35 @@ print("  the requantize's placement is the one gadget with no cell of its own: "
 print(f"  are already charged for it ({REQUANT_CELLS:.2f}/value on every distinct matmul "
       "input), and wiring it")
 print("  between a dequant's output and a walk's input is AIR work, not trace")
+
+# --- B10 step 4: the `lm_head` chunk and the token tie -------------------------
+print()
+print("B10 step 4 -- the `lm_head` chunk, one per 512-token continuation:")
+print(f"  the argmax is B6.5's max argument at its measured marginal, "
+      f"{MAXARG_CELLS:.3f} cells/comparison")
+print("  (requant_max - requant_only, b65/out/requant_*.json -- the same gadget, "
+      "run over the")
+print("  vocabulary instead of a matmul input's row; the tie `sum_i sel_i * i` "
+      "rides free on")
+print("  a column it already commits)")
+print()
+print(f"  {'model':<10} {'vocab':>9} {'walk':>10} {'dequant':>10} {'argmax':>10} "
+      f"{'fresh':>10} {'preproc':>10}")
+for name, cfg in (("Qwen-0.5B", QWEN), ("Llama-8B", LLAMA8B), ("Gemma-27B", GEMMA)):
+    h = lm_head_chunk(cfg, SEQ)
+    print(f"  {name:<10} {cfg[6]:>9,} {g(h['walk']):>10} {g(h['dequant']):>10} "
+          f"{g(h['argmax']):>10} {g(h['fresh']):>10} {g(h['preprocessed']):>10}")
+h8 = lm_head_chunk(LLAMA8B, SEQ)
+print(f"  at 8B the dequant is {h8['dequant'] / h8['fresh']:.0%} of the chunk and the "
+      f"argmax {h8['argmax'] / h8['fresh']:.0%};")
+print("  comparing the *accumulators* before the dequant would remove most of the "
+      "first, and is")
+print("  the plan's own rider -- it is sound only where the per-channel scales "
+      "are shared, and")
+print("  B1 decodes on the rounded logits, so it has to match those.")
+hg = lm_head_chunk(GEMMA, SEQ)
+print(f"  against the per-token budget: the head is {g(hg['per_token'])}cells/token at "
+      f"27B, {hg['per_token'] / c['total']:.1%} of {g(c['total'])}")
 
 if B5C:
     print()

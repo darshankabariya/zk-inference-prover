@@ -48,7 +48,7 @@ MATS = ["q", "k", "v", "o", "gate", "up", "down"]
 # disk and not.  `--slim` hashes them into the manifest and does not write them.
 # `mm` and `zz` stay: they are (nh, S), 64 KiB, and the model-wide shape table
 # reads `zz` (`b10/gpu/shapes32.py` computes `ao_rem_bits` from it).
-DERIVED = ("sc.i32", "dd.i32", "xx.u16")
+DERIVED = ("sc.i32", "dd.i32", "xx.u16", "scc.i32", "ddc.i32", "xxc.u16")
 SLIM = False
 
 
@@ -128,6 +128,13 @@ if __name__ == "__main__":
     p.add_argument("--glue", action="store_true",
                    help="also dump B10 step 2's wiring columns (residual stream, "
                         "norm weights and rsqrt/silu lookups)")
+    p.add_argument("--head", action="store_true",
+                   help="also dump B10 step 4's `lm_head` chunk (the accumulators, the "
+                        "quantized weights, the logits' order keys and the emitted tokens)")
+    p.add_argument("--corner", action="store_true",
+                   help="also dump B10 step 3's causal corner (the S decoded tokens "
+                        "against each other): one joint row maximum, the total "
+                        "denominator, and the corner's own keys and values")
     a = p.parse_args()
     SLIM = a.slim
     setup()
@@ -163,6 +170,11 @@ if __name__ == "__main__":
                      f"L{L}.norm1.rsqrt/in", f"L{L}.norm1.rsqrt/out",
                      f"L{L}.norm2.rsqrt/in", f"L{L}.norm2.rsqrt/out",
                      f"L{L}.silu/in", f"L{L}.silu/out"}
+    if a.head:
+        # B10 step 4: the head is a `Linear` like any other, but it has no layer
+        # prefix -- `m.head = Linear(..., "lm_head", ...)` -- so its recorder keys
+        # are bare.
+        keep |= {"lm_head/acc", "lm_head/qx", "lm_head/s_x"}
     m.rec = LastChunk(keep)
     if a.ids:
         ids = torch.from_numpy(np.load(a.ids).astype(np.int64))
@@ -173,8 +185,9 @@ if __name__ == "__main__":
         ids = ev[: a.tokens]
     cache = Cache(m.L)
     t0 = time.time()
+    logits = None
     for i in range(0, len(ids), a.chunk):
-        m.forward(ids[i:i + a.chunk], cache)
+        logits, cache = m.forward(ids[i:i + a.chunk], cache)
         print(f"  prefilled {min(i + a.chunk, len(ids))}/{len(ids)} "
               f"({time.time() - t0:.0f}s)", flush=True)
 
@@ -185,21 +198,50 @@ if __name__ == "__main__":
         digests = {}
 
         # ---- the attention block, in b5/extract.py's format ---------------------
-        sc = m.rec.cols[f"L{L}.qkacc"].to(torch.int64)          # (nh, S, C)
-        nh, S, C = sc.shape
+        sc_all = m.rec.cols[f"L{L}.qkacc"].to(torch.int64)      # (nh, S, C)
+        nh, S, C = sc_all.shape
         hd = m.hd
         # The decode rectangle: key c is visible to query t iff c <= (C - S) + t, so the
         # C - S prefix is fully visible and the S x S corner is the only masked part.
         P = C - S
         assert P > 0 and (P & (P - 1)) == 0, f"prefix {P} must be a power of two"
-        sc = sc[:, :, :P].contiguous()
+        sc = sc_all[:, :, :P].contiguous()
+        # B10 step 3: the causal corner.  Key k of it *is* decoded token k, so token
+        # t attends to it exactly when `k <= t`; `vis[t, k]` is that mask, and it is
+        # a function of the position alone, which is why the AIR can preprocess it.
+        scc = sc_all[:, :, P:].contiguous() if a.corner else None
+        vis = (torch.arange(S).unsqueeze(0) <= torch.arange(S).unsqueeze(1)) if a.corner \
+            else None
+
+        # ONE row maximum for the pair.  `m_t` is a property of the token, not of a
+        # half: the softmax is shift-invariant only when the same maximum is taken
+        # against every key of the row, and the two halves' numerators would
+        # otherwise be on two different scales (B10 rule / README 6.2).
         mm = sc.amax(-1)
-        dd = mm.unsqueeze(-1) - sc
+        if a.corner:
+            mm = torch.maximum(mm, scc.masked_fill(~vis, torch.iinfo(torch.int64).min)
+                               .amax(-1))
         sqk = m.rec.cols[f"L{L}.sqk"].double()
-        xx = (-dd.double() * sqk).float().to(BF16)
         nmax = (1 << spec.num_bits) - 1
-        num = round_hafz(nmax * torch.exp(xx.double())).clamp(0, nmax).to(torch.int64)
+
+        def numer(d):
+            """The spec's numerator for a shift array, and the bf16 exp input."""
+            x = (-d.double() * sqk).float().to(BF16)
+            n = round_hafz(nmax * torch.exp(x.double())).clamp(0, nmax).to(torch.int64)
+            return x, n
+
+        dd = mm.unsqueeze(-1) - sc
+        xx, num = numer(dd)
         zz = num.sum(-1)
+        if a.corner:
+            # the true shift, which the AIR commits for *every* slot -- Freivalds is
+            # over the whole rectangle -- and which is negative wherever a masked
+            # key outscores the maximum the token was shifted by
+            ddc = mm.unsqueeze(-1) - scc
+            zero = torch.zeros_like(ddc)
+            xxc, numc = numer(torch.where(vis, ddc, zero))
+            numc = torch.where(vis, numc, torch.zeros_like(numc))
+            zz = zz + numc.sum(-1)
 
         write("qq.i16", m.rec.cols[f"L{L}.qq"].numpy().astype(np.int16), digests)
         write("kk.i16", m.rec.cols[f"L{L}.kk"][:, :P].numpy().astype(np.int16), digests)
@@ -210,6 +252,14 @@ if __name__ == "__main__":
         write("xx.u16", xx.contiguous().view(torch.int16).numpy().view(np.uint16), digests)
         write("mm.i32", mm.numpy().astype(np.int32), digests)
         write("zz.i32", zz.numpy().astype(np.int32), digests)
+        if a.corner:
+            write("kkc.i16", m.rec.cols[f"L{L}.kk"][:, P:].numpy().astype(np.int16), digests)
+            write("vvc.i8", m.rec.cols[f"L{L}.vv"][:, P:].numpy().astype(np.int8), digests)
+            write("scc.i32", scc.numpy().astype(np.int32), digests)
+            write("ddc.i32", ddc.numpy().astype(np.int32), digests)
+            write("numc.i32", numc.numpy().astype(np.int32), digests)
+            write("xxc.u16", xxc.contiguous().view(torch.int16).numpy().view(np.uint16),
+                  digests)
 
         # ---- the attention-output fold's scales ---------------------------------
         # The composed attnout region proves the *rectangle* sub-computation (the
@@ -236,6 +286,11 @@ if __name__ == "__main__":
         # the two are comparable; nothing else in the dump moves.
         out_rect = torch.einsum("hsc,hcd->hsd", num.double(),
                                 m.rec.cols[f"L{L}.vv"][:, :P].double())
+        if a.corner:
+            # with the corner proved, the AIR's attention output is the forward
+            # pass's: both halves, causally masked
+            out_rect = out_rect + torch.einsum("hsc,hcd->hsd", numc.double(),
+                                               m.rec.cols[f"L{L}.vv"][:, P:].double())
         real_rect = out_rect * s_v.double().reshape(nh, 1, hd) / zz.double().unsqueeze(-1)
         flat_rect = real_rect.transpose(0, 1).reshape(S, nh * hd)
         s_o_rect = pow2_ceil(flat_rect.abs().amax(-1, keepdim=True).clamp_min(1e-30) / 127.0)
@@ -321,14 +376,111 @@ if __name__ == "__main__":
                         inv_d=int(pat(m.inv_d.reshape(1))[0]),
                         reduce=spec.reduce, rms_norm_eps=float(m.eps.item()))
 
+        # ---- B10 step 4: the `lm_head` chunk -------------------------------------
+        # The head is a `Linear` like every other matmul, recorded under a bare
+        # `lm_head/...` key because it has no layer.  What is new here is the
+        # *token* side: the order key the argmax region compares, and which token
+        # each row emits.
+        head = {}
+        if a.head:
+            hacc = m.rec.cols["lm_head/acc"].to(torch.int64)          # (S, vocab)
+            hsx = m.rec.cols["lm_head/s_x"]
+            lin = m.head
+            # the files carry the *mat* name, so `Layer::load` reads the head with
+            # the same code every other matmul goes through
+            write("acc_lm_head.i32", hacc.numpy().astype(np.int32), digests)
+            write("qx_lm_head.i8", m.rec.cols["lm_head/qx"].numpy().astype(np.int8), digests)
+            write("qw_lm_head.i8", lin.qw.detach().to("cpu").numpy().astype(np.int8), digests)
+            jxh = pow2_exponent(hsx.reshape(-1))
+            jwh = pow2_exponent(lin.s_w.reshape(-1))
+            write("jx_lm_head.i32", jxh, digests)
+            write("jw_lm_head.i32", jwh, digests)
+            # and the bf16 scale pairs, which the chain rung reads and the
+            # power-of-two one ignores -- the dump does not know which it will be
+            # composed under, only which the spec says (`deq_variants`)
+            mxh, exh = bf16_parts(hsx.reshape(-1))
+            mwh, ewh = bf16_parts(lin.s_w.reshape(-1))
+            write("sx_lm_head.i32", np.stack([mxh, exh], -1), digests)
+            write("sw_lm_head.i32", np.stack([mwh, ewh], -1), digests)
+            # B1's own logits for these rows, and the **order key** the argmax
+            # compares: bf16 magnitude order is pattern order, but logits are
+            # signed, so negatives are flipped into a single ascending 16-bit key.
+            lg = logits.detach().to("cpu").to(BF16)
+            pat = lg.view(torch.int16).numpy().view(np.uint16).astype(np.int64)
+            sign, mag = pat >> 15, pat & 0x7FFF
+            key = np.where(sign == 1, 0x7FFF - mag, 0x8000 + mag)
+            write("key_head.u16", key.astype(np.uint16), digests)
+            tokh = lg.float().argmax(-1).numpy().astype(np.int64)
+            write("tok_head.i32", tokh.astype(np.int32), digests)
+
+            # Which tokens do these rows emit?  The last chunk covers positions
+            # `N - S .. N - 1`, and row `t` predicts the token at position
+            # `N - S + t + 1` -- so the rows emit the window *shifted by one* from
+            # the decoded tokens the layer rectangle is extracted at.  Both
+            # alignments are counted rather than assumed, because getting this
+            # wrong is silent: the head would prove a real argmax of the wrong row.
+            idn = ids.numpy().astype(np.int64)
+            n = len(idn)
+            nxt = int((tokh[:-1] == idn[n - S + 1:]).sum())     # row t -> ids[N-S+t+1]
+            same = int((tokh == idn[n - S:]).sum())             # row t -> ids[N-S+t]
+            accs["lm_head"] = dict(
+                n_in=int(lin.n_in), n_out=int(lin.n_out), tokens=int(hacc.shape[0]),
+                abs_max=int(hacc.abs().amax()), bits=bits_for(int(hacc.abs().amax())),
+                kmax_needed=max(0, bits_for(int(hacc.abs().amax())) - 9),
+                worst_case=int(127 * 127 * lin.n_in),
+                kmax_worst_case=max(0, bits_for(127 * 127 * lin.n_in) - 9),
+                scales_pow2=bool((jxh != -1000).all() and (jwh != -1000).all()),
+                zero_frac=float((hacc == 0).double().mean()),
+            )
+            head = dict(
+                vocab=int(lin.n_out), d_in=int(lin.n_in), tokens=int(hacc.shape[0]),
+                tied_embedding=bool(getattr(m, "tied", False)),
+                abs_max=int(hacc.abs().amax()), bits=bits_for(int(hacc.abs().amax())),
+                kmax_needed=max(0, bits_for(int(hacc.abs().amax())) - 9),
+                scales_pow2=bool((jxh != -1000).all() and (jwh != -1000).all()),
+                zero_frac=float((hacc == 0).double().mean()),
+                # the alignment, both ways round
+                emits_next_token=nxt, emits_next_of=int(S - 1),
+                emits_same_position=same, emits_same_of=int(S),
+                # what the tie has to carry (README 9.2 measured this separately)
+                ties=int((lg.float() == lg.float().amax(-1, keepdim=True)).sum(-1).gt(1).sum()),
+            )
+            print(f"  head  vocab {lin.n_out:,} |acc| <= {int(hacc.abs().amax()):,} "
+                  f"({head['bits']} bits) pow2 {head['scales_pow2']}")
+            print(f"        rows emit the *next* token on {nxt}/{S - 1}; "
+                  f"the same position on {same}/{S}")
+
         frac = (-torch.log2(sqk)).reshape(nh, -1)
         fpi = frac[:, 0].tolist()
+        # B10 step 3: the master table is sized by the largest shift the prover
+        # *looks up*, so the corner's visible half counts and its masked half does
+        # not -- a masked shift is taken against a maximum over keys it is not one
+        # of, can be negative, and is never a table row.
+        d_max = int(dd.max())
+        corner_stats = {}
+        if a.corner:
+            dvis = ddc[vis.expand_as(ddc)]
+            d_max = max(d_max, int(dvis.max()))
+            corner_stats = dict(
+                keys=int(S),
+                masked_frac=float((~vis).double().mean()),
+                d_max_visible=int(dvis.max()), d_min_visible=int(dvis.min()),
+                d_min_masked=int(ddc[~vis.expand_as(ddc)].min()),
+                numerator_zero_frac=float((numc[vis.expand_as(numc)] == 0).double().mean()),
+                z_corner_max=int(numc.sum(-1).max()),
+                z_corner_min=int(numc.sum(-1).min()),
+                # which half the row maximum came from, per token: the reason
+                # `Z >= nmax` is a statement about the total and not about a band
+                max_from_corner=int((scc.masked_fill(~vis, torch.iinfo(torch.int64).min)
+                                     .amax(-1) > sc.amax(-1)).sum()),
+                rows=int(nh * S))
         stats = dict(
             heads=nh, s=S, c=P, hd=hd, layer=L, spec=a.spec, qk_bits=list(spec.qk_bits),
             num_bits=spec.num_bits, model=MODEL,
-            d_max=int(dd.max()), d_bits=bits_for(dd.max()),
-            d_fits_16bit=bool(dd.max() < (1 << 16)),
-            z_max=int(zz.max()), z_worst_case=int(nmax * P),
+            corner=bool(a.corner), corner_stats=corner_stats,
+            d_max=d_max, d_bits=bits_for(d_max),
+            d_fits_16bit=bool(d_max < (1 << 16)),
+            z_max=int(zz.max()), z_worst_case=int(nmax * (P + S if a.corner else P)),
             numerator_zero_frac=float((num == 0).double().mean()),
             frac_per_head=fpi,
             frac_shared_per_head=bool(frac.shape[1] == 1 or bool((frac == frac[:, :1]).all())),
@@ -336,7 +488,7 @@ if __name__ == "__main__":
             frac_spread=float(max(fpi) - min(fpi)),
             frac_integer_separated=bool(
                 all(abs((max(fpi) - f) - round(max(fpi) - f)) < 1e-9 for f in fpi)),
-            master_table_bits=int(bits_for(dd.max()) + round(max(fpi) - min(fpi))),
+            master_table_bits=int(bits_for(d_max) + round(max(fpi) - min(fpi))),
             attn_out=dict(jo_min=int(jo.min()), jo_max=int(jo.max()),
                           jv_min=int(jv.min()), jv_max=int(jv.max()),
                           e_min=e_min, e_max=e_max,
@@ -354,13 +506,20 @@ if __name__ == "__main__":
             # all seven, which is the layout B8 licensed and the denominator
             # charges.  The witness says so, so a prover cannot compose it under
             # the other layout by accident.
-            deq_variants={n: ("pow2" if _pow2_mat(spec, n) else "chain")
-                          for n in mats},
+            # B10 step 4: `lm_head` is declared beside the seven, because the head
+            # chunk's dequant is 79% of it and the two rungs differ by 52% -- a
+            # prover must not have to guess (rule 1).  Note that `b10-design` puts
+            # it on the *chain*, while `b2/cost_model.py` prices the design B8
+            # licensed (power-of-two on the head, +0.02% at 8B).  That divergence
+            # is named in `B10.md` §3; the manifest states what the dump is.
+            deq_variants={**{n: ("pow2" if _pow2_mat(spec, n) else "chain") for n in mats},
+                          **({"lm_head": ("pow2" if _pow2_mat(spec, "lm_head") else "chain")}
+                             if a.head else {})},
             dequant_round=spec.dequant_round,
             clamped={k: dict(over=v[0], total=v[1], frac=v[0] / v[1])
                      for k, v in (m.clamped or {}).items()},
             ids_from=a.ids, slim=bool(SLIM),
-            glue=glue,
+            glue=glue, head=head,
             torch=torch.__version__, files=digests,
         )
         json.dump(stats, open(os.path.join(OUT, "manifest.json"), "w"), indent=1)
