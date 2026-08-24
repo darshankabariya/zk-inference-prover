@@ -42,16 +42,73 @@ impl MerkleOps<Blake2sMerkleHasher> for CudaBackend {
     }
 }
 
+/// B7a milestone 3: which M31 reduction the Merkle commit uses.
+///
+/// `B7_M3_MERKLE=0` the original host round trip, `=2` the standalone
+/// `reduce_hashes_to_m31` kernel, anything else (the default) the reduction
+/// fused into the commit kernel itself. All three produce the same layer, so
+/// the ablation is a run and not a rebuild.
+fn b7a_m3_merkle_mode() -> u8 {
+    static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("B7_M3_MERKLE").as_deref() {
+        Ok("0") => 0,
+        Ok("2") => 2,
+        _ => 1,
+    })
+}
+
 impl MerkleOps<Blake2sM31MerkleHasher> for CudaBackend {
     fn commit_on_layer(
         log_size: u32,
         prev_layer: Option<&Blake2sHashVec>,
         columns: &[&BaseFieldVec],
     ) -> Blake2sHashVec {
+        // B7a milestone 3, the fused path: one kernel commits the layer and
+        // reduces it, because the hash words are already in registers there.
+        if b7a_m3_merkle_mode() == 1 {
+            let size = 1usize << log_size;
+            let result = Blake2sHashVec::new_uninitialized(size);
+            unsafe {
+                let ptrs: Vec<*const u32> = columns.iter().map(|c| c.device_ptr).collect();
+                let device_ptrs = bindings::copy_device_pointer_vec_from_host_to_device(
+                    ptrs.as_ptr(),
+                    columns.len(),
+                );
+                match prev_layer {
+                    Some(prev) => bindings::commit_on_layer_with_previous_m31(
+                        size,
+                        columns.len(),
+                        device_ptrs,
+                        prev.device_ptr,
+                        result.device_ptr as *mut Blake2sHash,
+                    ),
+                    None => bindings::commit_on_first_layer_m31(
+                        size,
+                        columns.len(),
+                        device_ptrs,
+                        result.device_ptr as *mut Blake2sHash,
+                    ),
+                }
+                bindings::cuda_free_memory(device_ptrs as *const std::ffi::c_void);
+            }
+            return result;
+        }
         let result = <CudaBackend as MerkleOps<Blake2sMerkleHasher>>::commit_on_layer(
             log_size, prev_layer, columns,
         );
-        // Apply M31 reduction to each hash on CPU (result is copied back)
+        // `=2`: the standalone reduce kernel, which is what round 2 measured. The
+        // `=0` path below is the original host round trip -- 6.44 GB over the
+        // proof at the B6.5 design point, down at 2.5 GB/s, a scalar loop, and
+        // back up again.
+        if b7a_m3_merkle_mode() == 2 {
+            unsafe {
+                bindings::reduce_hashes_to_m31(
+                    result.device_ptr as *mut Blake2sHash,
+                    result.size as u32,
+                );
+            }
+            return result;
+        }
         let mut hashes = result.to_vec();
         for hash in hashes.iter_mut() {
             hash.0 = reduce_to_m31(hash.0);

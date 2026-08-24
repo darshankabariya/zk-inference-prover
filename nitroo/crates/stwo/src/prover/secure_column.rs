@@ -24,6 +24,25 @@ impl<B: ColumnOps<BaseField>> SecureColumnByCoords<B> {
         SecureField::from_m31_array(std::array::from_fn(|i| self.columns[i].at(index)))
     }
 
+    /// B7a milestone 3: read many indices in one call.
+    ///
+    /// `at` is four device round-trips per index on a GPU backend. This goes
+    /// through `Column::batch_at_multi`, which the CudaBackend overrides with a
+    /// single gather kernel and one copy; the default implementation is the
+    /// same loop as before, so CPU and SIMD are unchanged.
+    pub fn at_batch(&self, indices: &[usize]) -> Vec<SecureField> {
+        let cols: [&Col<B, BaseField>; SECURE_EXTENSION_DEGREE] =
+            std::array::from_fn(|i| &self.columns[i]);
+        let flat = Col::<B, BaseField>::batch_at_multi(&cols, indices);
+        (0..indices.len())
+            .map(|j| {
+                SecureField::from_m31_array(std::array::from_fn(|i| {
+                    flat[j * SECURE_EXTENSION_DEGREE + i]
+                }))
+            })
+            .collect()
+    }
+
     pub fn zeros(len: usize) -> Self {
         Self {
             columns: std::array::from_fn(|_| Col::<B, BaseField>::zeros(len)),

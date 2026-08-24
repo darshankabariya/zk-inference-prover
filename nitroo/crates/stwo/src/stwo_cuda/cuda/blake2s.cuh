@@ -12,6 +12,17 @@ void commit_on_first_layer(uint32_t size, uint32_t number_of_columns, uint32_t *
 extern "C"
 void commit_on_layer_with_previous(uint32_t size, uint32_t number_of_columns, uint32_t **columns, Blake2sHash* previous_layer, Blake2sHash* result);
 
+// B7a milestone 3: reduce a committed layer mod 2^31-1 in place, on the device.
+extern "C"
+void reduce_hashes_to_m31(Blake2sHash *hashes, uint32_t size);
+
+// B7a milestone 3: commit a layer with the M31 reduction fused into the kernel.
+extern "C"
+void commit_on_first_layer_m31(uint32_t size, uint32_t number_of_columns, uint32_t **columns, Blake2sHash* result);
+
+extern "C"
+void commit_on_layer_with_previous_m31(uint32_t size, uint32_t number_of_columns, uint32_t **columns, Blake2sHash* previous_layer, Blake2sHash* result);
+
 extern "C"
 void blake2s_lifted_build_next_layer(
     int size, Blake2sHash *prev_layer, Blake2sHash *result, bool is_m31_output

@@ -119,6 +119,14 @@ pub trait FrameworkEval {
              Override this method to enable CUDA constraint evaluation."
         )
     }
+
+    /// B7a 2b: the flat parameter block the CUDA kernel should be handed instead
+    /// of `&self`'s raw bytes. `None` -- the default -- keeps the fork's original
+    /// behaviour, which is correct for a POD eval and meaningless for one holding
+    /// `String` or `Vec`.
+    fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 #[repr(C)]

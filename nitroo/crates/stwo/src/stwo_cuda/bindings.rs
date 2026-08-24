@@ -274,6 +274,25 @@ extern "C" {
         result: *mut Blake2sHash,
     );
 
+    /// B7a milestone 3: in-place M31 reduction of a committed Merkle layer.
+    pub fn reduce_hashes_to_m31(hashes: *mut Blake2sHash, size: u32);
+
+    /// B7a milestone 3: the two commits with the M31 reduction fused in.
+    pub fn commit_on_first_layer_m31(
+        size: usize,
+        amount_of_columns: usize,
+        columns: *const *const u32,
+        result: *mut Blake2sHash,
+    );
+
+    pub fn commit_on_layer_with_previous_m31(
+        size: usize,
+        amount_of_columns: usize,
+        columns: *const *const u32,
+        previous_layer: *const Blake2sHash,
+        result: *mut Blake2sHash,
+    );
+
     pub fn copy_blake_2s_hash_vec_from_host_to_device(
         from: *const Blake2sHash,
         size: usize,

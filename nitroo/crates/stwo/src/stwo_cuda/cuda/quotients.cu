@@ -192,14 +192,24 @@ __global__ void accumulate_numerators_kernel(
     int num_coeffs,
     m31 *result_0, m31 *result_1, m31 *result_2, m31 *result_3
 ) {
+    // B7a milestone 3: sum(b_j) is the same QM31 for every row, so it leaves the
+    // inner loop and one thread a block computes it. See gpu/m3_fork.py.
+    __shared__ qm31 b7a_b_sum;
+    if (threadIdx.x == 0) {
+        qm31 s = qm31{cm31{m31{0}, m31{0}}, cm31{m31{0}, m31{0}}};
+        for (int j = 0; j < num_coeffs; j++) s = add(s, line_coeffs_b[j]);
+        b7a_b_sum = s;
+    }
+    __syncthreads();
+
     int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= size) return;
 
     qm31 acc = qm31{cm31{m31{0}, m31{0}}, cm31{m31{0}, m31{0}}};
     for (int j = 0; j < num_coeffs; j++) {
-        qm31 value = mul_by_scalar(line_coeffs_c[j], columns[column_indices[j]][row]);
-        acc = add(acc, sub(value, line_coeffs_b[j]));
+        acc = add(acc, mul_by_scalar(line_coeffs_c[j], columns[column_indices[j]][row]));
     }
+    acc = sub(acc, b7a_b_sum);
     result_0[row] = acc.a.a;
     result_1[row] = acc.a.b;
     result_2[row] = acc.b.a;
@@ -237,6 +247,18 @@ void accumulate_numerators_batch(
 // Kernel for compute_quotients_and_combine: for each row, compute
 //   quotient[row] = sum over accumulations of:
 //     (partial_numerator[lifted_idx] - first_linear_term_acc * domain_point.y) * den_inv
+// B7a milestone 3: how many denominators share one inversion. Montgomery's
+// trick cuts the multiply count per accumulation from 63 to 37 at chunk 8 --
+// and **measured slower**, 14.32 ms to 15.71 ms (17.5). The arrays do stay in
+// registers (112 a thread, no spill), but 112 registers means 256 threads a
+// block instead of 1024, which halves occupancy from 1024 to 512 threads an SM;
+// this kernel reads four columns per accumulation at a strided `lifted_idx` and
+// loses more to that latency than it gains in arithmetic. So the default is 1 --
+// the original kernel, exactly -- and 8 is kept because the measurement is the
+// point: it is the evidence that the quotient combine is not purely
+// arithmetic-bound.
+#define B7A_INV_CHUNK 1
+
 __global__ void compute_quotients_and_combine_kernel(
     int max_size, int max_log_size,
     uint32_t half_coset_initial_index, uint32_t half_coset_step_size,
@@ -255,33 +277,60 @@ __global__ void compute_quotients_and_combine_kernel(
 
     qm31 quotient = qm31{cm31{m31{0}, m31{0}}, cm31{m31{0}, m31{0}}};
 
-    for (int a = 0; a < num_accumulations; a++) {
-        // Compute denominator inverse
-        cm31 prx = sample_points[a].x.a;
-        cm31 pry = sample_points[a].y.a;
-        cm31 pix = sample_points[a].x.b;
-        cm31 piy = sample_points[a].y.b;
+    // B7a milestone 3: Montgomery's trick over a chunk of accumulations, so the
+    // loop pays one M31 inversion per chunk instead of one per accumulation.
+    // Both inner loops run to the compile-time bound with an `i < n` guard, so
+    // ptxas unrolls them and the two arrays stay in registers instead of
+    // spilling to local memory. B7A_INV_CHUNK=1 reproduces the original kernel
+    // exactly and is the ablation; see gpu/m3_fork.py.
+    for (int a0 = 0; a0 < num_accumulations; a0 += B7A_INV_CHUNK) {
+        int n = num_accumulations - a0;
+        if (n > B7A_INV_CHUNK) n = B7A_INV_CHUNK;
 
-        cm31 first_sub = {sub(prx.a, domain_point.x), prx.b};
-        cm31 second_sub = {sub(pry.a, domain_point.y), pry.b};
-        cm31 den_inv = inv(sub(mul(first_sub, piy), mul(second_sub, pix)));
+        cm31 den[B7A_INV_CHUNK];
+        cm31 pre[B7A_INV_CHUNK];
+        cm31 last_pre = {m31{1}, m31{0}};
+#pragma unroll
+        for (int i = 0; i < B7A_INV_CHUNK; i++) {
+            if (i < n) {
+                int aa = a0 + i;
+                cm31 prx = sample_points[aa].x.a;
+                cm31 pry = sample_points[aa].y.a;
+                cm31 pix = sample_points[aa].x.b;
+                cm31 piy = sample_points[aa].y.b;
+                cm31 first_sub = {sub(prx.a, domain_point.x), prx.b};
+                cm31 second_sub = {sub(pry.a, domain_point.y), pry.b};
+                den[i] = sub(mul(first_sub, piy), mul(second_sub, pix));
+                pre[i] = (i == 0) ? den[i] : mul(last_pre, den[i]);
+                last_pre = pre[i];
+            }
+        }
+        cm31 run = inv(last_pre);
+#pragma unroll
+        for (int i = B7A_INV_CHUNK - 1; i >= 0; i--) {
+            if (i < n) {
+                cm31 den_inv = (i == 0) ? run : mul(run, pre[i - 1]);
+                if (i > 0) run = mul(run, den[i]);
 
-        // Lifting index
-        int log_ratio = max_log_size - acc_log_sizes[a];
-        int lifted_idx = (row >> (log_ratio + 1) << 1) + (row & 1);
+                int a = a0 + i;
+                // Lifting index
+                int log_ratio = max_log_size - acc_log_sizes[a];
+                int lifted_idx = (row >> (log_ratio + 1) << 1) + (row & 1);
 
-        // Read partial numerator
-        int base = a * 4;
-        qm31 partial = {
-            cm31{acc_partial_columns[base + 0][lifted_idx], acc_partial_columns[base + 1][lifted_idx]},
-            cm31{acc_partial_columns[base + 2][lifted_idx], acc_partial_columns[base + 3][lifted_idx]}
-        };
+                // Read partial numerator
+                int base = a * 4;
+                qm31 partial = {
+                    cm31{acc_partial_columns[base + 0][lifted_idx], acc_partial_columns[base + 1][lifted_idx]},
+                    cm31{acc_partial_columns[base + 2][lifted_idx], acc_partial_columns[base + 3][lifted_idx]}
+                };
 
-        // full_numerator = partial - first_linear_term_acc * domain_point.y
-        qm31 full_num = sub(partial, mul_by_scalar(first_linear_term_accs[a], domain_point.y));
+                // full_numerator = partial - first_linear_term_acc * domain_point.y
+                qm31 full_num = sub(partial, mul_by_scalar(first_linear_term_accs[a], domain_point.y));
 
-        // quotient += full_numerator * den_inv (QM31 * CM31)
-        quotient = add(quotient, mul(full_num, den_inv));
+                // quotient += full_numerator * den_inv (QM31 * CM31)
+                quotient = add(quotient, mul(full_num, den_inv));
+            }
+        }
     }
 
     result_0[row] = quotient.a.a;
@@ -305,7 +354,8 @@ void compute_quotients_and_combine(
     qm31 *first_linear_term_accs_device = clone_to_device<qm31>(first_linear_term_accs_host, num_accumulations);
     secure_field_point *sample_points_device = clone_to_device<secure_field_point>(sample_points_host, num_accumulations);
 
-    int block_dim = 1024;
+    // B7a milestone 3: 256, not 1024 -- see B7A_INV_CHUNK above.
+    int block_dim = B7A_INV_CHUNK > 1 ? 256 : 1024;
     int num_blocks = (max_size + block_dim - 1) / block_dim;
     compute_quotients_and_combine_kernel<<<num_blocks, block_dim>>>(
         max_size, max_log_size,

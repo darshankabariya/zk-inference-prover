@@ -25,6 +25,15 @@ use crate::prover::secure_column::SecureColumnByCoords;
 use crate::prover::vcs::ops::MerkleOps;
 use crate::prover::vcs::prover::MerkleProver;
 
+
+
+/// B7a milestone 3: `B7_M3_FRIGATHER=0` restores the per-position device reads
+/// this replaced, so the ablation is a run and not a rebuild.
+fn b7a_m3_fri_gather() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("B7_M3_FRIGATHER").map(|v| v != "0").unwrap_or(true))
+}
+
 pub trait FriOps: ColumnOps<BaseField> + PolyOps + Sized + ColumnOps<SecureField> {
     /// Folds a degree `d` polynomial into a degree `d/2` polynomial.
     ///
@@ -385,9 +394,13 @@ fn compute_decommitment_positions_and_witness_evals(
     query_positions: &[usize],
     fold_step: u32,
 ) -> (Vec<usize>, Vec<QM31>, HashMap<usize, QM31>) {
+    // B7a milestone 3: the positions first, then *one* gather for all of them.
+    // `column.at(p)` is four separate 4-byte device-to-host copies on the
+    // CudaBackend, and this loop ran 14,134 of them in the last 161 ms of the
+    // proof. `batch_at_multi` is the fork's own batched path, already used by
+    // `vcs/prover.rs`. Order, values and the resulting proof are unchanged.
     let mut decommitment_positions = Vec::new();
-    let mut witness_evals = Vec::new();
-    let mut value_map = HashMap::new();
+    let mut is_witness = Vec::new();
 
     // Group queries by the folding coset they reside in.
     for subset_queries in query_positions.chunk_by(|a, b| a >> fold_step == b >> fold_step) {
@@ -398,14 +411,24 @@ fn compute_decommitment_positions_and_witness_evals(
         for position in subset_decommitment_positions {
             // Add decommitment position.
             decommitment_positions.push(position);
-
-            let eval = column.at(position);
-            value_map.insert(position, eval);
-
             // Only add evals the verifier can't calculate.
-            if subset_queries_iter.next_if_eq(&&position).is_none() {
-                witness_evals.push(eval);
-            }
+            is_witness.push(subset_queries_iter.next_if_eq(&&position).is_none());
+        }
+    }
+
+    // B7_M3_FRIGATHER=0 restores the per-position reads, for the ablation.
+    let evals: Vec<QM31> = if b7a_m3_fri_gather() {
+        column.at_batch(&decommitment_positions)
+    } else {
+        decommitment_positions.iter().map(|&p| column.at(p)).collect()
+    };
+
+    let mut witness_evals = Vec::new();
+    let mut value_map = HashMap::new();
+    for (i, (&position, &eval)) in decommitment_positions.iter().zip(evals.iter()).enumerate() {
+        value_map.insert(position, eval);
+        if is_witness[i] {
+            witness_evals.push(eval);
         }
     }
 

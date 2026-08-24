@@ -133,11 +133,23 @@ __device__ void blake2s_finalize(Blake2sState* S, Blake2sHash* out) {
 }
 
 
+// B7a milestone 3: `is_m31_output` fuses the mod-2^31-1 reduction into the
+// commit, where the words are already in registers. `false` is the original
+// behaviour and what every non-M31 caller passes.
+__device__ __forceinline__ void b7a_reduce_hash_m31(Blake2sHash *h) {
+    const uint32_t P = 0x7FFFFFFFu;
+    for (int w = 0; w < 8; w++) {
+        uint64_t val = (uint64_t) h->s[w];
+        h->s[w] = (uint32_t) (((((val >> 31) + val + 1) >> 31) + val) & P);
+    }
+}
+
 __global__ void commit_on_first_layer_in_gpu(
     uint32_t size,
     uint32_t number_of_columns,
     uint32_t **data,
-    Blake2sHash *result
+    Blake2sHash *result,
+    bool is_m31_output
 ) {
     uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= size) return;
@@ -154,13 +166,15 @@ __global__ void commit_on_first_layer_in_gpu(
         blake2s_update(&state, bytes, sizeof(bytes));
     }
     blake2s_finalize(&state, &result[index]);
+    if (is_m31_output) b7a_reduce_hash_m31(&result[index]);
 }
 __global__ void commit_on_layer_using_previous_in_gpu(
     uint32_t size,
     uint32_t number_of_columns,
     uint32_t **data,
     Blake2sHash *prev_layer,
-    Blake2sHash *result
+    Blake2sHash *result,
+    bool is_m31_output
 ) {
     uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= size) return;
@@ -200,6 +214,7 @@ __global__ void commit_on_layer_using_previous_in_gpu(
         blake2s_update(&state, bytes, sizeof(bytes));
     }
     blake2s_finalize(&state, &result[index]);
+    if (is_m31_output) b7a_reduce_hash_m31(&result[index]);
 }
 
 // ============================================================================
@@ -465,7 +480,7 @@ void commit_on_first_layer(
     Blake2sHash* result
 ) {
     commit_on_first_layer_in_gpu<<<number_of_blocks_for(size), BLOCK_SIZE>>>(
-        size, number_of_columns, device_columns, result);
+        size, number_of_columns, device_columns, result, false);
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
     // cudaDeviceSynchronize removed: stream-ordered ops handle dependencies
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
@@ -478,8 +493,54 @@ void commit_on_layer_with_previous(
     Blake2sHash* result
 ) {
     commit_on_layer_using_previous_in_gpu<<<number_of_blocks_for(size), BLOCK_SIZE>>>(
-        size, number_of_columns, device_columns, previous_layer, result);
+        size, number_of_columns, device_columns, previous_layer, result, false);
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
     // cudaDeviceSynchronize removed: stream-ordered ops handle dependencies
+    ASSERT_CUDA_SUCCESS(cudaGetLastError());
+}
+
+// ============================================================================
+// B7a milestone 3: the M31 reduction of a committed layer, in place, on the
+// device. Same formula as `M31::reduce` and as the lifted path's
+// `is_m31_output` branch above; what it replaces is a full layer copied to the
+// host, reduced in a scalar loop and copied back.
+// ============================================================================
+__global__ void reduce_hashes_to_m31_kernel(Blake2sHash *hashes, uint32_t size) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= size) return;
+    const uint32_t P = 0x7FFFFFFF;
+    for (int w = 0; w < 8; w++) {
+        uint64_t val = (uint64_t) hashes[i].s[w];
+        hashes[i].s[w] = (uint32_t) (((((val >> 31) + val + 1) >> 31) + val) & P);
+    }
+}
+
+void reduce_hashes_to_m31(Blake2sHash *hashes, uint32_t size) {
+    if (size == 0) return;
+    reduce_hashes_to_m31_kernel<<<number_of_blocks_for(size), BLOCK_SIZE>>>(hashes, size);
+    ASSERT_CUDA_SUCCESS(cudaGetLastError());
+}
+
+// B7a milestone 3: the same two commits with the reduction fused in.
+void commit_on_first_layer_m31(
+    uint32_t size,
+    uint32_t number_of_columns,
+    uint32_t **device_columns,
+    Blake2sHash* result
+) {
+    commit_on_first_layer_in_gpu<<<number_of_blocks_for(size), BLOCK_SIZE>>>(
+        size, number_of_columns, device_columns, result, true);
+    ASSERT_CUDA_SUCCESS(cudaGetLastError());
+}
+
+void commit_on_layer_with_previous_m31(
+    uint32_t size,
+    uint32_t number_of_columns,
+    uint32_t **device_columns,
+    Blake2sHash* previous_layer,
+    Blake2sHash* result
+) {
+    commit_on_layer_using_previous_in_gpu<<<number_of_blocks_for(size), BLOCK_SIZE>>>(
+        size, number_of_columns, device_columns, previous_layer, result, true);
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
 }

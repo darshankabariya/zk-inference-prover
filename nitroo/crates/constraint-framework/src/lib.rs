@@ -301,6 +301,22 @@ impl<'a, F: Clone, EF: RelationEFTraitBound<F>, R: Relation<F, EF>> RelationEntr
     }
 }
 
+impl<'a, F: Clone, EF: RelationEFTraitBound<F>, R: Relation<F, EF>> RelationEntry<'a, F, EF, R> {
+    /// B7a 2b: read access to the entry, so a generator can interrogate the
+    /// relation it enters. `combine` is linear in `values`, so an evaluator that
+    /// can reach the relation can recover `z` and every `alpha_i` from it
+    /// without a per-component accessor. Additive; nothing else changes.
+    pub const fn relation(&self) -> &'a R {
+        self.relation
+    }
+    pub const fn values(&self) -> &'a [F] {
+        self.values
+    }
+    pub const fn multiplicity(&self) -> &EF {
+        &self.multiplicity
+    }
+}
+
 #[macro_export]
 macro_rules! relation {
     ($name:tt, $size:tt) => {

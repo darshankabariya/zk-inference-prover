@@ -409,10 +409,15 @@ impl<E: FrameworkEval + Sync> ComponentProver<CudaBackend> for FrameworkComponen
             // Prepend eval_id (FNV1a hash of component name) before the Eval struct data.
             // The CUDA dispatcher reads eval_id from offset 0 to select the correct kernel.
             let eval_id = fnv1a_eval_id_gen(self.eval.cuda_eval_name());
-            let eval_bytes = std::slice::from_raw_parts(
-                &self.eval as *const _ as *const u8,
-                std::mem::size_of::<E>(),
-            );
+            // B7a 2b: a non-POD eval supplies its own flat blob.
+            let blob = self.eval.cuda_eval_blob();
+            let eval_bytes: &[u8] = match &blob {
+                Some(b) => b.as_slice(),
+                None => std::slice::from_raw_parts(
+                    &self.eval as *const _ as *const u8,
+                    std::mem::size_of::<E>(),
+                ),
+            };
             let mut cuda_eval_buffer = Vec::with_capacity(4 + eval_bytes.len());
             cuda_eval_buffer.extend_from_slice(&eval_id.to_ne_bytes());
             cuda_eval_buffer.extend_from_slice(eval_bytes);
