@@ -75,30 +75,37 @@ box facts recorded the hard way, both in `briefs/a-h200.md`:
   it with a root symlink to the tenant's CUDA 12.9 install.
 - nvcc 12.9 needs gcc 14 or older; `CUDAHOSTCXX` must point at one.
 
-## What is left: the device chain (performance, not correctness)
+## The device chain is in (milestones 2b–5)
 
-Milestones 2b–5 move constraint evaluation, generation, tables, accumulators
-and preprocessed columns onto the device. Their content still lives in the
-frozen patch scripts under `experiments/b7/gpu/` (see the README there) and
-has to be brought into this crate as commits, milestone by milestone, with the
-digest checked after each. The audit of what applies cleanly and what drifted
-is in `briefs/a-h200.md` ("the chain, repaired as far as it can be"): about
-127 edits apply as written, and the genuine work is roughly 23 anchors in
-m4e–m4h plus re-deriving the `B7_M4_SCAN` fast path against today's `at_opt`
-layout.
+The whole B7 chain — generated constraint kernels' plumbing (2b), the device
+Merkle and FRI work's crate side (3), instrumentation and the by-reference
+tree lists (4), the device fills, tables, accumulators and preprocessed
+columns (4b–4h), and the chunked loop with its preprocessed-tree cache (5) —
+now lives in this crate as source, replayed against today's code and folded
+in on 2026-08-24. The device paths sit behind the same runtime switches as
+before (`B7_M4_FILL`, `B7_M4_WFILL`, `B7_M4_TABDEV`, `B7_M4_ACC`,
+`B7_M4_PRE`, `B7_M5_*`); with everything off, both arms walk the reference
+path. Mode 2 of each switch builds host and device sides and asserts every
+cell — that is the per-family check the digest then seals.
 
-One design decision from that work is already made and should be kept when
-m4d lands: **corner bands decline the device weight-fill path** —
+Two things the chain does *not* include, on purpose: the `B7_M4_SCAN`
+parallel-carry fast path (its arithmetic predates `at_opt` and is wrong under
+it; no recorded number ever used it) and `b9_diag`'s off-table diagnostics (a
+settled question). Details in `experiments/b7/gpu/README.md`.
 
-```rust
-let m4d = if with_rows { crate::util::m4b_mode("B7_M4_WFILL") } else { 0 };
-```
+**What still needs a box session:** the per-shape kernel *emit* —
+`b65 cudagen` / `b65 genemit` plus the two installers
+(`experiments/b7/gpu/m2b_kernels.py`, `m4b_kernels.py`) — has not been run
+for any shape against the vendored fork, so constraint evaluation takes the
+fork's scalar CPU fallback and `B7_M4_TABDEV`'s device route for the shared
+tables would abort on the stand-in dispatcher. Emitting for the current
+shapes (including the three new families) is stream B's session.
 
-because `devwfill.rs` has no notion of the corner/prefix distinction, and a
-guessed kernel there would file a silently wrong fill. The cells this gives up
-are only the S x S corner; the C − S prefix band still fills on the device.
-Teaching the fill the distinction is a performance question, not a
-correctness one.
+One design decision to keep: **corner bands decline every device path** —
+the fill (`!a.corner` threads through `commit_base_any` as `with_rows`), the
+preprocessed columns, and the per-token accumulators. The device kernels have
+no notion of the corner/prefix distinction, and a guessed kernel would file a
+silently wrong fill; the cells given up are only the S x S corner.
 
 ## What a corner band is
 
