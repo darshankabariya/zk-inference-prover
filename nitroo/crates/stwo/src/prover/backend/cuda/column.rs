@@ -191,6 +191,7 @@ impl Column<Blake2sHash> for Blake2sHashVec {
         Self {
             device_ptr: bindings::cuda_malloc_blake_2s_hash(len),
             size: len,
+            owns_memory: true,
         }
     }
 

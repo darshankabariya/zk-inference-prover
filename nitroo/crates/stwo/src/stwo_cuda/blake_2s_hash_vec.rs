@@ -6,6 +6,8 @@ use crate::core::vcs::blake2_hash::Blake2sHash;
 pub struct Blake2sHashVec {
     pub(crate) device_ptr: *const Blake2sHash,
     pub(crate) size: usize,
+    /// B7b: false for a view of another vector's memory, which is never freed here
+    pub(crate) owns_memory: bool,
 }
 
 // SAFETY: CUDA device pointers are safe to send/share between threads.
@@ -16,7 +18,18 @@ unsafe impl Sync for Blake2sHashVec {}
 
 impl Blake2sHashVec {
     pub fn new(device_ptr: *const Blake2sHash, size: usize) -> Self {
-        Self { device_ptr, size }
+        Self { device_ptr, size, owns_memory: true }
+    }
+
+    /// B7b: a vector over memory something else owns. The caller keeps that
+    /// owner alive for as long as the view is used.
+    pub fn from_borrowed_ptr(device_ptr: *const Blake2sHash, size: usize) -> Self {
+        Self { device_ptr, size, owns_memory: false }
+    }
+
+    /// B7b: a view of this vector's memory.
+    pub fn borrowed_view(&self) -> Self {
+        Self::from_borrowed_ptr(self.device_ptr, self.size)
     }
 
     pub fn from_vec(host_array: Vec<Blake2sHash>) -> Self {
@@ -139,6 +152,8 @@ impl Clone for Blake2sHashVec {
 
 impl Drop for Blake2sHashVec {
     fn drop(&mut self) {
-        unsafe { bindings::cuda_free_memory(self.device_ptr as *const c_void) };
+        if self.owns_memory {
+            unsafe { bindings::cuda_free_memory(self.device_ptr as *const c_void) };
+        }
     }
 }
