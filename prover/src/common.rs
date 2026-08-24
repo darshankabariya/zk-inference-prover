@@ -32,7 +32,9 @@ use stwo::core::utils::bit_reverse_coset_to_circle_domain_order;
 use stwo::core::vcs::blake2_merkle::Blake2sM31MerkleChannel;
 use stwo::core::verifier::verify;
 use stwo::prover::backend::simd::SimdBackend;
+use rayon::prelude::*;
 use stwo::prover::backend::simd::column::BaseColumn;
+use stwo::prover::backend::simd::m31::{LOG_N_LANES, N_LANES, PackedM31};
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::{CircleEvaluation, PolyOps as _};
 use stwo::prover::poly::twiddles::TwiddleTree;
@@ -40,15 +42,6 @@ use stwo::prover::{CommitmentSchemeProver, ComponentProver, prove};
 
 use crate::spans;
 use crate::util::{LOG_BLOWUP, peak_rss_bytes, pcs_config, rss_bytes};
-
-/// The backend the session commits and proves on. With the `cuda` feature this
-/// is the fork's CudaBackend, so commitment and proving run on the device;
-/// without it the same code runs on SimdBackend, which is the reference build
-/// every digest comparison is made against.
-#[cfg(feature = "cuda")]
-pub type Backend = stwo::prover::backend::cuda::CudaBackend;
-#[cfg(not(feature = "cuda"))]
-pub type Backend = SimdBackend;
 
 pub type Eval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
 pub type Proof = StarkProof<<Blake2sM31MerkleChannel as stwo::core::channel::MerkleChannel>::H>;
@@ -73,10 +66,74 @@ pub fn pad_log(natural: u32, log_rows: u32) -> u32 {
     natural.max(log_rows)
 }
 
+/// The permutation `bit_reverse_coset_to_circle_domain_order` applies, in
+/// closed form rather than as a swap loop.
+///
+/// stwo's version is `for i { j = f(i); if j > i { swap(i, j) } }`, which is
+/// only a correct application of `f` because `f` is an involution -- so out of
+/// place it is exactly `dst[i] = src[f(i)]`, with every element independent.
+#[inline]
+fn m4_perm(i: usize, log_n: u32) -> usize {
+    let n = 1usize << log_n;
+    let c = if i % 2 == 0 { i / 2 } else { (2 * n - i - 1) / 2 };
+    c.reverse_bits() >> (usize::BITS - log_n)
+}
+
+/// Assert the closed form against stwo's own function, once. Applying the swap
+/// loop to the identity vector yields `f` itself, so this is a direct
+/// comparison and not a spot check.
+fn m4_perm_selfcheck() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        for log_n in 1..=14u32 {
+            let n = 1usize << log_n;
+            let mut v: Vec<u32> = (0..n as u32).collect();
+            bit_reverse_coset_to_circle_domain_order(&mut v);
+            for (i, got) in v.iter().enumerate() {
+                assert_eq!(*got as usize, m4_perm(i, log_n),
+                           "m4_perm disagrees with stwo at log_n={log_n}, i={i}");
+            }
+        }
+    });
+}
+
 pub fn eval_of(log_size: u32, mut vals: Vec<M31>) -> Eval {
     assert_eq!(vals.len(), 1 << log_size);
+    // B7a milestone 4 (18.3): the shuffle and the repack as one parallel
+    // out-of-place gather straight into the packed lanes. `B7_M4_PAREVAL=0`
+    // restores the serial in-place pair below.
+    if crate::util::m4_switch("B7_M4_PAREVAL")
+        && log_size >= LOG_N_LANES.max(crate::util::m4_parmin())
+    {
+        m4_perm_selfcheck();
+        let t = std::time::Instant::now();
+        let n_vec = 1usize << (log_size - LOG_N_LANES);
+        let src = &vals[..];
+        let data: Vec<PackedM31> = (0..n_vec)
+            .into_par_iter()
+            .map(|vr| {
+                let mut lanes = [M31::zero(); N_LANES];
+                for (l, x) in lanes.iter_mut().enumerate() {
+                    *x = src[m4_perm((vr << LOG_N_LANES) | l, log_size)];
+                }
+                PackedM31::from_array(lanes)
+            })
+            .collect();
+        crate::util::m4_add("evalof/fused", t.elapsed().as_secs_f64());
+        return CircleEvaluation::new(
+            CanonicCoset::new(log_size).circle_domain(),
+            BaseColumn::from_simd(data),
+        );
+    }
+    // B7a milestone 4 (18.2): a column's trip from a `Vec<M31>` to a committed
+    // column is two passes, and they are timed apart.
+    let t = std::time::Instant::now();
     bit_reverse_coset_to_circle_domain_order(&mut vals);
-    CircleEvaluation::new(CanonicCoset::new(log_size).circle_domain(), BaseColumn::from_iter(vals))
+    crate::util::m4_add("evalof/bitrev", t.elapsed().as_secs_f64());
+    let t = std::time::Instant::now();
+    let col = BaseColumn::from_iter(vals);
+    crate::util::m4_add("evalof/pack", t.elapsed().as_secs_f64());
+    CircleEvaluation::new(CanonicCoset::new(log_size).circle_domain(), col)
 }
 
 pub fn m31_u32(v: u32) -> M31 {
@@ -98,10 +155,20 @@ pub enum Op {
     Mix(Vec<SecureField>),
 }
 
+/// B7b (README 26): the crate's prover backend, for the tree cache and the
+/// session. With the `cuda` feature this is the fork's CudaBackend, so
+/// commitment and proving run on the device; without it the same code runs on
+/// SimdBackend, which is the reference build every digest comparison is made
+/// against.
+#[cfg(feature = "cuda")]
+pub type PcsB = stwo::prover::backend::cuda::CudaBackend;
+#[cfg(not(feature = "cuda"))]
+pub type PcsB = SimdBackend;
+
 pub struct Session<'a> {
     pub config: PcsConfig,
     pub channel: Blake2sM31Channel,
-    pub cs: CommitmentSchemeProver<'a, Backend, Blake2sM31MerkleChannel>,
+    pub cs: CommitmentSchemeProver<'a, PcsB, Blake2sM31MerkleChannel>,
     pub ops: Vec<Op>,
     pub tree_cols: Vec<usize>,
     pub tree_cells: Vec<usize>,
@@ -109,24 +176,30 @@ pub struct Session<'a> {
     started: Instant,
 }
 
-pub fn twiddles(max_log: u32) -> TwiddleTree<Backend> {
-    Backend::precompute_twiddles(
+pub fn twiddles(max_log: u32) -> TwiddleTree<PcsB> {
+    PcsB::precompute_twiddles(
         CanonicCoset::new(max_log + 1 + LOG_BLOWUP).circle_domain().half_coset,
     )
 }
 
 impl<'a> Session<'a> {
-    pub fn new(tw: &'a TwiddleTree<Backend>) -> Self {
+    pub fn new(tw: &'a TwiddleTree<PcsB>) -> Self {
         let config = pcs_config();
         let mut channel = Blake2sM31Channel::default();
         config.mix_into(&mut channel);
         spans::reset();
-        #[cfg(feature = "cuda")]
-        crate::device::reset();
+        // B7a milestone 3: keep the interpolated coefficients, which is what
+        // routes OODS through the fork's batched `batch_eval_at_point` instead
+        // of one barycentric kernel launch per (column, point). See
+        // gpu/m3_patch.py; B7_M3_COEFFS=0 restores the old path.
+        let mut cs = CommitmentSchemeProver::<PcsB, Blake2sM31MerkleChannel>::new(config, tw);
+        if crate::util::m3_store_coeffs() {
+            cs.set_store_polynomials_coefficients();
+        }
         Self {
             config,
             channel,
-            cs: CommitmentSchemeProver::<Backend, Blake2sM31MerkleChannel>::new(config, tw),
+            cs,
             ops: vec![],
             tree_cols: vec![],
             tree_cells: vec![],
@@ -147,6 +220,78 @@ impl<'a> Session<'a> {
         #[cfg(feature = "cuda")]
         let evals = crate::device::upload_all(evals);
         tb.extend_evals(evals);
+        tb.commit(&mut self.channel);
+        self.ops.push(Op::Tree(sizes));
+    }
+
+    /// B7a milestone 4 (18.5): commit a tree whose columns the caller still
+    /// needs. The flat list is a list of references into the regions, so
+    /// building it costs nothing; see gpu/m4_refs.py.
+    /// B7a milestone 4 (19.6): commit one tree whose columns may be on the
+    /// host, on the device, or both. `Op::Tree`'s column order is part of the
+    /// transcript, so the list is exactly the list the host path built.
+    pub fn commit_any(&mut self, cols: Vec<crate::device::AnyCol>) {
+        let sizes = cols.iter().map(|c| c.log_size()).collect_vec();
+        self.tree_cols.push(sizes.len());
+        self.tree_cells.push(sizes.iter().map(|s| 1usize << s).sum());
+        self.tree_max_log.push(sizes.iter().copied().max().unwrap_or(0));
+        let mut tb = self.cs.tree_builder();
+        tb.extend_evals(crate::device::take_all(cols));
+        tb.commit(&mut self.channel);
+        self.ops.push(Op::Tree(sizes));
+    }
+
+    /// B7b (README 26): tree `i` as committed, cloned on the device -- what
+    /// the preprocessed-tree cache keeps.
+    pub fn tree_clone(&self, i: usize) -> stwo::prover::CommitmentTreeProver<PcsB, Blake2sM31MerkleChannel> {
+        self.cs.trees[i].clone()
+    }
+
+    /// Tree `i`'s root, as a string, for the cache's check.
+    pub fn tree_root(&self, i: usize) -> String {
+        format!("{:?}", self.cs.trees[i].commitment.root())
+    }
+
+    /// Tree `i`'s column log sizes, off the recorded transcript.
+    pub fn tree_sizes(&self, i: usize) -> Vec<u32> {
+        self.ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Tree(sz) => Some(sz.clone()),
+                _ => None,
+            })
+            .nth(i)
+            .expect("no such tree")
+    }
+
+    /// B7b (README 26): commit a tree that was committed before -- the clone
+    /// goes in, its root is mixed, and the transcript records exactly what
+    /// `commit_any` would have. Nothing is interpolated, extended or hashed.
+    pub fn commit_cached(
+        &mut self,
+        tree: stwo::prover::CommitmentTreeProver<PcsB, Blake2sM31MerkleChannel>,
+        sizes: Vec<u32>,
+    ) {
+        self.tree_cols.push(sizes.len());
+        self.tree_cells.push(sizes.iter().map(|s| 1usize << s).sum());
+        self.tree_max_log.push(sizes.iter().copied().max().unwrap_or(0));
+        self.cs.push_cached_tree(tree, &mut self.channel);
+        self.ops.push(Op::Tree(sizes));
+    }
+
+    pub fn commit_ref(&mut self, evals: &[&Eval]) {
+        let sizes = evals.iter().map(|e| e.domain.log_size()).collect_vec();
+        self.tree_cols.push(sizes.len());
+        self.tree_cells.push(sizes.iter().map(|s| 1usize << s).sum());
+        self.tree_max_log.push(sizes.iter().copied().max().unwrap_or(0));
+        let mut tb = self.cs.tree_builder();
+        #[cfg(feature = "cuda")]
+        tb.extend_evals(crate::device::upload_all_ref(evals));
+        // Without the cuda feature `extend_evals` needs owned columns, so the
+        // one copy `prove_layer` used to make is made here instead. Same
+        // bytes, same count -- moved, not removed. See 18.5.
+        #[cfg(not(feature = "cuda"))]
+        tb.extend_evals(evals.iter().map(|e| (*e).clone()).collect());
         tb.commit(&mut self.channel);
         self.ops.push(Op::Tree(sizes));
     }
@@ -183,13 +328,13 @@ impl<'a> Session<'a> {
     /// session's internal replay.
     pub fn prove_raw(
         mut self,
-        provers: &[&dyn ComponentProver<Backend>],
+        provers: &[&dyn ComponentProver<PcsB>],
     ) -> (Result<Proof, String>, RawStats) {
         let started = self.started;
         let pre_ok = self.check_pre();
         let tree_cols = self.tree_cols.clone();
         let tree_cells = self.tree_cells.clone();
-        let res = prove::<Backend, Blake2sM31MerkleChannel>(provers, &mut self.channel, self.cs)
+        let res = prove::<PcsB, Blake2sM31MerkleChannel>(provers, &mut self.channel, self.cs)
             .map_err(|e| format!("{e:?}"));
         let prove_secs = started.elapsed().as_secs_f64();
         let stats = RawStats {
@@ -205,7 +350,7 @@ impl<'a> Session<'a> {
 
     pub fn prove(
         mut self,
-        provers: &[&dyn ComponentProver<Backend>],
+        provers: &[&dyn ComponentProver<PcsB>],
         components: &[&dyn Component],
     ) -> Proven {
         let config = self.config;
@@ -214,7 +359,7 @@ impl<'a> Session<'a> {
         let tree_cols = self.tree_cols.clone();
         let tree_cells = self.tree_cells.clone();
         let pre_ok = self.check_pre();
-        let proof = match prove::<Backend, Blake2sM31MerkleChannel>(
+        let proof = match prove::<PcsB, Blake2sM31MerkleChannel>(
             provers,
             &mut self.channel,
             self.cs,

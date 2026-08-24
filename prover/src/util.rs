@@ -27,6 +27,100 @@ pub fn pcs_config() -> PcsConfig {
     cfg
 }
 
+/// B7a milestone 3's switches, read once. `=0` turns one off; the default is on.
+pub fn m3_switch(name: &str) -> bool {
+    std::env::var(name).map(|v| v != "0").unwrap_or(true)
+}
+
+pub fn m3_store_coeffs() -> bool {
+    m3_switch("B7_M3_COEFFS")
+}
+
+/// B7a milestone 4: the host-side timeline (18.2).
+///
+/// One named accumulator, reported as `host_phases` in every JSON, so where
+/// the wall goes *outside* `prove_ex` is a measurement rather than an estimate.
+/// It takes a lock, so it is called once per column or once per phase and
+/// never per row; at the design point that is ~8k locks against a 5 s wall.
+///
+/// B7b (README 26): keyed by chunk. A thread names the chunk it is working on
+/// (`m4_set_chunk`) and every phase it adds lands under that chunk, so a
+/// pipelined loop -- chunk k proving on one thread while chunk k+1 generates on
+/// another -- still reports each chunk's phases as its own. A single proof is
+/// chunk 0 and sees no difference.
+type M4Map = std::collections::BTreeMap<&'static str, (u64, f64)>;
+static M4_ACC: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::BTreeMap<u64, M4Map>>,
+> = std::sync::OnceLock::new();
+
+thread_local! {
+    static M4_CHUNK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+pub fn m4_set_chunk(k: u64) {
+    M4_CHUNK.with(|c| c.set(k));
+}
+
+pub fn m4_chunk() -> u64 {
+    M4_CHUNK.with(|c| c.get())
+}
+
+fn m4_acc() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, M4Map>> {
+    M4_ACC.get_or_init(|| std::sync::Mutex::new(Default::default()))
+}
+
+pub fn m4_add(name: &'static str, secs: f64) {
+    let k = m4_chunk();
+    let mut g = m4_acc().lock().unwrap();
+    let e = g.entry(k).or_default().entry(name).or_insert((0, 0.0));
+    e.0 += 1;
+    e.1 += secs;
+}
+
+/// The current chunk's phases.
+pub fn m4_report() -> Value {
+    let k = m4_chunk();
+    let g = m4_acc().lock().unwrap();
+    let mut o = serde_json::Map::new();
+    if let Some(m) = g.get(&k) {
+        for (k, (n, s)) in m.iter() {
+            o.insert((*k).to_string(), json!({"calls": n, "secs": s}));
+        }
+    }
+    Value::Object(o)
+}
+
+/// The first CUDA call in the process pays for context creation and the
+/// fatbin load. Attributing that to the twiddles would make a per-process cost
+/// look like a per-proof one, so it is drawn out on its own line.
+pub fn m4_touch_device() {
+    #[cfg(feature = "cuda")]
+    let _ = stwo::stwo_cuda::base_field_vec::BaseFieldVec::from_vec(
+        vec![stwo::core::fields::m31::M31::from_u32_unchecked(0); 1],
+    );
+}
+
+/// The smallest column the parallel gather is used for, `B7_M4_PARMIN`.
+///
+/// Default 16, swept in 18.4: below 2^16 rows rayon's per-column cost exceeds
+/// what the gather saves, and at the design point 2,641 of the 4,612 columns
+/// are that small. `=0` is every column, which is what 18.3 measured.
+pub fn m4_parmin() -> u32 {
+    std::env::var("B7_M4_PARMIN").ok().and_then(|v| v.parse().ok()).unwrap_or(16)
+}
+
+/// Milestone 4's switches, read once. `=0` turns one off; the default is on.
+pub fn m4_switch(name: &str) -> bool {
+    std::env::var(name).map(|v| v != "0").unwrap_or(true)
+}
+
+/// Milestone 4's tri-state modes, read once. Unlike `m4_switch` these
+/// default to **off**: a mode selects a path that has still to prove itself
+/// equal to the one it replaces, and the default has to be the proven one.
+pub fn m4b_mode(name: &str) -> u32 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+}
+
 pub fn config_json() -> Value {
     let cfg = pcs_config();
     json!({
@@ -38,6 +132,15 @@ pub fn config_json() -> Value {
         "fold_step": cfg.fri_config.line_fold_step,
         "security_bits_conjectured": cfg.security_bits(),
         "hash": "Blake2s (Blake2sM31MerkleChannel)",
+        // B7a milestone 3: which of the three changes this run had on.
+        "m3": {
+            "store_coeffs": m3_switch("B7_M3_COEFFS"),
+            "device_merkle_reduce": m3_switch("B7_M3_MERKLE"),
+            "fri_gather": m3_switch("B7_M3_FRIGATHER"),
+            "prewarm": m3_switch("B7_M3_PREWARM"),
+            "merkle_mode": std::env::var("B7_M3_MERKLE").unwrap_or_else(|_| "1".into()),
+            "launch_sync": std::env::var("B7_M3_LAUNCHSYNC").is_ok()
+        },
     })
 }
 

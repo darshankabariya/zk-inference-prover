@@ -244,6 +244,12 @@ pub struct ChanEval {
 }
 
 impl FrameworkEval for ChanEval {
+    /// milestone 2b: the flat parameter block for the generated
+    /// constraint kernel (`gpu/m2b/cudagen.rs`).
+    fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
+        crate::cudagen::blob_for(self)
+    }
+
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
     fn cuda_eval_name(&self) -> &'static str { "b65_chan_eval" }
@@ -333,6 +339,12 @@ pub struct KeyEval {
 }
 
 impl FrameworkEval for KeyEval {
+    /// milestone 2b: the flat parameter block for the generated
+    /// constraint kernel (`gpu/m2b/cudagen.rs`).
+    fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
+        crate::cudagen::blob_for(self)
+    }
+
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
     fn cuda_eval_name(&self) -> &'static str { "b65_key_eval" }
@@ -488,6 +500,12 @@ pub struct OutEval {
 }
 
 impl FrameworkEval for OutEval {
+    /// milestone 2b: the flat parameter block for the generated
+    /// constraint kernel (`gpu/m2b/cudagen.rs`).
+    fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
+        crate::cudagen::blob_for(self)
+    }
+
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
     fn cuda_eval_name(&self) -> &'static str { "b65_out_eval" }
@@ -545,6 +563,12 @@ pub struct RowEval {
 }
 
 impl FrameworkEval for RowEval {
+    /// milestone 2b: the flat parameter block for the generated
+    /// constraint kernel (`gpu/m2b/cudagen.rs`).
+    fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
+        crate::cudagen::blob_for(self)
+    }
+
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
     fn cuda_eval_name(&self) -> &'static str { "b65_row_eval" }
@@ -623,6 +647,12 @@ pub struct ExpTableEval {
 }
 
 impl FrameworkEval for ExpTableEval {
+    /// milestone 2b: the flat parameter block for the generated
+    /// constraint kernel (`gpu/m2b/cudagen.rs`).
+    fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
+        crate::cudagen::blob_for(self)
+    }
+
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
     fn cuda_eval_name(&self) -> &'static str { "b65_exp_table_eval" }
@@ -651,6 +681,12 @@ pub struct RangeTableEval {
 }
 
 impl FrameworkEval for RangeTableEval {
+    /// milestone 2b: the flat parameter block for the generated
+    /// constraint kernel (`gpu/m2b/cudagen.rs`).
+    fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
+        crate::cudagen::blob_for(self)
+    }
+
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
     fn cuda_eval_name(&self) -> &'static str { "b65_range_table_eval" }

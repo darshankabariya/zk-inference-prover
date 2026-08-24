@@ -538,6 +538,12 @@ pub struct GlueEval {
 
 
 impl FrameworkEval for GlueEval {
+    /// milestone 2b: the flat parameter block for the generated
+    /// constraint kernel (`gpu/m2b/cudagen.rs`).
+    fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
+        crate::cudagen::blob_for(self)
+    }
+
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
     fn cuda_eval_name(&self) -> &'static str { "b65_glue_eval" }
@@ -1556,6 +1562,12 @@ pub struct GTableEval {
 }
 
 impl FrameworkEval for GTableEval {
+    /// milestone 2b: the flat parameter block for the generated
+    /// constraint kernel (`gpu/m2b/cudagen.rs`).
+    fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
+        crate::cudagen::blob_for(self)
+    }
+
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
     fn cuda_eval_name(&self) -> &'static str { "b65_g_table_eval" }
@@ -1896,7 +1908,7 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
         })
         .collect();
 
-    let mut provers: Vec<&dyn ComponentProver<crate::common::Backend>> =
+    let mut provers: Vec<&dyn ComponentProver<crate::common::PcsB>> =
         vec![&comp];
     let mut comps: Vec<&dyn Component> = vec![&comp];
     for t in &tcomps {

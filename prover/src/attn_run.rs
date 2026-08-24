@@ -158,8 +158,10 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
     let pow = Powers::new(r, s, rv, &sh, &l.chan, &l.key, &l.out, l.rw);
 
     let t1 = Instant::now();
+    // The standalone path has no `Plan`, so no components and no evals: it
+    // keeps the hand-written builder, which is also what mode 2 compares against.
     let mut inter = attn_trace::interaction_phase(a, &l, cfg, &pow, &rel_exp, &rels, &com,
-                                                  &widths, true, true);
+                                                  &widths, true, true, None);
     let pre_x = attn_trace::pre_exp_x(a, &l);
     let mult0 = com.at[4];
     let pre_ranges: Vec<&crate::common::Eval> =
@@ -169,11 +171,11 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
     let (tcols, tsums) = attn_trace::table_sides(a, &widths, &rel_exp, &rels,
                                                  [&com.pre[pre_x], &com.pre[pre_x + 1]],
                                                  &pre_ranges, &mults);
-    inter.cols.extend(tcols);
+    inter.cols.extend(crate::device::host_cols(tcols));
     inter.table_sums = tsums;
     let interaction_secs = t1.elapsed().as_secs_f64();
     let n_inter = inter.cols.len();
-    sess.commit(inter.cols.clone());
+    sess.commit(inter.cols.iter().map(|c| c.host().clone()).collect());
 
     // The claimed accumulator values are public input; bind them to the transcript
     // before the components fix them, or a prover picks them adaptively.
@@ -275,7 +277,7 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
     assert_eq!(cells.preprocessed, real, "preprocessed cell model");
     let real: usize = com.base.iter().map(|e| e.domain.size()).sum();
     assert_eq!(cells.base, real, "base cell model");
-    let real: usize = inter.cols.iter().map(|e| e.domain.size()).sum();
+    let real: usize = inter.cols.iter().map(|c| c.size()).sum();
     assert_eq!(cells.interaction, real, "interaction cell model");
     cells.grid = cells.grid.min(cells.fresh());
 

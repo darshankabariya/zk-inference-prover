@@ -1,0 +1,164 @@
+//! B7b (README 26): the preprocessed tree, committed once per (layer, shape)
+//! and kept on the device.
+//!
+//! Tree 0 is a function of the shape and of what the layer puts into it -- the
+//! shared tables, the selectors, the weights and the scales -- and of nothing a
+//! chunk changes. So a chunk whose layer and shape have been committed before
+//! takes a device-to-device clone of that `CommitmentTreeProver` (the LDE'd
+//! columns and the Merkle layers) and mixes its root, through the fork's own
+//! `push_cached_tree`; the interpolation, the extension and the hash are not
+//! run again.
+//!
+//! The key is `chunks::key_of`: the layer's source and the params, which is
+//! what determines every cell of the tree in this binary. The check is the
+//! root: under `B7_M5_PRECACHE=2` every chunk commits the tree itself and its
+//! root is asserted equal to the cached one, which is a cell-for-cell
+//! comparison by construction. Mode 1 takes the clone. `B7_M5_PREMUT=stalekey`
+//! is the control: every layer maps to one key, so a loop over two different
+//! layers must fail the root check (rule 5).
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Mutex, OnceLock};
+
+use stwo::core::vcs::blake2_merkle::Blake2sM31MerkleChannel;
+use stwo::prover::CommitmentTreeProver;
+
+// B7b: the crate's prover backend -- `CudaBackend` on the GPU tree,
+// `SimdBackend` on the SIMD reference. `m5_patch.py` adds the alias to
+// `common.rs`, so this module compiles on both and the tree cache is a no-op
+// on the reference (mode 0, never taken).
+use crate::common::PcsB;
+
+pub type Tree = CommitmentTreeProver<PcsB, Blake2sM31MerkleChannel>;
+
+/// The tree holds device pointers (on CUDA). The context is per process and
+/// nothing here is bound to a thread, so handing it across threads is sound;
+/// the compiler cannot know that, hence the wrapper.
+struct SendTree(Tree);
+unsafe impl Send for SendTree {}
+
+struct Entry {
+    tree: SendTree,
+    sizes: Vec<u32>,
+    root: String,
+}
+
+static CACHE: OnceLock<Mutex<HashMap<u64, Entry>>> = OnceLock::new();
+static HITS: AtomicU64 = AtomicU64::new(0);
+static MISSES: AtomicU64 = AtomicU64::new(0);
+static CHECKS: AtomicU64 = AtomicU64::new(0);
+static CLONE_NS: AtomicU64 = AtomicU64::new(0);
+
+fn cache() -> &'static Mutex<HashMap<u64, Entry>> {
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn mode() -> u32 {
+    crate::util::m4b_mode("B7_M5_PRECACHE")
+}
+
+fn key(k: Option<u64>) -> Option<u64> {
+    match std::env::var("B7_M5_PREMUT").as_deref() {
+        Ok("stalekey") => k.map(|_| 0),
+        Ok("none") | Err(_) => k,
+        Ok(other) => panic!("B7_M5_PREMUT={other}: unknown mutation"),
+    }
+}
+
+pub fn report() -> serde_json::Value {
+    serde_json::json!({
+        "hits": HITS.load(Relaxed),
+        "misses": MISSES.load(Relaxed),
+        "checked": CHECKS.load(Relaxed),
+        "clone_secs": CLONE_NS.load(Relaxed) as f64 / 1e9,
+        "entries": cache().lock().unwrap().len(),
+    })
+}
+
+// B7b: the view of a cached tree. The default is a full clone -- correct on
+// every backend, and what the SIMD reference (which never takes the cache)
+// gets. `m5_patch.py` replaces the body below with a borrowed-pointer view on
+// the CUDA tree: the same coefficients, evaluations and Merkle layers, none
+// copied and none freed with the session. A clone was measured first (26.3):
+// 1,284 columns twice over and ~2,600 device copies of the layers, 0.023 s per
+// chunk -- launch-bound, and most of what the cache saved.
+// B7B-VIEW-BODY
+#[cfg(feature = "cuda")]
+fn view(t: &Tree) -> Tree {
+    use stwo::prover::poly::circle::{CircleCoefficients, CircleEvaluation};
+    use stwo::stwo_cuda::base_field_vec::BaseFieldVec;
+    let polynomials = t
+        .polynomials
+        .iter()
+        .map(|p| {
+            let coeffs = p.coeffs.as_ref().map(|c| {
+                CircleCoefficients::new(BaseFieldVec::from_borrowed_ptr(c.coeffs.device_ptr,
+                                                                        c.coeffs.size))
+            });
+            let evals = CircleEvaluation::new(
+                p.evals.domain,
+                BaseFieldVec::from_borrowed_ptr(p.evals.values.device_ptr, p.evals.values.size),
+            );
+            stwo::prover::Poly::new(coeffs, evals)
+        })
+        .collect();
+    let layers = t.commitment.layers.iter().map(|l| l.borrowed_view()).collect();
+    CommitmentTreeProver {
+        polynomials,
+        commitment: stwo::prover::vcs::prover::MerkleProver { layers },
+    }
+}
+
+// Without the cuda feature the tree's columns are host memory and a plain
+// clone is the view.
+#[cfg(not(feature = "cuda"))]
+fn view(t: &Tree) -> Tree {
+    t.clone()
+}
+
+/// The cached tree for this key, as a view, when mode 1 has one. The column
+/// log sizes are asserted: a key collision between two shapes would otherwise
+/// be a wrong proof rather than a loud one.
+pub fn take(k: Option<u64>, sizes: &[u32]) -> Option<Tree> {
+    if mode() != 1 {
+        return None;
+    }
+    let k = key(k)?;
+    let g = cache().lock().unwrap();
+    let e = g.get(&k)?;
+    assert_eq!(e.sizes, sizes, "precache: a cached tree with different column sizes under key {k:#x}");
+    let t = std::time::Instant::now();
+    let tree = view(&e.tree.0);
+    CLONE_NS.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
+    HITS.fetch_add(1, Relaxed);
+    Some(tree)
+}
+
+/// After a fresh commit of tree 0: store it under the key, or -- when the key
+/// is already there -- assert the fresh root against the stored one.
+pub fn fill(k: Option<u64>, sess: &crate::common::Session<'_>) {
+    if mode() == 0 {
+        return;
+    }
+    let Some(k) = key(k) else { return };
+    let root = sess.tree_root(0);
+    let mut g = cache().lock().unwrap();
+    match g.get(&k) {
+        Some(e) => {
+            CHECKS.fetch_add(1, Relaxed);
+            assert_eq!(
+                e.root, root,
+                "precache: the preprocessed tree committed for key {k:#x} has a different root \
+                 from the cached one -- the key does not determine the tree"
+            );
+        }
+        None => {
+            MISSES.fetch_add(1, Relaxed);
+            let t = std::time::Instant::now();
+            let tree = sess.tree_clone(0);
+            CLONE_NS.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
+            g.insert(k, Entry { tree: SendTree(tree), sizes: sess.tree_sizes(0), root });
+        }
+    }
+}

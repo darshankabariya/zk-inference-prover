@@ -355,6 +355,12 @@ impl DequantEval {
 }
 
 impl FrameworkEval for DequantEval {
+    /// milestone 2b: the flat parameter block for the generated
+    /// constraint kernel (`gpu/m2b/cudagen.rs`).
+    fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
+        crate::cudagen::blob_for(self)
+    }
+
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
     fn cuda_eval_name(&self) -> &'static str { "b65_dequant_eval" }
@@ -573,6 +579,12 @@ impl TableKind {
 use stwo::prover::backend::simd::m31::PackedM31;
 
 impl FrameworkEval for TableEval {
+    /// milestone 2b: the flat parameter block for the generated
+    /// constraint kernel (`gpu/m2b/cudagen.rs`).
+    fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
+        crate::cudagen::blob_for(self)
+    }
+
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
     fn cuda_eval_name(&self) -> &'static str { "b65_table_eval" }

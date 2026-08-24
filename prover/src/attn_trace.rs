@@ -481,6 +481,83 @@ pub fn commit_base(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     (base, at)
 }
 
+/// B7a milestone 4 (section 3 row 1): `commit_base`, wherever it runs.
+///
+/// Returns the host columns (the mirror under mode 1, because
+/// `interaction_phase` reads `com.base`), the component offsets, and the device
+/// columns when there are any.
+#[allow(clippy::too_many_arguments)]
+pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
+                       mult_exp: &mut [u32], mult_r: &mut [Vec<u32>],
+                       off_table: &mut usize, with_out: bool, with_rows: bool)
+                       -> (Vec<Eval>, Vec<usize>, Option<crate::devwfill::DevBand>) {
+    // `with_rows` postdates this milestone: it is `!a.corner`, and it says
+    // whether this band commits the per-token region (the row maxima, the
+    // denominator and its low limb).  A *corner* band does not -- there is one
+    // maximum and one denominator per token, not per band, so the corner rides
+    // on the prefix band's -- and `commit_base_dev` has no notion of any of
+    // this: `devwfill.rs` mentions neither `with_rows` nor `corner`.  A device
+    // fill that always built the per-token region would commit columns the AIR
+    // does not expect on a corner band.
+    //
+    // So corner bands take the host path, whatever the switch says.  That is
+    // correct by construction rather than by a guess at the kernel, and it
+    // costs the device fill only the S x S corner -- the cells are in the
+    // C - S prefix band, which still fills on the device.  Teaching the fill
+    // the distinction is its own piece of work; until then this cannot be
+    // silently wrong.
+    let m4d = if with_rows { crate::util::m4b_mode("B7_M4_WFILL") } else { 0 };
+    if m4d == 1 {
+        // B7a milestone 4 (section 3 row 1): with the tables' columns on the
+        // device the exp counter has no host reader left, so it stays there.
+        let dev = crate::devwfill::commit_base_dev(a, l, cfg, widths, mult_exp, mult_r,
+                                                   off_table, with_out,
+                                                   crate::devtab::mode() != 1);
+        let at = dev.at.clone();
+        return (vec![], at, Some(dev));
+    }
+    if m4d != 2 {
+        let (base, at) = commit_base(a, l, cfg, widths, mult_exp, mult_r, off_table,
+                                     with_out, with_rows);
+        return (base, at, None);
+    }
+    // mode 2: both, with every cell asserted equal before any column is used
+    let before_exp = mult_exp.to_vec();
+    let before_r: Vec<Vec<u32>> = mult_r.to_vec();
+    let before_off = *off_table;
+    let (base, at) = commit_base(a, l, cfg, widths, mult_exp, mult_r, off_table, with_out,
+                                 with_rows);
+    let after_exp = mult_exp.to_vec();
+    let after_r: Vec<Vec<u32>> = mult_r.to_vec();
+    let after_off = *off_table;
+    let dev = crate::devwfill::commit_base_dev(a, l, cfg, widths, mult_exp, mult_r,
+                                               off_table, with_out, true);
+    let label = format!("band {} 2^{}", a.shape.label(), l.key.g.log_rows);
+    crate::devwfill::check_cols(&format!("{label} base"), &base, &dev.base);
+    assert_eq!(at, dev.at, "{label}: the component offsets differ");
+    let delta = |x: &[u32], y: &[u32]| -> Vec<u32> {
+        x.iter().zip(y).map(|(p, q)| p - q).collect()
+    };
+    crate::devwfill::check_delta(&format!("{label} m_exp"), &before_exp, &after_exp,
+                                 &delta(mult_exp, &after_exp));
+    for (t, w) in widths.iter().enumerate() {
+        crate::devwfill::check_delta(&format!("{label} m_r[{w}]"), &before_r[t], &after_r[t],
+                                     &delta(&mult_r[t], &after_r[t]));
+    }
+    assert_eq!(*off_table - after_off, after_off - before_off,
+               "{label}: off-table bumps differ");
+    // the device's own bumps are the check's, not the proof's
+    mult_exp.copy_from_slice(&after_exp);
+    for (t, v) in mult_r.iter_mut().enumerate() {
+        v.copy_from_slice(&after_r[t]);
+    }
+    *off_table = after_off;
+    eprintln!("wfill-dev: {label} -- {} columns, {} cells, {} multiplicity tables \
+and the component offsets all match",
+              base.len(), dev.base.iter().map(|c| c.size).sum::<usize>(), widths.len() + 1);
+    (base, at, None)
+}
+
 /// One multiplicity column per table, in table order.
 pub fn mult_cols(a: &Attn, widths: &[u32], mult_exp: &[u32], mult_r: &[Vec<u32>]) -> Vec<Eval> {
     let mut cols = vec![eval_of(a.log_table, mult_exp.iter().map(|m| m31_u32(*m)).collect())];
@@ -505,7 +582,9 @@ pub fn commit_phase(a: &Attn, l: &Layouts, cfg: &Cfg) -> Committed {
 }
 
 pub struct Interaction {
-    pub cols: Vec<Eval>,
+    /// B7a milestone 4 (section 3 row 1): the accumulator columns are always
+    /// the host's; a LogUp column is wherever its region's columns were.
+    pub cols: Vec<crate::device::AnyCol<'static>>,
     pub claimed_chan: SecureField,
     pub claimed_hs: SecureField,
     pub claimed_av: SecureField,
@@ -523,19 +602,40 @@ pub struct Interaction {
 #[allow(clippy::too_many_arguments)]
 pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &ExpRel,
                          ranges: &[RangeRel], com: &Committed, widths: &[u32],
-                         with_out: bool, with_rows: bool) -> Interaction {
+                         with_out: bool, with_rows: bool,
+                         air: Option<&crate::devfrac::BandAir<'_>>)
+                         -> Interaction {
     let sh = a.shape;
     let (lc, lk, lo) = (&l.chan, &l.key, &l.out);
     let ridx = |b: u32| widths.iter().position(|w| *w == b).unwrap();
-    let mut cols: Vec<Eval> = vec![];
+    let mut cols = crate::device::ColSink::new();
     let mut use_sums = vec![];
 
+    // B7a milestone 4 (section 3 row 1): the accumulators, wherever they are.
+    // The kernels read this region's *own committed columns*, so the device
+    // route exists exactly when the fill left them there -- and `B7_M4_ACC=2`
+    // runs both, which is a check on the whole witness -> fill -> column ->
+    // accumulator chain, because the host side reads the witness instead.
+    let m4g = air.and_then(|x| x.dev).filter(|_| crate::devacc::mode() >= 1);
+    let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
+    // B7a milestone 4 (section 3 row 1): the per-row layout flags, written once
+    // at fill time by `b65_flags_band` and read here. Before this row each of
+    // the three kernels below recomputed them; now the AIR's selector columns
+    // and this segmentation are the same array.
+    let m4g_flags = air.and_then(|x| x.pre);
+    assert!(m4g.is_none() || m4g_flags.is_some(),
+            "the device accumulators need this band's flags: `devpre::band_dev` did not run");
+    assert!(m4g.is_none() || !with_out,
+            "the device accumulators have no A.V output region: \
+             the composed proof moves it into the attnout region");
+    let n_chan = if m4g_host { lc.g.rows } else { 0 };
+
     // ---- channel region ----------------------------------------------------
-    let (mut u, mut v, mut acc) = (vec![SecureField::zero(); lc.g.rows],
-                                   vec![SecureField::zero(); lc.g.rows],
-                                   vec![SecureField::zero(); lc.g.rows]);
+    let (mut u, mut v, mut acc) = (vec![SecureField::zero(); n_chan],
+                                   vec![SecureField::zero(); n_chan],
+                                   vec![SecureField::zero(); n_chan]);
     // the inner sums, in parallel: everything but the carry
-    let chan_inner: Vec<(SecureField, SecureField, bool, bool, bool)> = (0..lc.g.rows)
+    let chan_inner: Vec<(SecureField, SecureField, bool, bool, bool)> = (0..n_chan)
         .into_par_iter()
         .map(|j| {
         let (mut kf, mut qf) = (SecureField::zero(), SecureField::zero());
@@ -564,7 +664,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             (kf, qf, nofirst, last, istart)
         })
         .collect();
-    for j in 0..lc.g.rows {
+    for j in 0..n_chan {
         let (kf, qf, nofirst, last, istart) = chan_inner[j];
         // An inert row commits the offset in every slot, so its contribution is
         // exactly zero once the constraint subtracts `sum_p r^p * offset`.
@@ -579,10 +679,26 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             acc[j] += u[j] * v[j];
         }
     }
-    let claimed_chan = acc[lc.g.rows - 1];
-    cols.extend(secure_cols(lc.g.log_rows, &u));
-    cols.extend(secure_cols(lc.g.log_rows, &v));
-    cols.extend(secure_cols(lc.g.log_rows, &acc));
+    let claimed_chan = match m4g {
+        Some(d) => {
+            let got = crate::devacc::chan(&d.base, &d.at, lc, a, pow,
+                                           m4g_flags.unwrap().chan());
+            let h = m4g_host.then(|| {
+                let mut e = secure_cols(lc.g.log_rows, &u);
+                e.extend(secure_cols(lc.g.log_rows, &v));
+                e.extend(secure_cols(lc.g.log_rows, &acc));
+                (e, vec![acc[lc.g.rows - 1]])
+            });
+            crate::devacc::place(&format!("chan band 2^{}", lc.g.log_rows), got, h,
+                                 &mut cols)[0]
+        }
+        None => {
+            cols.extend(secure_cols(lc.g.log_rows, &u));
+            cols.extend(secure_cols(lc.g.log_rows, &v));
+            cols.extend(secure_cols(lc.g.log_rows, &acc));
+            acc[lc.g.rows - 1]
+        }
+    };
     if cfg.range_check {
         let base0 = com.at[0];
         let mut looks = vec![];
@@ -592,13 +708,15 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         for p in 0..lc.pq {
             looks.push(Look::Range(ridx(a.q_bits), base0 + lc.pk + p));
         }
-        let (c, s) = logup_cols(lc.g.log_rows, &looks, &com.base, &com.pre, exp, ranges);
-        cols.extend(c);
+        let (c, s) = crate::devfrac::band_cols(
+            air, 0, lc.g.log_rows, &com.at, &com.base,
+            || logup_cols(lc.g.log_rows, &looks, &com.base, &com.pre, exp, ranges));
+        cols.extend_any(c);
         use_sums.push(s);
     }
 
     // ---- grid region -------------------------------------------------------
-    let n = lk.g.rows;
+    let n = if m4g_host { lk.g.rows } else { 0 };
     let (mut zs, mut hs) = (vec![SecureField::zero(); n], vec![SecureField::zero(); n]);
     let (mut zn, mut wv) = (vec![SecureField::zero(); n], vec![SecureField::zero(); n]);
     let (mut av, mut sn) = (vec![SecureField::zero(); n], vec![SecureField::zero(); n]);
@@ -675,10 +793,29 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             hs[j] += zs[j];
         }
     }
-    let (claimed_hs, claimed_av, claimed_sn) = (hs[n - 1], av[n - 1], sn[n - 1]);
-    for c in [&zs, &hs, &zn, &wv, &av, &sn] {
-        cols.extend(secure_cols(lk.g.log_rows, c));
-    }
+    let m4g_aux = if a.variant == Variant::IntExp { 0 } else { lk.q };
+    let (claimed_hs, claimed_av, claimed_sn) = match m4g {
+        Some(d) => {
+            let got = crate::devacc::grid(&d.base, &d.at, lk, a, m4g_aux, pow,
+                                           m4g_flags.unwrap().key());
+            let h = m4g_host.then(|| {
+                let mut e = vec![];
+                for c in [&zs, &hs, &zn, &wv, &av, &sn] {
+                    e.extend(secure_cols(lk.g.log_rows, c));
+                }
+                (e, vec![hs[n - 1], av[n - 1], sn[n - 1]])
+            });
+            let c = crate::devacc::place(&format!("grid band 2^{}", lk.g.log_rows), got,
+                                         h, &mut cols);
+            (c[0], c[1], c[2])
+        }
+        None => {
+            for c in [&zs, &hs, &zn, &wv, &av, &sn] {
+                cols.extend(secure_cols(lk.g.log_rows, c));
+            }
+            (hs[n - 1], av[n - 1], sn[n - 1])
+        }
+    };
     {
         let b = com.at[1];
         let n_aux = if a.variant == Variant::IntExp { 0 } else { lk.q };
@@ -703,8 +840,10 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
                 looks.push(Look::Range(ridx(8), b + 2 * lk.q + n_aux + p));
             }
         }
-        let (c, s) = logup_cols(lk.g.log_rows, &looks, &com.base, &com.pre, exp, ranges);
-        cols.extend(c);
+        let (c, s) = crate::devfrac::band_cols(
+            air, 1, lk.g.log_rows, &com.at, &com.base,
+            || logup_cols(lk.g.log_rows, &looks, &com.base, &com.pre, exp, ranges));
+        cols.extend_any(c);
         use_sums.push(s);
     }
 
@@ -756,10 +895,11 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     // band's, and it carries the row maximum both halves shift by and the total
     // denominator both halves sum to.
     let rrows = if with_rows { 1usize << l.log_row } else { 0 };
-    let (mut am, mut az) = (vec![SecureField::zero(); rrows], vec![SecureField::zero(); rrows]);
+    let n_tok = if m4g_host { rrows } else { 0 };
+    let (mut am, mut az) = (vec![SecureField::zero(); n_tok], vec![SecureField::zero(); n_tok]);
     let with_max = a.variant != Variant::Bf16x;
     let zz = a.zz_row();
-    for j in 0..rrows {
+    for j in 0..n_tok {
         let (mut mf, mut zf) = (SecureField::zero(), SecureField::zero());
         for i in 0..l.rw {
             if let Some(t) = tok_of(rrows, l.rw, sh.toks(), j, i) {
@@ -775,14 +915,32 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         am[j] = if j > 0 { am[j - 1] * step } else { SecureField::zero() } + mf;
         az[j] = if j > 0 { az[j - 1] * step } else { SecureField::zero() } + zf;
     }
-    let (claimed_am, claimed_az) = if with_rows {
-        (am[rrows - 1], az[rrows - 1])
-    } else {
+    let (claimed_am, claimed_az) = if !with_rows {
+        // A corner band has no per-token region, so there is nothing to build
+        // on either side of the device link.
         (SecureField::zero(), SecureField::zero())
+    } else {
+        match m4g {
+            Some(d) => {
+                let got = crate::devacc::tok(&d.base, &d.at, l.log_row, l.rw, a, pow,
+                                          m4g_flags.unwrap().row());
+                let h = m4g_host.then(|| {
+                    let mut e = secure_cols(l.log_row, &am);
+                    e.extend(secure_cols(l.log_row, &az));
+                    (e, vec![am[rrows - 1], az[rrows - 1]])
+                });
+                let c = crate::devacc::place(&format!("tok band 2^{}", l.log_row), got, h,
+                                             &mut cols);
+                (c[0], c[1])
+            }
+            None => {
+                cols.extend(secure_cols(l.log_row, &am));
+                cols.extend(secure_cols(l.log_row, &az));
+                (am[rrows - 1], az[rrows - 1])
+            }
+        }
     };
     if with_rows {
-    cols.extend(secure_cols(l.log_row, &am));
-    cols.extend(secure_cols(l.log_row, &az));
     {
         // The high limb is derived by constraint, so it is not a committed column;
         // the generator rebuilds it from the witness to feed the lookup.
@@ -811,14 +969,17 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             looks.push(Look::Range(ridx(cfg.z_lo_bits), lo_at + l.rw + i));
             looks.push(Look::Range(ridx(cfg.z_hi_bits), hi_base + l.rw + i));
         }
-        let (c, s) = logup_cols(l.log_row, &looks, &all, &com.pre, exp, ranges);
-        cols.extend(c);
+        let (c, s) = crate::devfrac::band_cols(
+            air, 3, l.log_row, &com.at, &com.base,
+            || logup_cols(l.log_row, &looks, &all, &com.pre, exp, ranges));
+        cols.extend_any(c);
         use_sums.push(s);
     }
     }
 
-    Interaction { cols, claimed_chan, claimed_hs, claimed_av, claimed_sn, claimed_out,
-                  claimed_am, claimed_az, use_sums, table_sums: vec![] }
+    Interaction { cols: cols.into_inner(), claimed_chan, claimed_hs, claimed_av,
+                  claimed_sn, claimed_out, claimed_am, claimed_az, use_sums,
+                  table_sums: vec![] }
 }
 
 /// The tables' own LogUp sides, one column per table, in table order.

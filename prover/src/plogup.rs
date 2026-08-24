@@ -53,11 +53,76 @@ where
         .map(|c| {
             let (nums, dens): (Vec<PackedQM31>, Vec<PackedQM31>) =
                 (0..n_vec).into_par_iter().map(|vr| f(c, vr)).unzip();
-            let mut inv = unsafe { stwo::core::utils::uninit_vec(n_vec) };
-            batch_inverse_packed_qm31(&dens, &mut inv);
-            nums.into_par_iter().zip(inv).map(|(n, d)| n * d).collect()
+            invert_and_scale(nums, dens)
         })
         .collect();
+    finish(log_rows, fracs)
+}
+
+/// One column's fractions: the batch inversion and the scaling, apart from
+/// where the numerators and denominators came from.
+fn invert_and_scale(nums: Vec<PackedQM31>, dens: Vec<PackedQM31>) -> Vec<PackedQM31> {
+    let n_vec = dens.len();
+    let mut inv = unsafe { stwo::core::utils::uninit_vec(n_vec) };
+    batch_inverse_packed_qm31(&dens, &mut inv);
+    nums.into_par_iter().zip(inv).map(|(n, d)| n * d).collect()
+}
+
+/// `build`, fed a row at a time.
+///
+/// B7a milestone 4 (18.7). A fraction builder driven by the AIR's own lowering
+/// produces every lookup of a packed row in one pass over the IR, so asking it
+/// per column would re-run that pass `n_cols` times. This takes the row-major
+/// producer, applies `paired`'s batching, and hands the result to exactly the
+/// same phases `build` uses -- `invert_and_scale` and `finish` -- so the
+/// output is the same function of the same inputs and the bit-identity claim
+/// above covers both entry points.
+///
+/// `f(vr, dst)` fills `dst` with the `n_looks` fractions of packed row `vr`, in
+/// `add_to_relation` order.
+pub fn build_rows<F>(log_rows: u32, n_looks: usize, f: F) -> (Vec<Eval>, SecureField)
+where
+    F: Fn(usize, &mut Vec<(PackedQM31, PackedQM31)>) + Sync,
+{
+    assert!(n_looks > 0, "a LogUp trace needs at least one lookup");
+    let n_vec = 1usize << (log_rows - LOG_N_LANES);
+    let n_cols = n_looks.div_ceil(2);
+
+    // one pass over the row, then `paired`'s pairwise batching, written
+    // row-major so the pass happens once
+    let mut rows: Vec<(PackedQM31, PackedQM31)> =
+        unsafe { stwo::core::utils::uninit_vec(n_vec * n_cols) };
+    rows.par_chunks_mut(n_cols).enumerate().for_each(|(vr, dst)| {
+        let mut buf: Vec<(PackedQM31, PackedQM31)> = Vec::with_capacity(n_looks);
+        f(vr, &mut buf);
+        assert_eq!(buf.len(), n_looks, "row {vr} produced {} fractions", buf.len());
+        for (c, d) in dst.iter_mut().enumerate() {
+            let i = 2 * c;
+            let (n0, d0) = buf[i];
+            *d = if i + 1 < n_looks {
+                let (n1, d1) = buf[i + 1];
+                (n0 * d1 + n1 * d0, d0 * d1)
+            } else {
+                (n0, d0)
+            };
+        }
+    });
+
+    let fracs: Vec<Vec<PackedQM31>> = (0..n_cols)
+        .into_par_iter()
+        .map(|c| {
+            let nums: Vec<PackedQM31> = (0..n_vec).map(|vr| rows[vr * n_cols + c].0).collect();
+            let dens: Vec<PackedQM31> = (0..n_vec).map(|vr| rows[vr * n_cols + c].1).collect();
+            invert_and_scale(nums, dens)
+        })
+        .collect();
+    finish(log_rows, fracs)
+}
+
+/// Phases B and C, shared by both entry points.
+fn finish(log_rows: u32, fracs: Vec<Vec<PackedQM31>>) -> (Vec<Eval>, SecureField) {
+    let n_cols = fracs.len();
+    let n_vec = fracs[0].len();
 
     // phase B: pointwise running sums across columns, parallel over row chunks
     let mut cols: Vec<Vec<PackedQM31>> =

@@ -592,7 +592,51 @@ pub struct BuiltComponents {
 }
 
 impl BuiltComponents {
-    pub fn provers(&self) -> Vec<&dyn ComponentProver<crate::common::Backend>> {
+    /// B7a milestone 3: lower every component's constraints to its kernel
+    /// parameter blob once, in parallel, before proving. The fork calls
+    /// `cuda_eval_blob()` from its sequential component loop, which put the
+    /// whole lowering on one thread with the device idle (16.5's 85 ms).
+    /// One list of closures over the *evals*, then one `par_iter`.
+    ///
+    /// Not `par_iter` over the components: `FrameworkComponent` holds an
+    /// `InfoEvaluator`, whose `ArithmeticCounter` is an `Rc<RefCell<..>>`
+    /// (`constraint-framework/src/info.rs:166`), so a component is `!Sync` and
+    /// cannot cross a thread boundary. The evals themselves are plain data.
+    pub fn prewarm_blobs(&self) {
+        use rayon::prelude::*;
+        let mut tasks: Vec<Box<dyn Fn() + Send + Sync + '_>> = Vec::new();
+        for c in &self.chans {
+            let e = &c.eval;
+            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        }
+        for c in &self.keys {
+            let e = &c.eval;
+            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        }
+        for c in &self.rows {
+            let e = &c.eval;
+            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        }
+        for c in &self.mats {
+            let e = &c.eval;
+            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        }
+        for c in &self.walks {
+            let e = &c.eval;
+            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        }
+        for c in &self.tables {
+            let e = &c.eval;
+            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        }
+        let ao = &self.ao.eval;
+        tasks.push(Box::new(move || crate::cudagen::prewarm(ao)));
+        let exp_t = &self.exp_t.eval;
+        tasks.push(Box::new(move || crate::cudagen::prewarm(exp_t)));
+        tasks.par_iter().for_each(|t| t());
+    }
+
+    pub fn provers(&self) -> Vec<&dyn ComponentProver<crate::common::PcsB>> {
         let mut v: Vec<&dyn ComponentProver<_>> = vec![];
         let mut ri = 0usize;
         for b in 0..self.chans.len() {
@@ -890,6 +934,53 @@ pub struct ProverTamper {
 }
 
 pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Composed {
+    // B7a milestone 4 (19.6): 4a counts bytes host to device across the whole
+    // wall, and the fill's uploads happen before `Session::new` exists.
+    crate::device::reset();
+    let g = generate(layer, params, tamper, None);
+    prove_gen(layer, params, g)
+}
+
+/// B7b (README 26): everything `generate` built, owned, so a chunk's
+/// generation can be handed from the thread that made it to the one that
+/// proves it.
+pub struct Gen {
+    pub plan: Plan,
+    pub tables: Tables,
+    pub band_committed: Vec<Committed>,
+    pub band_dev: Vec<Option<crate::devwfill::DevBand>>,
+    pub band_pre: Vec<Option<crate::devpre::DevPreBand>>,
+    pub aor: crate::layer::AoRegion,
+    pub mat_regions: Vec<crate::layer::MatRegion>,
+    pub walk_regions: Vec<crate::layer::WalkRegion>,
+    // The glue family, which postdates the split: its regions, the owned
+    // columns of its shared tables, and its against-B1 summary.
+    pub glue_regions: Vec<crate::glue::GlueRegion>,
+    pub glue_tcols: Vec<Eval>,
+    pub glue_mcols: Vec<Eval>,
+    pub glue_b1: Value,
+    pub n_deq_base: usize,
+    pub pre_tables: Vec<Option<Eval>>,
+    pub base_mults: Vec<Option<Eval>>,
+    pub pre_logs: Vec<u32>,
+    pub mult_logs: Vec<u32>,
+    pub tab_pre: Vec<stwo::stwo_cuda::base_field_vec::BaseFieldVec>,
+    pub tab_mult: Vec<stwo::stwo_cuda::base_field_vec::BaseFieldVec>,
+    pub m4e_tabdev: bool,
+    pub trace_secs: f64,
+    /// what names this chunk's preprocessed tree (`chunks::key_of`); `None`
+    /// is the single-proof path, which never caches
+    pub pre_key: Option<u64>,
+}
+
+/// B7b (README 26): the first half of `prove_layer` -- every fill, every
+/// table, every column born where it will be committed -- up to the
+/// transcript.
+pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: Option<u64>)
+                -> Gen {
+    let m4_t = std::time::Instant::now();
+    crate::util::m4_touch_device();
+    crate::util::m4_add("wall/cuda_init", m4_t.elapsed().as_secs_f64());
     let t0 = std::time::Instant::now();
     let plan = Plan::new(params);
     let p = &plan.p;
@@ -906,50 +997,105 @@ pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Com
     }
 
     // ---- region traces -------------------------------------------------------
-    let mut pre_all: Vec<Eval> = vec![];
-    let mut base_all: Vec<Eval> = vec![];
+    // B7a milestone 4 (18.5): the regions keep their columns and the two flat
+    // lists are built from references once generation is done. `pre_tables`
+    // and `base_mults` are the only columns with no region of their own -- and
+    // they are exactly the ones the interaction's table sides read.
+    // B7a milestone 4 (section 3 row 1): a slot with no host column is one the
+    // device builds -- `x`, `y` and `m_exp`. The log sizes travel beside the
+    // lists because that is the one thing the commitment needs of a column and
+    // a missing `Eval` cannot say it.
+    let mut pre_tables: Vec<Option<Eval>> = vec![];
+    let mut base_mults: Vec<Option<Eval>> = vec![];
+    let mut pre_logs: Vec<u32> = vec![];
+    let mut mult_logs: Vec<u32> = vec![];
     let mut band_committed: Vec<Committed> = vec![];
+    // B7a milestone 4 (section 3 row 1): the band columns, when they are on the
+    // device. Parallel to `band_committed` because `Committed` belongs to the
+    // standalone path too and has no business knowing about a backend.
+    let mut band_dev: Vec<Option<crate::devwfill::DevBand>> = vec![];
+    let m4_t = std::time::Instant::now();
     let mut mult_exp = std::mem::take(&mut tables.m_exp);
     let mut mult_r = std::mem::take(&mut tables.m_r);
     for (b, a) in layer.bands.iter().enumerate() {
         let l = &plan.lays[b];
-        let pre = attn_trace::commit_pre(a, l, false, !a.corner);
-        let (base, at) = attn_trace::commit_base(a, l, &plan.cfg, &plan.widths, &mut mult_exp,
-                                                 &mut mult_r, &mut tables.off_table, false,
-                                                 !a.corner);
-        pre_all.extend(pre.iter().cloned());
-        base_all.extend(base.iter().cloned());
-        // A corner band's interaction phase reads its own causal-mask columns back
-        // out of `pre` (the exp lookup's multiplicity is `1 - msk`), so that band
-        // keeps them.  A prefix band does not, and its selectors are the wide ones
-        // -- `C` keys against the corner's `S` -- so they are dropped as before.
-        let keep = if a.corner { pre } else { vec![] };
-        band_committed.push(Committed { pre: keep, base, at, off_table: 0 });
+        // B7a milestone 4 (section 3 row 1): 48 columns of ACTIVE / NOFIRST /
+        // LAST / ISTART, which `b65_acc.cu` has computed since 24.1 -- at the
+        // wrong time. Mode 1 never builds them here; 2 builds them and asserts
+        // every cell against the kernel's below. A corner band declines the
+        // device fill altogether (the m4d decision), so its columns -- the
+        // causal masks among them -- are always built here.
+        let pre = if crate::devpre::mode() == 1 && !a.corner {
+            vec![]
+        } else {
+            attn_trace::commit_pre(a, l, false, !a.corner)
+        };
+        let (base, at, dev) =
+            attn_trace::commit_base_any(a, l, &plan.cfg, &plan.widths, &mut mult_exp,
+                                        &mut mult_r, &mut tables.off_table, false,
+                                        !a.corner);
+        band_dev.push(dev);
+        // Every band keeps its committed columns: the flat tree lists are
+        // assembled from references once generation is done, so the region has
+        // to own them. The corner band also reads its causal-mask columns back
+        // in its interaction phase (the exp lookup's multiplicity is `1 - msk`).
+        band_committed.push(Committed { pre, base, at, off_table: 0 });
     }
     tables.m_exp = mult_exp;
     tables.m_r = mult_r;
+    crate::util::m4_add("gen/bands", m4_t.elapsed().as_secs_f64());
 
+    // B7a milestone 4 (section 3 row 1): the flags, and the 48 selector columns
+    // built out of them. The flags are wanted whenever the accumulators will
+    // run -- which is whenever the band's fill was on the device -- so this
+    // happens one line after that fill and not inside the switch.
+    let m4_t = std::time::Instant::now();
+    let pre_mode = crate::devpre::mode();
+    // The shared tables' 31 columns share one flat list with `x`, `y` and
+    // `m_exp`, so there is no configuration where this row's half of it is on
+    // the device and 23's is not.
+    assert!(pre_mode == 0 || crate::devtab::mode() >= 1,
+            "B7_M4_PRE needs B7_M4_TABDEV: the shared tables are one list");
+    let band_pre: Vec<Option<crate::devpre::DevPreBand>> = layer
+        .bands
+        .iter()
+        .enumerate()
+        .map(|(b, a)| {
+            (pre_mode >= 1 || band_dev[b].is_some())
+                .then(|| crate::devpre::band_dev(a, &plan.lays[b], pre_mode >= 1))
+        })
+        .collect();
+    if pre_mode == 2 {
+        for (b, d) in band_pre.iter().enumerate() {
+            let h: Vec<&Eval> = band_committed[b].pre.iter().collect();
+            crate::devpre::check_run(&format!("band{b} selectors"), &h,
+                                     &d.as_ref().unwrap().cols);
+        }
+    }
+    crate::util::m4_add("gen/pre_bands", m4_t.elapsed().as_secs_f64());
+
+    let m4_t = std::time::Instant::now();
     let aor = ao_region(&layer.ao, p.ao_target, p.ao_q_bits, p.ao_rem_bits, &mut tables, None);
-    pre_all.extend(aor.pre.iter().cloned());
-    base_all.extend(aor.base.iter().cloned());
 
+    crate::util::m4_add("gen/attnout", m4_t.elapsed().as_secs_f64());
+
+    let m4_t = std::time::Instant::now();
     let mut mat_regions = vec![];
     for (m, sp) in layer.mats.iter().zip(&plan.specs) {
         let r = mat_region(m, sp, &mut tables);
-        pre_all.extend(r.pre.iter().cloned());
-        base_all.extend(r.base.iter().cloned());
         mat_regions.push(r);
     }
     let n_deq_base: usize = mat_regions
         .iter()
-        .map(|r| r.base.iter().map(|e| e.domain.size()).sum::<usize>())
+        .map(|r| r.base_cells())
         .sum();
 
+    crate::util::m4_add("gen/dequant", m4_t.elapsed().as_secs_f64());
+
+    let m4_t = std::time::Instant::now();
     let mut walk_regions = vec![];
     for w in &plan.walks {
         let r = walk_region(layer, &w.name, &w.mats, p.walk_p, &mut tables, None);
-        pre_all.extend(r.pre.iter().cloned());
-        base_all.extend(r.base.iter().cloned());
         walk_regions.push(r);
     }
 
@@ -1009,10 +1155,6 @@ pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Com
             glue_regions.push(r1);
             glue_regions.push(r2);
         }
-        for r in &glue_regions {
-            pre_all.extend(r.pre.iter().cloned());
-            base_all.extend(r.base.iter().cloned());
-        }
         tables.m_norm = std::mem::take(&mut gt.m_norm);
         tables.m_frac = std::mem::take(&mut gt.m_frac);
         tables.off_table += gt.off_table;
@@ -1026,63 +1168,379 @@ pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Com
     }
 
     // ---- shared tables (tree 0 tail) and their multiplicities (tree 1 tail) --
-    let pre_tbl0 = pre_all.len();
+    // The glue's shared tables, built once and owned here: the tree assembly
+    // below references them last (the order the by-value fill used), and the
+    // table-sides block reads them again.
+    let glue_tcols: Vec<Eval> =
+        gtables.as_ref().map(crate::glue::glue_table_cols).unwrap_or_default();
+    let glue_mcols: Vec<Eval> =
+        gtables.as_ref().map(crate::glue::glue_mult_cols).unwrap_or_default();
     let tbl_rows = 1usize << p.log_table;
-    pre_all.push(eval_of(p.log_table, (0..tbl_rows).map(|i| m31_u32(i as u32)).collect()));
-    pre_all.push(eval_of(p.log_table, tables.exp.iter().map(|v| m31_u32(*v)).collect()));
-    {
+    // B7a milestone 4 (section 3 row 1): the 31 columns 23.1 called "data, not
+    // closed forms". Measured column by column that is wrong twice over: the
+    // ten multiplicities are counters the fills already scatter-added into, and
+    // the normalisation, fraction and multiply rows are closed forms of the row
+    // index -- a leading-zero count, a shift and one rounding step apiece. Mode
+    // 1 never builds them here; 2 builds them and asserts every cell.
+    let host_rest = pre_mode != 1;
+    let host_mult = crate::devpre::merge_counters();
+    // the log sizes of the 21 and the 10, which the two flat lists need whether
+    // or not a host column exists to carry one
+    let rest_logs: Vec<u32> = [
+        vec![plan.log_norm; 6], vec![plan.log_frac; 3], vec![plan.log_mul; 4],
+        vec![p.ao_q_bits; 2], plan.widths.clone(),
+    ].concat();
+    let mult_logs_rest: Vec<u32> = [
+        vec![plan.log_norm, plan.log_frac, plan.log_mul, p.ao_q_bits],
+        plan.widths.clone(),
+    ].concat();
+    let mut pre_rest: Vec<Eval> = vec![];
+    let mut mult_rest: Vec<Eval> = vec![];
+    if host_rest {
         let get: [fn(&crate::bf16::NormRow) -> u32; 6] =
             [|r| r.m2, |r| r.ph, |r| r.st, |r| r.m7, |r| r.expfield, |r| r.nz];
         for g in get {
-            pre_all.push(eval_of(plan.log_norm, (0..1usize << plan.log_norm)
+            pre_rest.push(eval_of(plan.log_norm, (0..1usize << plan.log_norm)
                 .map(|i| m31_u32(tables.norm.get(i).map(g).unwrap_or(0))).collect()));
         }
         for t in 0..3 {
-            pre_all.push(eval_of(plan.log_frac, (0..1usize << plan.log_frac)
+            pre_rest.push(eval_of(plan.log_frac, (0..1usize << plan.log_frac)
                 .map(|i| {
                     let x = tables.frac.get(i).copied().unwrap_or((0, 0, 0));
                     m31_u32([x.0, x.1, x.2][t])
                 }).collect()));
         }
         for t in 0..4 {
-            pre_all.push(eval_of(plan.log_mul, (0..1usize << plan.log_mul)
+            pre_rest.push(eval_of(plan.log_mul, (0..1usize << plan.log_mul)
                 .map(|i| {
                     let x = tables.mul.get(i).copied()
                         .unwrap_or(crate::bf16::MulRow { a: 0, b: 0, m7: 0, carry: 0 });
                     m31_u32([x.a, x.b, x.m7, x.carry][t])
                 }).collect()));
         }
-        pre_all.push(eval_of(p.ao_q_bits, (0..1u32 << p.ao_q_bits).map(m31_u32).collect()));
-        pre_all.push(eval_of(p.ao_q_bits,
+        pre_rest.push(eval_of(p.ao_q_bits, (0..1u32 << p.ao_q_bits).map(m31_u32).collect()));
+        pre_rest.push(eval_of(p.ao_q_bits,
                              (0..1u32 << p.ao_q_bits)
                                  .map(|q| m31_u32(u32::from(q != 0))).collect()));
         for w in &plan.widths {
-            pre_all.push(eval_of(*w, (0..1u32 << w).map(m31_u32).collect()));
+            pre_rest.push(eval_of(*w, (0..1u32 << w).map(m31_u32).collect()));
         }
     }
-    let mult_start = base_all.len();
-    base_all.push(eval_of(p.log_table, tables.m_exp.iter().map(|m| m31_u32(*m)).collect()));
-    base_all.push(eval_of(plan.log_norm, tables.m_norm.iter().map(|m| m31_u32(*m)).collect()));
-    base_all.push(eval_of(plan.log_frac, tables.m_frac.iter().map(|m| m31_u32(*m)).collect()));
-    base_all.push(eval_of(plan.log_mul, tables.m_mul.iter().map(|m| m31_u32(*m)).collect()));
-    base_all.push(eval_of(p.ao_q_bits, tables.m_qnz.iter().map(|m| m31_u32(*m)).collect()));
-    for (t, w) in plan.widths.iter().enumerate() {
-        base_all.push(eval_of(*w, tables.m_r[t].iter().map(|m| m31_u32(*m)).collect()));
+    if host_mult {
+        mult_rest.push(eval_of(plan.log_norm,
+                               tables.m_norm.iter().map(|m| m31_u32(*m)).collect()));
+        mult_rest.push(eval_of(plan.log_frac,
+                               tables.m_frac.iter().map(|m| m31_u32(*m)).collect()));
+        mult_rest.push(eval_of(plan.log_mul,
+                               tables.m_mul.iter().map(|m| m31_u32(*m)).collect()));
+        mult_rest.push(eval_of(p.ao_q_bits,
+                               tables.m_qnz.iter().map(|m| m31_u32(*m)).collect()));
+        for (t, w) in plan.widths.iter().enumerate() {
+            mult_rest.push(eval_of(*w, tables.m_r[t].iter().map(|m| m31_u32(*m)).collect()));
+        }
     }
-    let glue_mult_start = base_all.len();
-    if let Some(gt) = &gtables {
-        pre_all.extend(crate::glue::glue_table_cols(gt));
-        base_all.extend(crate::glue::glue_mult_cols(gt));
+
+    // B7a milestone 4 (section 3 row 1): `x`, `y` and `m_exp`, 2^23 rows each
+    // and 0.101 GB of the 0.166 GB 4a had left. `B7_M4_TABDEV=1` means the host
+    // never builds them; 2 builds them here as well and asserts every cell
+    // against the kernel's, which is how they are checked.
+    let tab_mode = crate::devtab::mode();
+    let host_big = tab_mode != 1;
+    pre_logs.push(p.log_table);
+    pre_tables.push(host_big.then(|| {
+        eval_of(p.log_table, (0..tbl_rows).map(|i| m31_u32(i as u32)).collect())
+    }));
+    pre_logs.push(p.log_table);
+    pre_tables.push(host_big.then(|| {
+        eval_of(p.log_table, tables.exp.iter().map(|v| m31_u32(*v)).collect())
+    }));
+    if host_rest {
+        for e in pre_rest {
+            pre_logs.push(e.domain.log_size());
+            pre_tables.push(Some(e));
+        }
+    } else {
+        for l in &rest_logs {
+            pre_logs.push(*l);
+            pre_tables.push(None);
+        }
     }
+    // `m_exp` needs a counter to sum, and there is one only where a band's fill
+    // ran on the device (21.1). With the bands on the host it stays a host
+    // column and a 4a upload -- the honest accounting, not a special case.
+    let dev_counters: Vec<&stwo::stwo_cuda::base_field_vec::Uint32Vec> =
+        band_dev.iter().filter_map(|b| b.as_ref().map(|d| &d.m_exp)).collect();
+    let host_m = host_big || dev_counters.is_empty();
+    mult_logs.push(p.log_table);
+    base_mults.push(host_m.then(|| {
+        eval_of(p.log_table, tables.m_exp.iter().map(|m| m31_u32(*m)).collect())
+    }));
+    if host_mult {
+        for e in mult_rest {
+            mult_logs.push(e.domain.log_size());
+            base_mults.push(Some(e));
+        }
+    } else {
+        for l in &mult_logs_rest {
+            mult_logs.push(*l);
+            base_mults.push(None);
+        }
+    }
+    crate::util::m4_add("gen/tables", m4_t.elapsed().as_secs_f64());
+
+    // B7a milestone 4 (section 3 row 1): the shared tables' columns, uploaded
+    // once. Both trees take them from here and so do the table families'
+    // fraction kernels, so 4a counts each of these columns exactly once -- the
+    // same column `take_all` used to upload, moved earlier.
+    let m4_t = std::time::Instant::now();
+    let m4e_tabdev = tab_mode >= 1;
+    // B7a milestone 4 (section 3 row 1): the three closed-form columns, built
+    // where they are used. The other 31 are uploaded exactly as 22.4 uploaded
+    // all 34, so 4a still counts every shared-table column exactly once.
+    let dev3 = m4e_tabdev.then(|| {
+        crate::devtab::table_cols_dev(&layer.bands[0], p.log_table, &tables.exp,
+                                      &dev_counters)
+    });
+    if tab_mode == 2 {
+        let d = dev3.as_ref().unwrap();
+        crate::devtab::check_col("tables x", crate::devtab::htab(&pre_tables, 0), &d.x);
+        crate::devtab::check_col("tables y", crate::devtab::htab(&pre_tables, 1), &d.y);
+        if let Some(m) = d.m.as_ref() {
+            crate::devtab::check_col("tables m_exp",
+                                     crate::devtab::htab(&base_mults, 0), m);
+        }
+    }
+    // B7a milestone 4 (section 3 row 1): one counter list per shared table, in
+    // the order the two flat lists lay them out. Every one of these arrays is
+    // where a fill's scatter-add left it (20.1, 21.1), and the kernel sums them
+    // there rather than downloading, merging and uploading -- which is what
+    // deletes `gen/deq_dev_counters` and `gen/wfill_counters`.
+    let mult_dev = crate::devpre::mult_dev();
+    let mut pre_counters: Vec<Vec<&stwo::stwo_cuda::base_field_vec::Uint32Vec>> =
+        vec![vec![]; 4 + plan.widths.len()];
+    if mult_dev {
+        let ri = |w: u32| 4 + plan.widths.iter().position(|x| *x == w).unwrap();
+        let r8 = ri(8);
+        for r in &mat_regions {
+            let d = r.dev.as_ref().expect("B7_M4_FILL=1 but a dequant region is host-built");
+            pre_counters[0].push(&d.m_norm);
+            pre_counters[1].push(&d.m_frac);
+            pre_counters[2].push(&d.m_mul);
+            pre_counters[r8].push(&d.m_r8);
+        }
+        for r in &walk_regions {
+            let d = r.dev.as_ref().expect("B7_M4_WFILL=1 but a walk group is host-built");
+            pre_counters[r8].push(&d.m_r8);
+        }
+        let d = aor.dev.as_ref().expect("B7_M4_WFILL=1 but the attnout is host-built");
+        pre_counters[3].push(&d.m_qnz);
+        pre_counters[ri(p.ao_rem_bits)].push(&d.m_rem);
+        for (b, a) in layer.bands.iter().enumerate() {
+            let d = band_dev[b].as_ref().expect("B7_M4_WFILL=1 but a band is host-built");
+            if plan.cfg.range_check {
+                pre_counters[ri(a.k_bits)].push(&d.m_k);
+                pre_counters[ri(a.q_bits)].push(&d.m_q);
+                pre_counters[r8].push(&d.m_v);
+            }
+            if let crate::attn_witness::Variant::IntSplit(k) = a.variant {
+                pre_counters[ri(k)].push(d.m_aux.as_ref().unwrap());
+            }
+            pre_counters[ri(plan.cfg.z_lo_bits)].push(&d.m_lo);
+            pre_counters[ri(plan.cfg.z_hi_bits)].push(&d.m_hi);
+        }
+    }
+    let dev_rest = (pre_mode >= 1).then(|| {
+        crate::devpre::tables_dev(&tables, plan.log_norm, plan.log_frac, plan.log_mul,
+                                  p.ao_q_bits, &plan.widths, &pre_counters, mult_dev)
+    });
+    if pre_mode == 2 {
+        let d = dev_rest.as_ref().unwrap();
+        let hp: Vec<&Eval> =
+            (2..pre_tables.len()).map(|i| crate::devtab::htab(&pre_tables, i)).collect();
+        crate::devpre::check_run("shared tables", &hp, &d.pre);
+        if !d.mult.is_empty() {
+            let hm: Vec<&Eval> = (1..base_mults.len())
+                .map(|i| crate::devtab::htab(&base_mults, i)).collect();
+            crate::devpre::check_run("shared multiplicities", &hm, &d.mult);
+        }
+    }
+    let (tab_pre, tab_mult): (Vec<stwo::stwo_cuda::base_field_vec::BaseFieldVec>,
+                              Vec<stwo::stwo_cuda::base_field_vec::BaseFieldVec>) =
+        if m4e_tabdev {
+            let d = dev3.unwrap();
+            let mut pre = vec![d.x, d.y];
+            let m0 = match d.m {
+                Some(m) => m,
+                None => crate::device::upload_col(crate::devtab::hone(&base_mults[0])),
+            };
+            let mut mult = vec![m0];
+            match dev_rest {
+                Some(r) => {
+                    pre.extend(r.pre);
+                    if r.mult.is_empty() {
+                        mult.extend(base_mults[1..].iter()
+                            .map(|e| crate::device::upload_col(crate::devtab::hone(e))));
+                    } else {
+                        mult.extend(r.mult);
+                    }
+                }
+                None => {
+                    pre.extend(pre_tables[2..].iter()
+                        .map(|e| crate::device::upload_col(crate::devtab::hone(e))));
+                    mult.extend(base_mults[1..].iter()
+                        .map(|e| crate::device::upload_col(crate::devtab::hone(e))));
+                }
+            }
+            (pre, mult)
+        } else {
+            (vec![], vec![])
+        };
+    crate::util::m4_add("gen/tables_up", m4_t.elapsed().as_secs_f64());
     let trace_secs = t0.elapsed().as_secs_f64();
+    Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
+          glue_regions, glue_tcols, glue_mcols, glue_b1,
+          n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
+          m4e_tabdev, trace_secs, pre_key }
+}
+
+/// B7b (README 26): the second half -- the session, the three commits, the
+/// interaction, the components and the proof.
+pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
+    let Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
+              glue_regions, glue_tcols, glue_mcols, glue_b1,
+              n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
+              m4e_tabdev, trace_secs, pre_key } = g;
+    let p = &plan.p;
+    let t0 = std::time::Instant::now();
+
+    // The two trees, as references, in the order the owned vectors used to be
+    // filled: every band, then attnout, then the matmuls, then the walks, then
+    // the shared tables and their multiplicities. `Op::Tree`'s column order is
+    // part of the transcript, so this order is load-bearing and `proof_sha256`
+    // is what checks it.
+    let m4_t = std::time::Instant::now();
+    use crate::device::AnyCol;
+    let mut pre_all: Vec<AnyCol> = vec![];
+    let mut base_all: Vec<AnyCol> = vec![];
+    for ((c, d), pd) in band_committed.iter().zip(&band_dev).zip(&band_pre) {
+        match pd.as_ref().filter(|p| !p.cols.is_empty()) {
+            Some(p) => pre_all.extend(
+                p.cols.iter().zip(&p.logs).map(|(c, l)| AnyCol::Dev(c, *l))),
+            None => pre_all.extend(c.pre.iter().map(AnyCol::Host)),
+        }
+        match d {
+            // B7a milestone 4 (section 3 row 1): a band's committed columns are
+            // not all the same height -- three grids and a token block -- so the
+            // log size travels with the column.
+            Some(d) => base_all.extend(
+                d.base.iter().zip(&d.logs).map(|(c, l)| AnyCol::Dev(c, *l))),
+            None => base_all.extend(c.base.iter().map(AnyCol::Host)),
+        }
+    }
+    match &aor.dev {
+        Some(d) => {
+            let l = aor.lay.log_rows;
+            pre_all.extend(d.pre.iter().map(|c| AnyCol::Dev(c, l)));
+            base_all.extend(d.base.iter().map(|c| AnyCol::Dev(c, l)));
+        }
+        None => {
+            pre_all.extend(aor.pre.iter().map(AnyCol::Host));
+            base_all.extend(aor.base.iter().map(AnyCol::Host));
+        }
+    }
+    for r in &mat_regions {
+        // B7a milestone 4 (19.6): under `B7_M4_FILL=1` this region's columns
+        // are already on the device, in committed order, and this is where
+        // they join the tree without an upload.
+        match &r.dev {
+            Some(d) => {
+                let l = r.lay.log_rows;
+                pre_all.extend(d.pre.iter().map(|c| AnyCol::Dev(c, l)));
+                base_all.extend(d.base.iter().map(|c| AnyCol::Dev(c, l)));
+            }
+            None => {
+                pre_all.extend(r.pre.iter().map(AnyCol::Host));
+                base_all.extend(r.base.iter().map(AnyCol::Host));
+            }
+        }
+    }
+    for r in &walk_regions {
+        match &r.dev {
+            Some(d) => {
+                let l = r.lay.g.log_rows;
+                pre_all.extend(d.pre.iter().map(|c| AnyCol::Dev(c, l)));
+                base_all.extend(d.base.iter().map(|c| AnyCol::Dev(c, l)));
+            }
+            None => {
+                pre_all.extend(r.pre.iter().map(AnyCol::Host));
+                base_all.extend(r.base.iter().map(AnyCol::Host));
+            }
+        }
+    }
+    // The glue regions' columns follow the walks, as they did when the lists
+    // were built by value. The glue has no device path yet, so they are always
+    // host columns.
+    for r in &glue_regions {
+        pre_all.extend(r.pre.iter().map(AnyCol::Host));
+        base_all.extend(r.base.iter().map(AnyCol::Host));
+    }
+    if m4e_tabdev {
+        pre_all.extend(tab_pre.iter().zip(&pre_logs).map(|(d, l)| AnyCol::Dev(d, *l)));
+        base_all.extend(tab_mult.iter().zip(&mult_logs).map(|(d, l)| AnyCol::Dev(d, *l)));
+    } else {
+        pre_all.extend(pre_tables.iter().map(|e| AnyCol::Host(crate::devtab::hone(e))));
+        base_all.extend(base_mults.iter().map(|e| AnyCol::Host(crate::devtab::hone(e))));
+    }
+    // And the glue's shared tables close both trees, as before.
+    pre_all.extend(glue_tcols.iter().map(AnyCol::Host));
+    base_all.extend(glue_mcols.iter().map(AnyCol::Host));
+    crate::util::m4_add("gen/refs", m4_t.elapsed().as_secs_f64());
+    let trace_secs = trace_secs + t0.elapsed().as_secs_f64();
 
     // ---- one transcript -------------------------------------------------------
     let widest = pre_all.iter().chain(base_all.iter())
-        .map(|e| e.domain.log_size()).max().unwrap();
+        .map(|c| c.log_size()).max().unwrap();
+    let m4_t = std::time::Instant::now();
+    crate::util::m4_touch_device();
+    crate::util::m4_add("wall/cuda_init", m4_t.elapsed().as_secs_f64());
+    let m4_t = std::time::Instant::now();
     let tw = twiddles(widest);
+    crate::util::m4_add("wall/twiddles", m4_t.elapsed().as_secs_f64());
+    let m4_t = std::time::Instant::now();
     let mut sess = Session::new(&tw);
-    sess.commit(pre_all.clone());
-    sess.commit(base_all.clone());
+    crate::util::m4_add("wall/session_new", m4_t.elapsed().as_secs_f64());
+    // B7a milestone 4 (18.5): the trees take the columns by reference.
+    // `B7_M4_NOCLONE=0` commits from a clone of both lists instead, which is
+    // the cost this change removes.
+    let m4_pre_cells: usize = pre_all.iter().map(|c| c.size()).sum();
+    let m4_refs = crate::util::m4_switch("B7_M4_NOCLONE");
+    let m4_t = std::time::Instant::now();
+    // B7b (README 26): tree 0 from the cache when this layer and shape have
+    // committed it before (`B7_M5_PRECACHE=1`); otherwise committed here and,
+    // with the cache on, kept -- or, in mode 2, checked against what is kept.
+    let pre_sizes: Vec<u32> = pre_all.iter().map(|c| c.log_size()).collect();
+    match crate::precache::take(pre_key, &pre_sizes) {
+        Some(tree) => {
+            sess.commit_cached(tree, pre_sizes);
+            crate::util::m4_add("wall/commit_pre_cached", m4_t.elapsed().as_secs_f64());
+        }
+        None => {
+            if m4_refs {
+                sess.commit_any(pre_all);
+            } else {
+                sess.commit(pre_all.iter().map(|c| c.host().clone()).collect());
+            }
+            crate::precache::fill(pre_key, &sess);
+        }
+    }
+    crate::util::m4_add("wall/commit_pre", m4_t.elapsed().as_secs_f64());
+    let m4_t = std::time::Instant::now();
+    if m4_refs {
+        sess.commit_any(base_all);
+    } else {
+        sess.commit(base_all.iter().map(|c| c.host().clone()).collect());
+    }
+    crate::util::m4_add("wall/commit_base", m4_t.elapsed().as_secs_f64());
     let widths = plan.widths.clone();
     let rels = {
         let exp = sess.draw_relation(ExpRel::draw);
@@ -1112,34 +1570,62 @@ pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Com
     };
     let r_corner = if p.corner { ch[plan.corner_challenge_at()] } else { SecureField::zero() };
 
+    // B7a milestone 4 (section 3 row 1): the evals every family's interaction
+    // lowers, built by `build_components` -- the verifier's own route, and the
+    // one `genemit` lowers -- with `claims_for`'s placeholders in place of the
+    // claimed sums, which the accumulators below have not produced yet. 19.1 is
+    // what makes that correct: a claimed sum enters constraints and never a
+    // lookup. `Ir::fingerprint` records the number of scalars and not their
+    // values, so the shape a component lowers to here is the shape `genemit`
+    // compiled from the same design point.
+    let m4e_t = std::time::Instant::now();
+    let m4e_air = build_components(&plan, &rels, r, s, rv, r_corner, w_glue, lam_glue,
+                                   &crate::exprprobe::claims_for(&plan, 0x0b65_4b05));
+    crate::util::m4_add("int/air", m4e_t.elapsed().as_secs_f64());
+
     // ---- interaction ----------------------------------------------------------
     let t1 = std::time::Instant::now();
-    let mut inter_all: Vec<Eval> = vec![];
+    let mut inter_all: Vec<crate::device::AnyCol<'static>> = vec![];
     let mut claims = Claims::default();
+    let m4_t = std::time::Instant::now();
     for (b, a) in layer.bands.iter().enumerate() {
         let l = &plan.lays[b];
         let pow = plan.powers(b, r, s, rv, r_corner);
+        let air = crate::devfrac::BandAir {
+            tag: b,
+            chan: &m4e_air.chans[b].eval,
+            key: &m4e_air.keys[b].eval,
+            row: &m4e_air.rows[b].eval,
+            dev: band_dev[b].as_ref(),
+            pre: band_pre[b].as_ref(),
+        };
         let it = attn_trace::interaction_phase(a, l, &plan.cfg, &pow, &rels.exp, &rels.ranges,
                                                &band_committed[b], &plan.widths, false,
-                                               !a.corner);
+                                               !a.corner, Some(&air));
         inter_all.extend(it.cols);
         claims.bands.push([qm(it.claimed_chan), qm(it.claimed_hs), qm(it.claimed_av),
                            qm(it.claimed_sn), qm(it.claimed_am), qm(it.claimed_az)]);
         claims.use_sums.extend(it.use_sums.iter().map(|v| qm(*v)));
     }
-    let aoi = ao_interaction(&layer.ao, &aor, r, s, rv, p.c, &rels);
+    crate::util::m4_add("int/bands", m4_t.elapsed().as_secs_f64());
+    let m4_t = std::time::Instant::now();
+    let aoi = ao_interaction(&layer.ao, &aor, r, s, rv, p.c, &rels, &m4e_air.ao.eval);
     inter_all.extend(aoi.cols);
     claims.ao_out = qm(aoi.claimed_out);
     claims.ao_den = qm(aoi.claimed_den);
     claims.use_sums.push(qm(aoi.use_sum));
+    crate::util::m4_add("int/attnout", m4_t.elapsed().as_secs_f64());
+    let m4_t = std::time::Instant::now();
     for (m, reg) in layer.mats.iter().zip(&mat_regions) {
         let it = mat_interaction(m, reg, rv, s, &rels);
         inter_all.extend(it.cols);
         claims.mat_h.push(qm(it.claimed_h));
         claims.use_sums.push(qm(it.use_sum));
     }
-    for reg in &walk_regions {
-        let it = walk_interaction(layer, reg, rv, s, &rels, true);
+    crate::util::m4_add("int/dequant", m4_t.elapsed().as_secs_f64());
+    let m4_t = std::time::Instant::now();
+    for (wi, reg) in walk_regions.iter().enumerate() {
+        let it = walk_interaction(layer, reg, rv, s, &rels, true, &m4e_air.walks[wi].eval);
         inter_all.extend(it.cols);
         claims.walk_acc.push(it.claimed.iter().map(|v| qm(*v)).collect());
         claims.use_sums.push(qm(it.use_sum));
@@ -1150,43 +1636,78 @@ pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Com
         let specs = gp.ties(w_glue, lam_glue, &blank);
         for (i, reg) in glue_regions.iter().enumerate() {
             let it = crate::glue::glue_interaction(reg, gr, Some(&specs[i]));
-            inter_all.extend(it.cols);
+            inter_all.extend(crate::device::host_cols(it.cols));
             claims.glue_ties.push(it.claimed.iter().map(|v| qm(*v)).collect());
             claims.use_sums.push(qm(it.use_sum));
         }
     }
     // the tables' own sides, in table order
     {
-        let (c, sum) = table_col(p.log_table, &rels.exp,
-                                 &[&pre_all[pre_tbl0], &pre_all[pre_tbl0 + 1]],
-                                 &base_all[mult_start]);
+        // The two table families go the same route as the other six: their
+        // eval, lowered, run where their columns are. `pre_tables` and
+        // `base_mults` are the owned host columns and `tab_pre` / `tab_mult`
+        // their device copies when `B7_M4_TABDEV` uploaded them; the closure is
+        // the hand-written host builder the device result is checked against.
+        use crate::devtab::{htab, tab_cols as tc};
+        let (c, sum) = crate::devfrac::frac_cols(
+            &m4e_air.exp_t.eval, "exp_table", p.log_table,
+            tc(&pre_tables, &tab_pre, 0, 2), tc(&base_mults, &tab_mult, 0, 1),
+            || table_col(p.log_table, &rels.exp,
+                         &[htab(&pre_tables, 0), htab(&pre_tables, 1)],
+                         htab(&base_mults, 0)));
         inter_all.extend(c);
         claims.table_sums.push(qm(sum));
-        let norm_refs: Vec<&Eval> = (0..6).map(|i| &pre_all[pre_tbl0 + 2 + i]).collect();
-        let (c, sum) = table_col(plan.log_norm, &rels.norm, &norm_refs, &base_all[mult_start + 1]);
+        let (c, sum) = crate::devfrac::frac_cols(
+            &m4e_air.tables[0].eval, "table norm", plan.log_norm,
+            tc(&pre_tables, &tab_pre, 2, 6), tc(&base_mults, &tab_mult, 1, 1),
+            || {
+                let refs: Vec<&Eval> = (0..6).map(|i| htab(&pre_tables, 2 + i)).collect();
+                table_col(plan.log_norm, &rels.norm, &refs, htab(&base_mults, 1))
+            });
         inter_all.extend(c);
         claims.table_sums.push(qm(sum));
-        let frac_refs: Vec<&Eval> = (0..3).map(|i| &pre_all[pre_tbl0 + 8 + i]).collect();
-        let (c, sum) = table_col(plan.log_frac, &rels.frac, &frac_refs, &base_all[mult_start + 2]);
+        let (c, sum) = crate::devfrac::frac_cols(
+            &m4e_air.tables[1].eval, "table frac", plan.log_frac,
+            tc(&pre_tables, &tab_pre, 8, 3), tc(&base_mults, &tab_mult, 2, 1),
+            || {
+                let refs: Vec<&Eval> = (0..3).map(|i| htab(&pre_tables, 8 + i)).collect();
+                table_col(plan.log_frac, &rels.frac, &refs, htab(&base_mults, 2))
+            });
         inter_all.extend(c);
         claims.table_sums.push(qm(sum));
-        let mul_refs: Vec<&Eval> = (0..4).map(|i| &pre_all[pre_tbl0 + 11 + i]).collect();
-        let (c, sum) = table_col(plan.log_mul, &rels.mul, &mul_refs, &base_all[mult_start + 3]);
+        let (c, sum) = crate::devfrac::frac_cols(
+            &m4e_air.tables[2].eval, "table mul", plan.log_mul,
+            tc(&pre_tables, &tab_pre, 11, 4), tc(&base_mults, &tab_mult, 3, 1),
+            || {
+                let refs: Vec<&Eval> = (0..4).map(|i| htab(&pre_tables, 11 + i)).collect();
+                table_col(plan.log_mul, &rels.mul, &refs, htab(&base_mults, 3))
+            });
         inter_all.extend(c);
         claims.table_sums.push(qm(sum));
-        let qnz_refs: Vec<&Eval> = (0..2).map(|i| &pre_all[pre_tbl0 + 15 + i]).collect();
-        let (c, sum) = table_col(p.ao_q_bits, &rels.qnz, &qnz_refs, &base_all[mult_start + 4]);
+        let (c, sum) = crate::devfrac::frac_cols(
+            &m4e_air.tables[3].eval, "table qnz", p.ao_q_bits,
+            tc(&pre_tables, &tab_pre, 15, 2), tc(&base_mults, &tab_mult, 4, 1),
+            || {
+                let refs: Vec<&Eval> = (0..2).map(|i| htab(&pre_tables, 15 + i)).collect();
+                table_col(p.ao_q_bits, &rels.qnz, &refs, htab(&base_mults, 4))
+            });
         inter_all.extend(c);
         claims.table_sums.push(qm(sum));
         for (t, w) in plan.widths.iter().enumerate() {
-            let (c, sum) = table_col(*w, &rels.ranges[t], &[&pre_all[pre_tbl0 + 17 + t]],
-                                     &base_all[mult_start + 5 + t]);
+            let (c, sum) = crate::devfrac::frac_cols(
+                &m4e_air.tables[4 + t].eval, &format!("table range{w}"), *w,
+                tc(&pre_tables, &tab_pre, 17 + t, 1),
+                tc(&base_mults, &tab_mult, 5 + t, 1),
+                || table_col(*w, &rels.ranges[t], &[htab(&pre_tables, 17 + t)],
+                             htab(&base_mults, 5 + t)));
             inter_all.extend(c);
             claims.table_sums.push(qm(sum));
         }
+        // The glue's tables have no device path (and no generated kernels), so
+        // their sides keep the hand-written builder, reading the owned glue
+        // vectors directly.
         if let (Some(gp), Some(gr)) = (&plan.glue, &rels.glue) {
             let gcols = crate::glue::glue_table_ids(&gp.uns);
-            let base = pre_all.len() - gcols.len();
             for (t, (lr, cols, kind)) in
                 crate::glue::glue_table_kinds(&gp.uns, gr).into_iter().enumerate()
             {
@@ -1194,12 +1715,11 @@ pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Com
                     .iter()
                     .map(|c| {
                         let k = gcols.iter().position(|x| x == c).expect("glue table column");
-                        &pre_all[base + k]
+                        &glue_tcols[k]
                     })
                     .collect();
-                let (c, sum) = crate::glue::table_side(lr, &kind, &refs,
-                                                       &base_all[glue_mult_start + t]);
-                inter_all.extend(c);
+                let (c, sum) = crate::glue::table_side(lr, &kind, &refs, &glue_mcols[t]);
+                inter_all.extend(crate::device::host_cols(c));
                 claims.table_sums.push(qm(sum));
             }
         }
@@ -1215,14 +1735,18 @@ pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Com
         }
         _ => true,
     };
+    crate::util::m4_add("int/tables", m4_t.elapsed().as_secs_f64());
     let interaction_secs = t1.elapsed().as_secs_f64();
     let n_inter = inter_all.len();
     let clamp_edge = aor.q_out.iter().filter(|q| q.unsigned_abs() == 127).count();
     let family_cells = json!({
-        "bands": band_committed.iter().map(|c| c.base.iter().map(|e| e.domain.size()).sum::<usize>()).sum::<usize>(),
-        "attnout": aor.base.iter().map(|e| e.domain.size()).sum::<usize>(),
+        "bands": band_committed.iter().zip(&band_dev).map(|(c, d)| match d {
+            Some(d) => d.logs.iter().map(|l| 1usize << l).sum::<usize>(),
+            None => c.base.iter().map(|e| e.domain.size()).sum::<usize>(),
+        }).sum::<usize>(),
+        "attnout": aor.base_cells(),
         "dequant": n_deq_base,
-        "walks": walk_regions.iter().map(|w| w.base.iter().map(|e| e.domain.size()).sum::<usize>()).sum::<usize>(),
+        "walks": walk_regions.iter().map(|w| w.base_cells()).sum::<usize>(),
         "glue": glue_regions.iter().map(|g| g.base.iter().map(|e| e.domain.size()).sum::<usize>()).sum::<usize>(),
         "glue_regions": glue_regions.iter().map(|g| json!({
             "tag": g.tag, "rows": g.rows, "log_rows": g.log_rows,
@@ -1233,25 +1757,31 @@ pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Com
             "exponent_out_of_range": g.bad_exp,
         })).collect::<Vec<_>>(),
         "glue_vs_b1": glue_b1,
-        "interaction": inter_all.iter().map(|e| e.domain.size()).sum::<usize>(),
-        "preprocessed": pre_all.iter().map(|e| e.domain.size()).sum::<usize>(),
+        "interaction": inter_all.iter().map(|c| c.size()).sum::<usize>(),
+        "preprocessed": m4_pre_cells,
         "walk_weights": walk_regions.iter().map(|w| json!({
-            "group": w.name, "weights": w.n_weights,
+            "group": w.name, "weights": w.n_weights, "lead": w.lay.g.lead,
             "pk": w.lay.pk, "pq": w.lay.pq, "log_rows": w.lay.g.log_rows,
-            "pre_cells": w.pre.iter().map(|e| e.domain.size()).sum::<usize>(),
+            "pre_cells": w.pre_cells(),
         })).collect::<Vec<_>>(),
         "mats": layer.mats.iter().zip(&mat_regions).map(|(m, r)| json!({
             "name": m.name, "variant": m.variant.name(), "n": r.n,
             "per_row": r.lay.per_row, "log_rows": r.lay.log_rows,
             "kmax_needed": m.kmax_needed(), "kmax_blind": m.kmax_blind(),
-            "cells": r.base.iter().map(|e| e.domain.size()).sum::<usize>(),
+            "cells": r.base_cells(),
+            "lead": (1usize << r.lay.log_rows) - m.tokens * r.lay.chunks,
+        })).collect::<Vec<_>>(),
+        "band_leads": plan.lays.iter().map(|l| json!({
+            "chan": l.chan.g.lead, "key": l.key.g.lead, "out": l.out.g.lead,
         })).collect::<Vec<_>>(),
         "attnout_stats": {"n": aor.n, "per_row": aor.lay.per_row,
                           "log_rows": aor.lay.log_rows, "lead_rows": aor.lay.lead,
                           "q_bits": aor.q_bits, "rem_bits": aor.rem_bits,
                           "clamp_edge_count": clamp_edge},
     });
-    sess.commit(inter_all);
+    let m4_t = std::time::Instant::now();
+    sess.commit_any(inter_all);
+    crate::util::m4_add("wall/commit_inter", m4_t.elapsed().as_secs_f64());
     sess.mix(&claims.flat());
 
     // ---- components, prove ----------------------------------------------------
@@ -1265,8 +1795,15 @@ pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Com
         })
         .collect();
     let n_columns = [sizes[0].len(), sizes[1].len(), n_inter];
+    // B7a milestone 3: the lowering, off the prove loop's critical path.
+    #[cfg(feature = "cuda")]
+    if crate::util::m3_switch("B7_M3_PREWARM") {
+        built.prewarm_blobs();
+    }
     let provers = built.provers();
+    let m4_t = std::time::Instant::now();
     let (res, stats) = sess.prove_raw(&provers);
+    crate::util::m4_add("wall/prove_raw", m4_t.elapsed().as_secs_f64());
     let (proof, prove_error) = match res {
         Ok(pf) => (Some(pf), None),
         Err(e) => (None, Some(e)),

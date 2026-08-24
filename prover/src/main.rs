@@ -12,6 +12,20 @@ mod bf16;
 mod common;
 mod device;
 mod compose;
+mod cudagen;
+mod devlogup;
+mod devfill;
+mod devfrac;
+mod devpre;
+mod chunks;
+mod devtab;
+mod precache;
+mod scalars;
+mod devacc;
+mod devwfill;
+mod gencudakernels;
+mod cudakernels;
+mod exprprobe;
 mod dequant;
 mod glue;
 mod layer;
@@ -471,7 +485,7 @@ fn argmax_probes_cmd(args: &[String]) {
 // ----------------------------------------------------------------- compose ----
 
 /// Build the layer witness: real from `--witness`, else a small synthetic one.
-fn layer_of(args: &[String]) -> (layer::Layer, String) {
+pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     let vname = arg_strs(args, "--variants", &["intsplit6"])[0].clone();
     let variant = attn_witness::Variant::parse(&vname);
     let bands = arg_list(args, "--bands", &[8usize, 4, 2]);
@@ -490,7 +504,7 @@ fn layer_of(args: &[String]) -> (layer::Layer, String) {
      vname)
 }
 
-fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Params {
+pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Params {
     let b0 = &l.bands[0];
     let kmax = l.mats.iter().map(|m| m.kmax_blind()).max().unwrap()
         .min(bf16::KMAX_SOUND);
@@ -548,13 +562,42 @@ fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Params 
 fn compose_once(l: &layer::Layer, params: &compose::Params, tamper: &compose::ProverTamper)
                 -> (serde_json::Value, bool) {
     let out = compose::prove_layer(l, params, tamper);
+    let ser = compose_ser(&out);
+    compose_finish(out, ser, params)
+}
+
+/// The statement and the proof as bytes.
+pub struct Ser {
+    pub claims_bytes: Vec<u8>,
+    pub fixed_bytes: Vec<u8>,
+    pub proof_bytes: Option<Vec<u8>>,
+}
+
+/// B7a milestone 4 (18.2): section 5 puts serialization inside the whole wall
+/// and no harness has ever timed it. B7b (26): on its own, so the chunk loop
+/// serializes inside the wall and verifies after it.
+pub fn compose_ser(out: &compose::Composed) -> Ser {
+    let m4_t = std::time::Instant::now();
     let claims_bytes = serde_json::to_vec(&out.claims).unwrap();
     let fixed_bytes = serde_json::to_vec(&out.fixed).unwrap();
+    crate::util::m4_add("wall/ser_statement", m4_t.elapsed().as_secs_f64());
+    let proof_bytes = out.proof.as_ref().map(|pf| {
+        let m4_t = std::time::Instant::now();
+        let b = serde_json::to_vec(pf).unwrap();
+        crate::util::m4_add("wall/ser_proof", m4_t.elapsed().as_secs_f64());
+        b
+    });
+    Ser { claims_bytes, fixed_bytes, proof_bytes }
+}
+
+/// Verify from the bytes alone and assemble the report.
+pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params)
+                      -> (serde_json::Value, bool) {
+    let Ser { claims_bytes, fixed_bytes, proof_bytes } = ser;
     let mut proof_sha256 = String::new();
     let mut proof_ser_bytes = 0usize;
-    let (verdict, proof_bytes_len, verify_json) = match &out.proof {
-        Some(pf) => {
-            let proof_bytes = serde_json::to_vec(pf).unwrap();
+    let (verdict, proof_bytes_len, verify_json) = match (&out.proof, proof_bytes) {
+        (Some(pf), Some(proof_bytes)) => {
             // section 5 rung 1: the GPU proof must be byte-identical to the
             // SIMD proof built with the same options. This is the digest.
             proof_sha256 = crate::device::sha256_hex(&proof_bytes);
@@ -563,7 +606,7 @@ fn compose_once(l: &layer::Layer, params: &compose::Params, tamper: &compose::Pr
             let j = serde_json::to_value(&v).unwrap();
             (Some(v), pf.size_estimate(), j)
         }
-        None => (None, 0, json!({"prove_error": out.prove_error})),
+        _ => (None, 0, json!({"prove_error": out.prove_error})),
     };
     let accepts = verdict.as_ref().map(|v| v.accepts()).unwrap_or(false);
     let j = json!({
@@ -589,23 +632,49 @@ fn compose_once(l: &layer::Layer, params: &compose::Params, tamper: &compose::Pr
         "peak_rss_bytes": out.stats.peak_rss,
         "preprocessed_is_widest": out.stats.pre_ok,
         "phases": out.stats.phases,
+        "host_phases": crate::util::m4_report(),
         "proof_sha256": proof_sha256,
         "proof_ser_bytes": proof_ser_bytes,
         // milestone 2a: what the host->device crossing cost (README 10.2)
         "upload": crate::device::report(),
+        // milestone 3: what the constraint lowering cost, and where
+        "blob": crate::cudagen::blob_report(),
         "params": serde_json::to_value(params).unwrap(),
     });
     (j, accepts)
 }
 
 fn compose_cmd(args: &[String]) {
-    let (l, vname) = layer_of(args);
+    let (mut l, vname) = layer_of(args);
+    // B7a milestone 4 (section 3 row 1): rung 3's sixth probe on its own, so the
+    // `nopatch` control has a witness whose exp table is *not* the closed form
+    // to bite on (section 5 rules 5 and 8). The proof still accepts here -- the
+    // table and the witness agree; it is the pinned preprocessed root, which
+    // only `compose-probes` checks, that rejects it.
+    if let Some(i) = arg_str(args, "--corrupt-exp") {
+        l.corrupt_exp_table(i.parse().expect("--corrupt-exp wants a table row"));
+        eprintln!("compose: exp table row {i} flipped, witness rebuilt");
+    }
+    // B7a milestone 4 (section 3 row 1): rung 3's *seventh* probe on its own,
+    // so the `nopatch` control has a run whose normalisation table is not the
+    // closed form to bite on (section 5 rules 5 and 8). As with `--corrupt-exp`
+    // the proof still accepts here -- the table and the witness agree; it is
+    // the pinned preprocessed root, which only `compose-probes` checks, that
+    // rejects it.
+    let mut tamper = compose::ProverTamper::default();
+    if let Some(i) = arg_str(args, "--corrupt-norm") {
+        tamper.norm_row = Some(i.parse().expect("--corrupt-norm wants a table row"));
+        eprintln!("compose: norm table row {i} flipped, witness rebuilt");
+    }
     let params = params_of(&l, args, &vname);
     eprintln!("compose: {} bands={:?} variant={} kmax={} rem={} p={}",
               l.source, l.band_sizes, vname, params.kmax, params.ao_rem_bits, params.walk_p);
-    let (j, accepts) = compose_once(&l, &params, &Default::default());
+    let (j, accepts) = compose_once(&l, &params, &tamper);
     assert!(accepts, "honest composed proof rejected: {j}");
-    assert_eq!(j["ref_mismatch"], 0, "composed witness disagrees with the f64 reference");
+    if tamper.norm_row.is_none() {
+        assert_eq!(j["ref_mismatch"], 0,
+                   "composed witness disagrees with the f64 reference");
+    }
     assert_eq!(j["off_table"], 0, "honest composed witness has off-table values");
     emit("compose", json!({"source": l.source, "point": j}));
 }
@@ -1125,6 +1194,12 @@ fn main() {
         "pack" => pack_cmd(&args),
         "attn-probes" => attn_probes_cmd(&args),
         "compose" => compose_cmd(&args),
+        "compose-chunks" => chunks::chunks_cmd(&args),
+        "exprprobe" => exprprobe::cmd(&args),
+        "cudacheck" => cudagen::cmd(&args),
+        "cudaemit" => cudagen::emit_cmd(&args),
+        "logupcheck" => cudagen::logup_cmd(&args),
+        "genemit" => cudagen::gen_emit_cmd(&args),
         "compose-probes" => compose_probes_cmd(&args),
         "psweep" => psweep_cmd(&args),
         "requant" => requant_cmd(&args),
@@ -1136,7 +1211,7 @@ fn main() {
         "selftest" => selftest(&args),
         other => {
             eprintln!("unknown subcommand {other:?}; \
-                       expected tables|dequant|width|kmax|probes|pack|attn-probes|\
+                       expected tables|dequant|width|kmax|probes|pack|attn-probes|exprprobe|cudacheck|cudaemit|logupcheck|genemit|\
                        argmax|argmax-probes|\
                        compose|compose-probes|psweep|requant|requant-probes|glue|glue-probes|selftest");
             std::process::exit(2);

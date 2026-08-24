@@ -529,6 +529,19 @@ impl Layer {
         let mut group_qx: std::collections::HashMap<&str, Vec<i32>> = Default::default();
         for (name, var) in mat_variants(&cfg.layout) {
             let (ni, no) = if name == "down" { (n_out, n_in) } else { (n_in, n_out) };
+            // B7b (README 26): `B7_SYNTH_DIMS=q:3584x3584,k:3584x512,...` sets a
+            // matmul's (n_in, n_out) by name; unnamed matmuls keep the defaults.
+            let (ni, no) = std::env::var("B7_SYNTH_DIMS")
+                .ok()
+                .and_then(|spec| {
+                    spec.split(',').find_map(|e| {
+                        let (n, d) = e.split_once(':')?;
+                        if n != name { return None; }
+                        let (a, b) = d.split_once('x')?;
+                        Some((a.parse().ok()?, b.parse().ok()?))
+                    })
+                })
+                .unwrap_or((ni, no));
             let gname = WALK_GROUPS.iter().find(|(_, ms)| ms.contains(&name)).unwrap().0;
             let qx: Vec<i32> = group_qx
                 .entry(gname)
@@ -536,14 +549,20 @@ impl Layer {
                 .clone();
             let qw: Vec<i32> = (0..ni * no).map(|_| rng.random_range(-127..=127)).collect();
             let mut acc = vec![0i64; s * no];
-            for t in 0..s {
-                for i in 0..no {
-                    let mut v = 0i64;
+            // B7b (README 26): one token per task, the output channel innermost
+            // -- the same sums, in the order the memory is laid out.
+            {
+                use rayon::prelude::*;
+                let (qx, qw) = (&qx, &qw);
+                acc.par_chunks_mut(no).enumerate().for_each(|(t, row)| {
                     for k in 0..ni {
-                        v += qx[t * ni + k] as i64 * qw[k * no + i] as i64;
+                        let x = qx[t * ni + k] as i64;
+                        let w = &qw[k * no..(k + 1) * no];
+                        for i in 0..no {
+                            row[i] += x * w[i] as i64;
+                        }
                     }
-                    acc[t * no + i] = v;
-                }
+                });
             }
             mats.push(Mat {
                 name: name.into(), variant: var, n_in: ni, n_out: no, tokens: s,
@@ -994,6 +1013,21 @@ pub struct MatRegion {
     /// f64-reference mismatches (must be 0)
     pub ref_bad: usize,
     pub n: usize,
+    /// B7a milestone 4 (19.6): the same columns, born on the device. `Some`
+    /// only under `B7_M4_FILL=1`, where `pre` and `base` are empty and this is
+    /// the region.
+    pub dev: Option<crate::devfill::DevFill>,
+}
+
+impl MatRegion {
+    /// Committed cells, wherever the columns are.
+    pub fn base_cells(&self) -> usize {
+        let n = match &self.dev {
+            Some(d) => d.base.len(),
+            None => self.base.len(),
+        };
+        n << self.lay.log_rows
+    }
 }
 
 /// Build one matmul's dequant region: witness columns in the compose layout,
@@ -1010,6 +1044,24 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables) -> MatRegion {
     let f = map.f;
     let n = m.tokens * m.n_out;
 
+    // B7a milestone 4 (19.6): which fill runs. 1 is the device's alone -- the
+    // region has no host columns at all and `pre`/`base` stay empty -- and 2
+    // builds both and asserts every cell equal before either is used.
+    let m4c = crate::util::m4b_mode("B7_M4_FILL");
+    let m4c_want = m4c == 2;
+    if m4c == 1 {
+        let dev = crate::devfill::mat_region_dev(m, &spec, &lay, &map, tables, false);
+        let ref_bad = dev.ref_bad;
+        return MatRegion { lay, spec, map, pre: vec![], base: vec![], ref_bad, n,
+                           dev: Some(dev) };
+    }
+    let m4c_snap = |t: &Tables| -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, usize) {
+        let r8 = t.ridx(8);
+        (t.m_norm.clone(), t.m_frac.clone(), t.m_mul.clone(), t.m_r[r8].clone(),
+         t.off_table)
+    };
+    let m4c_before = m4c_want.then(|| m4c_snap(tables));
+
     let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); rows]; map.n_cols];
     // parallel over row blocks: each block fills its slice of every column and
     // accumulates its own table multiplicities, merged serially below
@@ -1020,6 +1072,11 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables) -> MatRegion {
         mul: Vec<(usize, u32)>,
         r8: Vec<(i64, u32)>,
         ref_bad: usize,
+        /// B7a milestone 4 (19.6): the f64 cross-check's own bf16 answer per
+        /// (row, slot), so `B7_M4_FILL=2` can compare the one part of the fill
+        /// that is not integer arithmetic cell for cell instead of comparing
+        /// two counts that are both zero on an honest witness.
+        want: Vec<u16>,
     }
     let starts: Vec<usize> = (0..rows).step_by(block).collect();
     let tref = &*tables;
@@ -1033,16 +1090,18 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables) -> MatRegion {
             let mut bm = std::collections::HashMap::new();
             let mut br = std::collections::HashMap::new();
             let mut ref_bad = 0usize;
+            let mut want = vec![0u16; if m4c_want { len * lay.per_row } else { 0 }];
             for jj in 0..len {
                 let j = start + jj;
                 fill_mat_row(m, &spec, &lay, &map, tref, j, jj, &mut local,
-                             &mut bn, &mut bf2, &mut bm, &mut br, &mut ref_bad);
+                             &mut bn, &mut bf2, &mut bm, &mut br, &mut ref_bad,
+                             &mut want);
             }
             let collect = |h: std::collections::HashMap<usize, u32>| {
                 h.into_iter().collect::<Vec<_>>()
             };
             (local, Bumps { norm: collect(bn), frac: collect(bf2), mul: collect(bm),
-                            r8: br.into_iter().collect(), ref_bad })
+                            r8: br.into_iter().collect(), ref_bad, want })
         })
         .collect();
     let mut ref_bad = 0usize;
@@ -1115,8 +1174,96 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables) -> MatRegion {
     pre.push(sel(&|j| j > 0 && last(j)));               // m2
     pre.push(sel(&|j| j + 1 == rows));                  // end
 
-    let base = cols.into_iter().map(|c| eval_of(lay.log_rows, c)).collect();
-    MatRegion { lay, spec, map, pre, base, ref_bad, n }
+    let base: Vec<Eval> = cols.into_iter().map(|c| eval_of(lay.log_rows, c)).collect();
+    if m4c_want {
+        // `B7_M4_FILL=2`: the check with teeth, and it runs before any column
+        // has changed hands. Every committed and preprocessed cell, the four
+        // multiplicity tables, `off_table`, `ref_bad` and -- because it is the
+        // only non-integer arithmetic in the fill -- the f64 cross-check's own
+        // answer per (row, slot).
+        let after = m4c_snap(tables);
+        let before = m4c_before.unwrap();
+        let mut want_host = vec![0u16; rows * lay.per_row];
+        for (bi, start) in starts.iter().enumerate() {
+            let w = &out[bi].1.want;
+            want_host[start * lay.per_row..start * lay.per_row + w.len()]
+                .copy_from_slice(w);
+        }
+        let dev = crate::devfill::mat_region_dev(m, &spec, &lay, &map, tables, true);
+        check_fill_dev(m, &lay, &base, &pre, ref_bad, &want_host, &dev, tables,
+                       &before, &after);
+        // the device's own bumps are the check's, not the proof's: put the
+        // shared tables back where the host fill left them
+        let r8 = tables.ridx(8);
+        tables.m_norm.copy_from_slice(&after.0);
+        tables.m_frac.copy_from_slice(&after.1);
+        tables.m_mul.copy_from_slice(&after.2);
+        tables.m_r[r8].copy_from_slice(&after.3);
+        tables.off_table = after.4;
+    }
+    MatRegion { lay, spec, map, pre, base, ref_bad, n, dev: None }
+}
+
+/// `B7_M4_FILL=2`: the device fill against the host fill, everything at once.
+///
+/// Not a sample: a fill that is wrong on one slot of one row is wrong, and the
+/// point of checking here rather than against a proof digest is that a
+/// mismatch names the column and the cell.
+#[allow(clippy::too_many_arguments)]
+fn check_fill_dev(m: &Mat, lay: &MatLayout, base: &[Eval], pre: &[Eval],
+                  ref_bad: usize, want_host: &[u16],
+                  dev: &crate::devfill::DevFill, tables: &Tables,
+                  before: &(Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, usize),
+                  after: &(Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, usize)) {
+    use stwo::prover::backend::Column as _;
+    let cmp = |what: &str, host: &[Eval], got: &[stwo::stwo_cuda::base_field_vec::BaseFieldVec]| {
+        assert_eq!(host.len(), got.len(), "{}: {what} column count", m.name);
+        for (i, (a, b)) in host.iter().zip(got).enumerate() {
+            let (a, b) = (a.values.to_cpu(), b.to_vec());
+            assert_eq!(a.len(), b.len(), "{}: {what} column {i} length", m.name);
+            if let Some(k) = (0..a.len()).find(|k| a[*k] != b[*k]) {
+                panic!("{}: {what} column {i} differs at cell {k}: host {:?}, device {:?}",
+                       m.name, a[k], b[k]);
+            }
+        }
+    };
+    cmp("base", base, &dev.base);
+    cmp("pre", pre, &dev.pre);
+    // the multiplicities: the device's delta against the host's, table by table
+    let delta = |a: &[u32], b: &[u32]| -> Vec<u32> {
+        a.iter().zip(b).map(|(x, y)| x - y).collect()
+    };
+    let r8 = tables.ridx(8);
+    let dev_now = (tables.m_norm.clone(), tables.m_frac.clone(), tables.m_mul.clone(),
+                   tables.m_r[r8].clone(), tables.off_table);
+    for (what, h, d) in [
+        ("m_norm", delta(&after.0, &before.0), delta(&dev_now.0, &after.0)),
+        ("m_frac", delta(&after.1, &before.1), delta(&dev_now.1, &after.1)),
+        ("m_mul", delta(&after.2, &before.2), delta(&dev_now.2, &after.2)),
+        ("m_r8", delta(&after.3, &before.3), delta(&dev_now.3, &after.3)),
+    ] {
+        if let Some(k) = (0..h.len()).find(|k| h[*k] != d[*k]) {
+            panic!("{}: {what}[{k}] bumped {} times by the host and {} by the device",
+                   m.name, h[k], d[k]);
+        }
+    }
+    assert_eq!(dev_now.4 - after.4, after.4 - before.4,
+               "{}: off-table bumps differ", m.name);
+    if let Some(w) = &dev.want {
+        assert_eq!(dev.ref_bad, ref_bad, "{}: ref_bad differs", m.name);
+        // The one unknown 19.6 named: `fill_mat_row`'s f64 cross-check, on
+        // device fp64. Compared per (row, slot), not as a count.
+        assert_eq!(w.len(), want_host.len(), "{}: want length", m.name);
+        if let Some(k) = (0..w.len()).find(|k| w[*k] as u16 != want_host[*k]) {
+            panic!("{}: the f64 cross-check differs at row {} slot {}: host {:#06x}, \
+                    device {:#06x}",
+                   m.name, k / lay.per_row, k % lay.per_row, want_host[k], w[k]);
+        }
+    }
+    eprintln!("fill-dev: {} -- {} base and {} pre columns, {} cells, the four \
+multiplicity tables and the f64 cross-check all match",
+              m.name, base.len(), pre.len(),
+              (base.len() + pre.len()) << lay.log_rows);
 }
 
 /// One row of a matmul dequant region: the witness fields of `per_row`
@@ -1129,7 +1276,7 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
                 bf2: &mut std::collections::HashMap<usize, u32>,
                 bm: &mut std::collections::HashMap<usize, u32>,
                 br: &mut std::collections::HashMap<i64, u32>,
-                ref_bad: &mut usize) {
+                ref_bad: &mut usize, wref: &mut [u16]) {
     let f = map.f;
     let sticky = spec.round.needs_sticky();
     // An inert lead row is filled as a row of *zero* accumulators against token 0's
@@ -1187,6 +1334,9 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
                 *br.entry(eo).or_default() += 1;
                 if spec.round == bf16::Round::Even {
                     let want = bf16::from_f64(a as f64 * (jjx as f64).exp2());
+                    if !wref.is_empty() {
+                        wref[jj * lay.per_row + s] = want;
+                    }
                     let got = bf16::pattern(sg, eo.max(0) as u32, nr.m7);
                     if want != got {
                         *ref_bad += 1;
@@ -1217,6 +1367,9 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
                     let swv = bf16::to_f32(bf16::pattern(0, m.sw[c].1, m.sw[c].0)) as f64;
                     let t1 = bf16::to_f32(bf16::from_f64(y0 * sxv)) as f64;
                     let want = bf16::from_f64(t1 * swv) | (u16::from(a < 0) << 15);
+                    if !wref.is_empty() {
+                        wref[jj * lay.per_row + s] = want;
+                    }
                     let got = bf16::pattern(sg, e_in.max(0) as u32, m_in);
                     if want != got {
                         *ref_bad += 1;
@@ -1230,7 +1383,7 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
 
 /// The matmul region's Freivalds claimed side and LogUp columns.
 pub struct MatInteraction {
-    pub cols: Vec<Eval>,
+    pub cols: Vec<crate::device::AnyCol<'static>>,
     pub claimed_h: SecureField,
     pub use_sum: SecureField,
 }
@@ -1240,7 +1393,13 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
     let lay = r.lay;
     let rows = 1usize << lay.log_rows;
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, lay.per_row);
+    // B7a milestone 4 (section 3 row 1): `z` and `h` where the region's own
+    // accumulator columns are. `B7_M4_ACC=2` runs both and asserts every cell.
+    let m4g = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
+    let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
+    let rows = if m4g_host { rows } else { 0 };
     // the Horner accumulators, inner sums in parallel, carries serial
+    let m4_t = std::time::Instant::now();
     let inner: Vec<SecureField> = (0..rows)
         .into_par_iter()
         .map(|j| {
@@ -1256,6 +1415,8 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
             zf
         })
         .collect();
+    crate::util::m4_add("int/deq_inner", m4_t.elapsed().as_secs_f64());
+    let m4_t = std::time::Instant::now();
     let (mut z, mut h) = (vec![SecureField::zero(); rows], vec![SecureField::zero(); rows]);
     for j in 0..rows {
         let nofirst = matches!(lay.at_opt(m.tokens, j), Some((_, b)) if b + 1 < lay.chunks);
@@ -1272,19 +1433,132 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
             h[j] += z[j];
         }
     }
-    let claimed_h = h[rows - 1];
-    let mut cols = crate::attn_trace::secure_cols_pub(lay.log_rows, &z);
-    cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
+    crate::util::m4_add("int/deq_carry", m4_t.elapsed().as_secs_f64());
+    let m4_t = std::time::Instant::now();
+    let mut sink = crate::device::ColSink::new();
+    let claimed_h = match m4g {
+        Some(d) => {
+            let got = crate::devacc::deq(d, &lay, &r.map, r.map.f.acc, rv, s_ch);
+            let hh = m4g_host.then(|| {
+                let mut e = crate::attn_trace::secure_cols_pub(lay.log_rows, &z);
+                e.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
+                (e, vec![h[rows - 1]])
+            });
+            crate::devacc::place(&format!("deq {} 2^{}", m.name, lay.log_rows), got, hh,
+                                 &mut sink)[0]
+        }
+        None => {
+            sink.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &z));
+            sink.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
+            h[rows - 1]
+        }
+    };
+    let mut cols = sink.into_inner();
+    crate::util::m4_add("int/deq_cols", m4_t.elapsed().as_secs_f64());
 
     // the LogUp columns, in the exact order the AIR adds lookups
-    let (lcols, use_sum) = mat_logup(r, rels);
+    let m4_t = std::time::Instant::now();
+    let (lcols, use_sum) = mat_logup(m, r, rv, s_ch, rels);
+    crate::util::m4_add("int/deq_logup", m4_t.elapsed().as_secs_f64());
     cols.extend(lcols);
     MatInteraction { cols, claimed_h, use_sum }
 }
 
 /// The interaction-mask columns come first (z, h), then the LogUp columns; this
 /// builds the latter with the parallel builder.
-fn mat_logup(r: &MatRegion, rels: &crate::compose::Rels) -> (Vec<Eval>, SecureField) {
+/// The same fractions, from the AIR itself (B7a milestone 4, 18.7).
+///
+/// `DequantEval` is the component the verifier checks; lowering it with
+/// `cudagen::lower_logup` gives every lookup's numerator and denominator as a
+/// straight-line IR over this region's own columns, in `add_to_relation`
+/// order -- which is the order `finalize_logup_in_pairs` batches them in and
+/// therefore the order `paired` needs. Nothing below is dequant-specific:
+/// swap the eval and it builds another family's LogUp columns.
+///
+/// The eval is rebuilt here rather than borrowed from `build_components`,
+/// which does not exist yet at generation time. Only `yside.claimed_h` is
+/// unavailable, and it enters constraints alone -- never a lookup -- so a
+/// placeholder is correct. `B7_M4_LOGUPIR=2` is what says the two agree.
+fn mat_logup_ir(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
+                rels: &crate::compose::Rels, on_device: bool)
+                -> (Vec<crate::device::AnyCol<'static>>, SecureField) {
+    use stwo::prover::backend::simd::m31::PackedM31;
+    let sub: Vec<crate::attn_air::RangeRel> = crate::dequant::range_widths(&r.spec)
+        .iter()
+        .map(|w| rels.range(*w).clone())
+        .collect();
+    let (rv_pow, rv_step) = crate::attn_air::powers(rv, r.lay.per_row);
+    let eval = crate::dequant::DequantEval {
+        log_rows: r.lay.log_rows,
+        sp: r.spec.clone(),
+        tag: m.name.clone(),
+        norm: rels.norm.clone(),
+        frac: rels.frac.clone(),
+        mul: rels.mul.clone(),
+        qnz: rels.qnz.clone(),
+        rels: sub,
+        yside: Some(crate::dequant::YSide {
+            rv_pow,
+            rv_step,
+            s: s_ch,
+            claimed_h: SecureField::zero(),
+        }),
+    };
+    // `B7_M4_LOGUPMUT` picks one of 2b's deliberate defects, so mode 2 has a
+    // negative control. B7a milestone 4 (section 3 row 1): one place reads it
+    // for every family, and it takes a `:family` suffix -- unaimed, a defect
+    // panics at whichever family is lowered first and says nothing about the
+    // rest (section 5 rule 5).
+    let ir = crate::devfrac::ir_of(&eval, r.lay.log_rows);
+    if on_device {
+        // The same IR, run by the generated kernel instead of the interpreter.
+        // The shape id comes from the compiled table by fingerprint, so a
+        // stale library is a loud failure and never a wrong proof.
+        let family = <crate::dequant::DequantEval as
+            stwo_constraint_framework::FrameworkEval>::cuda_eval_name(&eval);
+        let fp = ir.fingerprint();
+        let (shape, looks) = crate::gencudakernels::gen_shape_of(family, fp).unwrap_or_else(|| {
+            panic!("no generation kernel for {family} fingerprint {fp:#010x}                     ({} lookups): regenerate with `b65 genemit` and rebuild libstwo_cuda.a",
+                   ir.fracs.len())
+        });
+        assert_eq!(looks, ir.fracs.len(), "{family}: lookup count disagrees with the kernel");
+        if let Some(d) = &r.dev {
+            // B7a milestone 4 (19.6): the fill left this region's columns on
+            // the device, so the fractions read them where they are and the
+            // LogUp columns never come back. 19.4 measured both transfers and
+            // said they disappear together; this is the together.
+            let (cols, sum) = crate::devlogup::logup_cols_dev(
+                &ir, family, shape, r.lay.log_rows, &d.pre, &d.base);
+            return (cols.into_iter()
+                        .map(|c| crate::device::AnyCol::OwnedDev(c, r.lay.log_rows))
+                        .collect(),
+                    sum);
+        }
+        let (cols, sum) = crate::devlogup::logup_cols_dev_to_host(
+            &ir, family, shape, r.lay.log_rows, &r.pre, &r.base);
+        return (crate::device::host_cols(cols), sum);
+    }
+    let pre: Vec<&[PackedM31]> = r.pre.iter().map(|e| &e.data[..]).collect();
+    let base: Vec<&[PackedM31]> = r.base.iter().map(|e| &e.data[..]).collect();
+    let (cols, sum) = crate::cudagen::logup_cols(&ir, r.lay.log_rows, &pre, &base);
+    (crate::device::host_cols(cols), sum)
+}
+
+fn mat_logup(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
+             rels: &crate::compose::Rels)
+             -> (Vec<crate::device::AnyCol<'static>>, SecureField) {
+    // B7a milestone 4 (19.6): with the fill on the device there is no host
+    // column to build the fractions from, so the device path is the only one
+    // -- and it is also the one that leaves 4a's bytes at zero.
+    if r.dev.is_some() {
+        return mat_logup_ir(m, r, rv, s_ch, rels, true);
+    }
+    let m4b = crate::util::m4b_mode("B7_M4_LOGUPIR");
+    let from_ir = (m4b > 0).then(|| mat_logup_ir(m, r, rv, s_ch, rels, m4b >= 3));
+    // 2 checks the interpreter against the hand-written builder, 4 the kernel.
+    if m4b == 1 || m4b == 3 {
+        return from_ir.unwrap();
+    }
     use stwo::prover::backend::simd::qm31::PackedQM31;
     use stwo_constraint_framework::Relation;
     let map = &r.map;
@@ -1353,15 +1627,35 @@ fn mat_logup(r: &MatRegion, rels: &crate::compose::Rels) -> (Vec<Eval>, SecureFi
         }
     };
     let (n_pairs, fpair) = crate::plogup::paired(looks.len(), fr);
-    crate::plogup::build(r.lay.log_rows, n_pairs, fpair)
+    let host = crate::plogup::build(r.lay.log_rows, n_pairs, fpair);
+    if let Some((cols, sum)) = from_ir {
+        // `B7_M4_LOGUPIR=2`: the check. Every column, every cell, and the
+        // claimed sum -- not a sample, because a lowering that is wrong on one
+        // lookup of one row is wrong.
+        use stwo::prover::backend::Column as _;
+        assert_eq!(cols.len(), host.0.len(),
+                   "{}: IR built {} LogUp columns, the hand-written builder {}",
+                   m.name, cols.len(), host.0.len());
+        for (i, (a, b)) in cols.iter().zip(&host.0).enumerate() {
+            assert!(a.host().values.to_cpu() == b.values.to_cpu(),
+                    "{}: LogUp column {i} differs between the IR and the hand-written builder",
+                    m.name);
+        }
+        assert_eq!(sum, host.1, "{}: claimed sums differ", m.name);
+        eprintln!("logup-ir: {} -- {} columns and the claimed sum match", m.name, cols.len());
+    }
+    (crate::device::host_cols(host.0), host.1)
 }
 
 // ------------------------------------------------------------- attnout region --
 
 pub struct AoRegion {
     pub lay: AoLayout,
+    /// as `WalkRegion`'s: the mirror under `B7_M4_WFILL=1`
     pub pre: Vec<Eval>,
     pub base: Vec<Eval>,
+    /// B7a milestone 4 (section 3 row 1): the same columns, born on the device.
+    pub dev: Option<crate::devwfill::DevAo>,
     pub ref_bad: usize,
     /// the committed int8 outputs, for cross-checks
     pub q_out: Vec<i64>,
@@ -1370,12 +1664,35 @@ pub struct AoRegion {
     pub q_bits: u32,
 }
 
+impl AoRegion {
+    /// Committed cells, wherever the columns are.
+    pub fn base_cells(&self) -> usize {
+        let n = match &self.dev { Some(d) => d.base.len(), None => self.base.len() };
+        n << self.lay.log_rows
+    }
+}
+
 /// Column order per slot: acc, sg, qm, nz2, denp, d (after the shared den col).
 pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32,
                  tables: &mut Tables, corrupt: Option<usize>) -> AoRegion {
     let lay = AoLayout::choose(ao.nh, ao.s, ao.hd, per_row_target);
     let rows = 1usize << lay.log_rows;
     let pr = lay.per_row;
+    // B7a milestone 4 (section 3 row 1): the same three-value mode.
+    let m4d = crate::util::m4b_mode("B7_M4_WFILL");
+    assert!(m4d == 0 || corrupt.is_none(),
+            "attnout: the device fill has no `corrupt` path");
+    if m4d == 1 {
+        let dev = crate::devwfill::ao_region_dev(ao, &lay, q_bits, rem_bits, tables, false);
+        let (ref_bad, q_out) = (dev.ref_bad, dev.q_out.clone());
+        return AoRegion { lay, pre: vec![], base: vec![], dev: Some(dev), ref_bad, q_out,
+                          n: ao.nh * ao.s * ao.hd, rem_bits, q_bits };
+    }
+    let m4d_snap = |t: &Tables| -> (Vec<u32>, Vec<u32>, usize) {
+        (t.m_qnz.clone(), t.m_r[t.ridx(rem_bits)].clone(), t.off_table)
+    };
+    let m4d_before = (m4d == 2).then(|| m4d_snap(tables));
+    let mut want_host = vec![0u32; if m4d == 2 { rows * pr } else { 0 }];
     let n_cols = 1 + 6 * pr;
     let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); rows]; n_cols];
     let mut q_out = vec![0i64; ao.nh * ao.s * ao.hd];
@@ -1434,6 +1751,9 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                     // the reference: one f64 rounding, half away from zero
                     let want = ((mag as f64 * (e as f64).exp2()) / den as f64 + 0.5).floor()
                         as i64;
+                    if !want_host.is_empty() {
+                        want_host[j * pr + s] = want as u32;
+                    }
                     if want != qm {
                         ref_bad += 1;
                     }
@@ -1471,13 +1791,44 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
     pre.push(sel(&|j| j > 0 && last(j) && head_first(j)));       // m3: head step mu
     pre.push(sel(&|j| j + 1 == rows));                           // end
     let _ = active;
-    let base = cols.into_iter().map(|c| eval_of(lay.log_rows, c)).collect();
-    AoRegion { lay, pre, base, ref_bad, q_out, n: ao.nh * ao.s * ao.hd,
+    let base: Vec<Eval> = cols.into_iter().map(|c| eval_of(lay.log_rows, c)).collect();
+    if m4d == 2 {
+        let after = m4d_snap(tables);
+        let before = m4d_before.unwrap();
+        let dev = crate::devwfill::ao_region_dev(ao, &lay, q_bits, rem_bits, tables, true);
+        crate::devwfill::check_cols("attnout base", &base, &dev.base);
+        crate::devwfill::check_cols("attnout pre", &pre, &dev.pre);
+        let ri = tables.ridx(rem_bits);
+        crate::devwfill::check_delta("attnout m_qnz", &before.0, &after.0,
+                                     &sub_slice(&tables.m_qnz, &after.0));
+        crate::devwfill::check_delta("attnout m_rem", &before.1, &after.1,
+                                     &sub_slice(&tables.m_r[ri], &after.1));
+        assert_eq!(tables.off_table - after.2, after.2 - before.2,
+                   "attnout: off-table bumps differ");
+        assert_eq!(dev.ref_bad, ref_bad, "attnout: ref_bad differs");
+        assert_eq!(dev.q_out, q_out, "attnout: the committed int8 outputs differ");
+        // the one part of this family's fill that is not integer arithmetic,
+        // compared per (row, slot) rather than as a count -- which on an honest
+        // witness is zero on both sides and would agree vacuously
+        let w = dev.want.as_ref().expect("mode 2 asks for the reference");
+        assert_eq!(w.len(), want_host.len(), "attnout: want length");
+        if let Some(k) = (0..w.len()).find(|k| w[*k] != want_host[*k]) {
+            panic!("attnout: the f64 reference differs at row {} slot {}: host {}, device {}",
+                   k / pr, k % pr, want_host[k], w[k]);
+        }
+        tables.m_qnz.copy_from_slice(&after.0);
+        tables.m_r[ri].copy_from_slice(&after.1);
+        tables.off_table = after.2;
+        eprintln!("wfill-dev: attnout -- {} base and {} pre columns, {} cells, \
+both multiplicity tables and the f64 reference all match",
+                  base.len(), pre.len(), (base.len() + pre.len()) << lay.log_rows);
+    }
+    AoRegion { lay, pre, base, dev: None, ref_bad, q_out, n: ao.nh * ao.s * ao.hd,
                rem_bits, q_bits }
 }
 
 pub struct AoInteraction {
-    pub cols: Vec<Eval>,
+    pub cols: Vec<crate::device::AnyCol<'static>>,
     pub claimed_out: SecureField,
     pub claimed_den: SecureField,
     pub use_sum: SecureField,
@@ -1485,8 +1836,8 @@ pub struct AoInteraction {
 
 #[allow(clippy::too_many_arguments)]
 pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureField,
-                      rv: SecureField, c_ctx: usize, rels: &crate::compose::Rels)
-                      -> AoInteraction {
+                      rv: SecureField, c_ctx: usize, rels: &crate::compose::Rels,
+                      air: &crate::walk_air::AttnOutEval) -> AoInteraction {
     use stwo::prover::backend::simd::qm31::PackedQM31;
     use stwo_constraint_framework::Relation;
     let lay = r.lay;
@@ -1499,6 +1850,11 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
     let mu_out = rv_hd * s_span.inverse();
     let mu_den = r_c * s_span.inverse();
 
+    // B7a milestone 4 (section 3 row 1): the attnout's z, h and dz, on the same
+    // three-value mode every fill in this series uses.
+    let m4g = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
+    let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
+    let rows = if m4g_host { rows } else { 0 };
     let inner: Vec<SecureField> = (0..rows)
         .into_par_iter()
         .map(|j| {
@@ -1540,11 +1896,27 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
             }
         }
     }
-    let claimed_out = h[rows - 1];
-    let claimed_den = dz[rows - 1];
-    let mut cols = crate::attn_trace::secure_cols_pub(lay.log_rows, &z);
-    cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
-    cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &dz));
+    let mut cols = crate::device::ColSink::new();
+    let (claimed_out, claimed_den) = match m4g {
+        Some(d) => {
+            let got = crate::devacc::ao(d, &lay, ao.nh, ao.s, rv, s_ch, mu_out, mu_den);
+            let hh = m4g_host.then(|| {
+                let mut e = crate::attn_trace::secure_cols_pub(lay.log_rows, &z);
+                e.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
+                e.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &dz));
+                (e, vec![h[rows - 1], dz[rows - 1]])
+            });
+            let c = crate::devacc::place(&format!("attnout 2^{}", lay.log_rows), got, hh,
+                                         &mut cols);
+            (c[0], c[1])
+        }
+        None => {
+            cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &z));
+            cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
+            cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &dz));
+            (h[rows - 1], dz[rows - 1])
+        }
+    };
 
     // lookups per slot, in AIR order: (qm, nz2), d, dp
     let one = PackedQM31::broadcast(SecureField::one());
@@ -1564,10 +1936,16 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
             }
         }
     };
-    let (n_pairs, fpair) = crate::plogup::paired(n_looks, fr);
-    let (lcols, use_sum) = crate::plogup::build(lay.log_rows, n_pairs, fpair);
-    cols.extend(lcols);
-    AoInteraction { cols, claimed_out, claimed_den, use_sum }
+    let (lcols, use_sum) = crate::devfrac::frac_cols(
+        air, "attnout", lay.log_rows,
+        crate::devfrac::cols_of(&r.pre, r.dev.as_ref().map(|d| &d.pre[..])),
+        crate::devfrac::cols_of(&r.base, r.dev.as_ref().map(|d| &d.base[..])),
+        || {
+            let (n_pairs, fpair) = crate::plogup::paired(n_looks, fr);
+            crate::plogup::build(lay.log_rows, n_pairs, fpair)
+        });
+    cols.extend_any(lcols);
+    AoInteraction { cols: cols.into_inner(), claimed_out, claimed_den, use_sum }
 }
 
 // ------------------------------------------------------------------ walk regions --
@@ -1576,9 +1954,25 @@ pub struct WalkRegion {
     pub name: String,
     pub lay: WalkLayout,
     pub mats: Vec<usize>,
+    /// Under `B7_M4_WFILL=1` these are the *mirror* -- the device columns, back
+    /// on the host, because `walk_interaction` still reads them there. The
+    /// commitment takes `dev`, so they never go back up.
     pub pre: Vec<Eval>,
     pub base: Vec<Eval>,
     pub n_weights: usize,
+    /// B7a milestone 4 (section 3 row 1): the same columns, born on the device.
+    pub dev: Option<crate::devwfill::DevWalk>,
+}
+
+impl WalkRegion {
+    pub fn base_cells(&self) -> usize {
+        let n = match &self.dev { Some(d) => d.base.len(), None => self.base.len() };
+        n << self.lay.g.log_rows
+    }
+    pub fn pre_cells(&self) -> usize {
+        let n = match &self.dev { Some(d) => d.pre.len(), None => self.pre.len() };
+        n << self.lay.g.log_rows
+    }
 }
 
 /// Build one walk group's region: activations committed (offset +128), weights
@@ -1596,6 +1990,27 @@ pub fn walk_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: usize
         // q/k/v (and gate/up) must share one committed input
         assert_eq!(layer.mats[*i].qx, m0.qx, "walk group inputs differ");
     }
+
+    // B7a milestone 4 (section 3 row 1): which fill runs. 1 is the device's
+    // alone -- `pre` and `base` become the mirror the interaction reads -- and
+    // 2 builds both and asserts every cell equal before either is used.
+    let m4d = crate::util::m4b_mode("B7_M4_WFILL");
+    assert!(m4d == 0 || corrupt_qx.is_none(),
+            "{name}: the device walk fill has no `corrupt_qx` path");
+    if m4d == 1 {
+        let dev = crate::devwfill::walk_region_dev(layer, mat_idx, &lay, tables);
+        // B7a milestone 4 (section 3 row 1): no mirror. `walk_interaction` reads
+        // the device columns now, and nothing else reads a device region's host
+        // columns -- `base_cells` counts them off `dev`.
+        return WalkRegion { name: name.into(), lay, mats: mat_idx.to_vec(),
+                            pre: vec![], base: vec![],
+                            n_weights: mat_idx.iter().map(|i| layer.mats[*i].qw.len()).sum(),
+                            dev: Some(dev) };
+    }
+    let m4d_snap = |t: &Tables| -> (Vec<u32>, usize) {
+        (t.m_r[t.ridx(8)].clone(), t.off_table)
+    };
+    let m4d_before = (m4d == 2).then(|| m4d_snap(tables));
 
     let mut base = vec![];
     for p in 0..lay.pq {
@@ -1648,18 +2063,45 @@ pub fn walk_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: usize
     pre.push(sel(&|j| j > 0));
     pre.push(sel(&|j| j + 1 == rows));
 
+    if m4d == 2 {
+        // the check with teeth, before any column has changed hands
+        let after = m4d_snap(tables);
+        let before = m4d_before.unwrap();
+        let dev = crate::devwfill::walk_region_dev(layer, mat_idx, &lay, tables);
+        crate::devwfill::check_cols(&format!("walk {name} base"), &base, &dev.base);
+        crate::devwfill::check_cols(&format!("walk {name} pre"), &pre, &dev.pre);
+        let r8 = tables.ridx(8);
+        crate::devwfill::check_delta(&format!("walk {name} m_r8"), &before.0, &after.0,
+                                     &sub_slice(&tables.m_r[r8], &after.0));
+        assert_eq!(tables.off_table - after.1, after.1 - before.1,
+                   "walk {name}: off-table bumps differ");
+        // the device's own bumps are the check's, not the proof's
+        tables.m_r[r8].copy_from_slice(&after.0);
+        tables.off_table = after.1;
+        eprintln!("wfill-dev: walk {name} -- {} base and {} pre columns, {} cells, \
+the 8-bit range multiplicities all match",
+                  base.len(), pre.len(), (base.len() + pre.len()) << lay.g.log_rows);
+    }
     WalkRegion { name: name.into(), lay, mats: mat_idx.to_vec(), pre, base,
-                 n_weights: mat_idx.iter().map(|i| layer.mats[*i].qw.len()).sum() }
+                 n_weights: mat_idx.iter().map(|i| layer.mats[*i].qw.len()).sum(),
+                 dev: None }
+}
+
+/// `a - b`, entry by entry: what the *device* added on top of what the host
+/// left, so the two deltas can be compared without a second snapshot type.
+fn sub_slice(a: &[u32], b: &[u32]) -> Vec<u32> {
+    a.iter().zip(b).map(|(x, y)| x - y).collect()
 }
 
 pub struct WalkInteraction {
-    pub cols: Vec<Eval>,
+    pub cols: Vec<crate::device::AnyCol<'static>>,
     pub claimed: Vec<SecureField>,
     pub use_sum: SecureField,
 }
 
 pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: SecureField,
-                        rels: &crate::compose::Rels, range_check: bool) -> WalkInteraction {
+                        rels: &crate::compose::Rels, range_check: bool,
+                        air: &crate::walk_air::WalkEval) -> WalkInteraction {
     use stwo::prover::backend::simd::qm31::PackedQM31;
     use stwo_constraint_framework::Relation;
     let lay = r.lay;
@@ -1668,6 +2110,11 @@ pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: Se
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, lay.pk);
     let (s_pow, s_step) = crate::attn_air::powers(s_ch, lay.pq);
 
+    // B7a milestone 4 (section 3 row 1): the walks' v, us and accs, on the same
+    // three-value mode every fill in this series uses.
+    let m4g = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
+    let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
+    let rows = if m4g_host { rows } else { 0 };
     // v's inner sums in parallel (the activations), u's per matmul
     let inner: Vec<(SecureField, Vec<SecureField>)> = (0..rows)
         .into_par_iter()
@@ -1718,20 +2165,44 @@ pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: Se
             }
         }
     }
-    let claimed: Vec<SecureField> = accs.iter().map(|a| a[rows - 1]).collect();
-    let mut cols = crate::attn_trace::secure_cols_pub(lay.g.log_rows, &v);
-    for m in 0..r.mats.len() {
-        cols.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &us[m]));
-        cols.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &accs[m]));
-    }
+    let mut cols = crate::device::ColSink::new();
+    let claimed: Vec<SecureField> = match m4g {
+        Some(d) => {
+            let got = crate::devacc::walk(d, &lay, r.mats.len(), rv, s_ch);
+            let hh = m4g_host.then(|| {
+                let mut e = crate::attn_trace::secure_cols_pub(lay.g.log_rows, &v);
+                for m in 0..r.mats.len() {
+                    e.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &us[m]));
+                    e.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &accs[m]));
+                }
+                (e, accs.iter().map(|a| a[rows - 1]).collect::<Vec<_>>())
+            });
+            crate::devacc::place(&format!("walk {} 2^{}", r.name, lay.g.log_rows), got,
+                                 hh, &mut cols)
+        }
+        None => {
+            cols.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &v));
+            for m in 0..r.mats.len() {
+                cols.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &us[m]));
+                cols.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &accs[m]));
+            }
+            accs.iter().map(|a| a[rows - 1]).collect()
+        }
+    };
     let mut use_sum = SecureField::zero();
     if range_check {
         let one = PackedQM31::broadcast(SecureField::one());
         let fr = |i: usize, vr: usize| (one, rels.range(8).combine(&[r.base[i].data[vr]]));
-        let (n_pairs, fpair) = crate::plogup::paired(lay.pq, fr);
-        let (lcols, s) = crate::plogup::build(lay.g.log_rows, n_pairs, fpair);
-        cols.extend(lcols);
+        let (lcols, s) = crate::devfrac::frac_cols(
+            air, &format!("walk {}", r.name), lay.g.log_rows,
+            crate::devfrac::cols_of(&r.pre, r.dev.as_ref().map(|d| &d.pre[..])),
+            crate::devfrac::cols_of(&r.base, r.dev.as_ref().map(|d| &d.base[..])),
+            || {
+                let (n_pairs, fpair) = crate::plogup::paired(lay.pq, fr);
+                crate::plogup::build(lay.g.log_rows, n_pairs, fpair)
+            });
+        cols.extend_any(lcols);
         use_sum = s;
     }
-    WalkInteraction { cols, claimed, use_sum }
+    WalkInteraction { cols: cols.into_inner(), claimed, use_sum }
 }
