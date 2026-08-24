@@ -50,6 +50,25 @@ message(STATUS "Found cuh directories: ${CUH_DIRS}")
 add_library(
         stwo_cuda STATIC
         # Core CUDA utilities
+        # B7a m4c: the dequant fill kernel
+        b65_fill.cu
+        # end B7a m4c
+        # B7a m4d: the walk, attnout and band fill kernels
+        b65_wfill.cu
+        # end B7a m4d
+        # B7a m4f: the shared tables' fill kernel
+        b65_table_fill.cu
+        # end B7a m4f
+        # B7a m4g: the Horner accumulators
+        b65_acc.cu
+        # end B7a m4g
+        # B7a m4h: 4a's last 79 columns
+        b65_pre_fill.cu
+        # end B7a m4h
+        # B7a m4: generated b65 generation kernels
+        gen_b65_dispatch.cu
+        gen_b65_logup.cu
+        # end B7a m4
         batch_inverse.cu
         barycentric.cu
         utils.cu
