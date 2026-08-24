@@ -1,0 +1,648 @@
+//! The attention AIR: two Freivalds instances, one exp table, one shift -- packed
+//! over `insts` head instances sharing one column set.
+//!
+//! B5's arithmetic is unchanged.  What B6 adds is the instance axis, and the whole
+//! of it is three preprocessed selectors and three public constants:
+//!
+//! * the two accumulators that are already *Horners* fold instances for free.
+//!   `hs = sum_{gk} r^{gk} zs_{gk}` over the packed key axis `gk = i C + c` is
+//!   exactly `sum_i r^{C i} (sum_c r^c zs)`, and `h` likewise gives `rv^{hd i}`.
+//! * the three that are plain *sums* -- `acc` in the channel region, `av` and `sn`
+//!   in the grid -- have to pick up the same per-instance weight, or the two sides
+//!   of an identity are no longer comparable.  Each gets one preprocessed
+//!   instance-start selector and multiplies by `r^C` (or `rv^hd`) there.
+//! * the per-token region's Horner runs in `s`, so its natural instance weight is
+//!   `s^S`; the boundary multiplier `mu = r^C s^{-(S-rw)}` converts it to `r^C`.
+//!   `mu` is a public constant the verifier computes from `r` and `s`.
+//!
+//! The three application-level checks come out *identical* to B5's -- `r_sum am - hs
+//! == chan`, `av == out`, `sn == az` -- because every term carries the same weight.
+//! So one claimed value per identity covers every instance in the band, and
+//! per-instance soundness is Schwartz-Zippel on a polynomial of degree `insts C`
+//! rather than `C`: 336 instances cost 8.4 bits of the 124 QM31 has.
+//!
+//! Claims, for one head, with `r` over keys, `s` over query tokens and `rv` over
+//! output channels (three independent QM31 challenges drawn after the witness
+//! commits):
+//!
+//!   Q.K^T   sum_{t,c} r^c s^t score[t,c]  ==  sum_j (sum_c r^c qK[c,j])(sum_t s^t qQ[t,j])
+//!   A.V     sum_{t,j} rv^j s^t out[t,j]   ==  sum_c (sum_j rv^j qV[c,j])(sum_t s^t n[t,c])
+//!   denom   sum_t s^t Z_t                 ==  sum_c (sum_t s^t n[t,c])
+//!
+//! The integer variants never commit `score`.  They commit the shift
+//! `d[t,c] = m_t - score[t,c]` and one maximum `m_t` per token, and the Q.K^T
+//! claim is read as
+//!
+//!   sum_{t,c} r^c s^t score[t,c] = (sum_c r^c)(sum_t s^t m_t) - sum_{t,c} r^c s^t d[t,c]
+//!
+//! so the max shift costs one accumulator over `S` values instead of a column
+//! over the `S x C` grid, and `d`'s own lookup into the exp table doubles as the
+//! range check that makes `m_t >= max_c score[t,c]`.  What is *not* proven is
+//! `m_t <= max`: a prover may shift by more.  Softmax is exactly invariant under
+//! that shift, so the probs it changes are only the fixed-point rounding -- the
+//! `HighMax` probe measures how much -- and the committed `Z_t`, range-checked
+//! here, is what stops the numerators from being shifted into oblivion.
+//!
+//! Every constraint reads at most a `[-1, 0]` mask and is degree <= 3, which is
+//! what blowup 2 supports (B2).
+
+use num_traits::{One, Zero};
+use stwo::core::fields::FieldExpOps;
+use stwo::core::fields::m31::M31;
+use stwo::core::fields::qm31::SecureField;
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+use stwo_constraint_framework::{
+    EvalAtRow, FrameworkEval, INTERACTION_TRACE_IDX, RelationEntry, relation,
+};
+
+use crate::layout::{LayoutChan, LayoutKey, LayoutOut, Shape};
+use crate::attn_witness::Variant;
+
+relation!(ExpRel, 2);
+relation!(RangeRel, 1);
+
+pub fn id(s: impl Into<String>) -> PreProcessedColumnId {
+    PreProcessedColumnId { id: s.into() }
+}
+/// A band-local preprocessed column: several bands share one proof in B6.5, so
+/// every selector id carries its band's tag.
+pub fn band_id(tag: usize, s: &str) -> PreProcessedColumnId {
+    id(format!("{s}_band{tag}"))
+}
+pub const CHAN_SEL: [&str; 5] =
+    ["b6_c_nofirst", "b6_c_last", "b6_c_notzero", "b6_c_end", "b6_c_istart"];
+/// The grid region's preprocessed columns.  The last is not a selector: it is
+/// `2^-(F - frac_i)`, the constant that turns the committed *scaled* shift back into
+/// the shift itself, so one master exp table can serve every head in the band.
+pub const KEY_SEL: [&str; 8] =
+    ["b6_k_nofirst", "b6_k_last", "b6_k_notzero", "b6_k_end", "b6_k_m1", "b6_k_m2",
+     "b6_k_istart", "b6_k_dinv"];
+/// The *corner* grid's preprocessed columns (B10 step 3).  The same eight the
+/// prefix grid reads -- under their own ids, because the two regions are two
+/// components with two tilings -- plus `iend`, the row that completes an
+/// instance's key block.  The corner's key Horner runs in an independent
+/// challenge `r'`, so its natural per-instance weight is `r'^S`; the identity it
+/// is read against carries `am`, whose weight is the *prefix's* `r^C`.  `iend` is
+/// where the one converts to the other, at one preprocessed column and no fresh
+/// cell.
+pub const CORNER_SEL: [&str; 9] =
+    ["b6_x_nofirst", "b6_x_last", "b6_x_notzero", "b6_x_end", "b6_x_m1", "b6_x_m2",
+     "b6_x_istart", "b6_x_dinv", "b6_x_iend"];
+/// The corner's causal mask, one preprocessed column per token slot of a row:
+/// 1 where the key is in the decoded stream's future of that token.  A slot's
+/// token is a function of the row *and* the column, so the mask cannot be one
+/// column; what makes it affordable is that it lives on the corner's rows alone
+/// (`S` keys, not `C`), which is 4.2 M preprocessed cells a band at 8B.
+pub fn msk_id(tag: usize, i: usize) -> PreProcessedColumnId {
+    id(format!("b6_x_msk{i}_band{tag}"))
+}
+pub const OUT_SEL: [&str; 5] =
+    ["b6_o_nofirst", "b6_o_chanend", "b6_o_m1", "b6_o_m2", "b6_o_end"];
+pub const ROW_SEL: [&str; 3] = ["b6_r_notzero", "b6_r_end", "b6_r_istart"];
+pub const TBL_EXP_X: &str = "b6_exp_x";
+pub const TBL_EXP_Y: &str = "b6_exp_y";
+pub fn tbl_range(bits: u32) -> PreProcessedColumnId {
+    id(format!("b6_range_{bits}"))
+}
+
+/// Challenge powers, precomputed per region width.
+#[derive(Clone, Debug)]
+pub struct Powers {
+    pub r: SecureField,
+    pub rv: SecureField,
+    /// r^0..r^{pk-1} and r^pk, for the key chunk of the channel region
+    pub r_pow: Vec<SecureField>,
+    pub r_step: SecureField,
+    /// s^0..s^{pq-1} and s^pq, for the query chunk of the channel region
+    pub sq_pow: Vec<SecureField>,
+    pub sq_step: SecureField,
+    /// s^0..s^{q-1} and s^q, for the grid region
+    pub sg_pow: Vec<SecureField>,
+    pub sg_step: SecureField,
+    /// rv^0..rv^{pv-1} and rv^pv, for the value chunk of the grid region
+    pub rv_pow: Vec<SecureField>,
+    pub rv_step: SecureField,
+    /// s^0..s^{qo-1} and s^qo, for the A.V output region
+    pub so_pow: Vec<SecureField>,
+    pub so_step: SecureField,
+    /// s^0..s^{rw-1} and s^rw, for the per-token region
+    pub sr_pow: Vec<SecureField>,
+    pub sr_step: SecureField,
+    /// sum_{c<C} r^c, the coefficient the shift is folded through.  Per *instance*:
+    /// the packed key axis contributes `r^{C i}` on both sides, so this stays local.
+    pub r_sum: SecureField,
+    /// r^C -- the per-instance weight of the Q.K^T and denominator identities
+    pub r_c: SecureField,
+    /// rv^hd -- the per-instance weight of the A.V identity
+    pub rv_hd: SecureField,
+    /// the per-token region's instance-start multiplier, `r^C s^{-(S-rw)}`: its
+    /// Horner runs in `s`, so this is what converts its natural weight `s^S` into
+    /// the `r^C` every other region carries
+    pub mu: SecureField,
+    /// the per-instance weight of the *denominator* sum `sn`.  `sn` is a plain sum
+    /// over keys with an explicit multiplier, so the constant is a free choice --
+    /// and it has to be the same one on both grids, because `sn_prefix + sn_corner`
+    /// is what `az` is read against.  `r^C` of the prefix; equal to `r_c` there.
+    pub sn_c: SecureField,
+    /// the corner's instance-boundary multiplier `r^C r'^{-(S-1)}`, which turns the
+    /// key Horner's natural `r'^S` per instance into the prefix's `r^C`.  Unused by
+    /// the prefix grid, where the two already agree.
+    pub kappa: SecureField,
+}
+
+pub fn powers(base: SecureField, n: usize) -> (Vec<SecureField>, SecureField) {
+    let mut v = Vec::with_capacity(n);
+    let mut cur = SecureField::one();
+    for _ in 0..n {
+        v.push(cur);
+        cur *= base;
+    }
+    (v, cur)
+}
+
+impl Powers {
+    pub fn new(r: SecureField, s: SecureField, rv: SecureField, sh: &Shape,
+               lc: &LayoutChan, lk: &LayoutKey, lo: &LayoutOut, rw: usize) -> Self {
+        let (r_pow, r_step) = powers(r, lc.pk);
+        let (sq_pow, sq_step) = powers(s, lc.pq);
+        let (sg_pow, sg_step) = powers(s, lk.q);
+        let (rv_pow, rv_step) = powers(rv, lk.pv);
+        let (so_pow, so_step) = powers(s, lo.q);
+        let (sr_pow, sr_step) = powers(s, rw);
+        let (all_r, r_c) = powers(r, sh.c);
+        let r_sum = all_r.iter().fold(SecureField::zero(), |a, b| a + *b);
+        let (_, rv_hd) = powers(rv, sh.hd);
+        // s^{S-rw}, inverted: the per-token region multiplies by s^rw on every row
+        // after the first of an instance, so `mu s^{S-rw} = r^C`.
+        let (_, s_span) = powers(s, sh.s - rw);
+        let mu = r_c * s_span.inverse();
+        Self { r, rv, r_pow, r_step, sq_pow, sq_step, sg_pow, sg_step, rv_pow, rv_step,
+               so_pow, so_step, sr_pow, sr_step, r_sum, r_c, rv_hd, mu,
+               sn_c: r_c, kappa: r }
+    }
+
+    /// The corner grid's powers: built on the corner's own shape (`c = S`) and its
+    /// own key challenge `r'`, then told the three constants it shares with the
+    /// prefix -- the denominator's per-instance weight, the instance-boundary
+    /// multiplier that converts `r'^S` into the prefix's `r^C`, and `mu`.
+    ///
+    /// `mu` is the one that is not about weights but about *identity*: the corner
+    /// band commits its own row maximum, and nothing in its own statement forces
+    /// that to be the maximum the rectangle shifted by.  Two different maxima
+    /// would put the two halves' numerators on two different scales and the sum
+    /// `Z_prefix + Z_corner` would not be a softmax denominator at all.  Giving
+    /// the corner's per-token region the prefix's `mu` makes `am` a claim over the
+    /// same values with the same weights, so the verifier's `am_corner ==
+    /// am_prefix` is exactly "the two halves shifted by the same maximum".
+    pub fn as_corner(mut self, prefix_r_c: SecureField, prefix_mu: SecureField,
+                     s_keys: usize) -> Self {
+        let (_, rp_span) = powers(self.r, s_keys - 1);
+        self.sn_c = prefix_r_c;
+        self.kappa = prefix_r_c * rp_span.inverse();
+        self.mu = prefix_mu;
+        // and the channel region's own per-instance weight: `chan` is the side the
+        // corner's Q.K^T identity is read against, and the other two terms of that
+        // identity -- `am` (the prefix's per-token region) and `hs` (via `kappa`)
+        // -- both carry `r^C`.  Its natural `r'^S` would be a third weight.
+        self.r_c = prefix_r_c;
+        self
+    }
+}
+
+/// Offsets that make a signed committed value a non-negative table index.
+#[derive(Clone, Copy, Debug)]
+pub struct Offsets {
+    pub q: u32,
+    pub k: u32,
+    pub v: u32,
+}
+
+impl Offsets {
+    pub fn new(q_bits: u32, k_bits: u32) -> Self {
+        Self { q: 1 << (q_bits - 1), k: 1 << (k_bits - 1), v: 128 }
+    }
+}
+
+fn sum_pow(p: &[SecureField]) -> SecureField {
+    p.iter().fold(SecureField::zero(), |a, b| a + *b)
+}
+
+// ------------------------------------------------------------ Q.K^T region ---
+
+/// One row group per channel: the two inner sums of `Q.K^T`, multiplied per
+/// channel and accumulated.
+#[derive(Clone)]
+pub struct ChanEval {
+    pub tag: usize,
+    pub lay: LayoutChan,
+    pub pow: Powers,
+    pub off: Offsets,
+    pub claimed: SecureField,
+    pub rel_k: RangeRel,
+    pub rel_q: RangeRel,
+    pub range_check: bool,
+}
+
+impl FrameworkEval for ChanEval {
+    fn log_size(&self) -> u32 {
+        self.lay.g.log_rows
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.lay.g.log_rows + 1
+    }
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let sel: Vec<E::F> =
+            CHAN_SEL.iter().map(|n| eval.get_preprocessed_column(band_id(self.tag, n))).collect();
+        let (nofirst, last, notzero, end, istart) =
+            (sel[0].clone(), sel[1].clone(), sel[2].clone(), sel[3].clone(), sel[4].clone());
+        let ks: Vec<E::F> = (0..self.lay.pk).map(|_| eval.next_trace_mask()).collect();
+        let qs: Vec<E::F> = (0..self.lay.pq).map(|_| eval.next_trace_mask()).collect();
+
+        let [u_prev, u] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+        let [v_prev, v] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+        let [acc_prev, acc] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+
+        let mut kf = E::EF::zero();
+        for (p, kp) in ks.iter().enumerate() {
+            kf += kp.clone() * self.pow.r_pow[p];
+        }
+        kf = kf - sum_pow(&self.pow.r_pow) * SecureField::from_u32_unchecked(self.off.k, 0, 0, 0);
+        eval.add_constraint(u.clone() - (u_prev * self.pow.r_step) * nofirst.clone() - kf);
+
+        let mut qf = E::EF::zero();
+        for (p, qp) in qs.iter().enumerate() {
+            qf += qp.clone() * self.pow.sq_pow[p];
+        }
+        qf = qf - sum_pow(&self.pow.sq_pow) * SecureField::from_u32_unchecked(self.off.q, 0, 0, 0);
+        eval.add_constraint(v.clone() - (v_prev * self.pow.sq_step) * nofirst - qf);
+
+        // a plain sum over channels within an instance, times r^C at each instance
+        // start, so the packed claim carries the same weight the grid's r-Horner
+        // gives its side of the identity
+        let mut mult: E::EF = E::EF::from(notzero - istart.clone());
+        mult += istart * self.pow.r_c;
+        eval.add_constraint(acc.clone() - acc_prev * mult - (u * v) * last);
+        eval.add_constraint((acc - self.claimed) * end);
+
+        if self.range_check {
+            for kp in &ks {
+                eval.add_to_relation(RelationEntry::new(&self.rel_k, E::EF::one(),
+                                                        core::slice::from_ref(kp)));
+            }
+            for qp in &qs {
+                eval.add_to_relation(RelationEntry::new(&self.rel_q, E::EF::one(),
+                                                        core::slice::from_ref(qp)));
+            }
+            eval.finalize_logup_in_pairs();
+        }
+        eval
+    }
+}
+
+// -------------------------------------------------------------- grid region ---
+
+/// One row group per key: the whole `(t, c)` grid, and A.V's inner sums.
+#[derive(Clone)]
+pub struct KeyEval {
+    pub tag: usize,
+    pub lay: LayoutKey,
+    pub pow: Powers,
+    pub off: Offsets,
+    pub variant: Variant,
+    /// end-of-trace values of the three accumulators this region claims
+    pub claimed_hs: SecureField,
+    pub claimed_av: SecureField,
+    pub claimed_sn: SecureField,
+    pub rel_exp: ExpRel,
+    pub rel_v: RangeRel,
+    /// the split variant's remainder table
+    pub rel_split: Option<RangeRel>,
+    pub range_check: bool,
+    /// B10 step 3: this is the *causal corner*, the S x S grid of the decoded
+    /// tokens against each other.  It reads its own selectors, one causal-mask
+    /// column per token slot, and the instance-boundary multiplier `kappa`.  Its
+    /// masked slots stay in the score fold -- Freivalds is over the whole
+    /// rectangle and a masked entry is an honest score -- and leave the numerator
+    /// fold and the exp lookup, which is what "the token did not attend to it"
+    /// means in the AIR.
+    pub corner: bool,
+}
+
+impl FrameworkEval for KeyEval {
+    fn log_size(&self) -> u32 {
+        self.lay.g.log_rows
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.lay.g.log_rows + 1
+    }
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let names: &[&str] = if self.corner { &CORNER_SEL } else { &KEY_SEL };
+        let sel: Vec<E::F> =
+            names.iter().map(|n| eval.get_preprocessed_column(band_id(self.tag, n))).collect();
+        let (nofirst, last, notzero, end, m1, m2, istart) = (sel[0].clone(), sel[1].clone(),
+            sel[2].clone(), sel[3].clone(), sel[4].clone(), sel[5].clone(), sel[6].clone());
+        // the causal mask, one column per token slot; empty on the prefix grid
+        let msk: Vec<E::F> = (0..if self.corner { self.lay.q } else { 0 })
+            .map(|i| eval.get_preprocessed_column(msk_id(self.tag, i)))
+            .collect();
+        let vis = |i: usize| -> E::F {
+            match msk.get(i) {
+                Some(m) => E::F::one() - m.clone(),
+                None => E::F::one(),
+            }
+        };
+        // 2^-(F - frac_i): the committed index is the shift scaled to the master
+        // table's exponent, and this divides it back out (one preprocessed column
+        // for the whole band, zero fresh cells -- the cost of sharing is table rows)
+        let dinv = sel[7].clone();
+        let q = self.lay.q;
+        let idx: Vec<E::F> = (0..q).map(|_| eval.next_trace_mask()).collect();
+        let num: Vec<E::F> = (0..q).map(|_| eval.next_trace_mask()).collect();
+        let aux: Vec<E::F> = (0..self.n_aux()).map(|_| eval.next_trace_mask()).collect();
+        let vals: Vec<E::F> = (0..self.lay.pv).map(|_| eval.next_trace_mask()).collect();
+
+        let [zs_prev, zs] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+        let [hs_prev, hs] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+        let [zn_prev, zn] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+        let [wv_prev, wv] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+        let [av_prev, av] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+        let [sn_prev, sn] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+
+        // the value the score accumulator sees: the committed column, plus the
+        // remainder the split variant carries alongside it
+        let score: Vec<E::F> = (0..q)
+            .map(|i| match self.variant {
+                Variant::IntSplit(k) => (idx[i].clone() * M31::from_u32_unchecked(1 << k)
+                    + aux[i].clone()) * dinv.clone(),
+                _ => idx[i].clone() * dinv.clone(),
+            })
+            .collect();
+
+        let mut sf = E::EF::zero();
+        for (i, si) in score.iter().enumerate() {
+            sf += si.clone() * self.pow.sg_pow[i];
+        }
+        eval.add_constraint(zs.clone() - (zs_prev * self.pow.sg_step) * nofirst.clone() - sf);
+
+        // the numerator fold drops the masked slots: they are not keys this token
+        // attended to, so they are in neither `Z` nor `A.V`.  The score fold above
+        // keeps them -- Freivalds is over the whole rectangle.
+        let mut nf = E::EF::zero();
+        for (i, ni) in num.iter().enumerate() {
+            nf += (ni.clone() * vis(i)) * self.pow.sg_pow[i];
+        }
+        eval.add_constraint(zn.clone() - (zn_prev * self.pow.sg_step) * nofirst.clone() - nf);
+
+        let mut vf = E::EF::zero();
+        for (p, vp) in vals.iter().enumerate() {
+            vf += vp.clone() * self.pow.rv_pow[p];
+        }
+        vf = vf - sum_pow(&self.pow.rv_pow) * SecureField::from_u32_unchecked(self.off.v, 0, 0, 0);
+        eval.add_constraint(wv.clone() - (wv_prev * self.pow.rv_step) * nofirst - vf);
+
+        // sum over keys of wv * zn, closed on each key's last chunk row, times
+        // rv^hd at each instance start (the A.V identity's per-instance weight,
+        // which the output region's rv-Horner produces on its own side)
+        let mut av_mult: E::EF = E::EF::from(notzero.clone() - istart.clone());
+        av_mult += istart.clone() * self.pow.rv_hd;
+        eval.add_constraint(av.clone() - av_prev * av_mult
+            - (wv * zn.clone()) * last.clone());
+        // sum over keys of zn: the denominator statement, weighted by r^C to match
+        // the per-token region's `az`
+        let mut sn_mult: E::EF = E::EF::from(notzero - istart.clone());
+        sn_mult += istart * self.pow.sn_c;
+        eval.add_constraint(sn.clone() - sn_prev * sn_mult - zn.clone() * last);
+        // r^c on each completed key (keys are laid out in descending order).  On the
+        // corner, the row that closes an instance's key block takes `kappa` instead,
+        // which is `r^C r'^{-(S-1)}`: the block's own weights stay geometric in `r'`
+        // and the instance stride becomes the prefix's.
+        let mut mult: E::EF = E::EF::from(m1);
+        mult += m2.clone() * self.pow.r;
+        if self.corner {
+            mult += sel[8].clone() * (self.pow.kappa - self.pow.r);
+        }
+        eval.add_constraint(hs.clone() - hs_prev * mult - zs * self.key_end(&sel));
+
+        eval.add_constraint((hs - self.claimed_hs) * end.clone());
+        eval.add_constraint((av - self.claimed_av) * end.clone());
+        eval.add_constraint((sn - self.claimed_sn) * end);
+
+        // the exp lookups: index and numerator together, arity 2
+        for i in 0..q {
+            let key = match self.variant {
+                Variant::Bf16x => aux[i].clone(),
+                _ => idx[i].clone(),
+            };
+            // a masked slot is looked up at multiplicity zero: it never entered the
+            // numerator fold, and its shift may be negative (the row maximum is over
+            // the keys the token *did* attend to), so it is not a table row at all.
+            eval.add_to_relation(RelationEntry::new(&self.rel_exp, E::EF::from(vis(i)),
+                                                    &[key, num[i].clone()]));
+        }
+        // the remainder the table's granularity leaves behind, when there is one
+        if let Some(rel) = &self.rel_split {
+            for ai in aux.iter() {
+                eval.add_to_relation(RelationEntry::new(rel, E::EF::one(),
+                                                        core::slice::from_ref(ai)));
+            }
+        }
+        if self.range_check {
+            for vp in &vals {
+                eval.add_to_relation(RelationEntry::new(&self.rel_v, E::EF::one(),
+                                                        core::slice::from_ref(vp)));
+            }
+        }
+        eval.finalize_logup_in_pairs();
+        eval
+    }
+}
+
+impl KeyEval {
+    pub fn n_aux(&self) -> usize {
+        match self.variant {
+            Variant::IntExp => 0,
+            _ => self.lay.q,
+        }
+    }
+    fn key_end<F: Clone>(&self, sel: &[F]) -> F {
+        sel[1].clone() // `last` is also the chunk-end selector for the key Horner
+    }
+}
+
+// --------------------------------------------------------------- A.V outputs ---
+
+#[derive(Clone)]
+pub struct OutEval {
+    pub tag: usize,
+    pub lay: LayoutOut,
+    pub pow: Powers,
+    pub claimed: SecureField,
+}
+
+impl FrameworkEval for OutEval {
+    fn log_size(&self) -> u32 {
+        self.lay.g.log_rows
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.lay.g.log_rows + 1
+    }
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let sel: Vec<E::F> =
+            OUT_SEL.iter().map(|n| eval.get_preprocessed_column(band_id(self.tag, n))).collect();
+        let (nofirst, chanend, m1, m2, end) = (sel[0].clone(), sel[1].clone(),
+            sel[2].clone(), sel[3].clone(), sel[4].clone());
+        let ys: Vec<E::F> = (0..self.lay.q).map(|_| eval.next_trace_mask()).collect();
+        let [z_prev, z] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+        let [h_prev, h] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+
+        let mut yf = E::EF::zero();
+        for (i, yi) in ys.iter().enumerate() {
+            yf += yi.clone() * self.pow.so_pow[i];
+        }
+        eval.add_constraint(z.clone() - (z_prev * self.pow.so_step) * nofirst - yf);
+        let mut mult: E::EF = E::EF::from(m1);
+        mult += m2 * self.pow.rv;
+        eval.add_constraint(h.clone() - h_prev * mult - z * chanend);
+        eval.add_constraint((h - self.claimed) * end);
+        eval
+    }
+}
+
+// ------------------------------------------------------- per-token region ---
+
+/// One row per `rw` query tokens: the committed maxima and denominators, and the
+/// two-limb range check that makes the A.V window explicit.
+#[derive(Clone)]
+pub struct RowEval {
+    pub tag: usize,
+    pub log_rows: u32,
+    pub rw: usize,
+    pub pow: Powers,
+    pub with_max: bool,
+    pub claimed_am: SecureField,
+    pub claimed_az: SecureField,
+    /// low limb width of the denominator range check
+    pub z_lo_bits: u32,
+    /// lower bound on the denominator.  An honest shift is the row maximum, so
+    /// some key has `d = 0` and contributes the full-scale numerator: `Z >= nmax`
+    /// holds by construction, and requiring it caps how far a prover can shift
+    /// *past* the maximum -- the one direction the range check on `d` leaves open.
+    pub z_min: u32,
+    pub rel_lo: RangeRel,
+    pub rel_hi: RangeRel,
+}
+
+impl FrameworkEval for RowEval {
+    fn log_size(&self) -> u32 {
+        self.log_rows
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_rows + 1
+    }
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let sel: Vec<E::F> =
+            ROW_SEL.iter().map(|n| eval.get_preprocessed_column(band_id(self.tag, n))).collect();
+        let (notzero, end, istart) = (sel[0].clone(), sel[1].clone(), sel[2].clone());
+        // s^rw inside an instance, mu at an instance start
+        let step = |istart: E::F, notzero: E::F, pow: &Powers| -> E::EF {
+            let mut m: E::EF = E::EF::from(notzero - istart.clone()) * pow.sr_step;
+            m += istart * pow.mu;
+            m
+        };
+        let ms: Vec<E::F> = (0..if self.with_max { self.rw } else { 0 })
+            .map(|_| eval.next_trace_mask()).collect();
+        let zs: Vec<E::F> = (0..self.rw).map(|_| eval.next_trace_mask()).collect();
+        let los: Vec<E::F> = (0..self.rw).map(|_| eval.next_trace_mask()).collect();
+        let los2: Vec<E::F> = (0..self.rw).map(|_| eval.next_trace_mask()).collect();
+        let [am_prev, am] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+        let [az_prev, az] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+
+        let mut mf = E::EF::zero();
+        for (i, mi) in ms.iter().enumerate() {
+            mf += mi.clone() * self.pow.sr_pow[i];
+        }
+        eval.add_constraint(
+            am.clone() - am_prev * step(istart.clone(), notzero.clone(), &self.pow) - mf);
+        let mut zf = E::EF::zero();
+        for (i, zi) in zs.iter().enumerate() {
+            zf += zi.clone() * self.pow.sr_pow[i];
+        }
+        eval.add_constraint(
+            az.clone() - az_prev * step(istart, notzero, &self.pow) - zf);
+        eval.add_constraint((am - self.claimed_am) * end.clone());
+        eval.add_constraint((az - self.claimed_az) * end);
+
+        // Z = lo + 2^b hi and Z - z_min = lo2 + 2^b hi2, all four limbs
+        // range-checked.  The upper bound is what the A.V integer reading relies
+        // on, stated in the AIR instead of assumed from a blind worst case; the
+        // lower bound is what stops a prover from shifting the whole row into
+        // underflow, where every numerator is zero and the softmax is 0/0.
+        let inv = M31::from_u32_unchecked(1 << self.z_lo_bits).inverse();
+        let zmin = M31::from_u32_unchecked(self.z_min);
+        for i in 0..self.rw {
+            let hi = (zs[i].clone() - los[i].clone()) * inv;
+            let hi2 = (zs[i].clone() - E::F::from(zmin) - los2[i].clone()) * inv;
+            eval.add_to_relation(RelationEntry::new(&self.rel_lo, E::EF::one(),
+                                                    core::slice::from_ref(&los[i])));
+            eval.add_to_relation(RelationEntry::new(&self.rel_hi, E::EF::one(),
+                                                    core::slice::from_ref(&hi)));
+            eval.add_to_relation(RelationEntry::new(&self.rel_lo, E::EF::one(),
+                                                    core::slice::from_ref(&los2[i])));
+            eval.add_to_relation(RelationEntry::new(&self.rel_hi, E::EF::one(),
+                                                    core::slice::from_ref(&hi2)));
+        }
+        eval.finalize_logup_in_pairs();
+        eval
+    }
+}
+
+// ------------------------------------------------------------------ tables ---
+
+/// The exp table: `(index, numerator)` over all its rows, yielded at the
+/// multiplicity the prover committed.
+#[derive(Clone)]
+pub struct ExpTableEval {
+    pub log_rows: u32,
+    pub rel: ExpRel,
+}
+
+impl FrameworkEval for ExpTableEval {
+    fn log_size(&self) -> u32 {
+        self.log_rows
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_rows + 1
+    }
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let row = [eval.get_preprocessed_column(id(TBL_EXP_X)),
+                   eval.get_preprocessed_column(id(TBL_EXP_Y))];
+        let m = eval.next_trace_mask();
+        eval.add_to_relation(RelationEntry::new(&self.rel, -E::EF::from(m), &row));
+        eval.finalize_logup();
+        eval
+    }
+}
+
+/// A `0 .. 2^bits` range table.
+#[derive(Clone)]
+pub struct RangeTableEval {
+    pub bits: u32,
+    pub rel: RangeRel,
+}
+
+impl FrameworkEval for RangeTableEval {
+    fn log_size(&self) -> u32 {
+        self.bits
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.bits + 1
+    }
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let v = eval.get_preprocessed_column(tbl_range(self.bits));
+        let m = eval.next_trace_mask();
+        eval.add_to_relation(RelationEntry::new(&self.rel, -E::EF::from(m),
+                                                core::slice::from_ref(&v)));
+        eval.finalize_logup();
+        eval
+    }
+}

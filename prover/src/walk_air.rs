@@ -1,0 +1,218 @@
+//! The two region evals B6.5 adds to compose a layer proof.
+//!
+//! `WalkEval` is B3's r^T W walk, on B6's ChanEval skeleton: one row group per
+//! *input* channel `k`, chunked; `pk` preprocessed weights and `pq` committed
+//! activation bytes per row; `v = sum_t s^t qX[k, t]` shared by every matmul of
+//! the group (q/k/v share one input, so do gate/up), one `u_m = sum_i rv^i W_m[i, k]`
+//! and one `acc_m = sum_k u_m v` per matmul.  The verifier compares each `acc_m`
+//! against the dequant region's claimed side `h_m = sum_{t,i} s^t rv^i acc[t, i]`
+//! over the *same committed accumulator cells* the dequant rounds — that equality
+//! is the Freivalds identity `acc = qX qW` (mod p), with nothing committed twice.
+//!
+//! `AttnOutEval` replaces the bands' A.V output region *and* rounds the output:
+//! one row per (head, token, channel-chunk), the A.V outputs committed here as
+//! `acc`, the int8 fold (`q = round(acc * 2^e / Z)`, B6's `int8` variant with the
+//! review's two edge fixes) applied slot-wise, and two Horner accumulators that
+//! reproduce the claims the bands' identities need:
+//!
+//!   h  = sum_h rv^(hd*h) sum_t s^t sum_j rv^j acc[h,t,j]   vs  sum_b rv^(hd*off_b) av_b
+//!   dz = sum_h r^(C*h)   sum_t s^t den[h,t]                vs  sum_b r^(C*off_b)  az_b
+//!
+//! Per-slot the scale exponent `e = jv[h,j] - jo[t]` splits into `num = 2^max(e,0)`
+//! (preprocessed) and a committed `denp = den * 2^max(-e,0)` pinned by a
+//! preprocessed `pj` column, so the error identity stays degree 3.
+
+use num_traits::{One, Zero};
+use stwo::core::fields::m31::M31;
+use stwo::core::fields::qm31::SecureField;
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval, INTERACTION_TRACE_IDX, RelationEntry};
+
+use crate::attn_air::RangeRel;
+use crate::dequant::PairRel;
+use crate::layout::Grid;
+
+pub fn id(s: impl Into<String>) -> PreProcessedColumnId {
+    PreProcessedColumnId { id: s.into() }
+}
+pub const WALK_SEL: [&str; 4] = ["nofirst", "last", "notzero", "end"];
+pub fn walk_sel(tag: &str, name: &str) -> PreProcessedColumnId {
+    id(format!("b65_walk{tag}_{name}"))
+}
+pub fn walk_w(tag: &str, mat: usize, p: usize) -> PreProcessedColumnId {
+    id(format!("b65_walk{tag}_w{mat}_{p:04}"))
+}
+pub const AO_SEL: [&str; 6] = ["nofirst", "last", "m1", "m2", "m3", "end"];
+pub fn ao_sel(name: &str) -> PreProcessedColumnId {
+    id(format!("b65_ao_{name}"))
+}
+pub fn ao_chan(kind: &str, slot: usize) -> PreProcessedColumnId {
+    id(format!("b65_ao_{kind}{slot:04}"))
+}
+
+// ------------------------------------------------------------- the weight walk --
+
+#[derive(Clone)]
+pub struct WalkEval {
+    pub tag: String,
+    pub g: Grid,
+    /// weights per row per matmul — B3's packing knob `p`
+    pub pk: usize,
+    /// activation bytes per row (the token chunk)
+    pub pq: usize,
+    pub n_mats: usize,
+    /// rv^0..rv^{pk-1} and rv^pk
+    pub rv_pow: Vec<SecureField>,
+    pub rv_step: SecureField,
+    /// s^0..s^{pq-1} and s^pq
+    pub s_pow: Vec<SecureField>,
+    pub s_step: SecureField,
+    /// one claimed inner product per matmul
+    pub claimed: Vec<SecureField>,
+    pub rel_act: RangeRel,
+    pub range_check: bool,
+}
+
+impl FrameworkEval for WalkEval {
+    fn log_size(&self) -> u32 {
+        self.g.log_rows
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.g.log_rows + 1
+    }
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let sel: Vec<E::F> = WALK_SEL
+            .iter()
+            .map(|n| eval.get_preprocessed_column(walk_sel(&self.tag, n)))
+            .collect();
+        let (nofirst, last, notzero, end) =
+            (sel[0].clone(), sel[1].clone(), sel[2].clone(), sel[3].clone());
+        let ws: Vec<Vec<E::F>> = (0..self.n_mats)
+            .map(|m| {
+                (0..self.pk)
+                    .map(|p| eval.get_preprocessed_column(walk_w(&self.tag, m, p)))
+                    .collect()
+            })
+            .collect();
+        let acts: Vec<E::F> = (0..self.pq).map(|_| eval.next_trace_mask()).collect();
+
+        let [v_prev, v] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+        let mut vf = E::EF::zero();
+        for (p, a) in acts.iter().enumerate() {
+            vf += a.clone() * self.s_pow[p];
+        }
+        let off_sum: SecureField =
+            self.s_pow.iter().fold(SecureField::zero(), |x, y| x + *y)
+                * SecureField::from_u32_unchecked(128, 0, 0, 0);
+        vf = vf - off_sum;
+        eval.add_constraint(v.clone() - (v_prev * self.s_step) * nofirst.clone() - vf);
+
+        for m in 0..self.n_mats {
+            let [u_prev, u] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+            let [acc_prev, acc] =
+                eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+            let mut uf = E::EF::zero();
+            for (p, w) in ws[m].iter().enumerate() {
+                uf += w.clone() * self.rv_pow[p];
+            }
+            eval.add_constraint(u.clone() - (u_prev * self.rv_step) * nofirst.clone() - uf);
+            eval.add_constraint(acc.clone() - acc_prev * notzero.clone() - (u * v.clone()) * last.clone());
+            eval.add_constraint((acc - self.claimed[m]) * end.clone());
+        }
+        if self.range_check {
+            for a in &acts {
+                eval.add_to_relation(RelationEntry::new(&self.rel_act, E::EF::one(),
+                                                        core::slice::from_ref(a)));
+            }
+            eval.finalize_logup_in_pairs();
+        }
+        eval
+    }
+}
+
+// -------------------------------------------------- the attention-output region --
+
+#[derive(Clone)]
+pub struct AttnOutEval {
+    pub log_rows: u32,
+    /// channel slots per row
+    pub per_row: usize,
+    /// rv^0..rv^{per_row-1} and rv^per_row
+    pub rv_pow: Vec<SecureField>,
+    pub rv_step: SecureField,
+    pub s: SecureField,
+    /// rv^hd * s^-(S-1): the head-boundary step of `h`
+    pub mu_out: SecureField,
+    /// r^C * s^-(S-1): the head-boundary step of `dz`
+    pub mu_den: SecureField,
+    pub claimed_out: SecureField,
+    pub claimed_den: SecureField,
+    pub qnz: PairRel,
+    pub rel_rem: RangeRel,
+}
+
+impl FrameworkEval for AttnOutEval {
+    fn log_size(&self) -> u32 {
+        self.log_rows
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_rows + 1
+    }
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let two = M31::from_u32_unchecked(2);
+        let sel: Vec<E::F> =
+            AO_SEL.iter().map(|n| eval.get_preprocessed_column(ao_sel(*n))).collect();
+        let (nofirst, last, m1, m2, m3, end) = (sel[0].clone(), sel[1].clone(), sel[2].clone(),
+                                                sel[3].clone(), sel[4].clone(), sel[5].clone());
+        let den = eval.next_trace_mask();
+        let mut accs: Vec<E::F> = Vec::with_capacity(self.per_row);
+        for slot in 0..self.per_row {
+            let num = eval.get_preprocessed_column(ao_chan("n", slot));
+            let pj = eval.get_preprocessed_column(ao_chan("p", slot));
+            let acc = eval.next_trace_mask();
+            let sg = eval.next_trace_mask();
+            let qm = eval.next_trace_mask();
+            let nz2 = eval.next_trace_mask();
+            let denp = eval.next_trace_mask();
+            let d = eval.next_trace_mask();
+            accs.push(acc.clone());
+            eval.add_constraint(sg.clone() * sg.clone() - sg.clone());
+            // the sign pin (B6 review, gap 7), as in the standalone gadget
+            eval.add_constraint(sg.clone() * (E::F::one() - nz2.clone()));
+            // denp = den * 2^max(-e, 0), committed so the error identity and the
+            // tie-excluding bound stay degree <= 3 / degree 1
+            eval.add_constraint(denp.clone() - den.clone() * pj);
+            let mag = acc.clone() - (acc * sg) * two;
+            eval.add_constraint(
+                d.clone() - (mag * num) * two + (qm.clone() * two - E::F::one()) * denp.clone(),
+            );
+            let dp = denp * two - E::F::one() - d.clone();
+            eval.add_to_relation(RelationEntry::new(&self.qnz, E::EF::one(), &[qm, nz2]));
+            eval.add_to_relation(RelationEntry::new(
+                &self.rel_rem, E::EF::one(), core::slice::from_ref(&d)));
+            eval.add_to_relation(RelationEntry::new(
+                &self.rel_rem, E::EF::one(), core::slice::from_ref(&dp)));
+        }
+
+        let [z_prev, z] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+        let [h_prev, h] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+        let [dz_prev, dz] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+        let mut zf = E::EF::zero();
+        for (i, a) in accs.iter().enumerate() {
+            zf += a.clone() * self.rv_pow[i];
+        }
+        eval.add_constraint(z.clone() - (z_prev * self.rv_step) * nofirst - zf);
+        let mut mult: E::EF = E::EF::from(m1.clone());
+        mult += m2.clone() * self.s;
+        mult += m3.clone() * self.mu_out;
+        eval.add_constraint(h.clone() - h_prev * mult - z * last.clone());
+        let mut dmult: E::EF = E::EF::from(m1);
+        dmult += m2 * self.s;
+        dmult += m3 * self.mu_den;
+        eval.add_constraint(dz.clone() - dz_prev * dmult - E::EF::from(den * last));
+        eval.add_constraint((h - self.claimed_out) * end.clone());
+        eval.add_constraint((dz - self.claimed_den) * end);
+        eval.finalize_logup_in_pairs();
+        eval
+    }
+}

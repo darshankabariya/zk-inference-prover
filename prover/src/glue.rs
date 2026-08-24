@@ -1,0 +1,2123 @@
+//! B10 step 2 — the glue between the composed layer's regions.
+//!
+//! B6.5's composition ties every matmul's accumulators to its own committed
+//! activations and weights, and nothing at all ties one region's output to the
+//! next region's input (open gap 1).  The wiring is four gadgets, and every one
+//! of them is bf16 elementwise arithmetic:
+//!
+//! ```text
+//!   (a) RMSNorm   ms = bf16(sum_i bf16(x_i^2) / d)   r = rsqrt(ms + eps)
+//!                 h_i = bf16(bf16(x_i r) w_i)
+//!   (b) SwiGLU    y_i = bf16(silu(g_i) u_i)
+//!   (c) residual  x' = bf16(x + o),  x'' = bf16(x' + down)
+//!   (d) the requantize's placement -- B6.5's gadget between a dequant's output
+//!       and a walk's input; no new cell, only wiring
+//! ```
+//!
+//! Three primitives cover (a)-(c): a bf16 **unary** table (B4: a unary bf16 op
+//! *is* a 2^16-entry table), a bf16 **multiply**, and a bf16 **add** — the gadget
+//! B4 §9 scoped, costed at "12-15 cells" and deliberately did not build, because
+//! at the time its customer was the softmax denominator over C = 16K keys.  The
+//! norm's reduction is over `d`, twice a layer, which is three orders of
+//! magnitude smaller, so here it is affordable and here it is built.
+//!
+//! # The value representation
+//!
+//! A bf16 value lives here as **two** field columns rather than as a pattern:
+//!
+//! * `sm` — the *signed* significand: `0` for zero, else `±(128 + m7)`, i.e. in
+//!   `{0} ∪ ±[128, 256)`;
+//! * `ef` — the biased exponent field, `0` for zero, else `[1, 255)`.
+//!
+//! so the value is exactly `sm · 2^(ef − 134)` and "is zero" is `sm = 0` with no
+//! side condition.  That choice is what keeps every constraint **degree 2**,
+//! which the security config requires (blowup 2 ⇒ composition degree 2): the
+//! signed significand multiplies the alignment power directly, where a
+//! `(sign, mantissa, nz)` triple would need three committed factors.
+//!
+//! # The add
+//!
+//! ```text
+//!   u_a = ef_a − etop + DMAX  →  POW  →  pa      (and the same for b)
+//!   (pa − 2^DMAX)(pb − 2^DMAX) = 0                 so etop is the larger exponent
+//!   acc = sm_a pa + sm_b pb = mag (1 − 2 sg)       the exact sum, scaled
+//!   mag = M2 ph + r,  NORM(M2, ph, st) → (m7, ef, nz),  FRAC(ph, r, st)
+//!   sm_c = (128 nz + m7)(1 − 2 sg)   ef_c = nz (ef_n + etop − DMAX − 134)
+//! ```
+//!
+//! Three things make it work, and they are the whole soundness argument:
+//!
+//! * **The anchor is pinned from below, not from above.**  `POW` carries
+//!   `(u, 2^u)` for `u ∈ [0, DMAX]` and `(u, 0)` for `u < 0`, so an operand
+//!   *more than* `DMAX` binades below the anchor drops out — and the anchor
+//!   constraint forces some operand to sit exactly at it, so the operand that
+//!   drops is always the smaller one.  Anchoring at the *minimum* instead would
+//!   let a prover drop the larger, which is what `drop-big` probes.
+//! * **Dropping is exact for the rounding.**  `u < 0` means
+//!   `|lo| < 2^(8−DMAX) ulp(hi)`, and round-to-nearest returns `hi` whenever
+//!   `|lo| < ulp(hi)/4`, so `DMAX ≥ 10` makes "drop" and "add" the same bf16.
+//!   `DMAX = 12` is the default: it also bounds `|acc| < 2·255·2^12 < 2^21`, so
+//!   nothing wraps mod p and the shared `NORM` table needs only `kmax ≥ 13`.
+//! * **The normalisation is B6's, unchanged.**  `mag` is a non-negative integer
+//!   below `2^(kmax+9)`, which is exactly the domain B6's `NORM`/`FRAC` pair
+//!   already covers — so the add rides the tables the dequant regions commit
+//!   anyway and costs no table row of its own.
+//!
+//! # The reduction's order is a spec decision
+//!
+//! B1 accumulates the RMSNorm mean in fp32 and rounds once (`reduce="fp32"`),
+//! an order no bf16-add gadget reproduces.  Proving the norm therefore *pins*
+//! the order, and B1 already carries the one this AIR implements: `tree_sum`
+//! (`reduce="bf16-norm"`), a balanced binary tree padded to a power of two.
+//! A region here holds a whole balanced tree of `leaves` values **inside one
+//! row**, so the wiring between its adds is fixed column indices and costs
+//! nothing; chaining two such regions (`leaves`, then `d / leaves`) is the whole
+//! reduction, and with both widths powers of two it is bit-identical to
+//! `tree_sum`.  Two regions are tied by a **Horner claim** over the values they
+//! share — B6.5's `h_m == acc_m` trick, at ~0.5 cells per value — so a value is
+//! never committed twice.
+//!
+//! # What ties two regions positionwise
+//!
+//! A tie's weights are the verifier's own powers of a drawn challenge, chosen so
+//! that the value at **canonical stream position** `q` weighs `w^(N-1-q)` in
+//! every region that carries it.  The canonical order of a `(tokens x d)`
+//! activation stream is channel-major, `q = c*tokens + t`, because that is the
+//! order in which `tree_sum`'s own tiling (`Tiling` below) and the residual
+//! add's read it with plain geometric weights.  So `resid.h_out == norm.h_in`
+//! says "the same values in the same positions", however differently the two
+//! regions cut the stream into rows, and the layer's statement becomes
+//! *committed residual-stream in -> committed residual-stream out*.  A slot's
+//! output also pays a `VAL` lookup — the output range check README 3.7 named:
+//! it says the result is a value bf16 can represent.
+
+use num_traits::{One, Zero};
+use rayon::prelude::*;
+use serde_json::{Value, json};
+use stwo::core::air::Component;
+use stwo::core::fields::FieldExpOps;
+use stwo::core::fields::m31::{M31, P};
+use stwo::core::fields::qm31::SecureField;
+use stwo::prover::ComponentProver;
+use stwo::prover::backend::simd::qm31::PackedQM31;
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+use stwo_constraint_framework::{
+    EvalAtRow, FrameworkComponent, FrameworkEval, INTERACTION_TRACE_IDX, Relation, RelationEntry,
+    TraceLocationAllocator, relation,
+};
+
+use crate::bf16::{self, EXP_BIAS, Round};
+use crate::common::{Eval, Proven, Session, Sums, eval_of, log_rows_for, m31_u32, twiddles};
+use crate::dequant::{FracRel, NormRel, id};
+
+relation!(PowRel, 2);
+relation!(SMulRel, 5);
+relation!(UnRel, 4);
+relation!(ValRel, 2);
+
+pub const POW_COLS: [&str; 2] = ["b10_pow_u", "b10_pow_p"];
+pub const SMUL_COLS: [&str; 5] =
+    ["b10_smul_a", "b10_smul_b", "b10_smul_c", "b10_smul_cy", "b10_smul_nz"];
+pub const VAL_COLS: [&str; 2] = ["b10_val_sm", "b10_val_ef"];
+pub const UN_COLS: [&str; 4] = ["b10_un_i_sm", "b10_un_i_ef", "b10_un_o_sm", "b10_un_o_ef"];
+/// A region's own selector: `end` marks the last row, for the Horner ties.
+pub fn glue_sel(tag: &str, name: &str) -> PreProcessedColumnId {
+    id(format!("b10_g{tag}_{name}"))
+}
+pub fn un_col(kind: &str, i: usize) -> PreProcessedColumnId {
+    id(format!("{}_{kind}", UN_COLS[i]))
+}
+
+/// The alignment window.  `>= 10` makes "drop the far operand" and "add it" the
+/// same bf16; `12` also keeps `|acc| < 2^21`, so the shared `NORM` table needs
+/// only `kmax >= 13` and nothing wraps mod p.
+pub const DMAX: u32 = 12;
+/// How far below the anchor `POW` still carries a (dropping) row.
+pub const UMIN: i64 = 260;
+
+pub fn m31_of(v: i64) -> M31 {
+    crate::attn_trace::m31_of(v)
+}
+
+// ------------------------------------------------------------------ values ----
+
+/// A bf16 pattern as `(sm, ef)`.  Subnormals (`ef = 0, m7 != 0`) and
+/// infinities/NaN collapse to zero, which is a *different value*; the witness
+/// builders count them and the run reports the count, so one would show up as a
+/// reference mismatch rather than pass silently.
+pub fn split(pat: u16) -> (i64, u32) {
+    let (sg, ef, m7) = bf16::decode(pat);
+    if ef == 0 || ef == 0xff {
+        (0, 0)
+    } else {
+        let m = (128 + m7) as i64;
+        (if sg == 1 { -m } else { m }, ef)
+    }
+}
+
+pub fn join(sm: i64, ef: u32) -> u16 {
+    if sm == 0 {
+        0
+    } else {
+        bf16::pattern(u32::from(sm < 0), ef, sm.unsigned_abs() as u32 - 128)
+    }
+}
+
+/// bf16 has two zeros and the `(sm, ef)` representation has one, deliberately:
+/// `sm = 0` *is* zero, with no side condition, which is what keeps the add's
+/// constraints degree 2.  A negative zero -- which B1 commits whenever a product
+/// has one negative operand and one zero one -- is therefore canonicalised to
+/// `+0`.  Nothing downstream can see the difference: the requantize sends both to
+/// `q = 0`, and every add and multiply here treats them alike.  The runs count
+/// how many the real columns actually carry.
+pub fn canon(pat: u16) -> u16 {
+    if pat == 0x8000 { 0 } else { pat }
+}
+
+pub fn is_odd_pattern(pat: u16) -> bool {
+    let (_, ef, m7) = bf16::decode(pat);
+    (ef == 0 && m7 != 0) || ef == 0xff
+}
+
+pub fn to_f64(sm: i64, ef: u32) -> f64 {
+    if sm == 0 { 0.0 } else { sm as f64 * (ef as f64 - EXP_BIAS as f64).exp2() }
+}
+
+/// A signed significand held as a field element, back to `i64`.
+pub fn sgn_of(v: M31) -> i64 {
+    if v.0 > P / 2 { v.0 as i64 - P as i64 } else { v.0 as i64 }
+}
+
+// ------------------------------------------------------------------ tables ----
+
+/// `(u, 2^u)` for `u in [0, DMAX]` and `(u, 0)` for `u in [-UMIN, -1]`, the
+/// second family written as the field elements `p + u`.
+pub fn pow_table() -> Vec<(M31, M31)> {
+    let mut rows: Vec<(M31, M31)> = (0..=DMAX).map(|u| (m31_u32(u), m31_u32(1 << u))).collect();
+    rows.extend((1..=UMIN).map(|u| (m31_of(-u), M31::zero())));
+    rows
+}
+
+/// Every legal `(sm, ef)`: the zero value, and `±(128 + m7)` at every finite
+/// nonzero exponent field.
+pub fn val_table() -> Vec<(M31, M31)> {
+    let mut rows = vec![(M31::zero(), M31::zero())];
+    for ef in 1u32..0xff {
+        for m7 in 0u32..128 {
+            rows.push((m31_of(128 + m7 as i64), m31_u32(ef)));
+            rows.push((m31_of(-(128 + m7 as i64)), m31_u32(ef)));
+        }
+    }
+    rows
+}
+
+/// `(sm_a, sm_b) -> (sm_c, carry, nz)`: the correctly-rounded product of two
+/// *signed* significands, over every legal pair.  B6's `mul_table` is the
+/// unsigned core; carrying the sign in the key is what keeps the multiply's
+/// constraints degree 2 in the `(sm, ef)` representation, and it costs
+/// 257^2 rows against 2^14 rather than a committed sign column per operand.
+pub fn smul_vals() -> Vec<i64> {
+    std::iter::once(0)
+        .chain((128..256).map(|m| m as i64))
+        .chain((128..256).map(|m| -(m as i64)))
+        .collect()
+}
+
+pub fn smul_table(round: Round) -> Vec<[M31; 5]> {
+    let vals = smul_vals();
+    let mut rows = Vec::with_capacity(vals.len() * vals.len());
+    for a in &vals {
+        for b in &vals {
+            let (sm, cy) = if *a == 0 || *b == 0 {
+                (0i64, 0u32)
+            } else {
+                let p = (a.unsigned_abs() * b.unsigned_abs()) as u32; // [2^14, 2^16)
+                let carry = (p >> 15) & 1;
+                let shift = 7 + carry;
+                let m = p >> shift;
+                let rb = (p >> (shift - 1)) & 1;
+                let st = u32::from(p & ((1 << (shift - 1)) - 1) != 0);
+                let up = round.carry(m, rb, st);
+                let (msig, extra) = if m + up == 256 { (128, 1) } else { (m + up, 0) };
+                let sgn = if (*a < 0) != (*b < 0) { -1 } else { 1 };
+                (sgn * msig as i64, carry + extra)
+            };
+            rows.push([m31_of(*a), m31_of(*b), m31_of(sm), m31_u32(cy),
+                       m31_u32(u32::from(sm != 0))]);
+        }
+    }
+    rows
+}
+
+/// Which unary bf16 op a region's leaves apply.  `None` commits the leaf value
+/// itself and validates it against `VAL`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnKind {
+    None,
+    Square,
+    Rsqrt,
+    Silu,
+}
+
+impl UnKind {
+    pub fn name(&self) -> &'static str {
+        match self {
+            UnKind::None => "none",
+            UnKind::Square => "square",
+            UnKind::Rsqrt => "rsqrt",
+            UnKind::Silu => "silu",
+        }
+    }
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "none" => UnKind::None,
+            "square" => UnKind::Square,
+            "rsqrt" => UnKind::Rsqrt,
+            "silu" => UnKind::Silu,
+            other => panic!("unknown unary {other:?}"),
+        }
+    }
+    /// B1's own op: `store(fn(x))`, evaluated in f32 and rounded once, which is
+    /// what `model.py`'s `unary` does.
+    pub fn apply(&self, x: f64) -> f64 {
+        let x = x as f32;
+        (match self {
+            UnKind::None => x,
+            UnKind::Square => x * x,
+            UnKind::Rsqrt => {
+                if x <= 0.0 { 0.0 } else { x.sqrt().recip() }
+            }
+            UnKind::Silu => x / (1.0 + (-x).exp()),
+        }) as f64
+    }
+}
+
+/// `(sm_in, ef_in) -> (sm_out, ef_out)` over every legal input value.
+pub fn un_table(k: UnKind) -> Vec<[M31; 4]> {
+    val_table()
+        .into_iter()
+        .map(|(sm, ef)| {
+            let y = bf16::from_f32(k.apply(to_f64(sgn_of(sm), ef.0)) as f32);
+            let (osm, oef) = split(y);
+            [sm, ef, m31_of(osm), m31_u32(oef)]
+        })
+        .collect()
+}
+
+// --------------------------------------------------------------- the layout ---
+
+/// Where a slot's operand comes from.  Every one is a fixed column index of the
+/// same row, so a whole tree inside a row needs no wiring argument.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Src {
+    /// the constant `+0`.  `x + 0` is exact in bf16, so a tree position the
+    /// reduction pads with zero costs neither a column nor a slot: the slot that
+    /// would add it is *pruned* and its parent reads the other operand directly.
+    Zero,
+    /// group `g`'s committed leaf `i`, as committed
+    Leaf(usize, usize),
+    /// the same leaf's unary image
+    Un(usize, usize),
+    /// an earlier slot's output in the same row
+    Slot(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Add,
+    Mul,
+}
+
+/// One committed input group of a region: `n` bf16 values per row, all under the
+/// same unary (or none).  A region has as many groups as it has distinct input
+/// streams -- the norm-and-residual region has two, the residual stream and what
+/// is added to it -- and each group carries its own Horner tie, so two regions
+/// can be compared positionwise on a stream without committing it twice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Group {
+    pub n: usize,
+    pub un: UnKind,
+}
+
+/// One region's program: what every row computes.
+#[derive(Clone, Debug)]
+pub struct Prog {
+    pub groups: Vec<Group>,
+    pub kind: Kind,
+    /// `(a, b)` per slot, in evaluation order
+    pub slots: Vec<(Src, Src)>,
+    /// the slot outputs a tie may read, as named groups -- the tree's root, the
+    /// residual sums, ...
+    pub outs: Vec<Vec<usize>>,
+}
+
+impl Prog {
+    fn src(groups: &[Group], g: usize, i: usize) -> Src {
+        if groups[g].un == UnKind::None { Src::Leaf(g, i) } else { Src::Un(g, i) }
+    }
+
+    /// `tree_sum`'s own order over `pad` positions of which the first `n` are
+    /// group 0's committed leaves and the rest are `+0`: `x[..h] + x[h..]`,
+    /// repeatedly.  The zero positions are pruned, so the region proves exactly
+    /// `n - 1` adds however far `pad` reaches past `n`.
+    pub fn tree(n: usize, pad: usize, un: UnKind) -> Self {
+        assert!(pad.is_power_of_two() && pad >= 2, "a tree pads to a power of two");
+        assert!(n >= 2 && n <= pad, "a tree of {n} leaves does not fit {pad} positions");
+        let groups = vec![Group { n, un }];
+        let mut cur: Vec<Src> = (0..pad)
+            .map(|i| if i < n { Self::src(&groups, 0, i) } else { Src::Zero })
+            .collect();
+        let mut slots = vec![];
+        while cur.len() > 1 {
+            let h = cur.len() / 2;
+            let mut next = vec![];
+            for i in 0..h {
+                // `x + 0` is exact, so the pad never costs a slot
+                next.push(match (cur[i], cur[i + h]) {
+                    (Src::Zero, y) => y,
+                    (x, Src::Zero) => x,
+                    (x, y) => {
+                        slots.push((x, y));
+                        Src::Slot(slots.len() - 1)
+                    }
+                });
+            }
+            cur = next;
+        }
+        let root = match cur[0] {
+            Src::Slot(k) => k,
+            _ => unreachable!("a tree of at least two leaves ends in a slot"),
+        };
+        Self { groups, kind: Kind::Add, slots, outs: vec![vec![root]] }
+    }
+
+    /// `n` independent binary ops on two committed groups of `n` -- the residual
+    /// adds, the SwiGLU product, the norm's per-channel multiplies.  The row is
+    /// laid out as `[all a, then all b]`, which is what lets a producer's output
+    /// tie be compared with the consumer's group-`a` tie positionwise.
+    pub fn pairs(n: usize, kind: Kind, un_a: UnKind, un_b: UnKind) -> Self {
+        let groups = vec![Group { n, un: un_a }, Group { n, un: un_b }];
+        let slots = (0..n)
+            .map(|i| (Self::src(&groups, 0, i), Self::src(&groups, 1, i)))
+            .collect();
+        Self { groups, kind, slots, outs: vec![(0..n).collect()] }
+    }
+
+    /// The composed layer's wiring region: one row is one `(residue, token)`
+    /// block of the residual stream, and it proves both the RMSNorm reduction's
+    /// first `log2(pad)` levels over the squares *and* the residual add against
+    /// the block's second operand.  The stream is committed **once** and read by
+    /// both, so the two gadgets need no tie between them at all.
+    pub fn norm_resid(n: usize, pad: usize) -> Self {
+        let mut p = Self::tree(n, pad, UnKind::Square);
+        p.groups.push(Group { n, un: UnKind::None });
+        let base = p.slots.len();
+        for i in 0..n {
+            p.slots.push((Src::Leaf(0, i), Src::Leaf(1, i)));
+        }
+        p.outs.push((base..base + n).collect());
+        p
+    }
+
+    pub fn leaf_width(&self, g: usize) -> usize {
+        if self.groups[g].un == UnKind::None { 2 } else { 4 }
+    }
+    pub fn n_leaves(&self) -> usize {
+        self.groups.iter().map(|g| g.n).sum()
+    }
+    pub fn group_base(&self, g: usize) -> usize {
+        (0..g).map(|k| self.groups[k].n * self.leaf_width(k)).sum()
+    }
+    pub fn leaf_at(&self, g: usize, i: usize) -> usize {
+        self.group_base(g) + i * self.leaf_width(g)
+    }
+    pub fn leaves_width(&self) -> usize {
+        self.group_base(self.groups.len())
+    }
+    pub fn slot_width(&self, round: Round) -> usize {
+        match self.kind {
+            // pa, pb, etop, mag, sg, m2, ph, r, [st], m7n, efn, nzn, c_sm, c_ef
+            Kind::Add => 13 + usize::from(round.needs_sticky()),
+            // c_sm, cy, nzc, c_ef
+            Kind::Mul => 4,
+        }
+    }
+    pub fn slot_at(&self, s: usize, round: Round) -> usize {
+        self.leaves_width() + s * self.slot_width(round)
+    }
+    pub fn n_cols(&self, round: Round) -> usize {
+        self.leaves_width() + self.slots.len() * self.slot_width(round)
+    }
+    /// Column offsets of the `(sm, ef)` a slot output holds.
+    pub fn out_cols(&self, s: usize, round: Round) -> (usize, usize) {
+        let b = self.slot_at(s, round);
+        match self.kind {
+            Kind::Add => {
+                let k = 11 + usize::from(round.needs_sticky());
+                (b + k, b + k + 1)
+            }
+            Kind::Mul => (b, b + 3),
+        }
+    }
+    /// Where a source's `(sm, ef)` columns are; `None` for the constant zero.
+    pub fn src_cols(&self, s: &Src, round: Round) -> Option<(usize, usize)> {
+        match s {
+            Src::Zero => None,
+            Src::Leaf(g, i) => {
+                let b = self.leaf_at(*g, *i);
+                Some((b, b + 1))
+            }
+            Src::Un(g, i) => {
+                let b = self.leaf_at(*g, *i);
+                Some((b + 2, b + 3))
+            }
+            Src::Slot(k) => Some(self.out_cols(*k, round)),
+        }
+    }
+    /// The unary kinds this program's groups draw, deduplicated, in group order.
+    pub fn un_kinds(&self) -> Vec<UnKind> {
+        let mut v = vec![];
+        for g in &self.groups {
+            if g.un != UnKind::None && !v.contains(&g.un) {
+                v.push(g.un);
+            }
+        }
+        v
+    }
+}
+
+// ------------------------------------------------------------------ the AIR ---
+
+/// Which of a region's value sequences a tie accumulates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TieKind {
+    /// group `g`'s committed leaves, as committed (never the unary image)
+    In(usize),
+    /// the slots named by `outs[i]`
+    Out(usize),
+}
+
+/// One Horner claim over one of a region's value sequences:
+/// `H = sum_p w_p (sm_p + lam ef_p)`, accumulated a row at a time.  The weights
+/// are the verifier's own powers of a drawn challenge, chosen so that a value at
+/// canonical stream position `q` weighs `w^(N-1-q)` in **every** region that
+/// carries it -- which is what makes `resid.h_out == norm.h_in` mean "the same
+/// values, in the same positions", however differently the two regions tile the
+/// stream into rows.
+#[derive(Clone, Debug)]
+pub struct TieSpec {
+    pub kind: TieKind,
+    /// one weight per member of the sequence within a row
+    pub w: Vec<SecureField>,
+    /// the row-to-row step
+    pub step: SecureField,
+    pub claimed: SecureField,
+}
+
+#[derive(Clone)]
+pub struct Tie {
+    pub lam: SecureField,
+    pub specs: Vec<TieSpec>,
+}
+
+#[derive(Clone)]
+pub struct GlueEval {
+    pub log_rows: u32,
+    pub tag: String,
+    pub prog: Prog,
+    pub round: Round,
+    pub norm: NormRel,
+    pub frac: FracRel,
+    pub pow: PowRel,
+    pub smul: SMulRel,
+    /// one per entry of `prog.un_kinds()`
+    pub un: Vec<UnRel>,
+    pub val: ValRel,
+    pub tie: Option<Tie>,
+}
+
+
+impl FrameworkEval for GlueEval {
+    fn log_size(&self) -> u32 {
+        self.log_rows
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_rows + 1
+    }
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let sticky = self.round.needs_sticky();
+        let two = m31_u32(2);
+        let pmax = m31_u32(1 << DMAX);
+        let anchor = m31_u32(DMAX + EXP_BIAS);
+        let c128 = m31_u32(128);
+        let c127 = m31_u32(127);
+        let dmax = m31_u32(DMAX);
+
+        // ---- leaves: the committed inputs, and the unary that consumes them ---
+        let kinds = self.prog.un_kinds();
+        let mut leaf_in: Vec<Vec<(E::F, E::F)>> = vec![];
+        let mut leaf_un: Vec<Vec<(E::F, E::F)>> = vec![];
+        for g in &self.prog.groups {
+            let (mut ins, mut uns) = (vec![], vec![]);
+            for _ in 0..g.n {
+                let i_sm = eval.next_trace_mask();
+                let i_ef = eval.next_trace_mask();
+                ins.push((i_sm.clone(), i_ef.clone()));
+                if g.un == UnKind::None {
+                    // nothing else pins a committed pair to a legal bf16 value
+                    eval.add_to_relation(RelationEntry::new(
+                        &self.val, E::EF::one(), &[i_sm, i_ef]));
+                    uns.push((E::F::zero(), E::F::zero()));
+                } else {
+                    let o_sm = eval.next_trace_mask();
+                    let o_ef = eval.next_trace_mask();
+                    eval.add_to_relation(RelationEntry::new(
+                        &self.un[kinds.iter().position(|x| *x == g.un).unwrap()],
+                        E::EF::one(),
+                        &[i_sm, i_ef, o_sm.clone(), o_ef.clone()]));
+                    uns.push((o_sm, o_ef));
+                }
+            }
+            leaf_in.push(ins);
+            leaf_un.push(uns);
+        }
+
+        // ---- slots ------------------------------------------------------------
+        let mut outs: Vec<(E::F, E::F)> = vec![];
+        let zero_pair = (E::F::zero(), E::F::zero());
+        for (sa, sb) in &self.prog.slots {
+            let get = |s: &Src, outs: &Vec<(E::F, E::F)>| -> (E::F, E::F) {
+                match s {
+                    Src::Zero => zero_pair.clone(),
+                    Src::Leaf(g, i) => leaf_in[*g][*i].clone(),
+                    Src::Un(g, i) => leaf_un[*g][*i].clone(),
+                    Src::Slot(k) => outs[*k].clone(),
+                }
+            };
+            let (a_sm, a_ef) = get(sa, &outs);
+            let (b_sm, b_ef) = get(sb, &outs);
+            match self.prog.kind {
+                Kind::Add => {
+                    let pa = eval.next_trace_mask();
+                    let pb = eval.next_trace_mask();
+                    let etop = eval.next_trace_mask();
+                    let mag = eval.next_trace_mask();
+                    let sg = eval.next_trace_mask();
+                    let m2 = eval.next_trace_mask();
+                    let ph = eval.next_trace_mask();
+                    let r = eval.next_trace_mask();
+                    let st = if sticky { eval.next_trace_mask() } else { E::F::zero() };
+                    let m7n = eval.next_trace_mask();
+                    let efn = eval.next_trace_mask();
+                    let nzn = eval.next_trace_mask();
+                    let c_sm = eval.next_trace_mask();
+                    let c_ef = eval.next_trace_mask();
+                    // the two alignments.  `u < 0` rows carry pow = 0, so an
+                    // operand far below the anchor drops -- and the anchor
+                    // constraint keeps the dropped one the smaller.
+                    eval.add_to_relation(RelationEntry::new(
+                        &self.pow, E::EF::one(),
+                        &[a_ef.clone() - etop.clone() + E::F::from(dmax), pa.clone()]));
+                    eval.add_to_relation(RelationEntry::new(
+                        &self.pow, E::EF::one(),
+                        &[b_ef - etop.clone() + E::F::from(dmax), pb.clone()]));
+                    eval.add_constraint(
+                        (pa.clone() - E::F::from(pmax)) * (pb.clone() - E::F::from(pmax)));
+                    // acc = mag (1 - 2 sg): the exact sum, scaled by 2^(DMAX-etop)
+                    eval.add_constraint(sg.clone() * sg.clone() - sg.clone());
+                    eval.add_constraint(a_sm * pa + b_sm * pb - mag.clone()
+                                        + (mag.clone() * sg.clone()) * two);
+                    eval.add_constraint(mag - m2.clone() * ph.clone() - r.clone());
+                    eval.add_to_relation(RelationEntry::new(
+                        &self.norm, E::EF::one(),
+                        &[m2, ph.clone(), st.clone(), m7n.clone(), efn.clone(), nzn.clone()]));
+                    eval.add_to_relation(RelationEntry::new(
+                        &self.frac, E::EF::one(), &[ph, r, st]));
+                    // the zero result has one sign, as B6.5's fold does
+                    eval.add_constraint(sg.clone() * (E::F::one() - nzn.clone()));
+                    eval.add_constraint(
+                        c_sm.clone() - (nzn.clone() * c128 + m7n) * (E::F::one() - sg * two));
+                    eval.add_constraint(
+                        c_ef.clone() - nzn * (efn + etop - E::F::from(anchor)));
+                    // B10 step 2, README 3.7: the output's own range check.  A
+                    // `VAL` row exists for every legal `(sm, ef)` and for no
+                    // other pair, so this is exactly "the result is a bf16 value"
+                    // -- the check B6's dequant pays for its exponent field and
+                    // the add did not, and the one thing between a sound gadget
+                    // and a gadget that cannot prove what bf16 cannot represent.
+                    eval.add_to_relation(RelationEntry::new(
+                        &self.val, E::EF::one(), &[c_sm.clone(), c_ef.clone()]));
+                    outs.push((c_sm, c_ef));
+                }
+                Kind::Mul => {
+                    let c_sm = eval.next_trace_mask();
+                    let cy = eval.next_trace_mask();
+                    let nzc = eval.next_trace_mask();
+                    let c_ef = eval.next_trace_mask();
+                    eval.add_to_relation(RelationEntry::new(
+                        &self.smul, E::EF::one(),
+                        &[a_sm, b_sm, c_sm.clone(), cy.clone(), nzc.clone()]));
+                    eval.add_constraint(
+                        c_ef.clone() - nzc * (a_ef + b_ef + cy - E::F::from(c127)));
+                    eval.add_to_relation(RelationEntry::new(
+                        &self.val, E::EF::one(), &[c_sm.clone(), c_ef.clone()]));
+                    outs.push((c_sm, c_ef));
+                }
+            }
+        }
+
+        // ---- the ties ---------------------------------------------------------
+        if let Some(t) = &self.tie {
+            let nofirst = eval.get_preprocessed_column(glue_sel(&self.tag, "nofirst"));
+            let end = eval.get_preprocessed_column(glue_sel(&self.tag, "end"));
+            for spec in &t.specs {
+                let [h_prev, h] =
+                    eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+                let members: Vec<(E::F, E::F)> = match spec.kind {
+                    TieKind::In(g) => leaf_in[g].clone(),
+                    TieKind::Out(o) => {
+                        self.prog.outs[o].iter().map(|s| outs[*s].clone()).collect()
+                    }
+                };
+                let mut f = E::EF::zero();
+                for (k, (sm, ef)) in members.iter().enumerate() {
+                    f += (E::EF::from(sm.clone()) + E::EF::from(ef.clone()) * t.lam) * spec.w[k];
+                }
+                eval.add_constraint(h.clone() - (h_prev * nofirst.clone()) * spec.step - f);
+                eval.add_constraint((h - spec.claimed) * end.clone());
+            }
+        }
+        eval.finalize_logup_in_pairs();
+        eval
+    }
+}
+
+// ------------------------------------------------------------------ witness ---
+
+/// The values a region consumes: one `rows x n` block of bf16 patterns per group.
+pub struct GlueWitness {
+    pub rows: usize,
+    pub groups: Vec<Vec<u16>>,
+    /// what one f64-rounded evaluation says each `outs` group holds, per row
+    pub ref_out: Vec<Vec<u16>>,
+    pub source: String,
+    pub odd: usize,
+}
+
+impl GlueWitness {
+    pub fn new(rows: usize, groups: Vec<Vec<u16>>, prog: &Prog, round: Round, source: String)
+               -> Self {
+        for (g, vals) in groups.iter().enumerate() {
+            assert_eq!(vals.len(), rows * prog.groups[g].n, "group {g} has the wrong shape");
+        }
+        let odd = groups.iter().flatten().filter(|v| is_odd_pattern(**v)).count();
+        let ref_out = reference(&groups, rows, prog, round);
+        Self { rows, groups, ref_out, source, odd }
+    }
+
+    /// Random bf16 values over a wide exponent spread, so the far branch, the
+    /// exact zero and the cancellation edge are all exercised.
+    pub fn synthetic(rows: usize, prog: &Prog, round: Round, seed: u64) -> Self {
+        use rand::rngs::SmallRng;
+        use rand::{Rng, SeedableRng};
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut groups = vec![];
+        for g in &prog.groups {
+            // a product's exponent is the *sum* of its operands', so the
+            // multiply's synthetic spread has to be half the add's or the result
+            // leaves bf16's normal range -- the gadget's incompleteness edge, not
+            // a soundness one, and one the model's real values never reach
+            let spread: i32 = match (prog.kind, g.un) {
+                (Kind::Mul, UnKind::Silu) => 4,
+                (Kind::Mul, _) => 10,
+                (_, UnKind::Square) => 10,
+                _ => 20,
+            };
+            let mut vals = vec![0u16; rows * g.n];
+            for v in vals.iter_mut() {
+                let e: i32 = rng.random_range(-spread..spread);
+                let m: f64 = rng.random_range(-2.0f64..2.0);
+                *v = match rng.random_range(0..32u32) {
+                    // one value in 32 is an exact zero, two in 32 sit far away so
+                    // the POW table's dropping rows are exercised
+                    0 => 0,
+                    1..=2 if prog.kind != Kind::Mul =>
+                        bf16::from_f64(m * ((e as f64) * 4.0).exp2()),
+                    _ => bf16::from_f64(m * (e as f64).exp2()),
+                };
+            }
+            groups.push(vals);
+        }
+        Self::new(rows, groups, prog, round, format!("synthetic(seed={seed})"))
+    }
+}
+
+/// What the program computes, in f64 with one bf16 rounding per op -- the
+/// independent side of every `ref_mismatch` count below.
+pub fn reference(groups: &[Vec<u16>], rows: usize, prog: &Prog, round: Round) -> Vec<Vec<u16>> {
+    let per_row: Vec<Vec<u16>> = (0..rows)
+        .into_par_iter()
+        .map(|j| {
+            let lin: Vec<Vec<u16>> = prog
+                .groups
+                .iter()
+                .enumerate()
+                .map(|(g, gr)| {
+                    (0..gr.n).map(|i| canon(groups[g][j * gr.n + i])).collect()
+                })
+                .collect();
+            let lun: Vec<Vec<u16>> = prog
+                .groups
+                .iter()
+                .enumerate()
+                .map(|(g, gr)| {
+                    (0..gr.n)
+                        .map(|i| match gr.un {
+                            UnKind::None => 0u16,
+                            k => {
+                                let (sm, ef) = split(lin[g][i]);
+                                bf16::from_f32(k.apply(to_f64(sm, ef)) as f32)
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            let mut out: Vec<u16> = vec![];
+            for (sa, sb) in &prog.slots {
+                let get = |s: &Src, out: &Vec<u16>| -> u16 {
+                    match s {
+                        Src::Zero => 0,
+                        Src::Leaf(g, i) => lin[*g][*i],
+                        Src::Un(g, i) => lun[*g][*i],
+                        Src::Slot(k) => out[*k],
+                    }
+                };
+                let (a, b) = (get(sa, &out), get(sb, &out));
+                let (asm, aef) = split(a);
+                let (bsm, bef) = split(b);
+                let v = match prog.kind {
+                    Kind::Add => to_f64(asm, aef) + to_f64(bsm, bef),
+                    Kind::Mul => to_f64(asm, aef) * to_f64(bsm, bef),
+                };
+                out.push(canon(bf16::from_f64_round(v, round)));
+            }
+            prog.outs.iter().flat_map(|o| o.iter().map(|s| out[*s])).collect::<Vec<u16>>()
+        })
+        .collect();
+    // re-cut the flat per-row answers into one vector per `outs` group
+    let mut cut = vec![];
+    let mut base = 0usize;
+    for o in &prog.outs {
+        let w = o.len();
+        cut.push((0..rows).flat_map(|j| per_row[j][base..base + w].to_vec()).collect::<Vec<u16>>());
+        base += w;
+    }
+    cut
+}
+
+// ------------------------------------------------------------------- tables ---
+
+/// Every table this family reads, with the multiplicity columns the regions fill.
+/// `NORM` and `FRAC` are B6's, shared with the dequant regions in a composed
+/// proof -- there the layer's own multiplicity vectors are moved in here and
+/// moved back, so the two families' uses land in one column.  The other four are
+/// the glue's own.
+pub struct GlueTables {
+    pub pow: Vec<(M31, M31)>,
+    pub smul: Vec<[M31; 5]>,
+    pub uns: Vec<UnKind>,
+    pub un: Vec<Vec<[M31; 4]>>,
+    pub val: Vec<(M31, M31)>,
+    pub norm: Vec<bf16::NormRow>,
+    pub frac: Vec<(u32, u32, u32)>,
+    pub m_pow: Vec<u32>,
+    pub m_smul: Vec<u32>,
+    pub m_un: Vec<Vec<u32>>,
+    pub m_val: Vec<u32>,
+    pub m_norm: Vec<u32>,
+    pub m_frac: Vec<u32>,
+    pub log_pow: u32,
+    pub log_smul: u32,
+    pub log_un: u32,
+    pub log_val: u32,
+    pub log_norm: u32,
+    pub log_frac: u32,
+    pub kmax: u32,
+    pub sticky: bool,
+    pub off_table: usize,
+}
+
+impl GlueTables {
+    pub fn new(kmax: u32, round: Round, uns: &[UnKind]) -> Self {
+        assert!(kmax >= DMAX + 1, "kmax {kmax} is below the add's DMAX + 1 = {}", DMAX + 1);
+        let pow = pow_table();
+        let smul = smul_table(round);
+        let un: Vec<Vec<[M31; 4]>> = uns.iter().map(|k| un_table(*k)).collect();
+        let val = val_table();
+        let norm = bf16::norm_table(kmax, round);
+        let sticky = round.needs_sticky();
+        let mut frac = vec![(0u32, 0u32, 0u32)];
+        for k in 0..=kmax {
+            for r in 0..1u32 << k {
+                frac.push((1 << k, r, u32::from(sticky && r != 0)));
+            }
+        }
+        let log_pow = log_rows_for(pow.len(), 1);
+        let log_smul = log_rows_for(smul.len(), 1);
+        let log_un = log_rows_for(val.len(), 1);
+        let log_val = log_rows_for(val.len(), 1);
+        let log_norm = log_rows_for(norm.len(), 1);
+        let log_frac = log_rows_for(frac.len(), 1);
+        Self {
+            m_pow: vec![0; 1 << log_pow],
+            m_smul: vec![0; 1 << log_smul],
+            m_un: un.iter().map(|_| vec![0; 1 << log_un]).collect(),
+            m_val: vec![0; 1 << log_val],
+            m_norm: vec![0; 1 << log_norm],
+            m_frac: vec![0; 1 << log_frac],
+            pow, smul, uns: uns.to_vec(), un, val, norm, frac,
+            log_pow, log_smul, log_un, log_val, log_norm, log_frac,
+            kmax, sticky, off_table: 0,
+        }
+    }
+
+    pub fn un_index(&self, k: UnKind) -> usize {
+        self.uns.iter().position(|x| *x == k).expect("unary table not registered")
+    }
+    pub fn pow_at(&self, u: i64) -> Option<usize> {
+        if (0..=DMAX as i64).contains(&u) {
+            Some(u as usize)
+        } else if (-UMIN..0).contains(&u) {
+            Some(DMAX as usize + 1 + (-u - 1) as usize)
+        } else {
+            None
+        }
+    }
+    pub fn val_at(&self, sm: i64, ef: u32) -> Option<usize> {
+        val_at(sm, ef)
+    }
+    pub fn smul_at(&self, a: i64, b: i64) -> Option<usize> {
+        let idx = |v: i64| -> Option<usize> {
+            if v == 0 {
+                Some(0)
+            } else if (128..256).contains(&v.unsigned_abs()) {
+                Some(1 + usize::from(v < 0) * 128 + (v.unsigned_abs() - 128) as usize)
+            } else {
+                None
+            }
+        };
+        Some(idx(a)? * 257 + idx(b)?)
+    }
+    /// `norm_table`'s own row order: the zero row, the 255 exactly-representable
+    /// small magnitudes at `ph = 1`, then `(k, m2, st)` ascending.
+    pub fn norm_at(&self, m2: u32, ph: u32, st: u32) -> Option<usize> {
+        if m2 == 0 && ph == 0 {
+            return Some(0);
+        }
+        if ph == 1 && (1..256).contains(&m2) {
+            return Some(m2 as usize);
+        }
+        if !ph.is_power_of_two() || !(256..512).contains(&m2) {
+            return None;
+        }
+        let k = ph.trailing_zeros();
+        if k > self.kmax {
+            return None;
+        }
+        let per = 1 + usize::from(self.sticky);
+        Some(256 + (k as usize * 256 + (m2 - 256) as usize) * per
+             + if self.sticky { st as usize } else { 0 })
+    }
+    pub fn frac_at(&self, ph: u32, r: u32) -> Option<usize> {
+        if ph == 0 {
+            return if r == 0 { Some(0) } else { None };
+        }
+        if !ph.is_power_of_two() || ph.trailing_zeros() > self.kmax || r >= ph {
+            return None;
+        }
+        Some(ph as usize + r as usize)
+    }
+}
+
+/// `val_table`'s row order, as an index: the zero row, then `(ef, m7, sign)`.
+pub fn val_at(sm: i64, ef: u32) -> Option<usize> {
+    if sm == 0 && ef == 0 {
+        return Some(0);
+    }
+    if ef == 0 || ef >= 0xff || !(128..256).contains(&sm.unsigned_abs()) {
+        return None;
+    }
+    let m7 = sm.unsigned_abs() - 128;
+    Some(1 + ((ef - 1) as usize * 128 + m7 as usize) * 2 + usize::from(sm < 0))
+}
+
+// -------------------------------------------------------------- the region ----
+
+/// What a probe corrupts.  Every one is a value the *prover* controls, and each
+/// aims at a different half of the argument.
+#[derive(Clone, Copy, Debug)]
+pub enum Tamper {
+    /// the committed result, one significand step up (the output constraint)
+    Result(usize),
+    /// the normalisation's committed output, consistently -- the algebra still
+    /// holds and only the `NORM` row is wrong (the lookup)
+    NormOut(usize),
+    /// the anchor one step above the larger exponent (the anchor constraint)
+    Anchor(usize),
+    /// the anchor at the *smaller* exponent, so the larger operand would drop --
+    /// the step the whole "drop is safe" argument rests on
+    DropBig(usize),
+    /// a leaf committed outside the legal `(sm, ef)` set
+    NotBf16(usize),
+    /// the result's sign, flipped
+    Sign(usize),
+    /// one committed leaf of group 0 replaced -- the residual stream a consumer
+    /// reads is not the one its producer wrote (the Horner tie)
+    Stream(usize),
+}
+
+impl Tamper {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Tamper::Result(_) => "result one step up",
+            Tamper::NormOut(_) => "normalisation output, algebra kept",
+            Tamper::Anchor(_) => "anchor above the larger exponent",
+            Tamper::DropBig(_) => "anchor at the smaller exponent (drop the larger)",
+            Tamper::NotBf16(_) => "a leaf that is not a bf16 value",
+            Tamper::Sign(_) => "result sign flipped",
+            Tamper::Stream(_) => "one value of the residual stream, swapped",
+        }
+    }
+}
+
+pub struct GlueRegion {
+    pub pre: Vec<Eval>,
+    pub base: Vec<Eval>,
+    pub log_rows: u32,
+    pub rows: usize,
+    pub n_ops: usize,
+    pub n_leaves: usize,
+    pub ref_ok: usize,
+    pub ref_n: usize,
+    /// what each `outs` group holds, as bf16 patterns and in natural row order --
+    /// the next region's leaves
+    pub outs: Vec<Vec<u16>>,
+    pub prog: Prog,
+    pub round: Round,
+    pub tag: String,
+    pub bad_exp: usize,
+    /// natural row order, for the Horner ties: per group, then per `outs` group
+    pub in_nat: Vec<Vec<(i64, i64)>>,
+    pub out_nat: Vec<Vec<(i64, i64)>>,
+}
+
+impl GlueRegion {
+    /// The values one tie accumulates, in natural row order.
+    pub fn tie_vals(&self, kind: TieKind) -> &[(i64, i64)] {
+        match kind {
+            TieKind::In(g) => &self.in_nat[g],
+            TieKind::Out(o) => &self.out_nat[o],
+        }
+    }
+    /// The width of one tie's sequence within a row.
+    pub fn tie_width(&self, kind: TieKind) -> usize {
+        match kind {
+            TieKind::In(g) => self.prog.groups[g].n,
+            TieKind::Out(o) => self.prog.outs[o].len(),
+        }
+    }
+    /// The claim itself, recomputed from the witness rather than from the trace.
+    pub fn tie_claim(&self, spec: &TieSpec, lam: SecureField) -> SecureField {
+        let vals = self.tie_vals(spec.kind);
+        let w = self.tie_width(spec.kind);
+        let rows = 1usize << self.log_rows;
+        let mut h = SecureField::zero();
+        for j in 0..rows {
+            let mut f = SecureField::zero();
+            for k in 0..w {
+                let (sm, ef) = vals[j * w + k];
+                f += (SecureField::from(m31_of(sm)) + SecureField::from(m31_of(ef)) * lam)
+                    * spec.w[k];
+            }
+            h = h * spec.step + f;
+        }
+        h
+    }
+}
+
+struct RowOut {
+    cells: Vec<M31>,
+    outs: Vec<u16>,
+    /// the row's committed leaves and its named outputs, in natural row order and
+    /// as the columns actually hold them -- the Horner ties read these, because a
+    /// committed `Eval` is bit-reversed
+    in_nat: Vec<(i64, i64)>,
+    out_nat: Vec<(i64, i64)>,
+    look: Vec<(u8, usize)>,
+    off: usize,
+    bad_exp: usize,
+}
+
+/// Build one region's committed columns and bump the shared tables.
+pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
+                   tables: &mut GlueTables, tamper: Option<Tamper>) -> GlueRegion {
+    let log_rows = log_rows_for(w.rows, 1);
+    let rows = 1usize << log_rows;
+    let n_cols = prog.n_cols(round);
+    let sticky = round.needs_sticky();
+    let n_slots = prog.slots.len().max(1);
+    let n_ops = w.rows * prog.slots.len();
+    let n_leaf_tot = w.rows * prog.n_leaves();
+    let un_idx: Vec<usize> =
+        prog.groups.iter().map(|g| {
+            if g.un == UnKind::None { usize::MAX } else { tables.un_index(g.un) }
+        }).collect();
+    let out_w: usize = prog.outs.iter().map(|o| o.len()).sum();
+
+    let filled: Vec<RowOut> = (0..rows)
+        .into_par_iter()
+        .map(|j| {
+            let mut cells = vec![M31::zero(); n_cols];
+            let mut look: Vec<(u8, usize)> = vec![];
+            let (mut off, mut bad_exp) = (0usize, 0usize);
+            let live = j < w.rows;
+            // ---- leaves ----------------------------------------------------
+            let mut lin: Vec<Vec<(i64, u32)>> = vec![];
+            let mut lun: Vec<Vec<(i64, u32)>> = vec![];
+            // the *global* leaf index, so a probe aimed at value `t` lands on it
+            // whatever the region's row width (a per-row counter silently missed
+            // every target past the first row -- and a probe that does not fire
+            // reads as a gadget that accepts)
+            let mut flat = j * prog.n_leaves();
+            let mut in_nat: Vec<(i64, i64)> = vec![];
+            for (g, gr) in prog.groups.iter().enumerate() {
+                let (mut ins, mut uns) = (vec![], vec![]);
+                for i in 0..gr.n {
+                    let mut pat = if live { w.groups[g][j * gr.n + i] } else { 0 };
+                    if let Some(Tamper::Stream(t)) = tamper {
+                        if live && g == 0 && t % n_leaf_tot.max(1) == flat {
+                            pat ^= 1;
+                        }
+                    }
+                    let (mut sm, ef) = split(pat);
+                    if let Some(Tamper::NotBf16(t)) = tamper {
+                        if live && t % n_leaf_tot.max(1) == flat {
+                            sm = 5;
+                        }
+                    }
+                    flat += 1;
+                    let b = prog.leaf_at(g, i);
+                    cells[b] = m31_of(sm);
+                    cells[b + 1] = m31_u32(ef);
+                    in_nat.push((sm, ef as i64));
+                    if gr.un == UnKind::None {
+                        match val_at(sm, ef) {
+                            Some(k) => look.push((3, k)),
+                            None => off += 1,
+                        }
+                        uns.push((0i64, 0u32));
+                    } else {
+                        match val_at(sm, ef) {
+                            Some(k) => look.push((5 + un_idx[g] as u8, k)),
+                            None => off += 1,
+                        }
+                        let y = bf16::from_f32(gr.un.apply(to_f64(sm, ef)) as f32);
+                        let (osm, oef) = split(y);
+                        cells[b + 2] = m31_of(osm);
+                        cells[b + 3] = m31_u32(oef);
+                        uns.push((osm, oef));
+                    }
+                    ins.push((sm, ef));
+                }
+                lin.push(ins);
+                lun.push(uns);
+            }
+            // ---- slots ------------------------------------------------------
+            let mut outs: Vec<(i64, u32)> = vec![];
+            for (si, (sa, sb)) in prog.slots.iter().enumerate() {
+                let hit = |t: usize| live && t % (w.rows.max(1) * n_slots) == j * n_slots + si;
+                let get = |s: &Src, outs: &Vec<(i64, u32)>| -> (i64, u32) {
+                    match s {
+                        Src::Zero => (0, 0),
+                        Src::Leaf(g, i) => lin[*g][*i],
+                        Src::Un(g, i) => lun[*g][*i],
+                        Src::Slot(k) => outs[*k],
+                    }
+                };
+                let (a_sm, a_ef) = get(sa, &outs);
+                let (b_sm, b_ef) = get(sb, &outs);
+                let b = prog.slot_at(si, round);
+                match prog.kind {
+                    Kind::Add => {
+                        let mut etop = a_ef.max(b_ef) as i64;
+                        if let Some(Tamper::Anchor(i)) = tamper {
+                            if hit(i) {
+                                etop += 1;
+                            }
+                        }
+                        if let Some(Tamper::DropBig(i)) = tamper {
+                            if hit(i) && a_ef != b_ef {
+                                etop = a_ef.min(b_ef) as i64;
+                            }
+                        }
+                        let ua = a_ef as i64 - etop + DMAX as i64;
+                        let ub = b_ef as i64 - etop + DMAX as i64;
+                        let mut pw = |u: i64| -> i64 {
+                            match tables.pow_at(u) {
+                                Some(i) => {
+                                    look.push((0, i));
+                                    if u >= 0 { 1i64 << u } else { 0 }
+                                }
+                                None => {
+                                    off += 1;
+                                    0
+                                }
+                            }
+                        };
+                        let (fa, fb) = (pw(ua), pw(ub));
+                        cells[b] = m31_of(fa);
+                        cells[b + 1] = m31_of(fb);
+                        let acc = a_sm * fa + b_sm * fb;
+                        let mut sg = u32::from(acc < 0);
+                        let mag = acc.unsigned_abs();
+                        if let Some(Tamper::Sign(i)) = tamper {
+                            if hit(i) {
+                                sg ^= 1;
+                            }
+                        }
+                        let (m2, ph, st_raw, r) = match bf16::normalise(mag, tables.kmax) {
+                            Some(v) => v,
+                            None => {
+                                off += 1;
+                                (0, 0, 0, 0)
+                            }
+                        };
+                        let st = if sticky { st_raw } else { 0 };
+                        let (mut m7n, efn, nzn) = match tables.norm_at(m2, ph, st) {
+                            Some(i) => {
+                                let row = tables.norm[i];
+                                (row.m7, row.expfield, row.nz)
+                            }
+                            None => {
+                                off += 1;
+                                (0, 0, 0)
+                            }
+                        };
+                        if let Some(Tamper::NormOut(i)) = tamper {
+                            if hit(i) {
+                                m7n = (m7n + 1) % 128;
+                            }
+                        }
+                        // the bumped row is not in the table, so nothing is
+                        // bumped for it and the sums stop cancelling
+                        match tables.norm_at(m2, ph, st).filter(|_| {
+                            !matches!(tamper, Some(Tamper::NormOut(i)) if hit(i))
+                        }) {
+                            Some(i) => look.push((1, i)),
+                            None => off += 1,
+                        }
+                        match tables.frac_at(ph, r as u32) {
+                            Some(i) => look.push((4, i)),
+                            None => off += 1,
+                        }
+                        let mut c_sm =
+                            (128 * nzn as i64 + m7n as i64) * if sg == 1 { -1 } else { 1 };
+                        let c_ef = if nzn == 1 {
+                            efn as i64 + etop - DMAX as i64 - EXP_BIAS as i64
+                        } else {
+                            0
+                        };
+                        if nzn == 1 && !(1..0xff).contains(&c_ef) {
+                            bad_exp += 1;
+                        }
+                        if let Some(Tamper::Result(i)) = tamper {
+                            if hit(i) {
+                                c_sm += 1;
+                            }
+                        }
+                        cells[b + 2] = m31_of(etop);
+                        cells[b + 3] = m31_of(mag as i64);
+                        cells[b + 4] = m31_u32(sg);
+                        cells[b + 5] = m31_u32(m2);
+                        cells[b + 6] = m31_u32(ph);
+                        cells[b + 7] = m31_of(r as i64);
+                        let mut k = 8;
+                        if sticky {
+                            cells[b + k] = m31_u32(st);
+                            k += 1;
+                        }
+                        cells[b + k] = m31_u32(m7n);
+                        cells[b + k + 1] = m31_u32(efn);
+                        cells[b + k + 2] = m31_u32(nzn);
+                        cells[b + k + 3] = m31_of(c_sm);
+                        cells[b + k + 4] = m31_of(c_ef);
+                        match val_at(c_sm, c_ef.clamp(0, 0xff) as u32).filter(|_| {
+                            (0..0xff).contains(&c_ef)
+                        }) {
+                            Some(i) => look.push((3, i)),
+                            None => off += 1,
+                        }
+                        outs.push((c_sm, c_ef.clamp(0, 0xfe) as u32));
+                    }
+                    Kind::Mul => {
+                        let (c_sm0, cy, nzc) = match tables.smul_at(a_sm, b_sm) {
+                            Some(i) => {
+                                look.push((6, i));
+                                let row = tables.smul[i];
+                                (sgn_of(row[2]), row[3].0, row[4].0)
+                            }
+                            None => {
+                                off += 1;
+                                (0, 0, 0)
+                            }
+                        };
+                        let c_ef = if nzc == 1 {
+                            a_ef as i64 + b_ef as i64 + cy as i64 - 127
+                        } else {
+                            0
+                        };
+                        if nzc == 1 && !(1..0xff).contains(&c_ef) {
+                            bad_exp += 1;
+                        }
+                        let mut c_sm = c_sm0;
+                        if let Some(Tamper::Result(i)) = tamper {
+                            if hit(i) {
+                                c_sm += 1;
+                            }
+                        }
+                        cells[b] = m31_of(c_sm);
+                        cells[b + 1] = m31_u32(cy);
+                        cells[b + 2] = m31_u32(nzc);
+                        cells[b + 3] = m31_of(c_ef);
+                        match val_at(c_sm, c_ef.clamp(0, 0xff) as u32).filter(|_| {
+                            (0..0xff).contains(&c_ef)
+                        }) {
+                            Some(i) => look.push((3, i)),
+                            None => off += 1,
+                        }
+                        outs.push((c_sm, c_ef.clamp(0, 0xfe) as u32));
+                    }
+                }
+            }
+            let mut out_pat = Vec::with_capacity(out_w);
+            let mut out_nat = Vec::with_capacity(out_w);
+            for o in &prog.outs {
+                for s in o {
+                    let (sm, ef) = outs[*s];
+                    out_pat.push(join(sm, ef));
+                    let (c0, c1) = prog.out_cols(*s, round);
+                    out_nat.push((sgn_of(cells[c0]), sgn_of(cells[c1])));
+                }
+            }
+            RowOut { cells, outs: out_pat, in_nat, out_nat, look, off, bad_exp }
+        })
+        .collect();
+
+    let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); rows]; n_cols];
+    let (mut ref_ok, mut ref_n, mut bad_exp) = (0usize, 0usize, 0usize);
+    let mut outs: Vec<Vec<u16>> = prog.outs.iter().map(|o| vec![0u16; rows * o.len()]).collect();
+    for (j, f) in filled.iter().enumerate() {
+        for (c, v) in f.cells.iter().enumerate() {
+            cols[c][j] = *v;
+        }
+        let mut base = 0usize;
+        for (oi, o) in prog.outs.iter().enumerate() {
+            for k in 0..o.len() {
+                outs[oi][j * o.len() + k] = f.outs[base + k];
+                if j < w.rows {
+                    ref_n += 1;
+                    if f.outs[base + k] == w.ref_out[oi][j * o.len() + k] {
+                        ref_ok += 1;
+                    } else if std::env::var("B10_GLUE_DEBUG").is_ok() && ref_n - ref_ok < 8 {
+                        eprintln!("  {tag} ref mismatch row {j} out {oi}.{k}: got {:#06x} \
+                                   want {:#06x}", f.outs[base + k], w.ref_out[oi][j * o.len() + k]);
+                    }
+                }
+            }
+            base += o.len();
+        }
+        for (which, i) in &f.look {
+            match which {
+                0 => tables.m_pow[*i] += 1,
+                1 => tables.m_norm[*i] += 1,
+                3 => tables.m_val[*i] += 1,
+                4 => tables.m_frac[*i] += 1,
+                6 => tables.m_smul[*i] += 1,
+                u => tables.m_un[(*u - 5) as usize][*i] += 1,
+            }
+        }
+        tables.off_table += f.off;
+        bad_exp += f.bad_exp;
+    }
+    let base: Vec<Eval> = cols.into_iter().map(|c| eval_of(log_rows, c)).collect();
+    let mut end = vec![M31::zero(); rows];
+    end[rows - 1] = M31::one();
+    let mut nofirst = vec![M31::one(); rows];
+    nofirst[0] = M31::zero();
+    let pre = vec![eval_of(log_rows, nofirst), eval_of(log_rows, end)];
+    // the ties read the values in natural row order, per group
+    let mut in_nat: Vec<Vec<(i64, i64)>> =
+        prog.groups.iter().map(|g| Vec::with_capacity(rows * g.n)).collect();
+    let mut out_nat: Vec<Vec<(i64, i64)>> =
+        prog.outs.iter().map(|o| Vec::with_capacity(rows * o.len())).collect();
+    for f in &filled {
+        let mut b = 0usize;
+        for (g, gr) in prog.groups.iter().enumerate() {
+            in_nat[g].extend_from_slice(&f.in_nat[b..b + gr.n]);
+            b += gr.n;
+        }
+        let mut b = 0usize;
+        for (oi, o) in prog.outs.iter().enumerate() {
+            out_nat[oi].extend_from_slice(&f.out_nat[b..b + o.len()]);
+            b += o.len();
+        }
+    }
+    GlueRegion {
+        pre, base, log_rows, rows: w.rows, n_ops, n_leaves: n_leaf_tot,
+        ref_ok, ref_n, outs, prog: prog.clone(), round,
+        tag: tag.to_string(), bad_exp, in_nat, out_nat,
+    }
+}
+
+// ------------------------------------------------------------- interaction ----
+
+/// Every relation the glue draws, in one canonical order.
+#[derive(Clone)]
+pub struct GlueRels {
+    pub norm: NormRel,
+    pub frac: FracRel,
+    pub pow: PowRel,
+    pub smul: SMulRel,
+    pub un: Vec<UnRel>,
+    pub val: ValRel,
+}
+
+pub struct GlueInteraction {
+    pub cols: Vec<Eval>,
+    pub use_sum: SecureField,
+    pub claimed: Vec<SecureField>,
+}
+
+/// One lookup, as the columns (and the one expression) it reads.
+enum L {
+    /// `(sm, ef)` at a base column -- a leaf, or a slot's output
+    Val(usize, usize),
+    /// `(sm, ef, sm', ef')` of a leaf and its unary image
+    Un(usize, usize),
+    /// `ef - etop + DMAX` against the committed power
+    Pow(usize, usize, usize),
+    /// the normalisation, at a slot's base column
+    Norm(usize),
+    /// `(ph, r, st)`, at a slot's base column
+    Frac(usize),
+    /// `(sm_a, sm_b, sm_c, cy, nz)`: two operand columns and a slot base
+    SMul(usize, usize, usize),
+}
+
+/// The region's Horner ties and its LogUp columns, in the AIR's own order.
+pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>) -> GlueInteraction {
+    use stwo::prover::backend::simd::m31::PackedM31;
+    let prog = &r.prog;
+    let round = r.round;
+    let rows = 1usize << r.log_rows;
+    let sticky = round.needs_sticky();
+    let mut cols: Vec<Eval> = vec![];
+    let mut claimed: Vec<SecureField> = vec![];
+    if let Some(t) = tie {
+        for spec in &t.specs {
+            let vals = r.tie_vals(spec.kind);
+            let wdt = r.tie_width(spec.kind);
+            let mut h = vec![SecureField::zero(); rows];
+            for j in 0..rows {
+                let mut f = SecureField::zero();
+                for k in 0..wdt {
+                    let (sm, ef) = vals[j * wdt + k];
+                    f += (SecureField::from(m31_of(sm))
+                          + SecureField::from(m31_of(ef)) * t.lam) * spec.w[k];
+                }
+                h[j] = if j == 0 { f } else { h[j - 1] * spec.step + f };
+            }
+            claimed.push(h[rows - 1]);
+            cols.extend(crate::attn_trace::secure_cols_pub(r.log_rows, &h));
+        }
+    }
+
+    // the lookups, in exactly the order `evaluate` adds them
+    let mut looks: Vec<L> = vec![];
+    let mut un_of: Vec<usize> = vec![];
+    let kinds = prog.un_kinds();
+    for (g, gr) in prog.groups.iter().enumerate() {
+        for i in 0..gr.n {
+            let b = prog.leaf_at(g, i);
+            if gr.un == UnKind::None {
+                looks.push(L::Val(b, b + 1));
+                un_of.push(usize::MAX);
+            } else {
+                looks.push(L::Un(b, b + 1));
+                un_of.push(kinds.iter().position(|k| *k == gr.un).unwrap());
+            }
+        }
+    }
+    for (si, (sa, sb)) in prog.slots.iter().enumerate() {
+        let b = prog.slot_at(si, round);
+        let (o0, o1) = prog.out_cols(si, round);
+        match prog.kind {
+            Kind::Add => {
+                let ea = prog.src_cols(sa, round).map(|c| c.1);
+                let eb = prog.src_cols(sb, round).map(|c| c.1);
+                looks.push(L::Pow(ea.unwrap_or(usize::MAX), b + 2, b));
+                un_of.push(usize::MAX);
+                looks.push(L::Pow(eb.unwrap_or(usize::MAX), b + 2, b + 1));
+                un_of.push(usize::MAX);
+                looks.push(L::Norm(b));
+                un_of.push(usize::MAX);
+                looks.push(L::Frac(b));
+                un_of.push(usize::MAX);
+                looks.push(L::Val(o0, o1));
+                un_of.push(usize::MAX);
+            }
+            Kind::Mul => {
+                let ca = prog.src_cols(sa, round).map(|c| c.0).unwrap_or(usize::MAX);
+                let cb = prog.src_cols(sb, round).map(|c| c.0).unwrap_or(usize::MAX);
+                looks.push(L::SMul(ca, cb, b));
+                un_of.push(usize::MAX);
+                looks.push(L::Val(o0, o1));
+                un_of.push(usize::MAX);
+            }
+        }
+    }
+    let one = PackedQM31::broadcast(SecureField::one());
+    let zero = PackedM31::broadcast(M31::zero());
+    let dmax = PackedM31::broadcast(m31_u32(DMAX));
+    let k = 8 + usize::from(sticky);
+    let fr = |i: usize, vr: usize| -> (PackedQM31, PackedQM31) {
+        // `usize::MAX` is the constant `+0` operand: sm = ef = 0, no column
+        let c = |x: usize| if x == usize::MAX { zero } else { r.base[x].data[vr] };
+        match &looks[i] {
+            L::Val(a, b) => (one, rels.val.combine(&[c(*a), c(*b)])),
+            L::Un(a, b) => (one, rels.un[un_of[i]].combine(&[c(*a), c(*b), c(a + 2), c(b + 2)])),
+            L::Pow(ef, etop, p) => (one, rels.pow.combine(&[c(*ef) - c(*etop) + dmax, c(*p)])),
+            L::Norm(b) => {
+                let st = if sticky { c(b + 8) } else { zero };
+                (one, rels.norm.combine(&[c(b + 5), c(b + 6), st,
+                                          c(b + k), c(b + k + 1), c(b + k + 2)]))
+            }
+            L::Frac(b) => {
+                let st = if sticky { c(b + 8) } else { zero };
+                (one, rels.frac.combine(&[c(b + 6), c(b + 7), st]))
+            }
+            L::SMul(a, b2, out) => {
+                (one, rels.smul.combine(&[c(*a), c(*b2), c(*out), c(out + 1), c(out + 2)]))
+            }
+        }
+    };
+    let (n_pairs, fpair) = crate::plogup::paired(looks.len(), fr);
+    let (lcols, use_sum) = crate::plogup::build(r.log_rows, n_pairs, fpair);
+    cols.extend(lcols);
+    GlueInteraction { cols, use_sum, claimed }
+}
+
+// ---------------------------------------------------------------- the tables --
+
+/// The glue's own tables, in the shape `dequant::TableEval` has for B6's: a
+/// preprocessed row, a committed multiplicity, yielded at `-m`.
+#[derive(Clone)]
+pub enum GKind {
+    Pow(PowRel),
+    SMul(SMulRel),
+    Un(UnRel),
+    Val(ValRel),
+    Norm(NormRel),
+    Frac(FracRel),
+}
+
+impl GKind {
+    fn combine(&self, v: &[stwo::prover::backend::simd::m31::PackedM31]) -> PackedQM31 {
+        match self {
+            GKind::Pow(r) => r.combine(v),
+            GKind::SMul(r) => r.combine(v),
+            GKind::Un(r) => r.combine(v),
+            GKind::Val(r) => r.combine(v),
+            GKind::Norm(r) => r.combine(v),
+            GKind::Frac(r) => r.combine(v),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct GTableEval {
+    pub log_rows: u32,
+    pub cols: Vec<PreProcessedColumnId>,
+    pub kind: GKind,
+}
+
+impl FrameworkEval for GTableEval {
+    fn log_size(&self) -> u32 {
+        self.log_rows
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_rows + 1
+    }
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let row: Vec<E::F> =
+            self.cols.iter().map(|c| eval.get_preprocessed_column(c.clone())).collect();
+        let m = eval.next_trace_mask();
+        let neg = -E::EF::from(m);
+        match &self.kind {
+            GKind::Pow(r) => eval.add_to_relation(RelationEntry::new(r, neg, &row)),
+            GKind::SMul(r) => eval.add_to_relation(RelationEntry::new(r, neg, &row)),
+            GKind::Un(r) => eval.add_to_relation(RelationEntry::new(r, neg, &row)),
+            GKind::Val(r) => eval.add_to_relation(RelationEntry::new(r, neg, &row)),
+            GKind::Norm(r) => eval.add_to_relation(RelationEntry::new(r, neg, &row)),
+            GKind::Frac(r) => eval.add_to_relation(RelationEntry::new(r, neg, &row)),
+        }
+        eval.finalize_logup();
+        eval
+    }
+}
+
+pub fn table_side(log_rows: u32, kind: &GKind, row: &[&Eval], mult: &Eval)
+                  -> (Vec<Eval>, SecureField) {
+    crate::plogup::build(log_rows, 1, |_, vr| {
+        let vals: Vec<_> = row.iter().map(|c| c.data[vr]).collect();
+        (-PackedQM31::from(mult.data[vr]), kind.combine(&vals))
+    })
+}
+
+/// The glue's own preprocessed columns, in the order the prover commits them:
+/// `POW`, `SMUL`, `VAL`, then one unary table per kind in `uns`.
+pub fn glue_table_ids(uns: &[UnKind]) -> Vec<PreProcessedColumnId> {
+    let mut ids: Vec<PreProcessedColumnId> = POW_COLS.iter().map(|c| id(*c)).collect();
+    ids.extend(SMUL_COLS.iter().map(|c| id(*c)));
+    ids.extend(VAL_COLS.iter().map(|c| id(*c)));
+    for k in uns {
+        ids.extend((0..4).map(|i| un_col(k.name(), i)));
+    }
+    ids
+}
+
+/// The same columns' contents, padded to their own row counts.
+pub fn glue_table_cols(t: &GlueTables) -> Vec<Eval> {
+    let pad = |n: u32| 1usize << n;
+    let mut out = vec![];
+    for k in 0..2 {
+        out.push(eval_of(t.log_pow, (0..pad(t.log_pow))
+            .map(|i| t.pow.get(i).map(|r| if k == 0 { r.0 } else { r.1 })
+                 .unwrap_or(M31::zero())).collect()));
+    }
+    for k in 0..5 {
+        out.push(eval_of(t.log_smul, (0..pad(t.log_smul))
+            .map(|i| t.smul.get(i).map(|r| r[k]).unwrap_or(M31::zero())).collect()));
+    }
+    for k in 0..2 {
+        out.push(eval_of(t.log_val, (0..pad(t.log_val))
+            .map(|i| t.val.get(i).map(|r| if k == 0 { r.0 } else { r.1 })
+                 .unwrap_or(M31::zero())).collect()));
+    }
+    for u in &t.un {
+        for k in 0..4 {
+            out.push(eval_of(t.log_un, (0..pad(t.log_un))
+                .map(|i| u.get(i).map(|r| r[k]).unwrap_or(M31::zero())).collect()));
+        }
+    }
+    out
+}
+
+/// Their multiplicity columns, in the same order.
+pub fn glue_mult_cols(t: &GlueTables) -> Vec<Eval> {
+    let mut out = vec![
+        eval_of(t.log_pow, t.m_pow.iter().map(|m| m31_u32(*m)).collect()),
+        eval_of(t.log_smul, t.m_smul.iter().map(|m| m31_u32(*m)).collect()),
+        eval_of(t.log_val, t.m_val.iter().map(|m| m31_u32(*m)).collect()),
+    ];
+    for m in &t.m_un {
+        out.push(eval_of(t.log_un, m.iter().map(|v| m31_u32(*v)).collect()));
+    }
+    out
+}
+
+/// The glue tables' row counts, from their closed forms -- the verifier needs
+/// them and has no reason to materialise 200k rows to find out.
+pub fn glue_table_logs() -> (u32, u32, u32) {
+    let pow = DMAX as usize + 1 + UMIN as usize;
+    let val = 1 + 254 * 128 * 2;
+    let smul = 257 * 257;
+    (log_rows_for(pow, 1), log_rows_for(smul, 1), log_rows_for(val, 1))
+}
+
+/// `(log_rows, columns, kind)` for the glue's own table components, in order.
+pub fn glue_table_kinds(uns: &[UnKind], rels: &GlueRels)
+                        -> Vec<(u32, Vec<PreProcessedColumnId>, GKind)> {
+    let (log_pow, log_smul, log_val) = glue_table_logs();
+    let mut v = vec![
+        (log_pow, POW_COLS.iter().map(|c| id(*c)).collect::<Vec<_>>(),
+         GKind::Pow(rels.pow.clone())),
+        (log_smul, SMUL_COLS.iter().map(|c| id(*c)).collect(), GKind::SMul(rels.smul.clone())),
+        (log_val, VAL_COLS.iter().map(|c| id(*c)).collect(), GKind::Val(rels.val.clone())),
+    ];
+    for (i, k) in uns.iter().enumerate() {
+        v.push((log_val, (0..4).map(|j| un_col(k.name(), j)).collect(),
+                GKind::Un(rels.un[i].clone())));
+    }
+    v
+}
+
+// ----------------------------------------------------------------- the run ----
+
+pub struct Outcome {
+    pub proven: Proven,
+    pub sums: Sums,
+    pub prog: Prog,
+    pub round: Round,
+    pub n_ops: usize,
+    pub n_leaves: usize,
+    pub off_table: usize,
+    pub bad_exp: usize,
+    pub ref_ok: usize,
+    pub ref_n: usize,
+    pub odd: usize,
+    pub table_cells_pre: usize,
+    pub table_cells_fresh: usize,
+    pub region_cells: usize,
+    /// the glue component's own interaction cells: the Horner ties and the
+    /// LogUp columns its lookups drag along (a pair of lookups is 4 columns)
+    pub inter_cells: usize,
+    pub n_columns: [usize; 3],
+    pub tie_ok: bool,
+    pub trace_secs: f64,
+}
+
+impl Outcome {
+    pub fn accepts(&self) -> bool {
+        self.proven.stark_ok && self.sums.cancels() && self.off_table == 0 && self.tie_ok
+            && self.bad_exp == 0
+    }
+    /// Cells the gadget adds per op, witness *and* LogUp columns, the way B6 and
+    /// B6.5 count.  The tables amortise over a whole layer, so they are reported
+    /// apart; so are the leaves, which in a chained region are the previous
+    /// region's outputs and are committed there (`leaf_width` columns plus the
+    /// 2 cells the validity or unary lookup costs at pairwise batching).
+    pub fn cells_per_op_marginal(&self) -> f64 {
+        let leaf: usize = self
+            .prog
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(g, gr)| gr.n * (self.prog.leaf_width(g) + 2))
+            .sum();
+        let rows = self.n_ops / self.prog.slots.len().max(1);
+        (self.region_cells + self.inter_cells) as f64 / self.n_ops as f64
+            - (leaf * rows) as f64 / self.n_ops as f64
+    }
+    pub fn cells_per_op_total(&self) -> f64 {
+        (self.region_cells + self.inter_cells) as f64 / self.n_ops as f64
+    }
+    pub fn json(&self, src: &str, gadget: &str) -> Value {
+        json!({
+            "gadget": gadget,
+            "kind": match self.prog.kind { Kind::Add => "add", Kind::Mul => "mul" },
+            "unary": self.prog.groups.iter().map(|g| g.un.name()).collect::<Vec<_>>(),
+            "round": self.round.name(),
+            "groups": self.prog.groups.iter().map(|g| g.n).collect::<Vec<_>>(),
+            "slots": self.prog.slots.len(),
+            "source": src,
+            "ops": self.n_ops,
+            "cells_per_op_marginal": self.cells_per_op_marginal(),
+            "cells_per_op_total": self.cells_per_op_total(),
+            "region_cells": self.region_cells,
+            "interaction_cells": self.inter_cells,
+            "table_cells_preprocessed": self.table_cells_pre,
+            "table_cells_fresh": self.table_cells_fresh,
+            "dmax": DMAX,
+            "off_table": self.off_table,
+            "exponent_out_of_range": self.bad_exp,
+            "odd_input_patterns": self.odd,
+            "reference_checked": self.ref_n, "reference_ok": self.ref_ok,
+            "reference_mismatch": self.ref_n - self.ref_ok,
+            "tie_ok": self.tie_ok,
+            "columns": {"preprocessed": self.n_columns[0], "base": self.n_columns[1],
+                        "interaction": self.n_columns[2],
+                        "total": self.n_columns.iter().sum::<usize>()},
+            "trace_secs": self.trace_secs,
+            "sums": self.sums.json(), "accepts": self.accepts(),
+            "point": self.proven.json(),
+        })
+    }
+}
+
+/// The tie specs a standalone region carries: one per input group and one per
+/// `outs` group, with the plain descending weights -- the composed proof picks
+/// its own so that two differently tiled regions line up (see `compose::glue`).
+pub fn plain_ties(prog: &Prog, log_rows: u32, w: SecureField) -> Vec<TieSpec> {
+    let _ = log_rows;
+    let mut specs = vec![];
+    let mut push = |kind: TieKind, width: usize| {
+        // the value at flat position `q` weighs `w^(N-1-q)`: within a row the
+        // weights descend, and the row step is `w^width`
+        let ws: Vec<SecureField> =
+            (0..width).map(|k| w.pow((width - 1 - k) as u128)).collect();
+        specs.push(TieSpec { kind, w: ws, step: w.pow(width as u128),
+                             claimed: SecureField::zero() });
+    };
+    for (g, gr) in prog.groups.iter().enumerate() {
+        push(TieKind::In(g), gr.n);
+    }
+    for (oi, o) in prog.outs.iter().enumerate() {
+        push(TieKind::Out(oi), o.len());
+    }
+    specs
+}
+
+/// One region, proved on its own: the measurement and the probes both run here.
+pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
+           tamper: Option<Tamper>) -> Outcome {
+    let t0 = std::time::Instant::now();
+    let uns = prog.un_kinds();
+    let mut tables = GlueTables::new(kmax, round, &uns);
+    let region = glue_region(w, prog, round, "r", &mut tables, tamper);
+
+    // ---- tree 0: the region's selector, then every table ----------------------
+    let mut ids = vec![glue_sel("r", "nofirst"), glue_sel("r", "end")];
+    let mut pre: Vec<Eval> = region.pre.clone();
+    ids.extend(glue_table_ids(&uns));
+    pre.extend(glue_table_cols(&tables));
+    let pad = |n: u32| 1usize << n;
+    {
+        let get: [fn(&bf16::NormRow) -> u32; 6] =
+            [|r| r.m2, |r| r.ph, |r| r.st, |r| r.m7, |r| r.expfield, |r| r.nz];
+        for (t, g) in get.into_iter().enumerate() {
+            ids.push(id(crate::dequant::NORM_COLS[t]));
+            pre.push(eval_of(tables.log_norm, (0..pad(tables.log_norm))
+                .map(|i| m31_u32(tables.norm.get(i).map(g).unwrap_or(0))).collect()));
+        }
+        for t in 0..3 {
+            ids.push(id(crate::dequant::FRAC_COLS[t]));
+            pre.push(eval_of(tables.log_frac, (0..pad(tables.log_frac))
+                .map(|i| {
+                    let x = tables.frac.get(i).copied().unwrap_or((0, 0, 0));
+                    m31_u32([x.0, x.1, x.2][t])
+                }).collect()));
+        }
+    }
+    let table_cells_pre: usize = pre[region.pre.len()..].iter().map(|e| e.domain.size()).sum();
+
+    // ---- tree 1: the region, then the multiplicity columns --------------------
+    let mut base: Vec<Eval> = region.base.clone();
+    let region_cells: usize = base.iter().map(|e| e.domain.size()).sum();
+    let mult_start = base.len();
+    base.extend(glue_mult_cols(&tables));
+    base.push(eval_of(tables.log_norm, tables.m_norm.iter().map(|m| m31_u32(*m)).collect()));
+    base.push(eval_of(tables.log_frac, tables.m_frac.iter().map(|m| m31_u32(*m)).collect()));
+    let table_cells_fresh: usize = base[mult_start..].iter().map(|e| e.domain.size()).sum();
+    let trace_secs = t0.elapsed().as_secs_f64();
+
+    // ---- one transcript --------------------------------------------------------
+    let widest = pre.iter().chain(base.iter()).map(|e| e.domain.log_size()).max().unwrap();
+    let tw = twiddles(widest);
+    let mut sess = Session::new(&tw);
+    sess.commit(pre.clone());
+    sess.commit(base.clone());
+    let rels = GlueRels {
+        norm: sess.draw_relation(NormRel::draw),
+        frac: sess.draw_relation(FracRel::draw),
+        pow: sess.draw_relation(PowRel::draw),
+        smul: sess.draw_relation(SMulRel::draw),
+        un: uns.iter().map(|_| sess.draw_relation(UnRel::draw)).collect(),
+        val: sess.draw_relation(ValRel::draw),
+    };
+    let ch = sess.draw_felts(2);
+    let (w_ch, lam) = (ch[0], ch[1]);
+    let notie = std::env::var("B10_GLUE_NOTIE").is_ok();
+    let specs = plain_ties(prog, region.log_rows, w_ch);
+    let tie0 = Tie { lam, specs: specs.clone() };
+    let it = glue_interaction(&region, &rels, if notie { None } else { Some(&tie0) });
+    let inter_cells = it.cols.len() << region.log_rows;
+    let tie = Tie {
+        lam,
+        specs: specs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| TieSpec { claimed: it.claimed[i], ..s.clone() })
+            .collect(),
+    };
+
+    // an independent recomputation of every claim, from the witness rather than
+    // from the trace: a tie is only worth something if it is checkable
+    let tie_ok = notie
+        || tie.specs.iter().all(|s| region.tie_claim(s, lam) == s.claimed);
+
+    let mut sums = Sums { uses: it.use_sum, tables: SecureField::zero() };
+    let mut icols = it.cols;
+
+    // the tables' own sides
+    let mut kinds = glue_table_kinds(&tables.uns, &rels);
+    kinds.push((tables.log_norm, crate::dequant::NORM_COLS.iter().map(|c| id(*c)).collect(),
+                GKind::Norm(rels.norm.clone())));
+    kinds.push((tables.log_frac, crate::dequant::FRAC_COLS.iter().map(|c| id(*c)).collect(),
+                GKind::Frac(rels.frac.clone())));
+    let mults: Vec<&Eval> = base[mult_start..].iter().collect();
+    let mut tsums: Vec<SecureField> = vec![];
+    let mut tkinds: Vec<(u32, Vec<PreProcessedColumnId>, GKind)> = vec![];
+    for (ki, (lr, cs, kind)) in kinds.into_iter().enumerate() {
+        let refs: Vec<&Eval> = cs.iter().map(|c| &pre[pre_index(&ids, c)]).collect();
+        let (c, sum) = table_side(lr, &kind, &refs, mults[ki]);
+        icols.extend(c);
+        sums.tables += sum;
+        tsums.push(sum);
+        tkinds.push((lr, cs, kind));
+    }
+    let n_inter = icols.len();
+    sess.commit(icols);
+
+    // ---- components -------------------------------------------------------------
+    let alloc = &mut TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let comp = FrameworkComponent::<GlueEval>::new(
+        alloc,
+        GlueEval { log_rows: region.log_rows, tag: "r".into(), prog: prog.clone(), round,
+                   norm: rels.norm.clone(), frac: rels.frac.clone(), pow: rels.pow.clone(),
+                   smul: rels.smul.clone(), un: rels.un.clone(), val: rels.val.clone(),
+                   tie: if notie { None } else { Some(tie) } },
+        it.use_sum,
+    );
+    let tcomps: Vec<FrameworkComponent<GTableEval>> = tkinds
+        .into_iter()
+        .zip(&tsums)
+        .map(|((lr, cs, kind), sum)| {
+            FrameworkComponent::<GTableEval>::new(
+                alloc, GTableEval { log_rows: lr, cols: cs, kind }, *sum)
+        })
+        .collect();
+
+    let mut provers: Vec<&dyn ComponentProver<stwo::prover::backend::simd::SimdBackend>> =
+        vec![&comp];
+    let mut comps: Vec<&dyn Component> = vec![&comp];
+    for t in &tcomps {
+        provers.push(t);
+        comps.push(t);
+    }
+    let n_columns = [pre.len(), base.len(), n_inter];
+    let proven = sess.prove(&provers, &comps);
+    Outcome {
+        proven, sums, prog: prog.clone(), round,
+        n_ops: region.n_ops, n_leaves: region.n_leaves,
+        off_table: tables.off_table, bad_exp: region.bad_exp,
+        ref_ok: region.ref_ok, ref_n: region.ref_n, odd: w.odd,
+        table_cells_pre, table_cells_fresh, region_cells, inter_cells,
+        n_columns, tie_ok, trace_secs,
+    }
+}
+
+pub fn pre_index(ids: &[PreProcessedColumnId], want: &PreProcessedColumnId) -> usize {
+    ids.iter().position(|i| i == want).expect("preprocessed column not registered")
+}
+
+/// The tables alone, checked against an independent evaluation: `smul` against
+/// f32's own product, `un` against f32's own op, exactly as B6 checks `NORM`
+/// against a single f64 rounding.
+pub fn check_tables(round: Round, samples: usize) -> Value {
+    let smul = smul_table(round);
+    let vals = smul_vals();
+    let mut smul_bad = vec![];
+    for (i, row) in smul.iter().enumerate() {
+        if i % (smul.len() / samples.max(1)).max(1) != 0 {
+            continue;
+        }
+        let (a, b) = (vals[i / vals.len()], vals[i % vals.len()]);
+        if a == 0 || b == 0 {
+            continue;
+        }
+        // one exponent apiece, so the product's significand is the table's
+        let want = bf16::bf16_mul_ref(join(a, 134), join(b, 134));
+        let got = join(sgn_of(row[2]), (134 + 134 + row[3].0) as u32 - 127);
+        if want != got {
+            smul_bad.push(json!({"a": a, "b": b, "want": want, "got": got}));
+        }
+    }
+    let (mut un_bad, mut sub_out) = (vec![], 0usize);
+    for k in [UnKind::Square, UnKind::Rsqrt, UnKind::Silu] {
+        let t = un_table(k);
+        for (i, row) in t.iter().enumerate() {
+            if i % (t.len() / samples.max(1)).max(1) != 0 {
+                continue;
+            }
+            let x = to_f64(sgn_of(row[0]), row[1].0);
+            // bf16 subnormals are one value in this representation (`sm = 0`),
+            // so the comparison is between *values*, not patterns; the count of
+            // inputs whose true image is subnormal is reported instead
+            let want = bf16::from_f32(k.apply(x) as f32);
+            let got = join(sgn_of(row[2]), row[3].0);
+            if is_odd_pattern(want) {
+                sub_out += 1;
+            } else if canon(want) != canon(got) {
+                un_bad.push(json!({"op": k.name(), "x": x, "want": want, "got": got}));
+            }
+        }
+    }
+    json!({"smul_rows": smul.len(), "smul_mismatch": smul_bad,
+           "val_rows": val_table().len(), "pow_rows": pow_table().len(),
+           "un_mismatch": un_bad, "un_subnormal_image": sub_out,
+           "note": "a subnormal image is zero in the (sm, ef) representation, so it is counted rather than called a mismatch"})
+}
+
+// ------------------------------------------------------- the norm's layout ----
+
+/// How the composed proof tiles one `(tokens x d)` bf16 stream into rows.
+///
+/// `tree_sum` is `x[..h] + x[h..]` on the array padded to `pad = pad2(d)`, so its
+/// first `log2(b)` levels group the channels **by residue mod `a`**, not into
+/// contiguous blocks: after those levels position `r` holds the stride tree of
+/// `x[r], x[r+a], ..., x[r+(b-1)a]`.  So a row here is one `(residue, token)`
+/// pair, its `nreal = d/a` committed leaves are the channels `r + j a`, and a
+/// second region over the `a` roots of one token is the rest of the reduction --
+/// the composite is *bit-identical* to `tree_sum`.
+///
+/// The canonical position of channel `c` of token `t` is `c * tokens + t`
+/// (channel-major), which is exactly what makes the Horner tie's weights plain
+/// powers in both tilings: in this one the row index is `r * tokens + t` and the
+/// leaf `j` sits `j a tokens` positions later.
+#[derive(Clone, Copy, Debug)]
+pub struct Tiling {
+    pub tokens: usize,
+    pub d: usize,
+    /// rows per token at level 1, and the level-2 tree's width
+    pub a: usize,
+    /// the level-1 tree's width, `pad2(d) / a`
+    pub b: usize,
+    /// committed leaves per level-1 row, `d / a`
+    pub nreal: usize,
+}
+
+impl Tiling {
+    pub fn new(tokens: usize, d: usize, a: usize) -> Self {
+        let pad = d.next_power_of_two();
+        assert!(a.is_power_of_two() && a >= 1, "the tiling's a must be a power of two");
+        assert!(tokens.is_power_of_two(), "the tiling needs a power-of-two token count");
+        assert_eq!(d % a, 0, "the tiling's a = {a} must divide d = {d}");
+        let b = pad / a;
+        let nreal = d / a;
+        assert!(nreal >= 2 && nreal <= b, "d/a = {nreal} does not fit a tree of {b}");
+        Self { tokens, d, a, b, nreal }
+    }
+    pub fn rows1(&self) -> usize {
+        self.tokens * self.a
+    }
+    /// The natural-order value block a level-1 region's group reads: row
+    /// `r * tokens + t`, leaf `j` is channel `r + j a` of token `t`.
+    pub fn lay(&self, src: &[u16]) -> Vec<u16> {
+        let mut v = vec![0u16; self.rows1() * self.nreal];
+        for r in 0..self.a {
+            for t in 0..self.tokens {
+                let m = r * self.tokens + t;
+                for j in 0..self.nreal {
+                    v[m * self.nreal + j] = canon(src[t * self.d + r + j * self.a]);
+                }
+            }
+        }
+        v
+    }
+    /// The inverse: a level-1 group's block back to `(token, channel)` order.
+    pub fn unlay(&self, v: &[u16]) -> Vec<u16> {
+        let mut out = vec![0u16; self.tokens * self.d];
+        for r in 0..self.a {
+            for t in 0..self.tokens {
+                let m = r * self.tokens + t;
+                for j in 0..self.nreal {
+                    out[t * self.d + r + j * self.a] = v[m * self.nreal + j];
+                }
+            }
+        }
+        out
+    }
+    /// The level-1 roots, one per row, as the level-2 region's leaves: row `t`,
+    /// leaf `r`.
+    pub fn roots_to_l2(&self, roots: &[u16]) -> Vec<u16> {
+        let mut v = vec![0u16; self.tokens * self.a];
+        for r in 0..self.a {
+            for t in 0..self.tokens {
+                v[t * self.a + r] = roots[r * self.tokens + t];
+            }
+        }
+        v
+    }
+}
+
+/// Read a `(tokens x d)` bf16 column off a witness directory.
+pub fn read_u16(dir: &str, name: &str) -> Result<Vec<u16>, String> {
+    let raw = std::fs::read(format!("{dir}/{name}.u16")).map_err(|e| format!("{name}.u16: {e}"))?;
+    Ok(raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect())
+}
+
+/// What the reduction's order costs numerically: B1's fp32 `sum(x^2)/d + eps`
+/// against the balanced bf16 tree this AIR proves, on the same real column.
+/// `n1_in` is `store(ms + eps)`, so the comparison is one bf16 add away from the
+/// mean itself and is the number the spec change has to be judged on.  With
+/// `roots` supplied it is the *composed* two-level reduction that is compared,
+/// which is the check that the tiling above really is `tree_sum`'s order.
+pub fn norm_drift(dir: &str, d: usize, tokens_cap: usize, round: Round, which: &str,
+                  roots: Option<&[u16]>) -> Result<Value, String> {
+    let x = read_u16(dir, if which == "n2" { "xmid" } else { "xin" })?;
+    let want = read_u16(dir, if which == "n2" { "n2_in" } else { "n1_in" })?;
+    let man: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(format!("{dir}/manifest.json"))
+            .map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let eps = man["glue"]["eps"].as_u64().ok_or("manifest: glue.eps")? as u16;
+    let inv_d = man["glue"]["inv_d"].as_u64().ok_or("manifest: glue.inv_d")? as u16;
+    let tokens = (x.len() / d).min(tokens_cap.max(1)).max(1);
+    let pad = d.next_power_of_two();
+    let (mut same, mut worst, mut worst_ulp) = (0usize, 0f64, 0i64);
+    let (mut region_same, mut region_n) = (0usize, 0usize);
+    for t in 0..tokens {
+        // the tree, exactly as `tree_sum` builds it: pad with +0, halve, round
+        let mut lv: Vec<f64> = (0..pad)
+            .map(|c| {
+                if c >= d {
+                    0.0
+                } else {
+                    let (sm, ef) = split(x[t * d + c]);
+                    let sq = bf16::from_f32(UnKind::Square.apply(to_f64(sm, ef)) as f32);
+                    let (a, b) = split(sq);
+                    to_f64(a, b)
+                }
+            })
+            .collect();
+        while lv.len() > 1 {
+            let h = lv.len() / 2;
+            lv = (0..h)
+                .map(|i| {
+                    let s = bf16::from_f64_round(lv[i] + lv[i + h], round);
+                    let (a, b) = split(s);
+                    to_f64(a, b)
+                })
+                .collect();
+        }
+        let root = bf16::from_f64_round(lv[0], round);
+        if let Some(rt) = roots {
+            region_n += 1;
+            if canon(rt[t]) == canon(root) {
+                region_same += 1;
+            }
+        }
+        let (im, ie) = split(inv_d);
+        let ms = bf16::from_f64_round(lv[0] * to_f64(im, ie), round);
+        let (mm, me) = split(ms);
+        let (em, ee) = split(eps);
+        let got = bf16::from_f64_round(to_f64(mm, me) + to_f64(em, ee), round);
+        let w = want[t];
+        if got == canon(w) {
+            same += 1;
+        } else {
+            let (gs, ge) = split(got);
+            let (ws, we) = split(w);
+            let (g, wv) = (to_f64(gs, ge), to_f64(ws, we));
+            let rel = if wv != 0.0 { ((g - wv) / wv).abs() } else { 0.0 };
+            worst = worst.max(rel);
+            worst_ulp = worst_ulp.max((got as i64 - w as i64).abs());
+        }
+    }
+    Ok(json!({"norm": which, "tokens": tokens, "d": d, "identical": same,
+              "differ": tokens - same,
+              "worst_relative": worst, "worst_ulps": worst_ulp,
+              "two_level_checked": region_n, "two_level_matches_tree_sum": region_same,
+              "note": "B1's fp32 reduction against the balanced bf16 tree the AIR proves; \
+                       two_level_* compares the composed regions' root with tree_sum's own"}))
+}
