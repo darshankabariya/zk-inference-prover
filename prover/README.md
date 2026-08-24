@@ -52,10 +52,16 @@ env RAYON_NUM_THREADS=16 ./target/release/b65 compose \
     --table-bits 25 --bands 16,8,8 --witness $B8_ROOT/witness8b_b10/witness
 ```
 
-**Standing item for the next box session:** this crate was assembled and
-type-checked off-box (the exact construction is recorded in the consolidation
-commits), but no GPU has run it yet. Before any device work builds on it, run
-the digest command above on both arms and confirm `6c3fb61524dee2ec`.
+**Verified on the H200, 2026-08-24**, on exactly this tree and the vendored
+fork, three ways: the reference arm (54 s), the cuda arm with every device
+switch off (220 s, the scalar constraint fallback as expected before an
+emit-install), and the cuda arm with `B7_M4_FILL=2 B7_M4_WFILL=2 B7_M4_ACC=2`
+— the check mode that builds host and device sides and asserts every cell
+(all three bands, attnout and all seven matmul fills reported their
+multiplicity tables and f64 cross-checks matching). All three runs reproduced
+`proof_sha256 = 6c3fb61524dee2ec…` with `accepts: true`. The `PRE`/`TABDEV`
+switches and kernel-speed constraint evaluation still wait on the emit-install
+(below).
 
 To type-check off-box on a machine without CUDA: temporarily replace
 `../nitroo/crates/stwo/build.rs` with `fn main() {}` (checking does not link,
@@ -98,8 +104,11 @@ settled question). Details in `experiments/b7/gpu/README.md`.
 (`experiments/b7/gpu/m2b_kernels.py`, `m4b_kernels.py`) — has not been run
 for any shape against the vendored fork, so constraint evaluation takes the
 fork's scalar CPU fallback and `B7_M4_TABDEV`'s device route for the shared
-tables would abort on the stand-in dispatcher. Emitting for the current
-shapes (including the three new families) is stream B's session.
+tables would abort on the stand-in dispatcher. `B7_M4_PRE` requires
+`B7_M4_TABDEV` (the shared tables are one list — the guard in `prove_layer`
+says so loudly), so before an emit-install the device switches that can run
+are `FILL`, `WFILL` and `ACC`. Emitting for the current shapes (including
+the three new families) is stream B's session.
 
 One design decision to keep: **corner bands decline every device path** —
 the fill (`!a.corner` threads through `commit_base_any` as `with_rows`), the
