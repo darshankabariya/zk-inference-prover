@@ -57,6 +57,12 @@ type-checked off-box (the exact construction is recorded in the consolidation
 commits), but no GPU has run it yet. Before any device work builds on it, run
 the digest command above on both arms and confirm `6c3fb61524dee2ec`.
 
+To type-check off-box on a machine without CUDA: temporarily replace
+`../nitroo/crates/stwo/build.rs` with `fn main() {}` (checking does not link,
+so the CMake build of the kernels is not needed), run
+`cargo check` / `cargo check --features cuda`, and restore the file. Do not
+commit the stub.
+
 ## Building on a box
 
 The boxes consume this repo; they own nothing. Ship `prover/` and `nitroo/`
