@@ -36,7 +36,7 @@ use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::{CommitmentSchemeVerifier, TreeVec};
 use stwo::core::verifier::verify;
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+use stwo::core::vcs::blake2_merkle::Blake2sM31MerkleChannel;
 use stwo::prover::ComponentProver;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
@@ -592,7 +592,7 @@ pub struct BuiltComponents {
 }
 
 impl BuiltComponents {
-    pub fn provers(&self) -> Vec<&dyn ComponentProver<stwo::prover::backend::simd::SimdBackend>> {
+    pub fn provers(&self) -> Vec<&dyn ComponentProver<crate::common::Backend>> {
         let mut v: Vec<&dyn ComponentProver<_>> = vec![];
         let mut ri = 0usize;
         for b in 0..self.chans.len() {

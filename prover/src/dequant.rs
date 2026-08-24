@@ -355,6 +355,10 @@ impl DequantEval {
 }
 
 impl FrameworkEval for DequantEval {
+    /// milestone 2a: no kernel is registered under this name, so the
+    /// fork routes this component to `accumulate_pointwise_cpu`.
+    fn cuda_eval_name(&self) -> &'static str { "b65_dequant_eval" }
+
     fn log_size(&self) -> u32 {
         self.log_rows
     }
@@ -569,6 +573,10 @@ impl TableKind {
 use stwo::prover::backend::simd::m31::PackedM31;
 
 impl FrameworkEval for TableEval {
+    /// milestone 2a: no kernel is registered under this name, so the
+    /// fork routes this component to `accumulate_pointwise_cpu`.
+    fn cuda_eval_name(&self) -> &'static str { "b65_table_eval" }
+
     fn log_size(&self) -> u32 {
         self.log_rows
     }

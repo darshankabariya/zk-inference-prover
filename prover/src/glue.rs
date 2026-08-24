@@ -538,6 +538,10 @@ pub struct GlueEval {
 
 
 impl FrameworkEval for GlueEval {
+    /// milestone 2a: no kernel is registered under this name, so the
+    /// fork routes this component to `accumulate_pointwise_cpu`.
+    fn cuda_eval_name(&self) -> &'static str { "b65_glue_eval" }
+
     fn log_size(&self) -> u32 {
         self.log_rows
     }
@@ -1552,6 +1556,10 @@ pub struct GTableEval {
 }
 
 impl FrameworkEval for GTableEval {
+    /// milestone 2a: no kernel is registered under this name, so the
+    /// fork routes this component to `accumulate_pointwise_cpu`.
+    fn cuda_eval_name(&self) -> &'static str { "b65_g_table_eval" }
+
     fn log_size(&self) -> u32 {
         self.log_rows
     }
@@ -1888,7 +1896,7 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
         })
         .collect();
 
-    let mut provers: Vec<&dyn ComponentProver<stwo::prover::backend::simd::SimdBackend>> =
+    let mut provers: Vec<&dyn ComponentProver<crate::common::Backend>> =
         vec![&comp];
     let mut comps: Vec<&dyn Component> = vec![&comp];
     for t in &tcomps {

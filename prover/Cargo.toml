@@ -4,15 +4,23 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+# Move commitment and proving onto the fork's CudaBackend. Without this
+# feature the same code runs on SimdBackend and is the reference build that
+# every digest comparison is made against. The stwo dependency is the vendored
+# fork either way, so the two builds differ only in the backend.
+cuda = []
+
 [dependencies]
-stwo = { version = "2.3.0", features = ["prover", "parallel"] }
-stwo-constraint-framework = { version = "2.3.0", features = ["prover", "parallel"] }
+stwo = { path = "../nitroo/crates/stwo", features = ["prover", "parallel"] }
+stwo-constraint-framework = { path = "../nitroo/crates/constraint-framework", features = ["prover", "parallel"] }
 itertools = "0.12"
 num-traits = "0.2"
 rand = { version = "0.9", features = ["small_rng"] }
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["registry", "std"] }
 

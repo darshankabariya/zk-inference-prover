@@ -10,6 +10,7 @@ mod argmax;
 mod attn_witness;
 mod bf16;
 mod common;
+mod device;
 mod compose;
 mod dequant;
 mod glue;
@@ -549,9 +550,15 @@ fn compose_once(l: &layer::Layer, params: &compose::Params, tamper: &compose::Pr
     let out = compose::prove_layer(l, params, tamper);
     let claims_bytes = serde_json::to_vec(&out.claims).unwrap();
     let fixed_bytes = serde_json::to_vec(&out.fixed).unwrap();
+    let mut proof_sha256 = String::new();
+    let mut proof_ser_bytes = 0usize;
     let (verdict, proof_bytes_len, verify_json) = match &out.proof {
         Some(pf) => {
             let proof_bytes = serde_json::to_vec(pf).unwrap();
+            // section 5 rung 1: the GPU proof must be byte-identical to the
+            // SIMD proof built with the same options. This is the digest.
+            proof_sha256 = crate::device::sha256_hex(&proof_bytes);
+            proof_ser_bytes = proof_bytes.len();
             let v = compose::verify_composed(&fixed_bytes, &claims_bytes, &proof_bytes);
             let j = serde_json::to_value(&v).unwrap();
             (Some(v), pf.size_estimate(), j)
@@ -582,6 +589,10 @@ fn compose_once(l: &layer::Layer, params: &compose::Params, tamper: &compose::Pr
         "peak_rss_bytes": out.stats.peak_rss,
         "preprocessed_is_widest": out.stats.pre_ok,
         "phases": out.stats.phases,
+        "proof_sha256": proof_sha256,
+        "proof_ser_bytes": proof_ser_bytes,
+        // milestone 2a: what the host->device crossing cost (README 10.2)
+        "upload": crate::device::report(),
         "params": serde_json::to_value(params).unwrap(),
     });
     (j, accepts)

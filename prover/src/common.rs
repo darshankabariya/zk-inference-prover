@@ -29,7 +29,7 @@ use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec};
 use stwo::core::proof::StarkProof;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::utils::bit_reverse_coset_to_circle_domain_order;
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+use stwo::core::vcs::blake2_merkle::Blake2sM31MerkleChannel;
 use stwo::core::verifier::verify;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
@@ -40,6 +40,15 @@ use stwo::prover::{CommitmentSchemeProver, ComponentProver, prove};
 
 use crate::spans;
 use crate::util::{LOG_BLOWUP, peak_rss_bytes, pcs_config, rss_bytes};
+
+/// The backend the session commits and proves on. With the `cuda` feature this
+/// is the fork's CudaBackend, so commitment and proving run on the device;
+/// without it the same code runs on SimdBackend, which is the reference build
+/// every digest comparison is made against.
+#[cfg(feature = "cuda")]
+pub type Backend = stwo::prover::backend::cuda::CudaBackend;
+#[cfg(not(feature = "cuda"))]
+pub type Backend = SimdBackend;
 
 pub type Eval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
 pub type Proof = StarkProof<<Blake2sM31MerkleChannel as stwo::core::channel::MerkleChannel>::H>;
@@ -92,7 +101,7 @@ pub enum Op {
 pub struct Session<'a> {
     pub config: PcsConfig,
     pub channel: Blake2sM31Channel,
-    pub cs: CommitmentSchemeProver<'a, SimdBackend, Blake2sM31MerkleChannel>,
+    pub cs: CommitmentSchemeProver<'a, Backend, Blake2sM31MerkleChannel>,
     pub ops: Vec<Op>,
     pub tree_cols: Vec<usize>,
     pub tree_cells: Vec<usize>,
@@ -100,22 +109,24 @@ pub struct Session<'a> {
     started: Instant,
 }
 
-pub fn twiddles(max_log: u32) -> TwiddleTree<SimdBackend> {
-    SimdBackend::precompute_twiddles(
+pub fn twiddles(max_log: u32) -> TwiddleTree<Backend> {
+    Backend::precompute_twiddles(
         CanonicCoset::new(max_log + 1 + LOG_BLOWUP).circle_domain().half_coset,
     )
 }
 
 impl<'a> Session<'a> {
-    pub fn new(tw: &'a TwiddleTree<SimdBackend>) -> Self {
+    pub fn new(tw: &'a TwiddleTree<Backend>) -> Self {
         let config = pcs_config();
         let mut channel = Blake2sM31Channel::default();
         config.mix_into(&mut channel);
         spans::reset();
+        #[cfg(feature = "cuda")]
+        crate::device::reset();
         Self {
             config,
             channel,
-            cs: CommitmentSchemeProver::<SimdBackend, Blake2sM31MerkleChannel>::new(config, tw),
+            cs: CommitmentSchemeProver::<Backend, Blake2sM31MerkleChannel>::new(config, tw),
             ops: vec![],
             tree_cols: vec![],
             tree_cells: vec![],
@@ -130,6 +141,11 @@ impl<'a> Session<'a> {
         self.tree_cells.push(sizes.iter().map(|s| 1usize << s).sum());
         self.tree_max_log.push(sizes.iter().copied().max().unwrap_or(0));
         let mut tb = self.cs.tree_builder();
+        // The columns are built on the host. With the cuda feature they cross
+        // to the device here; without it they are already where the prover
+        // needs them and pass through unchanged.
+        #[cfg(feature = "cuda")]
+        let evals = crate::device::upload_all(evals);
         tb.extend_evals(evals);
         tb.commit(&mut self.channel);
         self.ops.push(Op::Tree(sizes));
@@ -167,13 +183,13 @@ impl<'a> Session<'a> {
     /// session's internal replay.
     pub fn prove_raw(
         mut self,
-        provers: &[&dyn ComponentProver<SimdBackend>],
+        provers: &[&dyn ComponentProver<Backend>],
     ) -> (Result<Proof, String>, RawStats) {
         let started = self.started;
         let pre_ok = self.check_pre();
         let tree_cols = self.tree_cols.clone();
         let tree_cells = self.tree_cells.clone();
-        let res = prove::<SimdBackend, Blake2sM31MerkleChannel>(provers, &mut self.channel, self.cs)
+        let res = prove::<Backend, Blake2sM31MerkleChannel>(provers, &mut self.channel, self.cs)
             .map_err(|e| format!("{e:?}"));
         let prove_secs = started.elapsed().as_secs_f64();
         let stats = RawStats {
@@ -189,7 +205,7 @@ impl<'a> Session<'a> {
 
     pub fn prove(
         mut self,
-        provers: &[&dyn ComponentProver<SimdBackend>],
+        provers: &[&dyn ComponentProver<Backend>],
         components: &[&dyn Component],
     ) -> Proven {
         let config = self.config;
@@ -198,7 +214,7 @@ impl<'a> Session<'a> {
         let tree_cols = self.tree_cols.clone();
         let tree_cells = self.tree_cells.clone();
         let pre_ok = self.check_pre();
-        let proof = match prove::<SimdBackend, Blake2sM31MerkleChannel>(
+        let proof = match prove::<Backend, Blake2sM31MerkleChannel>(
             provers,
             &mut self.channel,
             self.cs,

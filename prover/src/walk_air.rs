@@ -74,6 +74,10 @@ pub struct WalkEval {
 }
 
 impl FrameworkEval for WalkEval {
+    /// milestone 2a: no kernel is registered under this name, so the
+    /// fork routes this component to `accumulate_pointwise_cpu`.
+    fn cuda_eval_name(&self) -> &'static str { "b65_walk_eval" }
+
     fn log_size(&self) -> u32 {
         self.g.log_rows
     }
@@ -152,6 +156,10 @@ pub struct AttnOutEval {
 }
 
 impl FrameworkEval for AttnOutEval {
+    /// milestone 2a: no kernel is registered under this name, so the
+    /// fork routes this component to `accumulate_pointwise_cpu`.
+    fn cuda_eval_name(&self) -> &'static str { "b65_attn_out_eval" }
+
     fn log_size(&self) -> u32 {
         self.log_rows
     }

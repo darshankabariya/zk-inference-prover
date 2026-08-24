@@ -35,7 +35,7 @@ pub fn config_json() -> Value {
         "n_queries": cfg.fri_config.n_queries,
         "pow_bits": cfg.pow_bits,
         "log_last_layer_degree_bound": cfg.fri_config.log_last_layer_degree_bound,
-        "fold_step": cfg.fri_config.fold_step,
+        "fold_step": cfg.fri_config.line_fold_step,
         "security_bits_conjectured": cfg.security_bits(),
         "hash": "Blake2s (Blake2sM31MerkleChannel)",
     })

@@ -244,6 +244,10 @@ pub struct ChanEval {
 }
 
 impl FrameworkEval for ChanEval {
+    /// milestone 2a: no kernel is registered under this name, so the
+    /// fork routes this component to `accumulate_pointwise_cpu`.
+    fn cuda_eval_name(&self) -> &'static str { "b65_chan_eval" }
+
     fn log_size(&self) -> u32 {
         self.lay.g.log_rows
     }
@@ -329,6 +333,10 @@ pub struct KeyEval {
 }
 
 impl FrameworkEval for KeyEval {
+    /// milestone 2a: no kernel is registered under this name, so the
+    /// fork routes this component to `accumulate_pointwise_cpu`.
+    fn cuda_eval_name(&self) -> &'static str { "b65_key_eval" }
+
     fn log_size(&self) -> u32 {
         self.lay.g.log_rows
     }
@@ -480,6 +488,10 @@ pub struct OutEval {
 }
 
 impl FrameworkEval for OutEval {
+    /// milestone 2a: no kernel is registered under this name, so the
+    /// fork routes this component to `accumulate_pointwise_cpu`.
+    fn cuda_eval_name(&self) -> &'static str { "b65_out_eval" }
+
     fn log_size(&self) -> u32 {
         self.lay.g.log_rows
     }
@@ -533,6 +545,10 @@ pub struct RowEval {
 }
 
 impl FrameworkEval for RowEval {
+    /// milestone 2a: no kernel is registered under this name, so the
+    /// fork routes this component to `accumulate_pointwise_cpu`.
+    fn cuda_eval_name(&self) -> &'static str { "b65_row_eval" }
+
     fn log_size(&self) -> u32 {
         self.log_rows
     }
@@ -607,6 +623,10 @@ pub struct ExpTableEval {
 }
 
 impl FrameworkEval for ExpTableEval {
+    /// milestone 2a: no kernel is registered under this name, so the
+    /// fork routes this component to `accumulate_pointwise_cpu`.
+    fn cuda_eval_name(&self) -> &'static str { "b65_exp_table_eval" }
+
     fn log_size(&self) -> u32 {
         self.log_rows
     }
@@ -631,6 +651,10 @@ pub struct RangeTableEval {
 }
 
 impl FrameworkEval for RangeTableEval {
+    /// milestone 2a: no kernel is registered under this name, so the
+    /// fork routes this component to `accumulate_pointwise_cpu`.
+    fn cuda_eval_name(&self) -> &'static str { "b65_range_table_eval" }
+
     fn log_size(&self) -> u32 {
         self.bits
     }
