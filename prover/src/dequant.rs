@@ -330,6 +330,54 @@ pub struct YSide {
     pub claimed_h: SecureField,
 }
 
+/// Stream E: the output side.  One Horner claim over this region's *bf16
+/// outputs*, written in the glue's `(sm, ef)` language, so that a consumer's own
+/// claim over the same values can be compared with it -- which is what stops the
+/// dequant's output being a column some other region commits a second time.
+///
+/// The row weights need two constants where `YSide` needs one.  This region
+/// tiles `(token, channel-chunk)` with the chunks descending, so the canonical
+/// channel-major exponent `N - 1 - (c tokens + t)` falls by `per_row * tokens`
+/// from one chunk to the next inside a token and jumps by
+/// `(chunks - 1) per_row tokens - 1` at every token boundary.  `k_in` and `k_bd`
+/// are those two steps; the `oin` and `obd` selectors pick between them, keyed on
+/// whether the row *begins* a token -- which is why they are their own columns
+/// and not the `m1`/`m2` pair, whose `last` is the token's final chunk.
+/// What an output side accumulates.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OKind {
+    /// the glue's `(sm, ef)` pair, `sm + lam ef` -- the language the wiring
+    /// family's own claims are in, so the residual-stream ties compare with it
+    Pair,
+    /// the argmax's order key, `0x8000 + mag - sg(2 mag + 1)` with
+    /// `mag = eo 2^7 + m7`.  Degree 2 in the committed fields (one `sg mag`
+    /// product), which is the whole reason the head's tie is cheap: the key
+    /// never becomes a column, it is read off the dequant's own output.
+    Key,
+}
+
+#[derive(Clone)]
+pub struct OSide {
+    /// the within-row weight per slot
+    pub w: Vec<SecureField>,
+    pub lam: SecureField,
+    pub k_in: SecureField,
+    pub k_bd: SecureField,
+    pub claimed: SecureField,
+    pub kind: OKind,
+}
+
+/// The preprocessed selectors an output side adds, in this order: the ordinary
+/// row step, the token-boundary step, and whether the row is active at all.
+///
+/// The third is not redundant.  An inert lead row commits zeros, and while the
+/// glue's encoding of `+0` is the pair `(0, 0)` and so contributes nothing, the
+/// *order key* of `+0` is `0x8000` -- a padded row would otherwise fold junk
+/// into the claim, and the consumer would have to agree about padding it cannot
+/// see.  Gating the row's whole contribution keeps the claim a statement about
+/// the real values only.
+pub const DEQ_OSEL: [&str; 3] = ["oin", "obd", "oact"];
+
 #[derive(Clone)]
 pub struct DequantEval {
     pub log_rows: u32,
@@ -345,6 +393,8 @@ pub struct DequantEval {
     pub rels: Vec<RangeRel>,
     /// the composed proof's claimed side; `None` for the standalone gadget
     pub yside: Option<YSide>,
+    /// stream E: the output-side claim, when this region publishes one
+    pub oside: Option<OSide>,
 }
 
 impl DequantEval {
@@ -381,6 +431,10 @@ impl FrameworkEval for DequantEval {
             .map(|_| eval.next_trace_mask())
             .collect();
         let mut accs: Vec<E::F> = Vec::with_capacity(sp.per_row);
+        // stream E: `(sg, nz, m7, eo)` per slot, from whichever rung ran, so the
+        // output side can read the result as an expression rather than as a
+        // column nobody committed
+        let mut outs: Vec<(E::F, E::F, E::F, E::F)> = vec![];
         for slot in 0..sp.per_row {
             let acc = eval.next_trace_mask();
             accs.push(acc.clone());
@@ -476,7 +530,9 @@ impl FrameworkEval for DequantEval {
                         Variant::Pow2 => {
                             let jw = eval.get_preprocessed_column(chan_col(&self.tag, "j", slot));
                             let eo = eval.next_trace_mask();
-                            eval.add_constraint(eo.clone() - ef - nz * (shared[0].clone() + jw));
+                            eval.add_constraint(
+                                eo.clone() - ef - nz.clone() * (shared[0].clone() + jw));
+                            outs.push((sg.clone(), nz.clone(), m7.clone(), eo.clone()));
                             eval.add_to_relation(RelationEntry::new(
                                 self.rel(8), E::EF::one(), core::slice::from_ref(&eo)));
                             // y = sg 2^15 + eo 2^7 + m7 is degree 1, so the consumer
@@ -511,6 +567,9 @@ impl FrameworkEval for DequantEval {
                                 m_in = po;
                                 e_in = eo;
                             }
+                            // the chain's output is the *second* multiply's
+                            // mantissa and exponent
+                            outs.push((sg.clone(), nz.clone(), m_in.clone(), e_in.clone()));
                         }
                         _ => {}
                     }
@@ -538,6 +597,44 @@ impl FrameworkEval for DequantEval {
             mult += m2 * y.s;
             eval.add_constraint(h.clone() - h_prev * mult - z * last);
             eval.add_constraint((h - y.claimed_h) * end);
+        }
+        // stream E: the output side.  One accumulator, a two-valued row step,
+        // and the same `end` the claimed side closes on.
+        if let Some(o) = &self.oside {
+            assert_eq!(outs.len(), sp.per_row, "the output side needs every slot's result");
+            let oin = eval.get_preprocessed_column(deq_sel(&self.tag, DEQ_OSEL[0]));
+            let obd = eval.get_preprocessed_column(deq_sel(&self.tag, DEQ_OSEL[1]));
+            let oact = eval.get_preprocessed_column(deq_sel(&self.tag, DEQ_OSEL[2]));
+            let oend = eval.get_preprocessed_column(deq_sel(&self.tag, "end"));
+            let [u_prev, u] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+            let mut f = E::EF::zero();
+            for (i, (sg, nz, m7, eo)) in outs.iter().enumerate() {
+                match o.kind {
+                    OKind::Pair => {
+                        // the glue's encoding: a signed significand carrying the
+                        // implicit 128, and the biased exponent.  `nz` makes a
+                        // zero result the pair `(0, 0)`, which is what `canon`
+                        // gives it on the other side, and the region's own
+                        // `sg - sg nz = 0` already forbids a signed zero -- so
+                        // the two sides cannot disagree about -0.
+                        let sm = (nz.clone() * E::F::from(m31_u32(128)) + m7.clone())
+                            * (E::F::one() - sg.clone() * two);
+                        f += sm * o.w[i] + eo.clone() * (o.lam * o.w[i]);
+                    }
+                    OKind::Key => {
+                        // `mag` is the bf16 pattern's low 15 bits, which is
+                        // `eo 2^7 + m7` -- degree 1 -- and the key flips it about
+                        // 0x7FFF for a negative, which costs one product.
+                        let mag = eo.clone() * E::F::from(m31_u32(128)) + m7.clone();
+                        let key = E::F::from(m31_u32(0x8000)) + mag.clone()
+                            - sg.clone() * (mag * two + E::F::one());
+                        f += key * o.w[i];
+                    }
+                }
+            }
+            let mult: E::EF = E::EF::from(oin) * o.k_in + E::EF::from(obd) * o.k_bd;
+            eval.add_constraint(u.clone() - u_prev * mult - f * oact);
+            eval.add_constraint((u - o.claimed) * oend);
         }
         eval.finalize_logup_in_pairs();
         eval
@@ -1354,7 +1451,7 @@ pub fn run(w: &Witness, sp: &Spec, tamper: Option<Tamper>) -> Outcome {
             mul: mul_rel.clone(),
             qnz: qnz_rel.clone(),
             rels: rels.clone(),
-            yside: None,
+            yside: None, oside: None,
         },
         use_sum,
     );

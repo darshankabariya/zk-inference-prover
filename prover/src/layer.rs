@@ -120,6 +120,14 @@ pub struct Layer {
     /// adds have to reproduce, and the two norm weights and the two scalars are
     /// what the reduction's tail consumes.
     pub glue: Option<GlueCols>,
+    /// stream E: B1's own `key_head.u16`, the order keys the head's rows compare.
+    /// `None` unless the dump was written with `--head`.  It is a reference, not
+    /// an input: the proof derives its keys from the head's dequant output, and
+    /// this is what says the two agree.
+    pub head_keys: Option<Vec<u16>>,
+    /// stream E: `tok_head.i32`, the token each row emits.  The argmax region's
+    /// own input when it is composed; `None` unless the dump has a head.
+    pub head_tok: Option<Vec<u32>>,
 }
 
 pub struct GlueCols {
@@ -131,8 +139,24 @@ pub struct GlueCols {
     pub xmid: Vec<u16>,
     pub d_out: Vec<u16>,
     pub xout: Vec<u16>,
+    /// `n1_out` and `n2_out`: each norm's `r = rsqrt(mean of squares + eps)`,
+    /// one value per token.  The tails multiply the stream by it, so a row of
+    /// the tail region reads it once and every channel of that row shares it.
+    pub r1: Vec<u16>,
+    pub r2: Vec<u16>,
     pub w1: Vec<u16>,
     pub w2: Vec<u16>,
+    /// B1's own norm outputs, which are what the tails have to reproduce:
+    /// `x_q` is norm1's (q, k and v all read the same column, and the dump's
+    /// digests say so) and `x_gate` is norm2's.  `None` on a dump that did not
+    /// write them, in which case the tail region runs without its reference.
+    pub h1: Option<Vec<u16>>,
+    pub h2: Option<Vec<u16>>,
+    /// The SwiGLU's B1 columns, over `dff`: the gate matmul's dequantized
+    /// output, its silu image, and the product that `down` reads.
+    pub silu_in: Option<Vec<u16>>,
+    pub silu_out: Option<Vec<u16>>,
+    pub x_down: Option<Vec<u16>>,
     pub eps: u16,
     pub inv_d: u16,
     pub reduce: String,
@@ -159,17 +183,42 @@ impl GlueCols {
             }
             Ok(v[..tokens * d].to_vec())
         };
+        let dff = g["dff"].as_u64().unwrap_or(0) as usize;
+        // A column the tails and the SwiGLU only *check* against is optional:
+        // an older dump that does not carry it costs the reference, not the
+        // region, and the record says which of the two happened.
+        let opt = |n: &str, w: usize| -> Option<Vec<u16>> {
+            read_u16(&format!("{dir}/{n}.u16"))
+                .ok()
+                .filter(|v| v.len() >= tokens * w)
+                .map(|v| v[..tokens * w].to_vec())
+        };
+        // `r` is one value per token, not per channel
+        let rd1 = |n: &str| -> Result<Vec<u16>, String> {
+            let v = read_u16(&format!("{dir}/{n}.u16"))?;
+            if v.len() < tokens {
+                return Err(format!("{n}: {} values is under {tokens}", v.len()));
+            }
+            Ok(v[..tokens].to_vec())
+        };
         Ok(Some(Self {
             d,
-            dff: g["dff"].as_u64().unwrap_or(0) as usize,
+            dff,
             tokens,
             xin: rd("xin")?,
             o_out: rd("o_out")?,
             xmid: rd("xmid")?,
             d_out: rd("d_out")?,
             xout: rd("xout")?,
+            r1: rd1("n1_out")?,
+            r2: rd1("n2_out")?,
             w1: read_u16(&format!("{dir}/w1.u16"))?,
             w2: read_u16(&format!("{dir}/w2.u16"))?,
+            h1: opt("x_q", d),
+            h2: opt("x_gate", d),
+            silu_in: opt("silu_in", dff),
+            silu_out: opt("silu_out", dff),
+            x_down: opt("x_down", dff),
             eps: g["eps"].as_u64().ok_or("manifest: glue.eps")? as u16,
             inv_d: g["inv_d"].as_u64().ok_or("manifest: glue.inv_d")? as u16,
             reduce: g["reduce"].as_str().unwrap_or("").to_string(),
@@ -445,6 +494,17 @@ impl Layer {
         assert_eq!(jo.len(), s, "jo shape");
         assert_eq!(jv.len(), nh * hd, "jv shape");
         let glue = GlueCols::load(dir, &man, s)?;
+        // stream E: B1's key column, when the dump carries a head.  Read as
+        // patterns; the comparison happens on the claim, not value by value.
+        let head_keys = man["head"]["vocab"].as_u64().and_then(|v| {
+            let want = s * v as usize;
+            read_u16(&format!("{dir}/key_head.u16")).ok().filter(|k| k.len() >= want)
+                .map(|k| k[..want].to_vec())
+        });
+        let head_tok = head_keys.as_ref().and(
+            read_i32(&format!("{dir}/tok_head.i32")).ok()
+                .filter(|v| v.len() >= s)
+                .map(|v| v[..s].iter().map(|x| *x as u32).collect()));
         Ok(Self {
             bands,
             band_sizes: band_sizes.to_vec(),
@@ -453,6 +513,8 @@ impl Layer {
             ao: AttnOut { nh, s, hd, acc, den, jo, jv },
             source: format!("B6.5 layer witness [{dir}]"),
             glue,
+            head_keys,
+            head_tok,
         })
     }
 
@@ -608,7 +670,8 @@ impl Layer {
         }
         Self { bands, band_sizes: band_sizes_all, head_offsets, mats,
                ao: AttnOut { nh, s, hd, acc, den, jo, jv },
-               source: format!("synthetic layer (seed={seed})"), glue: None }
+               source: format!("synthetic layer (seed={seed})"), glue: None,
+               head_keys: None, head_tok: None }
     }
 }
 
@@ -822,6 +885,9 @@ pub struct Tables {
     pub m_qnz: Vec<u32>,
     pub m_r: Vec<Vec<u32>>,
     pub off_table: usize,
+    /// B9: which table lost a row, how many, and the range of the values that
+    /// did -- `off_table` alone cannot tell the two failure modes apart
+    pub off_kinds: std::collections::BTreeMap<String, (usize, i64, i64)>,
 }
 
 impl Tables {
@@ -848,6 +914,7 @@ impl Tables {
             log_exp, exp, kmax, round, norm, log_norm, frac, log_frac, mul, log_mul,
             q_bits, widths,
             off_table: 0,
+            off_kinds: Default::default(),
         }
     }
     pub fn ridx(&self, bits: u32) -> usize {
@@ -856,6 +923,29 @@ impl Tables {
     pub fn bump_r(&mut self, bits: u32, v: i64) {
         let t = self.ridx(bits);
         bump(&mut self.m_r[t], v, &mut self.off_table);
+    }
+    pub fn note_off(&mut self, kind: &str, v: i64, n: usize) {
+        let e = self.off_kinds.entry(kind.to_string()).or_insert((0, i64::MAX, i64::MIN));
+        e.0 += n;
+        e.1 = e.1.min(v);
+        e.2 = e.2.max(v);
+    }
+    /// `bump_r` with attribution
+    pub fn bump_rk(&mut self, bits: u32, v: i64, kind: &str) {
+        let t = self.ridx(bits);
+        let before = self.off_table;
+        bump(&mut self.m_r[t], v, &mut self.off_table);
+        if self.off_table != before {
+            self.note_off(kind, v, 1);
+        }
+    }
+    /// the (q, nz) pair table, with attribution
+    pub fn bump_qnzk(&mut self, v: i64, kind: &str) {
+        let before = self.off_table;
+        bump(&mut self.m_qnz, v, &mut self.off_table);
+        if self.off_table != before {
+            self.note_off(kind, v, 1);
+        }
     }
     /// O(1) index into the normalisation table (the rows are generated in a
     /// fixed order; a linear scan here was most of B6.5's first trace-gen time).
@@ -1033,7 +1123,7 @@ impl MatRegion {
 /// Build one matmul's dequant region: witness columns in the compose layout,
 /// multiplicities bumped into the shared tables.  Mirrors `dequant::run`'s
 /// witness loop without the tampers (compose probes corrupt the layer witness).
-pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables) -> MatRegion {
+pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool) -> MatRegion {
     assert!(spec.sound(), "unsound spec for {}", m.name);
     let lay = MatLayout::choose_or_padded(m.n_out, m.tokens, spec.per_row);
     let mut spec = spec.clone();
@@ -1122,6 +1212,7 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables) -> MatRegion {
                 tables.m_r[t][*v as usize] += n;
             } else {
                 tables.off_table += *n as usize;
+                tables.note_off("deq_eo", *v, *n as usize);
             }
         }
         ref_bad += b.ref_bad;
@@ -1173,6 +1264,21 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables) -> MatRegion {
     pre.push(sel(&|j| j > 0 && !last(j)));              // m1
     pre.push(sel(&|j| j > 0 && last(j)));               // m2
     pre.push(sel(&|j| j + 1 == rows));                  // end
+    if oside {
+        // stream E: the output side's row step.  `oin` is an ordinary step from
+        // one chunk to the next inside a token; `obd` is the jump at a token
+        // boundary, which is the row that *begins* a token -- the other end from
+        // `last`, and the reason these are their own columns.  Both carry `j > 0`
+        // like every other multiplier here: at row 0 the `[-1, 0]` mask wraps to
+        // the last row of the circle domain.  An inert lead row is neither, so
+        // the accumulator is multiplied by zero there, which is exact because it
+        // is still zero at that point.
+        let first = |j: usize| matches!(lay.at_opt(m.tokens, j),
+                                        Some((_, b)) if b + 1 == lay.chunks);
+        pre.push(sel(&|j| j > 0 && lay.at_opt(m.tokens, j).is_some() && !first(j)));
+        pre.push(sel(&|j| j > 0 && first(j)));
+        pre.push(sel(&|j| lay.at_opt(m.tokens, j).is_some()));
+    }
 
     let base: Vec<Eval> = cols.into_iter().map(|c| eval_of(lay.log_rows, c)).collect();
     if m4c_want {
@@ -1266,6 +1372,36 @@ multiplicity tables and the f64 cross-check all match",
               (base.len() + pre.len()) << lay.log_rows);
 }
 
+/// B1's own answer for one dequantized accumulator: the `Round::Even` reference
+/// `fill_mat_row` cross-checks its committed columns against.  It lives here as
+/// one function so that a consumer of a matmul's bf16 output -- the glue's
+/// SwiGLU reads the `gate` and `up` regions' -- reads exactly the value the
+/// dequant region proves, rather than a second implementation of the rung.
+pub fn deq_ref(m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
+    deq_ref_a(m.acc[t * m.n_out + c], m, spec, t, c)
+}
+
+/// The same, for an accumulator the caller already has -- which is not always
+/// `m.acc[..]`: an inert lead row of a padded layout commits a *zero*
+/// accumulator against token 0's scale, and its reference has to be the zero's
+/// image, not the value that would have been there had the row been real.
+pub fn deq_ref_a(a: i64, m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
+    match spec.variant {
+        DeqVariant::Pow2 => {
+            let jjx = m.jx[t] as i64 + m.jw[c] as i64;
+            bf16::from_f64(a as f64 * (jjx as f64).exp2())
+        }
+        DeqVariant::Chain => {
+            let y0 = bf16::to_f32(bf16::from_f64(a.unsigned_abs() as f64)) as f64;
+            let sxv = bf16::to_f32(bf16::pattern(0, m.sx[t].1, m.sx[t].0)) as f64;
+            let swv = bf16::to_f32(bf16::pattern(0, m.sw[c].1, m.sw[c].0)) as f64;
+            let t1 = bf16::to_f32(bf16::from_f64(y0 * sxv)) as f64;
+            bf16::from_f64(t1 * swv) | (u16::from(a < 0) << 15)
+        }
+        _ => unreachable!("matmul regions are pow2 or chain"),
+    }
+}
+
 /// One row of a matmul dequant region: the witness fields of `per_row`
 /// accumulators, written into a block-local column slice, with table
 /// multiplicities accumulated block-locally (merged by `mat_region`).
@@ -1333,7 +1469,7 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
                 set(f.eo, m31_of(eo), local);
                 *br.entry(eo).or_default() += 1;
                 if spec.round == bf16::Round::Even {
-                    let want = bf16::from_f64(a as f64 * (jjx as f64).exp2());
+                    let want = deq_ref_a(a, m, spec, t, c);
                     if !wref.is_empty() {
                         wref[jj * lay.per_row + s] = want;
                     }
@@ -1362,11 +1498,7 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
                     e_in = eo;
                 }
                 if spec.round == bf16::Round::Even {
-                    let y0 = bf16::to_f32(bf16::from_f64(mag as f64)) as f64;
-                    let sxv = bf16::to_f32(bf16::pattern(0, m.sx[t].1, m.sx[t].0)) as f64;
-                    let swv = bf16::to_f32(bf16::pattern(0, m.sw[c].1, m.sw[c].0)) as f64;
-                    let t1 = bf16::to_f32(bf16::from_f64(y0 * sxv)) as f64;
-                    let want = bf16::from_f64(t1 * swv) | (u16::from(a < 0) << 15);
+                    let want = deq_ref_a(a, m, spec, t, c);
                     if !wref.is_empty() {
                         wref[jj * lay.per_row + s] = want;
                     }
@@ -1386,10 +1518,23 @@ pub struct MatInteraction {
     pub cols: Vec<crate::device::AnyCol<'static>>,
     pub claimed_h: SecureField,
     pub use_sum: SecureField,
+    /// stream E: the output side's closing value, when this region carries one
+    pub claimed_out: Option<SecureField>,
+}
+
+/// The weights an output-side Horner claim runs on, as the composition derives
+/// them from the tie challenge.  Same numbers on both sides of the tie: the
+/// consumer's own claim is built from `w_glue` too.
+pub struct OSideW {
+    pub w: Vec<SecureField>,
+    pub lam: SecureField,
+    pub k_in: SecureField,
+    pub k_bd: SecureField,
+    pub kind: crate::dequant::OKind,
 }
 
 pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
-                       rels: &crate::compose::Rels) -> MatInteraction {
+                       rels: &crate::compose::Rels, out: Option<&OSideW>) -> MatInteraction {
     let lay = r.lay;
     let rows = 1usize << lay.log_rows;
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, lay.per_row);
@@ -1418,19 +1563,47 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
     crate::util::m4_add("int/deq_inner", m4_t.elapsed().as_secs_f64());
     let m4_t = std::time::Instant::now();
     let (mut z, mut h) = (vec![SecureField::zero(); rows], vec![SecureField::zero(); rows]);
-    for j in 0..rows {
-        let nofirst = matches!(lay.at_opt(m.tokens, j), Some((_, b)) if b + 1 < lay.chunks);
-        let last = matches!(lay.at_opt(m.tokens, j), Some((_, 0)));
-        z[j] = if nofirst { z[j - 1] * rv_step } else { SecureField::zero() } + inner[j];
-        h[j] = if j == 0 {
-            SecureField::zero()
-        } else if last {
-            h[j - 1] * s_ch
-        } else {
-            h[j - 1]
-        };
-        if last {
-            h[j] += z[j];
+    // B7a milestone 4 (18.4): the two accumulators, each with its own
+    // dependency structure honoured rather than one serial pass over both.
+    // The lead prefix keeps this exact: `inner` is zero on every lead row, so
+    // the scan's extra `s_ch` steps there multiply zero — but only when the
+    // lead is chunk-aligned, so the guard falls back to the serial loop if not.
+    if crate::util::m4_switch("B7_M4_SCAN") && lay.chunks > 0 && rows % lay.chunks == 0
+        && lay.lead % lay.chunks == 0 {
+        z.par_chunks_mut(lay.chunks).enumerate().for_each(|(c, zc)| {
+            let base = c * lay.chunks;
+            let mut run = SecureField::zero();
+            for (k, zk) in zc.iter_mut().enumerate() {
+                run = if k > 0 { run * rv_step } else { SecureField::zero() } + inner[base + k];
+                *zk = run;
+            }
+        });
+        let n_last = rows / lay.chunks;  // B7a m4g: `rows` is 0 on the device route
+        let mut hh = vec![SecureField::zero(); n_last];
+        let mut run = SecureField::zero();
+        for (m, hm) in hh.iter_mut().enumerate() {
+            run = run * s_ch + z[(m + 1) * lay.chunks - 1];
+            *hm = run;
+        }
+        h.par_iter_mut().enumerate().for_each(|(j, hj)| {
+            let m = (j + 1) / lay.chunks;
+            *hj = if m == 0 { SecureField::zero() } else { hh[m - 1] };
+        });
+    } else {
+        for j in 0..rows {
+            let nofirst = matches!(lay.at_opt(m.tokens, j), Some((_, b)) if b + 1 < lay.chunks);
+            let last = matches!(lay.at_opt(m.tokens, j), Some((_, 0)));
+            z[j] = if nofirst { z[j - 1] * rv_step } else { SecureField::zero() } + inner[j];
+            h[j] = if j == 0 {
+                SecureField::zero()
+            } else if last {
+                h[j - 1] * s_ch
+            } else {
+                h[j - 1]
+            };
+            if last {
+                h[j] += z[j];
+            }
         }
     }
     crate::util::m4_add("int/deq_carry", m4_t.elapsed().as_secs_f64());
@@ -1456,12 +1629,53 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
     let mut cols = sink.into_inner();
     crate::util::m4_add("int/deq_cols", m4_t.elapsed().as_secs_f64());
 
+    // stream E: the output side, between the claimed side's columns and the
+    // LogUp columns -- the order the AIR reads them in.
+    let claimed_out = out.map(|o| {
+        let mut u = vec![SecureField::zero(); rows];
+        for j in 0..rows {
+            let mut f = SecureField::zero();
+            if let Some((t, b)) = lay.at_opt(m.tokens, j) {
+                for s in 0..lay.per_row {
+                    let pat = crate::glue::canon(deq_ref(m, &r.spec, t, b * lay.per_row + s));
+                    f += match o.kind {
+                        crate::dequant::OKind::Pair => {
+                            let (sm, ef) = crate::glue::split(pat);
+                            (SecureField::from(m31_of(sm))
+                             + SecureField::from(m31_u32(ef)) * o.lam) * o.w[s]
+                        }
+                        // the same key the argmax region compares, off the same
+                        // host function the extractor's column was built with
+                        crate::dequant::OKind::Key => SecureField::from(
+                            m31_u32(crate::argmax::order_key(pat))) * o.w[s],
+                    };
+                }
+            }
+            // the multiplier is the step *into* this row: an ordinary chunk step
+            // inside a token, the boundary jump on a row that begins one
+            let mult = if j == 0 {
+                SecureField::zero()
+            } else {
+                match lay.at_opt(m.tokens, j) {
+                    Some((_, b)) if b + 1 == lay.chunks => o.k_bd,
+                    Some(_) => o.k_in,
+                    None => SecureField::zero(),
+                }
+            };
+            u[j] = if j == 0 { f } else { u[j - 1] * mult + f };
+        }
+        let claimed = u[rows - 1];
+        cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &u)
+            .into_iter().map(crate::device::AnyCol::OwnedHost));
+        claimed
+    });
+
     // the LogUp columns, in the exact order the AIR adds lookups
     let m4_t = std::time::Instant::now();
     let (lcols, use_sum) = mat_logup(m, r, rv, s_ch, rels);
     crate::util::m4_add("int/deq_logup", m4_t.elapsed().as_secs_f64());
     cols.extend(lcols);
-    MatInteraction { cols, claimed_h, use_sum }
+    MatInteraction { cols, claimed_h, use_sum, claimed_out }
 }
 
 /// The interaction-mask columns come first (z, h), then the LogUp columns; this
@@ -1503,6 +1717,10 @@ fn mat_logup_ir(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
             s: s_ch,
             claimed_h: SecureField::zero(),
         }),
+        // the output side carries no lookups, so it cannot change this eval's
+        // LogUp IR -- leaving it off here keeps the lowering identical whether
+        // the tie is on or not, which is what `B7_M4_LOGUPIR=2` compares
+        oside: None,
     };
     // `B7_M4_LOGUPMUT` picks one of 2b's deliberate defects, so mode 2 has a
     // negative control. B7a milestone 4 (section 3 row 1): one place reads it
@@ -1707,9 +1925,9 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                 for s in 0..pr {
                     cols[1 + 6 * s + 4][j] = M31::one();     // denp = den * pj = 1
                     cols[1 + 6 * s + 5][j] = M31::one();     // d = denp
-                    bump(&mut tables.m_qnz, 0, &mut tables.off_table);
-                    tables.bump_r(rem_bits, 1);              // d
-                    tables.bump_r(rem_bits, 0);              // dp = 2*1 - 1 - 1
+                    tables.bump_qnzk(0, "ao_qnz_lead");
+                    tables.bump_rk(rem_bits, 1, "ao_rem_lead");    // d
+                    tables.bump_rk(rem_bits, 0, "ao_rem_lead");    // dp = 2*1 - 1 - 1
                 }
             }
             Some((h, t, b)) => {
@@ -1744,9 +1962,9 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                     cols[c0 + 3][j] = m31_of(i64::from(qm != 0));
                     cols[c0 + 4][j] = m31_of(denp);
                     cols[c0 + 5][j] = m31_of(d);
-                    bump(&mut tables.m_qnz, qm, &mut tables.off_table);
-                    tables.bump_r(rem_bits, d);
-                    tables.bump_r(rem_bits, 2 * denp - 1 - d);
+                    tables.bump_qnzk(qm, "ao_qnz");
+                    tables.bump_rk(rem_bits, d, "ao_rem_d");
+                    tables.bump_rk(rem_bits, 2 * denp - 1 - d, "ao_rem_dp");
                     q_out[idx] = if a < 0 { -qm } else { qm };
                     // the reference: one f64 rounding, half away from zero
                     let want = ((mag as f64 * (e as f64).exp2()) / den as f64 + 0.5).floor()

@@ -99,16 +99,32 @@ parallel-carry fast path (its arithmetic predates `at_opt` and is wrong under
 it; no recorded number ever used it) and `b9_diag`'s off-table diagnostics (a
 settled question). Details in `experiments/b7/gpu/README.md`.
 
-**What still needs a box session:** the per-shape kernel *emit* —
-`b65 cudagen` / `b65 genemit` plus the two installers
-(`experiments/b7/gpu/m2b_kernels.py`, `m4b_kernels.py`) — has not been run
-for any shape against the vendored fork, so constraint evaluation takes the
-fork's scalar CPU fallback and `B7_M4_TABDEV`'s device route for the shared
-tables would abort on the stand-in dispatcher. `B7_M4_PRE` requires
-`B7_M4_TABDEV` (the shared tables are one list — the guard in `prove_layer`
-says so loudly), so before an emit-install the device switches that can run
-are `FILL`, `WFILL` and `ACC`. Emitting for the current shapes (including
-the three new families) is stream B's session.
+**The emit has been run (stream G, H100, 2026-08-25).** The per-shape kernel
+*emit* — `b65 cudaemit` / `b65 genemit` plus the two installers
+(`experiments/b7/gpu/m2b_kernels.py`, `m4b_kernels.py`) — ran against the
+vendored fork for the first time, over ten design points: 54 constraint
+shapes and 46 generation shapes in ten families, of which **47 constraint
+shapes are installed**. Records and the driver: `briefs/g-emit.md`,
+`experiments/b10/gpu/g_emit.sh`.
+
+Post-emit, **every device switch runs**, at both modes, and none of them moves
+a byte: `FILL`, `WFILL`, `ACC`, `TABDEV` and `PRE` were each invoked at mode 1
+and mode 2 and all ten reproduced the same `proof_sha256` with `accepts:
+true`. `B7_M4_PRE` still requires `B7_M4_TABDEV` (the shared tables are one
+list — the guard in `prove_layer` says so loudly). The pre-emit truth this
+paragraph used to record — only `ACC` running at mode 1, `FILL`/`WFILL`
+panicking in `devfrac.rs` for want of generation kernels — was correct then
+and is obsolete now; it is what the emit-install fixed.
+
+Two caveats worth keeping. First, the **glue family stays on the scalar CPU
+fallback**: its generated constraint kernels are ~10,400 instructions of
+straight-line code each and ptxas does not compile them (`-O3` and `-O1` both
+exceeded a 30-minute cap; `-O0` finishes in 636 s but spills a 27 kB stack
+frame). They are pruned from the install and carried by
+`B7_KERNEL_FALLBACK=1`, which announces the fallback per component. Second,
+note that with an *empty* shape table the fallback is silent, not announced —
+`blob_lower` returns `None` before reaching the announcement
+(`cudagen.rs:1899-1903`).
 
 One design decision to keep: **corner bands decline every device path** —
 the fill (`!a.corner` threads through `commit_base_any` as `with_rows`), the

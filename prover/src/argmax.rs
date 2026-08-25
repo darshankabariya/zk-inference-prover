@@ -51,11 +51,12 @@ use num_traits::{One, Zero};
 use serde_json::{Value, json};
 use stwo::core::air::Component;
 use stwo::core::fields::m31::M31;
+use stwo::core::fields::qm31::SecureField;
 use stwo::prover::ComponentProver;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, ORIGINAL_TRACE_IDX, Relation, RelationEntry,
-    TraceLocationAllocator,
+    EvalAtRow, FrameworkComponent, FrameworkEval, INTERACTION_TRACE_IDX, ORIGINAL_TRACE_IDX,
+    Relation, RelationEntry, TraceLocationAllocator,
 };
 
 use crate::attn_air::{RangeRel, RangeTableEval, tbl_range};
@@ -80,6 +81,23 @@ pub fn order_key(pat: u16) -> u32 {
 
 // -------------------------------------------------------------------- the AIR --
 
+/// Stream E: the argmax's side of the head tie.  One Horner claim over the
+/// region's committed keys, with the *mirror* of the dequant's weights -- this
+/// region's index map ascends the vocabulary where the dequant's chunks descend,
+/// so its row step is the inverse of the output side's.
+///
+/// `tag` names whose selectors to read: the head dequant's, because both regions
+/// walk the same `(token, chunk)` rows and sharing the columns is what makes it
+/// impossible for the two sides to disagree about which row is which.
+#[derive(Clone)]
+pub struct ATie {
+    pub w: Vec<SecureField>,
+    pub k_in: SecureField,
+    pub k_bd: SecureField,
+    pub claimed: SecureField,
+    pub tag: String,
+}
+
 #[derive(Clone)]
 pub struct ArgmaxEval {
     pub log_rows: u32,
@@ -87,11 +105,16 @@ pub struct ArgmaxEval {
     /// prove only "the token attains the maximum" -- B6.5's argument unchanged
     pub lax: bool,
     pub rk: RangeRel,
+    /// stream E: the tie to the head's dequant output, when this region is
+    /// composed rather than proved on its own
+    pub tie: Option<ATie>,
 }
 
 impl FrameworkEval for ArgmaxEval {
     /// milestone 2b: the flat parameter block for the generated
-    /// constraint kernel (`gpu/m2b/cudagen.rs`).
+    /// constraint kernel (`gpu/m2b/cudagen.rs`); `None` when this
+    /// component's fingerprint has no kernel, which is the fork's
+    /// scalar CPU route.
     fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
         crate::cudagen::blob_for(self)
     }
@@ -184,8 +207,40 @@ impl FrameworkEval for ArgmaxEval {
         }
         eval.add_constraint(ss.clone() - ss_prev * nofirst - f);
         let want = if self.lax { E::F::one() } else { tk };
+        if !self.lax {
+            // The all-ones indicator is the one assignment the chain and the
+            // closing sum both accept with `tok = vocab` -- no selector fires,
+            // so nothing above pins the token *into* the vocabulary.  The final
+            // slot of the last row closes the chain at 0 instead: an honest
+            // `tok < vocab` has `b = [i < tok] = 0` there already (pad slots
+            // included), and the all-ones cheat is the only witness this kills.
+            eval.add_constraint(bs[self.per_row - 1].clone() * last.clone());
+        }
         eval.add_constraint((ss - want) * last);
-        let _ = end;
+
+        // Stream E: the tie.  `end` was committed from the start and unused; it
+        // is exactly the selector a Horner claim closes on, so the tie needs no
+        // new column of its own beyond the step selectors it borrows from the
+        // head dequant's region.
+        if let Some(t) = &self.tie {
+            let oin = eval.get_preprocessed_column(
+                crate::dequant::deq_sel(&t.tag, crate::dequant::DEQ_OSEL[0]));
+            let obd = eval.get_preprocessed_column(
+                crate::dequant::deq_sel(&t.tag, crate::dequant::DEQ_OSEL[1]));
+            let oact = eval.get_preprocessed_column(
+                crate::dequant::deq_sel(&t.tag, crate::dequant::DEQ_OSEL[2]));
+            let [u_prev, u] =
+                eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+            let mut f = E::EF::zero();
+            for (i, k) in ks.iter().enumerate() {
+                f += k.clone() * t.w[i];
+            }
+            let mult: E::EF = E::EF::from(oin) * t.k_in + E::EF::from(obd) * t.k_bd;
+            eval.add_constraint(u.clone() - u_prev * mult - f * oact);
+            eval.add_constraint((u - t.claimed) * end);
+        } else {
+            let _ = end;
+        }
 
         eval.finalize_logup_in_pairs();
         eval
@@ -205,6 +260,15 @@ pub enum Tamper {
     PmHigh(usize),
     /// claim a maximum below the true one: some entry exceeds it
     PmLow(usize),
+    /// set the token to the vocabulary size itself: the all-ones indicator the
+    /// strict chain and closing sum both accepted before the final-slot close
+    TokVocab(usize),
+    /// Stream E: one committed key changed, with `pm` and `tok` recomputed from
+    /// the changed keys so the region stays internally consistent.  Every
+    /// constraint here still holds -- what this region proves is a statement
+    /// *about* its keys -- and only the tie to the head's dequant output can
+    /// tell that they are not the logits the layer computed.
+    Key(usize),
 }
 
 pub struct AWitness {
@@ -258,6 +322,78 @@ impl AWitness {
                source: format!("synthetic(seed={seed}, ties={tie_frac})") }
     }
 
+    /// The real head's own keys and tokens, from an `extract.py --head` dump:
+    /// `key_head.u16` is `(tokens, vocab)` of the order key this region compares
+    /// and `tok_head.i32` is the token each row emits.  `pm` is not dumped --
+    /// it is the row maximum, which is a fact about `key`, so it is derived here
+    /// and the region's own constraints are what check that the prover derived
+    /// it honestly.
+    ///
+    /// This is the statement's *input*: what pins `key` to the head's dequant is
+    /// a positionwise tie, and that tie is not built yet (see the record).  Until
+    /// it is, "the emitted token is the maximum" is proved about a committed key
+    /// column that B1 wrote, not about the logits the layer computed.
+    /// The same, from columns a `Layer` already holds.
+    pub fn from_cols(tokens: usize, vocab: usize, key: Vec<u32>, tok: Vec<u32>)
+                     -> Result<Self, String> {
+        let (mut pm, mut ties) = (vec![0u32; tokens], 0usize);
+        for t in 0..tokens {
+            let row = &key[t * vocab..(t + 1) * vocab];
+            let mx = *row.iter().max().expect("a row of the vocabulary");
+            pm[t] = mx;
+            if row.iter().filter(|v| **v == mx).count() > 1 {
+                ties += 1;
+            }
+            let first = row.iter().position(|v| *v == mx).expect("the maximum") as u32;
+            if tok[t] != first {
+                return Err(format!(
+                    "row {t}: the dump emits {} but the first maximum is {first}", tok[t]));
+            }
+        }
+        Ok(Self { tokens, vocab, key, tok, pm, ties, source: "the layer's head columns".into() })
+    }
+
+    pub fn from_dump(dir: &str, tokens: usize, vocab: usize) -> Result<Self, String> {
+        let path = |n: &str| format!("{dir}/{n}");
+        let raw = std::fs::read(path("key_head.u16")).map_err(|e| format!("key_head: {e}"))?;
+        let key: Vec<u32> = raw
+            .chunks_exact(2)
+            .map(|b| u32::from(u16::from_le_bytes([b[0], b[1]])))
+            .take(tokens * vocab)
+            .collect();
+        if key.len() != tokens * vocab {
+            return Err(format!("key_head: {} values, want {tokens} x {vocab}", key.len()));
+        }
+        let raw = std::fs::read(path("tok_head.i32")).map_err(|e| format!("tok_head: {e}"))?;
+        let tok: Vec<u32> = raw
+            .chunks_exact(4)
+            .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u32)
+            .take(tokens)
+            .collect();
+        if tok.len() != tokens {
+            return Err(format!("tok_head: {} values, want {tokens}", tok.len()));
+        }
+        let (mut pm, mut ties) = (vec![0u32; tokens], 0usize);
+        for t in 0..tokens {
+            let row = &key[t * vocab..(t + 1) * vocab];
+            let mx = *row.iter().max().expect("a row of the vocabulary");
+            pm[t] = mx;
+            let n_at = row.iter().filter(|v| **v == mx).count();
+            if n_at > 1 {
+                ties += 1;
+            }
+            // B1 decoded greedily with torch's lowest-index rule, so the dump's
+            // token has to *be* the first maximum; a dump that disagrees is a
+            // spec mismatch, not something for the region to prove around
+            let first = row.iter().position(|v| *v == mx).expect("the maximum") as u32;
+            if tok[t] != first {
+                return Err(format!(
+                    "row {t}: the dump emits {} but the first maximum is {first}", tok[t]));
+            }
+        }
+        Ok(Self { tokens, vocab, key, tok, pm, ties, source: format!("dump({dir})") })
+    }
+
     fn tampered(&self, bad: Option<Tamper>) -> (Vec<u32>, Vec<u32>) {
         let (mut tok, mut pm) = (self.tok.clone(), self.pm.clone());
         match bad {
@@ -281,7 +417,9 @@ impl AWitness {
                 let t = t % self.tokens;
                 pm[t] = pm[t].saturating_sub(1);
             }
-            None => {}
+            Some(Tamper::TokVocab(t)) => tok[t % self.tokens] = self.vocab as u32,
+            // stream E's key tamper is applied in `region`, which owns the keys
+            Some(Tamper::Key(_)) | None => {}
         }
         (tok, pm)
     }
@@ -329,15 +467,44 @@ impl Outcome {
     }
 }
 
-pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
-           -> (Outcome, MatLayout) {
-    // the vocabulary is not a power of two at either real model, so this is the
-    // padded chooser (B10 §2.41); every other region in the project still uses
-    // the exact one and keeps `lead = 0`.
-    let lay = MatLayout::choose_padded(w.vocab, w.tokens, per_row_target);
+/// The region's committed columns and its table uses, with no transcript of its
+/// own -- what a composed proof needs, and what `run` now builds its standalone
+/// proof out of so the two cannot drift apart.
+///
+/// The layout is *given*, not chosen: a tie to the head's dequant is
+/// positionwise, so both regions have to walk the same `(token, chunk)` rows.
+pub struct ARegion {
+    pub lay: MatLayout,
+    pub pre: Vec<Eval>,
+    pub base: Vec<Eval>,
+    pub off_table: usize,
+    /// the committed keys, row-major over `(row, slot)` -- the tie's Horner input
+    pub keys: Vec<u32>,
+    pub col_pm: usize,
+    pub k0: usize,
+    pub b0: usize,
+}
+
+pub fn region(w: &AWitness, lax: bool, lay: MatLayout, m_rk: &mut [u32],
+              bad: Option<Tamper>) -> ARegion {
     let pr = lay.per_row;
     let rows = 1usize << lay.log_rows;
-    let (tok, pm) = w.tampered(bad);
+    let mut keys = vec![0u32; rows * pr];
+    let (mut tok, mut pm) = w.tampered(bad);
+    // stream E: a key changed, and the row's own maximum and token move with it,
+    // so nothing inside the region notices
+    let mut kcol = std::borrow::Cow::Borrowed(&w.key);
+    if let Some(Tamper::Key(i)) = bad {
+        let q = i % w.key.len();
+        let t = q / w.vocab;
+        let owned = kcol.to_mut();
+        owned[q] = owned[q].wrapping_add(1) & ((1 << KEY_BITS) - 1);
+        let row = &owned[t * w.vocab..(t + 1) * w.vocab];
+        let mx = *row.iter().max().unwrap();
+        pm[t] = mx;
+        tok[t] = row.iter().position(|v| *v == mx).unwrap() as u32;
+    }
+    let wkey: &[u32] = &kcol;
 
     // column order = the AIR's mask order: pm, tok, keys, indicators, ss
     let col_pm = 0usize;
@@ -347,7 +514,6 @@ pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
     let col_ss = b0 + pr;
     let n_cols = col_ss + 1;
     let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); rows]; n_cols];
-    let mut m_rk = vec![0u32; 1 << KEY_BITS];
     let mut off_table = 0usize;
 
     let mut ss_carry = 0i64;
@@ -372,7 +538,7 @@ pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
             // the walk ascends the vocabulary: rows carry blocks in increasing
             // index order even though `MatLayout` numbers its chunks the other way
             let i = (lay.chunks - 1 - b) * pr + sl;
-            let k = w.key[t * w.vocab + i];
+            let k = wkey[t * w.vocab + i];
             // lax commits the one-hot selector, strict the monotone indicator --
             // the same column, carrying the weaker or the stronger statement
             let ind = if lax {
@@ -381,6 +547,7 @@ pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
                 u32::from((i as u32) < tok[t])
             };
             cols[k0 + sl][j] = m31_u32(k);
+            keys[j * pr + sl] = k;
             cols[b0 + sl][j] = m31_u32(ind);
             let arg = pm[t] as i64 - k as i64 - if lax { 0 } else { ind as i64 };
             if (0..(1i64 << KEY_BITS)).contains(&arg) {
@@ -393,8 +560,6 @@ pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
         cols[col_ss][j] = crate::attn_trace::m31_of(ss_carry);
     }
 
-    // the multiplicity column, then the selectors
-    let mult = eval_of(KEY_BITS, m_rk.iter().map(|v| m31_u32(*v)).collect());
     let sel = |f: &dyn Fn(usize) -> bool| {
         eval_of(lay.log_rows, (0..rows).map(|j| m31_u32(f(j) as u32)).collect())
     };
@@ -407,9 +572,66 @@ pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
         sel(&|j| matches!(lay.at_opt(w.tokens, j), Some((_, 0)))),
         sel(&|j| j + 1 == rows),
     ];
-    let tbl = eval_of(KEY_BITS, (0..1u32 << KEY_BITS).map(m31_u32).collect());
 
     let base: Vec<Eval> = cols.into_iter().map(|c| eval_of(lay.log_rows, c)).collect();
+    ARegion { lay, pre, base, off_table, keys, col_pm, k0, b0 }
+}
+
+/// The region's LogUp columns and its use sum, in the order the AIR adds the
+/// lookups.  Split out of `run` so the composed path builds the same fractions.
+pub fn logup(r: &ARegion, lax: bool, rk: &RangeRel) -> (Vec<Eval>, SecureField) {
+    let one = stwo::prover::backend::simd::qm31::PackedQM31::broadcast(SecureField::one());
+    let (n, f) = crate::plogup::paired(r.lay.per_row, |i, vr| {
+        let pmv = r.base[r.col_pm].data[vr];
+        let kv = r.base[r.k0 + i].data[vr];
+        let bv = r.base[r.b0 + i].data[vr];
+        let arg = if lax { pmv - kv } else { pmv - kv - bv };
+        (one, rk.combine(&[arg]))
+    });
+    crate::plogup::build(r.lay.log_rows, n, f)
+}
+
+/// Stream E: the tie's accumulator column, and the value it closes on.  The
+/// weights are the mirror of the head dequant's output side, and an inert row
+/// contributes nothing on either side.
+pub fn tie_col(r: &ARegion, tokens: usize, t: &ATie) -> (Vec<Eval>, SecureField) {
+    let rows = 1usize << r.lay.log_rows;
+    let mut u = vec![SecureField::zero(); rows];
+    for j in 0..rows {
+        let mut f = SecureField::zero();
+        if r.lay.at_opt(tokens, j).is_some() {
+            for sl in 0..r.lay.per_row {
+                f += SecureField::from(m31_u32(r.keys[j * r.lay.per_row + sl])) * t.w[sl];
+            }
+        }
+        let mult = if j == 0 {
+            SecureField::zero()
+        } else {
+            match r.lay.at_opt(tokens, j) {
+                Some((_, b)) if b + 1 == r.lay.chunks => t.k_bd,
+                Some(_) => t.k_in,
+                None => SecureField::zero(),
+            }
+        };
+        u[j] = if j == 0 { f } else { u[j - 1] * mult + f };
+    }
+    (crate::attn_trace::secure_cols_pub(r.lay.log_rows, &u), u[rows - 1])
+}
+
+pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
+           -> (Outcome, MatLayout) {
+    // the vocabulary is not a power of two at either real model, so this is the
+    // padded chooser (B10 §2.41); the composed path is handed the head dequant's
+    // layout instead, which `--deq-per-row 501` makes exact.
+    let lay = MatLayout::choose_padded(w.vocab, w.tokens, per_row_target);
+    let pr = lay.per_row;
+    let rows = 1usize << lay.log_rows;
+    let mut m_rk = vec![0u32; 1 << KEY_BITS];
+    let r = region(w, lax, lay, &mut m_rk, bad);
+    let (pre, base, off_table) = (r.pre.clone(), r.base.clone(), r.off_table);
+    let (col_pm, k0, b0) = (r.col_pm, r.k0, r.b0);
+    let mult = eval_of(KEY_BITS, m_rk.iter().map(|v| m31_u32(*v)).collect());
+    let tbl = eval_of(KEY_BITS, (0..1u32 << KEY_BITS).map(m31_u32).collect());
     let widest = lay.log_rows.max(KEY_BITS);
     let tw = twiddles(widest);
     let mut sess = Session::new(&tw);
@@ -441,7 +663,8 @@ pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
     let alloc = &mut TraceLocationAllocator::new_with_preprocessed_columns(
         &[id(AM_SEL[0]), id(AM_SEL[1]), id(AM_SEL[2]), tbl_range(KEY_BITS)]);
     let am = FrameworkComponent::<ArgmaxEval>::new(
-        alloc, ArgmaxEval { log_rows: lay.log_rows, per_row: pr, lax, rk: rk.clone() },
+        alloc, ArgmaxEval { log_rows: lay.log_rows, per_row: pr, lax, rk: rk.clone(),
+                            tie: None },
         use_sum);
     let tb = FrameworkComponent::<RangeTableEval>::new(
         alloc, RangeTableEval { bits: KEY_BITS, rel: rk }, tsum);

@@ -550,6 +550,8 @@ pub fn probe(a: &BuiltComponents, b: &BuiltComponents) -> Value {
     for i in 0..a.chans.len() {
         rows.push(probe_one("chan", format!("chan_band{i}"), &a.chans[i], &b.chans[i]));
         rows.push(probe_one("key", format!("key_band{i}"), &a.keys[i], &b.keys[i]));
+    }
+    for i in 0..a.rows.len() {
         rows.push(probe_one("row", format!("row_band{i}"), &a.rows[i], &b.rows[i]));
     }
     rows.push(probe_one("attnout", "attnout".into(), &a.ao, &b.ao));
@@ -674,11 +676,13 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
             .map(|w| (0..w.mats.len()).map(|_| felt()).collect())
             .collect(),
         // 3 per band + attnout + one per matmul + one per walk, and a margin.
-        use_sums: (0..(3 * nb + 1 + nm + nw + 8)).map(|_| felt()).collect(),
-        // exp + norm/frac/mul/qnz + one per range width, and a margin.
-        table_sums: (0..(5 + plan.widths.len() + 8)).map(|_| felt()).collect(),
-        // These synthetic shapes carry no glue regions, so nothing indexes this.
-        glue_ties: vec![],
+        use_sums: (0..(3 * nb + 1 + nm + nw + 16)).map(|_| felt()).collect(),
+        // exp + norm/frac/mul/qnz + one per range width, and a margin (the
+        // glue's table sides come out of the same margin).
+        table_sums: (0..(5 + plan.widths.len() + 16)).map(|_| felt()).collect(),
+        // `Params::ties` reads these via `.get(..).unwrap_or(zero)`, so the
+        // placeholder claims can stay empty without changing the IR's shape.
+        glue_ties: vec![], deq_out: vec![], head_key: vec![], am_key: vec![],
     }
 }
 
@@ -699,19 +703,20 @@ pub fn cmd(args: &[String]) {
         // Two independent transcripts: same shape, different Fiat-Shamir.
         let mut ch = stwo::core::channel::Blake2sM31Channel::default();
         ch.mix_u64(0xB65_2B00 + u64::from(tag));
-        // Six challenges: r, s, rv as before, then the corner and glue pair --
-        // unused on these synthetic shapes, which have neither family.
-        let rels = crate::compose::Rels::draw(&mut ch, &plan.widths, None);
+        let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
+                                              plan.glue.as_ref().map(|g| g.uns.as_slice()));
         let f = ch.draw_secure_felts(6);
-        (rels, f[0], f[1], f[2], f[3], f[4], f[5])
+        (rels, f)
     };
-    let (ra, r_a, s_a, rv_a, rc_a, w_a, lam_a) = draw(1);
-    let (rb, r_b, s_b, rv_b, rc_b, w_b, lam_b) = draw(2);
+    let (ra, fa) = draw(1);
+    let (rb, fb) = draw(2);
     let ca = claims_for(&plan, 0x1234_5678);
     let cb = claims_for(&plan, 0x9abc_def0);
 
-    let a = crate::compose::build_components(&plan, &ra, r_a, s_a, rv_a, rc_a, w_a, lam_a, &ca);
-    let b = crate::compose::build_components(&plan, &rb, r_b, s_b, rv_b, rc_b, w_b, lam_b, &cb);
+    let a = crate::compose::build_components(&plan, &ra, fa[0], fa[1], fa[2], fa[3], fa[4],
+                                             fa[5], &ca);
+    let b = crate::compose::build_components(&plan, &rb, fb[0], fb[1], fb[2], fb[3], fb[4],
+                                             fb[5], &cb);
     let report = probe(&a, &b);
 
     eprintln!(
