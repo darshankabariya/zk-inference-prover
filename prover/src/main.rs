@@ -534,6 +534,9 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         s: l.ao.s, c: b0.shape.c, hd: l.ao.hd, nh: l.ao.nh,
         bands: l.band_sizes[..n_pre].to_vec(),
         corner: l.bands.len() > n_pre,
+        // Stream E: the head's order-key claim.  Not under `--no-glue`'s gate,
+        // because a head dump has no wiring columns to switch off.
+        head_key: flag(args, "--head-key"),
         variant: vname.to_string(),
         log_table: b0.log_table,
         q_bits: b0.q_bits, k_bits: b0.k_bits, nmax: b0.nmax,
@@ -583,6 +586,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
                 dff: if flag(args, "--swiglu") { g.dff } else { 0 },
                 tails: flag(args, "--norm-tails"),
                 swiglu: flag(args, "--swiglu"),
+                deq_ties: flag(args, "--deq-ties"),
             }
         }),
     }
@@ -892,6 +896,18 @@ fn compose_probes_cmd(args: &[String]) {
                                "the multiply's output constraint"),
                         "a corrupted tail result accepted");
             }
+            // the dequant output ties: the wiring family's copy of `o_out` (and
+            // of `d_out`) is changed, the region's own add is recomputed from it,
+            // and only the tie against the dequant region's published output can
+            // tell.  This is the probe those ties exist for.
+            for (k, ((ri, _), name)) in g.out_ties.iter().enumerate() {
+                let _ = k;
+                assert!(!probe(&format!("deq tie: the wiring copy of {name}'s output"), &l,
+                               &compose::ProverTamper {
+                                   glue_add: Some((*ri, 4321)), ..Default::default() },
+                               &format!("the tie {name}_out == the {name} region's output")),
+                        "a corrupted dequant output copy accepted");
+            }
             if let Some(i) = g.swiglu {
                 assert!(!probe("swiglu: the product, one step up", &l,
                                &compose::ProverTamper {
@@ -953,6 +969,7 @@ fn layer_clone(l: &layer::Layer) -> layer::Layer {
             x_down: g.x_down.clone(),
             eps: g.eps, inv_d: g.inv_d, reduce: g.reduce.clone(),
         }),
+        head_keys: l.head_keys.clone(),
         source: l.source.clone(),
     }
 }

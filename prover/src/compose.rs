@@ -154,6 +154,11 @@ pub struct Params {
     /// heads, `C = S`, masked.  Absent on a witness extracted without it.
     #[serde(default)]
     pub corner: bool,
+    /// Stream E: publish the head's order-key claim.  It sits here rather than in
+    /// `GlueParams` because a head dump carries no wiring columns at all -- the
+    /// two features share the tie challenge, not the witness.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub head_key: bool,
 }
 
 /// The wiring family's two shape numbers.  `a` is how many rows one token's
@@ -177,6 +182,10 @@ pub struct GlueParams {
     pub tails: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub swiglu: bool,
+    /// Stream E: make `o_out` and `d_out` the `o` and `down` dequant regions'
+    /// own published outputs, tied to the copies the wiring family commits.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deq_ties: bool,
 }
 
 fn is_zero(v: &usize) -> bool {
@@ -217,6 +226,13 @@ pub struct Claims {
     /// that are the layer's boundary.
     #[serde(default)]
     pub glue_ties: Vec<Vec<[u32; 4]>>,
+    /// stream E: one per dequant output tie, in `GluePlan::out_ties` order --
+    /// the value the `o` and `down` regions publish for their own bf16 outputs
+    #[serde(default)]
+    pub deq_out: Vec<[u32; 4]>,
+    /// stream E: the head's order-key claim, when it is published
+    #[serde(default)]
+    pub head_key: Vec<[u32; 4]>,
 }
 
 pub fn qm(v: SecureField) -> [u32; 4] {
@@ -251,7 +267,35 @@ impl Claims {
         for g in &self.glue_ties {
             v.extend(g.iter().map(|x| unqm(*x)));
         }
+        // stream E, appended last: empty unless the dequant output ties are on,
+        // so the transcript is unchanged without them
+        v.extend(self.deq_out.iter().map(|x| unqm(*x)));
+        v.extend(self.head_key.iter().map(|x| unqm(*x)));
         v
+    }
+}
+
+/// `w^e` for a signed exponent: an output side's row step points backwards
+/// through the stream, so half of these are inverses.
+fn wpow(w: SecureField, e: i128) -> SecureField {
+    if e >= 0 { w.pow(e as u128) } else { w.pow((-e) as u128).inverse() }
+}
+
+/// Stream E: one matmul's output-side weights, from the wiring family's own tie
+/// challenge -- the consumer builds its claim from the same `w`, which is what
+/// makes the two comparable.  The value at channel `c` of token `t` carries
+/// `w^(N - 1 - (c tokens + t))`; that splits into a per-slot weight and a row
+/// step of two constants, derived in `dequant::OSide`.
+fn oside_w(w: SecureField, lam: SecureField, tokens: usize, n_out: usize,
+           per_row: usize, kind: crate::dequant::OKind) -> crate::layer::OSideW {
+    let n = (tokens * n_out) as i128;
+    let (tok, pr, no) = (tokens as i128, per_row as i128, n_out as i128);
+    crate::layer::OSideW {
+        w: (0..per_row).map(|s| wpow(w, n - 1 - s as i128 * tok)).collect(),
+        lam,
+        k_in: wpow(w, -(pr * tok)),
+        k_bd: wpow(w, (no - pr) * tok - 1),
+        kind,
     }
 }
 
@@ -306,6 +350,10 @@ pub struct GluePlan {
     /// accounting can name their cells apart from the reduction's
     pub tails: Vec<usize>,
     pub swiglu: Option<usize>,
+    /// stream E: `((region, tie), name)` per dequant output tie -- the wiring
+    /// side's claim over `o_out` and over `d_out`, and the matmul whose region
+    /// has to publish the same value
+    pub out_ties: Vec<((usize, usize), &'static str)>,
 }
 
 impl GluePlan {
@@ -345,6 +393,20 @@ impl GluePlan {
         }
         let mut eqs = vec![((0, 1), (1, 0)), ((0, 2), (2, 0)), ((2, 1), (3, 0))];
         let mut uns = l1.un_kinds();
+        // ---- stream E: the dequant output ties -------------------------------
+        //
+        // `gn1`'s group 1 *is* `o_out` and `gn2`'s is `d_out`, and neither has
+        // ever carried a Horner claim -- the wiring family committed those
+        // columns and only a `VAL` lookup pinned them.  One claim each, on the
+        // same channel-major weights the stream uses, and the `o` and `down`
+        // dequant regions publish the same value from their own outputs.
+        let mut out_ties = vec![];
+        if gp.deq_ties {
+            for (ri, name) in [(0usize, "o"), (2usize, "down")] {
+                regions[ri].ties.push((TieKind::In(1), stream.clone(), 1));
+                out_ties.push(((ri, regions[ri].ties.len() - 1), name));
+            }
+        }
         // ---- stream E: the two norm tails ------------------------------------
         //
         // A tail's group 0 is the same block of the residual stream the
@@ -412,6 +474,7 @@ impl GluePlan {
             stream_out: (2, 2),
             tails,
             swiglu,
+            out_ties,
         }
     }
 
@@ -579,11 +642,34 @@ impl Plan {
     /// How many secure felts the transcript draws after the relations, and where
     /// the corner's key challenge sits.  It goes *last* so a proof without the
     /// corner draws exactly what it drew before.
+    /// Stream E: the tie challenge pair is drawn for the wiring family *or* for
+    /// a head-key claim on its own, since a head dump has no wiring columns.
+    pub fn has_ties(&self) -> bool {
+        self.glue.is_some() || self.p.head_key
+    }
     pub fn n_challenges(&self) -> usize {
-        3 + if self.glue.is_some() { 2 } else { 0 } + if self.p.corner { 1 } else { 0 }
+        3 + if self.has_ties() { 2 } else { 0 } + if self.p.corner { 1 } else { 0 }
     }
     pub fn corner_challenge_at(&self) -> usize {
-        3 + if self.glue.is_some() { 2 } else { 0 }
+        3 + if self.has_ties() { 2 } else { 0 }
+    }
+
+    /// Stream E: does this matmul's dequant region publish an output-side claim?
+    /// Both sides ask the plan, so the preprocessed list, the region, the AIR and
+    /// the verifier cannot disagree about it.
+    pub fn has_oside(&self, name: &str) -> bool {
+        self.glue.as_ref().is_some_and(|g| g.out_ties.iter().any(|(_, n)| *n == name))
+            || (self.p.head_key && name == "lm_head")
+    }
+
+    /// What that output side accumulates: the head publishes the argmax's order
+    /// key, everything else the glue's `(sm, ef)` pair.
+    pub fn oside_kind(&self, name: &str) -> crate::dequant::OKind {
+        if name == "lm_head" {
+            crate::dequant::OKind::Key
+        } else {
+            crate::dequant::OKind::Pair
+        }
     }
 
     pub fn pre_ids(&self) -> Vec<PreProcessedColumnId> {
@@ -619,6 +705,9 @@ impl Plan {
                 }
             }
             ids.extend(DEQ_SEL.iter().map(|n| deq_sel(&m.name, n)));
+            if self.has_oside(&m.name) {
+                ids.extend(crate::dequant::DEQ_OSEL.iter().map(|n| deq_sel(&m.name, n)));
+            }
         }
         for w in &self.walks {
             for (mi, _) in w.mats.iter().enumerate() {
@@ -883,6 +972,32 @@ pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField
                 qnz: rels.qnz.clone(),
                 rels: sub,
                 yside: Some(YSide { rv_pow, rv_step, s, claimed_h: unqm(claims.mat_h[mi]) }),
+                // stream E: the output side, on the matmuls the plan names.  The
+                // claims arrive in the same order the plan lists the ties, which
+                // is mat order -- `o` before `down` -- and the assert below is
+                // what says so rather than trusting it.
+                oside: plan.has_oside(&m.name).then(|| {
+                    let kind = plan.oside_kind(&m.name);
+                    let ow = oside_w(w_glue, lam_glue, m.tokens, m.n_out,
+                                     plan.mat_lays[mi].per_row, kind);
+                    let claimed = if m.name == "lm_head" {
+                        claims.head_key.first().copied()
+                    } else {
+                        // the claims arrive in mat order and the plan lists the
+                        // ties in the same order, `o` before `down`
+                        plan.glue.as_ref().unwrap().out_ties.iter()
+                            .position(|(_, n)| *n == m.name)
+                            .and_then(|k| claims.deq_out.get(k).copied())
+                    };
+                    crate::dequant::OSide {
+                        w: ow.w,
+                        lam: ow.lam,
+                        k_in: ow.k_in,
+                        k_bd: ow.k_bd,
+                        claimed: claimed.map(unqm).unwrap_or(SecureField::zero()),
+                        kind,
+                    }
+                }),
             },
             next_use(claims),
         ));
@@ -1021,6 +1136,12 @@ pub struct ProverTamper {
     pub glue_stream: Option<(usize, usize)>,
     /// a tamper inside one glue region's arithmetic, by region index
     pub glue: Option<(usize, crate::glue::Tamper)>,
+    /// Stream E: corrupt the wiring family's own copy of a dequant output --
+    /// `(region index, value index)` into `o_out` for `gn1` or `d_out` for
+    /// `gn2`.  The region recomputes its add from the corrupted value, so
+    /// everything inside the glue stays consistent and the only thing that can
+    /// catch it is the dequant output tie.
+    pub glue_add: Option<(usize, usize)>,
 }
 
 pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Composed {
@@ -1169,7 +1290,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     let m4_t = std::time::Instant::now();
     let mut mat_regions = vec![];
     for (m, sp) in layer.mats.iter().zip(&plan.specs) {
-        let r = mat_region(m, sp, &mut tables);
+        let r = mat_region(m, sp, &mut tables, plan.has_oside(&m.name));
         mat_regions.push(r);
     }
     let n_deq_base: usize = mat_regions
@@ -1226,9 +1347,16 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                     stream[vi % n] ^= 1;
                 }
             }
+            let mut addv = t.lay(add);
+            if let Some((ri, vi)) = tamper.glue_add {
+                if ri == i1 {
+                    let n = addv.len();
+                    addv[vi % n] ^= 1;
+                }
+            }
             tail_in.push(stream.clone());
             let w1 = crate::glue::GlueWitness::new(
-                rows1, vec![stream.clone(), t.lay(add)], &prog1, plan.round,
+                rows1, vec![stream.clone(), addv], &prog1, plan.round,
                 format!("B1 residual stream [{} x {}]", t.tokens, t.d));
             let tam1 = tamper.glue.filter(|(ri, _)| *ri == i1).map(|(_, x)| x);
             let r1 = crate::glue::glue_region(&w1, &prog1, plan.round, &tag1, &mut gt, tam1);
@@ -1762,7 +1890,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let n_ch = plan.n_challenges();
     let ch = sess.draw_felts(n_ch);
     let (r, s, rv) = (ch[0], ch[1], ch[2]);
-    let (w_glue, lam_glue) = if plan.glue.is_some() {
+    let (w_glue, lam_glue) = if plan.has_ties() {
         (ch[3], ch[4])
     } else {
         (SecureField::zero(), SecureField::zero())
@@ -1824,10 +1952,64 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     crate::util::m4_add("int/attnout", m4_t.elapsed().as_secs_f64());
     let m4_t = std::time::Instant::now();
     for (m, reg) in layer.mats.iter().zip(&mat_regions) {
-        let it = mat_interaction(m, reg, rv, s, &rels);
+        // stream E: the output side rides on the wiring family's tie challenge,
+        // so it exists exactly when that family does and the plan says this
+        // matmul publishes one
+        let ow = plan.has_oside(&m.name).then(|| {
+            oside_w(w_glue, lam_glue, m.tokens, m.n_out, reg.lay.per_row,
+                    plan.oside_kind(&m.name))
+        });
+        let it = mat_interaction(m, reg, rv, s, &rels, ow.as_ref());
         inter_all.extend(it.cols);
         claims.mat_h.push(qm(it.claimed_h));
         claims.use_sums.push(qm(it.use_sum));
+        if let Some(c) = it.claimed_out {
+            if m.name == "lm_head" {
+                claims.head_key.push(qm(c));
+            } else {
+                claims.deq_out.push(qm(c));
+            }
+        }
+    }
+    // Stream E: the head's key claim against B1's own `key_head` column.  The
+    // proof derives its keys from the head dequant's committed output; this
+    // rebuilds the same Horner sum from the dump's column and compares the two
+    // field elements, which is 512 x vocab values checked at once.
+    let mut head_key_b1 = json!(null);
+    if plan.p.head_key {
+        if let (Some(mi), Some(keys)) =
+            (layer.mats.iter().position(|m| m.name == "lm_head"), layer.head_keys.as_ref())
+        {
+            let (m, lay) = (&layer.mats[mi], plan.mat_lays[mi]);
+            let ow = oside_w(w_glue, lam_glue, m.tokens, m.n_out, lay.per_row,
+                             crate::dequant::OKind::Key);
+            let rows = 1usize << lay.log_rows;
+            let mut u = SecureField::zero();
+            for j in 0..rows {
+                let mut f = SecureField::zero();
+                if let Some((t, b)) = lay.at_opt(m.tokens, j) {
+                    for sl in 0..lay.per_row {
+                        let c = b * lay.per_row + sl;
+                        f += SecureField::from(m31_u32(u32::from(keys[t * m.n_out + c]))) * ow.w[sl];
+                    }
+                }
+                let mult = if j == 0 {
+                    SecureField::zero()
+                } else {
+                    match lay.at_opt(m.tokens, j) {
+                        Some((_, b)) if b + 1 == lay.chunks => ow.k_bd,
+                        Some(_) => ow.k_in,
+                        None => SecureField::zero(),
+                    }
+                };
+                u = u * mult + f;
+            }
+            let got = claims.head_key.first().copied().map(unqm);
+            head_key_b1 = json!({
+                "values": m.tokens * m.n_out,
+                "matches_b1": got == Some(u),
+            });
+        }
     }
     crate::util::m4_add("int/dequant", m4_t.elapsed().as_secs_f64());
     let m4_t = std::time::Instant::now();
@@ -1969,6 +2151,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             "exponent_out_of_range": g.bad_exp,
         })).collect::<Vec<_>>(),
         "glue_vs_b1": glue_b1,
+        "head_key_vs_b1": head_key_b1,
         "interaction": inter_all.iter().map(|c| c.size()).sum::<usize>(),
         "preprocessed": m4_pre_cells,
         "walk_weights": walk_regions.iter().map(|w| json!({
@@ -2078,6 +2261,9 @@ pub struct Verdict {
     /// `gn1.xmid == gn2.in`, `gn2.roots == gn2b.in` -- the residual stream is
     /// threaded, from serialized bytes alone
     pub glue_ok: Vec<bool>,
+    /// stream E, one per dequant output tie: the region's own output claim equals
+    /// the wiring family's claim over the same values
+    pub deq_out_ok: Vec<bool>,
     /// the layer's committed residual-stream input and output claims
     pub stream_in: Option<[u32; 4]>,
     pub stream_out: Option<[u32; 4]>,
@@ -2091,11 +2277,13 @@ impl Verdict {
             && self.sizes_ok && self.qk_ok.iter().all(|x| *x) && self.den_ok.iter().all(|x| *x)
 
             && self.walk_ok.iter().all(|x| *x) && self.glue_ok.iter().all(|x| *x)
+            && self.deq_out_ok.iter().all(|x| *x)
     }
     fn rejected(msg: &str) -> Self {
         Self { stark_ok: false, root_ok: false, sums_cancel: false, qk_ok: vec![],
                den_ok: vec![], av_ok: false, den_link_ok: false, walk_ok: vec![],
-               sizes_ok: false, glue_ok: vec![false], stream_in: None, stream_out: None,
+               sizes_ok: false, glue_ok: vec![false], deq_out_ok: vec![false],
+               stream_in: None, stream_out: None,
                error: Some(msg.to_string()), verify_secs: 0.0 }
     }
 }
@@ -2150,7 +2338,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let n_ch = plan.n_challenges();
     let f = ch.draw_secure_felts(n_ch);
     let (r, s, rv) = (f[0], f[1], f[2]);
-    let (w_glue, lam_glue) = if plan.glue.is_some() {
+    let (w_glue, lam_glue) = if plan.has_ties() {
         (f[3], f[4])
     } else {
         (SecureField::zero(), SecureField::zero())
@@ -2241,8 +2429,23 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         ),
         None => (vec![], None, None),
     };
+    // stream E: and one per dequant output tie -- the `o` and `down` regions'
+    // own published outputs against the copies the wiring family committed.
+    // This is what makes `o_out` and `d_out` the dequant's results rather than
+    // two columns that merely happen to agree.
+    let deq_out_ok: Vec<bool> = match &plan.glue {
+        Some(g) => g
+            .out_ties
+            .iter()
+            .enumerate()
+            .map(|(k, ((ra, ta), _))| {
+                claims.deq_out.get(k).copied() == Some(claims.glue_ties[*ra][*ta])
+            })
+            .collect(),
+        None => vec![],
+    };
 
-    Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok,
+    Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
               sizes_ok, glue_ok, stream_in, stream_out, error,
               verify_secs: t0.elapsed().as_secs_f64() }
 }
