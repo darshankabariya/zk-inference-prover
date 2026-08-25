@@ -536,7 +536,10 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         corner: l.bands.len() > n_pre,
         // Stream E: the head's order-key claim.  Not under `--no-glue`'s gate,
         // because a head dump has no wiring columns to switch off.
-        head_key: flag(args, "--head-key"),
+        // `--head-argmax` implies the key claim: it is the counterparty
+        head_key: flag(args, "--head-key") || flag(args, "--head-argmax"),
+        head_argmax: flag(args, "--head-argmax"),
+        head_argmax_lax: flag(args, "--head-argmax-lax"),
         variant: vname.to_string(),
         log_table: b0.log_table,
         q_bits: b0.q_bits, k_bits: b0.k_bits, nmax: b0.nmax,
@@ -925,6 +928,19 @@ fn compose_probes_cmd(args: &[String]) {
         }
     }
 
+    // 16. stream E: the head tie.  One committed key of the argmax region is
+    //     changed and the region is made consistent with it, so every constraint
+    //     it carries still holds and only the equality with the head dequant's
+    //     own key claim can reject.
+    if compose::Plan::new(&params).argmax_mat().is_some() {
+        assert!(!probe("head tie: one of the argmax's committed keys", &l,
+                       &compose::ProverTamper {
+                           argmax: Some(argmax::Tamper::Key(1234567)),
+                           ..Default::default() },
+                       "the tie am_key == head_key"),
+                "an argmax on keys that are not the head's output accepted");
+    }
+
     // 8. a tampered claim in the serialized statement: the replayed transcript
     //    diverges and stwo's verify rejects
     {
@@ -970,6 +986,7 @@ fn layer_clone(l: &layer::Layer) -> layer::Layer {
             eps: g.eps, inv_d: g.inv_d, reduce: g.reduce.clone(),
         }),
         head_keys: l.head_keys.clone(),
+        head_tok: l.head_tok.clone(),
         source: l.source.clone(),
     }
 }

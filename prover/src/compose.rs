@@ -159,6 +159,14 @@ pub struct Params {
     /// two features share the tie challenge, not the witness.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub head_key: bool,
+    /// Stream E: compose the argmax region into this proof, tied to the head's
+    /// key claim.  Implies `head_key` -- that claim is its counterparty.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub head_argmax: bool,
+    /// the weaker statement ("the token attains the maximum"), which is what the
+    /// tie probe separates from the strict one
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub head_argmax_lax: bool,
 }
 
 /// The wiring family's two shape numbers.  `a` is how many rows one token's
@@ -233,6 +241,10 @@ pub struct Claims {
     /// stream E: the head's order-key claim, when it is published
     #[serde(default)]
     pub head_key: Vec<[u32; 4]>,
+    /// stream E: the argmax region's claim over the keys it compared -- equal to
+    /// `head_key` is what says it compared the head's own output
+    #[serde(default)]
+    pub am_key: Vec<[u32; 4]>,
 }
 
 pub fn qm(v: SecureField) -> [u32; 4] {
@@ -271,6 +283,7 @@ impl Claims {
         // so the transcript is unchanged without them
         v.extend(self.deq_out.iter().map(|x| unqm(*x)));
         v.extend(self.head_key.iter().map(|x| unqm(*x)));
+        v.extend(self.am_key.iter().map(|x| unqm(*x)));
         v
     }
 }
@@ -647,6 +660,14 @@ impl Plan {
     pub fn has_ties(&self) -> bool {
         self.glue.is_some() || self.p.head_key
     }
+
+    /// Stream E: the index of the matmul the argmax region is tied to, when it
+    /// is composed.  Its layout is that matmul's, so the tie is positionwise.
+    pub fn argmax_mat(&self) -> Option<usize> {
+        self.p.head_argmax
+            .then(|| self.p.mats.iter().position(|m| m.name == "lm_head"))
+            .flatten()
+    }
     pub fn n_challenges(&self) -> usize {
         3 + if self.has_ties() { 2 } else { 0 } + if self.p.corner { 1 } else { 0 }
     }
@@ -733,6 +754,11 @@ impl Plan {
         if let Some(g) = &self.glue {
             ids.extend(crate::glue::glue_table_ids(&g.uns));
         }
+        // stream E: the argmax region's own three selectors, last, so that no
+        // family before it moves an index
+        if self.argmax_mat().is_some() {
+            ids.extend(crate::argmax::AM_SEL.iter().map(|n| crate::argmax::id(n)));
+        }
         ids
     }
 
@@ -743,6 +769,7 @@ impl Plan {
         self.corner.iter().map(|c| if *c { 2 } else { 3 }).sum::<usize>()
             + 1 + self.p.mats.len() + self.walks.len()
             + self.glue.as_ref().map(|g| g.regions.len()).unwrap_or(0)
+            + usize::from(self.argmax_mat().is_some())
     }
     pub fn n_table_sums(&self) -> usize {
         5 + self.widths.len() + self.glue.as_ref().map(|g| g.n_tables()).unwrap_or(0)
@@ -762,6 +789,8 @@ pub struct BuiltComponents {
     pub exp_t: FrameworkComponent<ExpTableEval>,
     pub tables: Vec<FrameworkComponent<TableEval>>,
     pub gtables: Vec<FrameworkComponent<GTableEval>>,
+    /// stream E: the argmax region, last of all, so adding it moves nothing
+    pub argmax: Option<FrameworkComponent<crate::argmax::ArgmaxEval>>,
     pub pows: Vec<Powers>,
     /// per band, in `chans`/`keys` order: does it have a per-token region?  A
     /// corner band does not (B10 step 3), so `rows` is shorter than `chans` and
@@ -842,6 +871,9 @@ impl BuiltComponents {
         for t in &self.gtables {
             v.push(t);
         }
+        if let Some(a) = &self.argmax {
+            v.push(a);
+        }
         v
     }
     pub fn components(&self) -> Vec<&dyn Component> {
@@ -871,6 +903,9 @@ impl BuiltComponents {
         }
         for t in &self.gtables {
             v.push(t);
+        }
+        if let Some(a) = &self.argmax {
+            v.push(a);
         }
         v
     }
@@ -1100,8 +1135,51 @@ pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField
         }
     }
 
-    BuiltComponents { chans, keys, rows, ao, mats, walks, glue, exp_t, tables, gtables, pows,
-                      has_rows: plan.corner.iter().map(|c| !*c).collect() }
+    // stream E: the argmax, tied to the head's key claim.  It shares the layer's
+    // 16-bit range table and the head dequant's step selectors, so it adds one
+    // component and no table.
+    let argmax = plan.argmax_mat().map(|mi| {
+        let lay = plan.mat_lays[mi];
+        let m = &plan.p.mats[mi];
+        let tie = crate::argmax::ATie {
+            claimed: claims.am_key.first().copied().map(unqm).unwrap_or(SecureField::zero()),
+            tag: m.name.clone(),
+            ..argmax_tie_w(w_glue, m.tokens, m.n_out, lay.per_row)
+        };
+        FrameworkComponent::<crate::argmax::ArgmaxEval>::new(
+            alloc,
+            crate::argmax::ArgmaxEval {
+                log_rows: lay.log_rows,
+                per_row: lay.per_row,
+                lax: plan.p.head_argmax_lax,
+                rk: rels.range(crate::argmax::KEY_BITS).clone(),
+                tie: Some(tie),
+            },
+            next_use(claims),
+        )
+    });
+
+    BuiltComponents { chans, keys, rows, ao, mats, walks, glue, exp_t, tables, gtables, argmax,
+                      pows, has_rows: plan.corner.iter().map(|c| !*c).collect() }
+}
+
+/// Stream E: the argmax side's tie weights -- the mirror of the head dequant's
+/// output side.  Its index map ascends the vocabulary (`i = (chunks-1-b) pr + sl`)
+/// where the dequant's descends, so the ordinary row step is the *inverse* of the
+/// output side's and the boundary step differs in the token term's sign.
+fn argmax_tie_w(w: SecureField, tokens: usize, vocab: usize, per_row: usize)
+                -> crate::argmax::ATie {
+    let n = (tokens * vocab) as i128;
+    let (tok, pr, v) = (tokens as i128, per_row as i128, vocab as i128);
+    crate::argmax::ATie {
+        w: (0..per_row)
+            .map(|sl| wpow(w, n - 1 - (v - pr) * tok - sl as i128 * tok))
+            .collect(),
+        k_in: wpow(w, pr * tok),
+        k_bd: wpow(w, -((v - pr) * tok + 1)),
+        claimed: SecureField::zero(),
+        tag: String::new(),
+    }
 }
 
 // ------------------------------------------------------------------ proving ----
@@ -1142,6 +1220,8 @@ pub struct ProverTamper {
     /// everything inside the glue stays consistent and the only thing that can
     /// catch it is the dequant output tie.
     pub glue_add: Option<(usize, usize)>,
+    /// Stream E: a tamper inside the composed argmax region
+    pub argmax: Option<crate::argmax::Tamper>,
 }
 
 pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Composed {
@@ -1170,6 +1250,8 @@ pub struct Gen {
     pub glue_tcols: Vec<Eval>,
     pub glue_mcols: Vec<Eval>,
     pub glue_b1: Value,
+    /// stream E: the argmax region, when it is composed
+    pub am_region: Option<crate::argmax::ARegion>,
     pub n_deq_base: usize,
     pub pre_tables: Vec<Option<Eval>>,
     pub base_mults: Vec<Option<Eval>>,
@@ -1299,6 +1381,29 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         .sum();
 
     crate::util::m4_add("gen/dequant", m4_t.elapsed().as_secs_f64());
+
+    // Stream E: the argmax region, on the head dequant's own layout so the tie
+    // is positionwise.  Its range lookups go on the layer's 16-bit table, so its
+    // multiplicities are bumped into that table's vector the way the wiring
+    // family's go into `NORM` and `FRAC`.
+    let m4_t = std::time::Instant::now();
+    let am_region = plan.argmax_mat().map(|mi| {
+        let m = &plan.p.mats[mi];
+        let keys = layer.head_keys.as_ref().expect("--head-argmax needs key_head.u16");
+        let tok = layer.head_tok.as_ref().expect("--head-argmax needs tok_head.i32");
+        let w = crate::argmax::AWitness::from_cols(
+            m.tokens, m.n_out, keys.iter().map(|k| u32::from(*k)).collect(), tok.clone())
+            .expect("the head dump's argmax columns");
+        let ri = tables.widths.iter().position(|w| *w == crate::argmax::KEY_BITS)
+            .expect("the argmax needs the layer's 16-bit range table (--z-lo-bits 16)");
+        let mut m_rk = std::mem::take(&mut tables.m_r[ri]);
+        let r = crate::argmax::region(&w, plan.p.head_argmax_lax, plan.mat_lays[mi],
+                                      &mut m_rk, tamper.argmax);
+        tables.m_r[ri] = m_rk;
+        tables.off_table += r.off_table;
+        r
+    });
+    crate::util::m4_add("gen/argmax", m4_t.elapsed().as_secs_f64());
 
     let m4_t = std::time::Instant::now();
     let mut walk_regions = vec![];
@@ -1724,7 +1829,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     crate::util::m4_add("gen/tables_up", m4_t.elapsed().as_secs_f64());
     let trace_secs = t0.elapsed().as_secs_f64();
     Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
-          glue_regions, glue_tcols, glue_mcols, glue_b1,
+          glue_regions, glue_tcols, glue_mcols, glue_b1, am_region,
           n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
           m4e_tabdev, trace_secs, pre_key }
 }
@@ -1733,7 +1838,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
 /// interaction, the components and the proof.
 pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
-              glue_regions, glue_tcols, glue_mcols, glue_b1,
+              glue_regions, glue_tcols, glue_mcols, glue_b1, am_region,
               n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
               m4e_tabdev, trace_secs, pre_key } = g;
     let p = &plan.p;
@@ -1820,6 +1925,12 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // And the glue's shared tables close both trees, as before.
     pre_all.extend(glue_tcols.iter().map(AnyCol::Host));
     base_all.extend(glue_mcols.iter().map(AnyCol::Host));
+    // stream E: the argmax region closes both trees, matching `pre_ids` and the
+    // component order -- appending it moves no family before it
+    if let Some(r) = am_region.as_ref() {
+        pre_all.extend(r.pre.iter().map(AnyCol::Host));
+        base_all.extend(r.base.iter().map(AnyCol::Host));
+    }
     crate::util::m4_add("gen/refs", m4_t.elapsed().as_secs_f64());
     let trace_secs = trace_secs + t0.elapsed().as_secs_f64();
 
@@ -2119,6 +2230,34 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
     }
     crate::util::m4_add("int/tables", m4_t.elapsed().as_secs_f64());
+
+    // Stream E: the argmax's interaction columns come *after* the tables' own
+    // sides, because the framework hands out interaction spans in component
+    // order and the argmax component is last of all.  Appended earlier, this
+    // component is handed the exp table's columns instead and the prover dies
+    // evaluating a 2^23 polynomial on a 2^16 domain -- which is exactly how it
+    // failed the first time.
+
+    // stream E: the argmax's tie column then its lookups, the order the AIR
+    // reads them, and its use sum last of all -- the component is last too
+    let m4_t = std::time::Instant::now();
+    if let (Some(r), Some(mi)) = (am_region.as_ref(), plan.argmax_mat()) {
+        let m = &plan.p.mats[mi];
+        let tie = crate::argmax::ATie {
+            claimed: SecureField::zero(),
+            tag: m.name.clone(),
+            ..argmax_tie_w(w_glue, m.tokens, m.n_out, plan.mat_lays[mi].per_row)
+        };
+        let (tcols, claimed) = crate::argmax::tie_col(r, m.tokens, &tie);
+        inter_all.extend(crate::device::host_cols(tcols));
+        claims.am_key.push(qm(claimed));
+        let (lcols, use_sum) =
+            crate::argmax::logup(r, plan.p.head_argmax_lax,
+                                 rels.range(crate::argmax::KEY_BITS));
+        inter_all.extend(crate::device::host_cols(lcols));
+        claims.use_sums.push(qm(use_sum));
+    }
+    crate::util::m4_add("int/argmax", m4_t.elapsed().as_secs_f64());
     // an independent recomputation of every tie claim, from the region's witness
     // rather than from its trace: a tie is only worth something if it is checkable
     let glue_ties_ok = match (&plan.glue, &rels.glue) {
@@ -2264,6 +2403,9 @@ pub struct Verdict {
     /// stream E, one per dequant output tie: the region's own output claim equals
     /// the wiring family's claim over the same values
     pub deq_out_ok: Vec<bool>,
+    /// stream E: the argmax's key claim equals the head dequant's -- "the token
+    /// this row emits is the maximum of the logits *this layer computed*"
+    pub head_tie_ok: bool,
     /// the layer's committed residual-stream input and output claims
     pub stream_in: Option<[u32; 4]>,
     pub stream_out: Option<[u32; 4]>,
@@ -2277,12 +2419,13 @@ impl Verdict {
             && self.sizes_ok && self.qk_ok.iter().all(|x| *x) && self.den_ok.iter().all(|x| *x)
 
             && self.walk_ok.iter().all(|x| *x) && self.glue_ok.iter().all(|x| *x)
-            && self.deq_out_ok.iter().all(|x| *x)
+            && self.deq_out_ok.iter().all(|x| *x) && self.head_tie_ok
     }
     fn rejected(msg: &str) -> Self {
         Self { stark_ok: false, root_ok: false, sums_cancel: false, qk_ok: vec![],
                den_ok: vec![], av_ok: false, den_link_ok: false, walk_ok: vec![],
                sizes_ok: false, glue_ok: vec![false], deq_out_ok: vec![false],
+               head_tie_ok: false,
                stream_in: None, stream_out: None,
                error: Some(msg.to_string()), verify_secs: 0.0 }
     }
@@ -2445,7 +2588,17 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         None => vec![],
     };
 
+    // stream E: the argmax compared the head's own output.  Both claims are
+    // Horner sums over the same values with mirrored weights, so equality is the
+    // whole statement -- and it is checked from the parsed claims alone.
+    let head_tie_ok = if plan.p.head_argmax {
+        !claims.am_key.is_empty() && claims.am_key.first() == claims.head_key.first()
+    } else {
+        true
+    };
+
     Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
+              head_tie_ok,
               sizes_ok, glue_ok, stream_in, stream_out, error,
               verify_secs: t0.elapsed().as_secs_f64() }
 }

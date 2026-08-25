@@ -682,7 +682,7 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         table_sums: (0..(5 + plan.widths.len() + 16)).map(|_| felt()).collect(),
         // `Params::ties` reads these via `.get(..).unwrap_or(zero)`, so the
         // placeholder claims can stay empty without changing the IR's shape.
-        glue_ties: vec![], deq_out: vec![], head_key: vec![],
+        glue_ties: vec![], deq_out: vec![], head_key: vec![], am_key: vec![],
     }
 }
 

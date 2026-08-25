@@ -125,6 +125,9 @@ pub struct Layer {
     /// an input: the proof derives its keys from the head's dequant output, and
     /// this is what says the two agree.
     pub head_keys: Option<Vec<u16>>,
+    /// stream E: `tok_head.i32`, the token each row emits.  The argmax region's
+    /// own input when it is composed; `None` unless the dump has a head.
+    pub head_tok: Option<Vec<u32>>,
 }
 
 pub struct GlueCols {
@@ -498,6 +501,10 @@ impl Layer {
             read_u16(&format!("{dir}/key_head.u16")).ok().filter(|k| k.len() >= want)
                 .map(|k| k[..want].to_vec())
         });
+        let head_tok = head_keys.as_ref().and(
+            read_i32(&format!("{dir}/tok_head.i32")).ok()
+                .filter(|v| v.len() >= s)
+                .map(|v| v[..s].iter().map(|x| *x as u32).collect()));
         Ok(Self {
             bands,
             band_sizes: band_sizes.to_vec(),
@@ -507,6 +514,7 @@ impl Layer {
             source: format!("B6.5 layer witness [{dir}]"),
             glue,
             head_keys,
+            head_tok,
         })
     }
 
@@ -663,7 +671,7 @@ impl Layer {
         Self { bands, band_sizes: band_sizes_all, head_offsets, mats,
                ao: AttnOut { nh, s, hd, acc, den, jo, jv },
                source: format!("synthetic layer (seed={seed})"), glue: None,
-               head_keys: None }
+               head_keys: None, head_tok: None }
     }
 }
 
