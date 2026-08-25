@@ -869,6 +869,11 @@ fn compose_probes_cmd(args: &[String]) {
     {
         let gplan = compose::Plan::new(&params);
         if let Some(g) = gplan.glue.as_ref() {
+            // `Tamper::Stream` counts leaves across every group of the row and
+            // fires only inside group 0, so the index has to be derived from the
+            // layout rather than picked: a tail row is `[nreal x, 1 r, nreal w]`
+            // and anything at or past `nreal` corrupts nothing at all.
+            let in0 = g.t.nreal / 2;
             for (k, i) in g.tails.iter().copied().enumerate() {
                 let n = k + 1;
                 // the tie is the whole point of the tail: its copy of the
@@ -876,7 +881,7 @@ fn compose_probes_cmd(args: &[String]) {
                 // so only `nt.In(0) == gn.In(0)` can catch it
                 assert!(!probe(&format!("tail nt{n}: its own copy of the stream"), &l,
                                &compose::ProverTamper {
-                                   glue: Some((i, glue::Tamper::Stream(211))),
+                                   glue: Some((i, glue::Tamper::Stream(in0))),
                                    ..Default::default() },
                                &format!("the tie nt{n}.in == gn{n}.in")),
                         "a tail reading a different stream accepted");
