@@ -471,3 +471,59 @@ pub fn cmd(args: &[String]) {
         }),
     );
 }
+
+/// Stream I (open item 3 of this stream's record): the chain check run along a
+/// whole sequence rather than on one pair.
+///
+/// `--dir` holds one `<tag>.fixed.json` and one `<tag>.proof.json` per chunk,
+/// written by `compose --ser-dir`; `--tags` names them in sequence order. Every
+/// consecutive pair is checked, and the command reports how many links were run
+/// and how many held. Nothing here touches a witness or a prover: it is the
+/// verifier-side question, over bytes that were on disk before it started.
+///
+/// The two ends of the chain are not links and are not checked here -- the first
+/// chunk's input and the last chunk's output are declared inputs under the v1
+/// ground rule, so a sequence of `n` chunks has `n - 1` links.
+pub fn chain_cmd(args: &[String]) {
+    let dir = crate::arg_str(args, "--dir").expect("bounds-chain needs --dir <serialized dir>");
+    let tags = crate::arg_str(args, "--tags")
+        .expect("bounds-chain needs --tags <t0,t1,...> in sequence order");
+    let tags: Vec<String> = tags.split(',').map(|t| t.trim().to_string()).collect();
+    assert!(tags.len() >= 2, "a chain wants at least two chunks");
+
+    let read = |tag: &str, what: &str| -> Vec<u8> {
+        let path = format!("{dir}/{tag}.{what}.json");
+        std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
+    };
+
+    let mut links = vec![];
+    let mut passed = 0usize;
+    for w in tags.windows(2) {
+        let (a, b) = (&w[0], &w[1]);
+        let v = chain_check(&read(a, "fixed"), &read(a, "proof"),
+                            &read(b, "fixed"), &read(b, "proof"));
+        let ok = v.chains();
+        if ok {
+            passed += 1;
+        }
+        eprintln!("chain {a} -> {b}: {}", if ok { "ok" } else { "FAILED" });
+        links.push(json!({
+            "from": a,
+            "to": b,
+            "chains": ok,
+            "verdict": serde_json::to_value(&v).unwrap(),
+        }));
+    }
+    let n = links.len();
+    crate::util::emit(
+        "bounds-chain",
+        json!({
+            "dir": dir,
+            "chunks": tags,
+            "links_run": n,
+            "links_passed": passed,
+            "all_chain": passed == n,
+            "links": links,
+        }),
+    );
+}

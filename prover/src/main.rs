@@ -624,10 +624,25 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
 
 /// Run the whole serialized round trip: prove, write the statement and the
 /// proof as bytes, verify from the bytes alone.
-fn compose_once(l: &layer::Layer, params: &compose::Params, tamper: &compose::ProverTamper)
-                -> (serde_json::Value, bool) {
+///
+/// Stream I: `ser_to` is the sequence assembly's hook. The chain check that
+/// joins two chunks reads four byte strings off disk and nothing else, so a
+/// chunk that is going to be chained has to leave its statement and its proof
+/// behind as files. Passing `None` is the old behaviour exactly -- the bytes
+/// are still built, still verified from, and then dropped.
+fn compose_once(l: &layer::Layer, params: &compose::Params, tamper: &compose::ProverTamper,
+                ser_to: Option<(&str, &str)>) -> (serde_json::Value, bool) {
     let out = compose::prove_layer(l, params, tamper);
     let ser = compose_ser(&out);
+    if let Some((dir, tag)) = ser_to {
+        std::fs::create_dir_all(dir).expect("the serialization directory");
+        std::fs::write(format!("{dir}/{tag}.fixed.json"), &ser.fixed_bytes)
+            .expect("writing the statement");
+        if let Some(b) = &ser.proof_bytes {
+            std::fs::write(format!("{dir}/{tag}.proof.json"), b).expect("writing the proof");
+        }
+        eprintln!("compose: statement and proof written to {dir}/{tag}.{{fixed,proof}}.json");
+    }
     compose_finish(out, ser, params)
 }
 
@@ -738,7 +753,12 @@ fn compose_cmd(args: &[String]) {
     let params = params_of(&l, args, &vname);
     eprintln!("compose: {} bands={:?} variant={} kmax={} rem={} p={}",
               l.source, l.band_sizes, vname, params.kmax, params.ao_rem_bits, params.walk_p);
-    let (j, accepts) = compose_once(&l, &params, &tamper);
+    // Stream I: `--ser-dir DIR [--ser-tag TAG]` leaves this chunk's statement and
+    // proof on disk under that tag, which is what `bounds-chain` reads back.
+    let ser_dir = arg_str(args, "--ser-dir");
+    let ser_tag = arg_str(args, "--ser-tag").unwrap_or_else(|| "chunk".into());
+    let (j, accepts) = compose_once(&l, &params, &tamper,
+                                    ser_dir.as_deref().map(|d| (d, ser_tag.as_str())));
     assert!(accepts, "honest composed proof rejected: {j}");
     if tamper.norm_row.is_none() {
         assert_eq!(j["ref_mismatch"], 0,
@@ -761,7 +781,7 @@ fn oversize_probes_cmd(args: &[String]) {
         let params = params_of(l, args, &vname);
         let off: usize = l.bands.iter().map(|b| b.off_table).sum();
         eprintln!("oversize probe {name}: table 2^{} off_table {off}", params.log_table);
-        let (j, accepts) = compose_once(l, &params, &Default::default());
+        let (j, accepts) = compose_once(l, &params, &Default::default(), None);
         points.push(json!({
             "arm": name, "log_table": params.log_table,
             "table_rows": 1usize << params.log_table,
@@ -797,7 +817,7 @@ fn psweep_cmd(args: &[String]) {
         let mut params = params_of(&l, args, &vname);
         params.walk_p = p;
         eprintln!("psweep p={p}");
-        let (mut j, accepts) = compose_once(&l, &params, &Default::default());
+        let (mut j, accepts) = compose_once(&l, &params, &Default::default(), None);
         assert!(accepts, "honest composed proof rejected at p={p}");
         j["p"] = json!(p);
         points.push(j);
@@ -808,7 +828,7 @@ fn psweep_cmd(args: &[String]) {
 fn compose_probes_cmd(args: &[String]) {
     let (l, vname) = layer_of(args);
     let params = params_of(&l, args, &vname);
-    let (hj, ok) = compose_once(&l, &params, &Default::default());
+    let (hj, ok) = compose_once(&l, &params, &Default::default(), None);
     assert!(ok, "honest composed proof rejected");
     let honest_root = hj["pre_root"].as_str().unwrap().to_string();
     let mut out = vec![json!({"probe": "honest", "result": hj.clone()})];
@@ -1363,7 +1383,7 @@ fn selftest(args: &[String]) {
     // the composed proof, synthetic, through the serialized statement
     let (lc, vname) = layer_of(&["--table-bits".into(), "0".into()]);
     let pc = params_of(&lc, args, &vname);
-    let (cj, ok) = compose_once(&lc, &pc, &Default::default());
+    let (cj, ok) = compose_once(&lc, &pc, &Default::default(), None);
     assert!(ok, "composed selftest rejected: {cj}");
     emit("selftest", json!({"dequant": runs, "attention": packed, "tables": tbl,
                             "requant": rq, "compose": cj}));
@@ -1397,13 +1417,14 @@ fn main() {
         "argmax-probes" => argmax_probes_cmd(&args),
         "glue" => glue_cmd(&args),
         "bounds" => bounds::cmd(&args),
+        "bounds-chain" => bounds::chain_cmd(&args),
         "glue-probes" => glue_probes_cmd(&args),
         "selftest" => selftest(&args),
         other => {
             eprintln!("unknown subcommand {other:?}; \
                        expected tables|dequant|width|kmax|probes|pack|attn-probes|exprprobe|cudacheck|cudaemit|logupcheck|genemit|\
                        argmax|argmax-probes|\
-                       compose|compose-probes|psweep|requant|requant-probes|glue|glue-probes|selftest");
+                       compose|compose-probes|bounds-chain|psweep|requant|requant-probes|glue|glue-probes|selftest");
             std::process::exit(2);
         }
     }
