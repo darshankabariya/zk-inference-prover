@@ -822,6 +822,9 @@ pub struct Tables {
     pub m_qnz: Vec<u32>,
     pub m_r: Vec<Vec<u32>>,
     pub off_table: usize,
+    /// B9: which table lost a row, how many, and the range of the values that
+    /// did -- `off_table` alone cannot tell the two failure modes apart
+    pub off_kinds: std::collections::BTreeMap<String, (usize, i64, i64)>,
 }
 
 impl Tables {
@@ -848,6 +851,7 @@ impl Tables {
             log_exp, exp, kmax, round, norm, log_norm, frac, log_frac, mul, log_mul,
             q_bits, widths,
             off_table: 0,
+            off_kinds: Default::default(),
         }
     }
     pub fn ridx(&self, bits: u32) -> usize {
@@ -856,6 +860,29 @@ impl Tables {
     pub fn bump_r(&mut self, bits: u32, v: i64) {
         let t = self.ridx(bits);
         bump(&mut self.m_r[t], v, &mut self.off_table);
+    }
+    pub fn note_off(&mut self, kind: &str, v: i64, n: usize) {
+        let e = self.off_kinds.entry(kind.to_string()).or_insert((0, i64::MAX, i64::MIN));
+        e.0 += n;
+        e.1 = e.1.min(v);
+        e.2 = e.2.max(v);
+    }
+    /// `bump_r` with attribution
+    pub fn bump_rk(&mut self, bits: u32, v: i64, kind: &str) {
+        let t = self.ridx(bits);
+        let before = self.off_table;
+        bump(&mut self.m_r[t], v, &mut self.off_table);
+        if self.off_table != before {
+            self.note_off(kind, v, 1);
+        }
+    }
+    /// the (q, nz) pair table, with attribution
+    pub fn bump_qnzk(&mut self, v: i64, kind: &str) {
+        let before = self.off_table;
+        bump(&mut self.m_qnz, v, &mut self.off_table);
+        if self.off_table != before {
+            self.note_off(kind, v, 1);
+        }
     }
     /// O(1) index into the normalisation table (the rows are generated in a
     /// fixed order; a linear scan here was most of B6.5's first trace-gen time).
@@ -1122,6 +1149,7 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables) -> MatRegion {
                 tables.m_r[t][*v as usize] += n;
             } else {
                 tables.off_table += *n as usize;
+                tables.note_off("deq_eo", *v, *n as usize);
             }
         }
         ref_bad += b.ref_bad;
@@ -1418,19 +1446,47 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
     crate::util::m4_add("int/deq_inner", m4_t.elapsed().as_secs_f64());
     let m4_t = std::time::Instant::now();
     let (mut z, mut h) = (vec![SecureField::zero(); rows], vec![SecureField::zero(); rows]);
-    for j in 0..rows {
-        let nofirst = matches!(lay.at_opt(m.tokens, j), Some((_, b)) if b + 1 < lay.chunks);
-        let last = matches!(lay.at_opt(m.tokens, j), Some((_, 0)));
-        z[j] = if nofirst { z[j - 1] * rv_step } else { SecureField::zero() } + inner[j];
-        h[j] = if j == 0 {
-            SecureField::zero()
-        } else if last {
-            h[j - 1] * s_ch
-        } else {
-            h[j - 1]
-        };
-        if last {
-            h[j] += z[j];
+    // B7a milestone 4 (18.4): the two accumulators, each with its own
+    // dependency structure honoured rather than one serial pass over both.
+    // The lead prefix keeps this exact: `inner` is zero on every lead row, so
+    // the scan's extra `s_ch` steps there multiply zero — but only when the
+    // lead is chunk-aligned, so the guard falls back to the serial loop if not.
+    if crate::util::m4_switch("B7_M4_SCAN") && lay.chunks > 0 && rows % lay.chunks == 0
+        && lay.lead % lay.chunks == 0 {
+        z.par_chunks_mut(lay.chunks).enumerate().for_each(|(c, zc)| {
+            let base = c * lay.chunks;
+            let mut run = SecureField::zero();
+            for (k, zk) in zc.iter_mut().enumerate() {
+                run = if k > 0 { run * rv_step } else { SecureField::zero() } + inner[base + k];
+                *zk = run;
+            }
+        });
+        let n_last = rows / lay.chunks;  // B7a m4g: `rows` is 0 on the device route
+        let mut hh = vec![SecureField::zero(); n_last];
+        let mut run = SecureField::zero();
+        for (m, hm) in hh.iter_mut().enumerate() {
+            run = run * s_ch + z[(m + 1) * lay.chunks - 1];
+            *hm = run;
+        }
+        h.par_iter_mut().enumerate().for_each(|(j, hj)| {
+            let m = (j + 1) / lay.chunks;
+            *hj = if m == 0 { SecureField::zero() } else { hh[m - 1] };
+        });
+    } else {
+        for j in 0..rows {
+            let nofirst = matches!(lay.at_opt(m.tokens, j), Some((_, b)) if b + 1 < lay.chunks);
+            let last = matches!(lay.at_opt(m.tokens, j), Some((_, 0)));
+            z[j] = if nofirst { z[j - 1] * rv_step } else { SecureField::zero() } + inner[j];
+            h[j] = if j == 0 {
+                SecureField::zero()
+            } else if last {
+                h[j - 1] * s_ch
+            } else {
+                h[j - 1]
+            };
+            if last {
+                h[j] += z[j];
+            }
         }
     }
     crate::util::m4_add("int/deq_carry", m4_t.elapsed().as_secs_f64());
@@ -1707,9 +1763,9 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                 for s in 0..pr {
                     cols[1 + 6 * s + 4][j] = M31::one();     // denp = den * pj = 1
                     cols[1 + 6 * s + 5][j] = M31::one();     // d = denp
-                    bump(&mut tables.m_qnz, 0, &mut tables.off_table);
-                    tables.bump_r(rem_bits, 1);              // d
-                    tables.bump_r(rem_bits, 0);              // dp = 2*1 - 1 - 1
+                    tables.bump_qnzk(0, "ao_qnz_lead");
+                    tables.bump_rk(rem_bits, 1, "ao_rem_lead");    // d
+                    tables.bump_rk(rem_bits, 0, "ao_rem_lead");    // dp = 2*1 - 1 - 1
                 }
             }
             Some((h, t, b)) => {
@@ -1744,9 +1800,9 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                     cols[c0 + 3][j] = m31_of(i64::from(qm != 0));
                     cols[c0 + 4][j] = m31_of(denp);
                     cols[c0 + 5][j] = m31_of(d);
-                    bump(&mut tables.m_qnz, qm, &mut tables.off_table);
-                    tables.bump_r(rem_bits, d);
-                    tables.bump_r(rem_bits, 2 * denp - 1 - d);
+                    tables.bump_qnzk(qm, "ao_qnz");
+                    tables.bump_rk(rem_bits, d, "ao_rem_d");
+                    tables.bump_rk(rem_bits, 2 * denp - 1 - d, "ao_rem_dp");
                     q_out[idx] = if a < 0 { -qm } else { qm };
                     // the reference: one f64 rounding, half away from zero
                     let want = ((mag as f64 * (e as f64).exp2()) / den as f64 + 0.5).floor()

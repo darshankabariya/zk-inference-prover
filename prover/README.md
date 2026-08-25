@@ -106,9 +106,13 @@ for any shape against the vendored fork, so constraint evaluation takes the
 fork's scalar CPU fallback and `B7_M4_TABDEV`'s device route for the shared
 tables would abort on the stand-in dispatcher. `B7_M4_PRE` requires
 `B7_M4_TABDEV` (the shared tables are one list — the guard in `prove_layer`
-says so loudly), so before an emit-install the device switches that can run
-are `FILL`, `WFILL` and `ACC`. Emitting for the current shapes (including
-the three new families) is stream B's session.
+says so loudly), and before an emit-install the only mode-1 device switch
+that runs is `ACC`: `FILL` and `WFILL` panic in `devfrac.rs` asking for
+generation kernels the emit has not produced (probed one at a time on the
+H200, `briefs/a-h200.md` 2026-08-25 — their mode-2 check paths run, because
+mode 2 builds the host side and never asks `devfrac` for a kernel). Emitting
+for the current shapes (including the three new families) is stream B's
+session.
 
 One design decision to keep: **corner bands decline every device path** —
 the fill (`!a.corner` threads through `commit_base_any` as `with_rows`), the

@@ -277,6 +277,12 @@ pub fn pre_tables(a: &Attn, widths: &[u32]) -> Vec<Eval> {
     pre
 }
 
+pub static EXP_OFF_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static EXP_OFF_MIN: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MAX);
+pub static EXP_OFF_MAX: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MIN);
+pub static EXP_KEY_MAX: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+pub static EXP_ROWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn bump_slice(m: &mut [u32], v: i64, off: &mut usize) {
     if v >= 0 && (v as usize) < m.len() {
         m[v as usize] += 1;
@@ -370,7 +376,17 @@ pub fn commit_base(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
             // multiplicity zero -- so it bumps nothing and cannot be off-table.
             let g = grid_at(j, i);
             if g.is_none_or(|g| a.visible(g)) {
-                bump_slice(mult_exp, g.map(|g| a.table_key(g)).unwrap_or(0), off_table);
+                let key = g.map(|g| a.table_key(g)).unwrap_or(0);
+                use std::sync::atomic::Ordering::Relaxed;
+                EXP_KEY_MAX.fetch_max(key, Relaxed);
+                EXP_ROWS.store(mult_exp.len(), Relaxed);
+                let before = *off_table;
+                bump_slice(mult_exp, key, off_table);
+                if *off_table != before {
+                    EXP_OFF_N.fetch_add(1, Relaxed);
+                    EXP_OFF_MIN.fetch_min(key, Relaxed);
+                    EXP_OFF_MAX.fetch_max(key, Relaxed);
+                }
             }
             *slot = m31_of(grid_at(j, i).map(|g| a.col_idx(g)).unwrap_or(0));
         }

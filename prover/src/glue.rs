@@ -539,7 +539,9 @@ pub struct GlueEval {
 
 impl FrameworkEval for GlueEval {
     /// milestone 2b: the flat parameter block for the generated
-    /// constraint kernel (`gpu/m2b/cudagen.rs`).
+    /// constraint kernel (`gpu/m2b/cudagen.rs`); `None` when this
+    /// component's fingerprint has no kernel, which is the fork's
+    /// scalar CPU route.
     fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
         crate::cudagen::blob_for(self)
     }
@@ -1563,7 +1565,9 @@ pub struct GTableEval {
 
 impl FrameworkEval for GTableEval {
     /// milestone 2b: the flat parameter block for the generated
-    /// constraint kernel (`gpu/m2b/cudagen.rs`).
+    /// constraint kernel (`gpu/m2b/cudagen.rs`); `None` when this
+    /// component's fingerprint has no kernel, which is the fork's
+    /// scalar CPU route.
     fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
         crate::cudagen::blob_for(self)
     }

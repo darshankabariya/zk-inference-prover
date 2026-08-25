@@ -1022,9 +1022,10 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         // B7a milestone 4 (section 3 row 1): 48 columns of ACTIVE / NOFIRST /
         // LAST / ISTART, which `b65_acc.cu` has computed since 24.1 -- at the
         // wrong time. Mode 1 never builds them here; 2 builds them and asserts
-        // every cell against the kernel's below. A corner band declines the
-        // device fill altogether (the m4d decision), so its columns -- the
-        // causal masks among them -- are always built here.
+        // every cell against the kernel's below.  A corner band always builds
+        // and keeps its `pre`: the interaction phase reads the causal-mask
+        // columns back (the exp lookup's multiplicity is `1 - msk`), and its
+        // fill is host-side, so devpre never owns its selectors.
         let pre = if crate::devpre::mode() == 1 && !a.corner {
             vec![]
         } else {
@@ -1035,10 +1036,6 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                                         &mut mult_r, &mut tables.off_table, false,
                                         !a.corner);
         band_dev.push(dev);
-        // Every band keeps its committed columns: the flat tree lists are
-        // assembled from references once generation is done, so the region has
-        // to own them. The corner band also reads its causal-mask columns back
-        // in its interaction phase (the exp lookup's multiplicity is `1 - msk`).
         band_committed.push(Committed { pre, base, at, off_table: 0 });
     }
     tables.m_exp = mult_exp;
@@ -1061,15 +1058,15 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         .iter()
         .enumerate()
         .map(|(b, a)| {
-            (pre_mode >= 1 || band_dev[b].is_some())
+            (!a.corner && (pre_mode >= 1 || band_dev[b].is_some()))
                 .then(|| crate::devpre::band_dev(a, &plan.lays[b], pre_mode >= 1))
         })
         .collect();
     if pre_mode == 2 {
         for (b, d) in band_pre.iter().enumerate() {
+            let Some(d) = d.as_ref() else { continue };
             let h: Vec<&Eval> = band_committed[b].pre.iter().collect();
-            crate::devpre::check_run(&format!("band{b} selectors"), &h,
-                                     &d.as_ref().unwrap().cols);
+            crate::devpre::check_run(&format!("band{b} selectors"), &h, &d.cols);
         }
     }
     crate::util::m4_add("gen/pre_bands", m4_t.elapsed().as_secs_f64());
@@ -1098,7 +1095,9 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         let r = walk_region(layer, &w.name, &w.mats, p.walk_p, &mut tables, None);
         walk_regions.push(r);
     }
+    crate::util::m4_add("gen/walks", m4_t.elapsed().as_secs_f64());
 
+    let m4_t = std::time::Instant::now();
     // ---- B10 step 2: the wiring family -------------------------------------
     // The glue's `NORM`/`FRAC` uses are *moved into* the layer's own multiplicity
     // vectors and moved back, so the two families' lookups land in one column
@@ -1166,7 +1165,9 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                              glue_regions.iter().map(|r| r.bad_exp).sum::<usize>()});
         gtables = Some(gt);
     }
+    crate::util::m4_add("gen/glue", m4_t.elapsed().as_secs_f64());
 
+    let m4_t = std::time::Instant::now();
     // ---- shared tables (tree 0 tail) and their multiplicities (tree 1 tail) --
     // The glue's shared tables, built once and owned here: the tree assembly
     // below references them last (the order the by-value fill used), and the
@@ -1336,7 +1337,13 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         pre_counters[3].push(&d.m_qnz);
         pre_counters[ri(p.ao_rem_bits)].push(&d.m_rem);
         for (b, a) in layer.bands.iter().enumerate() {
-            let d = band_dev[b].as_ref().expect("B7_M4_WFILL=1 but a band is host-built");
+            // A corner band is host-built (the static fill kernels do not know
+            // its layout), so its bumps sit in the host multiplicity arrays and
+            // reach the table through the patch rows -- no device counter to sum.
+            let Some(d) = band_dev[b].as_ref() else {
+                assert!(a.corner, "B7_M4_WFILL=1 but a non-corner band is host-built");
+                continue;
+            };
             if plan.cfg.range_check {
                 pre_counters[ri(a.k_bits)].push(&d.m_k);
                 pre_counters[ri(a.q_bits)].push(&d.m_q);
@@ -1588,20 +1595,28 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let mut inter_all: Vec<crate::device::AnyCol<'static>> = vec![];
     let mut claims = Claims::default();
     let m4_t = std::time::Instant::now();
+    let mut row_i = 0usize;
     for (b, a) in layer.bands.iter().enumerate() {
         let l = &plan.lays[b];
         let pow = plan.powers(b, r, s, rv, r_corner);
-        let air = crate::devfrac::BandAir {
-            tag: b,
-            chan: &m4e_air.chans[b].eval,
-            key: &m4e_air.keys[b].eval,
-            row: &m4e_air.rows[b].eval,
-            dev: band_dev[b].as_ref(),
-            pre: band_pre[b].as_ref(),
-        };
+        // `build_components` gives a corner band no row component, and a corner
+        // band's fractions never take the device route -- so it gets no BandAir,
+        // and the row index counts prefix bands only.
+        let air = (!a.corner).then(|| {
+            let ri = row_i;
+            row_i += 1;
+            crate::devfrac::BandAir {
+                tag: b,
+                chan: &m4e_air.chans[b].eval,
+                key: &m4e_air.keys[b].eval,
+                row: &m4e_air.rows[ri].eval,
+                dev: band_dev[b].as_ref(),
+                pre: band_pre[b].as_ref(),
+            }
+        });
         let it = attn_trace::interaction_phase(a, l, &plan.cfg, &pow, &rels.exp, &rels.ranges,
                                                &band_committed[b], &plan.widths, false,
-                                               !a.corner, Some(&air));
+                                               !a.corner, air.as_ref());
         inter_all.extend(it.cols);
         claims.bands.push([qm(it.claimed_chan), qm(it.claimed_hs), qm(it.claimed_av),
                            qm(it.claimed_sn), qm(it.claimed_am), qm(it.claimed_az)]);
@@ -1630,6 +1645,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         claims.walk_acc.push(it.claimed.iter().map(|v| qm(*v)).collect());
         claims.use_sums.push(qm(it.use_sum));
     }
+    crate::util::m4_add("int/walks", m4_t.elapsed().as_secs_f64());
+    let m4_t = std::time::Instant::now();
     // the glue regions' ties and lookups, in component order
     if let (Some(gp), Some(gr)) = (&plan.glue, &rels.glue) {
         let blank = Claims::default();
@@ -1641,6 +1658,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             claims.use_sums.push(qm(it.use_sum));
         }
     }
+    crate::util::m4_add("int/glue", m4_t.elapsed().as_secs_f64());
+
+    let m4_t = std::time::Instant::now();
     // the tables' own sides, in table order
     {
         // The two table families go the same route as the other six: their
@@ -1724,6 +1744,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             }
         }
     }
+    crate::util::m4_add("int/tables", m4_t.elapsed().as_secs_f64());
     // an independent recomputation of every tie claim, from the region's witness
     // rather than from its trace: a tie is only worth something if it is checkable
     let glue_ties_ok = match (&plan.glue, &rels.glue) {
@@ -1735,7 +1756,6 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
         _ => true,
     };
-    crate::util::m4_add("int/tables", m4_t.elapsed().as_secs_f64());
     let interaction_secs = t1.elapsed().as_secs_f64();
     let n_inter = inter_all.len();
     let clamp_edge = aor.q_out.iter().filter(|q| q.unsigned_abs() == 127).count();
@@ -1785,7 +1805,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     sess.mix(&claims.flat());
 
     // ---- components, prove ----------------------------------------------------
+    let m4_t = std::time::Instant::now();
     let built = build_components(&plan, &rels, r, s, rv, r_corner, w_glue, lam_glue, &claims);
+    crate::util::m4_add("wall/build_components", m4_t.elapsed().as_secs_f64());
     let sizes: Vec<Vec<u32>> = sess
         .ops
         .iter()
@@ -1828,7 +1850,19 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         trace_secs,
         interaction_secs,
         ref_bad: mat_regions.iter().map(|r| r.ref_bad).sum::<usize>() + aor.ref_bad,
-        off_table: tables.off_table,
+        off_table: {
+            if tables.off_table > 0 {
+                use std::sync::atomic::Ordering::Relaxed;
+                eprintln!("off_table {} by table: {:?}", tables.off_table, tables.off_kinds);
+                eprintln!("exp table: {} rows, max key {}, off {} in [{}, {}]",
+                          crate::attn_trace::EXP_ROWS.load(Relaxed),
+                          crate::attn_trace::EXP_KEY_MAX.load(Relaxed),
+                          crate::attn_trace::EXP_OFF_N.load(Relaxed),
+                          crate::attn_trace::EXP_OFF_MIN.load(Relaxed),
+                          crate::attn_trace::EXP_OFF_MAX.load(Relaxed));
+            }
+            tables.off_table
+        },
         family_cells,
         n_columns,
         glue_ties_ok,

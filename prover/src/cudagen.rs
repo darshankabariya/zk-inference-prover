@@ -1300,7 +1300,8 @@ pub fn cmd(args: &[String]) {
 
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_2B02);
-    let rels = crate::compose::Rels::draw(&mut ch, &plan.widths, None);
+    let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
+                                          plan.glue.as_ref().map(|g| g.uns.len()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b02);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
@@ -1319,6 +1320,8 @@ pub fn cmd(args: &[String]) {
         for i in 0..b.chans.len() {
             go!(format!("chan_band{i}"), &b.chans[i]);
             go!(format!("key_band{i}"), &b.keys[i]);
+        }
+        for i in 0..b.rows.len() {
             go!(format!("row_band{i}"), &b.rows[i]);
         }
         go!("attnout".to_string(), &b.ao);
@@ -1907,16 +1910,27 @@ fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
         || lower(eval, SecureField::zero(), eval.log_size(), eval.max_constraint_log_degree_bound()),
     );
     let fp = ir.fingerprint();
-    let shape = crate::cudakernels::shape_of(name, fp).unwrap_or_else(|| {
-        panic!(
+    let shape = match crate::cudakernels::shape_of(name, fp) {
+        Some(s) => s,
+        // B10 step 5 (stream B): the glue and the corner-witness shapes lower
+        // to kernels ptxas cannot compile in reasonable time (52 min and
+        // counting on one), so `B7_KERNEL_FALLBACK=1` lets a component with no
+        // generated kernel run on the fork's scalar CPU fallback -- the same
+        // bytes, announced per component, never silent.
+        None if crate::util::m4_switch("B7_KERNEL_FALLBACK") => {
+            eprintln!("kernel fallback: {name} fingerprint {fp:#010x} \
+                       ({} instructions) evaluates on the CPU", ir.ops.len());
+            return None;
+        }
+        None => panic!(
             "no generated constraint kernel for {name} fingerprint {fp:#010x} \
              ({} instructions, {} constraints, {} scalars): regenerate with \
              `b65 cudaemit` and rebuild libstwo_cuda.a",
             ir.ops.len(),
             ir.constraints.len(),
             ir.scalars.len()
-        )
-    });
+        ),
+    };
     Some(ir.blob(shape))
 }
 
@@ -1938,7 +1952,8 @@ pub fn emit_cmd(args: &[String]) {
 
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_2B03);
-    let rels = crate::compose::Rels::draw(&mut ch, &plan.widths, None);
+    let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
+                                          plan.glue.as_ref().map(|g| g.uns.len()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b03);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
@@ -2009,11 +2024,21 @@ pub fn emit_cmd(args: &[String]) {
         for i in 0..b.chans.len() {
             go!(b.chans[i], format!("chan_band{i}"));
             go!(b.keys[i], format!("key_band{i}"));
+        }
+        // a corner band has no row component (B10 step 3): `rows` is shorter
+        // than `chans`, so it is walked on its own
+        for i in 0..b.rows.len() {
             go!(b.rows[i], format!("row_band{i}"));
         }
         go!(b.ao, "attnout".to_string());
         for i in 0..b.mats.len() {
             go!(b.mats[i], format!("dequant{i}"));
+        }
+        for i in 0..b.glue.len() {
+            go!(b.glue[i], format!("glue{i}"));
+        }
+        for i in 0..b.gtables.len() {
+            go!(b.gtables[i], format!("gtable{i}"));
         }
         for i in 0..b.walks.len() {
             go!(b.walks[i], format!("walk{i}"));
@@ -2291,7 +2316,8 @@ pub fn logup_cmd(args: &[String]) {
 
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_4B04);
-    let rels = crate::compose::Rels::draw(&mut ch, &plan.widths, None);
+    let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
+                                          plan.glue.as_ref().map(|g| g.uns.len()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b04);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
@@ -2305,6 +2331,8 @@ pub fn logup_cmd(args: &[String]) {
     for i in 0..b.chans.len() {
         go!(format!("chan_band{i}"), &b.chans[i]);
         go!(format!("key_band{i}"), &b.keys[i]);
+    }
+    for i in 0..b.rows.len() {
         go!(format!("row_band{i}"), &b.rows[i]);
     }
     go!("attnout".to_string(), &b.ao);
@@ -2530,7 +2558,8 @@ pub fn gen_emit_cmd(args: &[String]) {
 
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_4B05);
-    let rels = crate::compose::Rels::draw(&mut ch, &plan.widths, None);
+    let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
+                                          plan.glue.as_ref().map(|g| g.uns.len()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b05);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
@@ -2601,11 +2630,21 @@ pub fn gen_emit_cmd(args: &[String]) {
         for i in 0..b.chans.len() {
             go!(b.chans[i], format!("chan_band{i}"));
             go!(b.keys[i], format!("key_band{i}"));
+        }
+        // a corner band has no row component (B10 step 3): `rows` is shorter
+        // than `chans`, so it is walked on its own
+        for i in 0..b.rows.len() {
             go!(b.rows[i], format!("row_band{i}"));
         }
         go!(b.ao, "attnout".to_string());
         for i in 0..b.mats.len() {
             go!(b.mats[i], format!("dequant{i}"));
+        }
+        for i in 0..b.glue.len() {
+            go!(b.glue[i], format!("glue{i}"));
+        }
+        for i in 0..b.gtables.len() {
+            go!(b.gtables[i], format!("gtable{i}"));
         }
         for i in 0..b.walks.len() {
             go!(b.walks[i], format!("walk{i}"));
