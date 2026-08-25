@@ -682,7 +682,7 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         table_sums: (0..(5 + plan.widths.len() + 16)).map(|_| felt()).collect(),
         // `Params::ties` reads these via `.get(..).unwrap_or(zero)`, so the
         // placeholder claims can stay empty without changing the IR's shape.
-        glue_ties: vec![],
+        glue_ties: vec![], deq_out: vec![], head_key: vec![], am_key: vec![],
     }
 }
 
@@ -704,7 +704,7 @@ pub fn cmd(args: &[String]) {
         let mut ch = stwo::core::channel::Blake2sM31Channel::default();
         ch.mix_u64(0xB65_2B00 + u64::from(tag));
         let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                              plan.glue.as_ref().map(|g| g.uns.len()));
+                                              plan.glue.as_ref().map(|g| g.uns.as_slice()));
         let f = ch.draw_secure_felts(6);
         (rels, f)
     };

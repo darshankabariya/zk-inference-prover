@@ -1301,7 +1301,7 @@ pub fn cmd(args: &[String]) {
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_2B02);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                          plan.glue.as_ref().map(|g| g.uns.len()));
+                                          plan.glue.as_ref().map(|g| g.uns.as_slice()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b02);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
@@ -1953,7 +1953,7 @@ pub fn emit_cmd(args: &[String]) {
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_2B03);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                          plan.glue.as_ref().map(|g| g.uns.len()));
+                                          plan.glue.as_ref().map(|g| g.uns.as_slice()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b03);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
@@ -2317,7 +2317,7 @@ pub fn logup_cmd(args: &[String]) {
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_4B04);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                          plan.glue.as_ref().map(|g| g.uns.len()));
+                                          plan.glue.as_ref().map(|g| g.uns.as_slice()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b04);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
@@ -2559,7 +2559,7 @@ pub fn gen_emit_cmd(args: &[String]) {
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_4B05);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                          plan.glue.as_ref().map(|g| g.uns.len()));
+                                          plan.glue.as_ref().map(|g| g.uns.as_slice()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b05);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
