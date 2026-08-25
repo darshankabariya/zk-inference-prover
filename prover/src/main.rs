@@ -432,7 +432,22 @@ fn argmax_cmd(args: &[String]) {
     let ties: f64 = arg_scalar(args, "--ties", 0.25f64);
     let pr: usize = arg_scalar(args, "--per-row", 64usize);
     let seed: u64 = arg_scalar(args, "--seed", 7u64);
-    let w = argmax::AWitness::synthetic(tokens, vocab, ties, seed);
+    // `--witness DIR` proves the argmax on the head's own keys: `key_head.u16`
+    // and `tok_head.i32` out of an `extract.py --head` dump, with the shape read
+    // from that dump's manifest rather than from the flags.
+    let w = match arg_str(args, "--witness") {
+        Some(dir) => {
+            let man: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(format!("{dir}/manifest.json")).expect("manifest.json"))
+                .expect("manifest.json parses");
+            let tk = man["head"]["tokens"].as_u64().expect("manifest: head.tokens") as usize;
+            let vc = man["head"]["vocab"].as_u64().expect("manifest: head.vocab") as usize;
+            eprintln!("argmax on the dump's own keys: {tk} rows of {vc}");
+            argmax::AWitness::from_dump(&dir, tk, vc).expect("the head dump's argmax columns")
+        }
+        None => argmax::AWitness::synthetic(tokens, vocab, ties, seed),
+    };
+    let (tokens, vocab) = (w.tokens, w.vocab);
     let mut points = vec![];
     for lax in [false, true] {
         eprintln!("argmax {}x{} lax={lax}", tokens, vocab);
@@ -554,8 +569,21 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // wrote, and on nothing else -- a dump without those columns composes
         // exactly as it did before.  `--glue-a` is how many rows one token's
         // stream takes at the reduction's first level; it has to divide `d`.
+        // Stream E's two regions are opt-in: `--norm-tails` wires `h = (x r) w`
+        // and `--swiglu` the `silu(gate) * up` product.  Off, the composition is
+        // the pre-change one cell for cell, which is what the identity control
+        // checks.
         glue: l.glue.as_ref().filter(|_| !flag(args, "--no-glue")).map(|g| {
-            compose::GlueParams { d: g.d, a: arg_scalar(args, "--glue-a", 32usize) }
+            compose::GlueParams {
+                d: g.d,
+                a: arg_scalar(args, "--glue-a", 32usize),
+                // carried only when the region that needs it is on, so that
+                // with both flags off the serialized statement is not merely
+                // equivalent to the pre-change crate's but identical to it
+                dff: if flag(args, "--swiglu") { g.dff } else { 0 },
+                tails: flag(args, "--norm-tails"),
+                swiglu: flag(args, "--swiglu"),
+            }
         }),
     }
 }
@@ -835,6 +863,47 @@ fn compose_probes_cmd(args: &[String]) {
                 "an illegal glue leaf accepted");
     }
 
+    // 12-15. stream E's regions, on whichever of them this invocation built.
+    //    The indices come from the plan rather than being counted by hand, so a
+    //    later region cannot silently shift what these probes point at.
+    {
+        let gplan = compose::Plan::new(&params);
+        if let Some(g) = gplan.glue.as_ref() {
+            for (k, i) in g.tails.iter().copied().enumerate() {
+                let n = k + 1;
+                // the tie is the whole point of the tail: its copy of the
+                // stream is changed and the region stays internally consistent,
+                // so only `nt.In(0) == gn.In(0)` can catch it
+                assert!(!probe(&format!("tail nt{n}: its own copy of the stream"), &l,
+                               &compose::ProverTamper {
+                                   glue: Some((i, glue::Tamper::Stream(211))),
+                                   ..Default::default() },
+                               &format!("the tie nt{n}.in == gn{n}.in")),
+                        "a tail reading a different stream accepted");
+                assert!(!probe(&format!("tail nt{n}: one multiply's result"), &l,
+                               &compose::ProverTamper {
+                                   glue: Some((i, glue::Tamper::Result(97))),
+                                   ..Default::default() },
+                               "the multiply's output constraint"),
+                        "a corrupted tail result accepted");
+            }
+            if let Some(i) = g.swiglu {
+                assert!(!probe("swiglu: the product, one step up", &l,
+                               &compose::ProverTamper {
+                                   glue: Some((i, glue::Tamper::Result(4097))),
+                                   ..Default::default() },
+                               "the multiply's output constraint"),
+                        "a corrupted swiglu product accepted");
+                assert!(!probe("swiglu: a leaf that is not a bf16 value", &l,
+                               &compose::ProverTamper {
+                                   glue: Some((i, glue::Tamper::NotBf16(1234))),
+                                   ..Default::default() },
+                               "the UN / VAL lookup"),
+                        "an illegal swiglu leaf accepted");
+            }
+        }
+    }
+
     // 8. a tampered claim in the serialized statement: the replayed transcript
     //    diverges and stwo's verify rejects
     {
@@ -872,7 +941,11 @@ fn layer_clone(l: &layer::Layer) -> layer::Layer {
             d: g.d, dff: g.dff, tokens: g.tokens,
             xin: g.xin.clone(), o_out: g.o_out.clone(), xmid: g.xmid.clone(),
             d_out: g.d_out.clone(), xout: g.xout.clone(),
+            r1: g.r1.clone(), r2: g.r2.clone(),
             w1: g.w1.clone(), w2: g.w2.clone(),
+            h1: g.h1.clone(), h2: g.h2.clone(),
+            silu_in: g.silu_in.clone(), silu_out: g.silu_out.clone(),
+            x_down: g.x_down.clone(),
             eps: g.eps, inv_d: g.inv_d, reduce: g.reduce.clone(),
         }),
         source: l.source.clone(),

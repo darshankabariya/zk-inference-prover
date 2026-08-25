@@ -59,7 +59,7 @@ use crate::layer::{
     AoLayout, Layer, MatLayout, Tables, WALK_GROUPS, WalkLayout, ao_interaction, ao_region,
     mat_interaction, mat_region, walk_interaction, walk_region,
 };
-use crate::glue::{self, GKind, GTableEval, GlueEval, GlueRels, GlueTables, Prog, Tie,
+use crate::glue::{self, GKind, GTableEval, GlueEval, GlueRels, GlueTables, Kind, Prog, Tie,
                   TieKind, TieSpec, Tiling, UnKind};
 use crate::layout::Shape;
 use crate::walk_air::{AO_SEL, AttnOutEval, WALK_SEL, WalkEval, ao_chan, ao_sel, walk_sel, walk_w};
@@ -84,20 +84,24 @@ pub struct Rels {
 }
 
 impl Rels {
-    pub fn draw(ch: &mut Blake2sM31Channel, widths: &[u32], n_un: Option<usize>) -> Self {
+    /// `uns` is the plan's unary-kind list: the relations are drawn one per
+    /// entry, in that order, and both sides index them by it.
+    pub fn draw(ch: &mut Blake2sM31Channel, widths: &[u32],
+                uns: Option<&[crate::glue::UnKind]>) -> Self {
         let exp = ExpRel::draw(ch);
         let norm = NormRel::draw(ch);
         let frac = FracRel::draw(ch);
         let mul = MulRel::draw(ch);
         let qnz = PairRel::draw(ch);
         let ranges: Vec<RangeRel> = widths.iter().map(|_| RangeRel::draw(ch)).collect();
-        let glue = n_un.map(|n| GlueRels {
+        let glue = uns.map(|ks| GlueRels {
             norm: norm.clone(),
             frac: frac.clone(),
             pow: crate::glue::PowRel::draw(ch),
             smul: crate::glue::SMulRel::draw(ch),
             val: crate::glue::ValRel::draw(ch),
-            un: (0..n).map(|_| crate::glue::UnRel::draw(ch)).collect(),
+            un: ks.iter().map(|_| crate::glue::UnRel::draw(ch)).collect(),
+            uns: ks.to_vec(),
         });
         Self { exp, norm, frac, mul, qnz, widths: widths.to_vec(), ranges, glue }
     }
@@ -160,6 +164,23 @@ pub struct Params {
 pub struct GlueParams {
     pub d: usize,
     pub a: usize,
+    /// The FFN width, for the SwiGLU's own tiling.  Zero on a dump whose
+    /// manifest predates it, which is what `swiglu` then refuses to run on.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dff: usize,
+    /// Stream E's two additive regions, off by default.  They are opt-in rather
+    /// than opt-out so that the pre-change proof is reproduced by the *default*
+    /// invocation -- the identity control is then the ordinary run, not a run
+    /// with a flag in it.  Both are skipped when false so the serialized
+    /// statement is byte-identical to the pre-change crate's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tails: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub swiglu: bool,
+}
+
+fn is_zero(v: &usize) -> bool {
+    *v == 0
 }
 
 /// The trusted half of the statement, produced at setup.
@@ -272,6 +293,8 @@ pub struct GlueRegionPlan {
 /// dequant regions into `o_out` and `d_out`.
 pub struct GluePlan {
     pub t: Tiling,
+    /// the SwiGLU's own tiling, over `dff` instead of `d`
+    pub tff: Option<Tiling>,
     pub regions: Vec<GlueRegionPlan>,
     /// `((region, tie), (region, tie))` the verifier compares
     pub eqs: Vec<((usize, usize), (usize, usize))>,
@@ -279,6 +302,10 @@ pub struct GluePlan {
     /// the layer's committed residual-stream input and output claims
     pub stream_in: (usize, usize),
     pub stream_out: (usize, usize),
+    /// stream E: the region index of each norm's tail, and of the SwiGLU, so the
+    /// accounting can name their cells apart from the reduction's
+    pub tails: Vec<usize>,
+    pub swiglu: Option<usize>,
 }
 
 impl GluePlan {
@@ -316,13 +343,75 @@ impl GluePlan {
                            (TieKind::Out(0), one.clone(), 1)],
             });
         }
+        let mut eqs = vec![((0, 1), (1, 0)), ((0, 2), (2, 0)), ((2, 1), (3, 0))];
+        let mut uns = l1.un_kinds();
+        // ---- stream E: the two norm tails ------------------------------------
+        //
+        // A tail's group 0 is the same block of the residual stream the
+        // reduction's own group 0 is, in the same order and under the same
+        // weights, so the tie `nt.In(0) == gn.In(0)` says the tail scaled the
+        // very values the reduction squared -- which is the half of "the norm
+        // computed its own output" a committed column cannot fake.  `Out(0)` is
+        // published for the requantize region that will read it.
+        let mut tails = vec![];
+        if gp.tails {
+            let tail = Prog::norm_tail(nreal);
+            for (gn, tag) in [(0usize, "nt1"), (2usize, "nt2")] {
+                let i = regions.len();
+                regions.push(GlueRegionPlan {
+                    tag: tag.into(),
+                    prog: tail.clone(),
+                    log_rows: lr1,
+                    ties: vec![(TieKind::In(0), stream.clone(), 1),
+                               (TieKind::Out(0), stream.clone(), 1)],
+                });
+                eqs.push(((i, 0), (gn, 0)));
+                tails.push(i);
+            }
+        }
+        // ---- stream E: the SwiGLU product -----------------------------------
+        //
+        // Over `dff`, so it carries its own tiling.  Its three claims have no
+        // counterparty inside the glue yet: group 0 is the gate matmul's
+        // dequantized output, group 1 is `up`'s, and the output is what `down`
+        // requantizes.  All three land when the dequant ties and the requantize
+        // placement do; until then the claims are published and compared against
+        // B1's own columns, and the record says so.
+        let mut tff = None;
+        let mut swiglu = None;
+        if gp.swiglu {
+            assert!(gp.dff > 0, "the SwiGLU needs the manifest's dff");
+            let t2 = Tiling::new(p.s, gp.dff, gp.a);
+            let prog = Prog::pairs(t2.nreal, Kind::Mul, UnKind::Silu, UnKind::None);
+            let ff: Vec<u128> = (0..t2.nreal)
+                .map(|j| (t2.a * t2.tokens * (t2.nreal - 1 - j)) as u128)
+                .collect();
+            for k in prog.un_kinds() {
+                if !uns.contains(&k) {
+                    uns.push(k);
+                }
+            }
+            swiglu = Some(regions.len());
+            regions.push(GlueRegionPlan {
+                tag: "gsw".into(),
+                prog,
+                log_rows: crate::common::log_rows_for(t2.rows1(), 1),
+                ties: vec![(TieKind::In(0), ff.clone(), 1),
+                           (TieKind::In(1), ff.clone(), 1),
+                           (TieKind::Out(0), ff, 1)],
+            });
+            tff = Some(t2);
+        }
         Self {
             t,
+            tff,
             regions,
-            eqs: vec![((0, 1), (1, 0)), ((0, 2), (2, 0)), ((2, 1), (3, 0))],
-            uns: l1.un_kinds(),
+            eqs,
+            uns,
             stream_in: (0, 0),
             stream_out: (2, 2),
+            tails,
+            swiglu,
         }
     }
 
@@ -841,6 +930,7 @@ pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField
                     pow: gr.pow.clone(),
                     smul: gr.smul.clone(),
                     un: gr.un.clone(),
+                    uns: gr.uns.clone(),
                     val: gr.val.clone(),
                     tie: Some(ties[i].clone()),
                 },
@@ -1116,6 +1206,10 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         let t = gp.t;
         let rows1 = t.rows1();
         let mut mismatch = vec![];
+        // what the two reduction regions read as their stream, kept so a tail
+        // region reads the identical block -- the tie compares those, and B1's
+        // own column is the separate check
+        let mut tail_in: Vec<Vec<u16>> = vec![];
         // stream 0: xin + o_out into xmid, and the squares' first levels;
         // stream 1: xmid + d_out into xout, and norm2's
         let mut stream = t.lay(&gc.xin);
@@ -1132,6 +1226,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                     stream[vi % n] ^= 1;
                 }
             }
+            tail_in.push(stream.clone());
             let w1 = crate::glue::GlueWitness::new(
                 rows1, vec![stream.clone(), t.lay(add)], &prog1, plan.round,
                 format!("B1 residual stream [{} x {}]", t.tokens, t.d));
@@ -1153,6 +1248,102 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             stream = t.lay(&got);
             glue_regions.push(r1);
             glue_regions.push(r2);
+        }
+        // ---- stream E: h = (x * r) * w, once per norm -------------------------
+        for (k, i) in gp.tails.iter().copied().enumerate() {
+            let (rcol, wcol, want, wname) = if k == 0 {
+                (&gc.r1, &gc.w1, &gc.h1, "x_q")
+            } else {
+                (&gc.r2, &gc.w2, &gc.h2, "x_gate")
+            };
+            let prog = gp.regions[i].prog.clone();
+            let tag = gp.regions[i].tag.clone();
+            // `r` is per token and a row is one `(residue, token)` pair, so the
+            // row's single leaf is its own token's `r`; `w` is per channel and
+            // constant down the tokens, so the row reads channels `res + j a`.
+            let rblk: Vec<u16> =
+                (0..rows1).map(|m| crate::glue::canon(rcol[m % t.tokens])).collect();
+            let mut wblk = vec![0u16; rows1 * t.nreal];
+            for m in 0..rows1 {
+                let res = m / t.tokens;
+                for j in 0..t.nreal {
+                    wblk[m * t.nreal + j] = crate::glue::canon(wcol[res + j * t.a]);
+                }
+            }
+            let w = crate::glue::GlueWitness::new(
+                rows1, vec![tail_in[k].clone(), rblk, wblk], &prog, plan.round,
+                format!("B1 norm{} tail [{} x {}]", k + 1, t.tokens, t.d));
+            let tam = tamper.glue.filter(|(ri, _)| *ri == i).map(|(_, x)| x);
+            let r = crate::glue::glue_region(&w, &prog, plan.round, &tag, &mut gt, tam);
+            // the tail's output is the q/k/v (resp. gate/up) matmuls' own bf16
+            // input column, so B1 has already written down what it must be
+            if let Some(wv) = want {
+                let got = t.unlay(&r.outs[0]);
+                let bad = (0..t.tokens * t.d)
+                    .filter(|i| crate::glue::canon(got[*i]) != crate::glue::canon(wv[*i]))
+                    .count();
+                mismatch.push(json!({"column": wname, "values": t.tokens * t.d,
+                                     "mismatch": bad}));
+            } else {
+                mismatch.push(json!({"column": wname, "values": 0,
+                                     "mismatch": serde_json::Value::Null,
+                                     "note": "the dump does not carry this column"}));
+            }
+            glue_regions.push(r);
+        }
+        // ---- stream E: silu(gate) * up --------------------------------------
+        if let (Some(i), Some(tf)) = (gp.swiglu, gp.tff) {
+            let find = |n: &str| -> usize {
+                layer.mats.iter().position(|m| m.name == n)
+                    .unwrap_or_else(|| panic!("the SwiGLU needs the {n} matmul"))
+            };
+            let (gi, ui) = (find("gate"), find("up"));
+            assert_eq!(layer.mats[gi].n_out, tf.d,
+                       "the gate matmul's width is not the SwiGLU's dff");
+            // The two matmuls' dequantized outputs, read through the dequant
+            // region's own reference so this region consumes exactly what that
+            // region proves.  What is *not* here is the tie pinning them to it:
+            // that is the open dequant tie, and until it lands these leaves are
+            // pinned only by their VAL lookups.
+            let mut gate_out = vec![0u16; tf.tokens * tf.d];
+            let mut up_out = vec![0u16; tf.tokens * tf.d];
+            for t in 0..tf.tokens {
+                for c in 0..tf.d {
+                    let q = t * tf.d + c;
+                    gate_out[q] = crate::layer::deq_ref(&layer.mats[gi], &plan.specs[gi], t, c);
+                    up_out[q] = crate::layer::deq_ref(&layer.mats[ui], &plan.specs[ui], t, c);
+                }
+            }
+            let prog = gp.regions[i].prog.clone();
+            let tag = gp.regions[i].tag.clone();
+            let w = crate::glue::GlueWitness::new(
+                tf.rows1(), vec![tf.lay(&gate_out), tf.lay(&up_out)], &prog, plan.round,
+                format!("the gate and up dequant outputs [{} x {}]", tf.tokens, tf.d));
+            let tam = tamper.glue.filter(|(ri, _)| *ri == i).map(|(_, x)| x);
+            let r = crate::glue::glue_region(&w, &prog, plan.round, &tag, &mut gt, tam);
+            let n = tf.tokens * tf.d;
+            let cmp = |got: &[u16], want: &[u16]| -> usize {
+                (0..n).filter(|q| crate::glue::canon(got[*q]) != crate::glue::canon(want[*q]))
+                    .count()
+            };
+            // three columns B1 wrote for this gadget: the gate's dequantized
+            // output (the silu's input), the silu image the region's table
+            // supplies, and the product `down` reads
+            if let Some(v) = &gc.silu_in {
+                mismatch.push(json!({"column": "silu_in", "values": n,
+                                     "mismatch": cmp(&gate_out, v)}));
+            }
+            if let Some(v) = &gc.silu_out {
+                let img: Vec<u16> = gate_out.iter()
+                    .map(|p| crate::glue::un_image(UnKind::Silu, *p)).collect();
+                mismatch.push(json!({"column": "silu_out", "values": n,
+                                     "mismatch": cmp(&img, v)}));
+            }
+            if let Some(v) = &gc.x_down {
+                mismatch.push(json!({"column": "x_down", "values": n,
+                                     "mismatch": cmp(&tf.unlay(&r.outs[0]), v)}));
+            }
+            glue_regions.push(r);
         }
         tables.m_norm = std::mem::take(&mut gt.m_norm);
         tables.m_frac = std::mem::take(&mut gt.m_frac);
@@ -1564,6 +1755,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             smul: sess.draw_relation(crate::glue::SMulRel::draw),
             val: sess.draw_relation(crate::glue::ValRel::draw),
             un: g.uns.iter().map(|_| sess.draw_relation(crate::glue::UnRel::draw)).collect(),
+            uns: g.uns.clone(),
         });
         Rels { exp, norm, frac, mul, qnz, widths: widths.clone(), ranges, glue }
     };
@@ -1954,7 +2146,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let root_ok = format!("{:?}", proof.commitments[0]) == fixed.pre_root;
     vcs.commit(proof.commitments[0], &fixed.sizes[0], &mut ch);
     vcs.commit(proof.commitments[1], &fixed.sizes[1], &mut ch);
-    let rels = Rels::draw(&mut ch, &plan.widths, plan.glue.as_ref().map(|g| g.uns.len()));
+    let rels = Rels::draw(&mut ch, &plan.widths, plan.glue.as_ref().map(|g| g.uns.as_slice()));
     let n_ch = plan.n_challenges();
     let f = ch.draw_secure_felts(n_ch);
     let (r, s, rv) = (f[0], f[1], f[2]);

@@ -131,8 +131,24 @@ pub struct GlueCols {
     pub xmid: Vec<u16>,
     pub d_out: Vec<u16>,
     pub xout: Vec<u16>,
+    /// `n1_out` and `n2_out`: each norm's `r = rsqrt(mean of squares + eps)`,
+    /// one value per token.  The tails multiply the stream by it, so a row of
+    /// the tail region reads it once and every channel of that row shares it.
+    pub r1: Vec<u16>,
+    pub r2: Vec<u16>,
     pub w1: Vec<u16>,
     pub w2: Vec<u16>,
+    /// B1's own norm outputs, which are what the tails have to reproduce:
+    /// `x_q` is norm1's (q, k and v all read the same column, and the dump's
+    /// digests say so) and `x_gate` is norm2's.  `None` on a dump that did not
+    /// write them, in which case the tail region runs without its reference.
+    pub h1: Option<Vec<u16>>,
+    pub h2: Option<Vec<u16>>,
+    /// The SwiGLU's B1 columns, over `dff`: the gate matmul's dequantized
+    /// output, its silu image, and the product that `down` reads.
+    pub silu_in: Option<Vec<u16>>,
+    pub silu_out: Option<Vec<u16>>,
+    pub x_down: Option<Vec<u16>>,
     pub eps: u16,
     pub inv_d: u16,
     pub reduce: String,
@@ -159,17 +175,42 @@ impl GlueCols {
             }
             Ok(v[..tokens * d].to_vec())
         };
+        let dff = g["dff"].as_u64().unwrap_or(0) as usize;
+        // A column the tails and the SwiGLU only *check* against is optional:
+        // an older dump that does not carry it costs the reference, not the
+        // region, and the record says which of the two happened.
+        let opt = |n: &str, w: usize| -> Option<Vec<u16>> {
+            read_u16(&format!("{dir}/{n}.u16"))
+                .ok()
+                .filter(|v| v.len() >= tokens * w)
+                .map(|v| v[..tokens * w].to_vec())
+        };
+        // `r` is one value per token, not per channel
+        let rd1 = |n: &str| -> Result<Vec<u16>, String> {
+            let v = read_u16(&format!("{dir}/{n}.u16"))?;
+            if v.len() < tokens {
+                return Err(format!("{n}: {} values is under {tokens}", v.len()));
+            }
+            Ok(v[..tokens].to_vec())
+        };
         Ok(Some(Self {
             d,
-            dff: g["dff"].as_u64().unwrap_or(0) as usize,
+            dff,
             tokens,
             xin: rd("xin")?,
             o_out: rd("o_out")?,
             xmid: rd("xmid")?,
             d_out: rd("d_out")?,
             xout: rd("xout")?,
+            r1: rd1("n1_out")?,
+            r2: rd1("n2_out")?,
             w1: read_u16(&format!("{dir}/w1.u16"))?,
             w2: read_u16(&format!("{dir}/w2.u16"))?,
+            h1: opt("x_q", d),
+            h2: opt("x_gate", d),
+            silu_in: opt("silu_in", dff),
+            silu_out: opt("silu_out", dff),
+            x_down: opt("x_down", dff),
             eps: g["eps"].as_u64().ok_or("manifest: glue.eps")? as u16,
             inv_d: g["inv_d"].as_u64().ok_or("manifest: glue.inv_d")? as u16,
             reduce: g["reduce"].as_str().unwrap_or("").to_string(),
@@ -1294,6 +1335,29 @@ multiplicity tables and the f64 cross-check all match",
               (base.len() + pre.len()) << lay.log_rows);
 }
 
+/// B1's own answer for one dequantized accumulator: the `Round::Even` reference
+/// `fill_mat_row` cross-checks its committed columns against.  It lives here as
+/// one function so that a consumer of a matmul's bf16 output -- the glue's
+/// SwiGLU reads the `gate` and `up` regions' -- reads exactly the value the
+/// dequant region proves, rather than a second implementation of the rung.
+pub fn deq_ref(m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
+    let a = m.acc[t * m.n_out + c];
+    match spec.variant {
+        DeqVariant::Pow2 => {
+            let jjx = m.jx[t] as i64 + m.jw[c] as i64;
+            bf16::from_f64(a as f64 * (jjx as f64).exp2())
+        }
+        DeqVariant::Chain => {
+            let y0 = bf16::to_f32(bf16::from_f64(a.unsigned_abs() as f64)) as f64;
+            let sxv = bf16::to_f32(bf16::pattern(0, m.sx[t].1, m.sx[t].0)) as f64;
+            let swv = bf16::to_f32(bf16::pattern(0, m.sw[c].1, m.sw[c].0)) as f64;
+            let t1 = bf16::to_f32(bf16::from_f64(y0 * sxv)) as f64;
+            bf16::from_f64(t1 * swv) | (u16::from(a < 0) << 15)
+        }
+        _ => unreachable!("matmul regions are pow2 or chain"),
+    }
+}
+
 /// One row of a matmul dequant region: the witness fields of `per_row`
 /// accumulators, written into a block-local column slice, with table
 /// multiplicities accumulated block-locally (merged by `mat_region`).
@@ -1361,7 +1425,7 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
                 set(f.eo, m31_of(eo), local);
                 *br.entry(eo).or_default() += 1;
                 if spec.round == bf16::Round::Even {
-                    let want = bf16::from_f64(a as f64 * (jjx as f64).exp2());
+                    let want = deq_ref(m, spec, t, c);
                     if !wref.is_empty() {
                         wref[jj * lay.per_row + s] = want;
                     }
@@ -1390,11 +1454,7 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
                     e_in = eo;
                 }
                 if spec.round == bf16::Round::Even {
-                    let y0 = bf16::to_f32(bf16::from_f64(mag as f64)) as f64;
-                    let sxv = bf16::to_f32(bf16::pattern(0, m.sx[t].1, m.sx[t].0)) as f64;
-                    let swv = bf16::to_f32(bf16::pattern(0, m.sw[c].1, m.sw[c].0)) as f64;
-                    let t1 = bf16::to_f32(bf16::from_f64(y0 * sxv)) as f64;
-                    let want = bf16::from_f64(t1 * swv) | (u16::from(a < 0) << 15);
+                    let want = deq_ref(m, spec, t, c);
                     if !wref.is_empty() {
                         wref[jj * lay.per_row + s] = want;
                     }

@@ -272,6 +272,58 @@ impl AWitness {
                source: format!("synthetic(seed={seed}, ties={tie_frac})") }
     }
 
+    /// The real head's own keys and tokens, from an `extract.py --head` dump:
+    /// `key_head.u16` is `(tokens, vocab)` of the order key this region compares
+    /// and `tok_head.i32` is the token each row emits.  `pm` is not dumped --
+    /// it is the row maximum, which is a fact about `key`, so it is derived here
+    /// and the region's own constraints are what check that the prover derived
+    /// it honestly.
+    ///
+    /// This is the statement's *input*: what pins `key` to the head's dequant is
+    /// a positionwise tie, and that tie is not built yet (see the record).  Until
+    /// it is, "the emitted token is the maximum" is proved about a committed key
+    /// column that B1 wrote, not about the logits the layer computed.
+    pub fn from_dump(dir: &str, tokens: usize, vocab: usize) -> Result<Self, String> {
+        let path = |n: &str| format!("{dir}/{n}");
+        let raw = std::fs::read(path("key_head.u16")).map_err(|e| format!("key_head: {e}"))?;
+        let key: Vec<u32> = raw
+            .chunks_exact(2)
+            .map(|b| u32::from(u16::from_le_bytes([b[0], b[1]])))
+            .take(tokens * vocab)
+            .collect();
+        if key.len() != tokens * vocab {
+            return Err(format!("key_head: {} values, want {tokens} x {vocab}", key.len()));
+        }
+        let raw = std::fs::read(path("tok_head.i32")).map_err(|e| format!("tok_head: {e}"))?;
+        let tok: Vec<u32> = raw
+            .chunks_exact(4)
+            .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u32)
+            .take(tokens)
+            .collect();
+        if tok.len() != tokens {
+            return Err(format!("tok_head: {} values, want {tokens}", tok.len()));
+        }
+        let (mut pm, mut ties) = (vec![0u32; tokens], 0usize);
+        for t in 0..tokens {
+            let row = &key[t * vocab..(t + 1) * vocab];
+            let mx = *row.iter().max().expect("a row of the vocabulary");
+            pm[t] = mx;
+            let n_at = row.iter().filter(|v| **v == mx).count();
+            if n_at > 1 {
+                ties += 1;
+            }
+            // B1 decoded greedily with torch's lowest-index rule, so the dump's
+            // token has to *be* the first maximum; a dump that disagrees is a
+            // spec mismatch, not something for the region to prove around
+            let first = row.iter().position(|v| *v == mx).expect("the maximum") as u32;
+            if tok[t] != first {
+                return Err(format!(
+                    "row {t}: the dump emits {} but the first maximum is {first}", tok[t]));
+            }
+        }
+        Ok(Self { tokens, vocab, key, tok, pm, ties, source: format!("dump({dir})") })
+    }
+
     fn tampered(&self, bad: Option<Tamper>) -> (Vec<u32>, Vec<u32>) {
         let (mut tok, mut pm) = (self.tok.clone(), self.pm.clone());
         match bad {

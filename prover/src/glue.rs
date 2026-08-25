@@ -292,6 +292,20 @@ impl UnKind {
     }
 }
 
+/// The unary's image of one bf16 pattern, exactly the row `un_table` tabulates
+/// for it: one f32 evaluation and one rounding, which is B1's own
+/// `store(fn(x))`.  Exposed so a caller can compare a region's unary against
+/// B1's column without rebuilding the table.
+pub fn un_image(k: UnKind, pat: u16) -> u16 {
+    let (sm, ef) = split(pat);
+    un_image_parts(k, sm, ef)
+}
+
+/// The same, for a value already split into its `(sm, ef)` pair.
+pub fn un_image_parts(k: UnKind, sm: i64, ef: u32) -> u16 {
+    bf16::from_f32(k.apply(to_f64(sm, ef)) as f32)
+}
+
 /// `(sm_in, ef_in) -> (sm_out, ef_out)` over every legal input value.
 pub fn un_table(k: UnKind) -> Vec<[M31; 4]> {
     val_table()
@@ -419,6 +433,33 @@ impl Prog {
         p
     }
 
+    /// The RMSNorm tail, `h = (x * r) * w`, one row per `(residue, token)` block
+    /// of the stream -- the same tiling the reduction's first level uses, so the
+    /// tail's group 0 and the reduction's group 0 are the same values in the
+    /// same order and one Horner claim compares them.
+    ///
+    /// Group 1 is the row's single `r`: "broadcast down a row" is literally one
+    /// committed leaf that every slot of the row reads, which costs two cells
+    /// per row instead of two per value.  Group 2 is the norm weight's block,
+    /// committed per row because a row's channels differ (it is constant down
+    /// the tokens, which a preprocessed column could exploit -- priced in the
+    /// record, not built).
+    ///
+    /// The two multiplies chain through `Src::Slot`, so `x * r` never leaves the
+    /// row and only `h` is tied onwards.
+    pub fn norm_tail(n: usize) -> Self {
+        let groups = vec![Group { n, un: UnKind::None },
+                          Group { n: 1, un: UnKind::None },
+                          Group { n, un: UnKind::None }];
+        let mut slots: Vec<(Src, Src)> = (0..n)
+            .map(|i| (Src::Leaf(0, i), Src::Leaf(1, 0)))
+            .collect();
+        for i in 0..n {
+            slots.push((Src::Slot(i), Src::Leaf(2, i)));
+        }
+        Self { groups, kind: Kind::Mul, slots, outs: vec![(n..2 * n).collect()] }
+    }
+
     pub fn leaf_width(&self, g: usize) -> usize {
         if self.groups[g].un == UnKind::None { 2 } else { 4 }
     }
@@ -530,8 +571,10 @@ pub struct GlueEval {
     pub frac: FracRel,
     pub pow: PowRel,
     pub smul: SMulRel,
-    /// one per entry of `prog.un_kinds()`
+    /// one per entry of `uns`
     pub un: Vec<UnRel>,
+    /// the kinds `un` is indexed by -- the plan's union, see `GlueRels::uns`
+    pub uns: Vec<UnKind>,
     pub val: ValRel,
     pub tie: Option<Tie>,
 }
@@ -566,7 +609,7 @@ impl FrameworkEval for GlueEval {
         let dmax = m31_u32(DMAX);
 
         // ---- leaves: the committed inputs, and the unary that consumes them ---
-        let kinds = self.prog.un_kinds();
+        let kinds = &self.uns;
         let mut leaf_in: Vec<Vec<(E::F, E::F)>> = vec![];
         let mut leaf_un: Vec<Vec<(E::F, E::F)>> = vec![];
         for g in &self.prog.groups {
@@ -1070,6 +1113,19 @@ struct RowOut {
     bad_exp: usize,
 }
 
+/// The tag a row's lookup carries so the parallel fill's multiplicities can be
+/// merged into the right table afterwards.  `T_UN + i` is the `i`-th unary
+/// table, so the base has to sit above every fixed tag: with one unary the old
+/// base of 5 worked by luck, and the second one collided with `T_SMUL`, which
+/// credited every silu lookup to the multiply table and left the sums
+/// uncancelled with every constraint still satisfied.
+const T_POW: u8 = 0;
+const T_NORM: u8 = 1;
+const T_VAL: u8 = 3;
+const T_FRAC: u8 = 4;
+const T_SMUL: u8 = 6;
+const T_UN: u8 = 8;
+
 /// Build one region's committed columns and bump the shared tables.
 pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                    tables: &mut GlueTables, tamper: Option<Tamper>) -> GlueRegion {
@@ -1124,16 +1180,16 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                     in_nat.push((sm, ef as i64));
                     if gr.un == UnKind::None {
                         match val_at(sm, ef) {
-                            Some(k) => look.push((3, k)),
+                            Some(k) => look.push((T_VAL, k)),
                             None => off += 1,
                         }
                         uns.push((0i64, 0u32));
                     } else {
                         match val_at(sm, ef) {
-                            Some(k) => look.push((5 + un_idx[g] as u8, k)),
+                            Some(k) => look.push((T_UN + un_idx[g] as u8, k)),
                             None => off += 1,
                         }
-                        let y = bf16::from_f32(gr.un.apply(to_f64(sm, ef)) as f32);
+                        let y = un_image_parts(gr.un, sm, ef);
                         let (osm, oef) = split(y);
                         cells[b + 2] = m31_of(osm);
                         cells[b + 3] = m31_u32(oef);
@@ -1177,7 +1233,7 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                         let mut pw = |u: i64| -> i64 {
                             match tables.pow_at(u) {
                                 Some(i) => {
-                                    look.push((0, i));
+                                    look.push((T_POW, i));
                                     if u >= 0 { 1i64 << u } else { 0 }
                                 }
                                 None => {
@@ -1225,11 +1281,11 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                         match tables.norm_at(m2, ph, st).filter(|_| {
                             !matches!(tamper, Some(Tamper::NormOut(i)) if hit(i))
                         }) {
-                            Some(i) => look.push((1, i)),
+                            Some(i) => look.push((T_NORM, i)),
                             None => off += 1,
                         }
                         match tables.frac_at(ph, r as u32) {
-                            Some(i) => look.push((4, i)),
+                            Some(i) => look.push((T_FRAC, i)),
                             None => off += 1,
                         }
                         let mut c_sm =
@@ -1266,7 +1322,7 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                         match val_at(c_sm, c_ef.clamp(0, 0xff) as u32).filter(|_| {
                             (0..0xff).contains(&c_ef)
                         }) {
-                            Some(i) => look.push((3, i)),
+                            Some(i) => look.push((T_VAL, i)),
                             None => off += 1,
                         }
                         outs.push((c_sm, c_ef.clamp(0, 0xfe) as u32));
@@ -1274,7 +1330,7 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                     Kind::Mul => {
                         let (c_sm0, cy, nzc) = match tables.smul_at(a_sm, b_sm) {
                             Some(i) => {
-                                look.push((6, i));
+                                look.push((T_SMUL, i));
                                 let row = tables.smul[i];
                                 (sgn_of(row[2]), row[3].0, row[4].0)
                             }
@@ -1304,7 +1360,7 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                         match val_at(c_sm, c_ef.clamp(0, 0xff) as u32).filter(|_| {
                             (0..0xff).contains(&c_ef)
                         }) {
-                            Some(i) => look.push((3, i)),
+                            Some(i) => look.push((T_VAL, i)),
                             None => off += 1,
                         }
                         outs.push((c_sm, c_ef.clamp(0, 0xfe) as u32));
@@ -1349,13 +1405,14 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
             base += o.len();
         }
         for (which, i) in &f.look {
-            match which {
-                0 => tables.m_pow[*i] += 1,
-                1 => tables.m_norm[*i] += 1,
-                3 => tables.m_val[*i] += 1,
-                4 => tables.m_frac[*i] += 1,
-                6 => tables.m_smul[*i] += 1,
-                u => tables.m_un[(*u - 5) as usize][*i] += 1,
+            match *which {
+                T_POW => tables.m_pow[*i] += 1,
+                T_NORM => tables.m_norm[*i] += 1,
+                T_VAL => tables.m_val[*i] += 1,
+                T_FRAC => tables.m_frac[*i] += 1,
+                T_SMUL => tables.m_smul[*i] += 1,
+                u if u >= T_UN => tables.m_un[(u - T_UN) as usize][*i] += 1,
+                u => unreachable!("unknown glue lookup tag {u}"),
             }
         }
         tables.off_table += f.off;
@@ -1401,6 +1458,11 @@ pub struct GlueRels {
     pub pow: PowRel,
     pub smul: SMulRel,
     pub un: Vec<UnRel>,
+    /// the kinds `un` is indexed by.  This is the *plan's* list, the union over
+    /// every region, not any one program's: two regions drawing different
+    /// unaries share one relation vector, and indexing it by a single region's
+    /// `un_kinds()` would point the second region at the first one's table.
+    pub uns: Vec<UnKind>,
     pub val: ValRel,
 }
 
@@ -1457,7 +1519,7 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>) -> G
     // the lookups, in exactly the order `evaluate` adds them
     let mut looks: Vec<L> = vec![];
     let mut un_of: Vec<usize> = vec![];
-    let kinds = prog.un_kinds();
+    let kinds = &rels.uns;
     for (g, gr) in prog.groups.iter().enumerate() {
         for i in 0..gr.n {
             let b = prog.leaf_at(g, i);
@@ -1847,6 +1909,7 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
         pow: sess.draw_relation(PowRel::draw),
         smul: sess.draw_relation(SMulRel::draw),
         un: uns.iter().map(|_| sess.draw_relation(UnRel::draw)).collect(),
+        uns: uns.clone(),
         val: sess.draw_relation(ValRel::draw),
     };
     let ch = sess.draw_felts(2);
@@ -1899,7 +1962,8 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
         alloc,
         GlueEval { log_rows: region.log_rows, tag: "r".into(), prog: prog.clone(), round,
                    norm: rels.norm.clone(), frac: rels.frac.clone(), pow: rels.pow.clone(),
-                   smul: rels.smul.clone(), un: rels.un.clone(), val: rels.val.clone(),
+                   smul: rels.smul.clone(), un: rels.un.clone(), uns: rels.uns.clone(),
+                   val: rels.val.clone(),
                    tie: if notie { None } else { Some(tie) } },
         it.use_sum,
     );

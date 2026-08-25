@@ -704,7 +704,7 @@ pub fn cmd(args: &[String]) {
         let mut ch = stwo::core::channel::Blake2sM31Channel::default();
         ch.mix_u64(0xB65_2B00 + u64::from(tag));
         let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                              plan.glue.as_ref().map(|g| g.uns.len()));
+                                              plan.glue.as_ref().map(|g| g.uns.as_slice()));
         let f = ch.draw_secure_felts(6);
         (rels, f)
     };
