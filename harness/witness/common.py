@@ -162,8 +162,26 @@ SPECS["b10-design-even"] = replace(SPECS["b10-design"], dequant_round="even")
 SPECS["b10-glue"] = replace(SPECS["b10-design"], dequant_round="even",
                             reduce="bf16-norm")
 
+# B10 step 5: the frozen spec, and the end of the drift.  Steps 2 to 4 were each
+# measured on a different system, which is the thing this name exists to stop.
+# Step 2's glue forces round-to-even and the balanced-tree reduction, so
+# `b10-design`'s ties-away rounding cannot survive alongside it -- the shared
+# `NORM` table is built in one mode and the whole layer rounds that way.  Step 4
+# then found that the output head wants power-of-two linear scales: the head
+# chunk's dequant is 79% of it, the two rungs differ by 52% in cells, and B8
+# priced the quality cost of the cheaper rung at +0.02%.  `b10-final` is
+# `b10-glue` plus that one rung, and it is the only spec B10 both scores and
+# proves from here on.  A witness and a spec are one object, so every dump under
+# it declares it: `deq_variants` in the manifest names `pow2` for `lm_head` and
+# `chain` for the seven layer matmuls.
+#
+# Read as a lineage: `b6-design-p2o` + ties-away + 9-bit numerator = `b10-design`;
+# + round-to-even + `reduce="bf16-norm"` = `b10-glue`; + power-of-two scales on
+# `lm_head` = `b10-final`.
+SPECS["b10-final"] = replace(SPECS["b10-glue"], pow2_matmuls=("lm_head",))
+
 # B10's own list: one spec, scored against B8's fp32 and `b6-design-p2o` rows
-B10_SPECS = ["b10-design", "b10-design-even", "b10-glue"]
+B10_SPECS = ["b10-design", "b10-design-even", "b10-glue", "b10-final"]
 
 # B5's probes, kept apart so B1's own table stays what B1 measured
 B5_SPECS = ["qk-int12", "pow2-scales", "int-softmax", "int-softmax-12",
