@@ -690,6 +690,37 @@ impl Attn {
         64 - d.max(1).leading_zeros()
     }
 
+    /// Stream J: the largest key this band actually looks up, and the rows that
+    /// hold it.  `d_bits` is the *unscaled* shift; the table is indexed by the
+    /// shift scaled to the master exponent, so the two differ by up to the band's
+    /// spread -- and the driver's `d_bits + spread` sizing takes the maximum of
+    /// each separately, which over-counts whenever the largest raw shift does not
+    /// come from the lowest-exponent head (measured: every layer of b10-final,
+    /// `experiments/b10/out/oversize/`).
+    pub fn key_max(&self) -> i64 {
+        (0..self.dd.len()).filter(|g| self.visible(*g))
+            .map(|g| self.table_key(g)).max().unwrap_or(0)
+    }
+    pub fn key_bits(&self) -> u32 {
+        64 - self.key_max().max(1).leading_zeros()
+    }
+
+    /// Re-size this band's exp table to `bits` rows.  The table is a prefix of the
+    /// same closed form, so shrinking it is a truncation and every numerator the
+    /// witness already holds is unchanged -- what changes is which keys are still
+    /// in range, which is what `off_table` counts.
+    pub fn retable(&mut self, bits: u32) {
+        assert!(bits <= self.log_table, "retable only shrinks: {bits} > {}", self.log_table);
+        self.table.truncate(1usize << bits);
+        self.log_table = bits;
+        self.off_table = (0..self.dd.len()).filter(|g| self.visible(*g))
+            .filter(|g| {
+                let k = self.table_key(*g);
+                k < 0 || k as usize >= self.table.len()
+            })
+            .count();
+    }
+
     /// Relative change in the attention output `out / Z` against another witness:
     /// what a prover who shifted by more than the maximum actually changes.
     pub fn out_drift(&self, other: &Attn) -> f64 {
