@@ -274,6 +274,102 @@ fn up_u32(v: Vec<u32>) -> Uint32Vec {
     d
 }
 
+/// B11 stream F: the same upload with its two halves timed apart.
+///
+/// `gen/wfill_*_up` is a *host pack* — a rayon pass that narrows an `i64` or
+/// `i32` witness array into a fresh `Vec<u32>` — followed by a `cudaMemcpy` of
+/// that vector. The two answer different questions (a device-side generation
+/// path deletes the first and shrinks the second), so each family's `_up` timer
+/// keeps its meaning and gains a `_pack` / `_h2d` pair beside it, plus the
+/// bytes each array moved under `host_bytes`. Purely additive.
+fn timed_up(
+    pack_tag: &'static str,
+    h2d_tag: &'static str,
+    byte_tag: &'static str,
+    f: impl FnOnce() -> Vec<u32>,
+) -> Uint32Vec {
+    let t = std::time::Instant::now();
+    let v = f();
+    let pack = t.elapsed().as_secs_f64();
+    crate::util::m4_add(pack_tag, pack);
+    let bytes = (v.len() * 4) as u64;
+    let t = std::time::Instant::now();
+    let d = Uint32Vec::from_vec(v);
+    let el = t.elapsed().as_secs_f64();
+    crate::device::note_witness(bytes, el);
+    crate::util::m4_add(h2d_tag, el);
+    crate::util::m4_bytes(h2d_tag, bytes);
+    crate::util::m4_bytes(byte_tag, bytes);
+    // Per array as well as per family. Which arrays a device-side generation
+    // path stops uploading is the whole question, and the seconds it leaves
+    // behind have to be measured in the loop rather than divided out of an
+    // aggregate rate -- so the per-array line is the *copy*, which is what such
+    // a path still pays; its pack, which it does not, is in `_pack`.
+    let _ = pack;
+    crate::util::m4_add(byte_tag, el);
+    d
+}
+
+/// One band array, packed and uploaded, with its own byte line.
+fn band_up(byte_tag: &'static str, f: impl FnOnce() -> Vec<u32>) -> Uint32Vec {
+    timed_up("gen/wfill_band_pack", "gen/wfill_band_h2d", byte_tag, f)
+}
+
+// ------------------------------------------------ the band dump (stream F) --
+
+static BAND_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn raw<T>(v: &[T]) -> &[u8] {
+    // Safety: writing the exact bytes of a POD slice; the reader is told the
+    // element type and count by the shape JSON beside it.
+    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
+}
+
+/// B11 stream F: this band's witness arrays, raw, for the standalone probe.
+///
+/// `B7_F_BANDDUMP=DIR` writes one subdirectory per band -- the arrays
+/// `commit_base_dev` uploads, plus the exp table and a shape JSON -- so
+/// `experiments/b11/probe/band_up.cu` can price a device-side generation path
+/// against the *real* values and not only against the right sizes: it
+/// recomputes `dd`, `num`, `zz` and `out` on the card and compares them with
+/// what is here. Off unless the variable is set (~2.4 GB for a 16-instance
+/// band at C=16K), and it never runs in a timed loop.
+fn band_dump(a: &Attn, with_out: bool) {
+    let Ok(dir) = std::env::var("B7_F_BANDDUMP") else { return };
+    let b = BAND_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let d = std::path::Path::new(&dir).join(format!("band{b}"));
+    std::fs::create_dir_all(&d).expect("banddump directory");
+    let put = |name: &str, bytes: &[u8]| {
+        std::fs::write(d.join(name), bytes).unwrap_or_else(|e| panic!("banddump {name}: {e}"));
+    };
+    let sh = a.shape;
+    put("kk.i32", raw(&a.kk));
+    put("qq.i32", raw(&a.qq));
+    put("vv.i32", raw(&a.vv));
+    put("mm.i64", raw(&a.mm));
+    put("dd.i64", raw(&a.dd));
+    put("num.i64", raw(&a.num));
+    put("zz.i64", raw(&a.zz));
+    put("out.i64", raw(&a.out));
+    put("delta.i64", raw(&a.delta));
+    put("table.u32", raw(&a.table));
+    let j = serde_json::json!({
+        "s": sh.s, "c": sh.c, "hd": sh.hd, "insts": sh.insts,
+        "log_table": a.log_table, "table_len": a.table.len(),
+        "nmax": a.nmax, "corner": a.corner, "with_out": with_out,
+        "variant": format!("{:?}", a.variant),
+        "off_table": a.off_table,
+        "delta": a.delta,
+        "bytes": {
+            "kk": std::mem::size_of_val(&a.kk[..]), "qq": std::mem::size_of_val(&a.qq[..]),
+            "vv": std::mem::size_of_val(&a.vv[..]), "dd": std::mem::size_of_val(&a.dd[..]),
+            "num": std::mem::size_of_val(&a.num[..]), "out": std::mem::size_of_val(&a.out[..]),
+        },
+    });
+    put("shape.json", serde_json::to_string_pretty(&j).unwrap().as_bytes());
+    eprintln!("banddump: band {b} -> {}", d.display());
+}
+
 /// int8, four to a word. The kernel reads the bytes back through a
 /// `signed char*`, which is exact because the packing is the little-endian byte
 /// order the device already uses; `cudaMalloc` alignment covers the cast.
@@ -433,10 +529,12 @@ pub fn walk_region_dev(
     let rows = 1usize << lay.g.log_rows;
     let t_up = std::time::Instant::now();
 
-    let d_qx = up_u32(pack_i8(&m0.qx, "walk qx"));
+    let d_qx = timed_up("gen/wfill_walk_pack", "gen/wfill_walk_h2d", "walk/qx",
+                        || pack_i8(&m0.qx, "walk qx"));
     let d_qw: Vec<Uint32Vec> = mat_idx
         .iter()
-        .map(|i| up_u32(pack_i8(&layer.mats[*i].qw, "walk qw")))
+        .map(|i| timed_up("gen/wfill_walk_pack", "gen/wfill_walk_h2d", "walk/qw",
+                          || pack_i8(&layer.mats[*i].qw, "walk qw")))
         .collect();
     let qw_ptrs: Vec<*const i8> = d_qw.iter().map(|d| d.device_ptr as *const i8).collect();
     let n_out: Vec<u32> = mat_idx.iter().map(|i| layer.mats[*i].n_out as u32).collect();
@@ -516,10 +614,14 @@ pub fn ao_region_dev(
     let rows = 1usize << lay.log_rows;
     let pr = lay.per_row;
     let t_up = std::time::Instant::now();
-    let d_acc = up_u32(pack_i64(&ao.acc));
-    let d_den = up_u32(pack_i64(&ao.den));
-    let d_jo = up_u32(pack_i32_from_i32(&ao.jo));
-    let d_jv = up_u32(pack_i32_from_i32(&ao.jv));
+    let d_acc = timed_up("gen/wfill_ao_pack", "gen/wfill_ao_h2d", "ao/acc",
+                         || pack_i64(&ao.acc));
+    let d_den = timed_up("gen/wfill_ao_pack", "gen/wfill_ao_h2d", "ao/den",
+                         || pack_i64(&ao.den));
+    let d_jo = timed_up("gen/wfill_ao_pack", "gen/wfill_ao_h2d", "ao/jo",
+                        || pack_i32_from_i32(&ao.jo));
+    let d_jv = timed_up("gen/wfill_ao_pack", "gen/wfill_ao_h2d", "ao/jv",
+                        || pack_i32_from_i32(&ao.jv));
     crate::util::m4_add("gen/wfill_ao_up", t_up.elapsed().as_secs_f64());
 
     let t_alloc = std::time::Instant::now();
@@ -651,20 +753,22 @@ pub fn commit_base_dev(
     let with_max = a.variant != Variant::Bf16x;
     let n_aux = if a.variant == Variant::IntExp { 0 } else { lk.q };
 
+    band_dump(a, with_out);
+
     let t_up = std::time::Instant::now();
-    let d_kk = up_u32(pack_i32_from_i32(&a.kk));
-    let d_qq = up_u32(pack_i32_from_i32(&a.qq));
-    let d_vv = up_u32(pack_i32_from_i32(&a.vv));
-    let d_dd = up_u32(pack_i32(&a.dd, "band dd"));
-    let d_num = up_u32(pack_u16(&a.num, "band num"));
-    let d_delta = up_u32(pack_i64(&a.delta));
-    let d_mm = up_u32(pack_i64(&a.mm));
-    let d_zz = up_u32(pack_i64(&a.zz));
+    let d_kk = band_up("band/kk", || pack_i32_from_i32(&a.kk));
+    let d_qq = band_up("band/qq", || pack_i32_from_i32(&a.qq));
+    let d_vv = band_up("band/vv", || pack_i32_from_i32(&a.vv));
+    let d_dd = band_up("band/dd", || pack_i32(&a.dd, "band dd"));
+    let d_num = band_up("band/num", || pack_u16(&a.num, "band num"));
+    let d_delta = band_up("band/delta", || pack_i64(&a.delta));
+    let d_mm = band_up("band/mm", || pack_i64(&a.mm));
+    let d_zz = band_up("band/zz", || pack_i64(&a.zz));
     // only the bf16x variant reads these two, and only it pays for them
     let bf16x = a.variant == Variant::Bf16x;
-    let d_xx = bf16x.then(|| up_u32(pack_u16_raw(&a.xx)));
-    let d_sc = bf16x.then(|| up_u32(pack_i64(&a.sc)));
-    let d_out = with_out.then(|| up_u32(pack_i64(&a.out)));
+    let d_xx = bf16x.then(|| band_up("band/xx", || pack_u16_raw(&a.xx)));
+    let d_sc = bf16x.then(|| band_up("band/sc", || pack_i64(&a.sc)));
+    let d_out = with_out.then(|| band_up("band/out", || pack_i64(&a.out)));
     crate::util::m4_add("gen/wfill_band_up", t_up.elapsed().as_secs_f64());
 
     let (variant, split_k) = match a.variant {

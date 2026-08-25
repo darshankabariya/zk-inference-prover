@@ -69,12 +69,46 @@ fn m4_acc() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, M4Map>>
     M4_ACC.get_or_init(|| std::sync::Mutex::new(Default::default()))
 }
 
+type M4BMap = std::collections::BTreeMap<&'static str, u64>;
+static M4B_ACC: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::BTreeMap<u64, M4BMap>>,
+> = std::sync::OnceLock::new();
+
+fn m4b_acc() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, M4BMap>> {
+    M4B_ACC.get_or_init(|| std::sync::Mutex::new(Default::default()))
+}
+
 pub fn m4_add(name: &'static str, secs: f64) {
     let k = m4_chunk();
     let mut g = m4_acc().lock().unwrap();
     let e = g.entry(k).or_default().entry(name).or_insert((0, 0.0));
     e.0 += 1;
     e.1 += secs;
+}
+
+/// B11 stream F: the byte counter beside the timer.
+///
+/// A phase's achieved GB/s is only readable off one dump if the bytes it moved
+/// are recorded where its seconds are. Same keying as `m4_add` -- per chunk,
+/// per name -- reported as `host_bytes`.
+pub fn m4_bytes(name: &'static str, bytes: u64) {
+    let k = m4_chunk();
+    let mut g = m4b_acc().lock().unwrap();
+    let e = g.entry(k).or_default().entry(name).or_insert(0);
+    *e += bytes;
+}
+
+/// The current chunk's byte counters.
+pub fn m4_bytes_report() -> Value {
+    let k = m4_chunk();
+    let g = m4b_acc().lock().unwrap();
+    let mut o = serde_json::Map::new();
+    if let Some(m) = g.get(&k) {
+        for (k, b) in m.iter() {
+            o.insert((*k).to_string(), json!(b));
+        }
+    }
+    Value::Object(o)
 }
 
 /// The current chunk's phases.

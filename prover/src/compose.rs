@@ -938,6 +938,29 @@ impl BuiltComponents {
 /// the parsed claims — the verifier's route, also used by the prover so the two
 /// sides cannot diverge.
 #[allow(clippy::too_many_arguments)]
+/// B11 stream F step 3: what one `.extend(...)` added to the interaction set.
+///
+/// Called after each region appends its columns, with the running (columns,
+/// cells) pair the previous call left behind. The answer c-rider 5.1b wants —
+/// what share of the interaction cells a scoped GKR over `bands` alone would
+/// cover — is this table, and it also gives `family_cells` the `tables` field
+/// it was missing.
+fn inter_mark(
+    what: &str,
+    all: &[crate::device::AnyCol<'static>],
+    seen: &mut (usize, usize),
+    out: &mut Vec<Value>,
+) {
+    let cols = all.len();
+    let cells: usize = all.iter().map(|c| c.size()).sum();
+    out.push(json!({
+        "region": what,
+        "columns": cols - seen.0,
+        "cells": cells - seen.1,
+    }));
+    *seen = (cols, cells);
+}
+
 pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField,
                         rv: SecureField, r_corner: SecureField, w_glue: SecureField,
                         lam_glue: SecureField, claims: &Claims) -> BuiltComponents {
@@ -2065,6 +2088,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // ---- interaction ----------------------------------------------------------
     let t1 = std::time::Instant::now();
     let mut inter_all: Vec<crate::device::AnyCol<'static>> = vec![];
+    // B11 stream F step 3 (c-rider 5.1b): `inter_all` is built region by region
+    // in discrete `.extend(...)` calls, and the question "could a scoped GKR
+    // cover the bands alone" is a per-region cell count. `mark` records what
+    // each region added; purely additive, ~30 O(n) sums against a 3.5k-column
+    // vector.
+    let mut inter_split: Vec<serde_json::Value> = vec![];
+    let mut inter_seen = (0usize, 0usize);
     let mut claims = Claims::default();
     let m4_t = std::time::Instant::now();
     let mut row_i = 0usize;
@@ -2090,6 +2120,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                                                &band_committed[b], &plan.widths, false,
                                                !a.corner, air.as_ref());
         inter_all.extend(it.cols);
+        inter_mark(&format!("band{b}{}", if a.corner { " (corner)" } else { "" }),
+                   &inter_all, &mut inter_seen, &mut inter_split);
         claims.bands.push([qm(it.claimed_chan), qm(it.claimed_hs), qm(it.claimed_av),
                            qm(it.claimed_sn), qm(it.claimed_am), qm(it.claimed_az)]);
         claims.use_sums.extend(it.use_sums.iter().map(|v| qm(*v)));
@@ -2098,6 +2130,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let m4_t = std::time::Instant::now();
     let aoi = ao_interaction(&layer.ao, &aor, r, s, rv, p.c, &rels, &m4e_air.ao.eval);
     inter_all.extend(aoi.cols);
+    inter_mark("attnout", &inter_all, &mut inter_seen, &mut inter_split);
     claims.ao_out = qm(aoi.claimed_out);
     claims.ao_den = qm(aoi.claimed_den);
     claims.use_sums.push(qm(aoi.use_sum));
@@ -2113,6 +2146,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         });
         let it = mat_interaction(m, reg, rv, s, &rels, ow.as_ref());
         inter_all.extend(it.cols);
+        inter_mark(&format!("dequant/{}", m.name), &inter_all, &mut inter_seen,
+                   &mut inter_split);
         claims.mat_h.push(qm(it.claimed_h));
         claims.use_sums.push(qm(it.use_sum));
         if let Some(c) = it.claimed_out {
@@ -2168,6 +2203,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     for (wi, reg) in walk_regions.iter().enumerate() {
         let it = walk_interaction(layer, reg, rv, s, &rels, true, &m4e_air.walks[wi].eval);
         inter_all.extend(it.cols);
+        inter_mark(&format!("walk/{}", reg.name), &inter_all, &mut inter_seen,
+                   &mut inter_split);
         claims.walk_acc.push(it.claimed.iter().map(|v| qm(*v)).collect());
         claims.use_sums.push(qm(it.use_sum));
     }
@@ -2180,6 +2217,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         for (i, reg) in glue_regions.iter().enumerate() {
             let it = crate::glue::glue_interaction(reg, gr, Some(&specs[i]));
             inter_all.extend(crate::device::host_cols(it.cols));
+            inter_mark(&format!("glue/{}", reg.tag), &inter_all, &mut inter_seen,
+                       &mut inter_split);
             claims.glue_ties.push(it.claimed.iter().map(|v| qm(*v)).collect());
             claims.use_sums.push(qm(it.use_sum));
         }
@@ -2202,6 +2241,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                          &[htab(&pre_tables, 0), htab(&pre_tables, 1)],
                          htab(&base_mults, 0)));
         inter_all.extend(c);
+        inter_mark("table/exp", &inter_all, &mut inter_seen, &mut inter_split);
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
             &m4e_air.tables[0].eval, "table norm", plan.log_norm,
@@ -2211,6 +2251,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 table_col(plan.log_norm, &rels.norm, &refs, htab(&base_mults, 1))
             });
         inter_all.extend(c);
+        inter_mark("table/norm", &inter_all, &mut inter_seen, &mut inter_split);
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
             &m4e_air.tables[1].eval, "table frac", plan.log_frac,
@@ -2220,6 +2261,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 table_col(plan.log_frac, &rels.frac, &refs, htab(&base_mults, 2))
             });
         inter_all.extend(c);
+        inter_mark("table/frac", &inter_all, &mut inter_seen, &mut inter_split);
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
             &m4e_air.tables[2].eval, "table mul", plan.log_mul,
@@ -2229,6 +2271,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 table_col(plan.log_mul, &rels.mul, &refs, htab(&base_mults, 3))
             });
         inter_all.extend(c);
+        inter_mark("table/mul", &inter_all, &mut inter_seen, &mut inter_split);
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
             &m4e_air.tables[3].eval, "table qnz", p.ao_q_bits,
@@ -2238,6 +2281,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 table_col(p.ao_q_bits, &rels.qnz, &refs, htab(&base_mults, 4))
             });
         inter_all.extend(c);
+        inter_mark("table/qnz", &inter_all, &mut inter_seen, &mut inter_split);
         claims.table_sums.push(qm(sum));
         for (t, w) in plan.widths.iter().enumerate() {
             let (c, sum) = crate::devfrac::frac_cols(
@@ -2247,6 +2291,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 || table_col(*w, &rels.ranges[t], &[htab(&pre_tables, 17 + t)],
                              htab(&base_mults, 5 + t)));
             inter_all.extend(c);
+            inter_mark(&format!("table/range{w}"), &inter_all, &mut inter_seen,
+                       &mut inter_split);
             claims.table_sums.push(qm(sum));
         }
         // The glue's tables have no device path (and no generated kernels), so
@@ -2266,6 +2312,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                     .collect();
                 let (c, sum) = crate::glue::table_side(lr, &kind, &refs, &glue_mcols[t]);
                 inter_all.extend(crate::device::host_cols(c));
+                inter_mark(&format!("table/glue{t}"), &inter_all, &mut inter_seen,
+                           &mut inter_split);
                 claims.table_sums.push(qm(sum));
             }
         }
@@ -2297,6 +2345,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                                  rels.range(crate::argmax::KEY_BITS));
         inter_all.extend(crate::device::host_cols(lcols));
         claims.use_sums.push(qm(use_sum));
+        inter_mark("argmax", &inter_all, &mut inter_seen, &mut inter_split);
     }
     crate::util::m4_add("int/argmax", m4_t.elapsed().as_secs_f64());
     // an independent recomputation of every tie claim, from the region's witness
@@ -2312,6 +2361,24 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     };
     let interaction_secs = t1.elapsed().as_secs_f64();
     let n_inter = inter_all.len();
+    // B11 stream F step 3: the per-region deltas rolled up by family, so the
+    // "could a scoped GKR cover the bands alone" share is one division.
+    let inter_by_family = {
+        let mut by: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+        for e in &inter_split {
+            let r = e["region"].as_str().unwrap_or("");
+            let head = r.split('/').next().unwrap_or(r);
+            let fam = if head.starts_with("band") { "bands" } else { head };
+            let v = by.entry(fam.to_string()).or_default();
+            v.0 += e["columns"].as_u64().unwrap_or(0) as usize;
+            v.1 += e["cells"].as_u64().unwrap_or(0) as usize;
+        }
+        let m: serde_json::Map<String, Value> = by
+            .into_iter()
+            .map(|(k, (c, n))| (k, json!({"columns": c, "cells": n})))
+            .collect();
+        Value::Object(m)
+    };
     let clamp_edge = aor.q_out.iter().filter(|q| q.unsigned_abs() == 127).count();
     let family_cells = json!({
         "bands": band_committed.iter().zip(&band_dev).map(|(c, d)| match d {
@@ -2333,6 +2400,12 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         "glue_vs_b1": glue_b1,
         "head_key_vs_b1": head_key_b1,
         "interaction": inter_all.iter().map(|c| c.size()).sum::<usize>(),
+        // B11 stream F step 3: the interaction set region by region, in the
+        // order `inter_all` is built, plus the rollup by family. `tables` is the
+        // field `family_cells` was missing, and `bands` here is the interaction
+        // share a scoped GKR over the bands alone would cover.
+        "interaction_split": inter_split,
+        "interaction_by_family": inter_by_family,
         "preprocessed": m4_pre_cells,
         "walk_weights": walk_regions.iter().map(|w| json!({
             "group": w.name, "weights": w.n_weights, "lead": w.lay.g.lead,
