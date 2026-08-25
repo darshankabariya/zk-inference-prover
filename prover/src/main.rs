@@ -495,16 +495,38 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     let src = src_of(args);
     if let Some(dir) = &src.dir {
         match layer::Layer::load(dir, &src, &bands, variant) {
-            Ok(l) => return (l, vname),
+            Ok(mut l) => {
+                tighten_of(&mut l, args);
+                return (l, vname);
+            }
             Err(e) => eprintln!("  (no real layer witness: {e})"),
         }
     }
     let bands = arg_list(args, "--bands", &[2usize, 1]);
-    (layer::Layer::synthetic(arg_scalar(args, "--s", 32usize), arg_scalar(args, "--ctx", 128usize),
-                             arg_scalar(args, "--hd", 64usize), &bands, variant, &src,
-                             arg_scalar(args, "--nin", 64usize), arg_scalar(args, "--nout", 48usize),
-                             src.seed),
-     vname)
+    let mut l = layer::Layer::synthetic(
+        arg_scalar(args, "--s", 32usize), arg_scalar(args, "--ctx", 128usize),
+        arg_scalar(args, "--hd", 64usize), &bands, variant, &src,
+        arg_scalar(args, "--nin", 64usize), arg_scalar(args, "--nout", 48usize), src.seed);
+    tighten_of(&mut l, args);
+    (l, vname)
+}
+
+/// Stream J, off by default: `--tight-table [slack]` sizes the master exp table by
+/// the largest key the bands actually look up rather than by the manifest's
+/// `d_bits + spread`.  A negative slack is the tamper -- it takes the table *below*
+/// what the witness needs, leaving off-table keys with the numerators they already
+/// have, which no honest lookup argument can satisfy.
+fn tighten_of(l: &mut layer::Layer, args: &[String]) {
+    if !args.iter().any(|a| a == "--tight-table") {
+        return;
+    }
+    let slack: i32 = arg_scalar(args, "--tight-table", 0i32);
+    let need = l.key_bits() as i32;
+    let (before, after) = l.set_master_table((need + slack).max(1) as u32);
+    let off: usize = l.bands.iter().map(|b| b.off_table).sum();
+    eprintln!("tight-table: 2^{before} -> 2^{after} (key max {}, {} bits, slack {slack}, \
+off_table {off})",
+              l.bands.iter().map(|b| b.key_max()).max().unwrap_or(0), need);
 }
 
 pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Params {
@@ -680,6 +702,48 @@ fn compose_cmd(args: &[String]) {
     }
     assert_eq!(j["off_table"], 0, "honest composed witness has off-table values");
     emit("compose", json!({"source": l.source, "point": j}));
+}
+
+/// Stream J: the master exp table at three sizes on one witness.
+///
+/// `sized` is what the driver picks today (`d_bits + spread`, or `--table-bits`);
+/// `tight` is the largest key the bands actually look up; `tamper` is one bit
+/// below that, which leaves keys off the table holding the numerators they already
+/// have -- an internally consistent witness that only the lookup can object to.
+fn oversize_probes_cmd(args: &[String]) {
+    let (l, vname) = layer_of(args);
+    let mut points = vec![];
+    let mut arm = |name: &str, l: &layer::Layer| -> bool {
+        let params = params_of(l, args, &vname);
+        let off: usize = l.bands.iter().map(|b| b.off_table).sum();
+        eprintln!("oversize probe {name}: table 2^{} off_table {off}", params.log_table);
+        let (j, accepts) = compose_once(l, &params, &Default::default());
+        points.push(json!({
+            "arm": name, "log_table": params.log_table,
+            "table_rows": 1usize << params.log_table,
+            "witness_off_table": off,
+            "accepts": accepts,
+            "off_table": j["off_table"],
+            "cells": j["cells"], "pre_root": j["pre_root"],
+            "prove_error": j["prove_error"],
+        }));
+        accepts
+    };
+    assert!(arm("sized", &l), "the honest layer at the driver's size was rejected");
+    let need = l.key_bits();
+
+    let mut tight = layer_clone(&l);
+    tight.set_master_table(need);
+    assert!(arm("tight", &tight), "the honest layer at the tight size was rejected");
+
+    let mut bad = layer_clone(&l);
+    bad.set_master_table(need - 1);
+    assert!(bad.bands.iter().map(|b| b.off_table).sum::<usize>() > 0,
+            "the tamper arm has no off-table key -- nothing to reject");
+    assert!(!arm("tamper", &bad),
+            "a witness with keys past the table produced an accepting proof");
+
+    emit("oversize-probes", json!({"source": l.source, "key_bits": need, "arms": points}));
 }
 
 fn psweep_cmd(args: &[String]) {
@@ -1204,6 +1268,7 @@ fn main() {
         "logupcheck" => cudagen::logup_cmd(&args),
         "genemit" => cudagen::gen_emit_cmd(&args),
         "compose-probes" => compose_probes_cmd(&args),
+        "oversize-probes" => oversize_probes_cmd(&args),
         "psweep" => psweep_cmd(&args),
         "requant" => requant_cmd(&args),
         "requant-probes" => requant_probes_cmd(&args),

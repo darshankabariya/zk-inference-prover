@@ -916,6 +916,38 @@ impl Tables {
 }
 
 impl Layer {
+    /// Stream J: size the layer's master exp table by the largest key the bands
+    /// actually look up, instead of by the manifest's `d_bits + spread`.
+    ///
+    /// The two differ because the formula maximises the raw shift and the spread
+    /// separately: the key is `d * 2^(F - frac_i)`, so `bits(max_i d_i) + (F -
+    /// min_i frac_i)` is only tight when the largest raw shift comes from the
+    /// lowest-exponent head.  It never does -- `d_i` is itself proportional to
+    /// `2^frac_i`, so the raw maximum sits at a head *near* `F` -- and every layer
+    /// of b10-final measures 1-3 bits below the formula
+    /// (`experiments/b10/out/oversize/`).
+    ///
+    /// This changes no numerator and no committed column: the table is a prefix of
+    /// the same closed form, so the shrink is a truncation.  What it changes is the
+    /// statement's table size, exactly as `--table-bits` does -- and unlike
+    /// `--table-bits` it can differ per layer inside one chunk loop.
+    ///
+    /// Returns `(before, after)` in table bits, and leaves `off_table` on each band
+    /// recounted against the new size (zero whenever `bits >= key_bits`).
+    pub fn set_master_table(&mut self, bits: u32) -> (u32, u32) {
+        let before = self.bands.iter().map(|b| b.log_table).max().unwrap_or(0);
+        let after = bits.clamp(1, before);
+        for b in self.bands.iter_mut() {
+            b.retable(after);
+        }
+        (before, after)
+    }
+
+    /// The largest exp-table key any band of this layer looks up, in bits.
+    pub fn key_bits(&self) -> u32 {
+        self.bands.iter().map(|b| b.key_bits()).max().unwrap_or(1)
+    }
+
     /// Rebuild the attnout witness from the (possibly corrupted) bands, keeping
     /// the scales: the probes mutate a band and need `ao` to follow it.
     pub fn rebuild_ao(&mut self) {
