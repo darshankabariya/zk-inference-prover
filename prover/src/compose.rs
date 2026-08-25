@@ -481,7 +481,7 @@ impl Plan {
             let l0 = &self.lays[0];
             let pre0 = Powers::new(r, s, rv, &self.shapes[0], &l0.chan, &l0.key, &l0.out, l0.rw);
             Powers::new(r_corner, s, rv, sh, &l.chan, &l.key, &l.out, l.rw)
-                .as_corner(pre0.r_c, pre0.mu, sh.c)
+                .as_corner(pre0.r_c, sh.c)
         } else {
             Powers::new(r, s, rv, sh, &l.chan, &l.key, &l.out, l.rw)
         }

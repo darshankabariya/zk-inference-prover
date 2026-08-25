@@ -182,24 +182,22 @@ impl Powers {
     }
 
     /// The corner grid's powers: built on the corner's own shape (`c = S`) and its
-    /// own key challenge `r'`, then told the three constants it shares with the
-    /// prefix -- the denominator's per-instance weight, the instance-boundary
-    /// multiplier that converts `r'^S` into the prefix's `r^C`, and `mu`.
+    /// own key challenge `r'`, then told the two constants it shares with the
+    /// prefix -- the denominator's per-instance weight and the per-instance
+    /// weight of the channel region.
     ///
-    /// `mu` is the one that is not about weights but about *identity*: the corner
-    /// band commits its own row maximum, and nothing in its own statement forces
-    /// that to be the maximum the rectangle shifted by.  Two different maxima
-    /// would put the two halves' numerators on two different scales and the sum
-    /// `Z_prefix + Z_corner` would not be a softmax denominator at all.  Giving
-    /// the corner's per-token region the prefix's `mu` makes `am` a claim over the
-    /// same values with the same weights, so the verifier's `am_corner ==
-    /// am_prefix` is exactly "the two halves shifted by the same maximum".
-    pub fn as_corner(mut self, prefix_r_c: SecureField, prefix_mu: SecureField,
-                     s_keys: usize) -> Self {
+    /// `mu` is deliberately *not* among them: it is read only by `RowEval`'s
+    /// step and the per-token trace loop, and a corner band has neither -- the
+    /// pair's one per-token region is the prefix band's (B10 step 3), and the
+    /// row maximum both halves shift by is *its* `am`, checked against the
+    /// corner's Q.K^T by `verify_composed`'s claim equality.  (An earlier
+    /// version overrode `self.mu` here with a docstring claiming that override
+    /// carried the shared-maximum identity; the override was dead code and the
+    /// identity lives in the claim equality -- B10 review, stream B.)
+    pub fn as_corner(mut self, prefix_r_c: SecureField, s_keys: usize) -> Self {
         let (_, rp_span) = powers(self.r, s_keys - 1);
         self.sn_c = prefix_r_c;
         self.kappa = prefix_r_c * rp_span.inverse();
-        self.mu = prefix_mu;
         // and the channel region's own per-instance weight: `chan` is the side the
         // corner's Q.K^T identity is read against, and the other two terms of that
         // identity -- `am` (the prefix's per-token region) and `hs` (via `kappa`)

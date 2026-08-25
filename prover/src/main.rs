@@ -460,6 +460,9 @@ fn argmax_probes_cmd(args: &[String]) {
         ("the token does not attain the maximum", argmax::Tamper::NotMax(5)),
         ("the claimed maximum is above every entry", argmax::Tamper::PmHigh(2)),
         ("the claimed maximum is below the true one", argmax::Tamper::PmLow(4)),
+        // the strict close's own probe: `tok = vocab` is the all-ones indicator,
+        // killed only by the final-slot constraint; the lax sum rejects it too
+        ("the token equals the vocabulary size", argmax::Tamper::TokVocab(1)),
     ];
     let mut out = vec![];
     for lax in [false, true] {

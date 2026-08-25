@@ -184,6 +184,15 @@ impl FrameworkEval for ArgmaxEval {
         }
         eval.add_constraint(ss.clone() - ss_prev * nofirst - f);
         let want = if self.lax { E::F::one() } else { tk };
+        if !self.lax {
+            // The all-ones indicator is the one assignment the chain and the
+            // closing sum both accept with `tok = vocab` -- no selector fires,
+            // so nothing above pins the token *into* the vocabulary.  The final
+            // slot of the last row closes the chain at 0 instead: an honest
+            // `tok < vocab` has `b = [i < tok] = 0` there already (pad slots
+            // included), and the all-ones cheat is the only witness this kills.
+            eval.add_constraint(bs[self.per_row - 1].clone() * last.clone());
+        }
         eval.add_constraint((ss - want) * last);
         let _ = end;
 
@@ -205,6 +214,9 @@ pub enum Tamper {
     PmHigh(usize),
     /// claim a maximum below the true one: some entry exceeds it
     PmLow(usize),
+    /// set the token to the vocabulary size itself: the all-ones indicator the
+    /// strict chain and closing sum both accepted before the final-slot close
+    TokVocab(usize),
 }
 
 pub struct AWitness {
@@ -281,6 +293,7 @@ impl AWitness {
                 let t = t % self.tokens;
                 pm[t] = pm[t].saturating_sub(1);
             }
+            Some(Tamper::TokVocab(t)) => tok[t % self.tokens] = self.vocab as u32,
             None => {}
         }
         (tok, pm)
