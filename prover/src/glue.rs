@@ -577,6 +577,11 @@ pub struct GlueEval {
     pub uns: Vec<UnKind>,
     pub val: ValRel,
     pub tie: Option<Tie>,
+    /// Stream H: when this region carries one side of the layer's boundary, the
+    /// tree that side is committed in and which of the region's value sequences
+    /// it holds.  `None` on every region of a chunk proved with the boundary
+    /// flag off, which is why that chunk's proof is byte-for-byte the old one.
+    pub bound: Option<crate::bounds::Bound>,
 }
 
 
@@ -718,6 +723,30 @@ impl FrameworkEval for GlueEval {
                         &self.val, E::EF::one(), &[c_sm.clone(), c_ef.clone()]));
                     outs.push((c_sm, c_ef));
                 }
+            }
+        }
+
+        // ---- the boundary commitment (stream H) -------------------------------
+        // One side of the layer's boundary is committed in its own tree, and the
+        // whole of what binds it to the proof is this equality: the column in
+        // that tree holds the packed value the region itself carries, row for
+        // row.  There is no randomness in it, which is the reason the tree may
+        // be committed after the interaction tree -- the constraint is checked
+        // at the OODS point, drawn after every commitment, so a prover that
+        // knows the earlier challenges has gained nothing.  See
+        // notes/bounds-design.md.
+        if let Some(b) = &self.bound {
+            let members: Vec<(E::F, E::F)> = match b.kind {
+                TieKind::In(g) => leaf_in[g].clone(),
+                TieKind::Out(o) => {
+                    self.prog.outs[o].iter().map(|s| outs[*s].clone()).collect()
+                }
+            };
+            assert_eq!(members.len(), b.n, "the boundary's width disagrees with its plan");
+            let pack = m31_u32(crate::bounds::PACK as u32);
+            for (sm, ef) in members.iter() {
+                let [c] = eval.next_interaction_mask(b.tree, [0]);
+                eval.add_constraint(c - (sm.clone() * E::F::from(pack) + ef.clone()));
             }
         }
 
@@ -1964,7 +1993,7 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
                    norm: rels.norm.clone(), frac: rels.frac.clone(), pow: rels.pow.clone(),
                    smul: rels.smul.clone(), un: rels.un.clone(), uns: rels.uns.clone(),
                    val: rels.val.clone(),
-                   tie: if notie { None } else { Some(tie) } },
+                   tie: if notie { None } else { Some(tie) }, bound: None },
         it.use_sum,
     );
     let tcomps: Vec<FrameworkComponent<GTableEval>> = tkinds
