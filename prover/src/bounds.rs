@@ -362,6 +362,7 @@ fn chunk_json(c: &Chunk) -> Value {
 pub fn cmd(args: &[String]) {
     let a_dir = crate::arg_str(args, "--a").expect("bounds needs --a <witness dir>");
     let b_dir = crate::arg_str(args, "--b").expect("bounds needs --b <witness dir>");
+    let c_dir = crate::arg_str(args, "--c");
     let a_out = crate::arg_str(args, "--a-out-tampered");
     let b_in = crate::arg_str(args, "--b-in-tampered");
     let tie_cell: usize = crate::arg_scalar(args, "--tie-cell", 4321usize);
@@ -398,33 +399,16 @@ pub fn cmd(args: &[String]) {
     }));
     assert!(!t.accepts, "a boundary column that disagrees with its region accepted");
 
-    // 2. chunk N's output, moved by changing an input the chunk commits.  The
-    //    chunk stays internally consistent and must prove; the pair check is
-    //    what has to catch it.
-    if let Some(d) = &a_out {
-        let p = prove_one("p2_out", "N, output moved", d, &out_dir, args, &none);
-        let ch = chain_files(&p, &b);
-        probes.push(json!({
-            "probe": "chunk N's output boundary, moved by one bit of its own committed input",
-            "expects": "the chunk proves on its own; the pair check fails",
-            "witness": d,
-            "accepts": p.accepts,
-            "chain": serde_json::to_value(&ch).unwrap(),
-            "chains": ch.chains(),
-            "passed": p.accepts && !ch.chains(),
-            "chunk": chunk_json(&p),
-        }));
-        assert!(p.accepts, "the tampered-output chunk did not survive its own proof");
-        assert!(!ch.chains(), "a moved output still chained");
-    }
-
-    // 3. chunk N+1's input, the same way and from the other side.
-    if let Some(d) = &b_in {
-        let p = prove_one("p3_in", "N+1, input moved", d, &out_dir, args, &none);
+    // 2. the wrong neighbour: two chunks that are both entirely honest and both
+    //    accept, and are simply not consecutive.  This is the asymmetry in its
+    //    purest form -- nothing is tampered anywhere, and the pair check is the
+    //    only thing in the system that can say so.
+    if let Some(d) = &c_dir {
+        let p = prove_one("p2_far", "a non-neighbour", d, &out_dir, args, &none);
         let ch = chain_files(&a, &p);
         probes.push(json!({
-            "probe": "chunk N+1's input boundary, moved by one bit",
-            "expects": "the chunk proves on its own; the pair check fails",
+            "probe": "an honest chunk that is not N's successor",
+            "expects": "both chunks accept; the pair check fails",
             "witness": d,
             "accepts": p.accepts,
             "chain": serde_json::to_value(&ch).unwrap(),
@@ -432,8 +416,47 @@ pub fn cmd(args: &[String]) {
             "passed": p.accepts && !ch.chains(),
             "chunk": chunk_json(&p),
         }));
-        assert!(p.accepts, "the tampered-input chunk did not survive its own proof");
-        assert!(!ch.chains(), "a moved input still chained");
+        assert!(p.accepts, "an honest non-neighbour's own proof was rejected");
+        assert!(!ch.chains(), "a non-neighbour chained");
+    }
+
+    // 3 and 4. each side's boundary moved by one bit of the witness it is
+    //    extracted from.  What has to happen here depends on how much of the
+    //    layer statement is closed, and the probe reports which:
+    //
+    //    * while the residual stream is a free committed input, the chunk stays
+    //      internally consistent and proves, and only the pair check catches the
+    //      move -- the case the feature was built for;
+    //    * once the norm tails and the dequant output ties are in (stream E),
+    //      the stream is pinned forward into the matmul inputs, so a one-bit
+    //      change to it is caught *inside* the chunk and the proof is rejected.
+    //
+    //    Either outcome is a pass; what would be a failure is a chunk that
+    //    accepts and still chains.  So that is the whole assertion.
+    for (tag, name, dir, second) in [
+        ("p3_out", "chunk N's output boundary, moved by one bit of its own witness",
+         a_out.as_ref(), false),
+        ("p4_in", "chunk N+1's input boundary, moved by one bit of its own witness",
+         b_in.as_ref(), true),
+    ] {
+        let Some(d) = dir else { continue };
+        let p = prove_one(tag, name, d, &out_dir, args, &none);
+        let ch = if second { chain_files(&a, &p) } else { chain_files(&p, &b) };
+        probes.push(json!({
+            "probe": name,
+            "expects": "either the chunk's own proof rejects it, or it accepts and the \
+                        pair check fails -- never accepts and chains",
+            "witness": d,
+            "accepts": p.accepts,
+            "caught_inside_the_chunk": !p.accepts,
+            "prove_error": p.json.get("prove_error"),
+            "verdict": p.json.get("verdict"),
+            "chain": serde_json::to_value(&ch).unwrap(),
+            "chains": ch.chains(),
+            "passed": !(p.accepts && ch.chains()),
+            "chunk": chunk_json(&p),
+        }));
+        assert!(!(p.accepts && ch.chains()), "a moved boundary accepted and still chained");
     }
 
     assert!(honest.chains(), "the honest pair did not chain");
