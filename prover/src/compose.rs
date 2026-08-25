@@ -150,6 +150,12 @@ pub struct Params {
     /// heads, `C = S`, masked.  Absent on a witness extracted without it.
     #[serde(default)]
     pub corner: bool,
+    /// Stream H: the layer's residual-stream input and output are each committed
+    /// in a tree of their own, so that two chunks' boundaries can be compared
+    /// from bytes.  Needs the wiring family, since the boundary *is* its two
+    /// stream ties; absent, and a chunk composes exactly as it did before.
+    #[serde(default)]
+    pub bounds: bool,
 }
 
 /// The wiring family's two shape numbers.  `a` is how many rows one token's
@@ -381,6 +387,11 @@ pub struct Plan {
     pub log_frac: u32,
     pub log_mul: u32,
     pub glue: Option<GluePlan>,
+    /// Stream H: the two boundary sides, or empty.  A statement asks for the
+    /// boundary and has the wiring family, or it has no boundary at all — the
+    /// plan settles that once so the prover and the verifier cannot disagree
+    /// about how many trees the transcript has.
+    pub bounds: Vec<crate::bounds::Side>,
 }
 
 impl Plan {
@@ -464,8 +475,20 @@ impl Plan {
         let log_frac = crate::common::log_rows_for(frac_rows, 1);
         let log_mul = 14;
         let glue = p.glue.as_ref().map(|g| GluePlan::new(p, g));
+        // Stream H: the boundary is the wiring family's two stream ties, so it
+        // exists exactly when the statement asks for it and the family is there.
+        let bounds = match (&glue, p.bounds) {
+            (Some(g), true) => crate::bounds::sides(g),
+            _ => vec![],
+        };
         Self { p: p.clone(), attn_variant, round, shapes, lays, cfg, head_offsets, corner, specs,
-               mat_lays, ao_lay, walks, widths, log_norm, log_frac, log_mul, glue }
+               mat_lays, ao_lay, walks, widths, log_norm, log_frac, log_mul, glue, bounds }
+    }
+
+    /// How many trees the transcript commits: the three that were always there,
+    /// plus one per boundary side.
+    pub fn n_trees(&self) -> usize {
+        3 + self.bounds.len()
     }
 
     /// Tree 0's column ids, in exactly the order the prover commits them.
@@ -843,6 +866,12 @@ pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField
                     un: gr.un.clone(),
                     val: gr.val.clone(),
                     tie: Some(ties[i].clone()),
+                    // Stream H: a region carries a boundary side when the plan
+                    // named it one.  The sides are registered in `stream_in`,
+                    // `stream_out` order and the components in region order, so
+                    // the tree a side lands in is the same for prover and
+                    // verifier without either being told.
+                    bound: plan.bounds.iter().find(|s| s.region == i).map(|s| s.bound),
                 },
                 next_use(claims),
             ));
@@ -917,6 +946,9 @@ pub struct Composed {
     /// B10 step 2: the glue regions' own reference and B1 comparisons, and the
     /// tie claims each of them recomputed from the witness rather than the trace
     pub glue_ties_ok: bool,
+    /// Stream H: what the boundary trees cost this chunk, or null when the flag
+    /// was off and there are none
+    pub bounds: Value,
 }
 
 /// Tampers that need a hook inside the prover (everything else corrupts the
@@ -931,6 +963,12 @@ pub struct ProverTamper {
     pub glue_stream: Option<(usize, usize)>,
     /// a tamper inside one glue region's arithmetic, by region index
     pub glue: Option<(usize, crate::glue::Tamper)>,
+    /// Stream H: corrupt one cell of *one* boundary tree, leaving the region it
+    /// is tied to alone -- `(which side, which cell)`, side 0 being the input
+    /// and side 1 the output.  Nothing else in the chunk changes, so what has to
+    /// reject is that side's equality constraint: the probe that says the root
+    /// is bound to the proof and not merely appended to it.
+    pub bounds: Option<(usize, usize)>,
 }
 
 pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Composed {
@@ -971,6 +1009,9 @@ pub struct Gen {
     /// what names this chunk's preprocessed tree (`chunks::key_of`); `None`
     /// is the single-proof path, which never caches
     pub pre_key: Option<u64>,
+    /// Stream H: the boundary tamper, carried across the generate/prove split
+    /// because the boundary trees are built where they are committed.
+    pub bounds_tamper: Option<(usize, usize)>,
 }
 
 /// B7b (README 26): the first half of `prove_layer` -- every fill, every
@@ -1400,7 +1441,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
           glue_regions, glue_tcols, glue_mcols, glue_b1,
           n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
-          m4e_tabdev, trace_secs, pre_key }
+          m4e_tabdev, trace_secs, pre_key, bounds_tamper: tamper.bounds }
 }
 
 /// B7b (README 26): the second half -- the session, the three commits, the
@@ -1409,7 +1450,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
               glue_regions, glue_tcols, glue_mcols, glue_b1,
               n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
-              m4e_tabdev, trace_secs, pre_key } = g;
+              m4e_tabdev, trace_secs, pre_key, bounds_tamper } = g;
     let p = &plan.p;
     let t0 = std::time::Instant::now();
 
@@ -1595,7 +1636,12 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             tag: b,
             chan: &m4e_air.chans[b].eval,
             key: &m4e_air.keys[b].eval,
-            row: &m4e_air.rows[b].eval,
+            // `rows` holds one component per *prefix* band, so it cannot be
+            // indexed by band once the corner rides along.  Count the prefix
+            // bands before this one instead, and hand a corner band nothing.
+            row: (!plan.corner[b]).then(|| {
+                &m4e_air.rows[plan.corner[..b].iter().filter(|c| !**c).count()].eval
+            }),
             dev: band_dev[b].as_ref(),
             pre: band_pre[b].as_ref(),
         };
@@ -1782,6 +1828,22 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let m4_t = std::time::Instant::now();
     sess.commit_any(inter_all);
     crate::util::m4_add("wall/commit_inter", m4_t.elapsed().as_secs_f64());
+    // Stream H: the boundary sides, one tree each, committed after the
+    // interaction tree and before the claims are mixed.  Nothing is drawn
+    // between them and nothing reads them but the equality constraints, which
+    // is what the note argues makes this position sound.
+    let m4_t = std::time::Instant::now();
+    let bounds_report = if plan.bounds.is_empty() {
+        json!(null)
+    } else {
+        for (i, side) in plan.bounds.iter().enumerate() {
+            let tam = bounds_tamper.filter(|(s, _)| *s == i).map(|(_, c)| c);
+            let cols = crate::bounds::cols(&glue_regions[side.region], side, tam);
+            sess.commit(cols);
+        }
+        crate::bounds::report(&plan.bounds)
+    };
+    crate::util::m4_add("wall/commit_bounds", m4_t.elapsed().as_secs_f64());
     sess.mix(&claims.flat());
 
     // ---- components, prove ----------------------------------------------------
@@ -1832,6 +1894,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         family_cells,
         n_columns,
         glue_ties_ok,
+        bounds: bounds_report,
     }
 }
 
@@ -1855,6 +1918,11 @@ pub struct Verdict {
     /// the layer's committed residual-stream input and output claims
     pub stream_in: Option<[u32; 4]>,
     pub stream_out: Option<[u32; 4]>,
+    /// Stream H: the two boundary trees' roots, off the parsed proof.  These are
+    /// what `bounds::chain_check` compares across two proofs; a verifier reading
+    /// one proof alone gets them here so it never has to re-derive anything.
+    pub bound_in: Option<String>,
+    pub bound_out: Option<String>,
     pub error: Option<String>,
     pub verify_secs: f64,
 }
@@ -1870,6 +1938,7 @@ impl Verdict {
         Self { stark_ok: false, root_ok: false, sums_cancel: false, qk_ok: vec![],
                den_ok: vec![], av_ok: false, den_link_ok: false, walk_ok: vec![],
                sizes_ok: false, glue_ok: vec![false], stream_in: None, stream_out: None,
+               bound_in: None, bound_out: None,
                error: Some(msg.to_string()), verify_secs: 0.0 }
     }
 }
@@ -1902,7 +1971,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         || plan.glue.as_ref().is_some_and(|g| {
             g.regions.iter().zip(&claims.glue_ties).any(|(r, c)| r.ties.len() != c.len())
         })
-        || fixed.sizes.len() != 3
+        || fixed.sizes.len() != plan.n_trees()
     {
         return Verdict::rejected("claims shape mismatch");
     }
@@ -1931,6 +2000,20 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     };
     let r_corner = if plan.p.corner { f[plan.corner_challenge_at()] } else { SecureField::zero() };
     vcs.commit(proof.commitments[2], &fixed.sizes[2], &mut ch);
+    // Stream H: one tree per boundary side, replayed in the prover's order.  The
+    // roots are read out below; nothing is drawn from them here, because nothing
+    // in the AIR reads a boundary column except its equality constraint.
+    if proof.commitments.len() < plan.n_trees() {
+        return Verdict::rejected("the proof carries fewer roots than the statement claims");
+    }
+    for t in 3..plan.n_trees() {
+        vcs.commit(proof.commitments[t], &fixed.sizes[t], &mut ch);
+    }
+    let (bound_in, bound_out) = match plan.bounds.len() {
+        2 => (Some(format!("{:?}", proof.commitments[3])),
+              Some(format!("{:?}", proof.commitments[4]))),
+        _ => (None, None),
+    };
     ch.mix_felts(&claims.flat());
 
     // ---- components from the parsed statement ----------------------------------
@@ -1938,7 +2021,8 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let components = built.components();
     // the AIR's own column sizes must agree with the committed ones
     let derived = TreeVec::concat_cols(components.iter().map(|c| c.trace_log_degree_bounds()));
-    let sizes_ok = derived[1] == fixed.sizes[1] && derived[2] == fixed.sizes[2];
+    let sizes_ok = derived.len() == plan.n_trees()
+        && (1..plan.n_trees()).all(|t| derived[t] == fixed.sizes[t]);
 
     let vres = verify(&components, &mut ch, &mut vcs, proof);
     let stark_ok = vres.is_ok();
@@ -2017,6 +2101,6 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     };
 
     Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok,
-              sizes_ok, glue_ok, stream_in, stream_out, error,
+              sizes_ok, glue_ok, stream_in, stream_out, bound_in, bound_out, error,
               verify_secs: t0.elapsed().as_secs_f64() }
 }

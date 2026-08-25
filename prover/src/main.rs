@@ -9,6 +9,7 @@ mod attn_trace;
 mod argmax;
 mod attn_witness;
 mod bf16;
+mod bounds;
 mod common;
 mod device;
 mod compose;
@@ -554,6 +555,10 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         glue: l.glue.as_ref().filter(|_| !flag(args, "--no-glue")).map(|g| {
             compose::GlueParams { d: g.d, a: arg_scalar(args, "--glue-a", 32usize) }
         }),
+        // Stream H: the boundary commitment, off unless asked for either way --
+        // by the flag on the command line or by `B10_BOUNDS` in the environment.
+        // Off is what makes the recorded digest the identity line.
+        bounds: flag(args, "--bounds") || bounds::enabled(),
     }
 }
 
@@ -626,6 +631,10 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
         "family_cells": out.family_cells,
         "ref_mismatch": out.ref_bad, "off_table": out.off_table,
         "glue_ties_ok": out.glue_ties_ok,
+        // Stream H: the boundary trees' own cells and columns, and the two roots
+        // the chain check compares.  Null on a chunk proved with the flag off.
+        "bounds": out.bounds,
+        "bound_roots": verdict.as_ref().map(|v| json!({"in": v.bound_in, "out": v.bound_out})),
         "trace_secs": out.trace_secs, "interaction_secs": out.interaction_secs,
         "prove_secs": out.stats.prove_secs,
         "verify_secs": verdict.as_ref().map(|v| v.verify_secs).unwrap_or(0.0),
@@ -1207,6 +1216,7 @@ fn main() {
         "argmax" => argmax_cmd(&args),
         "argmax-probes" => argmax_probes_cmd(&args),
         "glue" => glue_cmd(&args),
+        "bounds" => bounds::cmd(&args),
         "glue-probes" => glue_probes_cmd(&args),
         "selftest" => selftest(&args),
         other => {

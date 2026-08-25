@@ -92,31 +92,27 @@ impl<MC: MerkleChannel> CommitmentSchemeVerifier<MC> {
         channel.mix_u64(proof.proof_of_work);
         // Get FRI query positions.
         let query_positions = fri_verifier.sample_query_positions(channel);
-        let preprocessed_query_positions = prepare_preprocessed_query_positions(
-            &query_positions,
-            lifting_log_size,
-            self.column_log_sizes()[0]
-                .iter()
-                .max()
-                .copied()
-                .unwrap_or_default(),
-        );
-
-        // Build the query positions tree: the preprocessed tree needs a different treatment than
-        // the other trees.
-        let query_positions_tree = TreeVec::new(
-            self.trees
-                .iter()
-                .enumerate()
-                .map(|(i, _)| {
-                    if i == 0 {
-                        preprocessed_query_positions.as_slice()
-                    } else {
-                        query_positions.as_slice()
-                    }
-                })
-                .collect::<Vec<_>>(),
-        );
+        // Build the query positions tree.  The prover's mirror of this is in
+        // `CommitmentSchemeProver::prove_values`: FRI's positions live in the
+        // lifted domain, and each tree needs them folded to its own depth,
+        // because `build_queries_per_log_size` below measures every column's
+        // shift against the tallest column of its own tree.  The fold is the
+        // identity for a tree that already reaches the full depth, so this is
+        // only a change for trees that do not -- the preprocessed tree, and any
+        // extra tree that commits a short family of columns of its own.
+        let per_tree: Vec<Vec<usize>> = self
+            .column_log_sizes()
+            .iter()
+            .map(|cols| {
+                prepare_preprocessed_query_positions(
+                    &query_positions,
+                    lifting_log_size,
+                    cols.iter().max().copied().unwrap_or_default(),
+                )
+            })
+            .collect();
+        let query_positions_tree =
+            TreeVec::new(per_tree.iter().map(|v| v.as_slice()).collect::<Vec<_>>());
         // Verify decommitments.
         // Build queries_per_log_size for each tree from flat query positions and column log sizes.
         self.trees

@@ -120,7 +120,10 @@ pub struct BandAir<'a> {
     pub tag: usize,
     pub chan: &'a crate::attn_air::ChanEval,
     pub key: &'a crate::attn_air::KeyEval,
-    pub row: &'a crate::attn_air::RowEval,
+    /// `None` on a corner band, which has no per-token region of its own: there
+    /// is one row maximum and one denominator per token and both live on the
+    /// prefix band, so component 3 is never lowered for a corner band.
+    pub row: Option<&'a crate::attn_air::RowEval>,
     pub dev: Option<&'a crate::devwfill::DevBand>,
     /// B7a milestone 4 (section 3 row 1): this band's selector columns and the
     /// flags they came from. `Some` whenever `dev` is, because the accumulators
@@ -157,7 +160,8 @@ pub fn band_cols(
     match which {
         0 => frac_cols(air.chan, &tag, log_rows, Cols::Unread, base, host),
         1 => frac_cols(air.key, &tag, log_rows, Cols::Unread, base, host),
-        3 => frac_cols(air.row, &tag, log_rows, Cols::Unread, base, host),
+        3 => frac_cols(air.row.expect("a corner band has no per-token region"),
+                       &tag, log_rows, Cols::Unread, base, host),
         _ => panic!("band component {which} has no eval"),
     }
 }
