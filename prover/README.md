@@ -95,7 +95,18 @@ in on 2026-08-24. The device paths sit behind the same runtime switches as
 before (`B7_M4_FILL`, `B7_M4_WFILL`, `B7_M4_TABDEV`, `B7_M4_ACC`,
 `B7_M4_PRE`, `B7_M5_*`); with everything off, both arms walk the reference
 path. Mode 2 of each switch builds host and device sides and asserts every
-cell — that is the per-family check the digest then seals.
+cell — that is the per-family check the digest then seals. Stream L
+(2026-08-26, `briefs/l-tracegen.md`) added three: `B7_M4_WFILL_BAND` (the
+band fill's own three-value gate, defaulting to `B7_M4_WFILL`),
+`B7_M4_POOL` (the pinned staging pool the witness packs write into;
+`B7_M4_POOLMUT=1` is its deliberate-defect control) and
+`B7_M4_WFILL_DIFF=1` (the mode-2 mirror surveys every column instead of
+panicking at the first mismatch). Since that stream the sequence runs with
+`B7_M4_WFILL=1 B7_M4_POOL=1` on top of stream K's env — the fills'
+corner-state defects that had kept `WFILL` honestly off since b-port
+(`zz` uploaded where the pair's `zz_row()` is committed; the corner
+bands' exp bumps dropped from the host multiplicity) are fixed and
+digest-gated.
 
 Two things the chain does *not* include, on purpose: the `B7_M4_SCAN`
 parallel-carry fast path (its arithmetic predates `at_opt` and is wrong under
@@ -137,17 +148,30 @@ fixed** (a `b65_`-prefixed eval whose blob is `None` takes the announced CPU
 fallback instead of handing the launcher raw struct bytes;
 `component_prover.rs`, repro before/after in `experiments/b11/kernels/out/`)
 — a missing shape without `B7_KERNEL_FALLBACK=1` still panics, as it must.
-Third, an **open defect handed on by stream K**: under `B7_M4_FILL=1` the
-head's device fill path mis-assembles a walk's column trees (a 2^18 eval
-domain handed a 2^20 column set at extension; `B7_EXT_DEBUG=1` is the
-diagnostic) — the head runs with host fills and device constraint kernels;
-layer chunks are unaffected.
+Third, an **open defect, found by stream K and scoped by stream L**: under
+`B7_M4_FILL=1` the head's device dequant fill mis-assembles a walk's column
+trees. L named the line: `mat_region_dev`'s last parameter is `with_want`,
+not `has_oside`, so the fill is never told the region has an output side
+and sizes its preprocessed tree three selector columns short (506 vs 510
+on `lm_head`, the sequence's only o-side matmul) — every later component's
+indices shift, and the head's two same-shape walk components make that an
+extension assert rather than a column-count mismatch. The fix is designed
+(pass `has_oside`, build the three row-index selectors host-side, append
+in the host's order; `B7_M4_FILL=2`'s mirror is the gate) but not landed —
+the head runs its dequant fill on the host, with its walk and attnout
+fills on the device (`B7_M4_WFILL`) since stream L; layer chunks are
+unaffected.
 
 One design decision to keep: **corner bands decline every device path** —
 the fill (`!a.corner` threads through `commit_base_any` as `with_rows`), the
 preprocessed columns, and the per-token accumulators. The device kernels have
 no notion of the corner/prefix distinction, and a guessed kernel would file a
-silently wrong fill; the cells given up are only the S x S corner.
+silently wrong fill; the cells given up are only the S x S corner. The
+*mixed* state that decision creates — prefix bands filling on the device
+while their corners fill on the host — is exactly where stream L's two
+defects lived, and is now exercised by the sequence itself and guarded by
+`devwfill::exp_mult_on_host` (its doc comment names the invariant the two
+sides must agree on).
 
 ## What a corner band is
 
