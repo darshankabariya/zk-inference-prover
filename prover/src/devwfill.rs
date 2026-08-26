@@ -890,7 +890,22 @@ pub fn commit_base_dev(
                              || pack_u16(&a.num, "band num"));
     let d_delta = band_up("band/delta", || pack_i64(&a.delta));
     let d_mm = band_up("band/mm", || pack_i64(&a.mm));
-    let d_zz = band_up("band/zz", || pack_i64(&a.zz));
+    // B11 stream L: `zz_row()`, not `zz`.
+    //
+    // This is the whole of what b-port called the prefix bands' fill kernels
+    // "predating the corner's key discipline", and it is on this side of the
+    // link rather than in the kernel. When a corner band rides with this one the
+    // per-token region belongs to the *pair*, and the denominator it commits is
+    // the pair's total -- `Z >= nmax` holds of the sum and of neither half,
+    // because the key whose shift is zero may be in either (`layer.rs:352`).
+    // `commit_base` has always read `a.zz_row()` for it; `commit_base_dev`
+    // uploaded `a.zz`, so on any corner-bearing witness the device built a
+    // denominator missing the corner's keys -- 48 of 352 columns wrong on a
+    // C=4K chunk (the 3 x rw per-token columns; the 16 maxima were right), and
+    // `off_table` bumps the host never makes, hence the rejection. Rectangles
+    // have no corner, `zz_row()` is `zz` there, and that is why stream G's
+    // switch matrix and stream F's whole loop saw nothing.
+    let d_zz = band_up("band/zz", || pack_i64(a.zz_row()));
     // only the bf16x variant reads these two, and only it pays for them
     let bf16x = a.variant == Variant::Bf16x;
     let d_xx = bf16x.then(|| band_up("band/xx", || pack_u16_raw(&a.xx)));

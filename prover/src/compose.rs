@@ -27,6 +27,7 @@
 //! There is no prover-side struct comparison anywhere on the accept path.
 
 use num_traits::Zero;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use stwo::core::air::Component;
@@ -1528,7 +1529,9 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 rows1, vec![stream.clone(), addv], &prog1, plan.round,
                 format!("B1 residual stream [{} x {}]", t.tokens, t.d));
             let tam1 = tamper.glue.filter(|(ri, _)| *ri == i1).map(|(_, x)| x);
+            let t_gr = std::time::Instant::now();
             let r1 = crate::glue::glue_region(&w1, &prog1, plan.round, &tag1, &mut gt, tam1);
+            crate::util::m4_add("gen/glue_region", t_gr.elapsed().as_secs_f64());
             // what the region computed is what the next one reads: that is what
             // the tie says, and it is checked against B1's own column here
             let got = t.unlay(&r1.outs[1]);
@@ -1541,7 +1544,9 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 t.tokens, vec![l2], &prog2, plan.round,
                 format!("the level-1 roots [{} x {}]", t.tokens, t.a));
             let tam2 = tamper.glue.filter(|(ri, _)| *ri == i1 + 1).map(|(_, x)| x);
+            let t_gr = std::time::Instant::now();
             let r2 = crate::glue::glue_region(&w2, &prog2, plan.round, &tag2, &mut gt, tam2);
+            crate::util::m4_add("gen/glue_region", t_gr.elapsed().as_secs_f64());
             stream = t.lay(&got);
             glue_regions.push(r1);
             glue_regions.push(r2);
@@ -1560,23 +1565,32 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // constant down the tokens, so the row reads channels `res + j a`.
             let rblk: Vec<u16> =
                 (0..rows1).map(|m| crate::glue::canon(rcol[m % t.tokens])).collect();
+            // B11 stream L, anatomy: the same shape of serial gather as the
+            // SwiGLU's below -- `rows1 * nreal` canonicalisations, one row
+            // independent of the next.
+            let t_wb = std::time::Instant::now();
             let mut wblk = vec![0u16; rows1 * t.nreal];
-            for m in 0..rows1 {
+            wblk.par_chunks_mut(t.nreal).enumerate().for_each(|(m, row)| {
                 let res = m / t.tokens;
                 for j in 0..t.nreal {
-                    wblk[m * t.nreal + j] = crate::glue::canon(wcol[res + j * t.a]);
+                    row[j] = crate::glue::canon(wcol[res + j * t.a]);
                 }
-            }
+            });
+            crate::util::m4_add("gen/glue_wblk", t_wb.elapsed().as_secs_f64());
             let w = crate::glue::GlueWitness::new(
                 rows1, vec![tail_in[k].clone(), rblk, wblk], &prog, plan.round,
                 format!("B1 norm{} tail [{} x {}]", k + 1, t.tokens, t.d));
             let tam = tamper.glue.filter(|(ri, _)| *ri == i).map(|(_, x)| x);
+            let t_gr = std::time::Instant::now();
             let r = crate::glue::glue_region(&w, &prog, plan.round, &tag, &mut gt, tam);
+            crate::util::m4_add("gen/glue_region", t_gr.elapsed().as_secs_f64());
             // the tail's output is the q/k/v (resp. gate/up) matmuls' own bf16
             // input column, so B1 has already written down what it must be
+            let t_b1 = std::time::Instant::now();
             if let Some(wv) = want {
                 let got = t.unlay(&r.outs[0]);
                 let bad = (0..t.tokens * t.d)
+                    .into_par_iter()
                     .filter(|i| crate::glue::canon(got[*i]) != crate::glue::canon(wv[*i]))
                     .count();
                 mismatch.push(json!({"column": wname, "values": t.tokens * t.d,
@@ -1586,6 +1600,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                                      "mismatch": serde_json::Value::Null,
                                      "note": "the dump does not carry this column"}));
             }
+            crate::util::m4_add("gen/glue_b1", t_b1.elapsed().as_secs_f64());
             glue_regions.push(r);
         }
         // ---- stream E: silu(gate) * up --------------------------------------
@@ -1602,30 +1617,50 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // region proves.  What is *not* here is the tie pinning them to it:
             // that is the open dequant tie, and until it lands these leaves are
             // pinned only by their VAL lookups.
+            // B11 stream L, anatomy: this is `tokens * d` calls to `deq_ref`,
+            // twice -- 4.2 M of them on a C=4K chunk's `gn1` -- and it was a
+            // serial nested loop inside the one term of trace generation that
+            // has no device path at all. `deq_ref` is a pure function of the
+            // matmul, its spec and the (token, channel) pair, so the rows are
+            // independent and rayon is the whole change.
+            let t_dq = std::time::Instant::now();
             let mut gate_out = vec![0u16; tf.tokens * tf.d];
             let mut up_out = vec![0u16; tf.tokens * tf.d];
-            for t in 0..tf.tokens {
-                for c in 0..tf.d {
-                    let q = t * tf.d + c;
-                    gate_out[q] = crate::layer::deq_ref(&layer.mats[gi], &plan.specs[gi], t, c);
-                    up_out[q] = crate::layer::deq_ref(&layer.mats[ui], &plan.specs[ui], t, c);
-                }
-            }
+            gate_out
+                .par_chunks_mut(tf.d)
+                .zip(up_out.par_chunks_mut(tf.d))
+                .enumerate()
+                .for_each(|(t, (g, u))| {
+                    for c in 0..tf.d {
+                        g[c] = crate::layer::deq_ref(&layer.mats[gi], &plan.specs[gi], t, c);
+                        u[c] = crate::layer::deq_ref(&layer.mats[ui], &plan.specs[ui], t, c);
+                    }
+                });
+            crate::util::m4_add("gen/glue_deqref", t_dq.elapsed().as_secs_f64());
             let prog = gp.regions[i].prog.clone();
             let tag = gp.regions[i].tag.clone();
             let w = crate::glue::GlueWitness::new(
                 tf.rows1(), vec![tf.lay(&gate_out), tf.lay(&up_out)], &prog, plan.round,
                 format!("the gate and up dequant outputs [{} x {}]", tf.tokens, tf.d));
             let tam = tamper.glue.filter(|(ri, _)| *ri == i).map(|(_, x)| x);
+            let t_gr = std::time::Instant::now();
             let r = crate::glue::glue_region(&w, &prog, plan.round, &tag, &mut gt, tam);
+            crate::util::m4_add("gen/glue_region", t_gr.elapsed().as_secs_f64());
             let n = tf.tokens * tf.d;
             let cmp = |got: &[u16], want: &[u16]| -> usize {
-                (0..n).filter(|q| crate::glue::canon(got[*q]) != crate::glue::canon(want[*q]))
+                (0..n)
+                    .into_par_iter()
+                    .filter(|q| crate::glue::canon(got[*q]) != crate::glue::canon(want[*q]))
                     .count()
             };
             // three columns B1 wrote for this gadget: the gate's dequantized
             // output (the silu's input), the silu image the region's table
             // supplies, and the product `down` reads
+            // B11 stream L, anatomy: everything from here to the end of the
+            // block is a *check* against B1's dumped columns, not a committed
+            // column -- three serial passes over `tokens * d` values. Timed
+            // apart so the record can say what the glue's seconds actually buy.
+            let t_b1 = std::time::Instant::now();
             if let Some(v) = &gc.silu_in {
                 mismatch.push(json!({"column": "silu_in", "values": n,
                                      "mismatch": cmp(&gate_out, v)}));
@@ -1640,6 +1675,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 mismatch.push(json!({"column": "x_down", "values": n,
                                      "mismatch": cmp(&tf.unlay(&r.outs[0]), v)}));
             }
+            crate::util::m4_add("gen/glue_b1", t_b1.elapsed().as_secs_f64());
             glue_regions.push(r);
         }
         tables.m_norm = std::mem::take(&mut gt.m_norm);
@@ -2116,9 +2152,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 pre: band_pre[b].as_ref(),
             }
         });
+        // B11 stream L, anatomy: the LogUp build apart from `inter_mark`'s
+        // accounting, which is the only other thing in this loop. Whatever
+        // `int/bands` minus `int/bands_build` comes to is the accounting.
+        let t_ib = std::time::Instant::now();
         let it = attn_trace::interaction_phase(a, l, &plan.cfg, &pow, &rels.exp, &rels.ranges,
                                                &band_committed[b], &plan.widths, false,
                                                !a.corner, air.as_ref());
+        crate::util::m4_add("int/bands_build", t_ib.elapsed().as_secs_f64());
         inter_all.extend(it.cols);
         inter_mark(&format!("band{b}{}", if a.corner { " (corner)" } else { "" }),
                    &inter_all, &mut inter_seen, &mut inter_split);
@@ -2201,7 +2242,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     crate::util::m4_add("int/dequant", m4_t.elapsed().as_secs_f64());
     let m4_t = std::time::Instant::now();
     for (wi, reg) in walk_regions.iter().enumerate() {
+        let t_iw = std::time::Instant::now();
         let it = walk_interaction(layer, reg, rv, s, &rels, true, &m4e_air.walks[wi].eval);
+        crate::util::m4_add("int/walks_build", t_iw.elapsed().as_secs_f64());
         inter_all.extend(it.cols);
         inter_mark(&format!("walk/{}", reg.name), &inter_all, &mut inter_seen,
                    &mut inter_split);
@@ -2215,7 +2258,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         let blank = Claims::default();
         let specs = gp.ties(w_glue, lam_glue, &blank);
         for (i, reg) in glue_regions.iter().enumerate() {
+            let t_ig = std::time::Instant::now();
             let it = crate::glue::glue_interaction(reg, gr, Some(&specs[i]));
+            crate::util::m4_add("int/glue_build", t_ig.elapsed().as_secs_f64());
             inter_all.extend(crate::device::host_cols(it.cols));
             inter_mark(&format!("glue/{}", reg.tag), &inter_all, &mut inter_seen,
                        &mut inter_split);
