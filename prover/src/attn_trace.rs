@@ -529,10 +529,13 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     let m4d = if with_rows { crate::devwfill::band_mode() } else { 0 };
     if m4d == 1 {
         // B7a milestone 4 (section 3 row 1): with the tables' columns on the
-        // device the exp counter has no host reader left, so it stays there.
+        // device the exp counter has no host reader left, so it stays there --
+        // unless a corner band rides with this one, in which case it does have
+        // one. See `devwfill::exp_mult_on_host`; `compose.rs` decides which
+        // column is committed from the same predicate, and the two must agree.
         let dev = crate::devwfill::commit_base_dev(a, l, cfg, widths, mult_exp, mult_r,
                                                    off_table, with_out,
-                                                   crate::devtab::mode() != 1);
+                                                   crate::devwfill::exp_mult_on_host(a));
         let at = dev.at.clone();
         return (vec![], at, Some(dev));
     }

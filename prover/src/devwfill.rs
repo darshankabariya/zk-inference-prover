@@ -283,6 +283,32 @@ pub fn band_mode() -> u32 {
     }
 }
 
+/// B11 stream L: must the exp table's multiplicity column be the host's?
+///
+/// `B7_M4_TABDEV=1` builds `m_exp` on the card, by summing the per-band exp
+/// counters `commit_base_dev` left there. That is right exactly when *every*
+/// band's bumps are on the card -- and a corner band always fills on the host,
+/// because it commits no per-token region and the device fill has no notion of
+/// its layout. So on a corner-bearing witness the bumps are split across the
+/// two sides and neither half alone is the column.
+///
+/// Only the two uniform states were ever run. All bands on the host is the
+/// sequence as stream K left it; all bands on the device is a rectangle, which
+/// has no corner. The sequence's own chunks are the mixed state, and taking the
+/// device half alone there silently loses the corner bands' exp lookups -- a
+/// LogUp sum that does not cancel, with every other check passing.
+///
+/// `a.zz_total` is the local signal that a corner rides with this band: it is
+/// set on the prefix half of a pair and on nothing else (`layer.rs:352`). When
+/// it is, the device band merges its counters into the host array as it does for
+/// every other table, and the host column is the one committed. `compose.rs`
+/// asks `layer.bands.iter().any(|b| b.corner)`, which is the same question
+/// about the same layer, and the two answers have to agree or the column and
+/// its counters come from different places.
+pub fn exp_mult_on_host(a: &Attn) -> bool {
+    crate::devtab::mode() != 1 || a.zz_total.is_some()
+}
+
 // --------------------------------------------------------------- the uploads --
 
 fn up_u32(v: Vec<u32>) -> Uint32Vec {

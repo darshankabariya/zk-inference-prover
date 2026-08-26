@@ -1793,8 +1793,20 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // `m_exp` needs a counter to sum, and there is one only where a band's fill
     // ran on the device (21.1). With the bands on the host it stays a host
     // column and a 4a upload -- the honest accounting, not a special case.
-    let dev_counters: Vec<&stwo::stwo_cuda::base_field_vec::Uint32Vec> =
-        band_dev.iter().filter_map(|b| b.as_ref().map(|d| &d.m_exp)).collect();
+    //
+    // B11 stream L: and only where *every* band's are. A corner band fills on
+    // the host, so on a corner-bearing witness the bumps are split and the
+    // device half alone is not the column -- see `devwfill::exp_mult_on_host`,
+    // which is the same predicate `commit_base_dev` was given, asked here of the
+    // whole layer. With a corner present the device bands merged their counters
+    // into `tables.m_exp`, so the host column is complete and the counter list
+    // is dropped rather than summed into a column nothing commits.
+    let host_corner = layer.bands.iter().any(|b| b.corner);
+    let dev_counters: Vec<&stwo::stwo_cuda::base_field_vec::Uint32Vec> = if host_corner {
+        vec![]
+    } else {
+        band_dev.iter().filter_map(|b| b.as_ref().map(|d| &d.m_exp)).collect()
+    };
     let host_m = host_big || dev_counters.is_empty();
     mult_logs.push(p.log_table);
     base_mults.push(host_m.then(|| {
