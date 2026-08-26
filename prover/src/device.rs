@@ -126,6 +126,12 @@ mod pinned {
         crate::util::m4b_mode("B7_M4_POOL") != 0
     }
 
+    /// `B7_M4_POOLMUT=1`: the pool's deliberate defect, aimed at the staged
+    /// bytes themselves. Off unless set, and it never runs in a timed loop.
+    pub fn mutate() -> bool {
+        crate::util::m4b_mode("B7_M4_POOLMUT") != 0
+    }
+
     pub fn peak_bytes() -> usize {
         PEAK.load(std::sync::atomic::Ordering::Relaxed) * 4
     }
@@ -172,6 +178,18 @@ staying on the pageable path",
         // only reference to it.
         let slice = unsafe { std::slice::from_raw_parts_mut(b.ptr, words) };
         pack(slice);
+        // B11 stream L: `B7_M4_POOLMUT=1` is the pool's deliberate defect.
+        //
+        // A staging pool is a new place for a witness array to be wrong, and a
+        // control that has never fired is not a control (B7A section 5 rule 5).
+        // This changes one word of one staged array after the pack has written
+        // it and before the copy reads it -- the exact failure the pool makes
+        // possible, and the narrowest version of it. The band and walk mirrors
+        // must panic under it; if they do not, they are not covering the pool.
+        if mutate() {
+            let k = words / 2;
+            slice[k] = slice[k].wrapping_add(1);
+        }
         Some(then(b.ptr as *const u32, words))
     }
 }
