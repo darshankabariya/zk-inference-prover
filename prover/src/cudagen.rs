@@ -1431,11 +1431,21 @@ impl Ir {
     /// distinct nonzero mask offset. Shared by the constraint kernel and the
     /// fraction kernel (18.7): the two differ only in what they do with the
     /// nodes, never in how the nodes are computed.
-    fn emit_instrs(&self) -> String {
+    ///
+    /// With a mask (B11 stream K), the list is restricted to the instructions
+    /// a segment's constraints reach, so a body too long for ptxas can be
+    /// split without renumbering anything -- a node keeps its `v{i}` name in
+    /// every segment that recomputes it. `None` emits the whole list,
+    /// byte-identically to what the unsplit emitter always produced.
+    fn emit_instrs_for(&self, mask: Option<&[bool]>) -> String {
+        let keep = |i: usize| mask.is_none_or(|m| m[i]);
         let mut out = String::new();
         // one row index per distinct nonzero mask offset, hoisted
         let mut offs: BTreeSet<isize> = BTreeSet::new();
-        for o in &self.ops {
+        for (i, o) in self.ops.iter().enumerate() {
+            if !keep(i) {
+                continue;
+            }
             if let Op::Load { off, .. } = o {
                 if *off != 0 {
                     offs.insert(*off);
@@ -1453,6 +1463,9 @@ impl Ir {
             if off == 0 { "row".to_string() } else { format!("r{}", off_name(off)) }
         };
         for (i, o) in self.ops.iter().enumerate() {
+            if !keep(i) {
+                continue;
+            }
             let t = self.ty(i);
             let e = match *o {
                 Op::Load { tree, col, off } => {
@@ -1500,9 +1513,19 @@ impl Ir {
     /// One shape's constraint kernel body: the instructions, the accumulation
     /// against `random_coeff_powers`, and the quotient write-back.
     fn emit_body(&self) -> String {
-        let mut out = self.emit_instrs();
+        self.emit_body_for(None, 0..self.constraints.len())
+    }
+
+    /// One segment's constraint kernel body (B11 stream K): the instructions
+    /// the segment reaches, the accumulation of its slice of the constraint
+    /// list -- with the *global* `rcp` indices, so the sum over segments is the
+    /// same field sum -- and the same write-back. `(None, full range)` is the
+    /// whole body, byte-identical to the unsegmented emitter.
+    fn emit_body_for(&self, mask: Option<&[bool]>, ks: std::ops::Range<usize>) -> String {
+        let mut out = self.emit_instrs_for(mask);
         out += "    qm31 res = {{0u, 0u}, {0u, 0u}};\n";
-        for (k, id) in self.constraints.iter().enumerate() {
+        for k in ks {
+            let id = self.constraints[k];
             out += &format!("    res = add(res, mul(v{id}, rcp[{k}]));\n");
         }
         out += "    const m31 di = denom_inv[row >> domain_log_size];\n";
@@ -1529,12 +1552,20 @@ impl Ir {
     /// construction: lookups `2c` and `2c+1` become column `c` with numerator
     /// `n0 d1 + n1 d0` and denominator `d0 d1`, and an odd tail stays alone.
     fn emit_frac_body(&self) -> String {
-        let mut out = self.emit_instrs();
+        self.emit_frac_body_for(None, 0..self.fracs.len().div_ceil(2))
+    }
+
+    /// One segment's fraction kernel body (B11 stream K): the per-column
+    /// writes are disjoint, so a split by column range needs no accumulate
+    /// path -- each segment writes its columns at their *global* indices.
+    /// `(None, full range)` is byte-identical to the unsegmented emitter.
+    fn emit_frac_body_for(&self, mask: Option<&[bool]>, cols: std::ops::Range<usize>) -> String {
+        let mut out = self.emit_instrs_for(mask);
         let ext = |id: usize| {
             if self.width[id] == 1 { format!("b65_ext(v{id})") } else { format!("v{id}") }
         };
         let n = self.fracs.len();
-        for c in 0..n.div_ceil(2) {
+        for c in cols {
             let i = 2 * c;
             let (n0, d0) = self.fracs[i];
             out += "    {\n";
@@ -1560,6 +1591,124 @@ fn off_name(off: isize) -> String {
     if off < 0 { format!("m{}", -off) } else { format!("p{off}") }
 }
 
+// -------------------------------------------------- the split (B11 stream K) ----
+//
+// The glue's constraint kernels (~10,400 instructions) and the head's dequant
+// (54,847) are past what ptxas will compile in reasonable time. The body is a
+// straight-line SSA list followed by a plain weighted sum of the constraints
+// against `random_coeff_powers`, and the quotient write-back already has an
+// accumulate path -- so the constraint list can be partitioned into segments,
+// each segment's kernel carrying only the transitive closure of its own
+// constraints, launched in sequence with every segment after the first on the
+// add path. M31 addition is exact, so the result is bit-identical by
+// construction. The cost is honest: a subexpression shared across segments is
+// recomputed in each one.
+
+/// One segment of a split kernel: which units it covers -- constraints for
+/// `emit_body_for`, fraction columns for `emit_frac_body_for` -- the emit mask
+/// of the instructions they reach, and that mask's population count.
+pub struct Seg {
+    pub units: std::ops::Range<usize>,
+    pub mask: Vec<bool>,
+    pub n_instrs: usize,
+}
+
+impl Ir {
+    /// The transitive operand closure of a set of root nodes, as an emit mask.
+    /// Follows exactly what `emit_instrs` reads: in particular a width-1
+    /// `Pack` is emitted as its first operand alone, so only that operand is
+    /// needed.
+    fn emit_mask(&self, roots: &[usize]) -> Vec<bool> {
+        let mut mask = vec![false; self.ops.len()];
+        let mut stack: Vec<usize> = roots.to_vec();
+        while let Some(i) = stack.pop() {
+            if mask[i] {
+                continue;
+            }
+            mask[i] = true;
+            match self.ops[i] {
+                Op::Pack(a, ..) if self.width[i] == 1 => stack.push(a),
+                ref o => stack.extend(operands(o)),
+            }
+        }
+        mask
+    }
+
+    /// Greedy contiguous partition of `units` (one root list each) into
+    /// segments whose emitted closure stays at or under `cap` instructions. A
+    /// single unit whose own closure already exceeds the cap gets a segment of
+    /// its own -- the cap is a knob, not a promise.
+    fn segment_units(&self, units: &[Vec<usize>], cap: usize) -> Vec<Seg> {
+        let closures: Vec<Vec<usize>> = units
+            .iter()
+            .map(|roots| {
+                let m = self.emit_mask(roots);
+                (0..self.ops.len()).filter(|&i| m[i]).collect()
+            })
+            .collect();
+        let mut segs: Vec<Seg> = vec![];
+        let mut start = 0usize;
+        let mut mask = vec![false; self.ops.len()];
+        let mut count = 0usize;
+        for (u, cl) in closures.iter().enumerate() {
+            let fresh = cl.iter().filter(|&&i| !mask[i]).count();
+            if u > start && count + fresh > cap {
+                segs.push(Seg {
+                    units: start..u,
+                    mask: std::mem::replace(&mut mask, vec![false; self.ops.len()]),
+                    n_instrs: count,
+                });
+                start = u;
+                count = 0;
+            }
+            for &i in cl {
+                if !mask[i] {
+                    mask[i] = true;
+                    count += 1;
+                }
+            }
+        }
+        if start < units.len() {
+            segs.push(Seg { units: start..units.len(), mask, n_instrs: count });
+        }
+        segs
+    }
+
+    /// The constraint segments of one shape at `cap`, or `None` when the shape
+    /// stays whole -- under the cap (so the installed library's kernels do not
+    /// churn byte for byte), or unsplittable (one constraint, or one segment).
+    pub fn constraint_segments(&self, cap: usize) -> Option<Vec<Seg>> {
+        if self.ops.len() <= cap || self.constraints.len() <= 1 {
+            return None;
+        }
+        let units: Vec<Vec<usize>> = self.constraints.iter().map(|&id| vec![id]).collect();
+        let segs = self.segment_units(&units, cap);
+        if segs.len() <= 1 { None } else { Some(segs) }
+    }
+
+    /// The fraction-column segments of one shape at `cap`, or `None` when the
+    /// shape stays whole. Column `c` is lookups `2c` and `2c+1`, exactly as
+    /// `emit_frac_body` pairs them.
+    pub fn frac_segments(&self, cap: usize) -> Option<Vec<Seg>> {
+        let n_cols = self.fracs.len().div_ceil(2);
+        if self.ops.len() <= cap || n_cols <= 1 {
+            return None;
+        }
+        let units: Vec<Vec<usize>> = (0..n_cols)
+            .map(|c| {
+                let mut roots = vec![self.fracs[2 * c].0, self.fracs[2 * c].1];
+                if 2 * c + 1 < self.fracs.len() {
+                    roots.push(self.fracs[2 * c + 1].0);
+                    roots.push(self.fracs[2 * c + 1].1);
+                }
+                roots
+            })
+            .collect();
+        let segs = self.segment_units(&units, cap);
+        if segs.len() <= 1 { None } else { Some(segs) }
+    }
+}
+
 /// One family's generated translation unit: a kernel per shape plus the host
 /// launcher the fork's dispatcher calls.
 pub struct Emitted {
@@ -1568,6 +1717,9 @@ pub struct Emitted {
     pub cuh: String,
     /// per shape, in shape-id order
     pub shapes: Vec<(u32, usize)>,
+    /// per shape: instruction count per emitted kernel -- one entry when the
+    /// shape stayed whole, one per segment when it was split (B11 stream K)
+    pub seg_instrs: Vec<Vec<usize>>,
 }
 
 /// How the generated kernels are launched. `min_blocks` is the part that
@@ -1593,8 +1745,13 @@ impl Launch {
 }
 
 /// `shapes` must be in shape-id order; each entry is one representative IR.
-pub fn emit_family(family: &str, shapes: &[(String, Ir)], launch: Launch) -> Emitted {
+/// `seg_cap` is the instruction count above which a shape's kernel is split
+/// into segments (B11 stream K); a shape at or under it emits byte-identically
+/// to what this function always produced.
+pub fn emit_family(family: &str, shapes: &[(String, Ir)], launch: Launch, seg_cap: usize) -> Emitted {
     let fname = format!("evaluate_{family}");
+    let segs: Vec<Option<Vec<Seg>>> =
+        shapes.iter().map(|(_, ir)| ir.constraint_segments(seg_cap)).collect();
     let mut cu = format!(
         "// Generated by experiments/b7/gpu/m2b/cudagen.rs (B7a milestone 2b step 3).\n\
          // Do not edit: regenerate with `b65 cudaemit`.\n\
@@ -1616,25 +1773,43 @@ pub fn emit_family(family: &str, shapes: &[(String, Ir)], launch: Launch) -> Emi
             ir.scalars.len(),
             ir.fingerprint()
         );
-        cu += &format!(
-            "{}\n\
-             __global__ void {fname}_s{id}_kernel(\n\
-             \x20   m31 *q0, m31 *q1, m31 *q2, m31 *q3,\n\
-             \x20   m31 **t0, m31 **t1, m31 **t2,\n\
-             \x20   const qm31 *__restrict__ sc,\n\
-             \x20   const qm31 *__restrict__ rcp,\n\
-             \x20   const m31 *__restrict__ denom_inv,\n\
-             \x20   unsigned domain_log_size,\n\
-             \x20   unsigned eval_domain_log_size,\n\
-             \x20   qm31 cumsum_shift,\n\
-             \x20   bool accumulate\n\
-             ) {{\n\
-             \x20   const unsigned n = 1u << eval_domain_log_size;\n\
-             \x20   const unsigned row = threadIdx.x + blockDim.x * blockIdx.x;\n\
-             \x20   if (row >= n) return;\n{}}}\n\n",
-            launch.attr(),
-            ir.emit_body()
-        );
+        // one kernel per (shape, segment); an unsegmented shape keeps its
+        // historical name so the installed library does not churn
+        let kernel = |kname: String, body: String| {
+            format!(
+                "{}\n\
+                 __global__ void {kname}(\n\
+                 \x20   m31 *q0, m31 *q1, m31 *q2, m31 *q3,\n\
+                 \x20   m31 **t0, m31 **t1, m31 **t2,\n\
+                 \x20   const qm31 *__restrict__ sc,\n\
+                 \x20   const qm31 *__restrict__ rcp,\n\
+                 \x20   const m31 *__restrict__ denom_inv,\n\
+                 \x20   unsigned domain_log_size,\n\
+                 \x20   unsigned eval_domain_log_size,\n\
+                 \x20   qm31 cumsum_shift,\n\
+                 \x20   bool accumulate\n\
+                 ) {{\n\
+                 \x20   const unsigned n = 1u << eval_domain_log_size;\n\
+                 \x20   const unsigned row = threadIdx.x + blockDim.x * blockIdx.x;\n\
+                 \x20   if (row >= n) return;\n{body}}}\n\n",
+                launch.attr()
+            )
+        };
+        match &segs[id] {
+            None => cu += &kernel(format!("{fname}_s{id}_kernel"), ir.emit_body()),
+            Some(ss) => {
+                for (p, s) in ss.iter().enumerate() {
+                    cu += &format!(
+                        "// shape {id} segment {p}: constraints {}..{}, {} instructions\n",
+                        s.units.start, s.units.end, s.n_instrs
+                    );
+                    cu += &kernel(
+                        format!("{fname}_s{id}p{p}_kernel"),
+                        ir.emit_body_for(Some(&s.mask), s.units.clone()),
+                    );
+                }
+            }
+        }
     }
 
     // the launcher
@@ -1688,13 +1863,32 @@ pub fn emit_family(family: &str, shapes: &[(String, Ir)], launch: Launch) -> Emi
         block = launch.block
     );
     for id in 0..n_shapes {
-        cu += &format!(
-            "\x20   case {id}u: {fname}_s{id}_kernel<<<blocks, block, 0, stream>>>(\n\
-             \x20       quotients_0, quotients_1, quotients_2, quotients_3, d_t0, d_t1, d_t2,\n\
-             \x20       d_sc, random_coeff_powers, denominator_inverses,\n\
-             \x20       domain_log_size, eval_domain_log_size, cumsum_shift, should_accumulate);\n\
-             \x20       break;\n"
-        );
+        match &segs[id] {
+            None => {
+                cu += &format!(
+                    "\x20   case {id}u: {fname}_s{id}_kernel<<<blocks, block, 0, stream>>>(\n\
+                     \x20       quotients_0, quotients_1, quotients_2, quotients_3, d_t0, d_t1, d_t2,\n\
+                     \x20       d_sc, random_coeff_powers, denominator_inverses,\n\
+                     \x20       domain_log_size, eval_domain_log_size, cumsum_shift, should_accumulate);\n\
+                     \x20       break;\n"
+                );
+            }
+            // the segments run in sequence on the same stream; segment 0 takes
+            // the caller's accumulate flag, every later one adds onto it
+            Some(ss) => {
+                cu += &format!("\x20   case {id}u:\n");
+                for p in 0..ss.len() {
+                    let acc = if p == 0 { "should_accumulate" } else { "true" };
+                    cu += &format!(
+                        "\x20       {fname}_s{id}p{p}_kernel<<<blocks, block, 0, stream>>>(\n\
+                         \x20           quotients_0, quotients_1, quotients_2, quotients_3, d_t0, d_t1, d_t2,\n\
+                         \x20           d_sc, random_coeff_powers, denominator_inverses,\n\
+                         \x20           domain_log_size, eval_domain_log_size, cumsum_shift, {acc});\n"
+                    );
+                }
+                cu += "\x20       break;\n";
+            }
+        }
     }
     cu += &format!(
         "\x20   }}\n\
@@ -1734,6 +1928,14 @@ pub fn emit_family(family: &str, shapes: &[(String, Ir)], launch: Launch) -> Emi
         cu,
         cuh,
         shapes: shapes.iter().map(|(_, i)| (i.fingerprint(), i.scalars.len())).collect(),
+        seg_instrs: shapes
+            .iter()
+            .zip(&segs)
+            .map(|((_, ir), s)| match s {
+                None => vec![ir.ops.len()],
+                Some(ss) => ss.iter().map(|s| s.n_instrs).collect(),
+            })
+            .collect(),
     }
 }
 
@@ -1947,6 +2149,8 @@ pub fn emit_cmd(args: &[String]) {
         block: crate::arg_scalar(args, "--block", 256u32),
         min_blocks: crate::arg_scalar(args, "--min-blocks", 2u32),
     };
+    // B11 stream K: instruction count above which a shape's kernel is split.
+    let seg_cap: usize = crate::arg_scalar(args, "--seg-cap", 3000usize);
     let dir = std::path::Path::new(&out);
     std::fs::create_dir_all(dir).unwrap();
 
@@ -2075,9 +2279,17 @@ pub fn emit_cmd(args: &[String]) {
     );
     let mut total_instr = 0usize;
     for (family, shapes) in &fams {
-        let e = emit_family(family, shapes, launch);
+        let e = emit_family(family, shapes, launch, seg_cap);
         std::fs::write(dir.join(format!("evaluate_{family}.cu")), &e.cu).unwrap();
         std::fs::write(dir.join(format!("evaluate_{family}.cuh")), &e.cuh).unwrap();
+        for (id, si) in e.seg_instrs.iter().enumerate() {
+            if si.len() > 1 {
+                eprintln!(
+                    "  {family} shape {id}: split into {} segments at cap {seg_cap}: {si:?}",
+                    si.len()
+                );
+            }
+        }
         for (id, (name, ir)) in shapes.iter().enumerate() {
             total_instr += ir.ops.len();
             table += &format!(
@@ -2093,6 +2305,7 @@ pub fn emit_cmd(args: &[String]) {
             "shapes": shapes.iter().enumerate().map(|(id, (n, ir))| json!({
                 "id": id, "example": n, "fingerprint": format!("{:#010x}", ir.fingerprint()),
                 "instructions": ir.ops.len(), "scalars": ir.scalars.len(),
+                "segments": e.seg_instrs[id],
             })).collect::<Vec<_>>(),
             "cu_lines": e.cu.lines().count(),
         }));
@@ -2109,6 +2322,7 @@ pub fn emit_cmd(args: &[String]) {
     let man = json!({
         "source": l.source,
         "launch": {"block": launch.block, "min_blocks": launch.min_blocks},
+        "seg_cap": seg_cap,
         "families": manifest,
         "components": rows,
         "kernels": fams.iter().map(|(_, s)| s.len()).sum::<usize>(),
@@ -2388,10 +2602,14 @@ pub fn logup_cmd(args: &[String]) {
 // plain `extern "C"` and there is no blob, no `cuda_eval_name` and no case in
 // `evaluate_constraints.cu`.
 
-/// One family's generated fraction translation unit.
-pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch) -> Emitted {
+/// One family's generated fraction translation unit. `seg_cap` splits an
+/// over-long shape by column range (B11 stream K), exactly as `emit_family`
+/// splits by constraint; at or under the cap the output is byte-identical.
+pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch, seg_cap: usize) -> Emitted {
     // `cuda_eval_name()` already starts with `b65_`; don't say it twice.
     let fname = format!("gen_{family}");
+    let segs: Vec<Option<Vec<Seg>>> =
+        shapes.iter().map(|(_, ir)| ir.frac_segments(seg_cap)).collect();
     let mut cu = format!(
         "// Generated by experiments/b7/gpu/m2b/cudagen.rs (B7a milestone 4, 18.7).\n\
          // Do not edit: regenerate with `b65 genemit`.\n\
@@ -2417,20 +2635,36 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch) -
             ir.scalars.len(),
             ir.fingerprint()
         );
-        cu += &format!(
-            "{}\n\
-             __global__ void {fname}_s{id}_kernel(\n\
-             \x20   m31 **t0, m31 **t1,\n\
-             \x20   const qm31 *__restrict__ sc,\n\
-             \x20   qm31 *__restrict__ num,\n\
-             \x20   qm31 *__restrict__ den,\n\
-             \x20   unsigned n_rows\n\
-             ) {{\n\
-             \x20   const unsigned row = threadIdx.x + blockDim.x * blockIdx.x;\n\
-             \x20   if (row >= n_rows) return;\n{}}}\n\n",
-            launch.attr(),
-            ir.emit_frac_body()
-        );
+        let kernel = |kname: String, body: String| {
+            format!(
+                "{}\n\
+                 __global__ void {kname}(\n\
+                 \x20   m31 **t0, m31 **t1,\n\
+                 \x20   const qm31 *__restrict__ sc,\n\
+                 \x20   qm31 *__restrict__ num,\n\
+                 \x20   qm31 *__restrict__ den,\n\
+                 \x20   unsigned n_rows\n\
+                 ) {{\n\
+                 \x20   const unsigned row = threadIdx.x + blockDim.x * blockIdx.x;\n\
+                 \x20   if (row >= n_rows) return;\n{body}}}\n\n",
+                launch.attr()
+            )
+        };
+        match &segs[id] {
+            None => cu += &kernel(format!("{fname}_s{id}_kernel"), ir.emit_frac_body()),
+            Some(ss) => {
+                for (p, s) in ss.iter().enumerate() {
+                    cu += &format!(
+                        "// shape {id} segment {p}: columns {}..{}, {} instructions\n",
+                        s.units.start, s.units.end, s.n_instrs
+                    );
+                    cu += &kernel(
+                        format!("{fname}_s{id}p{p}_kernel"),
+                        ir.emit_frac_body_for(Some(&s.mask), s.units.clone()),
+                    );
+                }
+            }
+        }
     }
 
     let n_shapes = shapes.len();
@@ -2499,11 +2733,27 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch) -
         block = launch.block
     );
     for id in 0..n_shapes {
-        cu += &format!(
-            "\x20   case {id}u: {fname}_s{id}_kernel<<<blocks, block>>>(\n\
-             \x20       d_t0, d_t1, d_sc, num, den, n_rows);\n\
-             \x20       break;\n"
-        );
+        match &segs[id] {
+            None => {
+                cu += &format!(
+                    "\x20   case {id}u: {fname}_s{id}_kernel<<<blocks, block>>>(\n\
+                     \x20       d_t0, d_t1, d_sc, num, den, n_rows);\n\
+                     \x20       break;\n"
+                );
+            }
+            // the per-column writes are disjoint, so the segments just run in
+            // sequence -- no accumulate path involved
+            Some(ss) => {
+                cu += &format!("\x20   case {id}u:\n");
+                for p in 0..ss.len() {
+                    cu += &format!(
+                        "\x20       {fname}_s{id}p{p}_kernel<<<blocks, block>>>(\n\
+                         \x20           d_t0, d_t1, d_sc, num, den, n_rows);\n"
+                    );
+                }
+                cu += "\x20       break;\n";
+            }
+        }
     }
     cu += &format!(
         "\x20   }}\n\
@@ -2533,6 +2783,14 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch) -
         cu,
         cuh,
         shapes: shapes.iter().map(|(_, i)| (i.fingerprint(), i.scalars.len())).collect(),
+        seg_instrs: shapes
+            .iter()
+            .zip(&segs)
+            .map(|((_, ir), s)| match s {
+                None => vec![ir.ops.len()],
+                Some(ss) => ss.iter().map(|s| s.n_instrs).collect(),
+            })
+            .collect(),
     }
 }
 
@@ -2553,6 +2811,8 @@ pub fn gen_emit_cmd(args: &[String]) {
         block: crate::arg_scalar(args, "--block", 256u32),
         min_blocks: crate::arg_scalar(args, "--min-blocks", 2u32),
     };
+    // B11 stream K: instruction count above which a shape's kernel is split.
+    let seg_cap: usize = crate::arg_scalar(args, "--seg-cap", 3000usize);
     let dir = std::path::Path::new(&out);
     std::fs::create_dir_all(dir).unwrap();
 
@@ -2673,9 +2933,17 @@ pub fn gen_emit_cmd(args: &[String]) {
          pub static GEN_SHAPES: &[(&str, u32, usize, usize)] = &[\n",
     );
     for (family, shapes) in &fams {
-        let e = emit_frac_family(family, shapes, launch);
+        let e = emit_frac_family(family, shapes, launch, seg_cap);
         std::fs::write(dir.join(format!("gen_{family}.cu")), &e.cu).unwrap();
         std::fs::write(dir.join(format!("gen_{family}.cuh")), &e.cuh).unwrap();
+        for (id, si) in e.seg_instrs.iter().enumerate() {
+            if si.len() > 1 {
+                eprintln!(
+                    "  {family} fraction shape {id}: split into {} segments at cap {seg_cap}: {si:?}",
+                    si.len()
+                );
+            }
+        }
         for (sid, (_, ir)) in shapes.iter().enumerate() {
             rs += &format!(
                 "    (\"{family}\", {:#010x}, {sid}, {}),\n",
@@ -2689,6 +2957,7 @@ pub fn gen_emit_cmd(args: &[String]) {
             "cu_lines": e.cu.lines().count(),
             "lookups": shapes.iter().map(|(_, i)| i.fracs.len()).collect::<Vec<usize>>(),
             "instructions": shapes.iter().map(|(_, i)| i.ops.len()).sum::<usize>(),
+            "segments": e.seg_instrs,
         }));
     }
     rs += "];\n\n\
