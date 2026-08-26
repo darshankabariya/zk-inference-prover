@@ -1321,7 +1321,8 @@ pub fn cmd(args: &[String]) {
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
                                           plan.glue.as_ref().map(|g| g.uns.as_slice()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
-    let claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b02);
+    let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b02);
+    fill_tie_claims(&plan, &mut claims, 0x7135_2b02);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
 
     let mut passes = vec![];
@@ -2173,6 +2174,39 @@ fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
 
 // -------------------------------------------------------------- cudaemit ----
 
+/// B11 stream K: the tie claims must be present, nonzero and distinct when a
+/// design point is lowered for emit. `claims_for` leaves the four tie vectors
+/// empty and the builders read the gaps as zero -- and a zero-valued scalar
+/// slot is exactly what `lit` folds away, so the emitted IR was missing the
+/// claimed side every real proof carries: the glue lowered to ~10,400
+/// instructions at emit and 29,304 at prove, and no tie-bearing kernel could
+/// ever match at prove time. The values are otherwise irrelevant -- the blob
+/// replays the real ones -- so distinct nonzero placeholders, sized exactly
+/// from the plan, make the emitted shape the proved shape. (A real proof
+/// whose tie claim lands on 0 or 1, or on another slot's value, still folds
+/// differently and takes the announced fallback -- `lit`'s recorded 2^-124
+/// caveat, unchanged.)
+fn fill_tie_claims(plan: &crate::compose::Plan, claims: &mut crate::compose::Claims, seed: u64) {
+    let mut x = seed | 1;
+    let mut felt = || {
+        let mut a = [0u32; 4];
+        for l in a.iter_mut() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *l = ((x % 0x7fff_fffe) + 1) as u32;
+        }
+        a
+    };
+    if let Some(g) = plan.glue.as_ref() {
+        claims.glue_ties =
+            g.regions.iter().map(|r| r.ties.iter().map(|_| felt()).collect()).collect();
+        claims.deq_out = g.out_ties.iter().map(|_| felt()).collect();
+    }
+    claims.head_key = vec![felt()];
+    claims.am_key = vec![felt()];
+}
+
 /// `cudaemit`: lower every component, group by fingerprint into kernels, and
 /// write the generated CUDA, the Rust shape table and a manifest.
 pub fn emit_cmd(args: &[String]) {
@@ -2194,7 +2228,8 @@ pub fn emit_cmd(args: &[String]) {
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
                                           plan.glue.as_ref().map(|g| g.uns.as_slice()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
-    let claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b03);
+    let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b03);
+    fill_tie_claims(&plan, &mut claims, 0x7135_2b03);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
 
     // family -> shapes, in first-seen order; a shape is a fingerprint. Seeded
@@ -2285,6 +2320,11 @@ pub fn emit_cmd(args: &[String]) {
         go!(b.exp_t, "exp_table".to_string());
         for i in 0..b.tables.len() {
             go!(b.tables[i], format!("table{i}"));
+        }
+        // B11 stream K: the head's argmax region was never emitted -- 10,079
+        // instructions on the CPU per head chunk until now.
+        if let Some(am) = &b.argmax {
+            go!(am, "argmax".to_string());
         }
     }
 
@@ -2568,7 +2608,8 @@ pub fn logup_cmd(args: &[String]) {
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
                                           plan.glue.as_ref().map(|g| g.uns.as_slice()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
-    let claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b04);
+    let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b04);
+    fill_tie_claims(&plan, &mut claims, 0x7135_4b04);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
 
     let mut rows = vec![];
@@ -2856,7 +2897,8 @@ pub fn gen_emit_cmd(args: &[String]) {
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
                                           plan.glue.as_ref().map(|g| g.uns.as_slice()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
-    let claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b05);
+    let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b05);
+    fill_tie_claims(&plan, &mut claims, 0x7135_4b05);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
 
     // Same accumulate-across-design-points store as `cudaemit`, in its own file:
