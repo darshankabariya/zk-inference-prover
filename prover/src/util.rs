@@ -148,11 +148,118 @@ pub fn m4_switch(name: &str) -> bool {
     std::env::var(name).map(|v| v != "0").unwrap_or(true)
 }
 
-/// Milestone 4's tri-state modes, read once. Unlike `m4_switch` these
-/// default to **off**: a mode selects a path that has still to prove itself
-/// equal to the one it replaces, and the default has to be the proven one.
+/// Milestone 4's tri-state modes, read once. A mode selects a path that has
+/// still to prove itself equal to the one it replaces, and the default has to
+/// be the proven one -- so a mode is born off, and then, in the same commit
+/// that lands its digest gate, its default flips to the value that gated.
+/// `m4b_default` is that table.
 pub fn m4b_mode(name: &str) -> u32 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| m4b_default(name))
+}
+
+/// The proven default for each tri-state mode, on the CUDA build.
+///
+/// B11 stream N, step 0. Every mode named here ran in stream M's seq4 and in
+/// the three sequences before it, with all 66 proof digests byte-identical
+/// back to stream I's, so on this build the proven value *is* the device
+/// value and the default table should say so. Before this the values lived
+/// only in a copy-pasted env string, which is how `B7_M4_ACC`, `B7_M4_PRE`
+/// and `B7_M4_LOGUPIR` came to sit dark for four streams (M's Record (1)):
+/// b-port's one measured rejection dropped `ACC` and `PRE` alongside the
+/// actually-broken `WFILL`, and the reduced string then propagated verbatim
+/// through four drivers.
+///
+/// Two kinds of value are deliberately absent. Mirror modes (`=2`, both paths
+/// run with every cell asserted) and the `*MUT` mutations are debugging
+/// instruments rather than paths, so they stay explicit-only. And a mode that
+/// is not listed here is a path that has not yet gated: it is born off,
+/// exactly as before, and graduates into this table in the commit that lands
+/// its own gate.
+#[cfg(feature = "cuda")]
+fn m4b_default(name: &str) -> u32 {
+    match name {
+        // The region fills, the witness fills, the shared tables, the pinned
+        // staging pool, the preprocessed columns, the accumulators and the
+        // glue's fill: all on.
+        "B7_M4_FILL"
+        | "B7_M4_WFILL"
+        | "B7_M4_TABDEV"
+        | "B7_M4_POOL"
+        | "B7_M4_PRE"
+        | "B7_M4_ACC"
+        | "B7_M4_GFILL" => 1,
+        // The two milestone-5 caches. They are in seq4's family env like
+        // everything above, and they are what makes the table *seq4's* env
+        // rather than its device subset: the lowering cache (`scalars.rs`) and
+        // the preprocessed-tree clone (`precache.rs`). Neither is a device
+        // path -- they are digest-neutral by construction, each with a mode-2
+        // mirror that says so -- but leaving them off here would have made a
+        // run with an empty env a *different configuration* from seq4, and a
+        // slower one, which is the precise failure this table exists to stop.
+        "B7_M5_IRCACHE" | "B7_M5_PRECACHE" => 1,
+        // The generated fraction builders. `3` keeps 19.3's meaning: the
+        // generated builder runs and is checked against the hand-written one.
+        "B7_M4_LOGUPIR" => 3,
+        _ => 0,
+    }
+}
+
+/// Without the `cuda` feature every mode stays off. This is the one hard
+/// constraint on step 0's table: the SimdBackend build is the reference that
+/// every digest comparison is made against, and a device default on that arm
+/// would call FFI stubs. The reference arm is untouched by construction.
+#[cfg(not(feature = "cuda"))]
+fn m4b_default(_name: &str) -> u32 {
+    0
+}
+
+/// Every mode this build knows, with the value it resolved to and where that
+/// value came from.
+///
+/// The env string no longer names the configuration, so the report has to: a
+/// recorded number must name its configuration even when the env is empty.
+/// `source` is `"env"` when the run set the variable and `"default"` when it
+/// took the table above.
+pub fn modes_json() -> Value {
+    let mut modes = serde_json::Map::new();
+    let mut put = |name: &str, value: u32| {
+        modes.insert(
+            name.trim_start_matches("B7_").to_string(),
+            json!({
+                "value": value,
+                "source": if std::env::var(name).is_ok() { "env" } else { "default" },
+            }),
+        );
+    };
+    for name in [
+        "B7_M4_FILL",
+        "B7_M4_WFILL",
+        "B7_M4_TABDEV",
+        "B7_M4_POOL",
+        "B7_M4_PRE",
+        "B7_M4_ACC",
+        "B7_M4_GFILL",
+        "B7_M4_LOGUPIR",
+        "B7_M5_PIPE",
+        "B7_M5_PRECACHE",
+        "B7_M5_IRCACHE",
+    ] {
+        put(name, m4b_mode(name));
+    }
+    // `B7_M4_WFILL_BAND` is the one mode whose fallback is another mode
+    // rather than the table, so it is asked for through its own reader. This
+    // is the switch's global value; which fill a *particular* band takes also
+    // depends on its layout (`devwfill::band_fill_mode`).
+    put("B7_M4_WFILL_BAND", crate::devwfill::band_mode());
+    // The plain on/off switches resolve the same way and belong in the same
+    // object. All of them default on and all of them predate this stream.
+    for name in ["B7_M4_PAREVAL", "B7_M4_NOCLONE", "B7_M4_SCAN", "B7_M4_REFBAD"] {
+        put(name, u32::from(m4_switch(name)));
+    }
+    Value::Object(modes)
 }
 
 pub fn config_json() -> Value {
@@ -233,6 +340,7 @@ pub fn emit(name: &str, body: Value) {
     let out = json!({
         "bench": name,
         "env": env_json(),
+        "modes": modes_json(),
         "security": config_json(),
         "result": body,
     });
