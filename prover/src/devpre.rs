@@ -59,6 +59,8 @@
 //! this series uses: 0 the host builds all 79, 1 the device does and they are
 //! never on the host, 2 both with every cell asserted equal.
 
+use std::sync::{Mutex, OnceLock};
+
 use num_traits::{One, Zero};
 use rayon::prelude::*;
 use stwo::core::fields::FieldExpOps;
@@ -193,6 +195,35 @@ pub fn premut() -> (u32, u32) {
     (m, t)
 }
 
+/// B11 stream M: does some fill in this chunk bump a *host* multiplicity
+/// counter, for a reason no switch states?
+///
+/// One band can be on the host while the switch says device -- a corner band,
+/// which fills on the host whatever `B7_M4_WFILL_BAND` says because the device
+/// fill has no notion of its layout. `fills_dev` has to know, and it is asked
+/// from inside the fills themselves (`merge_counters` is read by
+/// `mat_region_dev`, `walk_region_dev` and `commit_base_dev`), none of which
+/// has the layer in hand. So the layer's answer is recorded once, before the
+/// first fill runs, and read from here.
+///
+/// Keyed by chunk exactly as the phase timers are, so a pipelined loop -- chunk
+/// k proving while chunk k+1 generates -- cannot have one chunk read another's
+/// answer. A run that never records one is a run with no bands to ask about.
+static HOST_FILL: OnceLock<Mutex<std::collections::BTreeMap<u64, bool>>> = OnceLock::new();
+
+fn host_fill_map() -> &'static Mutex<std::collections::BTreeMap<u64, bool>> {
+    HOST_FILL.get_or_init(|| Mutex::new(Default::default()))
+}
+
+/// Record this chunk's answer. Called once, before the first fill.
+pub fn note_host_fill(v: bool) {
+    host_fill_map().lock().unwrap().insert(crate::util::m4_chunk(), v);
+}
+
+fn host_fill() -> bool {
+    host_fill_map().lock().unwrap().get(&crate::util::m4_chunk()).copied().unwrap_or(false)
+}
+
 /// Did every fill that bumps one of the ten multiplicity counters run on the
 /// device? Mode 2 of a fill builds both ways and returns the *host* columns
 /// (20.2's shape), so only mode 1 leaves a counter where the kernel can sum it.
@@ -202,9 +233,19 @@ pub fn fills_dev() -> bool {
     // ran on the device" has to read the band gate too -- otherwise
     // `B7_M4_WFILL=1 B7_M4_WFILL_BAND=0` would claim the counters are on the
     // device while three bands' worth of bumps sit on the host.
+    //
+    // B11 stream M: the switches are not the whole answer. A corner band is on
+    // the host with every switch at 1, so `B7_M4_PRE=1` on a sequence chunk
+    // used to build the nine multiplicity columns on the card from the device
+    // counters alone and drop the corner bands' chan and key bumps -- accepted
+    // by every other check and rejected by `sums_cancel`. Stream L had already
+    // met this for the tenth counter, `m_exp`, and fixed it there alone
+    // (`devwfill::exp_mult_on_host`); this is the same predicate asked of all
+    // ten.
     crate::util::m4b_mode("B7_M4_FILL") == 1
         && crate::util::m4b_mode("B7_M4_WFILL") == 1
         && crate::devwfill::band_mode() == 1
+        && !host_fill()
 }
 
 /// The ten multiplicity columns are the device's exactly when every counter

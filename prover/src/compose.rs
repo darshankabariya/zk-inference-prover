@@ -1373,6 +1373,30 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // standalone path too and has no business knowing about a backend.
     let mut band_dev: Vec<Option<crate::devwfill::DevBand>> = vec![];
     let m4_t = std::time::Instant::now();
+    // B11 stream M: before the first fill, because the fills read the answer.
+    //
+    // `devpre::fills_dev` decides whether the ten multiplicity columns are
+    // built on the card from device counters alone, and it is asked from inside
+    // the fills, where the layer is not in scope. It has to be told about every
+    // fill that bumps one of those counters and is *not* on the card, for a
+    // reason no switch states. There are two:
+    //
+    //  * a **corner band**, which fills on the host whatever
+    //    `B7_M4_WFILL_BAND` says because the device fill has no notion of its
+    //    layout (`devwfill::band_fill_mode`, the one place that decision
+    //    lives);
+    //  * the **argmax region**, which has no device fill at all and whose range
+    //    lookups go on the layer's 16-bit table -- the block below takes
+    //    `tables.m_r[ri]` and bumps it on the host.
+    //
+    // Both were silent before this stream because `B7_M4_PRE` had never been
+    // on: with the columns host-built the split does not matter. With it on,
+    // the kernel sums the device counters and the host half is simply dropped,
+    // and the proof is rejected by `sums_cancel` with every other check green.
+    crate::devpre::note_host_fill(
+        layer.bands.iter().any(|a| crate::devwfill::band_fill_mode(a) != 1)
+            || plan.argmax_mat().is_some(),
+    );
     let mut mult_exp = std::mem::take(&mut tables.m_exp);
     let mut mult_r = std::mem::take(&mut tables.m_r);
     for (b, a) in layer.bands.iter().enumerate() {
@@ -2021,11 +2045,19 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
     }
     // The glue regions' columns follow the walks, as they did when the lists
-    // were built by value. The glue has no device path yet, so they are always
-    // host columns.
+    // were built by value. B11 stream M: and they are on the card under
+    // `B7_M4_GFILL=1`, where the fill left them.
     for r in &glue_regions {
-        pre_all.extend(r.pre.iter().map(AnyCol::Host));
-        base_all.extend(r.base.iter().map(AnyCol::Host));
+        match &r.dev {
+            Some(d) => {
+                pre_all.extend(d.pre.iter().map(|c| AnyCol::Dev(c, r.log_rows)));
+                base_all.extend(d.base.iter().map(|c| AnyCol::Dev(c, r.log_rows)));
+            }
+            None => {
+                pre_all.extend(r.pre.iter().map(AnyCol::Host));
+                base_all.extend(r.base.iter().map(AnyCol::Host));
+            }
+        }
     }
     if m4e_tabdev {
         pre_all.extend(tab_pre.iter().zip(&pre_logs).map(|(d, l)| AnyCol::Dev(d, *l)));
@@ -2271,9 +2303,10 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         let specs = gp.ties(w_glue, lam_glue, &blank);
         for (i, reg) in glue_regions.iter().enumerate() {
             let t_ig = std::time::Instant::now();
-            let it = crate::glue::glue_interaction(reg, gr, Some(&specs[i]));
+            let it = crate::glue::glue_interaction(reg, gr, Some(&specs[i]),
+                                                   &m4e_air.glue[i].eval);
             crate::util::m4_add("int/glue_build", t_ig.elapsed().as_secs_f64());
-            inter_all.extend(crate::device::host_cols(it.cols));
+            inter_all.extend(it.cols);
             inter_mark(&format!("glue/{}", reg.tag), &inter_all, &mut inter_seen,
                        &mut inter_split);
             claims.glue_ties.push(it.claimed.iter().map(|v| qm(*v)).collect());
@@ -2445,12 +2478,12 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         "attnout": aor.base_cells(),
         "dequant": n_deq_base,
         "walks": walk_regions.iter().map(|w| w.base_cells()).sum::<usize>(),
-        "glue": glue_regions.iter().map(|g| g.base.iter().map(|e| e.domain.size()).sum::<usize>()).sum::<usize>(),
+        "glue": glue_regions.iter().map(|g| g.base_cells()).sum::<usize>(),
         "glue_regions": glue_regions.iter().map(|g| json!({
             "tag": g.tag, "rows": g.rows, "log_rows": g.log_rows,
             "leaves": g.n_leaves, "ops": g.n_ops,
-            "columns": g.base.len(),
-            "cells": g.base.iter().map(|e| e.domain.size()).sum::<usize>(),
+            "columns": match &g.dev { Some(d) => d.base.len(), None => g.base.len() },
+            "cells": g.base_cells(),
             "reference_mismatch": g.ref_n - g.ref_ok,
             "exponent_out_of_range": g.bad_exp,
         })).collect::<Vec<_>>(),

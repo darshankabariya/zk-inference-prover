@@ -24,6 +24,7 @@ mod precache;
 mod scalars;
 mod devacc;
 mod devwfill;
+mod devgfill;
 mod gencudakernels;
 mod cudakernels;
 mod exprprobe;

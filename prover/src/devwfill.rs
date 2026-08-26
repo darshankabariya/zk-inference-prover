@@ -283,6 +283,21 @@ pub fn band_mode() -> u32 {
     }
 }
 
+/// B11 stream M: which fill *this* band takes, switch and layout together.
+///
+/// A corner band commits no per-token region and `commit_base_dev` has no
+/// notion of that layout, so it fills on the host whatever the switch says
+/// (`attn_trace::commit_base_any`). That override used to live inline at the
+/// one place that picked the path, and the consequence -- that a corner-bearing
+/// witness therefore leaves multiplicity bumps on the host -- had to be
+/// rediscovered by whoever else needed it. `devpre::fills_dev` needs it, so the
+/// decision lives here now and both callers read the same function: this one
+/// picks the path, and `compose::generate` asks it of every band before the
+/// first fill runs.
+pub fn band_fill_mode(a: &Attn) -> u32 {
+    if a.corner { 0 } else { band_mode() }
+}
+
 /// B11 stream L: must the exp table's multiplicity column be the host's?
 ///
 /// `B7_M4_TABDEV=1` builds `m_exp` on the card, by summing the per-band exp

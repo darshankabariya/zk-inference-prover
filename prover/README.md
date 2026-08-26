@@ -108,6 +108,23 @@ corner-state defects that had kept `WFILL` honestly off since b-port
 bands' exp bumps dropped from the host multiplicity) are fixed and
 digest-gated.
 
+Stream M (2026-08-26, `briefs/m-hostgen.md`) added `B7_M4_GFILL` (the glue's
+witness generation, on the same three-value pattern; `B7_M4_GFILLMUT` is its
+deliberate-defect control) and turned on three switches that had never been
+live in the sequence at all -- `B7_M4_ACC`, `B7_M4_PRE` and `B7_M4_LOGUPIR`.
+Two of the three had been dropped as collateral in b-port's one measured
+rejection rather than on evidence of their own, but `B7_M4_PRE` was also
+really broken, and the defect generalises: `devpre::fills_dev` decided whether
+the ten multiplicity columns are summed on the card from the three switches
+alone, and **a fill can be on the host for a reason no switch states** -- a
+corner band, whose layout the device fill does not know, and the argmax
+region, which has no device fill at all and bumps the layer's 16-bit range
+table. Either one leaves half the bumps on the host, the kernel sums only the
+other half, and the proof is rejected by `sums_cancel` with every other check
+green. The predicate now asks the layer once, before the first fill runs
+(`devpre::note_host_fill`), and `devwfill::band_fill_mode` is the single place
+the corner override lives.
+
 Two things the chain does *not* include, on purpose: the `B7_M4_SCAN`
 parallel-carry fast path (its arithmetic predates `at_opt` and is wrong under
 it; no recorded number ever used it) and `b9_diag`'s off-table diagnostics (a
