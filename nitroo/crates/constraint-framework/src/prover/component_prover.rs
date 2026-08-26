@@ -395,12 +395,15 @@ impl<E: FrameworkEval + Sync> ComponentProver<CudaBackend> for FrameworkComponen
             .map(|column_evaluations| column_evaluations.device_ptr)
             .collect_vec();
 
+        // Interactions past the third ride in the third pointer array: the
+        // dispatch ABI carries three trees, so trees 2.. are chained here and
+        // the emitted kernels index them with a column offset (B11 stream K).
+        // A component with three trees or fewer sees exactly the old layout.
         let mut trace2_evaluations_vec = vec![];
-        if trace.len() != 2 {
-            trace2_evaluations_vec = trace[2]
-                .iter()
-                .map(|column_evaluations| column_evaluations.device_ptr)
-                .collect_vec();
+        for tree in trace.iter().skip(2) {
+            trace2_evaluations_vec.extend(
+                tree.iter().map(|column_evaluations| column_evaluations.device_ptr),
+            );
         }
         span.exit();
 

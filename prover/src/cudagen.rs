@@ -296,6 +296,14 @@ pub struct Ir {
     pub scalar_refs: Vec<u32>,
     /// columns per tree: `[preprocessed, base, interaction]`
     pub cols: [usize; 3],
+    /// columns per interaction, all of them (B11 stream K).  A component under
+    /// `--bounds` masks interactions past the third; the fork's dispatch ABI
+    /// carries three trees, so the host chains trees 2.. into one pointer
+    /// array and the emitter needs every chained tree's full width to offset a
+    /// column.  Empty on IRs serialized before the field existed -- such a
+    /// store can still emit any 3-tree shape, and a wider one refuses loudly.
+    #[serde(default)]
+    pub tree_cols: Vec<usize>,
     /// the preprocessed ids, in `get_preprocessed_column` call order
     pub pre_ids: Vec<String>,
     pub log_size: u32,
@@ -941,6 +949,15 @@ fn lower_impl<E: FrameworkEval>(
         info.mask_offsets.get(1).map(|v| v.len()).unwrap_or(0),
         info.mask_offsets.get(2).map(|v| v.len()).unwrap_or(0),
     ];
+    let tree_cols: Vec<usize> = (0..n_int)
+        .map(|i| {
+            if i == 0 {
+                pre_ids.len()
+            } else {
+                info.mask_offsets.get(i).map(|v| v.len()).unwrap_or(0)
+            }
+        })
+        .collect();
 
     let mut lo = Lower {
         ir: Ir {
@@ -951,6 +968,7 @@ fn lower_impl<E: FrameworkEval>(
             scalars: vec![],
             scalar_refs: vec![],
             cols,
+            tree_cols,
             pre_ids,
             log_size,
             eval_log_size,
@@ -1469,7 +1487,24 @@ impl Ir {
             let t = self.ty(i);
             let e = match *o {
                 Op::Load { tree, col, off } => {
-                    format!("t{tree}[{col}][{}]", rowvar(off))
+                    // Interactions past the third (a component under
+                    // `--bounds` masks five): the fork's dispatch ABI carries
+                    // three trees, so the host chains trees 2.. into the third
+                    // pointer array (component_prover.rs) and the column is
+                    // offset by the full width of every chained tree before
+                    // this one.  Tree 2's offset is zero, so a 3-tree shape
+                    // emits byte-identically.
+                    if tree <= 1 {
+                        format!("t{tree}[{col}][{}]", rowvar(off))
+                    } else {
+                        assert!(
+                            tree == 2 || self.tree_cols.len() > tree,
+                            "tree {tree} load without per-tree column counts: \
+                             re-emit from a fresh shape store"
+                        );
+                        let shift: usize = self.tree_cols.iter().take(tree).skip(2).sum();
+                        format!("t2[{}][{}]", col + shift, rowvar(off))
+                    }
                 }
                 Op::ConstM31(c) => format!("{c}u"),
                 Op::Scalar(k) => {
