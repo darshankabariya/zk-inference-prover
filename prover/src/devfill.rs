@@ -190,7 +190,7 @@ pub struct DevFill {
 /// scale columns and five selectors; a region that publishes an output-side
 /// claim commits three more (`layer.rs`, the `if oside` block), and until this
 /// parameter existed the device fill was never told. It sized `n_pre` three
-/// columns short -- 506 against the host's 510 on `lm_head`, the sequence's
+/// columns short -- 506 against the host's 509 on `lm_head`, the sequence's
 /// only o-side matmul -- and every later component's preprocessed indices
 /// shifted by three. The three are functions of the row index alone, so they
 /// are built here on the host and appended in the host's order; nothing about
