@@ -702,6 +702,9 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
         "preprocessed_is_widest": out.stats.pre_ok,
         "phases": out.stats.phases,
         "host_phases": crate::util::m4_report(),
+        // B11 stream F: the bytes the named phases moved, so a phase's GB/s is
+        // read off the same dump as its seconds
+        "host_bytes": crate::util::m4_bytes_report(),
         "proof_sha256": proof_sha256,
         "proof_ser_bytes": proof_ser_bytes,
         // milestone 2a: what the host->device crossing cost (README 10.2)
