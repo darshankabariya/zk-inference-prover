@@ -136,6 +136,9 @@ pub struct FBandCfg {
     pub z_lo_bits: u32,
     pub z_hi_bits: u32,
     pub z_min: i64,
+    /// B11 stream N, lever 2: the causal corner's mask, which the grid kernel
+    /// needs for the exp multiplicity and for nothing else.
+    pub corner: u32,
     pub mutate: u32,
 }
 
@@ -260,6 +263,12 @@ pub fn wfill_mut(fam: Fam) -> u32 {
         "descend" => 4,
         "inst" => 5,
         "aoref" => 6,
+        // B11 stream N, lever 2: the two ways a corner band's fill could be
+        // wrong that no earlier control reaches. `nomask` is the kernel's (a
+        // masked slot bumping the exp table); `notok` is this side's (a corner
+        // band building the per-token region it does not own).
+        "nomask" => 7,
+        "notok" => 8,
         other => panic!("unknown B7_M4_WFILLMUT {other:?}"),
     }
 }
@@ -295,7 +304,26 @@ pub fn band_mode() -> u32 {
 /// picks the path, and `compose::generate` asks it of every band before the
 /// first fill runs.
 pub fn band_fill_mode(a: &Attn) -> u32 {
-    if a.corner { 0 } else { band_mode() }
+    if a.corner { corner_mode() } else { band_mode() }
+}
+
+/// `B7_M4_WFILL_CORNER`: the corner bands' own fill switch, defaulting **off**.
+///
+/// B11 stream N, lever 2. Until this stream a corner band filled on the host
+/// whatever any switch said, because `commit_base_dev` had no notion of a
+/// layout with no per-token region and would have committed columns the AIR
+/// does not expect. It has that notion now (`commit_base_dev` takes
+/// `with_rows`, `devpre::band_dev` with it), but a path is born off and
+/// graduates on its gate: this is the switch that opens it, and the mirror
+/// runs under `B7_M4_WFILL_CORNER=2` on a corner-bearing witness.
+///
+/// It falls back to `band_mode` only once it has gated -- until then, not even
+/// `B7_M4_WFILL=1` reaches the corner.
+pub fn corner_mode() -> u32 {
+    std::env::var("B7_M4_WFILL_CORNER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
 }
 
 /// B11 stream L: must the exp table's multiplicity column be the host's?
@@ -321,7 +349,16 @@ pub fn band_fill_mode(a: &Attn) -> u32 {
 /// about the same layer, and the two answers have to agree or the column and
 /// its counters come from different places.
 pub fn exp_mult_on_host(a: &Attn) -> bool {
-    crate::devtab::mode() != 1 || a.zz_total.is_some()
+    // B11 stream N, lever 2: `a.zz_total.is_some()` says a corner band rides
+    // with this one, and the reason that forced this band's counter back to the
+    // host was that the corner's own bumps were made *there*. Once the corner
+    // fills on the card that reason is gone and both halves are device
+    // counters, so the condition gains the corner's mode.
+    //
+    // This predicate and `compose::generate`'s `host_corner` are twins and must
+    // say the same thing. Drift between them is not loud where it happens: the
+    // proof is rejected later by `sums_cancel` with every other check green.
+    crate::devtab::mode() != 1 || (a.zz_total.is_some() && corner_mode() != 1)
 }
 
 // --------------------------------------------------------------- the uploads --
@@ -881,6 +918,17 @@ pub struct DevBand {
 /// `mult_exp` and `mult_r` are the caller's, exactly as `commit_base` takes
 /// them: 20.6 called this the awkward part, and it is a counter array, which is
 /// what the scatter-add already handles.
+/// One band's committed base columns, filled on the device.
+///
+/// B11 stream N, lever 2 (a): `with_rows` is `!a.corner`, and it says whether
+/// this band commits the **per-token region** -- the row maxima, the
+/// denominator and its low limb. A corner band does not: there is one maximum
+/// and one denominator per *token*, not per band, so the corner rides on the
+/// prefix band's. That distinction was the whole of why a corner band could
+/// not fill on the card. The fill had no notion of it and would have committed
+/// a per-token region the AIR does not expect there, so `commit_base_any` sent
+/// every corner to the host whatever the switch said; now the fill knows, and
+/// `devwfill::corner_mode` is what opens the path.
 pub fn commit_base_dev(
     a: &Attn,
     l: &Layouts,
@@ -891,6 +939,7 @@ pub fn commit_base_dev(
     off_table: &mut usize,
     with_out: bool,
     merge_m_exp: bool,
+    with_rows: bool,
 ) -> DevBand {
     let sh = a.shape;
     // the host's two layout assertions, kept here because they are about the
@@ -912,6 +961,13 @@ pub fn commit_base_dev(
 
     band_dump(a, with_out);
 
+    // B11 stream N, lever 2: `notok` is this lever's own negative control -- a
+    // corner band that builds the per-token region anyway, which is precisely
+    // what `commit_base_any` used to send every corner to the host to avoid.
+    // It has to be decided here, before the uploads, because the two arrays
+    // that region reads are skipped with it.
+    let with_rows = with_rows || wfill_mut(Fam::Band) == 8;
+
     let t_up = std::time::Instant::now();
     // The four arrays that are 99.99% of the band's bytes (stream F's table:
     // dd 1,073.74 MB, num 536.87, kk 268.44, vv 268.44, qq 8.39) go through the
@@ -930,7 +986,7 @@ pub fn commit_base_dev(
                              |d| pack_u16_into(d, &a.num, "band num"),
                              || pack_u16(&a.num, "band num"));
     let d_delta = band_up("band/delta", || pack_i64(&a.delta));
-    let d_mm = band_up("band/mm", || pack_i64(&a.mm));
+    let d_mm = with_rows.then(|| band_up("band/mm", || pack_i64(&a.mm)));
     // B11 stream L: `zz_row()`, not `zz`.
     //
     // This is the whole of what b-port called the prefix bands' fill kernels
@@ -946,7 +1002,9 @@ pub fn commit_base_dev(
     // `off_table` bumps the host never makes, hence the rejection. Rectangles
     // have no corner, `zz_row()` is `zz` there, and that is why stream G's
     // switch matrix and stream F's whole loop saw nothing.
-    let d_zz = band_up("band/zz", || pack_i64(a.zz_row()));
+    // B11 stream N: both of these feed the per-token region alone, so a corner
+    // band uploads neither.
+    let d_zz = with_rows.then(|| band_up("band/zz", || pack_i64(a.zz_row())));
     // only the bf16x variant reads these two, and only it pays for them
     let bf16x = a.variant == Variant::Bf16x;
     let d_xx = bf16x.then(|| band_up("band/xx", || pack_u16_raw(&a.xx)));
@@ -984,6 +1042,7 @@ pub fn commit_base_dev(
         z_lo_bits: cfg.z_lo_bits,
         z_hi_bits: cfg.z_hi_bits,
         z_min: cfg.z_min as i64,
+        corner: u32::from(a.corner),
         mutate: wfill_mut(Fam::Band),
     };
 
@@ -1068,26 +1127,41 @@ pub fn commit_base_dev(
     }
 
     // ---- the per-token region ----------------------------------------------
+    // B11 stream N, lever 2 (a): absent on a corner band. `at` still gains both
+    // ends of it, so `at[3] == at[4]` there and every index after the outputs
+    // keeps its meaning -- the host's `commit_base` pushes the same empty span
+    // for the same reason.
     at.push(base.len());
-    let n_tok = if with_max { l.rw } else { 0 } + 3 * l.rw;
-    let tok = uninit(n_tok, rrows);
-    let tok_p = ptrs(&tok);
-    let m_lo = zeroes(mult_r[ridx(cfg.z_lo_bits)].len());
-    let m_hi = zeroes(mult_r[ridx(cfg.z_hi_bits)].len());
-    unsafe {
-        b65_fill_band_tok(
-            d_mm.device_ptr,
-            d_zz.device_ptr,
-            tok_p.as_ptr(),
-            u32::from(with_max),
-            FMult::of(&m_lo),
-            FMult::of(&m_hi),
-            counts.device_ptr as *mut u32,
-            bcfg,
-        );
-    }
-    logs.extend(vec![l.log_row; tok.len()]);
-    base.extend(tok);
+    let (m_lo, m_hi) = if with_rows {
+        let n_tok = if with_max { l.rw } else { 0 } + 3 * l.rw;
+        let tok = uninit(n_tok, rrows);
+        let tok_p = ptrs(&tok);
+        let m_lo = zeroes(mult_r[ridx(cfg.z_lo_bits)].len());
+        let m_hi = zeroes(mult_r[ridx(cfg.z_hi_bits)].len());
+        unsafe {
+            b65_fill_band_tok(
+                d_mm.as_ref().unwrap().device_ptr,
+                d_zz.as_ref().unwrap().device_ptr,
+                tok_p.as_ptr(),
+                u32::from(with_max),
+                FMult::of(&m_lo),
+                FMult::of(&m_hi),
+                counts.device_ptr as *mut u32,
+                bcfg,
+            );
+        }
+        logs.extend(vec![l.log_row; tok.len()]);
+        base.extend(tok);
+        (m_lo, m_hi)
+    } else {
+        // The two `z` range counters this region would have bumped, at their
+        // real width and all zero. A corner band makes no `z` lookups at all,
+        // but `b65_pre_fill` sums one counter *per band* into each range
+        // table's multiplicity column and asserts every one of them is the
+        // table's width -- so the shape has to be there even when the content
+        // is nothing.
+        (zeroes(mult_r[ridx(cfg.z_lo_bits)].len()), zeroes(mult_r[ridx(cfg.z_hi_bits)].len()))
+    };
     at.push(base.len());
     crate::util::m4_add("gen/wfill_band_kernel", t_k.elapsed().as_secs_f64());
 
@@ -1109,8 +1183,12 @@ pub fn commit_base_dev(
         if let Variant::IntSplit(k) = a.variant {
             add_into(&mut mult_r[ridx(k)], &m_aux.to_vec());
         }
-        add_into(&mut mult_r[ridx(cfg.z_lo_bits)], &m_lo.to_vec());
-        add_into(&mut mult_r[ridx(cfg.z_hi_bits)], &m_hi.to_vec());
+        // B11 stream N: a corner band has no per-token region, so it made no
+        // `z` range bumps to merge.
+        if with_rows {
+            add_into(&mut mult_r[ridx(cfg.z_lo_bits)], &m_lo.to_vec());
+            add_into(&mut mult_r[ridx(cfg.z_hi_bits)], &m_hi.to_vec());
+        }
     }
     *off_table += got[0] as usize;
     crate::util::m4_add("gen/wfill_counters", t_d.elapsed().as_secs_f64());

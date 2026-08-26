@@ -524,7 +524,14 @@ impl DevPreBand {
     pub fn key(&self) -> &Uint32Vec {
         &self.flags[1]
     }
+    /// B11 stream N: absent on a corner band, which has no per-token region.
+    /// Every caller is already inside a `with_rows` arm, so reaching this on a
+    /// corner is a bug in the caller and says so rather than indexing past the
+    /// end.
     pub fn row(&self) -> &Uint32Vec {
+        assert_eq!(self.flags.len(), 3,
+                   "a corner band has no per-token flags: this caller is outside a \
+                    `with_rows` arm");
         &self.flags[2]
     }
 }
@@ -550,7 +557,7 @@ fn scale_of(a: &Attn) -> Vec<u32> {
 }
 
 /// Build one band's flags and, when the device owns them, its 16 selectors.
-pub fn band_dev(a: &Attn, l: &Layouts, want_cols: bool) -> DevPreBand {
+pub fn band_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> DevPreBand {
     let (mutate, at) = premut();
     let sh = a.shape;
     let rrows = 1usize << l.log_row;
@@ -558,11 +565,24 @@ pub fn band_dev(a: &Attn, l: &Layouts, want_cols: bool) -> DevPreBand {
     // size fields and nothing else
     let tokg = FGridA { log_rows: l.log_row, rows: rrows as u32, groups: 1, chunks: 1,
                         lead: 0, descending: 0 };
-    let shapes: [(u32, FGridA, u32, u32, usize, u32); 3] = [
-        (SHAPE_CHAN, FGridA::of(&l.chan.g), sh.hd as u32, 0, 5, AT_CHAN),
-        (SHAPE_KEY, FGridA::of(&l.key.g), sh.c as u32, 0, 8, AT_KEY),
-        (SHAPE_TOK, tokg, sh.s as u32, l.rw as u32, 3, AT_ROW),
-    ];
+    // B11 stream N, lever 2 (b): `SHAPE_TOK` was carried unconditionally, and a
+    // corner band has no rows for it. `commit_pre` has always skipped those
+    // three selector columns on a corner (`attn_trace.rs:258`), so a corner
+    // band's device selectors have to skip them too or the two disagree by
+    // three columns. The *flags* are cut with them: nothing segments a region
+    // that does not exist.
+    let shapes: &[(u32, FGridA, u32, u32, usize, u32)] = if with_rows {
+        &[
+            (SHAPE_CHAN, FGridA::of(&l.chan.g), sh.hd as u32, 0, 5, AT_CHAN),
+            (SHAPE_KEY, FGridA::of(&l.key.g), sh.c as u32, 0, 8, AT_KEY),
+            (SHAPE_TOK, tokg, sh.s as u32, l.rw as u32, 3, AT_ROW),
+        ]
+    } else {
+        &[
+            (SHAPE_CHAN, FGridA::of(&l.chan.g), sh.hd as u32, 0, 5, AT_CHAN),
+            (SHAPE_KEY, FGridA::of(&l.key.g), sh.c as u32, 0, 8, AT_KEY),
+        ]
+    };
 
     let t_f = std::time::Instant::now();
     let flags: Vec<Uint32Vec> = shapes

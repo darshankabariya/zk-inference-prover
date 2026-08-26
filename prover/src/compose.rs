@@ -1440,8 +1440,16 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         .iter()
         .enumerate()
         .map(|(b, a)| {
-            (!a.corner && (pre_mode >= 1 || band_dev[b].is_some()))
-                .then(|| crate::devpre::band_dev(a, &plan.lays[b], pre_mode >= 1))
+            // B11 stream N, lever 2 (b): a corner band gets its flags too, once
+            // its fill is on the card -- the accumulators segment on them and
+            // `interaction_phase` asserts they are there. Its *columns* are a
+            // separate question: `commit_pre` still builds a corner's selectors
+            // on the host below, because the interaction phase reads the
+            // causal-mask columns back, so `want_cols` stays false for it.
+            let corner_dev = a.corner && band_dev[b].is_some();
+            ((!a.corner && (pre_mode >= 1 || band_dev[b].is_some())) || corner_dev)
+                .then(|| crate::devpre::band_dev(a, &plan.lays[b], pre_mode >= 1 && !a.corner,
+                                                 !a.corner))
         })
         .collect();
     if pre_mode == 2 {
@@ -1825,7 +1833,13 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // whole layer. With a corner present the device bands merged their counters
     // into `tables.m_exp`, so the host column is complete and the counter list
     // is dropped rather than summed into a column nothing commits.
-    let host_corner = layer.bands.iter().any(|b| b.corner);
+    // B11 stream N, lever 2: this asked "is there a corner band?" because a
+    // corner band's fill was always on the host. Now it asks the question it
+    // always meant -- "is any band's fill on the host?" -- which is
+    // `devwfill::exp_mult_on_host`'s twin read over the whole layer, and the
+    // two have to move together or `sums_cancel` rejects with everything else
+    // green.
+    let host_corner = layer.bands.iter().any(|b| crate::devwfill::band_fill_mode(b) != 1);
     let dev_counters: Vec<&stwo::stwo_cuda::base_field_vec::Uint32Vec> = if host_corner {
         vec![]
     } else {
