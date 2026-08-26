@@ -54,6 +54,28 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
             .map(|idx| &trace.polys[PREPROCESSED_TRACE_IDX][*idx])
             .collect();
 
+        // B11 stream K, diagnostic twin of the cuda impl's: see there.
+        if std::env::var("B7_EXT_DEBUG").is_ok() {
+            let max_evals = component_polys
+                .iter()
+                .flatten()
+                .map(|c| c.evals.domain.log_size())
+                .max();
+            let max_coeffs = component_polys
+                .iter()
+                .flatten()
+                .filter_map(|c| c.coeffs.as_ref().map(|k| k.log_size()))
+                .max();
+            eprintln!(
+                "ext-debug(simd): {} eval_domain 2^{} trees {:?} max evals {:?} max coeffs {:?}",
+                self.eval.cuda_eval_name(),
+                eval_domain.log_size(),
+                component_polys.iter().map(|t| t.len()).collect::<Vec<_>>(),
+                max_evals,
+                max_coeffs,
+            );
+        }
+
         // Extend trace if necessary.
         // TODO: Don't extend when eval_size < committed_size. Instead, pick a good
         // subdomain. (For larger blowup factors).
@@ -285,6 +307,30 @@ impl<E: FrameworkEval + Sync> ComponentProver<CudaBackend> for FrameworkComponen
             .flatten()
             .any(|c| c.evals.domain.log_size() != eval_domain.log_size());
         span.exit();
+
+        // B11 stream K, diagnostic: name the component and its column sizes
+        // before the extension, which asserts when a column is committed on a
+        // domain larger than the component's evaluation domain.
+        if std::env::var("B7_EXT_DEBUG").is_ok() {
+            let max_evals = component_polys
+                .iter()
+                .flatten()
+                .map(|c| c.evals.domain.log_size())
+                .max();
+            let max_coeffs = component_polys
+                .iter()
+                .flatten()
+                .filter_map(|c| c.coeffs.as_ref().map(|k| k.log_size()))
+                .max();
+            eprintln!(
+                "ext-debug: {} eval_domain 2^{} trees {:?} max evals {:?} max coeffs {:?}",
+                self.eval.cuda_eval_name(),
+                eval_domain.log_size(),
+                component_polys.iter().map(|t| t.len()).collect::<Vec<_>>(),
+                max_evals,
+                max_coeffs,
+            );
+        }
 
         let span = span!(Level::INFO, "Check & Extension").entered();
         let trace: TreeVec<
