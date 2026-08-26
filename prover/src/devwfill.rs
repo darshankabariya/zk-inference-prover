@@ -264,6 +264,25 @@ pub fn wfill_mut(fam: Fam) -> u32 {
     }
 }
 
+/// B11 stream L: the band fill's own switch, defaulting to `B7_M4_WFILL`.
+///
+/// `B7_M4_WFILL` turns on three device generation paths at once -- the walk
+/// regions, the attnout, and every non-corner band. Stream L measured them
+/// apart on the sequence's own witness and they are not in the same state: the
+/// walk and attnout fills reproduce the host cell for cell, while the band fill
+/// disagrees with the host on the grid region and the proof is then rejected
+/// (`off_table` bumps that the host never makes). One switch cannot express
+/// that, so the band gate becomes its own three-value variable which falls back
+/// to `B7_M4_WFILL` when it is not set. `B7_M4_WFILL=1 B7_M4_WFILL_BAND=0` is
+/// the configuration that takes the walks' win and leaves the bands on the host
+/// until the fill is fixed.
+pub fn band_mode() -> u32 {
+    match std::env::var("B7_M4_WFILL_BAND") {
+        Ok(v) => v.parse().unwrap_or(0),
+        Err(_) => crate::util::m4b_mode("B7_M4_WFILL"),
+    }
+}
+
 // --------------------------------------------------------------- the uploads --
 
 fn up_u32(v: Vec<u32>) -> Uint32Vec {
@@ -310,9 +329,64 @@ fn timed_up(
     d
 }
 
+/// B11 stream L: the same upload with the pack aimed at the pinned pool.
+///
+/// `into` writes the array's `words` u32s into a page-locked slice and `f` is
+/// the pageable path unchanged, taken whenever the pool is off or unavailable
+/// (`device::staged_upload` returns `None`). The two must produce identical
+/// bytes — they are two loop shells over one narrowing, which is why the
+/// `word_*` helpers exist — and the digest gate is what proves it.
+///
+/// The timers keep their names and their meaning on both paths: `_pack` is the
+/// narrowing, `_h2d` the copy. What moves between the arms is `_h2d`, and that
+/// is the whole measurement.
+#[cfg(feature = "cuda")]
+fn timed_up_into(
+    pack_tag: &'static str,
+    h2d_tag: &'static str,
+    byte_tag: &'static str,
+    words: usize,
+    into: impl FnOnce(&mut [u32]),
+    f: impl FnOnce() -> Vec<u32>,
+) -> Uint32Vec {
+    let Some((d, pack, copy)) = crate::device::staged_upload(words, into) else {
+        return timed_up(pack_tag, h2d_tag, byte_tag, f);
+    };
+    let bytes = (words * 4) as u64;
+    crate::util::m4_add(pack_tag, pack);
+    crate::device::note_witness(bytes, copy);
+    crate::util::m4_add(h2d_tag, copy);
+    crate::util::m4_bytes(h2d_tag, bytes);
+    crate::util::m4_bytes(byte_tag, bytes);
+    crate::util::m4_add(byte_tag, copy);
+    d
+}
+
+#[cfg(not(feature = "cuda"))]
+fn timed_up_into(
+    pack_tag: &'static str,
+    h2d_tag: &'static str,
+    byte_tag: &'static str,
+    _words: usize,
+    _into: impl FnOnce(&mut [u32]),
+    f: impl FnOnce() -> Vec<u32>,
+) -> Uint32Vec {
+    timed_up(pack_tag, h2d_tag, byte_tag, f)
+}
+
 /// One band array, packed and uploaded, with its own byte line.
 fn band_up(byte_tag: &'static str, f: impl FnOnce() -> Vec<u32>) -> Uint32Vec {
     timed_up("gen/wfill_band_pack", "gen/wfill_band_h2d", byte_tag, f)
+}
+
+/// The same, with the pack able to target the pinned pool.
+fn band_up_into(
+    byte_tag: &'static str,
+    words: usize,
+    into: impl FnOnce(&mut [u32]),
+    f: impl FnOnce() -> Vec<u32>,
+) -> Uint32Vec {
+    timed_up_into("gen/wfill_band_pack", "gen/wfill_band_h2d", byte_tag, words, into, f)
 }
 
 // ------------------------------------------------ the band dump (stream F) --
@@ -370,29 +444,36 @@ fn band_dump(a: &Attn, with_out: bool) {
     eprintln!("banddump: band {b} -> {}", d.display());
 }
 
+// B11 stream L: each narrowing is written once, as the word it produces, and
+// then driven by two loop shells -- one that collects a fresh `Vec<u32>` (the
+// pageable path, unchanged) and one that writes into a slice of the pinned
+// staging pool. Two shells over one kernel of arithmetic rather than two
+// implementations of the arithmetic: a pack that disagreed with itself between
+// the two paths would move the digest, and there is nothing to disagree about
+// if the narrowing exists once.
 /// int8, four to a word. The kernel reads the bytes back through a
 /// `signed char*`, which is exact because the packing is the little-endian byte
 /// order the device already uses; `cudaMalloc` alignment covers the cast.
-fn pack_i8(v: &[i32], what: &str) -> Vec<u32> {
-    let n = v.len().div_ceil(4);
-    let bad = std::sync::atomic::AtomicBool::new(false);
-    let out = (0..n)
-        .into_par_iter()
-        .map(|w| {
-            let mut acc = 0u32;
-            for k in 0..4 {
-                let i = 4 * w + k;
-                if i < v.len() {
-                    let x = v[i];
-                    if !(-128..=127).contains(&x) {
-                        bad.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    acc |= u32::from(x as i8 as u8) << (8 * k);
-                }
+#[inline]
+fn word_i8(v: &[i32], w: usize, bad: &std::sync::atomic::AtomicBool) -> u32 {
+    let mut acc = 0u32;
+    for k in 0..4 {
+        let i = 4 * w + k;
+        if i < v.len() {
+            let x = v[i];
+            if !(-128..=127).contains(&x) {
+                bad.store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            acc
-        })
-        .collect();
+            acc |= u32::from(x as i8 as u8) << (8 * k);
+        }
+    }
+    acc
+}
+
+fn pack_i8(v: &[i32], what: &str) -> Vec<u32> {
+    let bad = std::sync::atomic::AtomicBool::new(false);
+    let out: Vec<u32> =
+        (0..v.len().div_ceil(4)).into_par_iter().map(|w| word_i8(v, w, &bad)).collect();
     assert!(
         !bad.load(std::sync::atomic::Ordering::Relaxed),
         "{what}: a value does not fit int8, so the packed upload would truncate it"
@@ -400,32 +481,44 @@ fn pack_i8(v: &[i32], what: &str) -> Vec<u32> {
     out
 }
 
-/// u16, two to a word, with the same checked narrowing.
-fn pack_u16(v: &[i64], what: &str) -> Vec<u32> {
-    let n = v.len().div_ceil(2);
+fn pack_i8_into(dst: &mut [u32], v: &[i32], what: &str) {
     let bad = std::sync::atomic::AtomicBool::new(false);
-    let out = (0..n)
-        .into_par_iter()
-        .map(|w| {
-            let mut acc = 0u32;
-            for k in 0..2 {
-                let i = 2 * w + k;
-                if i < v.len() {
-                    let x = v[i];
-                    if !(0..=65535).contains(&x) {
-                        bad.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    acc |= ((x as u16) as u32) << (16 * k);
-                }
-            }
-            acc
-        })
-        .collect();
+    dst.par_iter_mut().enumerate().for_each(|(w, d)| *d = word_i8(v, w, &bad));
     assert!(
         !bad.load(std::sync::atomic::Ordering::Relaxed),
-        "{what}: a value does not fit u16"
+        "{what}: a value does not fit int8, so the packed upload would truncate it"
     );
+}
+
+/// u16, two to a word, with the same checked narrowing.
+#[inline]
+fn word_u16(v: &[i64], w: usize, bad: &std::sync::atomic::AtomicBool) -> u32 {
+    let mut acc = 0u32;
+    for k in 0..2 {
+        let i = 2 * w + k;
+        if i < v.len() {
+            let x = v[i];
+            if !(0..=65535).contains(&x) {
+                bad.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            acc |= ((x as u16) as u32) << (16 * k);
+        }
+    }
+    acc
+}
+
+fn pack_u16(v: &[i64], what: &str) -> Vec<u32> {
+    let bad = std::sync::atomic::AtomicBool::new(false);
+    let out: Vec<u32> =
+        (0..v.len().div_ceil(2)).into_par_iter().map(|w| word_u16(v, w, &bad)).collect();
+    assert!(!bad.load(std::sync::atomic::Ordering::Relaxed), "{what}: a value does not fit u16");
     out
+}
+
+fn pack_u16_into(dst: &mut [u32], v: &[i64], what: &str) {
+    let bad = std::sync::atomic::AtomicBool::new(false);
+    dst.par_iter_mut().enumerate().for_each(|(w, d)| *d = word_u16(v, w, &bad));
+    assert!(!bad.load(std::sync::atomic::Ordering::Relaxed), "{what}: a value does not fit u16");
 }
 
 fn pack_u16_raw(v: &[u16]) -> Vec<u32> {
@@ -458,17 +551,17 @@ fn pack_i64(v: &[i64]) -> Vec<u32> {
 /// i32, checked. `dd` is a *shift*, bounded by the score range, so the window is
 /// generous -- and a witness that broke it would otherwise be silently
 /// truncated instead of loudly out of range.
+#[inline]
+fn word_i32(x: i64, bad: &std::sync::atomic::AtomicBool) -> u32 {
+    if x < i32::MIN as i64 || x > i32::MAX as i64 {
+        bad.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    x as i32 as u32
+}
+
 fn pack_i32(v: &[i64], what: &str) -> Vec<u32> {
     let bad = std::sync::atomic::AtomicBool::new(false);
-    let out = v
-        .par_iter()
-        .map(|x| {
-            if *x < i32::MIN as i64 || *x > i32::MAX as i64 {
-                bad.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            *x as i32 as u32
-        })
-        .collect();
+    let out = v.par_iter().map(|x| word_i32(*x, &bad)).collect();
     assert!(
         !bad.load(std::sync::atomic::Ordering::Relaxed),
         "{what}: a value does not fit i32"
@@ -476,8 +569,21 @@ fn pack_i32(v: &[i64], what: &str) -> Vec<u32> {
     out
 }
 
+fn pack_i32_into(dst: &mut [u32], v: &[i64], what: &str) {
+    let bad = std::sync::atomic::AtomicBool::new(false);
+    dst.par_iter_mut().zip(v.par_iter()).for_each(|(d, x)| *d = word_i32(*x, &bad));
+    assert!(
+        !bad.load(std::sync::atomic::Ordering::Relaxed),
+        "{what}: a value does not fit i32"
+    );
+}
+
 fn pack_i32_from_i32(v: &[i32]) -> Vec<u32> {
     v.par_iter().map(|x| *x as u32).collect()
+}
+
+fn pack_i32_from_i32_into(dst: &mut [u32], v: &[i32]) {
+    dst.par_iter_mut().zip(v.par_iter()).for_each(|(d, x)| *d = *x as u32);
 }
 
 fn zeroes(n: usize) -> Uint32Vec {
@@ -529,12 +635,22 @@ pub fn walk_region_dev(
     let rows = 1usize << lay.g.log_rows;
     let t_up = std::time::Instant::now();
 
-    let d_qx = timed_up("gen/wfill_walk_pack", "gen/wfill_walk_h2d", "walk/qx",
-                        || pack_i8(&m0.qx, "walk qx"));
+    // The quantised weights are the walk's bytes (stream F: 231.7 MB a chunk,
+    // 218.10 of it `qw`), and their pack is a four-to-a-word narrowing -- the
+    // case the pinned pool is for.
+    let d_qx = timed_up_into("gen/wfill_walk_pack", "gen/wfill_walk_h2d", "walk/qx",
+                             m0.qx.len().div_ceil(4),
+                             |d| pack_i8_into(d, &m0.qx, "walk qx"),
+                             || pack_i8(&m0.qx, "walk qx"));
     let d_qw: Vec<Uint32Vec> = mat_idx
         .iter()
-        .map(|i| timed_up("gen/wfill_walk_pack", "gen/wfill_walk_h2d", "walk/qw",
-                          || pack_i8(&layer.mats[*i].qw, "walk qw")))
+        .map(|i| {
+            let qw = &layer.mats[*i].qw;
+            timed_up_into("gen/wfill_walk_pack", "gen/wfill_walk_h2d", "walk/qw",
+                          qw.len().div_ceil(4),
+                          |d| pack_i8_into(d, qw, "walk qw"),
+                          || pack_i8(qw, "walk qw"))
+        })
         .collect();
     let qw_ptrs: Vec<*const i8> = d_qw.iter().map(|d| d.device_ptr as *const i8).collect();
     let n_out: Vec<u32> = mat_idx.iter().map(|i| layer.mats[*i].n_out as u32).collect();
@@ -756,11 +872,22 @@ pub fn commit_base_dev(
     band_dump(a, with_out);
 
     let t_up = std::time::Instant::now();
-    let d_kk = band_up("band/kk", || pack_i32_from_i32(&a.kk));
-    let d_qq = band_up("band/qq", || pack_i32_from_i32(&a.qq));
-    let d_vv = band_up("band/vv", || pack_i32_from_i32(&a.vv));
-    let d_dd = band_up("band/dd", || pack_i32(&a.dd, "band dd"));
-    let d_num = band_up("band/num", || pack_u16(&a.num, "band num"));
+    // The four arrays that are 99.99% of the band's bytes (stream F's table:
+    // dd 1,073.74 MB, num 536.87, kk 268.44, vv 268.44, qq 8.39) go through the
+    // pinned pool when it is on. `mm`/`zz`/`delta` are 0.26 MB together and are
+    // left on the pageable path: they would each grow the pool to no measurable
+    // end.
+    let d_kk = band_up_into("band/kk", a.kk.len(), |d| pack_i32_from_i32_into(d, &a.kk),
+                            || pack_i32_from_i32(&a.kk));
+    let d_qq = band_up_into("band/qq", a.qq.len(), |d| pack_i32_from_i32_into(d, &a.qq),
+                            || pack_i32_from_i32(&a.qq));
+    let d_vv = band_up_into("band/vv", a.vv.len(), |d| pack_i32_from_i32_into(d, &a.vv),
+                            || pack_i32_from_i32(&a.vv));
+    let d_dd = band_up_into("band/dd", a.dd.len(), |d| pack_i32_into(d, &a.dd, "band dd"),
+                            || pack_i32(&a.dd, "band dd"));
+    let d_num = band_up_into("band/num", a.num.len().div_ceil(2),
+                             |d| pack_u16_into(d, &a.num, "band num"),
+                             || pack_u16(&a.num, "band num"));
     let d_delta = band_up("band/delta", || pack_i64(&a.delta));
     let d_mm = band_up("band/mm", || pack_i64(&a.mm));
     let d_zz = band_up("band/zz", || pack_i64(&a.zz));
@@ -943,9 +1070,26 @@ pub fn commit_base_dev(
 /// Not a sample: a fill that is wrong on one cell of one column is wrong, and
 /// the point of checking here rather than against a proof digest is that the
 /// panic says where.
+/// B11 stream L: `B7_M4_WFILL_DIFF=1` turns the first-mismatch panic into a
+/// survey.
+///
+/// The default is right for a control -- a fill that is wrong anywhere is
+/// wrong, and stopping at the first cell keeps the panic short. But when the
+/// mirror does bite, the *shape* of the disagreement is the diagnosis: one
+/// column or every column, one row or all of them, a whole region or a single
+/// slot. Under the variable every column is compared and a compact table is
+/// printed before the panic, so one run answers that instead of one bisect per
+/// column.
+fn diff_survey() -> bool {
+    crate::util::m4b_mode("B7_M4_WFILL_DIFF") != 0
+}
+
 pub fn check_cols(what: &str, host: &[Eval], got: &[BaseFieldVec]) {
     use stwo::prover::backend::Column as _;
     assert_eq!(host.len(), got.len(), "{what}: column count");
+    if diff_survey() {
+        return survey_cols(what, host, got);
+    }
     for (i, (a, b)) in host.iter().zip(got).enumerate() {
         let (a, b) = (a.values.to_cpu(), b.to_vec());
         assert_eq!(a.len(), b.len(), "{what}: column {i} length");
@@ -953,6 +1097,52 @@ pub fn check_cols(what: &str, host: &[Eval], got: &[BaseFieldVec]) {
             panic!("{what}: column {i} differs at cell {k}: host {:?}, device {:?}", a[k], b[k]);
         }
     }
+}
+
+/// Every mismatching column of one check, as a table, then the panic.
+fn survey_cols(what: &str, host: &[Eval], got: &[BaseFieldVec]) {
+    use stwo::prover::backend::Column as _;
+    let mut bad: Vec<(usize, usize, usize, usize, M31, M31)> = vec![];
+    let mut rows = 0usize;
+    for (i, (a, b)) in host.iter().zip(got).enumerate() {
+        let (a, b) = (a.values.to_cpu(), b.to_vec());
+        assert_eq!(a.len(), b.len(), "{what}: column {i} length");
+        rows = a.len();
+        let n = (0..a.len()).filter(|k| a[*k] != b[*k]).count();
+        if n > 0 {
+            let k = (0..a.len()).find(|k| a[*k] != b[*k]).unwrap();
+            bad.push((i, n, a.len(), k, a[k], b[k]));
+        }
+    }
+    if bad.is_empty() {
+        return;
+    }
+    eprintln!(
+        "wfill-diff: {what} -- {} of {} columns differ ({} rows each)",
+        bad.len(),
+        host.len(),
+        rows
+    );
+    for (i, n, len, k, h, d) in bad.iter().take(64) {
+        eprintln!(
+            "wfill-diff:   column {i:5} {n:9} of {len} cells differ; \
+first at row {k}: host {h:?}, device {d:?}"
+        );
+    }
+    if bad.len() > 64 {
+        eprintln!("wfill-diff:   ... and {} more columns", bad.len() - 64);
+    }
+    let cols: Vec<usize> = bad.iter().map(|x| x.0).collect();
+    let all = bad.iter().all(|x| x.1 == x.2);
+    eprintln!(
+        "wfill-diff: {what} -- columns {:?}{}, every cell wrong in all of them: {}",
+        &cols[..cols.len().min(32)],
+        if cols.len() > 32 { " (truncated)" } else { "" },
+        all
+    );
+    let (i, n, len, k, h, d) = bad[0];
+    panic!("{what}: column {i} differs at cell {k}: host {h:?}, device {d:?} \
+({n} of {len} cells; {} columns in all -- see the wfill-diff lines)", bad.len());
 }
 
 /// The multiplicity deltas: what the host's bumps added against what the
