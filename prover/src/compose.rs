@@ -934,10 +934,6 @@ impl BuiltComponents {
     }
 }
 
-/// Build every component from the plan, the drawn relations and challenges, and
-/// the parsed claims — the verifier's route, also used by the prover so the two
-/// sides cannot diverge.
-#[allow(clippy::too_many_arguments)]
 /// B11 stream F step 3: what one `.extend(...)` added to the interaction set.
 ///
 /// Called after each region appends its columns, with the running (columns,
@@ -961,6 +957,10 @@ fn inter_mark(
     *seen = (cols, cells);
 }
 
+/// Build every component from the plan, the drawn relations and challenges, and
+/// the parsed claims — the verifier's route, also used by the prover so the two
+/// sides cannot diverge.
+#[allow(clippy::too_many_arguments)]
 pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField,
                         rv: SecureField, r_corner: SecureField, w_glue: SecureField,
                         lam_glue: SecureField, claims: &Claims) -> BuiltComponents {

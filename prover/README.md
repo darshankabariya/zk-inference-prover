@@ -127,7 +127,16 @@ frame). They are pruned from the install and carried by
 `B7_KERNEL_FALLBACK=1`, which announces the fallback per component. Second,
 note that with an *empty* shape table the fallback is silent, not announced —
 `blob_lower` returns `None` before reaching the announcement
-(`cudagen.rs:1899-1903`).
+(`cudagen.rs:1899-1903`). Third, an **open defect found by stream I**
+(2026-08-25, handed to stream G): a shape *missing from a family that is
+installed* announces the fallback and then enters the device launcher anyway,
+aborting on the blob-magic guard (`b65 kernel dispatch: … got a blob with
+magic 0x1`). A wholly-pruned family (the glue) falls back cleanly; only the
+partly-installed case bites — it is what keeps the 8B head off the cuda arm
+(its dequant shapes are pruned from the installed dequant family; repro in
+`briefs/i-assemble.md` §9). The head's dequant kernels are themselves a
+ptxas casualty like the glue's, one order worse (~55k-instruction units
+under `--deq-per-row 501`).
 
 One design decision to keep: **corner bands decline every device path** —
 the fill (`!a.corner` threads through `commit_base_any` as `with_rows`), the
