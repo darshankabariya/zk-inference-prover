@@ -57,6 +57,198 @@ pub fn note_witness(bytes: u64, secs: f64) {
     WITNESS_UPS.fetch_add(1, Ordering::Relaxed);
 }
 
+// ------------------------------------------------ the pinned staging pool --
+
+/// B11 stream L: one page-locked buffer that the witness packs write into.
+///
+/// Stream F measured every upload in this crate at **6.95 GB/s on a link that
+/// delivers 45.5 GB/s out of page-locked host memory**, and established that
+/// the whole gap is the source being pageable (`briefs/f-wfill.md` §1). It also
+/// established the shape of the fix, which is the part that is easy to get
+/// wrong: **pinning pays exactly where a pass over the data already happens.**
+/// A pack that narrows an `i64` witness array into `u32` words has to write its
+/// output somewhere, and writing it into pinned memory instead of a fresh
+/// `Vec` is free — F measured the pack unchanged at 0.0767 s and the copy
+/// falling 0.2230 → 0.0474 s. An array that needs *no* pack is the opposite
+/// case: staging it costs a host `memcpy` that eats everything the faster DMA
+/// saves (F measured 0.0545 against 0.0548 s — no gain at all).
+///
+/// So this is a buffer the pack targets, never a buffer things are copied
+/// through. One allocation per process, grown to the largest array any family
+/// asks for and then reused by every family and every chunk: `cudaHostAlloc`
+/// pins physical pages for as long as they are held and is far too expensive
+/// to do per array, which is why the pool is a pool and not an allocation.
+///
+/// `B7_M4_POOL=1` turns it on; with it off every caller takes exactly the
+/// pageable path it took before, so the default is still the proven one.
+#[cfg(feature = "cuda")]
+mod pinned {
+    use std::ffi::c_void;
+    use std::sync::Mutex;
+
+    unsafe extern "C" {
+        fn cudaHostAlloc(p: *mut *mut c_void, size: usize, flags: u32) -> i32;
+        fn cudaFreeHost(p: *mut c_void) -> i32;
+        fn cudaDeviceSynchronize() -> i32;
+    }
+
+    /// Wait for the copy out of the pool to land.
+    ///
+    /// Load-bearing, not hygiene: the fork's copy is `cudaMemcpyAsync` on
+    /// stream 0, and out of *page-locked* memory that call really does return
+    /// while the DMA is in flight (out of pageable memory it staged through a
+    /// driver buffer first, which is part of why it was slow). The pool is
+    /// handed straight to the next pack, so without this the next pack would
+    /// overwrite bytes the card has not read yet.
+    pub fn sync() {
+        unsafe { cudaDeviceSynchronize() };
+    }
+
+    /// `cudaHostAllocDefault` — page-locked and not mapped into the device's
+    /// address space. Mapping it would make the kernels read over the link
+    /// instead of copying, which is a different design and not this one.
+    const HOST_ALLOC_DEFAULT: u32 = 0;
+
+    struct Buf {
+        ptr: *mut u32,
+        words: usize,
+    }
+
+    // Safety: the pointer is only ever reached through the mutex below, and one
+    // page-locked host allocation is valid for every thread in the process.
+    unsafe impl Send for Buf {}
+
+    static POOL: Mutex<Option<Buf>> = Mutex::new(None);
+    /// The high-water mark, so the record can say what the pool actually cost.
+    static PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    pub fn enabled() -> bool {
+        crate::util::m4b_mode("B7_M4_POOL") != 0
+    }
+
+    /// `B7_M4_POOLMUT=1`: the pool's deliberate defect, aimed at the staged
+    /// bytes themselves. Off unless set, and it never runs in a timed loop.
+    pub fn mutate() -> bool {
+        crate::util::m4b_mode("B7_M4_POOLMUT") != 0
+    }
+
+    pub fn peak_bytes() -> usize {
+        PEAK.load(std::sync::atomic::Ordering::Relaxed) * 4
+    }
+
+    /// Fill `words` u32s of page-locked memory with `pack` and hand back the
+    /// pointer to copy from, for the duration of `then`.
+    ///
+    /// Returns `None` when the pool is not available — it is turned off, the
+    /// allocation failed, or another thread is inside it. Every caller then
+    /// takes its old pageable path, so a contended or memory-tight run is
+    /// slower and never wrong.
+    pub fn with<T>(
+        words: usize,
+        pack: impl FnOnce(&mut [u32]),
+        then: impl FnOnce(*const u32, usize) -> T,
+    ) -> Option<T> {
+        if !enabled() || words == 0 {
+            return None;
+        }
+        // `try_lock`, not `lock`: the fills are sequential today (one band, then
+        // the next), so contention means an assumption has changed and the right
+        // answer is the old path rather than a wait or a second pinned buffer.
+        let mut g = POOL.try_lock().ok()?;
+        if g.as_ref().is_none_or(|b| b.words < words) {
+            if let Some(b) = g.take() {
+                unsafe { cudaFreeHost(b.ptr as *mut c_void) };
+            }
+            let mut p: *mut c_void = std::ptr::null_mut();
+            let rc = unsafe { cudaHostAlloc(&mut p, words * 4, HOST_ALLOC_DEFAULT) };
+            if rc != 0 || p.is_null() {
+                eprintln!(
+                    "pool: cudaHostAlloc({} MB) failed rc={rc}; \
+staying on the pageable path",
+                    words * 4 / 1_000_000
+                );
+                return None;
+            }
+            PEAK.fetch_max(words, std::sync::atomic::Ordering::Relaxed);
+            *g = Some(Buf { ptr: p as *mut u32, words });
+        }
+        let b = g.as_mut().unwrap();
+        // Safety: `b.words >= words` was just ensured, the allocation is live
+        // for as long as the pool holds it, and the mutex guard makes this the
+        // only reference to it.
+        let slice = unsafe { std::slice::from_raw_parts_mut(b.ptr, words) };
+        pack(slice);
+        // B11 stream L: `B7_M4_POOLMUT=1` is the pool's deliberate defect.
+        //
+        // A staging pool is a new place for a witness array to be wrong, and a
+        // control that has never fired is not a control (B7A section 5 rule 5).
+        // This changes one word of one staged array after the pack has written
+        // it and before the copy reads it -- the exact failure the pool makes
+        // possible, and the narrowest version of it. The band and walk mirrors
+        // must panic under it; if they do not, they are not covering the pool.
+        if mutate() {
+            let k = words / 2;
+            slice[k] = slice[k].wrapping_add(1);
+        }
+        Some(then(b.ptr as *const u32, words))
+    }
+}
+
+/// Is the pinned staging pool on for this run?
+#[cfg(feature = "cuda")]
+pub fn pool_enabled() -> bool {
+    pinned::enabled()
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn pool_enabled() -> bool {
+    false
+}
+
+/// The largest the pool ever grew, in bytes — reported so the record can price
+/// what pinning cost in host memory as well as what it bought in bandwidth.
+#[cfg(feature = "cuda")]
+pub fn pool_peak_bytes() -> usize {
+    pinned::peak_bytes()
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn pool_peak_bytes() -> usize {
+    0
+}
+
+/// Pack `words` u32s straight into page-locked memory and upload them.
+///
+/// The one entry point the fills use. Hands back the device handle and the two
+/// halves' seconds — the pack and the copy — so the caller's `_pack` / `_h2d`
+/// timers keep the meaning they had on the pageable path and the two are
+/// comparable across the A/B. `None` means the pool was not available and the
+/// caller must take its own pageable path — see `pinned::with`.
+#[cfg(feature = "cuda")]
+pub fn staged_upload(
+    words: usize,
+    pack: impl FnOnce(&mut [u32]),
+) -> Option<(stwo::stwo_cuda::base_field_vec::Uint32Vec, f64, f64)> {
+    let mut packed = 0.0f64;
+    let timed = |dst: &mut [u32]| {
+        let t = Instant::now();
+        pack(dst);
+        packed = t.elapsed().as_secs_f64();
+    };
+    let (dev, copy) = pinned::with(words, timed, |ptr, n| {
+        let t = Instant::now();
+        let dev = unsafe {
+            stwo::stwo_cuda::bindings::copy_uint32_t_vec_from_host_to_device(ptr, n as u32)
+        };
+        pinned::sync();
+        (
+            stwo::stwo_cuda::base_field_vec::Uint32Vec::new(dev, n),
+            t.elapsed().as_secs_f64(),
+        )
+    })?;
+    Some((dev, packed, copy))
+}
+
 pub fn reset() {
     UPLOAD_NS.store(0, Ordering::Relaxed);
     UPLOAD_BYTES.store(0, Ordering::Relaxed);
@@ -296,6 +488,12 @@ pub fn report() -> Value {
         "devcopy_columns": DEVCOPY_COLS.load(Ordering::Relaxed),
         "devcopy_bytes": DEVCOPY_BYTES.load(Ordering::Relaxed),
         "devcopy_secs": DEVCOPY_NS.load(Ordering::Relaxed) as f64 / 1e9,
+        // B11 stream L: whether the packs wrote into page-locked memory, and
+        // how much of it that cost -- pinning is host memory taken out of
+        // circulation for the process's life, so its size belongs in the record
+        // beside the bandwidth it bought.
+        "pool_enabled": pool_enabled(),
+        "pool_peak_bytes": pool_peak_bytes(),
     })
 }
 

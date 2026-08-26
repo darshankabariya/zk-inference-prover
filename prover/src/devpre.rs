@@ -197,7 +197,14 @@ pub fn premut() -> (u32, u32) {
 /// device? Mode 2 of a fill builds both ways and returns the *host* columns
 /// (20.2's shape), so only mode 1 leaves a counter where the kernel can sum it.
 pub fn fills_dev() -> bool {
-    crate::util::m4b_mode("B7_M4_FILL") == 1 && crate::util::m4b_mode("B7_M4_WFILL") == 1
+    // B11 stream L: the band fill has its own switch now, and a host-built band
+    // bumps the host multiplicity arrays. So "every fill that bumps a counter
+    // ran on the device" has to read the band gate too -- otherwise
+    // `B7_M4_WFILL=1 B7_M4_WFILL_BAND=0` would claim the counters are on the
+    // device while three bands' worth of bumps sit on the host.
+    crate::util::m4b_mode("B7_M4_FILL") == 1
+        && crate::util::m4b_mode("B7_M4_WFILL") == 1
+        && crate::devwfill::band_mode() == 1
 }
 
 /// The ten multiplicity columns are the device's exactly when every counter

@@ -522,13 +522,20 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     // C - S prefix band, which still fills on the device.  Teaching the fill
     // the distinction is its own piece of work; until then this cannot be
     // silently wrong.
-    let m4d = if with_rows { crate::util::m4b_mode("B7_M4_WFILL") } else { 0 };
+    //
+    // B11 stream L: the switch read here is the band fill's own
+    // (`B7_M4_WFILL_BAND`, defaulting to `B7_M4_WFILL`), because the band fill
+    // and the walk fill are not in the same state -- see `devwfill::band_mode`.
+    let m4d = if with_rows { crate::devwfill::band_mode() } else { 0 };
     if m4d == 1 {
         // B7a milestone 4 (section 3 row 1): with the tables' columns on the
-        // device the exp counter has no host reader left, so it stays there.
+        // device the exp counter has no host reader left, so it stays there --
+        // unless a corner band rides with this one, in which case it does have
+        // one. See `devwfill::exp_mult_on_host`; `compose.rs` decides which
+        // column is committed from the same predicate, and the two must agree.
         let dev = crate::devwfill::commit_base_dev(a, l, cfg, widths, mult_exp, mult_r,
                                                    off_table, with_out,
-                                                   crate::devtab::mode() != 1);
+                                                   crate::devwfill::exp_mult_on_host(a));
         let at = dev.at.clone();
         return (vec![], at, Some(dev));
     }
@@ -549,6 +556,22 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     let dev = crate::devwfill::commit_base_dev(a, l, cfg, widths, mult_exp, mult_r,
                                                off_table, with_out, true);
     let label = format!("band {} 2^{}", a.shape.label(), l.key.g.log_rows);
+    // B11 stream L: the region offsets, printed before the comparison rather
+    // than after it.  `check_cols` names a column by its index in the whole
+    // base vector, and which *region* that index falls in is the first thing a
+    // mismatch has to be attributed to -- but the `at` assert below only runs
+    // if the columns already matched, so on a real mismatch the offsets were
+    // never printed.  They are four numbers; printing them costs nothing and
+    // turns "column 304" into "the grid region's column 40".
+    eprintln!(
+        "wfill-dev: {label} -- {} base columns, regions at {:?} \
+(chan {}+{}, grid 2*{}+{}+{}, out {}, tok {})",
+        dev.base.len(), dev.at,
+        l.chan.pk, l.chan.pq, l.key.q,
+        if a.variant == Variant::IntExp { 0 } else { l.key.q }, l.key.pv,
+        if with_out { l.out.q } else { 0 },
+        (if a.variant != Variant::Bf16x { l.rw } else { 0 }) + 3 * l.rw
+    );
     crate::devwfill::check_cols(&format!("{label} base"), &base, &dev.base);
     assert_eq!(at, dev.at, "{label}: the component offsets differ");
     let delta = |x: &[u32], y: &[u32]| -> Vec<u32> {
