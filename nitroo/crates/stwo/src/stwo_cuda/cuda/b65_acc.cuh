@@ -64,6 +64,12 @@
 #define B65A_MUT_NOMASK 7u     // let an inert lead row contribute a numerator
 #define B65A_MUT_EVERYROW 8u   // land stage 2's term on every row, not the last
 #define B65A_MUT_NOSPLIT 9u    // read the key column alone, not `idx 2^k + aux`
+// B11 stream N: the glue's ties, whose three ways of being wrong are its three
+// factors -- the row-to-row step, the within-row weight, and `lam`, which is
+// the only thing that keeps a leaf's two halves apart.
+#define B65A_MUT_NOTIESTEP 10u  // fold the rows with 1 instead of the tie's step
+#define B65A_MUT_NOTIEW 11u     // weigh every member of a row's sequence alike
+#define B65A_MUT_NOTIELAM 12u   // drop `ef`'s `lam`, collapsing (sm, ef) to sm
 
 // Per-row layout facts, computed once by the region's own kernel so that the
 // stage-2 builder and the scan need to know nothing about the layout.
@@ -258,6 +264,35 @@ struct B65AccAo {
     unsigned mutate;
 };
 
+// B11 stream N: one of the glue region's Horner ties, which is the seventh
+// region of the table at the top of this file and the plainest of them.
+//
+// A tie folds one of the region's *value sequences* -- a group's committed
+// leaves, or the slots one output names -- into a single claim,
+//
+//     h[j] = step * h[j-1] + sum_k w[k] * (sm[j][k] + lam * ef[j][k]),
+//
+// which is the same affine recurrence every other region has, with no
+// segmentation at all: no group starts, no instance starts, no last-row term.
+// So a tie needs no flags and no stage 2 -- it is one stage-1 lane and the
+// shared scan, and `a[j]` is the constant `step` everywhere but row 0.
+//
+// What it reads is not a committed column. `b65_gfill.cu` leaves `(sm, ef)`
+// per leaf and per output in `in_nat` / `out_nat`, in **coset row order**, for
+// exactly this purpose; before this stream those two arrays were copied back
+// across the link and folded on the host, which is all `gen/gfill_d2h` was.
+// `src` picks the array, `off` and `width` cut this tie's sequence out of a
+// row of it, and `stride` is that array's own row width.
+struct B65AccGTie {
+    unsigned src;     // 0 = `in_nat`, 1 = `out_nat`
+    unsigned off;     // first member of this tie's sequence within a row
+    unsigned width;   // members of the sequence
+    unsigned stride;  // members per row of the source array
+    unsigned w_off;   // where this tie's weights start in the packed array
+    unsigned pad;
+    qm31 step;
+};
+
 // ---------------------------------------------------------------- the shared half --
 
 // The inclusive affine scan: `b[l][j] <- a[l][j] * b[l][j-1] + b[l][j]`, with
@@ -325,5 +360,13 @@ extern "C" void b65_acc_deq(const m31 *const *acc_cols, const qm31 *rv_pow,
 extern "C" void b65_acc_ao(const m31 *den_col, const m31 *const *acc_cols,
                            const qm31 *rv_pow, qm31 rv_step, unsigned *flags,
                            qm31 *a, qm31 *b, B65AccAo cfg);
+
+// B11 stream N: every tie of one glue region, one lane each. `specs` and
+// `weights` are host arrays and are cloned to the card here; `in_nat` and
+// `out_nat` are already there, where `b65_gfill.cu` left them.
+extern "C" void b65_acc_gtie(const int *in_nat, const int *out_nat,
+                             const qm31 *weights, unsigned n_weights, qm31 lam,
+                             const B65AccGTie *specs, unsigned n_specs, qm31 *a,
+                             qm31 *b, unsigned rows, unsigned mutate);
 
 #endif

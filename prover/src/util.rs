@@ -190,7 +190,12 @@ fn m4b_default(name: &str) -> u32 {
         | "B7_M4_POOL"
         | "B7_M4_PRE"
         | "B7_M4_ACC"
-        | "B7_M4_GFILL" => 1,
+        | "B7_M4_GFILL"
+        // B11 stream N, lever 3: the glue's Horner ties. Graduated here in the
+        // commit that landed its gate -- the mode-2 mirror clean on all four
+        // glue regions (40 columns, 401,408 cells, 10 claims), three aimed
+        // controls each shown to bite, and the gate chunk's digest unmoved.
+        | "B7_M4_GTIE" => 1,
         // The two milestone-5 caches. They are in seq4's family env like
         // everything above, and they are what makes the table *seq4's* env
         // rather than its device subset: the lowering cache (`scalars.rs`) and
@@ -242,6 +247,7 @@ pub fn modes_json() -> Value {
         "B7_M4_PRE",
         "B7_M4_ACC",
         "B7_M4_GFILL",
+        "B7_M4_GTIE",
         "B7_M4_LOGUPIR",
         "B7_M5_PIPE",
         "B7_M5_PRECACHE",

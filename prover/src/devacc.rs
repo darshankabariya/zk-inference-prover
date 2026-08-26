@@ -106,6 +106,19 @@ pub struct FAccS2 {
     pub m_n: [u32; 4],
 }
 
+/// Mirrors `B65AccGTie`: one of the glue region's Horner ties.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FAccGTie {
+    pub src: u32,
+    pub off: u32,
+    pub width: u32,
+    pub stride: u32,
+    pub w_off: u32,
+    pub pad: u32,
+    pub step: [u32; 4],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FAccChan {
@@ -203,6 +216,9 @@ unsafe extern "C" {
     fn b65_acc_ao(den_col: *const u32, acc_cols: *const *const u32, rv_pow: *const u32,
                   rv_step: [u32; 4], flags: *mut u32, a: *mut u32, b: *mut u32,
                   cfg: FAccAo);
+    fn b65_acc_gtie(in_nat: *const i32, out_nat: *const i32, weights: *const u32,
+                    n_weights: u32, lam: [u32; 4], specs: *const FAccGTie,
+                    n_specs: u32, a: *mut u32, b: *mut u32, rows: u32, mutate: u32);
 }
 
 /// `B65A_ISTART`, the only flag a stage-2 lane ever selects on.
@@ -226,6 +242,9 @@ pub enum Reg {
     Walk,
     Deq,
     Ao,
+    /// B11 stream N: the glue region's Horner ties, the seventh region and the
+    /// only one whose values are not committed columns.
+    GTie,
 }
 
 impl Reg {
@@ -237,6 +256,7 @@ impl Reg {
             Reg::Walk => "walk",
             Reg::Deq => "deq",
             Reg::Ao => "ao",
+            Reg::GTie => "gtie",
         }
     }
 }
@@ -254,7 +274,7 @@ pub fn accmut(reg: Reg) -> u32 {
         None => (raw, None),
     };
     if let Some(r) = want.as_deref() {
-        assert!(["chan", "grid", "tok", "walk", "deq", "ao"].contains(&r),
+        assert!(["chan", "grid", "tok", "walk", "deq", "ao", "gtie"].contains(&r),
                 "unknown B7_M4_ACCMUT region {r:?}");
         if r != reg.name() {
             return 0;
@@ -271,6 +291,10 @@ pub fn accmut(reg: Reg) -> u32 {
         "nomask" => 7,
         "everyrow" => 8,
         "nosplit" => 9,
+        // B11 stream N: the ties' three factors, one control each.
+        "notiestep" => 10,
+        "notiew" => 11,
+        "notielam" => 12,
         other => panic!("unknown B7_M4_ACCMUT {other:?}"),
     }
 }
@@ -763,4 +787,50 @@ pub fn ao(dev: &crate::devwfill::DevAo, lay: &crate::layer::AoLayout, nh: usize,
     let cols = acc.split(&[0, 2, 3], mutate);
     note(Reg::Ao, "region", cols.len(), acc.rows, t.elapsed().as_secs_f64());
     DevAccCols { cols, claims: vec![claims[2], claims[3]], log_rows: lay.log_rows }
+}
+
+// ============================================================== the glue ties ==
+
+/// `B7_M4_GTIE`: 0 the host, 1 the device, 2 both with every cell asserted.
+///
+/// B11 stream N. Born off, like every path before it: this switch joins the
+/// default table in `util::m4b_default` in the same commit that lands its
+/// digest gate, and not before.
+pub fn tie_mode() -> u32 {
+    crate::util::m4b_mode("B7_M4_GTIE")
+}
+
+/// One glue region's Horner ties, on their way into the tree.
+///
+/// The seventh region of `b65_acc.cuh`'s table and the plainest of them: a tie
+/// has no segmentation at all, so there are no flags and no stage 2 -- one
+/// stage-1 lane per tie and then the shared affine scan, which is the same
+/// primitive as every other region's and therefore the same field element the
+/// host's serial fold produces.
+///
+/// `in_nat` and `out_nat` are the arrays `b65_gfill.cu` already leaves on the
+/// card, in coset row order. Before this stream they were copied back across
+/// the link for the host to fold, which is the whole of `gen/gfill_d2h`.
+///
+/// The caller owns the order: `specs` is `Tie::specs` as the AIR reads it, and
+/// the columns come back four per tie in that order, which is exactly what
+/// `attn_trace::secure_cols_pub` produces on the host arm.
+pub fn gtie(in_nat: *const i32, out_nat: *const i32, log_rows: u32,
+            specs: &[FAccGTie], weights: &[SecureField], lam: SecureField)
+            -> DevAccCols {
+    let t = std::time::Instant::now();
+    let mutate = accmut(Reg::GTie);
+    let acc = Acc::new(log_rows, specs.len());
+    let w = pows(weights);
+    unsafe {
+        b65_acc_gtie(in_nat, out_nat, w.as_ptr() as *const u32, w.len() as u32,
+                     q4(lam), specs.as_ptr(), specs.len() as u32, acc.ap(), acc.bp(),
+                     acc.rows as u32, mutate);
+    }
+    acc.scan(0, specs.len(), mutate);
+    let claims = acc.last();
+    let order: Vec<u32> = (0..specs.len() as u32).collect();
+    let cols = acc.split(&order, mutate);
+    note(Reg::GTie, "glue", cols.len(), acc.rows, t.elapsed().as_secs_f64());
+    DevAccCols { cols, claims, log_rows }
 }

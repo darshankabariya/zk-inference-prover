@@ -1604,6 +1604,54 @@ enum L {
     SMul(usize, usize, usize),
 }
 
+/// Where each tie's sequence sits in the fill's two row-flat natural arrays.
+///
+/// B11 stream N. The host reads a tie through `tie_vals`, which hands back the
+/// one regrouped vector for that group or output. The device has no regrouped
+/// vectors -- `b65_fill_glue` writes one array per kind, `n_leaves` or `out_w`
+/// `(sm, ef)` pairs to a row -- so a tie is named by where its sequence starts
+/// in a row and how wide it is. Both offsets are the same running sums the fill
+/// itself uses: `FGroup::flat` for the leaves, and `out_slot`'s concatenation
+/// order for the outputs.
+///
+/// The weights of every tie are packed into one array, so the kernel takes one
+/// upload rather than one per lane.
+fn tie_specs(r: &GlueRegion, t: &Tie) -> (Vec<crate::devacc::FAccGTie>, Vec<SecureField>) {
+    let prog = &r.prog;
+    let n_leaves = prog.n_leaves();
+    let out_w: usize = prog.outs.iter().map(|o| o.len()).sum();
+    let mut weights: Vec<SecureField> = vec![];
+    let specs = t
+        .specs
+        .iter()
+        .map(|spec| {
+            let (src, off, width, stride) = match spec.kind {
+                TieKind::In(g) => {
+                    let off: usize = prog.groups[..g].iter().map(|x| x.n).sum();
+                    (0u32, off, prog.groups[g].n, n_leaves)
+                }
+                TieKind::Out(o) => {
+                    let off: usize = prog.outs[..o].iter().map(|x| x.len()).sum();
+                    (1u32, off, prog.outs[o].len(), out_w)
+                }
+            };
+            assert_eq!(width, spec.w.len(), "a tie's weight count is its width");
+            let w_off = weights.len();
+            weights.extend_from_slice(&spec.w);
+            crate::devacc::FAccGTie {
+                src,
+                off: off as u32,
+                width: width as u32,
+                stride: stride as u32,
+                w_off: w_off as u32,
+                pad: 0,
+                step: spec.step.to_m31_array().map(|x| x.0),
+            }
+        })
+        .collect();
+    (specs, weights)
+}
+
 /// The region's Horner ties and its LogUp columns, in the AIR's own order.
 ///
 /// B11 stream M: `air` is this region's own eval, and it is here because the
@@ -1623,21 +1671,54 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>,
     let mut cols = crate::device::ColSink::new();
     let mut claimed: Vec<SecureField> = vec![];
     if let Some(t) = tie {
-        for spec in &t.specs {
-            let vals = r.tie_vals(spec.kind);
-            let wdt = r.tie_width(spec.kind);
-            let mut h = vec![SecureField::zero(); rows];
-            for j in 0..rows {
-                let mut f = SecureField::zero();
-                for k in 0..wdt {
-                    let (sm, ef) = vals[j * wdt + k];
-                    f += (SecureField::from(m31_of(sm))
-                          + SecureField::from(m31_of(ef)) * t.lam) * spec.w[k];
+        // B11 stream N: which side folds the ties. The device route needs the
+        // fill's own natural arrays, so it exists exactly when this region
+        // filled on the card; mode 2 builds both and asserts every cell and
+        // every claim.
+        let m4t = r.dev.as_ref().filter(|_| crate::devacc::tie_mode() >= 1);
+        let host = m4t.is_none() || crate::devacc::tie_mode() == 2;
+        let mut host_cols: Vec<crate::common::Eval> = vec![];
+        let mut host_claims: Vec<SecureField> = vec![];
+        if host {
+            for spec in &t.specs {
+                let vals = r.tie_vals(spec.kind);
+                let wdt = r.tie_width(spec.kind);
+                let mut h = vec![SecureField::zero(); rows];
+                for j in 0..rows {
+                    let mut f = SecureField::zero();
+                    for k in 0..wdt {
+                        let (sm, ef) = vals[j * wdt + k];
+                        f += (SecureField::from(m31_of(sm))
+                              + SecureField::from(m31_of(ef)) * t.lam) * spec.w[k];
+                    }
+                    h[j] = if j == 0 { f } else { h[j - 1] * spec.step + f };
                 }
-                h[j] = if j == 0 { f } else { h[j - 1] * spec.step + f };
+                host_claims.push(h[rows - 1]);
+                host_cols.extend(crate::attn_trace::secure_cols_pub(r.log_rows, &h));
             }
-            claimed.push(h[rows - 1]);
-            cols.extend(crate::attn_trace::secure_cols_pub(r.log_rows, &h));
+        }
+        match m4t {
+            Some(d) => {
+                let (specs, weights) = tie_specs(r, t);
+                let got = crate::devacc::gtie(
+                    d.d_in_nat.device_ptr as *const i32,
+                    d.d_out_nat.device_ptr as *const i32,
+                    r.log_rows,
+                    &specs,
+                    &weights,
+                    t.lam,
+                );
+                claimed = crate::devacc::place(
+                    &format!("glue {} ties", r.tag),
+                    got,
+                    host.then_some((host_cols, host_claims)),
+                    &mut cols,
+                );
+            }
+            None => {
+                claimed = host_claims;
+                cols.extend(host_cols);
+            }
         }
     }
     let n_tie = cols.len();
