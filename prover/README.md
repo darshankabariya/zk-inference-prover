@@ -119,24 +119,29 @@ paragraph used to record — only `ACC` running at mode 1, `FILL`/`WFILL`
 panicking in `devfrac.rs` for want of generation kernels — was correct then
 and is obsolete now; it is what the emit-install fixed.
 
-Two caveats worth keeping. First, the **glue family stays on the scalar CPU
-fallback**: its generated constraint kernels are ~10,400 instructions of
-straight-line code each and ptxas does not compile them (`-O3` and `-O1` both
-exceeded a 30-minute cap; `-O0` finishes in 636 s but spills a 27 kB stack
-frame). They are pruned from the install and carried by
-`B7_KERNEL_FALLBACK=1`, which announces the fallback per component. Second,
-note that with an *empty* shape table the fallback is silent, not announced —
-`blob_lower` returns `None` before reaching the announcement
-(`cudagen.rs:1899-1903`). Third, an **open defect found by stream I**
-(2026-08-25, handed to stream G): a shape *missing from a family that is
-installed* announces the fallback and then enters the device launcher anyway,
-aborting on the blob-magic guard (`b65 kernel dispatch: … got a blob with
-magic 0x1`). A wholly-pruned family (the glue) falls back cleanly; only the
-partly-installed case bites — it is what keeps the 8B head off the cuda arm
-(its dequant shapes are pruned from the installed dequant family; repro in
-`briefs/i-assemble.md` §9). The head's dequant kernels are themselves a
-ptxas casualty like the glue's, one order worse (~55k-instruction units
-under `--deq-per-row 501`).
+Since stream K (2026-08-26, `briefs/k-kernels.md`) **no family is pruned**:
+the emitter splits any kernel above `--seg-cap` (default 3,000) instructions
+into segments — each segment carries the transitive SSA closure of its own
+constraints at their global weight indices and accumulates into the
+quotient, so the split is bit-identical by construction, and under-cap
+families emit byte-identically. That put the glue (29,304 instructions,
+12/2/12 segments), the head's dequant (54,847, up to 22 segments) and the
+argmax through ptxas in normal build time, and the head proves on the cuda
+arm. The former "~10,400-instruction glue" was an emit-time placeholder
+shape (zero tie claims, fixed in the same stream).
+
+Three caveats worth keeping. First, with an *empty* shape table the fallback
+is silent, not announced — `blob_lower` returns `None` before reaching the
+announcement. Second, the partly-installed-family **dispatch defect is
+fixed** (a `b65_`-prefixed eval whose blob is `None` takes the announced CPU
+fallback instead of handing the launcher raw struct bytes;
+`component_prover.rs`, repro before/after in `experiments/b11/kernels/out/`)
+— a missing shape without `B7_KERNEL_FALLBACK=1` still panics, as it must.
+Third, an **open defect handed on by stream K**: under `B7_M4_FILL=1` the
+head's device fill path mis-assembles a walk's column trees (a 2^18 eval
+domain handed a 2^20 column set at extension; `B7_EXT_DEBUG=1` is the
+diagnostic) — the head runs with host fills and device constraint kernels;
+layer chunks are unaffected.
 
 One design decision to keep: **corner bands decline every device path** —
 the fill (`!a.corner` threads through `commit_base_any` as `with_rows`), the
