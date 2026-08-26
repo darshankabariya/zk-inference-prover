@@ -184,6 +184,18 @@ pub struct DevFill {
 /// multiplicities: the counters come back and are added in, which is the same
 /// arithmetic the host's block-local `HashMap`s do and in an order that cannot
 /// matter, because counting is commutative.
+///
+/// `oside` is the plan's `has_oside` for this matmul, and it is the whole of
+/// stream M's head fix. The kernel's preprocessed list is the per-channel
+/// scale columns and five selectors; a region that publishes an output-side
+/// claim commits three more (`layer.rs`, the `if oside` block), and until this
+/// parameter existed the device fill was never told. It sized `n_pre` three
+/// columns short -- 506 against the host's 510 on `lm_head`, the sequence's
+/// only o-side matmul -- and every later component's preprocessed indices
+/// shifted by three. The three are functions of the row index alone, so they
+/// are built here on the host and appended in the host's order; nothing about
+/// `b65_fill_dequant` moves, which is what keeps the installed kernel
+/// fingerprints out of it.
 pub fn mat_region_dev(
     m: &Mat,
     spec: &Spec,
@@ -191,11 +203,14 @@ pub fn mat_region_dev(
     map: &Map,
     tables: &mut Tables,
     with_want: bool,
+    oside: bool,
 ) -> DevFill {
     let rows = 1usize << lay.log_rows;
     let f = map.f;
     let sticky = spec.round.needs_sticky();
     let chan_w = if spec.variant == DeqVariant::Chain { 2 } else { 1 };
+    // what the kernel writes. The o-side trio is appended after it returns, so
+    // this stays exactly the count `b65_fill_dequant` has always been handed.
     let n_pre = chan_w * lay.per_row + 5;
     let do_ref = spec.round == crate::bf16::Round::Even
         && crate::util::m4_switch("B7_M4_REFBAD");
@@ -333,6 +348,31 @@ pub fn mat_region_dev(
     }
     let kernel_secs = t_k.elapsed().as_secs_f64();
     crate::util::m4_add("gen/deq_dev_kernel", kernel_secs);
+
+    // ---- stream M: the o-side trio, in the host's order --------------------
+    // `layer.rs`'s `if oside` block, cell for cell. `oin` is an ordinary step
+    // from one chunk to the next inside a token, `obd` the jump at the row
+    // that begins a token, and the third says the row is live at all. Each is
+    // a function of `j` and the layout, so none of them needs the witness and
+    // none of them belongs in the kernel.
+    let mut pre = pre;
+    if oside {
+        let t_o = std::time::Instant::now();
+        let first = |j: usize| {
+            matches!(lay.at_opt(m.tokens, j), Some((_, b)) if b + 1 == lay.chunks)
+        };
+        let sel = |fsel: &dyn Fn(usize) -> bool| {
+            let col = crate::common::eval_of(
+                lay.log_rows,
+                (0..rows).map(|j| crate::common::m31_u32(fsel(j) as u32)).collect(),
+            );
+            crate::device::upload_col(&col)
+        };
+        pre.push(sel(&|j| j > 0 && lay.at_opt(m.tokens, j).is_some() && !first(j)));
+        pre.push(sel(&|j| j > 0 && first(j)));
+        pre.push(sel(&|j| lay.at_opt(m.tokens, j).is_some()));
+        crate::util::m4_add("gen/deq_dev_oside", t_o.elapsed().as_secs_f64());
+    }
 
     // the counters, back to the host: a few hundred kB, and 4a forbids H2D of
     // trace columns, not D2H of a counter

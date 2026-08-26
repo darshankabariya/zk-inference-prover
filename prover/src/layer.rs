@@ -1172,7 +1172,11 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool) -> Mat
     let m4c = crate::util::m4b_mode("B7_M4_FILL");
     let m4c_want = m4c == 2;
     if m4c == 1 {
-        let dev = crate::devfill::mat_region_dev(m, &spec, &lay, &map, tables, false);
+        // B11 stream M: `oside` is the region's, not `with_want`'s. The two
+        // parameters sit next to each other and the o-side one was missing
+        // entirely, so the head's device fill built 506 preprocessed columns
+        // where the host builds 510.
+        let dev = crate::devfill::mat_region_dev(m, &spec, &lay, &map, tables, false, oside);
         let ref_bad = dev.ref_bad;
         return MatRegion { lay, spec, map, pre: vec![], base: vec![], ref_bad, n,
                            dev: Some(dev) };
@@ -1327,7 +1331,7 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool) -> Mat
             want_host[start * lay.per_row..start * lay.per_row + w.len()]
                 .copy_from_slice(w);
         }
-        let dev = crate::devfill::mat_region_dev(m, &spec, &lay, &map, tables, true);
+        let dev = crate::devfill::mat_region_dev(m, &spec, &lay, &map, tables, true, oside);
         check_fill_dev(m, &lay, &base, &pre, ref_bad, &want_host, &dev, tables,
                        &before, &after);
         // the device's own bumps are the check's, not the proof's: put the
@@ -1574,6 +1578,14 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
     // accumulator columns are. `B7_M4_ACC=2` runs both and asserts every cell.
     let m4g = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
     let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
+    // B11 stream M: the region's real height, kept before `rows` is shadowed to
+    // zero. `devacc` builds `z` and `h`; it does *not* build stream E's output
+    // side, which is a third accumulator over the *witness* rather than over
+    // this region's columns and so has nothing to do with where the fill went.
+    // Suppressing it with the other two left `u[rows - 1]` indexing an empty
+    // vector -- reachable only on an o-side matmul with `B7_M4_ACC` on, which
+    // is `lm_head` and only `lm_head`, and `ACC` had never been on.
+    let n_rows = rows;
     let rows = if m4g_host { rows } else { 0 };
     // the Horner accumulators, inner sums in parallel, carries serial
     let m4_t = std::time::Instant::now();
@@ -1664,8 +1676,10 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
     // stream E: the output side, between the claimed side's columns and the
     // LogUp columns -- the order the AIR reads them in.
     let claimed_out = out.map(|o| {
-        let mut u = vec![SecureField::zero(); rows];
-        for j in 0..rows {
+        // `n_rows`, not `rows`: this accumulator is the witness's, and it runs
+        // whatever `B7_M4_ACC` did to the other two.
+        let mut u = vec![SecureField::zero(); n_rows];
+        for j in 0..n_rows {
             let mut f = SecureField::zero();
             if let Some((t, b)) = lay.at_opt(m.tokens, j) {
                 for s in 0..lay.per_row {
@@ -1696,7 +1710,7 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
             };
             u[j] = if j == 0 { f } else { u[j - 1] * mult + f };
         }
-        let claimed = u[rows - 1];
+        let claimed = u[n_rows - 1];
         cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &u)
             .into_iter().map(crate::device::AnyCol::OwnedHost));
         claimed
@@ -1772,23 +1786,46 @@ fn mat_logup_ir(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
                    ir.fracs.len())
         });
         assert_eq!(looks, ir.fracs.len(), "{family}: lookup count disagrees with the kernel");
+        // B11 stream M: the region's preprocessed slice is wider than this
+        // eval's on an o-side matmul.
+        //
+        // `mat_region` commits three extra selectors for a region that
+        // publishes an output-side claim, and they are the *argmax*
+        // component's -- it "shares the head dequant's step selectors"
+        // (`compose.rs`, where it is built). `DequantEval` never reads them, so
+        // its fraction IR declares the 506 columns it does read while the
+        // region carries 509, and handing the kernel all of them fails
+        // `logup_cols_dev_ptrs`' count check. The three sit *after* the ones
+        // the IR loads, so the prefix is exactly what to supply -- and the
+        // assert says so rather than trusting it.
+        let np = ir.cols[0];
+        let npre = |n: usize| {
+            assert!(n >= np,
+                    "{family}: the region has {n} preprocessed columns, fewer than \
+                     the {np} its fraction IR loads");
+            np
+        };
         if let Some(d) = &r.dev {
             // B7a milestone 4 (19.6): the fill left this region's columns on
             // the device, so the fractions read them where they are and the
             // LogUp columns never come back. 19.4 measured both transfers and
             // said they disappear together; this is the together.
             let (cols, sum) = crate::devlogup::logup_cols_dev(
-                &ir, family, shape, r.lay.log_rows, &d.pre, &d.base);
+                &ir, family, shape, r.lay.log_rows, &d.pre[..npre(d.pre.len())], &d.base);
             return (cols.into_iter()
                         .map(|c| crate::device::AnyCol::OwnedDev(c, r.lay.log_rows))
                         .collect(),
                     sum);
         }
         let (cols, sum) = crate::devlogup::logup_cols_dev_to_host(
-            &ir, family, shape, r.lay.log_rows, &r.pre, &r.base);
+            &ir, family, shape, r.lay.log_rows, &r.pre[..npre(r.pre.len())], &r.base);
         return (crate::device::host_cols(cols), sum);
     }
-    let pre: Vec<&[PackedM31]> = r.pre.iter().map(|e| &e.data[..]).collect();
+    // the same prefix, for the interpreter: `logup_cols` indexes this list by
+    // the IR's own column numbers, so a wider one is silently ignored rather
+    // than loudly wrong -- but only the prefix is ever meant
+    let pre: Vec<&[PackedM31]> =
+        r.pre.iter().take(ir.cols[0]).map(|e| &e.data[..]).collect();
     let base: Vec<&[PackedM31]> = r.base.iter().map(|e| &e.data[..]).collect();
     let (cols, sum) = crate::cudagen::logup_cols(&ir, r.lay.log_rows, &pre, &base);
     (crate::device::host_cols(cols), sum)

@@ -526,7 +526,12 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     // B11 stream L: the switch read here is the band fill's own
     // (`B7_M4_WFILL_BAND`, defaulting to `B7_M4_WFILL`), because the band fill
     // and the walk fill are not in the same state -- see `devwfill::band_mode`.
-    let m4d = if with_rows { crate::devwfill::band_mode() } else { 0 };
+    //
+    // B11 stream M: and the corner override above is now that function's twin,
+    // `devwfill::band_fill_mode`, because `devpre::fills_dev` has to reach the
+    // same answer before any fill has run.
+    debug_assert_eq!(with_rows, !a.corner, "with_rows is the band's `!corner`");
+    let m4d = crate::devwfill::band_fill_mode(a);
     if m4d == 1 {
         // B7a milestone 4 (section 3 row 1): with the tables' columns on the
         // device the exp counter has no host reader left, so it stays there --

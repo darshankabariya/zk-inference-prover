@@ -195,16 +195,36 @@ pub fn ir_of<E: FrameworkEval>(eval: &E, log_rows: u32) -> Ir {
 /// 19.4's fingerprint lesson: a stale `libstwo_cuda.a` must abort rather than
 /// hand a component a kernel that computes something else.
 fn shape_of(family: &str, ir: &Ir) -> usize {
-    let fp = ir.fingerprint();
-    let (shape, looks) = crate::gencudakernels::gen_shape_of(family, fp).unwrap_or_else(|| {
+    shape_opt(family, ir).unwrap_or_else(|| {
+        let fp = ir.fingerprint();
         panic!(
             "no generation kernel for {family} fingerprint {fp:#010x} ({} lookups): \
              regenerate with `b65 genemit --families {family}` and rebuild libstwo_cuda.a",
             ir.fracs.len()
         )
-    });
+    })
+}
+
+/// The same lookup, as a question rather than a demand.
+///
+/// B11 stream M: a *host-filled* region has a hand-written builder to fall back
+/// to, so a fingerprint the installed store does not carry can decline the
+/// kernel instead of ending the proof -- announced per component, never
+/// silent, on the same `B7_KERNEL_FALLBACK` switch the constraint side has used
+/// for the glue and corner shapes since stream B (`cudagen.rs`). This is the
+/// route the `lit` caveat needs: a lowering whose scalars fold differently from
+/// the emitted one produces a fingerprint nothing compiled, and the glue's ties
+/// are the only place in the design that can do it.
+///
+/// A region whose columns are on the *device* has no host builder at all, so
+/// `frac_cols` still demands `shape_of` there. 19.4's lesson is untouched
+/// either way: this declines a kernel that does not exist; it never accepts one
+/// that computes something else, because the fingerprint has to match.
+fn shape_opt(family: &str, ir: &Ir) -> Option<usize> {
+    let fp = ir.fingerprint();
+    let (shape, looks) = crate::gencudakernels::gen_shape_of(family, fp)?;
     assert_eq!(looks, ir.fracs.len(), "{family}: lookup count disagrees with the kernel");
-    shape
+    Some(shape)
 }
 
 /// 19.2's three properties, per shape and per witness rather than once.
@@ -271,7 +291,27 @@ pub fn frac_cols<E: FrameworkEval>(
     }
 
     // ---- the generated kernel ---------------------------------------------
-    let shape = shape_of(family, &ir);
+    // B11 stream M: with host columns in hand a missing fingerprint can decline
+    // instead of aborting, on `B7_KERNEL_FALLBACK`. On the device there is
+    // nothing to decline *to*, so the demand stands.
+    let shape = if on_dev {
+        shape_of(family, &ir)
+    } else {
+        match shape_opt(family, &ir) {
+            Some(s) => s,
+            None if crate::util::m4_switch("B7_KERNEL_FALLBACK") => {
+                eprintln!(
+                    "kernel fallback: {tag}: {family} fraction fingerprint {:#010x} \
+                     ({} lookups) builds on the host",
+                    ir.fingerprint(),
+                    ir.fracs.len()
+                );
+                let (cols, sum) = host();
+                return (crate::device::host_cols(cols), sum);
+            }
+            None => shape_of(family, &ir),
+        }
+    };
     let t = std::time::Instant::now();
     let (up_pre, up_base) = (pre.upload(), base.upload());
     let (pp, bp) = (pre.ptrs(ir.cols[0], &up_pre), base.ptrs(ir.cols[1], &up_base));

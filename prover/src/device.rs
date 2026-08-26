@@ -377,6 +377,19 @@ impl AnyCol<'_> {
             _ => panic!("a device column has no host copy"),
         }
     }
+
+    /// The same, by value, for the standalone probe paths that hand their
+    /// columns straight to a `Session`. B11 stream M: the glue's rung is one
+    /// of those, and it is a SimdBackend path -- it has no device fill to take
+    /// and no device column to hand over -- so a device column here is the same
+    /// loud bug as above.
+    pub fn into_host(self) -> HostEval {
+        match self {
+            AnyCol::OwnedHost(e) => e,
+            AnyCol::Host(e) => e.clone(),
+            _ => panic!("a device column has no host copy"),
+        }
+    }
 }
 
 /// B7a milestone 4 (section 3 row 1): a tree's columns being assembled in AIR

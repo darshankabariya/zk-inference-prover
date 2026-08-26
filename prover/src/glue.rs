@@ -1093,9 +1093,25 @@ pub struct GlueRegion {
     /// natural row order, for the Horner ties: per group, then per `outs` group
     pub in_nat: Vec<Vec<(i64, i64)>>,
     pub out_nat: Vec<Vec<(i64, i64)>>,
+    /// B11 stream M: the region's columns when the fill left them on the card,
+    /// under `B7_M4_GFILL=1`. `pre` and `base` are then empty and this is where
+    /// the columns are. The three arrays above are *not* on the card: the ties
+    /// and the boundary sides read them by row, they are a fifth of the
+    /// columns' bytes, and bringing them back is what lets the whole tie half
+    /// stay exactly where it was.
+    pub dev: Option<crate::devgfill::DevGlue>,
 }
 
 impl GlueRegion {
+    /// Committed cells, wherever the columns are.
+    pub fn base_cells(&self) -> usize {
+        let n = match &self.dev {
+            Some(d) => d.base.len(),
+            None => self.base.len(),
+        };
+        n << self.log_rows
+    }
+
     /// The values one tie accumulates, in natural row order.
     pub fn tie_vals(&self, kind: TieKind) -> &[(i64, i64)] {
         match kind {
@@ -1156,10 +1172,65 @@ const T_SMUL: u8 = 6;
 const T_UN: u8 = 8;
 
 /// Build one region's committed columns and bump the shared tables.
+/// The reference count the host loop keeps inline: how many of this region's
+/// outputs agree with `GlueWitness::ref_out`, the one f64-rounded evaluation.
+///
+/// B11 stream M: pulled out so the device path reports the same two numbers
+/// from the same comparison. It reads `outs` and nothing else, so it does not
+/// care which side built them.
+fn ref_count(w: &GlueWitness, prog: &Prog, outs: &[Vec<u16>]) -> (usize, usize) {
+    let (mut ok, mut n) = (0usize, 0usize);
+    for (oi, o) in prog.outs.iter().enumerate() {
+        for j in 0..w.rows {
+            for k in 0..o.len() {
+                n += 1;
+                if outs[oi][j * o.len() + k] == w.ref_out[oi][j * o.len() + k] {
+                    ok += 1;
+                }
+            }
+        }
+    }
+    (ok, n)
+}
+
 pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                    tables: &mut GlueTables, tamper: Option<Tamper>) -> GlueRegion {
     let log_rows = log_rows_for(w.rows, 1);
     let rows = 1usize << log_rows;
+    // B11 stream M: which fill runs. 1 is the device's alone -- `pre` and
+    // `base` stay empty and the columns live in `dev` -- and 2 builds both and
+    // asserts every cell, every multiplicity delta, `off_table`, `bad_exp` and
+    // both natural arrays before either is used.
+    //
+    // The tampers stay host-side, and a run with one set declines the device
+    // path rather than running a kernel that has never heard of them. That is
+    // announced: a probe that silently proved the untampered witness would read
+    // as a gadget that accepts.
+    let m4g = crate::devgfill::mode();
+    let m4g = if m4g != 0 && tamper.is_some() {
+        eprintln!("gfill-dev: {tag}: a glue tamper is set, so this region fills on the host");
+        0
+    } else {
+        m4g
+    };
+    if m4g == 1 {
+        let dev = crate::devgfill::glue_region_dev(w, prog, round, tables);
+        let (ref_ok, ref_n) = ref_count(w, prog, &dev.outs);
+        let bad_exp = dev.bad_exp;
+        let (in_nat, out_nat, outs) =
+            (dev.in_nat.clone(), dev.out_nat.clone(), dev.outs.clone());
+        crate::devgfill::merge(tables, &dev);
+        return GlueRegion {
+            pre: vec![], base: vec![], log_rows, rows: w.rows,
+            n_ops: w.rows * prog.slots.len(),
+            n_leaves: w.rows * prog.n_leaves(),
+            ref_ok, ref_n, outs, prog: prog.clone(), round,
+            tag: tag.to_string(), bad_exp, in_nat, out_nat,
+            dev: Some(dev),
+        };
+    }
+    let m4g_snap = (m4g == 2).then(|| crate::devgfill::GlueSnap::of(tables));
+    let m4g_off = tables.off_table;
     let n_cols = prog.n_cols(round);
     let sticky = round.needs_sticky();
     let n_slots = prog.slots.len().max(1);
@@ -1470,10 +1541,23 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
             b += o.len();
         }
     }
+    // B11 stream M, mode 2: both fills built, everything asserted equal before
+    // any column is used. The device's own bumps are the check's and not the
+    // proof's, so the host's tables go back where the host fill left them.
+    if m4g == 2 {
+        let after = crate::devgfill::GlueSnap::of(tables);
+        let after_off = tables.off_table;
+        let dev = crate::devgfill::glue_region_dev(w, prog, round, tables);
+        crate::devgfill::check_glue_dev(tag, &base, &pre, &dev,
+                                        after_off - m4g_off, bad_exp,
+                                        &in_nat, &out_nat, &outs,
+                                        &m4g_snap.unwrap(), &after);
+        crate::devgfill::restore(tables, &after, after_off);
+    }
     GlueRegion {
         pre, base, log_rows, rows: w.rows, n_ops, n_leaves: n_leaf_tot,
         ref_ok, ref_n, outs, prog: prog.clone(), round,
-        tag: tag.to_string(), bad_exp, in_nat, out_nat,
+        tag: tag.to_string(), bad_exp, in_nat, out_nat, dev: None,
     }
 }
 
@@ -1496,7 +1580,10 @@ pub struct GlueRels {
 }
 
 pub struct GlueInteraction {
-    pub cols: Vec<Eval>,
+    /// B11 stream M: columns of either kind. The ties are host accumulators and
+    /// always will be; the LogUp half goes wherever `devfrac::frac_cols` sends
+    /// it, which since this stream is the generated kernel.
+    pub cols: Vec<crate::device::AnyCol<'static>>,
     pub use_sum: SecureField,
     pub claimed: Vec<SecureField>,
 }
@@ -1518,13 +1605,22 @@ enum L {
 }
 
 /// The region's Horner ties and its LogUp columns, in the AIR's own order.
-pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>) -> GlueInteraction {
+///
+/// B11 stream M: `air` is this region's own eval, and it is here because the
+/// LogUp half now goes through `devfrac::frac_cols` like every other family's.
+/// The glue was the last component with no device route at all -- not for want
+/// of a kernel, which stream K's split emitter has compiled and installed since
+/// `b65_glue_eval` fit under the cap, but because nothing ever called the
+/// router. The ties stay on the host: they are a serial Horner fold over the
+/// region's own values, which is `devacc`'s shape and not this stream's.
+pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>,
+                        air: &GlueEval) -> GlueInteraction {
     use stwo::prover::backend::simd::m31::PackedM31;
     let prog = &r.prog;
     let round = r.round;
     let rows = 1usize << r.log_rows;
     let sticky = round.needs_sticky();
-    let mut cols: Vec<Eval> = vec![];
+    let mut cols = crate::device::ColSink::new();
     let mut claimed: Vec<SecureField> = vec![];
     if let Some(t) = tie {
         for spec in &t.specs {
@@ -1544,6 +1640,7 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>) -> G
             cols.extend(crate::attn_trace::secure_cols_pub(r.log_rows, &h));
         }
     }
+    let n_tie = cols.len();
 
     // the lookups, in exactly the order `evaluate` adds them
     let mut looks: Vec<L> = vec![];
@@ -1614,10 +1711,23 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>) -> G
             }
         }
     };
-    let (n_pairs, fpair) = crate::plogup::paired(looks.len(), fr);
-    let (lcols, use_sum) = crate::plogup::build(r.log_rows, n_pairs, fpair);
-    cols.extend(lcols);
-    GlueInteraction { cols, use_sum, claimed }
+    // B11 stream M: the router, with the hand-written builder as the closure it
+    // compares against at modes 2 and 4 and falls back to at mode 0. The
+    // region's columns are the host's today -- `gen/glue` has no device path --
+    // so this is `Cols::Host` and the opt-in `B7_M4_LOGUPIR` decides. When
+    // `gen/glue` puts them on the card the same call takes the kernel
+    // unconditionally, which is how the two levers compose.
+    let (lcols, use_sum) = crate::devfrac::frac_cols(
+        air, &format!("glue {}", r.tag), r.log_rows,
+        crate::devfrac::cols_of(&r.pre, r.dev.as_ref().map(|d| &d.pre[..])),
+        crate::devfrac::cols_of(&r.base, r.dev.as_ref().map(|d| &d.base[..])),
+        || {
+            let (n_pairs, fpair) = crate::plogup::paired(looks.len(), fr);
+            crate::plogup::build(r.log_rows, n_pairs, fpair)
+        });
+    cols.extend_any(lcols);
+    debug_assert!(cols.len() > n_tie, "glue {}: no LogUp columns", r.tag);
+    GlueInteraction { cols: cols.into_inner(), use_sum, claimed }
 }
 
 // ---------------------------------------------------------------- the tables --
@@ -1946,7 +2056,18 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
     let notie = std::env::var("B10_GLUE_NOTIE").is_ok();
     let specs = plain_ties(prog, region.log_rows, w_ch);
     let tie0 = Tie { lam, specs: specs.clone() };
-    let it = glue_interaction(&region, &rels, if notie { None } else { Some(&tie0) });
+    // B11 stream M: the eval the LogUp half lowers, built before the claims
+    // exist. `compose` does the same thing for the same reason (`claims_for`'s
+    // placeholders): a claimed sum enters constraints and never a lookup, so
+    // the fraction IR this produces is the one `genemit` compiled.
+    let air0 = GlueEval {
+        log_rows: region.log_rows, tag: "r".into(), prog: prog.clone(), round,
+        norm: rels.norm.clone(), frac: rels.frac.clone(), pow: rels.pow.clone(),
+        smul: rels.smul.clone(), un: rels.un.clone(), uns: rels.uns.clone(),
+        val: rels.val.clone(),
+        tie: if notie { None } else { Some(tie0.clone()) }, bound: None,
+    };
+    let it = glue_interaction(&region, &rels, if notie { None } else { Some(&tie0) }, &air0);
     let inter_cells = it.cols.len() << region.log_rows;
     let tie = Tie {
         lam,
@@ -1963,7 +2084,11 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
         || tie.specs.iter().all(|s| region.tie_claim(s, lam) == s.claimed);
 
     let mut sums = Sums { uses: it.use_sum, tables: SecureField::zero() };
-    let mut icols = it.cols;
+    // B11 stream M: this rung is the SimdBackend probe path and commits through
+    // a `Session`, so the router's columns come back to the host here. They are
+    // already the host's -- the rung has no device fill for `frac_cols` to
+    // notice -- and `into_host` is loud if that ever stops being true.
+    let mut icols: Vec<Eval> = it.cols.into_iter().map(|c| c.into_host()).collect();
 
     // the tables' own sides
     let mut kinds = glue_table_kinds(&tables.uns, &rels);
