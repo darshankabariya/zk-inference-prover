@@ -30,6 +30,7 @@ use crate::bf16;
 use crate::common::{Eval, eval_of, m31_u32};
 use crate::dequant::{Map, Spec, Variant as DeqVariant};
 use crate::layout::{Grid, Shape};
+use crate::witread::{self, Site};
 
 pub fn m31_of(v: i64) -> M31 {
     crate::attn_trace::m31_of(v)
@@ -163,7 +164,8 @@ pub struct GlueCols {
 }
 
 fn read_u16(path: &str) -> Result<Vec<u16>, String> {
-    let raw = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    let raw = witread::read_file(path)?;
+    let _s = witread::scope(Site::DecodeU16);
     Ok(raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect())
 }
 
@@ -181,6 +183,7 @@ impl GlueCols {
             if v.len() < tokens * d {
                 return Err(format!("{n}: {} values is under {tokens} x {d}", v.len()));
             }
+            let _s = witread::scope(Site::DecodeTrunc);
             Ok(v[..tokens * d].to_vec())
         };
         let dff = g["dff"].as_u64().unwrap_or(0) as usize;
@@ -191,7 +194,10 @@ impl GlueCols {
             read_u16(&format!("{dir}/{n}.u16"))
                 .ok()
                 .filter(|v| v.len() >= tokens * w)
-                .map(|v| v[..tokens * w].to_vec())
+                .map(|v| {
+                    let _s = witread::scope(Site::DecodeTrunc);
+                    v[..tokens * w].to_vec()
+                })
         };
         // `r` is one value per token, not per channel
         let rd1 = |n: &str| -> Result<Vec<u16>, String> {
@@ -199,6 +205,7 @@ impl GlueCols {
             if v.len() < tokens {
                 return Err(format!("{n}: {} values is under {tokens}", v.len()));
             }
+            let _s = witread::scope(Site::DecodeTrunc);
             Ok(v[..tokens].to_vec())
         };
         Ok(Some(Self {
@@ -227,12 +234,22 @@ impl GlueCols {
 }
 
 fn read_i32(path: &str) -> Result<Vec<i64>, String> {
-    let raw = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    let raw = witread::read_file(path)?;
+    let _s = witread::scope(Site::DecodeI32);
     Ok(raw.chunks_exact(4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as i64).collect())
 }
 fn read_i8(path: &str) -> Result<Vec<i32>, String> {
-    let raw = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    let raw = witread::read_file(path)?;
+    let _s = witread::scope(Site::DecodeI8);
     Ok(raw.iter().map(|b| *b as i8 as i32).collect())
+}
+/// The same file as `i32`.  `read_i32` widens every value to `i64` and the
+/// columns that want `i32` then narrow it back, so this is a second pass over
+/// an array that was just built, which is what `decode/recast` counts.
+fn read_i32_narrow(path: &str) -> Result<Vec<i32>, String> {
+    let v = read_i32(path)?;
+    let _s = witread::scope(Site::DecodeRecast);
+    Ok(v.iter().map(|x| *x as i32).collect())
 }
 
 /// The seven layer matmuls, in the order every region and every selector reads
@@ -282,9 +299,7 @@ pub const WALK_GROUPS: [(&str, &[&str]); 5] =
 impl Layer {
     pub fn load(dir: &str, cfg: &Src, band_sizes: &[usize], variant: Variant)
                 -> Result<Self, String> {
-        let man: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(format!("{dir}/manifest.json"))
-                .map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        let man: serde_json::Value = witread::read_json(&format!("{dir}/manifest.json"))?;
         let g = |k: &str| man[k].as_u64().ok_or(format!("manifest: missing {k}"));
         let (nh, s, c, hd) = (g("heads")? as usize, g("s")? as usize,
                               g("c")? as usize, g("hd")? as usize);
@@ -329,34 +344,43 @@ impl Layer {
         let mut head_offsets = vec![];
         let mut sizes = vec![];
         let mut off = 0usize;
-        for insts in band_sizes {
-            let sh = Shape { s, c, hd, insts: *insts };
-            let src = Src { head: off, ..cfg.clone() };
-            bands.push(Attn::load(dir, off, sh, variant, src.nmax, src.log_table, master,
-                                  false)?);
-            head_offsets.push(off);
-            sizes.push(*insts);
-            off += insts;
-        }
-        if has_corner {
-            let mut off = 0usize;
+        {
+            let _s = witread::scope(Site::Bands);
             for insts in band_sizes {
-                let sh = Shape { s, c: s, hd, insts: *insts };
+                let sh = Shape { s, c, hd, insts: *insts };
                 let src = Src { head: off, ..cfg.clone() };
                 bands.push(Attn::load(dir, off, sh, variant, src.nmax, src.log_table, master,
-                                      true)?);
+                                      false)?);
                 head_offsets.push(off);
                 sizes.push(*insts);
                 off += insts;
+            }
+        }
+        if has_corner {
+            let mut off = 0usize;
+            {
+                let _s = witread::scope(Site::Bands);
+                for insts in band_sizes {
+                    let sh = Shape { s, c: s, hd, insts: *insts };
+                    let src = Src { head: off, ..cfg.clone() };
+                    bands.push(Attn::load(dir, off, sh, variant, src.nmax, src.log_table,
+                                          master, true)?);
+                    head_offsets.push(off);
+                    sizes.push(*insts);
+                    off += insts;
+                }
             }
             // the per-token region belongs to the pair, and the denominator it
             // commits is the total: `Z >= nmax` is true of the sum and of neither
             // half, because the key whose shift is zero may be in either
             let n_pre = band_sizes.len();
-            for b in 0..n_pre {
-                let tot: Vec<i64> = bands[b].zz.iter().zip(&bands[b + n_pre].zz)
-                    .map(|(x, y)| x + y).collect();
-                bands[b].zz_total = Some(tot);
+            {
+                let _s = witread::scope(Site::ZzTotal);
+                for b in 0..n_pre {
+                    let tot: Vec<i64> = bands[b].zz.iter().zip(&bands[b + n_pre].zz)
+                        .map(|(x, y)| x + y).collect();
+                    bands[b].zz_total = Some(tot);
+                }
             }
             // Rule 21, on the join: the prover recomputes both halves' numerators
             // from `qq`, `kk`, `vv` and the dump's row maximum, and the extractor
@@ -364,6 +388,7 @@ impl Layer {
             // so this is the two implementations agreeing about the causal
             // computation -- and it is the only check that would catch a mask off
             // by one, which is self-consistent on either side alone.
+            let _s = witread::scope(Site::CheckRule21);
             let zz32 = read_i32(&format!("{dir}/zz.i32"))?;
             let mut bad = 0usize;
             for (b, insts) in band_sizes.iter().enumerate() {
@@ -387,12 +412,15 @@ impl Layer {
         // layer-wide `master` this holds by construction; without one (a dump whose
         // Q scale is not per head) it is the old precondition, and the message
         // names the fix.
-        for b in &bands[1..] {
-            assert_eq!(b.log_table, bands[0].log_table, "bands disagree on table rows");
-            assert_eq!(b.table, bands[0].table,
-                       "bands disagree on the exp table (no layer-wide master exponent: \
-                        the dump has frac_shared_per_head = false)");
-            assert_eq!(b.frac, bands[0].frac, "bands disagree on the master exponent");
+        {
+            let _s = witread::scope(Site::CheckTableEq);
+            for b in &bands[1..] {
+                assert_eq!(b.log_table, bands[0].log_table, "bands disagree on table rows");
+                assert_eq!(b.table, bands[0].table,
+                           "bands disagree on the exp table (no layer-wide master exponent: \
+                            the dump has frac_shared_per_head = false)");
+                assert_eq!(b.frac, bands[0].frac, "bands disagree on the master exponent");
+            }
         }
 
         // B10 step 0: the dump names its own dequant layout, so a `b10-design`
@@ -419,6 +447,7 @@ impl Layer {
             MAT_VARIANTS
         };
         let mut mats = vec![];
+        let mats_scope = witread::scope(Site::Mats);
         for (name, var) in vars {
             let acc = read_i32(&format!("{dir}/acc_{name}.i32"))?;
             let qx = read_i8(&format!("{dir}/qx_{name}.i8"))?;
@@ -430,9 +459,10 @@ impl Layer {
             assert_eq!(acc.len(), tokens * n_out, "{name}: acc shape");
             assert_eq!(qx.len(), tokens * n_in, "{name}: qx shape");
             assert_eq!(qw.len(), n_in * n_out, "{name}: qw shape");
-            let jx = read_i32(&format!("{dir}/jx_{name}.i32"))?.iter().map(|v| *v as i32).collect();
-            let jw = read_i32(&format!("{dir}/jw_{name}.i32"))?.iter().map(|v| *v as i32).collect();
+            let jx = read_i32_narrow(&format!("{dir}/jx_{name}.i32"))?;
+            let jw = read_i32_narrow(&format!("{dir}/jw_{name}.i32"))?;
             let pair = |v: Vec<i64>| -> Vec<(u32, u32)> {
+                let _s = witread::scope(Site::DecodeRecast);
                 v.chunks_exact(2).map(|p| (p[0] as u32, p[1] as u32)).collect()
             };
             let sx = pair(read_i32(&format!("{dir}/sx_{name}.i32"))?);
@@ -462,11 +492,10 @@ impl Layer {
             assert_eq!(acc.len(), tokens * n_out, "lm_head: acc shape");
             assert_eq!(qx.len(), tokens * n_in, "lm_head: qx shape");
             assert_eq!(qw.len(), n_in * n_out, "lm_head: qw shape");
-            let jx = read_i32(&format!("{dir}/jx_{name}.i32"))?.iter().map(|v| *v as i32)
-                .collect();
-            let jw = read_i32(&format!("{dir}/jw_{name}.i32"))?.iter().map(|v| *v as i32)
-                .collect();
+            let jx = read_i32_narrow(&format!("{dir}/jx_{name}.i32"))?;
+            let jw = read_i32_narrow(&format!("{dir}/jw_{name}.i32"))?;
             let pair = |v: Vec<i64>| -> Vec<(u32, u32)> {
+                let _s = witread::scope(Site::DecodeRecast);
                 v.chunks_exact(2).map(|p| (p[0] as u32, p[1] as u32)).collect()
             };
             let sx = pair(read_i32(&format!("{dir}/sx_{name}.i32"))?);
@@ -475,22 +504,27 @@ impl Layer {
                             acc, qx, qw, jx, jw, sx, sw });
         }
 
+        drop(mats_scope);
+
         // the attnout region proves what the bands prove -- which with the corner
         // is two bands per head, so a head's totals accumulate
         let (mut acc, mut den) = (vec![0i64; nh * s * hd], vec![0i64; nh * s]);
-        for (bi, b) in bands.iter().enumerate() {
-            for i in 0..band_sizes[bi] {
-                let h = head_offsets[bi] + i;
-                for t in 0..s {
-                    den[h * s + t] += b.zz[i * s + t];
-                    for j in 0..hd {
-                        acc[(h * s + t) * hd + j] += b.out[(i * s + t) * hd + j];
+        {
+            let _s = witread::scope(Site::AttnOut);
+            for (bi, b) in bands.iter().enumerate() {
+                for i in 0..band_sizes[bi] {
+                    let h = head_offsets[bi] + i;
+                    for t in 0..s {
+                        den[h * s + t] += b.zz[i * s + t];
+                        for j in 0..hd {
+                            acc[(h * s + t) * hd + j] += b.out[(i * s + t) * hd + j];
+                        }
                     }
                 }
             }
         }
-        let jo: Vec<i32> = read_i32(&format!("{dir}/jo.i32"))?.iter().map(|v| *v as i32).collect();
-        let jv: Vec<i32> = read_i32(&format!("{dir}/jv.i32"))?.iter().map(|v| *v as i32).collect();
+        let jo: Vec<i32> = read_i32_narrow(&format!("{dir}/jo.i32"))?;
+        let jv: Vec<i32> = read_i32_narrow(&format!("{dir}/jv.i32"))?;
         assert_eq!(jo.len(), s, "jo shape");
         assert_eq!(jv.len(), nh * hd, "jv shape");
         let glue = GlueCols::load(dir, &man, s)?;

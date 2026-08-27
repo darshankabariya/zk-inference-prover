@@ -31,9 +31,14 @@ use rayon::prelude::*;
 
 use crate::bf16;
 use crate::layout::Shape;
+use crate::witread::{self, Site};
 
-fn read<T: Copy>(path: &str, width: usize, conv: impl Fn(&[u8]) -> T) -> Result<Vec<T>, String> {
-    let raw = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+/// A raw column, read and widened.  `site` says which decode the widening is,
+/// so that the two widths this is called at are visible apart.
+fn read<T: Copy>(path: &str, width: usize, site: Site,
+                 conv: impl Fn(&[u8]) -> T) -> Result<Vec<T>, String> {
+    let raw = witread::read_file(path)?;
+    let _s = witread::scope(site);
     Ok(raw.chunks_exact(width).map(conv).collect())
 }
 
@@ -281,9 +286,7 @@ impl Attn {
     #[allow(clippy::too_many_arguments)]
     pub fn load(dir: &str, head: usize, sh: Shape, variant: Variant, nmax: u32,
                 log_table: u32, master: Option<f64>, corner: bool) -> Result<Self, String> {
-        let man: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(format!("{dir}/manifest.json"))
-                .map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        let man: serde_json::Value = witread::read_json(&format!("{dir}/manifest.json"))?;
         let g = |k: &str| man[k].as_u64().ok_or(format!("manifest: missing {k}"));
         let (nh, s0, c0, hd0) = (g("heads")? as usize, g("s")? as usize,
                                  g("c")? as usize, g("hd")? as usize);
@@ -319,20 +322,24 @@ impl Attn {
         if corner && sh.c != s0 {
             return Err(format!("the corner is square: S={s0}, asked for C={}", sh.c));
         }
-        let qq16 = read(&format!("{dir}/qq.i16"), 2, |b| i16::from_le_bytes([b[0], b[1]]))?;
-        let kk16 = read(&format!("{dir}/{ktag}"), 2, |b| i16::from_le_bytes([b[0], b[1]]))?;
-        let vv8 = std::fs::read(format!("{dir}/{vtag}")).map_err(|e| e.to_string())?;
-        let num32 = read(&format!("{dir}/{ntag}"), 4,
+        let qq16 = read(&format!("{dir}/qq.i16"), 2, Site::DecodeI16,
+                        |b| i16::from_le_bytes([b[0], b[1]]))?;
+        let kk16 = read(&format!("{dir}/{ktag}"), 2, Site::DecodeI16,
+                        |b| i16::from_le_bytes([b[0], b[1]]))?;
+        let vv8 = witread::read_file(&format!("{dir}/{vtag}"))?;
+        let num32 = read(&format!("{dir}/{ntag}"), 4, Site::DecodeI32,
                          |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))?;
         let mm_in: Option<Vec<i64>> = if has_corner {
-            let mm32 = read(&format!("{dir}/mm.i32"), 4,
+            let mm32 = read(&format!("{dir}/mm.i32"), 4, Site::DecodeI32,
                             |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))?;
+            let _s = witread::scope(Site::DecodeGather);
             Some((0..sh.insts * sh.s)
                 .map(|i| mm32[hh(i / sh.s) * s0 + i % sh.s] as i64)
                 .collect())
         } else {
             None
         };
+        let gather = witread::scope(Site::DecodeGather);
         let qq = (0..sh.insts * sh.s * sh.hd)
             .map(|i| {
                 let (inst, rest) = (i / (sh.s * sh.hd), i % (sh.s * sh.hd));
@@ -351,10 +358,12 @@ impl Attn {
                 vv8[hh(inst) * c0 * hd0 + (rest / hd0 % c0) * hd0 + rest % hd0] as i8 as i32
             })
             .collect();
+        drop(gather);
         // torch's own numerators, for the bit-for-bit comparison, only where the
         // shape fits inside the dump (no tiling) and the band is real heads
         let tiled = sh.s > s0 || sh.c > c0;
         let torch_num = (!tiled).then(|| {
+            let _s = witread::scope(Site::DecodeGather);
             (0..sh.insts * sh.s * sh.c)
                 .map(|i| {
                     let (inst, rest) = (i / (sh.s * sh.c), i % (sh.s * sh.c));
@@ -464,6 +473,7 @@ impl Attn {
         let vis = |i: usize| !corner || i % nc <= (i / nc) % ns;
         // exact integer scores, one (instance, token) row at a time
         let mut sc = vec![0i64; ni * ns * nc];
+        let scores = witread::scope(Site::Scores);
         sc.par_chunks_mut(nc).enumerate().for_each(|(ti, row)| {
             let (inst, t) = (ti / ns, ti % ns);
             let qrow = &qq[(inst * ns + t) * nhd..(inst * ns + t + 1) * nhd];
@@ -472,11 +482,13 @@ impl Attn {
                 *dst = qrow.iter().zip(krow).map(|(a, b)| *a as i64 * *b as i64).sum();
             }
         });
+        drop(scores);
         // The row maximum is a property of the *token*, not of the band: with the
         // causal corner the token's keys are split over two bands and one maximum
         // has to serve both, or their numerators are on two different scales and
         // `Z_prefix + Z_corner` is not a softmax denominator.  `mm_in` is how the
         // caller hands the joint one down; alone, a band takes its own.
+        let maxima = witread::scope(Site::Maxima);
         let mut mm: Vec<i64> = match mm_in {
             Some(m) => {
                 assert_eq!(m.len(), ni * ns, "external row maxima have the wrong shape");
@@ -550,6 +562,7 @@ impl Attn {
             .unwrap_or(1)
             .max(1);
         let d_bits = 64 - scaled_max.leading_zeros();
+        drop(maxima);
         let log_table = if log_table > 0 {
             log_table
         } else {
@@ -561,6 +574,7 @@ impl Attn {
                 _ => d_bits.clamp(4, 22),
             }
         };
+        let table_scope = witread::scope(Site::Table);
         let (log_table, mut table) = match variant {
             Variant::Bf16x => (LOG_EXP_TABLE, bf16::exp_bf16_table(nmax)),
             Variant::IntExp => (log_table, bf16::exp_int_table(1 << log_table, nmax, frac)),
@@ -568,6 +582,7 @@ impl Attn {
                                      bf16::exp_int_table(1 << log_table, nmax, frac - k as f64)),
         };
 
+        drop(table_scope);
         if let Some(Corrupt::Table(i)) = bad {
             // a corrupted *table* with the witness rebuilt to match: internally
             // consistent, and only the preprocessed root gives it away (B4 section 3)
@@ -579,6 +594,7 @@ impl Attn {
         let mut xx = vec![0u16; ni * ns * nc];
         let mut num = vec![0i64; ni * ns * nc];
         let mut off_table = 0usize;
+        let numerators = witread::scope(Site::Numerators);
         for i in 0..ni * ns * nc {
             // a masked entry has no numerator and is not a table row: its shift is
             // taken against a maximum over keys it is not one of, so it can be
@@ -603,6 +619,7 @@ impl Attn {
                 off_table += 1;
             }
         }
+        drop(numerators);
         if let Some(Corrupt::Unmask(i)) = bad {
             // the mask is preprocessed, so a prover cannot move it; what it *can*
             // do is claim a denominator and an output that count a masked key.
@@ -617,9 +634,12 @@ impl Attn {
             let i = i % num.len();
             num[i] = if num[i] == 0 { nmax as i64 } else { 0 };
         }
+        let den_scope = witread::scope(Site::Denominator);
         let mut zz: Vec<i64> =
             (0..ni * ns).map(|ti| num[ti * nc..(ti + 1) * nc].iter().sum()).collect();
+        drop(den_scope);
         let mut out = vec![0i64; ni * ns * nhd];
+        let av = witread::scope(Site::Av);
         out.par_chunks_mut(nhd).enumerate().for_each(|(ti, row)| {
             let (inst, t) = (ti / ns, ti % ns);
             let nrow = &num[(inst * ns + t) * nc..(inst * ns + t + 1) * nc];
@@ -632,6 +652,7 @@ impl Attn {
                 }
             }
         });
+        drop(av);
         // the last two corruptions leave the committed columns inconsistent with
         // each other, which is what the two Freivalds identities are there to catch
         match bad {
@@ -659,7 +680,10 @@ impl Attn {
             _ => {}
         }
         let _ = &mut qq;                        // queries are left alone on purpose
-        let torch_mismatch = torch_num.map(|t| (0..num.len()).filter(|i| t[*i] != num[*i]).count());
+        let torch_mismatch = torch_num.map(|t| {
+            let _s = witread::scope(Site::CheckTorchNum);
+            (0..num.len()).filter(|i| t[*i] != num[*i]).count()
+        });
         // One master table serves the band only if the per-head exponents differ by
         // integers; computed-and-discarded in B6, asserted here (B6 review).  Only
         // the real-witness path carries calibrated fracs -- a synthetic witness

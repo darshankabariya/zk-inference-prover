@@ -35,6 +35,7 @@ mod layout;
 mod plogup;
 mod requant;
 mod walk_air;
+mod witread;
 mod spans;
 mod util;
 
