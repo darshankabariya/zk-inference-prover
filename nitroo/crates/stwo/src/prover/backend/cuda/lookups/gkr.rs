@@ -49,15 +49,17 @@ pub(crate) fn alloc_secure(n: usize) -> SecureFieldVec {
     SecureFieldVec::new(unsafe { bindings::gkr_alloc_qm31(n as u32) }, n)
 }
 
-/// The round-sum partials land in one process-wide buffer, sized for the
-/// largest launch and never freed: allocating it per round was measurable
-/// against launches this small. The prover calls `sum_as_poly` sequentially.
+/// The round-sum partials land in one per-thread buffer, sized for the largest
+/// launch and never freed: allocating it per round was measurable against
+/// launches this small. Per-thread rather than process-wide because two
+/// concurrent `sum_as_poly` calls (the test harness runs tests in parallel)
+/// must not share a scratch buffer; the prover itself is sequential here.
 fn partials_ptr() -> *const u32 {
-    use std::sync::OnceLock;
-    static PARTIALS: OnceLock<usize> = OnceLock::new();
-    *PARTIALS.get_or_init(|| unsafe {
-        bindings::gkr_alloc_qm31(2 * GKR_SUM_MAX_BLOCKS as u32) as usize
-    }) as *const u32
+    thread_local! {
+        static PARTIALS: *const u32 =
+            unsafe { bindings::gkr_alloc_qm31(2 * GKR_SUM_MAX_BLOCKS as u32) };
+    }
+    PARTIALS.with(|p| *p)
 }
 
 impl GkrOps for CudaBackend {
