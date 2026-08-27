@@ -272,6 +272,13 @@ pub mod prof {
         *ON.get_or_init(|| std::env::var("B11_GKR_PROF").map(|v| v != "0").unwrap_or(false))
     }
 
+    /// `B11_GKR_PROF=2`: additionally print every call, for hunting a cost
+    /// that an aggregate hides.
+    fn verbose() -> bool {
+        static V: OnceLock<bool> = OnceLock::new();
+        *V.get_or_init(|| std::env::var("B11_GKR_PROF").map(|v| v == "2").unwrap_or(false))
+    }
+
     pub struct Scope {
         phase: usize,
         start: std::time::Instant,
@@ -291,9 +298,12 @@ pub mod prof {
     impl Drop for Scope {
         fn drop(&mut self) {
             unsafe { super::bindings::gkr_device_synchronize() };
-            NANOS[self.phase]
-                .fetch_add(self.start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            let nanos = self.start.elapsed().as_nanos() as u64;
+            NANOS[self.phase].fetch_add(nanos, Ordering::Relaxed);
             CALLS[self.phase].fetch_add(1, Ordering::Relaxed);
+            if verbose() {
+                eprintln!("gkrprof: {} {} us", NAMES[self.phase], nanos / 1000);
+            }
         }
     }
 
