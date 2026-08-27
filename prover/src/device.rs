@@ -264,6 +264,28 @@ pub fn reset() {
     MIRROR_COLS.store(0, Ordering::Relaxed);
 }
 
+/// How many bytes of the card are in use right now, as the driver reports it.
+///
+/// B11 stream O. Peak memory has been sampled from outside with `nvidia-smi`
+/// every two seconds, which says what a whole run reached but cannot say when.
+/// The overlap question needs a number at an exact line instead: how much a
+/// chunk is holding once it has been generated and before anything has been
+/// proved, because that -- not the prove-time peak -- is what a second chunk
+/// in flight would add. `cudaMemGetInfo` is what the fork already calls, so
+/// this is the same number the driver would give the sampler, read where it
+/// means something.
+#[cfg(feature = "cuda")]
+pub fn mem_used_bytes() -> u64 {
+    let (free, total) = stwo::stwo_cuda::get_cuda_memory_info();
+    total.saturating_sub(free) as u64
+}
+
+/// The reference arm has no card to ask.
+#[cfg(not(feature = "cuda"))]
+pub fn mem_used_bytes() -> u64 {
+    0
+}
+
 /// Move one column to the device.
 ///
 /// `into_cpu_vec` reinterprets the SIMD column's backing store as a
