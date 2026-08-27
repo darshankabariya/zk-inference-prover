@@ -163,10 +163,15 @@ pub struct GlueCols {
     pub reduce: String,
 }
 
+// Stream P: this widening and the two below it are parallel.  Each output
+// element is a function of its own one, two or four bytes and an indexed
+// parallel collect keeps the order, so these are the same arrays the serial
+// versions built -- and on a sequence chunk they were 0.8 s of the 17 s the
+// layer took to build.
 fn read_u16(path: &str) -> Result<Vec<u16>, String> {
     let raw = witread::read_file(path)?;
     let _s = witread::scope(Site::DecodeU16);
-    Ok(raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect())
+    Ok(raw.par_chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect())
 }
 
 impl GlueCols {
@@ -236,12 +241,14 @@ impl GlueCols {
 fn read_i32(path: &str) -> Result<Vec<i64>, String> {
     let raw = witread::read_file(path)?;
     let _s = witread::scope(Site::DecodeI32);
-    Ok(raw.chunks_exact(4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as i64).collect())
+    Ok(raw.par_chunks_exact(4)
+        .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as i64)
+        .collect())
 }
 fn read_i8(path: &str) -> Result<Vec<i32>, String> {
     let raw = witread::read_file(path)?;
     let _s = witread::scope(Site::DecodeI8);
-    Ok(raw.iter().map(|b| *b as i8 as i32).collect())
+    Ok(raw.par_iter().map(|b| *b as i8 as i32).collect())
 }
 /// The same file as `i32`.  `read_i32` widens every value to `i64` and the
 /// columns that want `i32` then narrow it back, so this is a second pass over
@@ -249,7 +256,7 @@ fn read_i8(path: &str) -> Result<Vec<i32>, String> {
 fn read_i32_narrow(path: &str) -> Result<Vec<i32>, String> {
     let v = read_i32(path)?;
     let _s = witread::scope(Site::DecodeRecast);
-    Ok(v.iter().map(|x| *x as i32).collect())
+    Ok(v.par_iter().map(|x| *x as i32).collect())
 }
 
 /// The seven layer matmuls, in the order every region and every selector reads
