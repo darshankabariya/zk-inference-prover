@@ -325,6 +325,41 @@ pub mod dev {
         }
     }
 
+    /// Grow the device memory pool once, ahead of the circuit evaluation.
+    ///
+    /// `gen_layers` materialises every GKR layer of every instance before the
+    /// first sumcheck round, and nothing is freed until the rounds consume
+    /// them -- so without this, every one of its allocations extends the
+    /// pool's high-water mark and pays the driver's synchronous mapping cost,
+    /// which profiling showed as ~0.5-1.5 ms per `next_layer` call regardless
+    /// of size. One big allocation maps the same memory in one driver call;
+    /// freeing it hands the range to the pool's free list.
+    pub fn prewarm(layers: &[Layer<CudaBackend>]) -> f64 {
+        use stwo::stwo_cuda::bindings;
+        let input_qm31: usize = layers
+            .iter()
+            .map(|l| match l {
+                Layer::GrandProduct(m) => m.len(),
+                Layer::LogUpGeneric { numerators, denominators } => {
+                    numerators.len() + denominators.len()
+                }
+                Layer::LogUpMultiplicities { denominators, .. } => 2 * denominators.len(),
+                Layer::LogUpSingles { denominators } => denominators.len(),
+            })
+            .sum();
+        // every level of every tree sums to under 2x the input layer; the
+        // halved trees are generic (num + den) even where the input was
+        // singles, so budget 4x, plus the eq tables and slack
+        let budget = 4 * input_qm31 + (1 << 22);
+        let t = std::time::Instant::now();
+        unsafe {
+            let p = bindings::gkr_alloc_qm31(budget as u32);
+            bindings::cuda_free_memory(p as *const std::ffi::c_void);
+        }
+        sync();
+        t.elapsed().as_secs_f64()
+    }
+
     /// One device-to-device pass over every layer column: what putting already
     /// resident fractions into MLE layout costs. The copies are dropped; only
     /// the time is kept.
@@ -360,11 +395,11 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
     let n_instances = c.insts.len();
 
     #[cfg(feature = "cuda")]
-    let (proof, arm, upload_secs, reshape_secs, prove_secs, phases) = {
+    let (proof, arm, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases) = {
         if std::env::var("B11_GKR_HOST").map(|v| v != "0").unwrap_or(false) {
             let t1 = Instant::now();
             let (proof, _artifact) = prove_batch(channel, c.layers);
-            (proof, "host simd", 0.0, 0.0, t1.elapsed().as_secs_f64(), None)
+            (proof, "host simd", 0.0, 0.0, 0.0, t1.elapsed().as_secs_f64(), None)
         } else {
             use stwo::prover::backend::cuda::lookups::gkr::prof;
             let t0 = Instant::now();
@@ -375,21 +410,25 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             dev::reshape_pass(&layers);
             dev::sync();
             let reshape_secs = t0.elapsed().as_secs_f64();
+            // Once per process in production -- the pool keeps its high-water
+            // mark across chunks -- so it is timed and reported, not counted
+            // among the arm's per-chunk adds.
+            let prewarm_secs = dev::prewarm(&layers);
             prof::reset();
             let t1 = Instant::now();
             let (proof, _artifact) = prove_batch(channel, layers);
             dev::sync();
             let prove_secs = t1.elapsed().as_secs_f64();
             let phases = prof::on().then(prof::snapshot);
-            (proof, "device", upload_secs, reshape_secs, prove_secs, phases)
+            (proof, "device", upload_secs, reshape_secs, prewarm_secs, prove_secs, phases)
         }
     };
     #[cfg(not(feature = "cuda"))]
-    let (proof, arm, upload_secs, reshape_secs, prove_secs, phases) = {
+    let (proof, arm, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases) = {
         let t1 = Instant::now();
         let (proof, _artifact) = prove_batch(channel, c.layers);
         let phases: Option<Vec<(&'static str, f64, u64)>> = None;
-        (proof, "host simd", 0.0, 0.0, t1.elapsed().as_secs_f64(), phases)
+        (proof, "host simd", 0.0, 0.0, 0.0, t1.elapsed().as_secs_f64(), phases)
     };
 
     let sums = sums_of(c.sites.len(), &c.insts, &proof.output_claims_by_instance);
@@ -409,6 +448,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             arm,
             upload_secs,
             reshape_secs,
+            prewarm_secs,
             assembly_secs,
             phases,
             // the caller adds what it measured around the whole call
@@ -441,6 +481,9 @@ pub struct Cost {
     /// one device-to-device pass over every layer: putting already resident
     /// fractions into MLE layout
     pub reshape_secs: f64,
+    /// growing the device pool to the circuit's high-water mark, once per
+    /// process in production (the pool persists across chunks)
+    pub prewarm_secs: f64,
     /// serialising the proof
     pub assembly_secs: f64,
     /// the device sumcheck's phase split, when `B11_GKR_PROF=1`
@@ -463,6 +506,7 @@ impl Cost {
             "arm": self.arm,
             "upload_secs": self.upload_secs,
             "reshape_secs": self.reshape_secs,
+            "prewarm_secs": self.prewarm_secs,
             "assembly_secs": self.assembly_secs,
         });
         if let Some(ph) = &self.phases {
