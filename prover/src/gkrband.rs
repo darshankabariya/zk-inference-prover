@@ -356,6 +356,50 @@ pub mod dev {
             let p = bindings::gkr_alloc_qm31(budget as u32);
             bindings::cuda_free_memory(p as *const std::ffi::c_void);
         }
+        // Launch every kernel the sumcheck uses once, on two elements. The
+        // first launch of a kernel pays its module load -- measured at ~88 ms
+        // for the first `next_layer` of a process, against ~13 us for every
+        // call after it -- and the chunk loop pays that once per *process*,
+        // not per chunk, exactly like `wall/cuda_init`.
+        let two = SecureFieldVec::from_vec(vec![
+            stwo::core::fields::qm31::SecureField::from_u32_unchecked(1, 0, 0, 0),
+            stwo::core::fields::qm31::SecureField::from_u32_unchecked(2, 0, 0, 0),
+        ]);
+        let two_base = BaseFieldVec::from_vec(vec![
+            stwo::core::fields::m31::M31::from_u32_unchecked(1),
+            stwo::core::fields::m31::M31::from_u32_unchecked(2),
+        ]);
+        let out = |n: usize| SecureFieldVec::new_uninitialized(n);
+        let (o1, o2, o3) = (out(1), out(1), out(2));
+        let lambda = stwo::stwo_cuda::bindings::CudaSecureField::zero();
+        unsafe {
+            bindings::gkr_next_layer_grand_product(two.device_ptr, o1.device_ptr, 1);
+            bindings::gkr_next_layer_logup_generic(
+                two.device_ptr, two.device_ptr, o1.device_ptr, o2.device_ptr, 1);
+            bindings::gkr_next_layer_logup_multiplicities(
+                two_base.device_ptr, two.device_ptr, o1.device_ptr, o2.device_ptr, 1);
+            bindings::gkr_next_layer_logup_singles(
+                two.device_ptr, o1.device_ptr, o2.device_ptr, 1);
+            bindings::gkr_sum_grand_product(two.device_ptr, two.device_ptr, 1, o3.device_ptr, 1);
+            bindings::gkr_sum_logup_generic(
+                two.device_ptr, two.device_ptr, two.device_ptr, lambda, 1, o3.device_ptr, 1);
+            bindings::gkr_sum_logup_multiplicities(
+                two_base.device_ptr, two.device_ptr, two.device_ptr, lambda, 1,
+                o3.device_ptr, 1);
+            bindings::gkr_sum_logup_singles(
+                two.device_ptr, two.device_ptr, lambda, 1, o3.device_ptr, 1);
+            bindings::fix_first_variable_secure_field(
+                two.device_ptr, 2, lambda, o1.device_ptr);
+            bindings::fix_first_variable_base_field(
+                two_base.device_ptr, 2, lambda, o1.device_ptr);
+            bindings::gen_eq_evals(
+                lambda,
+                two.device_ptr as *const stwo::stwo_cuda::bindings::CudaSecureField,
+                0,
+                o1.device_ptr as *const stwo::stwo_cuda::bindings::CudaSecureField,
+                1,
+            );
+        }
         sync();
         t.elapsed().as_secs_f64()
     }
