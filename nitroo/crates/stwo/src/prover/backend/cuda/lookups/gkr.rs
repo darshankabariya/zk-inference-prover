@@ -328,6 +328,36 @@ mod tests {
         Mle::new(values.to_vec())
     }
 
+    /// The whole batched proof, value by value: output claims, every round
+    /// polynomial of every layer's sumcheck, and every mask. Equality here is
+    /// exactly what makes the serialised proofs -- and so the composed
+    /// digests -- byte-identical.
+    fn assert_proof_eq(
+        a: &crate::prover::lookups::gkr_verifier::GkrBatchProof,
+        b: &crate::prover::lookups::gkr_verifier::GkrBatchProof,
+    ) {
+        assert_eq!(
+            a.output_claims_by_instance, b.output_claims_by_instance,
+            "output claims differ"
+        );
+        assert_eq!(a.sumcheck_proofs.len(), b.sumcheck_proofs.len());
+        for (i, (x, y)) in zip(&a.sumcheck_proofs, &b.sumcheck_proofs).enumerate() {
+            assert_eq!(x.round_polys.len(), y.round_polys.len(), "layer {i}");
+            for (r, (p, q)) in zip(&x.round_polys, &y.round_polys).enumerate() {
+                assert_eq!(p.to_vec(), q.to_vec(), "layer {i} round {r}");
+            }
+        }
+        assert_eq!(a.layer_masks_by_instance.len(), b.layer_masks_by_instance.len());
+        for (i, (x, y)) in
+            zip(&a.layer_masks_by_instance, &b.layer_masks_by_instance).enumerate()
+        {
+            assert_eq!(x.len(), y.len(), "instance {i}");
+            for (l, (m, n)) in zip(x, y).enumerate() {
+                assert_eq!(m.columns(), n.columns(), "instance {i} mask {l}");
+            }
+        }
+    }
+
     /// Compare a CUDA layer against a CPU layer, column by column.
     fn assert_layer_eq(got: &Layer<CudaBackend>, want: &Layer<CpuBackend>) {
         let got = got.to_cpu();
@@ -535,11 +565,8 @@ mod tests {
         let (cuda_proof, cuda_artifact) = prove_batch(&mut test_channel(), cuda_layers);
         let (cpu_proof, cpu_artifact) = prove_batch(&mut test_channel(), cpu_layers);
 
-        // Byte equality of the serialised proofs is the digest gate in small.
-        assert_eq!(
-            serde_json::to_vec(&cuda_proof).unwrap(),
-            serde_json::to_vec(&cpu_proof).unwrap()
-        );
+        // Value equality of the whole proof is the digest gate in small.
+        assert_proof_eq(&cuda_proof, &cpu_proof);
         assert_eq!(cuda_artifact.ood_point, cpu_artifact.ood_point);
         for (a, b) in zip(
             &cuda_artifact.claims_to_verify_by_instance,
@@ -566,10 +593,7 @@ mod tests {
             &mut test_channel(),
             vec![Layer::<CpuBackend>::GrandProduct(cpu_secure(&values))],
         );
-        assert_eq!(
-            serde_json::to_vec(&cuda_proof).unwrap(),
-            serde_json::to_vec(&cpu_proof).unwrap()
-        );
+        assert_proof_eq(&cuda_proof, &cpu_proof);
         partially_verify_batch(vec![Gate::GrandProduct], &cuda_proof, &mut test_channel())
             .expect("the device grand-product proof verifies");
     }
