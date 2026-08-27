@@ -4,7 +4,9 @@ mod blake2s;
 mod column;
 mod field;
 mod fri;
-mod lookups;
+// B11 stream R: `pub` so the prover crate can read the GKR phase accounting
+// (`lookups::gkr::prof`) on a profiled run. One visibility word; no code moves.
+pub mod lookups;
 pub mod poly;
 pub mod poseidon252;
 mod quotient;

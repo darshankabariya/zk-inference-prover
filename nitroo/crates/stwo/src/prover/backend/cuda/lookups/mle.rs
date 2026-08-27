@@ -19,6 +19,7 @@ impl MleOps<BaseField> for CudaBackend {
     where
         Self: MleOps<SecureField>,
     {
+        let _t = super::gkr::prof::scope(super::gkr::prof::FIX);
         let evals_size = mle.len();
         let result_evals = SecureFieldVec::new_uninitialized(evals_size >> 1);
         unsafe {
@@ -41,6 +42,7 @@ impl MleOps<SecureField> for CudaBackend {
     where
         Self: MleOps<SecureField>,
     {
+        let _t = super::gkr::prof::scope(super::gkr::prof::FIX);
         let evals_size = mle.len();
         let result_evals = SecureFieldVec::new_uninitialized(evals_size >> 1);
         unsafe {

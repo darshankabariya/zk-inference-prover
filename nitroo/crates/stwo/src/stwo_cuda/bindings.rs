@@ -427,6 +427,66 @@ extern "C" {
         evals_size: u32,
     );
 
+    // B11 stream R: the GKR layer halving, one launch per call.
+    pub fn gkr_next_layer_grand_product(inp: *const u32, out: *const u32, n_out: u32);
+    pub fn gkr_next_layer_logup_generic(
+        num: *const u32,
+        den: *const u32,
+        num_out: *const u32,
+        den_out: *const u32,
+        n_out: u32,
+    );
+    pub fn gkr_next_layer_logup_multiplicities(
+        num: *const u32,
+        den: *const u32,
+        num_out: *const u32,
+        den_out: *const u32,
+        n_out: u32,
+    );
+    pub fn gkr_next_layer_logup_singles(
+        den: *const u32,
+        num_out: *const u32,
+        den_out: *const u32,
+        n_out: u32,
+    );
+
+    // B11 stream R: the round polynomial's evaluations at t = 0 and t = 2, as
+    // `2 * n_blocks` per-block partials the caller adds up.
+    pub fn gkr_sum_grand_product(
+        inp: *const u32,
+        eq: *const u32,
+        n_terms: u32,
+        partials: *const u32,
+        n_blocks: u32,
+    );
+    pub fn gkr_sum_logup_generic(
+        num: *const u32,
+        den: *const u32,
+        eq: *const u32,
+        lambda: CudaSecureField,
+        n_terms: u32,
+        partials: *const u32,
+        n_blocks: u32,
+    );
+    pub fn gkr_sum_logup_multiplicities(
+        num: *const u32,
+        den: *const u32,
+        eq: *const u32,
+        lambda: CudaSecureField,
+        n_terms: u32,
+        partials: *const u32,
+        n_blocks: u32,
+    );
+    pub fn gkr_sum_logup_singles(
+        den: *const u32,
+        eq: *const u32,
+        lambda: CudaSecureField,
+        n_terms: u32,
+        partials: *const u32,
+        n_blocks: u32,
+    );
+    pub fn gkr_device_synchronize();
+
     pub fn fix_first_variable_base_field(
         evals: *const u32,
         evals_size: usize,
