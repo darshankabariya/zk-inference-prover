@@ -25,6 +25,7 @@ mod scalars;
 mod devacc;
 mod devwfill;
 mod devgfill;
+mod gkrband;
 mod gencudakernels;
 mod cudakernels;
 mod exprprobe;
@@ -84,11 +85,11 @@ fn spec_of(args: &[String], variant: &str, round: &str, per_row: usize) -> Spec 
     }
 }
 
-fn flag(args: &[String], key: &str) -> bool {
+pub fn flag(args: &[String], key: &str) -> bool {
     args.iter().any(|a| a == key)
 }
 
-fn src_of(args: &[String]) -> Src {
+pub fn src_of(args: &[String]) -> Src {
     Src {
         dir: arg_str(args, "--witness"),
         head: arg_scalar(args, "--head", 0usize),
@@ -108,7 +109,7 @@ fn src_of(args: &[String]) -> Src {
     }
 }
 
-fn attn_cfg(args: &[String], grid_target: usize) -> attn_trace::Cfg {
+pub fn attn_cfg(args: &[String], grid_target: usize) -> attn_trace::Cfg {
     let nmax = (1u32 << arg_scalar(args, "--numbits", 8u32)) - 1;
     attn_trace::Cfg {
         chan_target: arg_scalar(args, "--keys-per-row", 128usize),
@@ -621,6 +622,9 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // by the flag on the command line or by `B10_BOUNDS` in the environment.
         // Off is what makes the recorded digest the identity line.
         bounds: flag(args, "--bounds") || bounds::enabled(),
+        // B11 stream Q: opt in to the LogUp-GKR arm for the bands. A flag and
+        // not an env mode, because it changes the proof.
+        gkr_bands: flag(args, "--gkr-bands"),
     }
 }
 
@@ -1435,6 +1439,7 @@ fn main() {
         "bounds-chain" => bounds::chain_cmd(&args),
         "glue-probes" => glue_probes_cmd(&args),
         "selftest" => selftest(&args),
+        "gkr" => gkrband::cmd(&args),
         other => {
             eprintln!("unknown subcommand {other:?}; \
                        expected tables|dequant|width|kmax|probes|pack|attn-probes|exprprobe|cudacheck|cudaemit|logupcheck|genemit|\

@@ -77,21 +77,38 @@ pub fn logup_cols(
     exp: &ExpRel,
     ranges: &[RangeRel],
 ) -> (Vec<Eval>, SecureField) {
-    let one = PackedQM31::broadcast(SecureField::one());
-    let frac = |l: &Look, vec_row: usize| -> (PackedQM31, PackedQM31) {
-        match l {
-            Look::Exp(a, b) => {
-                (one, exp.combine(&[cols[*a].data[vec_row], cols[*b].data[vec_row]]))
-            }
-            Look::Range(r, a) => (one, ranges[*r].combine(&[cols[*a].data[vec_row]])),
-            Look::ExpVis(a, b, m) => {
-                let vis = one - PackedQM31::from(pre[*m].data[vec_row]);
-                (vis, exp.combine(&[cols[*a].data[vec_row], cols[*b].data[vec_row]]))
-            }
-        }
-    };
-    let (n_cols, f) = crate::plogup::paired(looks.len(), |i, vr| frac(&looks[i], vr));
+    let (n_cols, f) = crate::plogup::paired(looks.len(),
+                                            |i, vr| look_frac(&looks[i], vr, cols, pre, exp,
+                                                              ranges));
     crate::plogup::build(log_rows, n_cols, f)
+}
+
+/// One lookup's numerator and denominator at one packed row.
+///
+/// B11 stream Q: this used to be a closure inside `logup_cols`. It is a free
+/// function now because the GKR arm proves the *same* fractions this returns
+/// without ever pairing them into columns, and the two arms have to be reading
+/// one definition. Nothing about the committed path changes: `logup_cols` calls
+/// it through `paired` exactly where the closure used to be called.
+pub fn look_frac(l: &Look, vec_row: usize, cols: &[Eval], pre: &[Eval], exp: &ExpRel,
+                 ranges: &[RangeRel]) -> (PackedQM31, PackedQM31) {
+    let one = PackedQM31::broadcast(SecureField::one());
+    match l {
+        Look::Exp(a, b) => {
+            (one, exp.combine(&[cols[*a].data[vec_row], cols[*b].data[vec_row]]))
+        }
+        Look::Range(r, a) => (one, ranges[*r].combine(&[cols[*a].data[vec_row]])),
+        Look::ExpVis(a, b, m) => {
+            let vis = one - PackedQM31::from(pre[*m].data[vec_row]);
+            (vis, exp.combine(&[cols[*a].data[vec_row], cols[*b].data[vec_row]]))
+        }
+    }
+}
+
+/// Whether a lookup's numerator is one, which decides whether its GKR instance
+/// needs to carry numerators at all.
+pub fn look_is_unit(l: &Look) -> bool {
+    !matches!(l, Look::ExpVis(..))
 }
 
 /// A table's own side: `-multiplicity / (z - combine(row))`.
@@ -648,7 +665,8 @@ pub struct Interaction {
 pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &ExpRel,
                          ranges: &[RangeRel], com: &Committed, widths: &[u32],
                          with_out: bool, with_rows: bool,
-                         air: Option<&crate::devfrac::BandAir<'_>>)
+                         air: Option<&crate::devfrac::BandAir<'_>>,
+                         mut gkr: Option<&mut crate::gkrband::Collect>)
                          -> Interaction {
     let sh = a.shape;
     let (lc, lk, lo) = (&l.chan, &l.key, &l.out);
@@ -752,6 +770,9 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         }
         for p in 0..lc.pq {
             looks.push(Look::Range(ridx(a.q_bits), base0 + lc.pk + p));
+        }
+        if let Some(g) = gkr.as_deref_mut() {
+            g.push(0, lc.g.log_rows, &looks, &com.base, &com.pre, exp, ranges);
         }
         let (c, s) = crate::devfrac::band_cols(
             air, 0, lc.g.log_rows, &com.at, &com.base,
@@ -885,6 +906,9 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
                 looks.push(Look::Range(ridx(8), b + 2 * lk.q + n_aux + p));
             }
         }
+        if let Some(g) = gkr.as_deref_mut() {
+            g.push(1, lk.g.log_rows, &looks, &com.base, &com.pre, exp, ranges);
+        }
         let (c, s) = crate::devfrac::band_cols(
             air, 1, lk.g.log_rows, &com.at, &com.base,
             || logup_cols(lk.g.log_rows, &looks, &com.base, &com.pre, exp, ranges));
@@ -1013,6 +1037,9 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             looks.push(Look::Range(ridx(cfg.z_hi_bits), hi_base + i));
             looks.push(Look::Range(ridx(cfg.z_lo_bits), lo_at + l.rw + i));
             looks.push(Look::Range(ridx(cfg.z_hi_bits), hi_base + l.rw + i));
+        }
+        if let Some(g) = gkr.as_deref_mut() {
+            g.push(3, l.log_row, &looks, &all, &com.pre, exp, ranges);
         }
         let (c, s) = crate::devfrac::band_cols(
             air, 3, l.log_row, &com.at, &com.base,

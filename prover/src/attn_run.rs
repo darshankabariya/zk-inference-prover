@@ -161,7 +161,7 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
     // The standalone path has no `Plan`, so no components and no evals: it
     // keeps the hand-written builder, which is also what mode 2 compares against.
     let mut inter = attn_trace::interaction_phase(a, &l, cfg, &pow, &rel_exp, &rels, &com,
-                                                  &widths, true, true, None);
+                                                  &widths, true, true, None, None);
     let pre_x = attn_trace::pre_exp_x(a, &l);
     let mult0 = com.at[4];
     let pre_ranges: Vec<&crate::common::Eval> =

@@ -155,6 +155,13 @@ pub struct Params {
     /// heads, `C = S`, masked.  Absent on a witness extracted without it.
     #[serde(default)]
     pub corner: bool,
+    /// B11 stream Q: prove the attention bands' lookups with LogUp-GKR instead
+    /// of committing their running-sum columns. A flag and not an env mode,
+    /// because it changes the proof: the GKR arm has its own digests by design.
+    /// Skipped when false, so a statement written with the flag off is byte
+    /// identical to one from a crate that never had it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gkr_bands: bool,
     /// Stream H: the layer's residual-stream input and output are each committed
     /// in a tree of their own, so that two chunks' boundaries can be compared
     /// from bytes.  Needs the wiring family, since the boundary *is* its two
@@ -2190,6 +2197,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let mut inter_split: Vec<serde_json::Value> = vec![];
     let mut inter_seen = (0usize, 0usize);
     let mut claims = Claims::default();
+    // B11 stream Q: on the GKR arm the same lookup lists the committed columns
+    // are built from are handed to the collector at each of the three band
+    // sites. Collecting is additive -- it reads the committed columns and
+    // writes nothing the committed path can see -- so the flag-off pass is the
+    // pass it always was.
+    let mut gkr: Option<Box<crate::gkrband::Collect>> =
+        p.gkr_bands.then(|| Box::new(crate::gkrband::Collect::with_direct(false)));
     let m4_t = std::time::Instant::now();
     let mut row_i = 0usize;
     for (b, a) in layer.bands.iter().enumerate() {
@@ -2214,9 +2228,12 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // accounting, which is the only other thing in this loop. Whatever
         // `int/bands` minus `int/bands_build` comes to is the accounting.
         let t_ib = std::time::Instant::now();
+        if let Some(g) = gkr.as_mut() {
+            g.band = b;
+        }
         let it = attn_trace::interaction_phase(a, l, &plan.cfg, &pow, &rels.exp, &rels.ranges,
                                                &band_committed[b], &plan.widths, false,
-                                               !a.corner, air.as_ref());
+                                               !a.corner, air.as_ref(), gkr.as_deref_mut());
         crate::util::m4_add("int/bands_build", t_ib.elapsed().as_secs_f64());
         inter_all.extend(it.cols);
         inter_mark(&format!("band{b}{}", if a.corner { " (corner)" } else { "" }),
@@ -2226,6 +2243,18 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         claims.use_sums.extend(it.use_sums.iter().map(|v| qm(*v)));
     }
     crate::util::m4_add("int/bands", m4_t.elapsed().as_secs_f64());
+    // B11 stream Q: the bands' fractional sums, proved by one batched GKR at the
+    // transcript position the verifier will replay -- after tree 1 and the
+    // relation challenges, before the interaction tree's own commit. The sums it
+    // yields are the same quantity `use_sums` carries, so what changes is the
+    // argument and not the statement.
+    let gkr_proved = gkr.map(|g| {
+        let t = std::time::Instant::now();
+        let mut pr = crate::gkrband::prove_collected(&mut sess.channel, *g);
+        crate::util::m4_add("int/gkr", t.elapsed().as_secs_f64());
+        pr.cost.total_secs = t.elapsed().as_secs_f64();
+        pr
+    });
     let m4_t = std::time::Instant::now();
     let aoi = ao_interaction(&layer.ao, &aor, r, s, rv, p.c, &rels, &m4e_air.ao.eval);
     inter_all.extend(aoi.cols);
@@ -2510,6 +2539,10 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // share a scoped GKR over the bands alone would cover.
         "interaction_split": inter_split,
         "interaction_by_family": inter_by_family,
+        // B11 stream Q: what the GKR arm proved and what it cost, or null with
+        // the flag off. Reported beside `interaction_by_family` because the two
+        // are the same question from the two sides.
+        "gkr": gkr_proved.as_ref().map(|p| p.cost.json()),
         "preprocessed": m4_pre_cells,
         "walk_weights": walk_regions.iter().map(|w| json!({
             "group": w.name, "weights": w.n_weights, "lead": w.lay.g.lead,

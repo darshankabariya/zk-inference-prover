@@ -8,7 +8,7 @@ use crate::core::fields::{ExtensionOf, Field};
 use crate::core::Fraction;
 
 /// Univariate polynomial stored as coefficients in the monomial basis.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UnivariatePoly<F: Field>(Vec<F>);
 
 impl<F: Field> UnivariatePoly<F> {

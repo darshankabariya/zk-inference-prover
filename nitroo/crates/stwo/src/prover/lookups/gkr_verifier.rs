@@ -149,6 +149,7 @@ pub fn partially_verify_batch(
 }
 
 /// Batch GKR proof.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GkrBatchProof {
     /// Sum-check proof for each layer.
     pub sumcheck_proofs: Vec<SumcheckProof>,
@@ -217,7 +218,7 @@ impl Gate {
 struct InvalidNumMaskColumnsError;
 
 /// Stores two evaluations of each column in a GKR layer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GkrMask {
     columns: Vec<[SecureField; 2]>,
 }

@@ -177,7 +177,7 @@ pub fn partially_verify(
     Ok((assignment, claim))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SumcheckProof {
     pub round_polys: Vec<UnivariatePoly<SecureField>>,
 }
