@@ -450,14 +450,15 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             let layers: Vec<_> = c.layers.iter().map(dev::upload_layer).collect();
             dev::sync();
             let upload_secs = t0.elapsed().as_secs_f64();
+            // Once per process in production -- the pool keeps its high-water
+            // mark across chunks -- so it is timed and reported, not counted
+            // among the arm's per-chunk adds. Before the reshape, so no later
+            // allocation pays the pool's first-touch mapping.
+            let prewarm_secs = dev::prewarm(&layers);
             let t0 = Instant::now();
             dev::reshape_pass(&layers);
             dev::sync();
             let reshape_secs = t0.elapsed().as_secs_f64();
-            // Once per process in production -- the pool keeps its high-water
-            // mark across chunks -- so it is timed and reported, not counted
-            // among the arm's per-chunk adds.
-            let prewarm_secs = dev::prewarm(&layers);
             prof::reset();
             let t1 = Instant::now();
             let (proof, _artifact) = prove_batch(channel, layers);
