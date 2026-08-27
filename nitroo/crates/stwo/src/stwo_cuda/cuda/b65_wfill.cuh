@@ -42,6 +42,11 @@
 #define B65W_MUT_DESCEND 4u  // the chunk order, not descending
 #define B65W_MUT_INST 5u     // the (instance, local) split of a packed group
 #define B65W_MUT_AOREF 6u    // attnout's f64 reference, ties to even
+// B11 stream N, lever 2: the corner band's own way of being wrong. A masked
+// slot is not a lookup, so it bumps nothing; ignoring the mask bumps every
+// slot and the multiplicity delta parts company with the host's. This is the
+// defect the lever was opened on, made deliberate.
+#define B65W_MUT_NOMASK 7u   // let a masked corner slot bump the exp table
 
 // `Grid` from `layout.rs`, field for field. `rows` is `1 << log_rows`.
 struct B65Grid {
@@ -127,6 +132,11 @@ struct B65BandCfg {
     unsigned range_check;
     unsigned z_lo_bits, z_hi_bits;
     long long z_min;
+    // B11 stream N, lever 2: is this the causal corner band? The grid kernel
+    // needs it for one thing only -- a masked slot is not a lookup at all, so
+    // it bumps no exp multiplicity (`Attn::visible`). The committed columns are
+    // the same either way.
+    unsigned corner;
     unsigned mutate;
 };
 

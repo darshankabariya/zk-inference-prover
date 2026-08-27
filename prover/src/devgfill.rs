@@ -125,6 +125,36 @@ pub fn mode() -> u32 {
     crate::util::m4b_mode("B7_M4_GFILL")
 }
 
+/// Whether anything on the host will read the two natural arrays.
+///
+/// **B11 stream N: the answer is always yes, and that is a finding.** Brief N
+/// scoped this download as existing "only to bring the ties' arrays back", so
+/// that moving the tie fold onto the card would delete it. Opening it says
+/// otherwise: `in_nat` / `out_nat` have three host readers, and only one of
+/// them is the fold.
+///
+///  * `glue::glue_interaction`'s Horner ties -- the fold, which stream N moves
+///    to the device (`devacc::gtie`).
+///  * `bounds::cols` (`bounds.rs:130`), which builds the **boundary tree's
+///    committed columns** out of the same sequence, packed `sm * PACK + ef`
+///    per (row, slot). That is stream H's chunk-to-chunk chaining, it is on in
+///    the sequence's pins (`--bounds`), and it is a committed column rather
+///    than a check -- so it cannot simply be dropped, and a device path for it
+///    is its own lever with its own gate.
+///  * `GlueRegion::tie_claim`, the independent recomputation of every claim
+///    from the witness rather than from the trace (`compose.rs:2447`,
+///    `glue.rs:2165`). The bar keeps checks, and with the fold on the card
+///    this one gains teeth: it now cross-checks the *device's* claim against a
+///    host recomputation on every run, not only under mode 2.
+///
+/// So the download stays and this returns true unconditionally. It is kept as
+/// a named predicate rather than deleted because it is where the reasoning
+/// lives, and because the day `bounds::cols` moves to the card it is the one
+/// line that changes.
+pub fn tie_host() -> bool {
+    true
+}
+
 /// `B7_M4_GFILLMUT`: one deliberate defect in the device fill, so mode 2's
 /// check has negative controls. The names are the kernel's.
 fn gfill_mut() -> u32 {
@@ -251,10 +281,21 @@ pub struct DevGlue {
     pub off_table: usize,
     pub bad_exp: usize,
     /// `(sm, ef)` per leaf and per output, in row order, regrouped the way
-    /// `GlueRegion` holds them
+    /// `GlueRegion` holds them. **Empty when the ties fold on the device**
+    /// (`B7_M4_GTIE=1`): nothing on the host reads them then, and bringing them
+    /// back is all `gen/gfill_d2h` ever was.
     pub in_nat: Vec<Vec<(i64, i64)>>,
     pub out_nat: Vec<Vec<(i64, i64)>>,
     pub outs: Vec<Vec<u16>>,
+    /// B11 stream N: the same two arrays where the kernel wrote them, row-flat
+    /// and in coset row order, kept alive for `devacc::gtie`. The `Uint32Vec`
+    /// owns the allocation; the ties read it as `i32`, which is how
+    /// `b65_fill_glue` wrote it.
+    pub d_in_nat: Uint32Vec,
+    pub d_out_nat: Uint32Vec,
+    /// the two arrays' row widths, which are the ties' strides
+    pub n_leaves: usize,
+    pub out_w: usize,
 }
 
 /// Build one glue region on the device.
@@ -416,25 +457,47 @@ pub fn glue_region_dev(w: &GlueWitness, prog: &Prog, round: crate::bf16::Round,
          evaluates the unary there and the device has no table row to read",
         got[2]
     );
-    let flat_in = d_in_nat.to_vec();
-    let flat_on = d_out_nat.to_vec();
+    // B11 stream N: the two `(sm, ef)` arrays come back only if something on
+    // the host is going to fold them.
+    //
+    // They exist for one reader -- `glue::glue_interaction`'s Horner ties --
+    // and under `B7_M4_GTIE=1` that fold happens on the card, out of the very
+    // arrays this would copy. So the download and the regrouping below are
+    // skipped and `in_nat` / `out_nat` stay empty; the device arrays are kept
+    // alive in `DevGlue` instead, which is what `devacc::gtie` reads.
+    //
+    // `out_pat` is a different array and a different reader: `ref_count`'s f64
+    // cross-check compares it against `w.ref_out` on the host. It is one
+    // `u32` per output slot rather than two per value, it is not what the ties
+    // read, and the check stays -- so it comes back either way.
+    let host_nat = tie_host();
+    let flat_in = if host_nat { d_in_nat.to_vec() } else { vec![] };
+    let flat_on = if host_nat { d_out_nat.to_vec() } else { vec![] };
     let flat_op = d_out_pat.to_vec();
     // regroup: the kernel writes one row-flat array, `GlueRegion` holds one
     // vector per group and per output
-    let mut in_nat: Vec<Vec<(i64, i64)>> =
-        prog.groups.iter().map(|g| Vec::with_capacity(rows * g.n)).collect();
-    for j in 0..rows {
-        let mut at = 0usize;
-        for (g, gr) in prog.groups.iter().enumerate() {
-            for _ in 0..gr.n {
-                let k = (j * n_leaves + at) * 2;
-                in_nat[g].push((flat_in[k] as i32 as i64, flat_in[k + 1] as i32 as i64));
-                at += 1;
+    let mut in_nat: Vec<Vec<(i64, i64)>> = if host_nat {
+        prog.groups.iter().map(|g| Vec::with_capacity(rows * g.n)).collect()
+    } else {
+        vec![]
+    };
+    if host_nat {
+        for j in 0..rows {
+            let mut at = 0usize;
+            for (g, gr) in prog.groups.iter().enumerate() {
+                for _ in 0..gr.n {
+                    let k = (j * n_leaves + at) * 2;
+                    in_nat[g].push((flat_in[k] as i32 as i64, flat_in[k + 1] as i32 as i64));
+                    at += 1;
+                }
             }
         }
     }
-    let mut out_nat: Vec<Vec<(i64, i64)>> =
-        prog.outs.iter().map(|o| Vec::with_capacity(rows * o.len())).collect();
+    let mut out_nat: Vec<Vec<(i64, i64)>> = if host_nat {
+        prog.outs.iter().map(|o| Vec::with_capacity(rows * o.len())).collect()
+    } else {
+        vec![]
+    };
     let mut outs: Vec<Vec<u16>> =
         prog.outs.iter().map(|o| vec![0u16; rows * o.len()]).collect();
     for j in 0..rows {
@@ -442,7 +505,10 @@ pub fn glue_region_dev(w: &GlueWitness, prog: &Prog, round: crate::bf16::Round,
         for (oi, o) in prog.outs.iter().enumerate() {
             for k in 0..o.len() {
                 let f = j * out_w + at;
-                out_nat[oi].push((flat_on[f * 2] as i32 as i64, flat_on[f * 2 + 1] as i32 as i64));
+                if host_nat {
+                    out_nat[oi]
+                        .push((flat_on[f * 2] as i32 as i64, flat_on[f * 2 + 1] as i32 as i64));
+                }
                 outs[oi][j * o.len() + k] = flat_op[f] as u16;
                 at += 1;
             }
@@ -479,6 +545,7 @@ pub fn glue_region_dev(w: &GlueWitness, prog: &Prog, round: crate::bf16::Round,
         off_table: got[0] as usize,
         bad_exp: got[1] as usize,
         in_nat, out_nat, outs,
+        d_in_nat, d_out_nat, n_leaves, out_w,
     }
 }
 

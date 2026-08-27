@@ -540,7 +540,8 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
         // column is committed from the same predicate, and the two must agree.
         let dev = crate::devwfill::commit_base_dev(a, l, cfg, widths, mult_exp, mult_r,
                                                    off_table, with_out,
-                                                   crate::devwfill::exp_mult_on_host(a));
+                                                   crate::devwfill::exp_mult_on_host(a),
+                                                   with_rows);
         let at = dev.at.clone();
         return (vec![], at, Some(dev));
     }
@@ -559,7 +560,7 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     let after_r: Vec<Vec<u32>> = mult_r.to_vec();
     let after_off = *off_table;
     let dev = crate::devwfill::commit_base_dev(a, l, cfg, widths, mult_exp, mult_r,
-                                               off_table, with_out, true);
+                                               off_table, with_out, true, with_rows);
     let label = format!("band {} 2^{}", a.shape.label(), l.key.g.log_rows);
     // B11 stream L: the region offsets, printed before the comparison rather
     // than after it.  `check_cols` names a column by its index in the whole
