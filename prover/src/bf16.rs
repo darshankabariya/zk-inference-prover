@@ -25,6 +25,8 @@
 //! round-half-away-from-zero would.  Both are built here so the ladder can price
 //! the difference.
 
+use rayon::prelude::*;
+
 /// bf16 bits -> f32 (exact: bf16 is the f32 prefix).
 pub fn to_f32(bits: u16) -> f32 {
     f32::from_bits((bits as u32) << 16)
@@ -340,8 +342,14 @@ pub fn exp_bf16_table(nmax: u32) -> Vec<u32> {
 /// and it makes this table encode *the same function* as the bf16-indexed one:
 /// the two variants differ in how the argument is addressed, not in what is
 /// computed, which is what lets the torch witness check both.
+///
+/// Stream P: built in parallel.  Every row is a pure function of its own index,
+/// so the rows are the same values in the same order however many threads
+/// build them -- and at the sequence's table sizes (2^23..2^27 rows, stream J's
+/// tight sizing) this was two thirds of the cost of loading a layer.
 pub fn exp_int_table(rows: usize, nmax: u32, frac: f64) -> Vec<u32> {
     (0..rows)
+        .into_par_iter()
         .map(|d| {
             let x = to_f32(from_f32((-(d as f64) / frac.exp2()) as f32)) as f64;
             let v = round_hafz(nmax as f64 * x.exp());

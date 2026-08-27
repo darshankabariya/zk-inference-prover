@@ -57,6 +57,18 @@
 //! plan line gives it, which is what `bounds-chain` reads back to join two
 //! chunks. It is the same pair of files the one-shot `compose` path writes.
 
+//! # B11 stream P: what `build_secs` is made of
+//!
+//! `build_secs` is one number for four different kinds of work, and on the
+//! sequence it is most of the wall (`briefs/o-overlap.md` section 5). The
+//! loaders now charge their time to sites (`witread.rs`); this loop reads the
+//! counters by difference around the region it already times, so every chunk
+//! row carries `read_secs`, `decode_secs`, `check_secs` and `construct_secs`
+//! beside `build_secs`, with the bytes read and the per-site map underneath.
+//! The counters are process-wide, which is exactly right here: under a plan one
+//! thread builds one chunk's layer at a time, and the difference across that
+//! region is that chunk's.
+
 use std::time::Instant;
 
 use serde_json::{Value, json};
@@ -325,6 +337,7 @@ struct SendGen<'a> {
     k: usize,
     built: Built<'a>,
     build_secs: f64,
+    split: crate::witread::Split,
     gen_secs: f64,
 }
 
@@ -349,6 +362,9 @@ struct Row {
     /// parameters. Under a plan this is per chunk and it is not small; the
     /// cycling loop builds its layers once in setup and this is ~0 there.
     build_secs: f64,
+    /// where those seconds went: read, decode, check, construct, and the
+    /// per-site detail underneath them (stream P)
+    split: crate::witread::Split,
     gen_secs: f64,
     upload: Value,
     /// what the card was holding the moment this chunk had been generated and
@@ -373,6 +389,9 @@ fn write_ser(dir: &str, tag: &str, ser: &crate::Ser) {
 
 pub fn chunks_cmd(args: &[String]) {
     let t_setup = Instant::now();
+    // Setup gets its own split. The cycling loop builds its layers here rather
+    // than per chunk, and without this the work would be timed by nothing.
+    let snap_setup = crate::witread::snapshot();
     let tamper = ProverTamper::default();
     let pipe = crate::util::m4b_mode("B7_M5_PIPE") == 1;
     let ser_dir = arg_str(args, "--ser-dir");
@@ -406,6 +425,7 @@ pub fn chunks_cmd(args: &[String]) {
         Source::Cycle { .. } => arg_scalar(args, "--chunks", 4usize),
     };
     let setup_secs = t_setup.elapsed().as_secs_f64();
+    let setup_split = crate::witread::since(&snap_setup);
     eprintln!(
         "compose-chunks: {n} chunks over {} layer(s) [{}], pipe={pipe} \
          ircache={} precache={}; setup {setup_secs:.1} s",
@@ -417,6 +437,7 @@ pub fn chunks_cmd(args: &[String]) {
 
     let mut rows: Vec<Row> = Vec::with_capacity(n);
     crate::device::reset();
+    let snap_loop = crate::witread::snapshot();
     let t_loop = Instant::now();
     if !pipe {
         for k in 0..n {
@@ -425,8 +446,10 @@ pub fn chunks_cmd(args: &[String]) {
                 crate::device::reset();
             }
             let t = Instant::now();
+            let snap = crate::witread::snapshot();
             let built = src.build(k, &tamper);
             let build_secs = t.elapsed().as_secs_f64();
+            let split = crate::witread::since(&snap);
             let pkey = src.pre_key(k, &built);
             let tg = Instant::now();
             let g = compose::generate(built.layer(), built.params(), &tamper, pkey);
@@ -453,6 +476,7 @@ pub fn chunks_cmd(args: &[String]) {
                 ser,
                 secs,
                 build_secs,
+                split,
                 gen_secs,
                 upload: crate::device::report(),
                 mem_after_gen,
@@ -476,21 +500,23 @@ pub fn chunks_cmd(args: &[String]) {
                 for k in 0..n {
                     crate::util::m4_set_chunk(k as u64);
                     let t = Instant::now();
+                    let snap = crate::witread::snapshot();
                     let built = src.build(k, tamper);
                     let build_secs = t.elapsed().as_secs_f64();
+                    let split = crate::witread::since(&snap);
                     let tg = Instant::now();
                     let g = compose::generate(built.layer(), built.params(), tamper,
                                               src.pre_key(k, &built));
                     let gen_secs = tg.elapsed().as_secs_f64();
                     eprintln!("compose-chunks: generated chunk {k} in {:.3} s \
                                (witness {build_secs:.3} s)", t.elapsed().as_secs_f64());
-                    if tx.send(SendGen { g, k, built, build_secs, gen_secs }).is_err() {
+                    if tx.send(SendGen { g, k, built, build_secs, split, gen_secs }).is_err() {
                         return;
                     }
                 }
             });
             for k in 0..n {
-                let SendGen { g, k: kk, built, build_secs, gen_secs } =
+                let SendGen { g, k: kk, built, build_secs, split, gen_secs } =
                     rx.recv().expect("the generation thread died");
                 assert_eq!(k, kk);
                 crate::util::m4_set_chunk(k as u64);
@@ -517,9 +543,10 @@ pub fn chunks_cmd(args: &[String]) {
                     out,
                     ser,
                     secs,
-                    // Both measured on the generation thread, where they
+                    // All three measured on the generation thread, where they
                     // happened, and reported against the chunk they belong to.
                     build_secs,
+                    split,
                     gen_secs,
                     upload: crate::device::report(),
                     mem_after_gen,
@@ -536,6 +563,10 @@ pub fn chunks_cmd(args: &[String]) {
         });
     }
     let loop_secs = t_loop.elapsed().as_secs_f64();
+    // The loop's own split, taken from the counters rather than by adding the
+    // chunks up: the two agree only if every loader call happened inside a
+    // chunk's timed build, which is what this is here to show.
+    let loop_split = crate::witread::since(&snap_loop);
 
     // The verifier, after the loop: it is the CPU's and not the prover's wall.
     let mut chunks: Vec<Value> = vec![];
@@ -567,6 +598,7 @@ pub fn chunks_cmd(args: &[String]) {
         j["layer_source"] = json!(r.source);
         j["chunk_secs"] = json!(r.secs);
         j["build_secs"] = json!(r.build_secs);
+        r.split.merge_into(&mut j);
         j["generate_secs"] = json!(r.gen_secs);
         j["mem_after_gen"] = json!(r.mem_after_gen);
         j["mem_after_prove"] = json!(r.mem_after_prove);
@@ -618,6 +650,16 @@ pub fn chunks_cmd(args: &[String]) {
         // so a loop whose wall is much larger than its `whole_sum` is holding
         // the difference here, and it is host work that overlap can hide.
         "build_sum": builds.iter().sum::<f64>(),
+        // Stream P: the same seconds, split into the four kinds of work the
+        // loaders do, with the bytes they read and the per-site detail. Taken
+        // over the whole loop, so a term here is comparable to `build_sum` and
+        // to nothing outside `loop_secs`.
+        "read_sum": loop_split.kind(crate::witread::Kind::Read),
+        "decode_sum": loop_split.kind(crate::witread::Kind::Decode),
+        "check_sum": loop_split.kind(crate::witread::Kind::Check),
+        "construct_sum": loop_split.kind(crate::witread::Kind::Construct),
+        "build_split": loop_split.json(),
+        "setup_build_split": setup_split.json(),
         "gen_sum": gens.iter().sum::<f64>(),
         "upload_scope": if pipe { "loop-cumulative" } else { "chunk" },
         "upload_total": crate::device::report(),
