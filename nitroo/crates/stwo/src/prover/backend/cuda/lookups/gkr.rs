@@ -219,10 +219,10 @@ impl GkrOps for CudaBackend {
         let mut host: Vec<SecureField> = Vec::with_capacity(2 * n_blocks);
         unsafe {
             host.set_len(2 * n_blocks);
-            bindings::copy_uint32_t_vec_from_device_to_host(
+            bindings::gkr_read_partials(
                 partials,
-                host.as_mut_ptr() as *const u32,
-                (4 * 2 * n_blocks) as u32,
+                n_blocks as u32,
+                host.as_mut_ptr() as *mut u32,
             );
         }
         let mut eval_at_0 = SecureField::zero();

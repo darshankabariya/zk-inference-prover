@@ -1,3 +1,5 @@
+#include <cstring>
+
 #include "utils.cuh"
 #include "gkr.cuh"
 
@@ -280,4 +282,19 @@ void gkr_device_synchronize() {
 // `cuda_free_memory`, which is pool-aware.
 qm31 *gkr_alloc_qm31(uint32_t n) {
     return cuda_mem_pool_allocate<qm31>(n);
+}
+
+// Pass-5 readback for the round sums: the per-round copy home lands in one
+// pinned staging buffer (allocated once) instead of pageable memory, which
+// saves the driver's staging on every one of the ~1,700 round trips a chunk
+// makes. The caller hands a host destination; the pinned buffer is internal.
+void gkr_read_partials(const qm31 *dev, uint32_t n_pairs, qm31 *out_host) {
+    static qm31 *pinned = nullptr;
+    if (pinned == nullptr) {
+        ASSERT_CUDA_SUCCESS(cudaMallocHost((void **)&pinned, 2 * 264 * sizeof(qm31)));
+    }
+    ASSERT_CUDA_SUCCESS(cudaMemcpyAsync(pinned, dev, 2 * n_pairs * sizeof(qm31),
+                                        cudaMemcpyDeviceToHost, 0));
+    ASSERT_CUDA_SUCCESS(cudaStreamSynchronize(0));
+    memcpy(out_host, pinned, 2 * n_pairs * sizeof(qm31));
 }

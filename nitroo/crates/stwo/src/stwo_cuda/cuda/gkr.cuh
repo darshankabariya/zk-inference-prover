@@ -46,4 +46,8 @@ void gkr_device_synchronize();
 extern "C"
 qm31 *gkr_alloc_qm31(uint32_t n);
 
+// The round-sum partials, read back through a pinned staging buffer.
+extern "C"
+void gkr_read_partials(const qm31 *dev, uint32_t n_pairs, qm31 *out_host);
+
 #endif // GKR_H
