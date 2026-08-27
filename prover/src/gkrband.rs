@@ -371,7 +371,7 @@ pub mod dev {
         ]);
         let out = |n: usize| SecureFieldVec::new_uninitialized(n);
         let (o1, o2, o3) = (out(1), out(1), out(2));
-        let lambda = stwo::stwo_cuda::bindings::CudaSecureField::zero();
+        let lambda = stwo::stwo_cuda::bindings::CudaSecureField::zero;
         unsafe {
             bindings::gkr_next_layer_grand_product(two.device_ptr, o1.device_ptr, 1);
             bindings::gkr_next_layer_logup_generic(
@@ -382,18 +382,18 @@ pub mod dev {
                 two.device_ptr, o1.device_ptr, o2.device_ptr, 1);
             bindings::gkr_sum_grand_product(two.device_ptr, two.device_ptr, 1, o3.device_ptr, 1);
             bindings::gkr_sum_logup_generic(
-                two.device_ptr, two.device_ptr, two.device_ptr, lambda, 1, o3.device_ptr, 1);
+                two.device_ptr, two.device_ptr, two.device_ptr, lambda(), 1, o3.device_ptr, 1);
             bindings::gkr_sum_logup_multiplicities(
-                two_base.device_ptr, two.device_ptr, two.device_ptr, lambda, 1,
+                two_base.device_ptr, two.device_ptr, two.device_ptr, lambda(), 1,
                 o3.device_ptr, 1);
             bindings::gkr_sum_logup_singles(
-                two.device_ptr, two.device_ptr, lambda, 1, o3.device_ptr, 1);
+                two.device_ptr, two.device_ptr, lambda(), 1, o3.device_ptr, 1);
             bindings::fix_first_variable_secure_field(
-                two.device_ptr, 2, lambda, o1.device_ptr);
+                two.device_ptr, 2, lambda(), o1.device_ptr);
             bindings::fix_first_variable_base_field(
-                two_base.device_ptr, 2, lambda, o1.device_ptr);
+                two_base.device_ptr, 2, lambda(), o1.device_ptr);
             bindings::gen_eq_evals(
-                lambda,
+                lambda(),
                 two.device_ptr as *const stwo::stwo_cuda::bindings::CudaSecureField,
                 0,
                 o1.device_ptr as *const stwo::stwo_cuda::bindings::CudaSecureField,
