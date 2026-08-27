@@ -683,6 +683,9 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         // `Params::ties` reads these via `.get(..).unwrap_or(zero)`, so the
         // placeholder claims can stay empty without changing the IR's shape.
         glue_ties: vec![], deq_out: vec![], head_key: vec![], am_key: vec![],
+        // B11 stream Q: the GKR bundle is bytes, not a claim; nothing the
+        // components lower reads it, so the placeholder statement carries none.
+        gkr: None,
     }
 }
 

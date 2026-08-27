@@ -259,6 +259,13 @@ pub struct Claims {
     /// `head_key` is what says it compared the head's own output
     #[serde(default)]
     pub am_key: Vec<[u32; 4]>,
+    /// B11 stream Q: the bands' batch GKR proof, as bytes, on the GKR arm only.
+    /// It rides here because the statement already travels everywhere the proof
+    /// does and `Claims::flat` -- what the transcript mixes -- reads only the
+    /// felt fields, so carrying it changes no channel state. Absent with the
+    /// flag off, which is what keeps a flag-off statement byte identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gkr: Option<Vec<u8>>,
 }
 
 pub fn qm(v: SecureField) -> [u32; 4] {
@@ -2249,12 +2256,38 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // yields are the same quantity `use_sums` carries, so what changes is the
     // argument and not the statement.
     let gkr_proved = gkr.map(|g| {
+        // The verifier derives its instance list from the plan alone. If that
+        // derivation ever drifts from what the interaction pass actually
+        // collected, it has to fail here -- loudly, on the proving side --
+        // rather than as an unexplained rejection later.
+        let want = crate::gkrband::sites_of(&plan);
+        crate::gkrband::same_sites(&g.sites, &want)
+            .expect("`gkrband::sites_of` disagrees with the bands' own lookup sites");
         let t = std::time::Instant::now();
         let mut pr = crate::gkrband::prove_collected(&mut sess.channel, *g);
         crate::util::m4_add("int/gkr", t.elapsed().as_secs_f64());
         pr.cost.total_secs = t.elapsed().as_secs_f64();
         pr
     });
+    if let Some(pr) = gkr_proved.as_ref() {
+        let mut b = serde_json::to_vec(&pr.proof).expect("the GKR proof serialises");
+        // B11 stream Q, the arm's own control: `B11_GKRMUT=<index>` flips one
+        // digit of the serialised GKR bundle. Everything else about the chunk
+        // stays honest, so the only thing that can catch it is the sumcheck
+        // itself -- which is the point. Off, the bundle is untouched.
+        if let Ok(spec) = std::env::var("B11_GKRMUT") {
+            let at: usize = spec.parse().unwrap_or(0);
+            let digits: Vec<usize> = (0..b.len())
+                .filter(|i| b[*i].is_ascii_digit() && b[*i] != b'0')
+                .collect();
+            assert!(!digits.is_empty(), "no digit to corrupt in the GKR bundle");
+            let i = digits[at % digits.len()];
+            eprintln!("gkrmut: byte {i} of {} ({} -> {})", b.len(),
+                      b[i] as char, (b[i] - 1) as char);
+            b[i] -= 1;
+        }
+        claims.gkr = Some(b);
+    }
     let m4_t = std::time::Instant::now();
     let aoi = ao_interaction(&layer.ao, &aor, r, s, rv, p.c, &rels, &m4e_air.ao.eval);
     inter_all.extend(aoi.cols);
@@ -2761,6 +2794,38 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         (SecureField::zero(), SecureField::zero())
     };
     let r_corner = if plan.p.corner { f[plan.corner_challenge_at()] } else { SecureField::zero() };
+    // B11 stream Q: on the GKR arm the bands' fractional sums are proved here,
+    // between the relation challenges the fractions depend on and the
+    // interaction tree's own commit -- the position the prover occupies. The
+    // sumcheck moves the channel, so a verifier that skipped it would diverge
+    // at OODS; that is the shape of the failure if the two ever drift.
+    let mut gkr_sums: Vec<SecureField> = vec![];
+    if plan.p.gkr_bands {
+        let Some(bytes) = claims.gkr.as_ref() else {
+            return Verdict::rejected("the statement asks for the GKR arm and carries no GKR proof");
+        };
+        let sites = crate::gkrband::sites_of(&plan);
+        match crate::gkrband::verify(&mut ch, &sites, bytes) {
+            Ok((sums, _artifact, _insts)) => gkr_sums = sums,
+            Err(e) => return Verdict::rejected(&format!("the bands' GKR proof: {e}")),
+        }
+        // The sums the GKR proved have to be the ones the statement then feeds
+        // to `sums_cancel`, or the sumcheck is about some other numbers. The
+        // band sites come first in `use_sums`, in the order
+        // `interaction_phase` pushes them, which is the order `sites_of`
+        // rebuilds -- per band: channel, grid, per-token.
+        if gkr_sums.len() > claims.use_sums.len() {
+            return Verdict::rejected("more GKR sites than the statement has use sums");
+        }
+        if let Some(i) = (0..gkr_sums.len())
+            .find(|i| gkr_sums[*i] != unqm(claims.use_sums[*i]))
+        {
+            return Verdict::rejected(&format!(
+                "the GKR's sum for {} is not the one the statement uses", sites[i].tag()));
+        }
+    } else if claims.gkr.is_some() {
+        return Verdict::rejected("the statement carries a GKR proof the flag did not ask for");
+    }
     vcs.commit(proof.commitments[2], &fixed.sizes[2], &mut ch);
     // Stream H: one tree per boundary side, replayed in the prover's order.  The
     // roots are read out below; nothing is drawn from them here, because nothing

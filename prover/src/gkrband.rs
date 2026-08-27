@@ -60,6 +60,8 @@ use stwo::prover::lookups::gkr_verifier::{
 };
 use stwo::prover::lookups::mle::Mle;
 
+use crate::attn_witness::Variant as AttnVariant;
+
 /// One band region's lookup site, as `interaction_phase` reaches it.
 ///
 /// `which` is the component index `devfrac::band_cols` uses -- 0 for the channel
@@ -579,4 +581,80 @@ fn tamper(proof: &mut GkrBatchProof) -> String {
         }
     }
     "nothing (the proof was empty)".into()
+}
+
+/// The band sites, derived from the plan alone.
+///
+/// This is the verifier's route to the instance list, and it has to agree with
+/// what the prover's collector saw at the three `devfrac::band_cols` sites
+/// exactly -- the same rows, the same lookup counts, the same numerator kinds,
+/// in the same order. `Plan` is the object whose whole purpose is that the two
+/// sides cannot disagree about layouts, so the derivation reads only from it.
+///
+/// The prover asserts this function against the collector's own sites before it
+/// proves anything, so a drift between the two is a loud failure on the proving
+/// side rather than a rejected proof on the verifying side.
+pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
+    let mut out = vec![];
+    for (b, corner) in plan.corner.iter().enumerate() {
+        let l = &plan.lays[b];
+        let (lc, lk) = (&l.chan, &l.key);
+        let cfg = &plan.cfg;
+
+        // ---- the channel region: the key and query range checks, all unit
+        if cfg.range_check {
+            out.push(Site {
+                band: b,
+                which: 0,
+                log_rows: lc.g.log_rows,
+                unit: vec![true; lc.pk + lc.pq],
+            });
+        }
+
+        // ---- the grid region: one exp lookup per score slot, then the
+        // variant's remainder checks, then the V range checks. On a corner band
+        // the exp lookups carry `1 - mask` and are the only non-unit lookups in
+        // the whole set.
+        let mut unit = vec![!*corner; lk.q];
+        if let AttnVariant::IntSplit(_) = plan.attn_variant {
+            unit.extend(vec![true; lk.q]);
+        }
+        if cfg.range_check {
+            unit.extend(vec![true; lk.pv]);
+        }
+        out.push(Site { band: b, which: 1, log_rows: lk.g.log_rows, unit });
+
+        // ---- the per-token region: four denominator limbs per token. A corner
+        // band has none -- the pair lives on its prefix band.
+        if !*corner {
+            out.push(Site {
+                band: b,
+                which: 3,
+                log_rows: l.log_row,
+                unit: vec![true; 4 * l.rw],
+            });
+        }
+    }
+    out
+}
+
+/// The two sides' site lists, compared field by field, with the first
+/// disagreement named.
+pub fn same_sites(a: &[Site], b: &[Site]) -> Result<(), String> {
+    if a.len() != b.len() {
+        return Err(format!("{} sites against {}", a.len(), b.len()));
+    }
+    for (i, (x, y)) in a.iter().zip(b).enumerate() {
+        if x.band != y.band || x.which != y.which || x.log_rows != y.log_rows
+            || x.unit != y.unit
+        {
+            return Err(format!(
+                "site {i} differs: {} 2^{} {} looks ({} unit) against {} 2^{} {} looks ({} unit)",
+                x.tag(), x.log_rows, x.n_looks(),
+                x.unit.iter().filter(|u| **u).count(),
+                y.tag(), y.log_rows, y.n_looks(),
+                y.unit.iter().filter(|u| **u).count()));
+        }
+    }
+    Ok(())
 }
