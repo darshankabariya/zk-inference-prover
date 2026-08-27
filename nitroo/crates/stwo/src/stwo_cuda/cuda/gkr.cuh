@@ -42,4 +42,8 @@ void gkr_sum_logup_singles(
 extern "C"
 void gkr_device_synchronize();
 
+// Pool allocation without the zeroing pass; freed by `cuda_free_memory`.
+extern "C"
+qm31 *gkr_alloc_qm31(uint32_t n);
+
 #endif // GKR_H

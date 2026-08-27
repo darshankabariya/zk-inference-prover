@@ -486,6 +486,7 @@ extern "C" {
         n_blocks: u32,
     );
     pub fn gkr_device_synchronize();
+    pub fn gkr_alloc_qm31(n: u32) -> *const u32;
 
     pub fn fix_first_variable_base_field(
         evals: *const u32,

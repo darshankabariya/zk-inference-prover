@@ -272,3 +272,12 @@ void gkr_sum_logup_singles(
 void gkr_device_synchronize() {
     ASSERT_CUDA_SUCCESS(cudaDeviceSynchronize());
 }
+
+// Pass-2 allocation for the sumcheck's own buffers: straight from the pool,
+// no zeroing. `cuda_malloc_uint32_t` memsets every allocation, which for the
+// circuit evaluation means an extra full write pass (and an extra launch) per
+// layer whose cells the kernel overwrites anyway. Freed by the ordinary
+// `cuda_free_memory`, which is pool-aware.
+qm31 *gkr_alloc_qm31(uint32_t n) {
+    return cuda_mem_pool_allocate<qm31>(n);
+}

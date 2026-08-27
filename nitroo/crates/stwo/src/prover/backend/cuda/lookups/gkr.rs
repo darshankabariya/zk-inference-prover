@@ -41,11 +41,30 @@ use crate::stwo_cuda::{bindings, secure_field_vec::SecureFieldVec};
 /// one packet. 264 blocks of 256 threads covers an H100's 132 SMs twice over.
 const GKR_SUM_MAX_BLOCKS: usize = 264;
 
+/// A device buffer straight from the pool, with no zeroing pass: every cell of
+/// a sumcheck buffer is written by the kernel that fills it, so the memset in
+/// `cuda_malloc_uint32_t` would be an extra launch and an extra full write per
+/// layer. Freed by the ordinary `Drop`, which is pool-aware.
+pub(crate) fn alloc_secure(n: usize) -> SecureFieldVec {
+    SecureFieldVec::new(unsafe { bindings::gkr_alloc_qm31(n as u32) }, n)
+}
+
+/// The round-sum partials land in one process-wide buffer, sized for the
+/// largest launch and never freed: allocating it per round was measurable
+/// against launches this small. The prover calls `sum_as_poly` sequentially.
+fn partials_ptr() -> *const u32 {
+    use std::sync::OnceLock;
+    static PARTIALS: OnceLock<usize> = OnceLock::new();
+    *PARTIALS.get_or_init(|| unsafe {
+        bindings::gkr_alloc_qm31(2 * GKR_SUM_MAX_BLOCKS as u32) as usize
+    }) as *const u32
+}
+
 impl GkrOps for CudaBackend {
     fn gen_eq_evals(y: &[SecureField], v: SecureField) -> Mle<Self, SecureField> {
         let _t = prof::scope(prof::EQ);
         let y_size = y.len();
-        let result_evals = SecureFieldVec::new_uninitialized(1 << y_size);
+        let result_evals = alloc_secure(1 << y_size);
 
         unsafe {
             bindings::gen_eq_evals(
@@ -65,7 +84,7 @@ impl GkrOps for CudaBackend {
         let n_out = (1usize << layer.n_variables()) / 2;
         match layer {
             Layer::GrandProduct(mle) => {
-                let out = SecureFieldVec::new_uninitialized(n_out);
+                let out = alloc_secure(n_out);
                 unsafe {
                     bindings::gkr_next_layer_grand_product(
                         mle.device_ptr,
@@ -79,8 +98,8 @@ impl GkrOps for CudaBackend {
                 numerators,
                 denominators,
             } => {
-                let num_out = SecureFieldVec::new_uninitialized(n_out);
-                let den_out = SecureFieldVec::new_uninitialized(n_out);
+                let num_out = alloc_secure(n_out);
+                let den_out = alloc_secure(n_out);
                 unsafe {
                     bindings::gkr_next_layer_logup_generic(
                         numerators.device_ptr,
@@ -99,8 +118,8 @@ impl GkrOps for CudaBackend {
                 numerators,
                 denominators,
             } => {
-                let num_out = SecureFieldVec::new_uninitialized(n_out);
-                let den_out = SecureFieldVec::new_uninitialized(n_out);
+                let num_out = alloc_secure(n_out);
+                let den_out = alloc_secure(n_out);
                 unsafe {
                     bindings::gkr_next_layer_logup_multiplicities(
                         numerators.device_ptr,
@@ -116,8 +135,8 @@ impl GkrOps for CudaBackend {
                 }
             }
             Layer::LogUpSingles { denominators } => {
-                let num_out = SecureFieldVec::new_uninitialized(n_out);
-                let den_out = SecureFieldVec::new_uninitialized(n_out);
+                let num_out = alloc_secure(n_out);
+                let den_out = alloc_secure(n_out);
                 unsafe {
                     bindings::gkr_next_layer_logup_singles(
                         denominators.device_ptr,
@@ -147,7 +166,7 @@ impl GkrOps for CudaBackend {
         let lambda: CudaSecureField = h.lambda.into();
 
         let n_blocks = n_terms.div_ceil(256).min(GKR_SUM_MAX_BLOCKS).max(1);
-        let partials = SecureFieldVec::new_uninitialized(2 * n_blocks);
+        let partials = partials_ptr();
 
         unsafe {
             match &h.input_layer {
@@ -155,7 +174,7 @@ impl GkrOps for CudaBackend {
                     mle.device_ptr,
                     eq_evals.device_ptr,
                     n_terms as u32,
-                    partials.device_ptr,
+                    partials,
                     n_blocks as u32,
                 ),
                 Layer::LogUpGeneric {
@@ -167,7 +186,7 @@ impl GkrOps for CudaBackend {
                     eq_evals.device_ptr,
                     lambda,
                     n_terms as u32,
-                    partials.device_ptr,
+                    partials,
                     n_blocks as u32,
                 ),
                 Layer::LogUpMultiplicities {
@@ -179,7 +198,7 @@ impl GkrOps for CudaBackend {
                     eq_evals.device_ptr,
                     lambda,
                     n_terms as u32,
-                    partials.device_ptr,
+                    partials,
                     n_blocks as u32,
                 ),
                 Layer::LogUpSingles { denominators } => bindings::gkr_sum_logup_singles(
@@ -187,7 +206,7 @@ impl GkrOps for CudaBackend {
                     eq_evals.device_ptr,
                     lambda,
                     n_terms as u32,
-                    partials.device_ptr,
+                    partials,
                     n_blocks as u32,
                 ),
             }
@@ -195,10 +214,18 @@ impl GkrOps for CudaBackend {
 
         // Field addition is exact and associative, so adding the block
         // partials on the host changes nothing about the values.
-        let partials = partials.to_vec();
+        let mut host: Vec<SecureField> = Vec::with_capacity(2 * n_blocks);
+        unsafe {
+            host.set_len(2 * n_blocks);
+            bindings::copy_uint32_t_vec_from_device_to_host(
+                partials,
+                host.as_mut_ptr() as *const u32,
+                (4 * 2 * n_blocks) as u32,
+            );
+        }
         let mut eval_at_0 = SecureField::zero();
         let mut eval_at_2 = SecureField::zero();
-        for pair in partials.chunks_exact(2) {
+        for pair in host.chunks_exact(2) {
             eval_at_0 += pair[0];
             eval_at_2 += pair[1];
         }
