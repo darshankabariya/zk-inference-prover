@@ -260,6 +260,10 @@ pub fn modes_json() -> Value {
     // is the switch's global value; which fill a *particular* band takes also
     // depends on its layout (`devwfill::band_fill_mode`).
     put("B7_M4_WFILL_BAND", crate::devwfill::band_mode());
+    // `B7_M4_WFILL_CORNER` has not gated and defaults off, but a run that
+    // sets it must still name it here, or its JSON claims a configuration it
+    // did not run.
+    put("B7_M4_WFILL_CORNER", crate::devwfill::corner_mode());
     // The plain on/off switches resolve the same way and belong in the same
     // object. All of them default on and all of them predate this stream.
     for name in ["B7_M4_PAREVAL", "B7_M4_NOCLONE", "B7_M4_SCAN", "B7_M4_REFBAD"] {
