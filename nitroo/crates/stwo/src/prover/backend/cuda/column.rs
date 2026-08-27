@@ -161,8 +161,10 @@ impl Column<SecureField> for SecureFieldVec {
 }
 
 impl FromIterator<SecureField> for SecureFieldVec {
-    fn from_iter<T: IntoIterator<Item = SecureField>>(_iter: T) -> Self {
-        todo!()
+    // B11 stream R: was `todo!()`; first reached by `EqEvals::generate` on an
+    // empty point, the batched GKR's first layer.
+    fn from_iter<T: IntoIterator<Item = SecureField>>(iter: T) -> Self {
+        Self::from_vec(iter.into_iter().collect())
     }
 }
 
