@@ -636,15 +636,25 @@ fn compose_once(l: &layer::Layer, params: &compose::Params, tamper: &compose::Pr
     let out = compose::prove_layer(l, params, tamper);
     let ser = compose_ser(&out);
     if let Some((dir, tag)) = ser_to {
-        std::fs::create_dir_all(dir).expect("the serialization directory");
-        std::fs::write(format!("{dir}/{tag}.fixed.json"), &ser.fixed_bytes)
-            .expect("writing the statement");
-        if let Some(b) = &ser.proof_bytes {
-            std::fs::write(format!("{dir}/{tag}.proof.json"), b).expect("writing the proof");
-        }
-        eprintln!("compose: statement and proof written to {dir}/{tag}.{{fixed,proof}}.json");
+        ser_write(dir, tag, &ser);
     }
     compose_finish(out, ser, params)
+}
+
+/// Leave one chunk's statement and proof on disk under `tag`.
+///
+/// Stream O: the chunk loop has to write exactly these two files, per chunk
+/// and under the chunk's own tag, because `bounds-chain` joins two chunks by
+/// reading them back off disk and nothing else. It was a branch inside
+/// `compose_once` and is a function so that the loop can call it too.
+pub fn ser_write(dir: &str, tag: &str, ser: &Ser) {
+    std::fs::create_dir_all(dir).expect("the serialization directory");
+    std::fs::write(format!("{dir}/{tag}.fixed.json"), &ser.fixed_bytes)
+        .expect("writing the statement");
+    if let Some(b) = &ser.proof_bytes {
+        std::fs::write(format!("{dir}/{tag}.proof.json"), b).expect("writing the proof");
+    }
+    eprintln!("compose: statement and proof written to {dir}/{tag}.{{fixed,proof}}.json");
 }
 
 /// The statement and the proof as bytes.

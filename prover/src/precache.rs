@@ -49,6 +49,8 @@ static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
 static CHECKS: AtomicU64 = AtomicU64::new(0);
 static CLONE_NS: AtomicU64 = AtomicU64::new(0);
+static FORGOTTEN: AtomicU64 = AtomicU64::new(0);
+static PEAK_ENTRIES: AtomicU64 = AtomicU64::new(0);
 
 fn cache() -> &'static Mutex<HashMap<u64, Entry>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -73,7 +75,49 @@ pub fn report() -> serde_json::Value {
         "checked": CHECKS.load(Relaxed),
         "clone_secs": CLONE_NS.load(Relaxed) as f64 / 1e9,
         "entries": cache().lock().unwrap().len(),
+        // Stream O: how many trees the loop handed back, and the most it ever
+        // held at once. On a sequence of distinct shapes the second number is
+        // the one that decides whether the run fits on the card.
+        "forgotten": FORGOTTEN.load(Relaxed),
+        "peak_entries": PEAK_ENTRIES.load(Relaxed),
     })
+}
+
+/// Drop the tree cached under this key, and say whether there was one.
+///
+/// B11 stream O. B7b's loop proves one shape over and over: one key, one
+/// entry, and chunk 0's tree is what every chunk after it clones. The
+/// sequence is the opposite -- 33 chunks, 33 layers, 33 shapes, so 33
+/// distinct keys. Every chunk misses, every chunk pays `tree_clone` for an
+/// entry nothing will ever take, and every entry stays on the device until
+/// the process exits. Across 33 processes that cost nothing, because each
+/// process held one and then died; in one process it is 33 preprocessed trees
+/// resident at the end, which is the run.
+///
+/// So the loop hands a key back once the chunk that owns it has been proved,
+/// which is the point where the last borrowed view of that tree is dropped.
+/// It only does so for a chunk whose shape no later chunk repeats -- if two
+/// chunks share a key the second is a genuine hit and the entry must stay.
+///
+/// Forgetting is off while a mutation is set: `stalekey` maps every layer to
+/// one key precisely so that the second chunk's root check fails against the
+/// first chunk's entry (rule 5), and an entry handed back before that
+/// comparison would make the control pass by losing its evidence.
+pub fn forget(k: u64) -> bool {
+    if mode() == 0 || mutating() {
+        return false;
+    }
+    let Some(k) = key(Some(k)) else { return false };
+    let gone = cache().lock().unwrap().remove(&k).is_some();
+    if gone {
+        FORGOTTEN.fetch_add(1, Relaxed);
+    }
+    gone
+}
+
+/// Whether `B7_M5_PREMUT` is asking for something other than the honest key.
+fn mutating() -> bool {
+    matches!(std::env::var("B7_M5_PREMUT").as_deref(), Ok(v) if v != "none")
 }
 
 // B7b: the view of a cached tree. The default is a full clone -- correct on
@@ -159,6 +203,7 @@ pub fn fill(k: Option<u64>, sess: &crate::common::Session<'_>) {
             let tree = sess.tree_clone(0);
             CLONE_NS.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
             g.insert(k, Entry { tree: SendTree(tree), sizes: sess.tree_sizes(0), root });
+            PEAK_ENTRIES.fetch_max(g.len() as u64, Relaxed);
         }
     }
 }
