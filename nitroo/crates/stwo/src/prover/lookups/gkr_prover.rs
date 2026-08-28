@@ -39,6 +39,34 @@ pub trait GkrOps: MleOps<BaseField> + MleOps<SecureField> {
         h: &GkrMultivariatePolyOracle<'_, Self>,
         claim: SecureField,
     ) -> UnivariatePoly<SecureField>;
+
+    /// The same, for every oracle one sum-check round is live on.
+    ///
+    /// B11 stream T: see [`MultivariatePolyOracle::sum_as_poly_in_first_variable_batch`].
+    /// Within a round every live oracle has the same number of variables and
+    /// shares one `eq_evals` table and one `lambda`, so a device backend can
+    /// answer the whole round with one launch and one copy home. The default is
+    /// the per-oracle loop, unchanged.
+    fn sum_as_poly_in_first_variable_batch(
+        hs: &[&GkrMultivariatePolyOracle<'_, Self>],
+        claims: &[SecureField],
+    ) -> Vec<UnivariatePoly<SecureField>> {
+        zip(hs, claims)
+            .map(|(h, &claim)| Self::sum_as_poly_in_first_variable(h, claim))
+            .collect()
+    }
+
+    /// Fold every layer a sum-check round folds, in one call.
+    ///
+    /// B11 stream T: one launch per round instead of one per column per
+    /// instance. Every layer handed here has the same number of variables, so
+    /// every column has the same length. The default is the per-layer loop.
+    fn fix_first_variable_batch(
+        layers: Vec<Layer<Self>>,
+        challenge: SecureField,
+    ) -> Vec<Layer<Self>> {
+        layers.into_iter().map(|l| l.fix_first_variable(challenge)).collect()
+    }
 }
 
 /// Stores evaluations of [`eq(x, y)`] on all boolean hypercube points of the form
@@ -173,7 +201,9 @@ impl<B: GkrOps> Layer<B> {
     }
 
     /// Returns a transformed layer with the first variable of each column fixed to `assignment`.
-    fn fix_first_variable(self, x0: SecureField) -> Self {
+    /// B11 stream T: `pub(crate)` so a backend's batched fold can fall back to
+    /// it -- the fallback every batched seam in this file keeps.
+    pub(crate) fn fix_first_variable(self, x0: SecureField) -> Self {
         if self.n_variables() == 0 {
             return self;
         }
@@ -306,6 +336,55 @@ impl<B: GkrOps> MultivariatePolyOracle for GkrMultivariatePolyOracle<'_, B> {
 
     fn sum_as_poly_in_first_variable(&self, claim: SecureField) -> UnivariatePoly<SecureField> {
         B::sum_as_poly_in_first_variable(self, claim)
+    }
+
+    fn sum_as_poly_in_first_variable_batch(
+        polys: &[&Self],
+        claims: &[SecureField],
+    ) -> Vec<UnivariatePoly<SecureField>> {
+        B::sum_as_poly_in_first_variable_batch(polys, claims)
+    }
+
+    /// B11 stream T: the eq correction is a scalar per oracle and stays here;
+    /// the layers -- the device work -- fold together.
+    fn fix_first_variable_batch(
+        polys: Vec<Self>,
+        live: &[bool],
+        challenge: SecureField,
+    ) -> Vec<Self> {
+        let mut heads = Vec::with_capacity(polys.len());
+        let mut layers = Vec::new();
+        for (poly, &live) in zip(polys, live) {
+            let fold = live && !poly.is_constant();
+            let eq_fixed_var_correction = if fold {
+                let z0 = poly.eq_evals.y()[poly.eq_evals.y().len() - poly.n_variables()];
+                poly.eq_fixed_var_correction * eq(&[challenge], &[z0])
+            } else {
+                poly.eq_fixed_var_correction
+            };
+            if fold {
+                layers.push(poly.input_layer);
+                heads.push((poly.eq_evals, eq_fixed_var_correction, poly.lambda, None));
+            } else {
+                heads.push((
+                    poly.eq_evals,
+                    eq_fixed_var_correction,
+                    poly.lambda,
+                    Some(poly.input_layer),
+                ));
+            }
+        }
+        let mut folded = B::fix_first_variable_batch(layers, challenge).into_iter();
+        heads
+            .into_iter()
+            .map(|(eq_evals, eq_fixed_var_correction, lambda, kept)| Self {
+                eq_evals,
+                eq_fixed_var_correction,
+                input_layer: kept
+                    .unwrap_or_else(|| folded.next().expect("a folded layer is missing")),
+                lambda,
+            })
+            .collect()
     }
 
     fn fix_first_variable(self, challenge: SecureField) -> Self {

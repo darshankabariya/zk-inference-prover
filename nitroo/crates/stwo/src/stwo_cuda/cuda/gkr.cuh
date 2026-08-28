@@ -38,6 +38,21 @@ void gkr_sum_logup_singles(
     const qm31 *den, const qm31 *eq, qm31 lambda,
     uint32_t n_terms, qm31 *partials, uint32_t n_blocks);
 
+// B11 stream T: one sum-check round's sums for every live instance, in one
+// launch. `kind` picks the layer variant per instance; `a` is the numerator
+// side and `b` the denominator side.
+extern "C"
+void gkr_sum_batch(
+    const void *const *a_host, const qm31 *const *b_host, const uint32_t *kind_host,
+    uint32_t n_inst, const qm31 *eq, qm31 lambda, uint32_t n_terms,
+    qm31 *partials, uint32_t n_blocks);
+
+// B11 stream T: one round's variable fixes, every column in one launch.
+extern "C"
+void gkr_fix_batch(
+    const void *const *src_host, const uint32_t *is_base_host, qm31 *const *dst_host,
+    uint32_t n_cols, qm31 assignment, uint32_t half);
+
 // Profiling only.
 extern "C"
 void gkr_device_synchronize();

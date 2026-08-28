@@ -34,6 +34,40 @@ pub trait MultivariatePolyOracle: Sized {
     /// The returned oracle represents the multivariate polynomial `g'`, defined as
     /// `g'(x_1, ..., x_{n-1}) = g(challenge, x_1, ..., x_{n-1})`.
     fn fix_first_variable(self, challenge: SecureField) -> Self;
+
+    /// The same, for every oracle a round is live on, in one call.
+    ///
+    /// B11 stream T: `prove_batch` asks each live oracle separately, and on a
+    /// device backend that is one kernel launch plus one blocking copy home per
+    /// oracle per round -- the round trip stream R measured as the binding wall,
+    /// because the next challenge depends on the answer and nothing overlaps.
+    /// Every oracle a round is live on has the same number of variables (that is
+    /// what "live" means here), so the whole round is one launch and one copy;
+    /// this is the seam that lets a backend say so. The default is exactly the
+    /// loop it replaces, so a backend that does not override it is unchanged.
+    fn sum_as_poly_in_first_variable_batch(
+        polys: &[&Self],
+        claims: &[SecureField],
+    ) -> Vec<UnivariatePoly<SecureField>> {
+        zip(polys, claims)
+            .map(|(poly, &claim)| poly.sum_as_poly_in_first_variable(claim))
+            .collect()
+    }
+
+    /// Fix the first variable of every oracle a round folds, in one call.
+    ///
+    /// B11 stream T: the other half of the same round trip. `live` marks the
+    /// oracles this round folds; the rest are returned untouched. Like the batch
+    /// above, the default is the loop it replaces.
+    fn fix_first_variable_batch(
+        polys: Vec<Self>,
+        live: &[bool],
+        challenge: SecureField,
+    ) -> Vec<Self> {
+        zip(polys, live)
+            .map(|(poly, &live)| if live { poly.fix_first_variable(challenge) } else { poly })
+            .collect()
+    }
 }
 
 /// Performs sum-check on a random linear combinations of multiple multivariate polynomials.
@@ -81,11 +115,25 @@ pub fn prove_batch<O: MultivariatePolyOracle>(
     for round in 0..n_variables {
         let n_remaining_rounds = n_variables - round;
 
+        // B11 stream T: the round's live oracles, asked together. The order is
+        // the oracle order and the arithmetic is the same arithmetic; what
+        // changes is how many times the round crosses the host-device link.
+        let live_polys = multivariate_polys
+            .iter()
+            .filter(|poly| n_remaining_rounds == poly.n_variables())
+            .collect_vec();
+        let live_claims = zip(&multivariate_polys, &claims)
+            .filter(|(poly, _)| n_remaining_rounds == poly.n_variables())
+            .map(|(_, &claim)| claim)
+            .collect_vec();
+        let mut live_round_polys =
+            O::sum_as_poly_in_first_variable_batch(&live_polys, &live_claims).into_iter();
+
         let this_round_polys = zip(&multivariate_polys, &claims)
             .enumerate()
             .map(|(i, (multivariate_poly, &claim))| {
                 let round_poly = if n_remaining_rounds == multivariate_poly.n_variables() {
-                    multivariate_poly.sum_as_poly_in_first_variable(claim)
+                    live_round_polys.next().expect("a live oracle got no round polynomial")
                 } else {
                     (claim / BaseField::from(2)).into()
                 };
@@ -98,6 +146,7 @@ pub fn prove_batch<O: MultivariatePolyOracle>(
                 round_poly
             })
             .collect_vec();
+        assert!(live_round_polys.next().is_none(), "more round polynomials than live oracles");
 
         let round_poly = random_linear_combination(&this_round_polys, lambda);
 
@@ -110,16 +159,12 @@ pub fn prove_batch<O: MultivariatePolyOracle>(
             .map(|round_poly| round_poly.eval_at_point(challenge))
             .collect();
 
-        multivariate_polys = multivariate_polys
-            .into_iter()
-            .map(|multivariate_poly| {
-                if n_remaining_rounds != multivariate_poly.n_variables() {
-                    return multivariate_poly;
-                }
-
-                multivariate_poly.fix_first_variable(challenge)
-            })
-            .collect();
+        let live_mask = multivariate_polys
+            .iter()
+            .map(|poly| n_remaining_rounds == poly.n_variables())
+            .collect_vec();
+        multivariate_polys =
+            O::fix_first_variable_batch(multivariate_polys, &live_mask, challenge);
 
         round_polys.push(round_poly);
         assignment.push(challenge);

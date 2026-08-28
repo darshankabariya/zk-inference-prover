@@ -56,10 +56,43 @@ pub(crate) fn alloc_secure(n: usize) -> SecureFieldVec {
 /// must not share a scratch buffer; the prover itself is sequential here.
 fn partials_ptr() -> *const u32 {
     thread_local! {
-        static PARTIALS: *const u32 =
-            unsafe { bindings::gkr_alloc_qm31(2 * GKR_SUM_MAX_BLOCKS as u32) };
+        static PARTIALS: *const u32 = unsafe {
+            bindings::gkr_alloc_qm31(2 * (GKR_SUM_MAX_BLOCKS * GKR_SUM_MAX_INSTANCES) as u32)
+        };
     }
     PARTIALS.with(|p| *p)
+}
+
+/// The most instances one fused round writes partials for. A batch beyond this
+/// falls back to the per-instance loop rather than overrunning the buffer --
+/// the composed arm's batch is fifteen.
+const GKR_SUM_MAX_INSTANCES: usize = 64;
+
+unsafe extern "C" {
+    /// B11 stream T: one round's sums for every live instance, in one launch.
+    /// Declared here rather than in `bindings` because it is the GKR arm's own
+    /// kernel and nothing else calls it.
+    /// B11 stream T: one round's variable fixes, every column in one launch.
+    fn gkr_fix_batch(
+        src_host: *const *const std::ffi::c_void,
+        is_base_host: *const u32,
+        dst_host: *const *const u32,
+        n_cols: u32,
+        assignment: CudaSecureField,
+        half: u32,
+    );
+
+    fn gkr_sum_batch(
+        a_host: *const *const std::ffi::c_void,
+        b_host: *const *const u32,
+        kind_host: *const u32,
+        n_inst: u32,
+        eq: *const u32,
+        lambda: CudaSecureField,
+        n_terms: u32,
+        partials: *const u32,
+        n_blocks: u32,
+    );
 }
 
 impl GkrOps for CudaBackend {
@@ -235,6 +268,208 @@ impl GkrOps for CudaBackend {
         eval_at_0 *= h.eq_fixed_var_correction;
         eval_at_2 *= h.eq_fixed_var_correction;
         correct_sum_as_poly_in_first_variable(eval_at_0, eval_at_2, claim, y, n_variables)
+    }
+
+    /// B11 stream T: the whole round in one launch and one copy home.
+    ///
+    /// Stream R measured the wall this removes: per instance per round, one
+    /// launch plus one *blocking* copy home, because the next challenge depends
+    /// on the answer. The oracles a round is live on all have the same number of
+    /// variables and share one `eq` table and one `lambda` -- the conditions are
+    /// checked here, not assumed, and a batch that fails any of them takes the
+    /// per-instance loop. The kernel's per-thread arithmetic is the
+    /// single-instance kernels' arithmetic term for term, so every round
+    /// polynomial is the field element it was before: this is a scheduling
+    /// change, and the proof digest is what says so.
+    fn sum_as_poly_in_first_variable_batch(
+        hs: &[&GkrMultivariatePolyOracle<'_, Self>],
+        claims: &[SecureField],
+    ) -> Vec<UnivariatePoly<SecureField>> {
+        let _t = prof::scope(prof::SUM);
+        let fallback = || -> Vec<UnivariatePoly<SecureField>> {
+            hs.iter()
+                .zip(claims)
+                .map(|(h, &claim)| Self::sum_as_poly_in_first_variable(h, claim))
+                .collect()
+        };
+        // `B11_GKR_FUSE=0` pins the round back to the per-instance loop, so the
+        // fused and unfused arms can be measured on one build and one chunk.
+        if std::env::var("B11_GKR_FUSE").map(|v| v == "0").unwrap_or(false) {
+            return fallback();
+        }
+        let Some(first) = hs.first() else { return vec![] };
+        let n_variables = first.n_variables();
+        let n_inst = hs.len();
+        if n_inst < 2 || n_inst > GKR_SUM_MAX_INSTANCES || n_variables == 0 {
+            return fallback();
+        }
+        let eq_ptr = first.eq_evals.as_ref().device_ptr;
+        let lambda = first.lambda;
+        let uniform = hs.iter().all(|h| {
+            h.n_variables() == n_variables
+                && h.eq_evals.as_ref().device_ptr == eq_ptr
+                && h.lambda == lambda
+        });
+        if !uniform {
+            return fallback();
+        }
+
+        let n_terms = 1usize << (n_variables - 1);
+        let n_blocks = n_terms.div_ceil(256).min(GKR_SUM_MAX_BLOCKS).max(1);
+
+        let mut a: Vec<*const std::ffi::c_void> = Vec::with_capacity(n_inst);
+        let mut b: Vec<*const u32> = Vec::with_capacity(n_inst);
+        let mut kind: Vec<u32> = Vec::with_capacity(n_inst);
+        for h in hs {
+            let (ap, bp, k) = match &h.input_layer {
+                Layer::GrandProduct(mle) => (mle.device_ptr as *const _, std::ptr::null(), 0u32),
+                Layer::LogUpGeneric {
+                    numerators,
+                    denominators,
+                } => (numerators.device_ptr as *const _, denominators.device_ptr, 1),
+                Layer::LogUpMultiplicities {
+                    numerators,
+                    denominators,
+                } => (numerators.device_ptr as *const _, denominators.device_ptr, 2),
+                Layer::LogUpSingles { denominators } => {
+                    (std::ptr::null(), denominators.device_ptr, 3)
+                }
+            };
+            a.push(ap);
+            b.push(bp);
+            kind.push(k);
+        }
+
+        let partials = partials_ptr();
+        unsafe {
+            gkr_sum_batch(
+                a.as_ptr(),
+                b.as_ptr(),
+                kind.as_ptr(),
+                n_inst as u32,
+                eq_ptr,
+                lambda.into(),
+                n_terms as u32,
+                partials,
+                n_blocks as u32,
+            );
+        }
+
+        // One copy home for the round. Field addition is exact and associative,
+        // so adding each instance's block partials on the host changes nothing.
+        let pairs = n_blocks * n_inst;
+        let mut host: Vec<SecureField> = Vec::with_capacity(2 * pairs);
+        unsafe {
+            host.set_len(2 * pairs);
+            bindings::gkr_read_partials(partials, pairs as u32, host.as_mut_ptr() as *mut u32);
+        }
+
+        hs.iter()
+            .zip(claims)
+            .enumerate()
+            .map(|(i, (h, &claim))| {
+                let mut eval_at_0 = SecureField::zero();
+                let mut eval_at_2 = SecureField::zero();
+                for pair in host[2 * i * n_blocks..2 * (i + 1) * n_blocks].chunks_exact(2) {
+                    eval_at_0 += pair[0];
+                    eval_at_2 += pair[1];
+                }
+                eval_at_0 *= h.eq_fixed_var_correction;
+                eval_at_2 *= h.eq_fixed_var_correction;
+                correct_sum_as_poly_in_first_variable(
+                    eval_at_0,
+                    eval_at_2,
+                    claim,
+                    h.eq_evals.y(),
+                    n_variables,
+                )
+            })
+            .collect()
+    }
+
+    /// B11 stream T: one launch for every column of every layer the round folds.
+    ///
+    /// `Mle::fix_first_variable` allocates its output and launches once per
+    /// column; a round folds two columns per LogUp instance, which stream R
+    /// counted as 9,624 launches a chunk. The outputs are allocated first and
+    /// their pointers handed to one kernel, so the round's folds cost one
+    /// launch. The per-element arithmetic is `mle.cu`'s, unchanged.
+    fn fix_first_variable_batch(
+        layers: Vec<Layer<Self>>,
+        challenge: SecureField,
+    ) -> Vec<Layer<Self>> {
+        let _t = prof::scope(prof::FIX);
+        let unfused = std::env::var("B11_GKR_FUSE").map(|v| v == "0").unwrap_or(false);
+        if unfused || layers.len() < 2 {
+            return layers.into_iter().map(|l| l.fix_first_variable(challenge)).collect();
+        }
+        // Every layer here has the same number of variables, so every column has
+        // the same length; a layer with nothing left to fold is handed back.
+        let half = (1usize << layers[0].n_variables()) >> 1;
+        if half == 0 || layers.iter().any(|l| l.n_variables() != layers[0].n_variables()) {
+            return layers.into_iter().map(|l| l.fix_first_variable(challenge)).collect();
+        }
+
+        let mut src: Vec<*const std::ffi::c_void> = vec![];
+        let mut is_base: Vec<u32> = vec![];
+        let mut outs: Vec<SecureFieldVec> = vec![];
+        for layer in &layers {
+            let mut take = |p: *const u32, base: bool| {
+                src.push(p as *const std::ffi::c_void);
+                is_base.push(base as u32);
+                outs.push(alloc_secure(half));
+            };
+            match layer {
+                Layer::GrandProduct(mle) => take(mle.device_ptr, false),
+                Layer::LogUpGeneric {
+                    numerators,
+                    denominators,
+                } => {
+                    take(numerators.device_ptr, false);
+                    take(denominators.device_ptr, false);
+                }
+                Layer::LogUpMultiplicities {
+                    numerators,
+                    denominators,
+                } => {
+                    take(numerators.device_ptr, true);
+                    take(denominators.device_ptr, false);
+                }
+                Layer::LogUpSingles { denominators } => take(denominators.device_ptr, false),
+            }
+        }
+        let dst: Vec<*const u32> = outs.iter().map(|c| c.device_ptr).collect();
+        unsafe {
+            gkr_fix_batch(
+                src.as_ptr(),
+                is_base.as_ptr(),
+                dst.as_ptr(),
+                src.len() as u32,
+                challenge.into(),
+                half as u32,
+            );
+        }
+        // The sources are freed as the old layers drop below; the pool frees are
+        // stream-ordered behind the launch, exactly as the per-column path's are.
+        let mut outs = outs.into_iter();
+        let folded = layers
+            .iter()
+            .map(|layer| match layer {
+                Layer::GrandProduct(_) => Layer::GrandProduct(Mle::new(outs.next().unwrap())),
+                Layer::LogUpGeneric { .. } | Layer::LogUpMultiplicities { .. } => {
+                    Layer::LogUpGeneric {
+                        numerators: Mle::new(outs.next().unwrap()),
+                        denominators: Mle::new(outs.next().unwrap()),
+                    }
+                }
+                Layer::LogUpSingles { .. } => Layer::LogUpSingles {
+                    denominators: Mle::new(outs.next().unwrap()),
+                },
+            })
+            .collect();
+        assert!(outs.next().is_none(), "more folded columns than layers asked for");
+        drop(layers);
+        folded
     }
 }
 
@@ -620,6 +855,72 @@ mod tests {
 
     /// Grand product through the whole pipeline too -- the band arm never uses
     /// it, but the backend claims all four variants.
+    /// B11 stream T: the fused round against the unfused path it replaces.
+    ///
+    /// The digest gate says the composed proof is unmoved; this says why, value
+    /// by value, on the mixture the composed arm actually presents -- instances
+    /// of every layer variant, all live in the same round, sharing one `eq`
+    /// table and one `lambda`.
+    #[test]
+    fn sum_as_poly_batch_matches_unbatched() {
+        let mut rng = rng();
+        for log_n in [2usize, 3, 5, 8, 12] {
+            let n = 1 << log_n;
+            let y = secure(&mut rng, log_n);
+            let lambda: SecureField = rng.gen();
+            let eq = EqEvals::<CudaBackend>::generate(&y);
+
+            // one oracle per variant, plus a second generic so the batch is not
+            // a permutation of distinct kinds
+            let mut layers: Vec<Layer<CudaBackend>> = vec![];
+            for _ in 0..2 {
+                layers.push(Layer::LogUpGeneric {
+                    numerators: cuda_secure(&secure(&mut rng, n)),
+                    denominators: cuda_secure(&secure(&mut rng, n)),
+                });
+            }
+            layers.push(Layer::LogUpSingles {
+                denominators: cuda_secure(&secure(&mut rng, n)),
+            });
+            layers.push(Layer::GrandProduct(cuda_secure(&secure(&mut rng, n))));
+            layers.push(Layer::LogUpMultiplicities {
+                numerators: Mle::new(BaseFieldVec::from_vec(
+                    (0..n).map(|_| rng.gen::<BaseField>()).collect_vec(),
+                )),
+                denominators: cuda_secure(&secure(&mut rng, n)),
+            });
+
+            // a different correction and claim per oracle: both enter only the
+            // host-side tail, which is exactly where a batch could mix them up
+            let oracles = layers
+                .into_iter()
+                .enumerate()
+                .map(|(i, input_layer)| GkrMultivariatePolyOracle {
+                    eq_evals: Cow::Borrowed(&eq),
+                    input_layer,
+                    eq_fixed_var_correction: SecureField::from_u32_unchecked(
+                        i as u32 + 1,
+                        7,
+                        0,
+                        i as u32,
+                    ),
+                    lambda,
+                })
+                .collect_vec();
+            let claims = (0..oracles.len())
+                .map(|i| SecureField::from_u32_unchecked(i as u32 + 3, 1, 4, 1))
+                .collect_vec();
+
+            let refs = oracles.iter().collect_vec();
+            let got = CudaBackend::sum_as_poly_in_first_variable_batch(&refs, &claims);
+            assert_eq!(got.len(), oracles.len());
+            for (i, (oracle, &claim)) in zip(&oracles, &claims).enumerate() {
+                let want = CudaBackend::sum_as_poly_in_first_variable(oracle, claim);
+                assert_eq!(got[i].to_vec(), want.to_vec(), "log_n={log_n} oracle={i}");
+            }
+        }
+    }
+
     #[test]
     fn prove_batch_grand_product_matches_cpu() {
         let mut rng = rng();

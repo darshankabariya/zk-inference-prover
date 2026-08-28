@@ -1,4 +1,6 @@
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
 #include "utils.cuh"
 #include "gkr.cuh"
@@ -207,6 +209,162 @@ __global__ void gkr_sum_logup_singles_kernel(
     gkr_block_reduce_pair(acc0, acc2, partials);
 }
 
+// B11 stream T: one round's sums for every live instance, in one launch.
+//
+// Stream R named the binding wall: `sumcheck::prove_batch` asks each live
+// oracle separately every round, and the next challenge depends on the answer,
+// so a chunk pays one launch plus one blocking copy home per instance per round
+// -- about 4,800 round trips at 30-36 us. Within a round every live oracle has
+// the same number of variables and shares one `eq` table and one `lambda`, so
+// the whole round is this kernel: `blockIdx.y` is the instance, `blockIdx.x`
+// the chunk, and the partials land in that instance's own slice. The per-thread
+// arithmetic is copied from the four single-instance kernels above, term for
+// term, because it has to produce the same field elements they do.
+//
+// `kind`: 0 grand product, 1 LogUp generic, 2 LogUp multiplicities, 3 singles.
+// `a` is the numerator side (qm31, or m31 for multiplicities, unused for
+// singles), `b` the denominator side (unused for grand product).
+__global__ void gkr_sum_batch_kernel(
+        const void *const *a, const qm31 *const *b, const uint32_t *kind,
+        const qm31 *eq, qm31 lambda, uint32_t n_terms, qm31 *partials,
+        uint32_t n_blocks) {
+    const uint32_t inst = blockIdx.y;
+    qm31 *out = partials + 2u * (size_t)inst * n_blocks;
+    const uint32_t k = kind[inst];
+    qm31 acc0 = qm31_zero(), acc2 = qm31_zero();
+
+    if (k == 0u) {
+        const qm31 *inp = (const qm31 *)a[inst];
+        for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n_terms;
+             i += gridDim.x * blockDim.x) {
+            qm31 a00 = inp[2 * i], a01 = inp[2 * i + 1];
+            qm31 a10 = inp[2 * (n_terms + i)], a11 = inp[2 * (n_terms + i) + 1];
+            qm31 a20 = sub(dbl(a10), a00), a21 = sub(dbl(a11), a01);
+            qm31 e = eq[i];
+            acc0 = add(acc0, mul(e, mul(a00, a01)));
+            acc2 = add(acc2, mul(e, mul(a20, a21)));
+        }
+    } else if (k == 1u) {
+        const qm31 *num = (const qm31 *)a[inst];
+        const qm31 *den = b[inst];
+        for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n_terms;
+             i += gridDim.x * blockDim.x) {
+            qm31 n00 = num[2 * i], n01 = num[2 * i + 1];
+            qm31 d00 = den[2 * i], d01 = den[2 * i + 1];
+            qm31 n10 = num[2 * (n_terms + i)], n11 = num[2 * (n_terms + i) + 1];
+            qm31 d10 = den[2 * (n_terms + i)], d11 = den[2 * (n_terms + i) + 1];
+            qm31 n20 = sub(dbl(n10), n00), n21 = sub(dbl(n11), n01);
+            qm31 d20 = sub(dbl(d10), d00), d21 = sub(dbl(d11), d01);
+            qm31 numer0 = add(mul(n00, d01), mul(n01, d00));
+            qm31 denom0 = mul(d00, d01);
+            qm31 numer2 = add(mul(n20, d21), mul(n21, d20));
+            qm31 denom2 = mul(d20, d21);
+            qm31 e = eq[i];
+            acc0 = add(acc0, mul(e, add(numer0, mul(lambda, denom0))));
+            acc2 = add(acc2, mul(e, add(numer2, mul(lambda, denom2))));
+        }
+    } else if (k == 2u) {
+        const m31 *num = (const m31 *)a[inst];
+        const qm31 *den = b[inst];
+        for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n_terms;
+             i += gridDim.x * blockDim.x) {
+            m31 n00 = num[2 * i], n01 = num[2 * i + 1];
+            qm31 d00 = den[2 * i], d01 = den[2 * i + 1];
+            m31 n10 = num[2 * (n_terms + i)], n11 = num[2 * (n_terms + i) + 1];
+            qm31 d10 = den[2 * (n_terms + i)], d11 = den[2 * (n_terms + i) + 1];
+            m31 n20 = sub(add(n10, n10), n00), n21 = sub(add(n11, n11), n01);
+            qm31 d20 = sub(dbl(d10), d00), d21 = sub(dbl(d11), d01);
+            qm31 numer0 = add(mul(n00, d01), mul(n01, d00));
+            qm31 denom0 = mul(d00, d01);
+            qm31 numer2 = add(mul(n20, d21), mul(n21, d20));
+            qm31 denom2 = mul(d20, d21);
+            qm31 e = eq[i];
+            acc0 = add(acc0, mul(e, add(numer0, mul(lambda, denom0))));
+            acc2 = add(acc2, mul(e, add(numer2, mul(lambda, denom2))));
+        }
+    } else {
+        const qm31 *den = b[inst];
+        for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n_terms;
+             i += gridDim.x * blockDim.x) {
+            qm31 d00 = den[2 * i], d01 = den[2 * i + 1];
+            qm31 d10 = den[2 * (n_terms + i)], d11 = den[2 * (n_terms + i) + 1];
+            qm31 d20 = sub(dbl(d10), d00), d21 = sub(dbl(d11), d01);
+            qm31 numer0 = add(d00, d01);
+            qm31 denom0 = mul(d00, d01);
+            qm31 numer2 = add(d20, d21);
+            qm31 denom2 = mul(d20, d21);
+            qm31 e = eq[i];
+            acc0 = add(acc0, mul(e, add(numer0, mul(lambda, denom0))));
+            acc2 = add(acc2, mul(e, add(numer2, mul(lambda, denom2))));
+        }
+    }
+    gkr_block_reduce_pair(acc0, acc2, out);
+}
+
+// The three small host arrays (two pointer tables and the kinds) are uploaded
+// once per round; at fifteen instances that is under half a kilobyte against
+// the fourteen launches and fourteen blocking copies it replaces.
+void gkr_sum_batch(
+        const void *const *a_host, const qm31 *const *b_host, const uint32_t *kind_host,
+        uint32_t n_inst, const qm31 *eq, qm31 lambda, uint32_t n_terms,
+        qm31 *partials, uint32_t n_blocks) {
+    const void **d_a = clone_to_device<const void *>((const void **)a_host, n_inst);
+    const qm31 **d_b = clone_to_device<const qm31 *>((const qm31 **)b_host, n_inst);
+    uint32_t *d_kind = clone_to_device<uint32_t>((uint32_t *)kind_host, n_inst);
+    dim3 grid(n_blocks, n_inst);
+    gkr_sum_batch_kernel<<<grid, GKR_SUM_BLOCK>>>(
+        d_a, d_b, d_kind, eq, lambda, n_terms, partials, n_blocks);
+    ASSERT_CUDA_SUCCESS(cudaGetLastError());
+    // Stream-ordered: the frees queue behind the kernel, and the caller's copy
+    // home behind both.
+    cuda_free_memory(d_a);
+    cuda_free_memory(d_b);
+    cuda_free_memory(d_kind);
+}
+
+// B11 stream T: one round's variable fixes, for every column of every folded
+// instance, in one launch.
+//
+// The other half of the round's launch traffic: `Mle::fix_first_variable` is
+// one launch per column, and a round folds two columns per LogUp instance. The
+// arithmetic is `mle.cu`'s template body, term for term; `is_base` picks the
+// source type, because a `LogUpMultiplicities` numerator column is base-field
+// and folds into a secure-field one. Every column in a batch has the same
+// length -- the layers a round folds all have the same number of variables.
+__global__ void gkr_fix_batch_kernel(
+        const void *const *src, const uint32_t *is_base, qm31 *const *dst,
+        qm31 assignment, uint32_t half) {
+    const uint32_t col = blockIdx.y;
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= half) return;
+    if (is_base[col]) {
+        const m31 *e = (const m31 *)src[col];
+        m31 l = e[i], r = e[i + half];
+        dst[col][i] = add(l, mul(sub(r, l), assignment));
+    } else {
+        const qm31 *e = (const qm31 *)src[col];
+        qm31 l = e[i], r = e[i + half];
+        dst[col][i] = add(l, mul(sub(r, l), assignment));
+    }
+}
+
+void gkr_fix_batch(
+        const void *const *src_host, const uint32_t *is_base_host, qm31 *const *dst_host,
+        uint32_t n_cols, qm31 assignment, uint32_t half) {
+    const void **d_src = clone_to_device<const void *>((const void **)src_host, n_cols);
+    uint32_t *d_base = clone_to_device<uint32_t>((uint32_t *)is_base_host, n_cols);
+    qm31 **d_dst = clone_to_device<qm31 *>((qm31 **)dst_host, n_cols);
+    const uint32_t block = half < 256u ? half : 256u;
+    const uint32_t blocks = (half + block - 1u) / block;
+    dim3 grid(blocks, n_cols);
+    gkr_fix_batch_kernel<<<grid, block>>>(d_src, d_base, d_dst, assignment, half);
+    ASSERT_CUDA_SUCCESS(cudaGetLastError());
+    // Stream-ordered, like every free on this path.
+    cuda_free_memory(d_src);
+    cuda_free_memory(d_base);
+    cuda_free_memory(d_dst);
+}
+
 void gkr_next_layer_grand_product(const qm31 *inp, qm31 *out, uint32_t n_out) {
     uint32_t block = 256;
     uint32_t blocks = (n_out + block - 1) / block;
@@ -289,9 +447,23 @@ qm31 *gkr_alloc_qm31(uint32_t n) {
 // saves the driver's staging on every one of the ~1,700 round trips a chunk
 // makes. The caller hands a host destination; the pinned buffer is internal.
 void gkr_read_partials(const qm31 *dev, uint32_t n_pairs, qm31 *out_host) {
-    static qm31 *pinned = nullptr;
+    // B11 stream T: one round's partials for every live instance now arrive in
+    // one copy, so the staging buffer is sized for the whole round rather than
+    // one instance -- 264 blocks times 64 instances, which no batch reaches.
+    static const uint32_t PINNED_PAIRS = 264u * 64u;
+    // Per thread, like the partials buffer it reads: the test harness runs
+    // tests in parallel and two concurrent readbacks must not share staging.
+    // (Found by stream T: the batched copy is larger and takes longer, so the
+    // window this always had became wide enough to fail a test.)
+    static thread_local qm31 *pinned = nullptr;
     if (pinned == nullptr) {
-        ASSERT_CUDA_SUCCESS(cudaMallocHost((void **)&pinned, 2 * 264 * sizeof(qm31)));
+        ASSERT_CUDA_SUCCESS(cudaMallocHost((void **)&pinned,
+                                           2 * PINNED_PAIRS * sizeof(qm31)));
+    }
+    if (n_pairs > PINNED_PAIRS) {
+        fprintf(stderr, "gkr_read_partials: %u pairs, staging holds %u\n",
+                n_pairs, PINNED_PAIRS);
+        abort();
     }
     ASSERT_CUDA_SUCCESS(cudaMemcpyAsync(pinned, dev, 2 * n_pairs * sizeof(qm31),
                                         cudaMemcpyDeviceToHost, 0));
