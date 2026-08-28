@@ -1019,3 +1019,281 @@ pub fn check_height_cols(hl: &HeightLink, cols: &[Eval]) {
     }
     eprintln!("linkcheck 2^{h}: done ({bad_step} step, {bad_pre} prefix violations shown)");
 }
+
+// ------------------------------------------------------------------------
+// B11 stream U, lever 1: the link's committed columns on the card.
+//
+// Stream T measured the five host loops this section replaces -- the carry
+// quotient at 0.078 s, the eq column at 0.041 s, the coordinate split at
+// 0.032 s, the prefix sums at 0.024 s and the term products at 0.014 s, so
+// 0.190 s per C=16384 chunk -- and named them the arm's single largest
+// remaining item, host work in a regime where every other interaction column
+// is built on the card. Nothing about *what* is computed changes here: the
+// same values in the same slots, which is why every one of T's digests is a
+// reproduction gate for this lever rather than a number to re-record.
+// ------------------------------------------------------------------------
+
+/// Where the link's own columns are built.
+///
+/// On the cuda arm the whole chain runs on the card and the sixteen columns per
+/// height reach the commitment device-resident, the way the bands' fraction
+/// columns already do. `B11_LINKDEV=0` puts the build back on the host: that is
+/// the control the stream's own Δ is measured against, the same shape as T's
+/// `B11_GKR_FUSE=0`.
+#[cfg(feature = "cuda")]
+pub fn dev_link() -> bool {
+    std::env::var("B11_LINKDEV").map(|v| v != "0").unwrap_or(true)
+}
+
+/// One height's sixteen committed columns, built wherever the prover can build
+/// them, ready for the interaction tree.
+pub fn height_cols<'a, F: Fn(usize, &RCol) -> Src<'a>>(
+    hl: &HeightLink,
+    src_of: &F,
+) -> Vec<crate::device::AnyCol<'static>> {
+    #[cfg(feature = "cuda")]
+    if dev_link() {
+        let cols = dev::height_cols(hl, src_of);
+        dev::col_check(hl, src_of, &cols);
+        return cols;
+    }
+    let t = std::time::Instant::now();
+    let coeff = fold_coeff(hl, src_of);
+    crate::util::m4_add("int/link_fold", t.elapsed().as_secs_f64());
+    let t = std::time::Instant::now();
+    let cols = build_height_cols(hl, coeff);
+    crate::util::m4_add("int/link_cols", t.elapsed().as_secs_f64());
+    crate::device::host_cols(cols)
+}
+
+/// The eq-weighted total of one height's folded coefficient column, taken
+/// wherever the fold ran. This is what `B11_LINKMUT` re-derives its claim from,
+/// so it has to exist on both paths or the control would only be armed on one.
+pub fn fold_total<'a, F: Fn(usize, &RCol) -> Src<'a>>(
+    hl: &HeightLink,
+    src_of: &F,
+) -> SecureField {
+    #[cfg(feature = "cuda")]
+    if dev_link() {
+        return dev::fold_total(hl, src_of);
+    }
+    eq_total(hl, &fold_coeff(hl, src_of))
+}
+
+/// The link's column build on the card.
+///
+/// Five kernels in `nitroo/.../cuda/gkr.cu` beside `b65_link_coeff`, one per
+/// host loop, each reproducing its loop value for value. The intermediate
+/// columns -- the folded coefficients, the eq evaluations, the shifted
+/// products -- never come home; only the claim's own total does, as the block
+/// partials of the products, because the prover asserts that boundary loudly.
+#[cfg(feature = "cuda")]
+pub mod dev {
+    use super::*;
+    use crate::device::AnyCol;
+    use stwo::prover::backend::cuda::CudaBackend;
+    use stwo::stwo_cuda::base_field_vec::BaseFieldVec;
+    use stwo::stwo_cuda::secure_field_vec::SecureFieldVec;
+
+    unsafe extern "C" {
+        fn b65_link_coeff(cols: *const *const u32, w_host: *const u32, n_cols: u32,
+                          k: [u32; 4], out: *const u32, n_rows: u32);
+        fn b65_link_split(src: *const u32, o0: *const u32, o1: *const u32,
+                          o2: *const u32, o3: *const u32, n_rows: u32);
+        fn b65_link_terms(coeff: *const u32, eq: *const u32, shift: [u32; 4],
+                          out: *const u32, partials: *mut u32, n_blocks: u32,
+                          n_rows: u32);
+        fn b65_link_carry(half0: *const u32, half1: *const u32, n_vars: u32,
+                          log_size: u32, o0: *const u32, o1: *const u32,
+                          o2: *const u32, o3: *const u32);
+        fn b65_link_prefix(src: *const u32, o0: *const u32, o1: *const u32,
+                           o2: *const u32, o3: *const u32, log_size: u32);
+    }
+
+    fn sync() {
+        unsafe { stwo::stwo_cuda::bindings::gkr_device_synchronize() };
+    }
+
+    /// Four fresh device columns of one height -- one coordinate each.
+    fn quad(n: usize) -> [BaseFieldVec; 4] {
+        std::array::from_fn(|_| BaseFieldVec::new_uninitialized(n))
+    }
+
+    fn flat(v: &[SecureField]) -> Vec<u32> {
+        v.iter().flat_map(|x| x.to_m31_array().map(|c| c.0)).collect()
+    }
+
+    /// The fold, with the coefficient column left where it is built.
+    ///
+    /// T's `fold_dev` combined the device-resident terms on the card and then
+    /// downloaded the column so the host loops could read it, adding the
+    /// host-resident terms on the way. There is nothing left on the host to
+    /// read it, so the host-resident terms -- the preprocessed causal masks,
+    /// and every base column of a host-filled band -- are uploaded instead and
+    /// the whole affine combine is one launch. The accumulation order is the
+    /// weight order either way and field addition is exact, so it is the same
+    /// column.
+    fn fold<'a, F: Fn(usize, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
+                                                -> SecureFieldVec {
+        let n = 1usize << hl.h;
+        let mut keep: Vec<BaseFieldVec> = vec![];
+        let mut ptrs: Vec<*const u32> = vec![];
+        let mut ws: Vec<u32> = vec![];
+        for (band, c, w) in &hl.weights {
+            let p = match src_of(*band, c) {
+                Src::Host(e) => {
+                    assert_eq!(e.len(), n, "column height disagrees with the fold");
+                    let d = crate::device::upload_col(e);
+                    let p = d.device_ptr;
+                    keep.push(d);
+                    p
+                }
+                Src::Dev(p) => p,
+            };
+            ptrs.push(p);
+            ws.extend(w.to_m31_array().map(|x| x.0));
+        }
+        let out = SecureFieldVec::new_uninitialized(n);
+        unsafe {
+            b65_link_coeff(ptrs.as_ptr(), ws.as_ptr(), ptrs.len() as u32,
+                           hl.konst.to_m31_array().map(|x| x.0),
+                           out.device_ptr, n as u32);
+        }
+        drop(keep);
+        out
+    }
+
+    /// `coeff * eq - shift` into `out`, and the unshifted products' total.
+    /// A `None` output asks for the total alone, which is what the
+    /// `B11_LINKMUT` control needs of a bent column.
+    fn terms_of(coeff: &SecureFieldVec, eq: &SecureFieldVec, shift: SecureField,
+                out: Option<&SecureFieldVec>, n_rows: usize) -> SecureField {
+        let n_blocks = n_rows.div_ceil(256).clamp(1, 1024);
+        let mut part = vec![0u32; 4 * n_blocks];
+        unsafe {
+            b65_link_terms(coeff.device_ptr, eq.device_ptr,
+                           shift.to_m31_array().map(|x| x.0),
+                           out.map(|o| o.device_ptr).unwrap_or(std::ptr::null()),
+                           part.as_mut_ptr(), n_blocks as u32, n_rows as u32);
+        }
+        part.chunks(4).fold(SecureField::zero(), |a, c| {
+            a + SecureField::from_m31_array(
+                [0usize, 1, 2, 3].map(|i| M31::from_u32_unchecked(c[i])))
+        })
+    }
+
+    fn eq_col(hl: &HeightLink) -> SecureFieldVec {
+        CudaBackend::gen_eq_evals(&hl.point, SecureField::one()).into_evals()
+    }
+
+    pub fn fold_total<'a, F: Fn(usize, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
+                                                          -> SecureField {
+        let n = 1usize << hl.h;
+        let coeff = fold(hl, src_of);
+        let eq = eq_col(hl);
+        terms_of(&coeff, &eq, hl.shift, None, n)
+    }
+
+    pub fn height_cols<'a, F: Fn(usize, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
+                                                           -> Vec<AnyCol<'static>> {
+        let h = hl.h;
+        let n = 1usize << h;
+
+        let t = std::time::Instant::now();
+        let coeff = fold(hl, src_of);
+        sync();
+        crate::util::m4_add("int/link_fold", t.elapsed().as_secs_f64());
+
+        let cols_t = std::time::Instant::now();
+        let t = std::time::Instant::now();
+        let eq = eq_col(hl);
+        sync();
+        crate::util::m4_add("int/link_eq", t.elapsed().as_secs_f64());
+
+        // the products, and the prefix sum's boundary asserted where the host
+        // builder asserts it: a weight bug fails the prover, not just the
+        // verifier
+        let t = std::time::Instant::now();
+        let terms = SecureFieldVec::new_uninitialized(n);
+        let total = terms_of(&coeff, &eq, hl.shift, Some(&terms), n);
+        assert_eq!(total, hl.claim,
+                   "the folded coefficient column disagrees with the GKR claim at height {h}");
+        crate::util::m4_add("int/link_terms", t.elapsed().as_secs_f64());
+
+        let t = std::time::Instant::now();
+        let prefix = quad(n);
+        unsafe {
+            b65_link_prefix(terms.device_ptr, prefix[0].device_ptr, prefix[1].device_ptr,
+                            prefix[2].device_ptr, prefix[3].device_ptr, h);
+        }
+        sync();
+        drop(terms);
+        crate::util::m4_add("int/link_prefix", t.elapsed().as_secs_f64());
+
+        let t = std::time::Instant::now();
+        let (half0, half1) = gen_half_coset_carry_quotients(&hl.mle_point);
+        let (f0, f1) = (flat(&half0), flat(&half1));
+        let q = quad(n);
+        unsafe {
+            b65_link_carry(f0.as_ptr(), f1.as_ptr(), half0.len() as u32, h,
+                           q[0].device_ptr, q[1].device_ptr, q[2].device_ptr,
+                           q[3].device_ptr);
+        }
+        sync();
+        crate::util::m4_add("int/link_q", t.elapsed().as_secs_f64());
+
+        let t = std::time::Instant::now();
+        let coeff4 = quad(n);
+        let eq4 = quad(n);
+        unsafe {
+            b65_link_split(coeff.device_ptr, coeff4[0].device_ptr, coeff4[1].device_ptr,
+                           coeff4[2].device_ptr, coeff4[3].device_ptr, n as u32);
+            b65_link_split(eq.device_ptr, eq4[0].device_ptr, eq4[1].device_ptr,
+                           eq4[2].device_ptr, eq4[3].device_ptr, n as u32);
+        }
+        sync();
+        drop(coeff);
+        drop(eq);
+        crate::util::m4_add("int/link_split", t.elapsed().as_secs_f64());
+
+        crate::util::m4_add("int/link_cols", cols_t.elapsed().as_secs_f64());
+        let mut out: Vec<AnyCol<'static>> = Vec::with_capacity(16);
+        for group in [q, coeff4, eq4, prefix] {
+            out.extend(group.into_iter().map(|c| AnyCol::OwnedDev(c, h)));
+        }
+        out
+    }
+
+    /// `B11_LINKCOLCHECK=1`: the card's sixteen columns against the host
+    /// builder's, cell for cell -- stream T's `B11_FEEDCHECK` for this lever.
+    /// It pays a download and a second, host build of the same height, so it is
+    /// a control and never a measurement.
+    pub fn col_check<'a, F: Fn(usize, &RCol) -> Src<'a>>(
+        hl: &HeightLink, src_of: &F, cols: &[AnyCol<'static>],
+    ) {
+        if std::env::var("B11_LINKCOLCHECK").map(|v| v != "1").unwrap_or(true) {
+            return;
+        }
+        let want = build_height_cols(hl, fold_coeff(hl, src_of));
+        assert_eq!(want.len(), cols.len(), "the two link builds differ in column count");
+        let mut bad = 0usize;
+        for (i, (w, g)) in want.iter().zip(cols).enumerate() {
+            let got = match g {
+                AnyCol::OwnedDev(d, _) => d.to_vec(),
+                _ => panic!("the link's device build handed back a host column"),
+            };
+            let host = w.values.as_slice();
+            assert_eq!(host.len(), got.len(), "link column {i} differs in length");
+            for (r, (a, b)) in host.iter().zip(&got).enumerate() {
+                if a != b && bad < 8 {
+                    eprintln!("linkcolcheck 2^{}: column {i} row {r}: host {} device {}",
+                              hl.h, a.0, b.0);
+                    bad += 1;
+                }
+            }
+        }
+        eprintln!("linkcolcheck 2^{}: {} columns, {} mismatching cells shown",
+                  hl.h, cols.len(), bad);
+        assert_eq!(bad, 0, "the link's device columns disagree with the host builder");
+    }
+}

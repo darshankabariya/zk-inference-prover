@@ -2440,12 +2440,6 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 crate::gkrlink::RCol::Msk(i) => crate::gkrlink::Src::Host(&com.pre[msk0 + i]),
             }
         };
-        let fold = |l: &crate::gkrlink::HeightLink| {
-            let t = std::time::Instant::now();
-            let c = crate::gkrlink::fold_coeff(l, &src_of);
-            crate::util::m4_add("int/link_fold", t.elapsed().as_secs_f64());
-            c
-        };
         // B11 stream S, the link's own control: `B11_LINKMUT=<k>` bends one
         // folded weight and re-derives the claim from the bent column, so the
         // prover's every self-check passes and the proof is *self-consistent*
@@ -2455,17 +2449,16 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             let at: usize = spec.parse::<usize>().unwrap_or(0) % hl.len();
             eprintln!("linkmut: height 2^{}, first folded weight bent", hl[at].h);
             hl[at].weights[0].2 += SecureField::one();
-            let bent = fold(&hl[at]);
-            hl[at].claim = crate::gkrlink::eq_total(&hl[at], &bent);
+            hl[at].claim = crate::gkrlink::fold_total(&hl[at], &src_of);
             hl[at].shift = hl[at].claim
                 / SecureField::from(M31::from_u32_unchecked(1u32 << hl[at].h));
         }
+        // B11 stream U, lever 1: the fold and the five column builds are one
+        // call now, because on the cuda arm they are one chain that stays on
+        // the card -- the coefficient column is no longer downloaded for the
+        // host loops to read. `B11_LINKDEV=0` is the host control.
         for l in &hl {
-            let coeff = fold(l);
-            let t = std::time::Instant::now();
-            let cols = crate::gkrlink::build_height_cols(l, coeff);
-            crate::util::m4_add("int/link_cols", t.elapsed().as_secs_f64());
-            inter_all.extend(crate::device::host_cols(cols));
+            inter_all.extend(crate::gkrlink::height_cols(l, &src_of));
         }
         inter_mark("gkrlink", &inter_all, &mut inter_seen, &mut inter_split);
         crate::util::m4_add("int/link", m4_t.elapsed().as_secs_f64());
