@@ -26,7 +26,7 @@
 //!
 //! There is no prover-side struct comparison anywhere on the accept path.
 
-use num_traits::Zero;
+use num_traits::{One, Zero};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

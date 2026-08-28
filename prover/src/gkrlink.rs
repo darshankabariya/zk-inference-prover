@@ -41,7 +41,7 @@ use std::collections::BTreeMap;
 use num_traits::{One, Zero};
 use stwo::core::circle::{CirclePoint, Coset};
 use stwo::core::constraints::{coset_vanishing, point_vanishing};
-use stwo::core::fields::FieldExpOps;
+use stwo::core::fields::{Field, FieldExpOps};
 use stwo::core::fields::m31::{BaseField, M31};
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::TreeVec;
@@ -467,12 +467,15 @@ pub struct HeightLink {
 }
 
 /// eq weights over one instance's looks: position `p`'s bits pair MSB-first
-/// with the look part of the instance's OOD point.
+/// with the look part of the instance's OOD point -- the convention the MLE
+/// machinery fixes (`eval_at_point` splits halves on `point[0]`, and the CPU
+/// `gen_eq_evals` walks `y` reversed). Each pass doubles the table with the
+/// processed coordinate as the new index MSB, so the walk runs over `x_look`
+/// *reversed*: the last pass, and therefore the MSB, is `x_look[0]`.
 fn eq_weights(k: usize, x_look: &[SecureField]) -> Vec<SecureField> {
     assert_eq!(k, x_look.len());
     let mut out = vec![SecureField::one()];
-    for x in x_look {
-        // prepend the next variable: existing entries take bit 0, new take 1
+    for x in x_look.iter().rev() {
         let mut next = Vec::with_capacity(out.len() * 2);
         for w in &out {
             next.push(*w * (SecureField::one() - *x));
