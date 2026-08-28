@@ -61,6 +61,19 @@ use crate::attn_witness::Variant;
 relation!(ExpRel, 2);
 relation!(RangeRel, 1);
 
+impl ExpRel {
+    /// the drawn elements, for the GKR link's affine weights (B11 stream S)
+    pub fn parts(&self) -> (SecureField, &[SecureField]) {
+        (self.0.z, &self.0.alpha_powers)
+    }
+}
+impl RangeRel {
+    /// the drawn elements, for the GKR link's affine weights (B11 stream S)
+    pub fn parts(&self) -> (SecureField, &[SecureField]) {
+        (self.0.z, &self.0.alpha_powers)
+    }
+}
+
 pub fn id(s: impl Into<String>) -> PreProcessedColumnId {
     PreProcessedColumnId { id: s.into() }
 }

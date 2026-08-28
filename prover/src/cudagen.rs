@@ -2239,9 +2239,9 @@ pub fn emit_cmd(args: &[String]) {
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b03);
     fill_tie_claims(&plan, &mut claims, 0x7135_2b03);
-    let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
-
-    // family -> shapes, in first-seen order; a shape is a fingerprint. Seeded
+    let link = plan.p.gkr_bands.then(|| crate::gkrlink::link_for(&plan, 0x0b65_1157));
+    let b = crate::compose::build_components_linked(&plan, &rels, f[0], f[1], f[2], f[3], f[4],
+                                                    f[5], &claims, link.as_deref());  // family -> shapes, in first-seen order; a shape is a fingerprint. Seeded
     // from every shape a previous emit run saw, so one library serves every
     // design point (see `Ir`'s note).
     let store = dir.join("shapes.json");
@@ -2312,6 +2312,9 @@ pub fn emit_cmd(args: &[String]) {
         // than `chans`, so it is walked on its own
         for i in 0..b.rows.len() {
             go!(b.rows[i], format!("row_band{i}"));
+        }
+        for i in 0..b.links.len() {
+            go!(b.links[i], format!("link{i}"));
         }
         go!(b.ao, "attnout".to_string());
         for i in 0..b.mats.len() {
@@ -2981,6 +2984,9 @@ pub fn gen_emit_cmd(args: &[String]) {
         // than `chans`, so it is walked on its own
         for i in 0..b.rows.len() {
             go!(b.rows[i], format!("row_band{i}"));
+        }
+        for i in 0..b.links.len() {
+            go!(b.links[i], format!("link{i}"));
         }
         go!(b.ao, "attnout".to_string());
         for i in 0..b.mats.len() {
