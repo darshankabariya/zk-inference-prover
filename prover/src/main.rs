@@ -626,6 +626,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // B11 stream Q: opt in to the LogUp-GKR arm for the bands. A flag and
         // not an env mode, because it changes the proof.
         gkr_bands: flag(args, "--gkr-bands"),
+        gkr_dequant: flag(args, "--gkr-dequant"),
     }
 }
 

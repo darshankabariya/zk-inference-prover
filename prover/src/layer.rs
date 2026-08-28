@@ -1610,8 +1610,20 @@ pub struct OSideW {
     pub kind: crate::dequant::OKind,
 }
 
+/// B11 stream U, lever 3: `gkr` is `--gkr-dequant`, and it is the one thing in
+/// this file the second GKR family changes.
+///
+/// The region's Horner accumulators (`z`, `h`, and stream E's output side) are
+/// untouched -- they are what stays in the tree. What the flag removes is the
+/// LogUp half: instead of `mat_logup`'s committed running-sum columns, the
+/// region's fractions become GKR input layers (collected in `compose`, before
+/// the proof's transcript position) and its claimed sum leaves `use_sums` for
+/// `sums_cancel`. This is the same shape stream S gave the bands in
+/// `attn_trace::interaction_phase`.
+#[allow(clippy::too_many_arguments)]
 pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
-                       rels: &crate::compose::Rels, out: Option<&OSideW>) -> MatInteraction {
+                       rels: &crate::compose::Rels, out: Option<&OSideW>, gkr: bool)
+                       -> MatInteraction {
     let lay = r.lay;
     let rows = 1usize << lay.log_rows;
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, lay.per_row);
@@ -1757,11 +1769,20 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
         claimed
     });
 
-    // the LogUp columns, in the exact order the AIR adds lookups
+    // the LogUp columns, in the exact order the AIR adds lookups -- or, under
+    // the flag, the same fractions handed to the GKR collector instead
     let m4_t = std::time::Instant::now();
-    let (lcols, use_sum) = mat_logup(m, r, rv, s_ch, rels);
-    crate::util::m4_add("int/deq_logup", m4_t.elapsed().as_secs_f64());
-    cols.extend(lcols);
+    let use_sum = if gkr {
+        // the fractions were handed to the collector before the GKR proof ran,
+        // in `compose`'s own pass -- see the comment there for why the two are
+        // in different places
+        SecureField::zero()
+    } else {
+        let (lcols, use_sum) = mat_logup(m, r, rv, s_ch, rels);
+        crate::util::m4_add("int/deq_logup", m4_t.elapsed().as_secs_f64());
+        cols.extend(lcols);
+        use_sum
+    };
     MatInteraction { cols, claimed_h, use_sum, claimed_out }
 }
 
@@ -1780,16 +1801,22 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
 /// which does not exist yet at generation time. Only `yside.claimed_h` is
 /// unavailable, and it enters constraints alone -- never a lookup -- so a
 /// placeholder is correct. `B7_M4_LOGUPIR=2` is what says the two agree.
-fn mat_logup_ir(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
-                rels: &crate::compose::Rels, on_device: bool)
-                -> (Vec<crate::device::AnyCol<'static>>, SecureField) {
-    use stwo::prover::backend::simd::m31::PackedM31;
+/// The evaluator whose fraction IR *is* this region's lookups.
+///
+/// B11 stream U, lever 3: the GKR arm needs the same evaluator, so it is built
+/// here once and both callers take it. `gkr` is false in both -- the fractions
+/// the arm proves are the ones the committed arm would have built, so the
+/// lowering is of the *un-ablated* evaluator and asks for the flag-off shape,
+/// which is stream T's precedent for the bands and is why the kernel store
+/// already carries this fingerprint.
+pub fn deq_logup_eval(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
+                      rels: &crate::compose::Rels) -> crate::dequant::DequantEval {
     let sub: Vec<crate::attn_air::RangeRel> = crate::dequant::range_widths(&r.spec)
         .iter()
         .map(|w| rels.range(*w).clone())
         .collect();
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, r.lay.per_row);
-    let eval = crate::dequant::DequantEval {
+    crate::dequant::DequantEval {
         log_rows: r.lay.log_rows,
         sp: r.spec.clone(),
         tag: m.name.clone(),
@@ -1808,7 +1835,15 @@ fn mat_logup_ir(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
         // LogUp IR -- leaving it off here keeps the lowering identical whether
         // the tie is on or not, which is what `B7_M4_LOGUPIR=2` compares
         oside: None,
-    };
+        gkr: false,
+    }
+}
+
+fn mat_logup_ir(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
+                rels: &crate::compose::Rels, on_device: bool)
+                -> (Vec<crate::device::AnyCol<'static>>, SecureField) {
+    use stwo::prover::backend::simd::m31::PackedM31;
+    let eval = deq_logup_eval(m, r, rv, s_ch, rels);
     // `B7_M4_LOGUPMUT` picks one of 2b's deliberate defects, so mode 2 has a
     // negative control. B7a milestone 4 (section 3 row 1): one place reads it
     // for every family, and it takes a `:family` suffix -- unaimed, a defect

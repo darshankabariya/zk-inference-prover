@@ -294,6 +294,52 @@ pub enum RCol {
     Row(usize),
     /// the corner's `i`-th causal-mask column, preprocessed tree
     Msk(usize),
+    /// B11 stream U: a dequant region's `i`-th trace mask. The index is
+    /// `dequant::Map`'s column index, which *is* the mask index -- the map
+    /// exists so that "the AIR, the trace generator and the LogUp generator
+    /// agree by construction instead of by inspection", and this is a fourth
+    /// reader of the same agreement.
+    Deq(usize),
+    /// B11 stream U: a dequant region's weight-scale mantissa column for slot
+    /// `i` (`chan_col(tag, "m", i)`), preprocessed tree. The only preprocessed
+    /// column any dequant lookup reads: the `chain` variant's second scale is
+    /// offline, so its mantissa enters the `mul` lookup from the preprocessed
+    /// side while everything else in the lookup is committed.
+    DeqPre(usize),
+}
+
+/// Which region a site's looks and a folded weight's column belong to: the
+/// family, and the region's index within it.
+///
+/// B11 stream U, lever 3: stream S keyed the fold's weights by band index
+/// alone, because the bands were the only family with an arm. The dequant
+/// family's regions index into the plan's matmul list, and the two index spaces
+/// are unrelated -- so the key is the pair, and `link_params`' `BTreeMap` is
+/// keyed by it. Nothing else about the fold changes: a weight is still one
+/// `(region, column)` pair's coefficient in one height's affine combination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Reg {
+    /// band `b`, in `Plan::corner`'s order (the prefix bands, then the corners)
+    Band(usize),
+    /// dequant region `m`, in the plan's matmul order
+    Deq(usize),
+}
+
+impl Default for Reg {
+    /// the collector's field needs one; band 0 is what stream S's single-family
+    /// collector always meant
+    fn default() -> Self {
+        Reg::Band(0)
+    }
+}
+
+impl Reg {
+    pub fn tag(&self) -> String {
+        match self {
+            Reg::Band(b) => format!("band{b}"),
+            Reg::Deq(m) => format!("deq{m}"),
+        }
+    }
 }
 
 /// An affine form `sum coeff * col + k` over one band's columns.
@@ -316,9 +362,9 @@ pub struct LinkLook {
     pub den: Affine,
 }
 
-/// One site's looks, in the exact order `interaction_phase` pushes them.
+/// One site's looks, in the exact order the interaction pass pushes them.
 pub struct SiteLooks {
-    pub band: usize,
+    pub reg: Reg,
     pub which: usize,
     pub log_rows: u32,
     pub looks: Vec<LinkLook>,
@@ -364,7 +410,7 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
                                    Affine::col(RCol::Chan(lc.pk + pp), SecureField::one())),
                 });
             }
-            out.push(SiteLooks { band: b, which: 0, log_rows: lc.g.log_rows, looks });
+            out.push(SiteLooks { reg: Reg::Band(b), which: 0, log_rows: lc.g.log_rows, looks });
         }
 
         // ---- grid region: exp lookups, the variant's remainder checks, the
@@ -409,7 +455,7 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
                 });
             }
         }
-        out.push(SiteLooks { band: b, which: 1, log_rows: lk.g.log_rows, looks });
+        out.push(SiteLooks { reg: Reg::Band(b), which: 1, log_rows: lk.g.log_rows, looks });
 
         // ---- per-token region: the two denominator bounds' limbs. The high
         // limbs are not committed -- `hi = (Z - lo) * 2^-z_lo_bits` -- so they
@@ -450,8 +496,103 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
                     }),
                 });
             }
-            out.push(SiteLooks { band: b, which: 3, log_rows: l.log_row, looks });
+            out.push(SiteLooks { reg: Reg::Band(b), which: 3, log_rows: l.log_row, looks });
         }
+    }
+    if plan.p.gkr_dequant {
+        out.extend(deq_looks(plan, rels));
+    }
+    out
+}
+
+/// The dequant family's lookup sites as affine forms.
+///
+/// B11 stream U, lever 3. This mirrors `layer::mat_logup`'s hand-written
+/// builder look for look and column for column -- that builder is the ground
+/// truth for the *order*, because `plogup::paired` batches in it and the
+/// generated kernel lowers `DequantEval::evaluate` in it, so all three agree or
+/// `B7_M4_LOGUPIR=2` fails. Every value a dequant lookup reads is a committed
+/// trace mask, one preprocessed column, or the constant zero, so every
+/// denominator is affine in committed columns exactly as memo section 4 needs;
+/// the `mul` lookups' numerator is the committed `nz`, which is affine too.
+///
+/// Only `pow2` and `chain` are reachable: the hand builder answers
+/// `unreachable!()` for the others, and so does this.
+pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
+                 -> Vec<SiteLooks> {
+    let one = SecureField::one();
+    let mut out = vec![];
+    for (m, sp) in plan.specs.iter().enumerate() {
+        let map = crate::dequant::Map::new(sp);
+        let f = map.f;
+        let sticky = sp.round.needs_sticky();
+        let mut looks = vec![];
+        // the relation's own drawn elements: `combine(v) = sum alpha_i v_i - z`,
+        // which is affine in `v` with the alphas as coefficients
+        let rel = |z: SecureField, al: &[SecureField], cols: &[Option<RCol>]| {
+            let mut den = Affine { terms: vec![], k: -z };
+            for (i, c) in cols.iter().enumerate() {
+                // a `None` is the constant-zero column the non-sticky rounding
+                // modes pass, and `alpha_i * 0` is not a term at all
+                if let Some(c) = c {
+                    den.terms.push((*c, al[i]));
+                }
+            }
+            den
+        };
+        let (nz_ok, al_norm) = rels.norm.parts();
+        let (fz, al_frac) = rels.frac.parts();
+        let (mz, al_mul) = rels.mul.parts();
+        for s in 0..sp.per_row {
+            let st = sticky.then(|| RCol::Deq(map.at(s, f.st)));
+            looks.push(LinkLook {
+                num: None,
+                den: rel(nz_ok, al_norm, &[
+                    Some(RCol::Deq(map.at(s, f.m2))), Some(RCol::Deq(map.at(s, f.ph))), st,
+                    Some(RCol::Deq(map.at(s, f.m7))), Some(RCol::Deq(map.at(s, f.ef))),
+                    Some(RCol::Deq(map.at(s, f.nz)))]),
+            });
+            looks.push(LinkLook {
+                num: None,
+                den: rel(fz, al_frac, &[
+                    Some(RCol::Deq(map.at(s, f.ph))), Some(RCol::Deq(map.at(s, f.r))), st]),
+            });
+            match sp.variant {
+                crate::dequant::Variant::Pow2 => looks.push(LinkLook {
+                    num: None,
+                    den: range_den(rels.range(8),
+                                   Affine::col(RCol::Deq(map.at(s, f.eo)), one)),
+                }),
+                crate::dequant::Variant::Chain => {
+                    for t in 0..2 {
+                        let m_in = if t == 0 { RCol::Deq(map.at(s, f.m7)) }
+                                   else { RCol::Deq(map.at(s, f.mul[0][0])) };
+                        // the activation scale is committed and shared by the
+                        // row; the weight scale is offline and preprocessed
+                        let ms = if t == 0 { RCol::Deq(map.shared[0]) } else { RCol::DeqPre(s) };
+                        looks.push(LinkLook {
+                            num: Some(Affine::col(RCol::Deq(map.at(s, f.nz)), one)),
+                            den: rel(mz, al_mul, &[
+                                Some(m_in), Some(ms),
+                                Some(RCol::Deq(map.at(s, f.mul[t][0]))),
+                                Some(RCol::Deq(map.at(s, f.mul[t][1])))]),
+                        });
+                        looks.push(LinkLook {
+                            num: None,
+                            den: range_den(rels.range(8),
+                                           Affine::col(RCol::Deq(map.at(s, f.mul[t][2])), one)),
+                        });
+                    }
+                }
+                v => panic!("the dequant GKR arm has no looks for variant {}", v.name()),
+            }
+        }
+        out.push(SiteLooks {
+            reg: Reg::Deq(m),
+            which: 0,
+            log_rows: plan.mat_lays[m].log_rows,
+            looks,
+        });
     }
     out
 }
@@ -471,7 +612,7 @@ pub struct HeightLink {
     pub claim: SecureField,
     pub shift: SecureField,
     /// folded weights per referenced column, and the folded constant
-    pub weights: Vec<(usize, RCol, SecureField)>,
+    pub weights: Vec<(Reg, RCol, SecureField)>,
     pub konst: SecureField,
 }
 
@@ -519,7 +660,7 @@ pub fn link_params(
     struct Acc {
         point: Vec<SecureField>,
         claim: SecureField,
-        weights: BTreeMap<(usize, RCol), SecureField>,
+        weights: BTreeMap<(Reg, RCol), SecureField>,
         konst: SecureField,
         n: usize,
     }
@@ -553,14 +694,14 @@ pub fn link_params(
         });
         debug_assert_eq!(acc.point.as_slice(), x_row);
 
-        fn push(acc: &mut Acc, alpha: SecureField, band: usize, claim: SecureField,
+        fn push(acc: &mut Acc, alpha: SecureField, reg: Reg, claim: SecureField,
                 parts: &mut dyn Iterator<Item = (SecureField, Affine)>) {
             let a = alpha.pow(acc.n as u128);
             acc.n += 1;
             acc.claim += a * claim;
             for (w, aff) in parts {
                 for (c, cw) in &aff.terms {
-                    *acc.weights.entry((band, *c)).or_insert(SecureField::zero()) +=
+                    *acc.weights.entry((reg, *c)).or_insert(SecureField::zero()) +=
                         a * w * *cw;
                 }
                 acc.konst += a * w * aff.k;
@@ -580,11 +721,11 @@ pub fn link_params(
                     k: SecureField::one(),
                 }))
             });
-            push(acc, alpha, site.band, num_claim, &mut parts);
+            push(acc, alpha, site.reg, num_claim, &mut parts);
         }
         let mut parts = inst.ents.iter().zip(&eqw)
             .map(|(l, w)| (*w, site.looks[*l].den.clone()));
-        push(acc, alpha, site.band, den_claim, &mut parts);
+        push(acc, alpha, site.reg, den_claim, &mut parts);
     }
 
     Ok(by_h
@@ -597,7 +738,7 @@ pub fn link_params(
                 point: acc.point,
                 claim: acc.claim,
                 shift,
-                weights: acc.weights.into_iter().map(|((b, c), w)| (b, c, w)).collect(),
+                weights: acc.weights.into_iter().map(|((r, c), w)| (r, c, w)).collect(),
                 konst: acc.konst,
             }
         })
@@ -663,7 +804,7 @@ pub enum Src<'a> {
 /// The device-resident terms are combined by one kernel launch and brought
 /// back; the host-resident ones are added on the host. With every column on the
 /// host this is exactly the loop `build_height_cols` used to open with.
-pub fn fold_coeff<'a, F: Fn(usize, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
+pub fn fold_coeff<'a, F: Fn(Reg, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
                                                       -> SecureColumn {
     let h = hl.h;
     assert!(h >= LOG_N_LANES, "a link height below the SIMD lane count");
@@ -671,8 +812,8 @@ pub fn fold_coeff<'a, F: Fn(usize, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &
 
     let mut host: Vec<(&Eval, SecureField)> = vec![];
     let mut dev: Vec<(*const u32, SecureField)> = vec![];
-    for (band, c, w) in &hl.weights {
-        match src_of(*band, c) {
+    for (reg, c, w) in &hl.weights {
+        match src_of(*reg, c) {
             Src::Host(e) => {
                 assert_eq!(e.len(), 1usize << h, "column height disagrees with the fold");
                 host.push((e, *w));
@@ -1047,7 +1188,7 @@ pub fn dev_link() -> bool {
 
 /// One height's sixteen committed columns, built wherever the prover can build
 /// them, ready for the interaction tree.
-pub fn height_cols<'a, F: Fn(usize, &RCol) -> Src<'a>>(
+pub fn height_cols<'a, F: Fn(Reg, &RCol) -> Src<'a>>(
     hl: &HeightLink,
     src_of: &F,
 ) -> Vec<crate::device::AnyCol<'static>> {
@@ -1069,7 +1210,7 @@ pub fn height_cols<'a, F: Fn(usize, &RCol) -> Src<'a>>(
 /// The eq-weighted total of one height's folded coefficient column, taken
 /// wherever the fold ran. This is what `B11_LINKMUT` re-derives its claim from,
 /// so it has to exist on both paths or the control would only be armed on one.
-pub fn fold_total<'a, F: Fn(usize, &RCol) -> Src<'a>>(
+pub fn fold_total<'a, F: Fn(Reg, &RCol) -> Src<'a>>(
     hl: &HeightLink,
     src_of: &F,
 ) -> SecureField {
@@ -1133,14 +1274,14 @@ pub mod dev {
     /// the whole affine combine is one launch. The accumulation order is the
     /// weight order either way and field addition is exact, so it is the same
     /// column.
-    fn fold<'a, F: Fn(usize, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
+    fn fold<'a, F: Fn(Reg, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
                                                 -> SecureFieldVec {
         let n = 1usize << hl.h;
         let mut keep: Vec<BaseFieldVec> = vec![];
         let mut ptrs: Vec<*const u32> = vec![];
         let mut ws: Vec<u32> = vec![];
-        for (band, c, w) in &hl.weights {
-            let p = match src_of(*band, c) {
+        for (reg, c, w) in &hl.weights {
+            let p = match src_of(*reg, c) {
                 Src::Host(e) => {
                     assert_eq!(e.len(), n, "column height disagrees with the fold");
                     let d = crate::device::upload_col(e);
@@ -1186,7 +1327,7 @@ pub mod dev {
         CudaBackend::gen_eq_evals(&hl.point, SecureField::one()).into_evals()
     }
 
-    pub fn fold_total<'a, F: Fn(usize, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
+    pub fn fold_total<'a, F: Fn(Reg, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
                                                           -> SecureField {
         let n = 1usize << hl.h;
         let coeff = fold(hl, src_of);
@@ -1194,7 +1335,7 @@ pub mod dev {
         terms_of(&coeff, &eq, hl.shift, None, n)
     }
 
-    pub fn height_cols<'a, F: Fn(usize, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
+    pub fn height_cols<'a, F: Fn(Reg, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
                                                            -> Vec<AnyCol<'static>> {
         let h = hl.h;
         let n = 1usize << h;
@@ -1268,7 +1409,7 @@ pub mod dev {
     /// builder's, cell for cell -- stream T's `B11_FEEDCHECK` for this lever.
     /// It pays a download and a second, host build of the same height, so it is
     /// a control and never a measurement.
-    pub fn col_check<'a, F: Fn(usize, &RCol) -> Src<'a>>(
+    pub fn col_check<'a, F: Fn(Reg, &RCol) -> Src<'a>>(
         hl: &HeightLink, src_of: &F, cols: &[AnyCol<'static>],
     ) {
         if std::env::var("B11_LINKCOLCHECK").map(|v| v != "1").unwrap_or(true) {

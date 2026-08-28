@@ -79,7 +79,10 @@ use crate::attn_witness::Variant as AttnVariant;
 /// the existing code names.
 #[derive(Clone, Debug)]
 pub struct Site {
-    pub band: usize,
+    /// B11 stream U, lever 3: which family and which region within it. Stream S
+    /// carried a band index alone; the dequant family's regions index into the
+    /// plan's matmul list, and the two spaces are unrelated.
+    pub reg: crate::gkrlink::Reg,
     pub which: usize,
     pub log_rows: u32,
     /// numerator kind per lookup, in `add_to_relation` order: true when the
@@ -89,7 +92,11 @@ pub struct Site {
 
 impl Site {
     pub fn tag(&self) -> String {
-        format!("band{}/{}", self.band, ["chan", "key", "out", "row"][self.which])
+        match self.reg {
+            crate::gkrlink::Reg::Band(b) =>
+                format!("band{b}/{}", ["chan", "key", "out", "row"][self.which]),
+            crate::gkrlink::Reg::Deq(m) => format!("deq{m}"),
+        }
     }
     pub fn n_looks(&self) -> usize {
         self.unit.len()
@@ -218,10 +225,10 @@ where
 /// path can see.
 #[derive(Default)]
 pub struct Collect {
-    /// the band whose regions are arriving; the caller sets it before each
-    /// band's interaction pass, because a corner band reaches
+    /// the region whose lookups are arriving; the caller sets it before each
+    /// region's interaction pass, because a corner band reaches
     /// `interaction_phase` with no `BandAir` to carry its index
-    pub band: usize,
+    pub reg: crate::gkrlink::Reg,
     pub sites: Vec<Site>,
     /// the host-built input layers, in the order the host sites arrived
     pub layers: Vec<Layer<SimdBackend>>,
@@ -268,7 +275,7 @@ impl Collect {
     ) {
         let t0 = Instant::now();
         let site = Site {
-            band: self.band,
+            reg: self.reg,
             which,
             log_rows,
             unit: looks.iter().map(crate::attn_trace::look_is_unit).collect(),
@@ -282,6 +289,42 @@ impl Collect {
         let frac = |look: usize, vr: usize| {
             crate::attn_trace::look_frac(&looks[look], vr, cols, pre, exp, ranges)
         };
+        let mut direct = SecureField::zero();
+        for inst in plan(std::slice::from_ref(&site)) {
+            let inst = Inst { site: at, ..inst };
+            if self.want_direct {
+                direct += direct_sum(&inst, &frac);
+            }
+            self.layers.push(input_layer(&inst, &frac));
+            self.on_dev.push(false);
+            self.insts.push(inst);
+        }
+        self.sites.push(site);
+        self.direct.push(direct);
+        self.layers_secs += t0.elapsed().as_secs_f64();
+    }
+
+    /// B11 stream U, lever 3: one region's input layers from a fraction table
+    /// the caller has already built.
+    ///
+    /// `Collect::push` above is the bands' path, and it is band-shaped:
+    /// `attn_trace::look_frac` names the columns a band lookup reads. The
+    /// dequant family's lookups come from its fraction IR instead, so the
+    /// fractions arrive as a table and everything downstream -- the plan, the
+    /// layers, the direct sum -- is the same code.
+    pub fn push_flat(
+        &mut self,
+        which: usize,
+        log_rows: u32,
+        unit: Vec<bool>,
+        flat: &[Vec<(PackedSecureField, PackedSecureField)>],
+    ) {
+        let t0 = Instant::now();
+        assert!(flat.iter().all(|r| r.len() == unit.len()),
+                "the fraction table has a row with a different look count");
+        let site = Site { reg: self.reg, which, log_rows, unit };
+        let at = self.sites.len();
+        let frac = |look: usize, vr: usize| flat[vr][look];
         let mut direct = SecureField::zero();
         for inst in plan(std::slice::from_ref(&site)) {
             let inst = Inst { site: at, ..inst };
@@ -318,6 +361,11 @@ impl Collect {
 /// full cell-for-cell comparison.
 fn feedcheck_on() -> bool {
     std::env::var("B11_FEEDCHECK").map(|v| v == "1").unwrap_or(false)
+}
+
+/// The bands' numerator kinds, in look order.
+fn unit_of(looks: &[crate::attn_trace::Look]) -> Vec<bool> {
+    looks.iter().map(crate::attn_trace::look_is_unit).collect()
 }
 
 /// Whether `cols` actually holds this component's committed span. A
@@ -379,17 +427,17 @@ pub fn feed_site(
             0 => {
                 let mut e = air.chan.clone();
                 e.gkr = false;
-                c.push_dev(which, log_rows, looks, &e, &base);
+                c.push_dev(which, log_rows, unit_of(looks), &e, &[], &base);
             }
             1 => {
                 let mut e = air.key.clone();
                 e.gkr = false;
-                c.push_dev(which, log_rows, looks, &e, &base);
+                c.push_dev(which, log_rows, unit_of(looks), &e, &[], &base);
             }
             3 => {
                 let mut e = air.row.clone();
                 e.gkr = false;
-                c.push_dev(which, log_rows, looks, &e, &base);
+                c.push_dev(which, log_rows, unit_of(looks), &e, &[], &base);
             }
             _ => panic!("band component {which} has no eval"),
         }
@@ -400,6 +448,152 @@ pub fn feed_site(
             c.check_fed(first, looks, cols, pre, exp, ranges);
         }
     }
+}
+
+/// B11 stream U, lever 3: one dequant region's lookups, wherever its columns
+/// are.
+///
+/// This is `feed_site`'s shape for the second family. `mat_interaction` calls it
+/// in place of `mat_logup` under `--gkr-dequant`: the region's fractions become
+/// GKR input layers instead of committed running-sum columns, and its claimed
+/// sum leaves `use_sums` for `sums_cancel`.
+///
+/// The fractions come from the region's own fraction IR, which is the lowering
+/// of the *un-ablated* `DequantEval` -- stream T's precedent, and the reason the
+/// kernel store already carries this fingerprint: under the flag the evaluator
+/// emits no lookups at all and its IR would be empty. One definition of the
+/// fraction, three readers: this, `mat_logup`'s hand-written builder (the one
+/// `B7_M4_LOGUPIR=2` compares against) and `gkrlink::deq_looks`.
+pub fn deq_site(
+    c: &mut Collect,
+    reg: usize,
+    eval: &crate::dequant::DequantEval,
+    r: &crate::layer::MatRegion,
+) {
+    c.reg = crate::gkrlink::Reg::Deq(reg);
+    let log_rows = r.lay.log_rows;
+    let unit = crate::dequant::look_units(&r.spec);
+    let ir = crate::scalars::cached_ir(eval, log_rows, log_rows, true, || {
+        crate::devfrac::ir_of(eval, log_rows)
+    });
+    // `mat_logup_ir`'s prefix rule, asserted the same way: an o-side region
+    // commits three extra preprocessed selectors that belong to the *argmax*
+    // component, `DequantEval` never reads them, and they sit after the ones
+    // the IR loads -- so the prefix is exactly what to supply.
+    let np = ir.cols[0];
+    let prefix = |n: usize| {
+        assert!(n >= np,
+                "deq{reg}: the region has {n} preprocessed columns, fewer than the \
+                 {np} its fraction IR loads");
+        np
+    };
+    // `B11_DEQMUT` bends one of *this region's* fractions, which is a statement
+    // about the host builder's values, so it takes the host path even where the
+    // fill left the columns on the card. Nothing else in the run moves.
+    let mutating = std::env::var("B11_DEQMUT").ok()
+        .and_then(|v| v.parse::<usize>().ok()) == Some(reg);
+    #[cfg(feature = "cuda")]
+    if let Some(d) = &r.dev {
+        // The prover's path: the columns are on the card and so are the
+        // fractions. The two controls below both need the host builder's values
+        // -- one to bend them, one to compare against -- so each takes the
+        // region off the feed and neither is on the prover's path.
+        if !mutating && !feedcheck_on() {
+            let pp: Vec<*const u32> =
+                d.pre[..prefix(d.pre.len())].iter().map(|x| x.device_ptr).collect();
+            let bp: Vec<*const u32> = d.base.iter().map(|x| x.device_ptr).collect();
+            c.push_dev(0, log_rows, unit, eval, &pp, &bp);
+            return;
+        }
+        eprintln!("deq{reg}: off the feed for a control, columns downloaded");
+    }
+    // The host builder's inputs: the region's own columns. Only the controls
+    // reach here with a device fill, and the download they need is theirs.
+    #[cfg(feature = "cuda")]
+    let down = r.dev.as_ref().map(|d| {
+        // `common::eval_of` takes values in *coset* order and permutes them into
+        // the committed one; a device column is already committed order, so the
+        // download reinterprets rather than permutes -- the same construction
+        // `device::take_all` makes on a build without the cuda feature.
+        let domain = stwo::core::poly::circle::CanonicCoset::new(log_rows).circle_domain();
+        let ev = |c: &stwo::stwo_cuda::base_field_vec::BaseFieldVec| {
+            crate::common::Eval::new(
+                domain,
+                stwo::prover::backend::simd::column::BaseColumn::from_iter(c.to_vec()))
+        };
+        (d.pre[..prefix(d.pre.len())].iter().map(ev).collect::<Vec<_>>(),
+         d.base.iter().map(ev).collect::<Vec<_>>())
+    });
+    #[cfg(not(feature = "cuda"))]
+    let down: Option<(Vec<crate::common::Eval>, Vec<crate::common::Eval>)> = None;
+    let (hpre, hbase) = match &down {
+        Some((pp, bb)) => (&pp[..], &bb[..]),
+        None => (&r.pre[..prefix(r.pre.len())], &r.base[..]),
+    };
+    let mut flat = deq_fracs(&ir, log_rows, hpre, hbase);
+    // `B11_FEEDCHECK=1`: the feed over an uploaded copy of the very columns the
+    // host builder just read, cell for cell against it, then thrown away. Stream
+    // T's control for the bands, on the family that joins them; the upload is
+    // the check's, exactly as `B7_M4_LOGUPIR=3` pays one.
+    #[cfg(feature = "cuda")]
+    if feedcheck_on() {
+        use stwo::stwo_cuda::base_field_vec::BaseFieldVec;
+        use stwo::prover::backend::Column as _;
+        let up = |v: &[crate::common::Eval]| -> Vec<BaseFieldVec> {
+            v.iter().map(|e| BaseFieldVec::from_vec(e.values.to_cpu())).collect()
+        };
+        let (upre, ubase) = (up(hpre), up(hbase));
+        let pp: Vec<*const u32> = upre.iter().map(|x| x.device_ptr).collect();
+        let bp: Vec<*const u32> = ubase.iter().map(|x| x.device_ptr).collect();
+        let mut scratch = Collect { reg: c.reg, ..Default::default() };
+        scratch.push_dev(0, log_rows, unit.clone(), eval, &pp, &bp);
+        scratch.check_fed_flat(0, &flat);
+    }
+    // B11 stream U, lever 3: the family's own instance-aimed control.
+    //
+    // `B11_DEQMUT=<k>` bends one denominator of dequant region `k`'s input
+    // layer -- one fraction of one look of one row -- and changes nothing else.
+    // The GKR then proves the bent layer honestly, so its sumcheck is internally
+    // consistent and every claim it yields is the claim of the layer it saw; the
+    // *link*'s coefficient column is built from the committed columns, which are
+    // untouched. The two can only disagree, and the prover's own boundary assert
+    // is where they do, naming the height. That is the property the arm's
+    // soundness rests on for this family -- the GKR's input layer and the
+    // committed columns are one function -- and this is what says it is load
+    // bearing rather than assumed.
+    if let Ok(spec) = std::env::var("B11_DEQMUT") {
+        if spec.parse::<usize>().unwrap_or(0) == reg {
+            eprintln!("deqmut: dequant region {reg}, look 0 of row 0, denominator bent");
+            flat[0][0].1 += PackedSecureField::broadcast(SecureField::one());
+        }
+    }
+    c.push_flat(0, log_rows, unit, &flat);
+}
+
+/// One region's fractions, every look at every packed row, laid out
+/// `[look][vec_row]`.
+///
+/// `cudagen::frac_at` runs the whole straight-line IR once per packed row and
+/// hands back every look, so asking it per `(look, row)` -- which is the shape
+/// `input_layer` wants -- would run it `n_looks` times over. It runs once here
+/// and the layers index the table.
+pub fn deq_fracs(ir: &crate::cudagen::Ir, log_rows: u32,
+                 pre: &[crate::common::Eval], base: &[crate::common::Eval])
+                 -> Vec<Vec<(PackedSecureField, PackedSecureField)>> {
+    use stwo::prover::backend::simd::m31::PackedM31;
+    let sc = crate::cudagen::FracScalars::new(ir);
+    let p: Vec<&[PackedM31]> = pre.iter().map(|e| &e.data[..]).collect();
+    let b: Vec<&[PackedM31]> = base.iter().map(|e| &e.data[..]).collect();
+    let n_vec_row = 1usize << (log_rows - LOG_N_LANES);
+    (0..n_vec_row)
+        .into_par_iter()
+        .map(|vr| {
+            let mut v = Vec::with_capacity(ir.ops.len());
+            let mut out = Vec::with_capacity(ir.fracs.len());
+            crate::cudagen::frac_at(ir, &sc, &p, &b, vr, &mut v, &mut out);
+            out
+        })
+        .collect()
 }
 
 /// B11 stream T: the device feed's host half.
@@ -413,7 +607,7 @@ mod feedimpl {
     use stwo::stwo_cuda::secure_field_vec::SecureFieldVec;
     use stwo_constraint_framework::FrameworkEval;
 
-    use super::{Collect, Inst, Site, input_layer, plan};
+    use super::{Collect, Inst, Site, input_layer, plan, unit_of};
 
     unsafe extern "C" {
         /// The generated fraction kernel's unpaired variant, behind the same
@@ -448,20 +642,22 @@ mod feedimpl {
         /// which is exactly where `input_layer` puts it on the host. Nothing is
         /// copied, permuted or reshaped afterwards -- the permutation the plan's
         /// unit/non-unit split induces lives in the pointer table.
+        #[allow(clippy::too_many_arguments)]
         pub fn push_dev<E: FrameworkEval>(
             &mut self,
             which: usize,
             log_rows: u32,
-            looks: &[crate::attn_trace::Look],
+            unit: Vec<bool>,
             eval: &E,
+            pre_ptrs: &[*const u32],
             base_ptrs: &[*const u32],
         ) {
             let t0 = std::time::Instant::now();
             let site = Site {
-                band: self.band,
+                reg: self.reg,
                 which,
                 log_rows,
-                unit: looks.iter().map(crate::attn_trace::look_is_unit).collect(),
+                unit,
             };
             let at = self.sites.len();
             let n_rows = 1usize << log_rows;
@@ -510,13 +706,23 @@ mod feedimpl {
             assert_eq!(ir.cols[1], base_ptrs.len(),
                        "{family}: base column count");
             // The bands read the base tree alone (18.7's measurement, asserted
-            // per shape here as `devfrac::assert_supplied` asserts it there): a
-            // preprocessed load would index a null.
-            assert!(
-                !ir.ops.iter().any(|o| matches!(*o, crate::cudagen::Op::Load { tree: 0, .. })),
-                "{family}: the feed's IR loads a preprocessed column, which the \
-                 bands' fractions never did"
-            );
+            // per shape here as `devfrac::assert_supplied` asserts it there), so
+            // they hand over no preprocessed pointers and a preprocessed load
+            // would index a null. B11 stream U: the dequant family *does* read
+            // one -- the `chain` variant's offline weight-scale mantissa -- so a
+            // caller may supply the tree instead, and the assert holds for
+            // whichever case it is.
+            if pre_ptrs.is_empty() {
+                assert!(
+                    !ir.ops.iter().any(|o| matches!(*o, crate::cudagen::Op::Load { tree: 0, .. })),
+                    "{family}: the feed's IR loads a preprocessed column and the \
+                     caller supplied none"
+                );
+            } else {
+                assert_eq!(ir.cols[0], pre_ptrs.len(),
+                           "{family}: the feed's IR loads {} preprocessed columns, the \
+                            caller supplied {}", ir.cols[0], pre_ptrs.len());
+            }
             let (shape, kernel_looks) = crate::gencudakernels::gen_shape_of(
                 family, ir.fingerprint())
                 .unwrap_or_else(|| panic!(
@@ -527,7 +733,8 @@ mod feedimpl {
 
             let sc: Vec<u32> =
                 ir.scalars.iter().flat_map(|s| s.to_m31_array().map(|x| x.0)).collect();
-            let pre_ptrs = vec![std::ptr::null::<u32>(); ir.cols[0]];
+            let nulls = vec![std::ptr::null::<u32>(); ir.cols[0]];
+            let pre_ptrs = if pre_ptrs.is_empty() { &nulls[..] } else { pre_ptrs };
             let cname = CString::new(family).unwrap();
             unsafe {
                 gen_b65_feed_dispatch(
@@ -573,22 +780,22 @@ mod feedimpl {
             let up: Vec<BaseFieldVec> =
                 cols[lo..hi].iter().map(|e| BaseFieldVec::from_vec(e.values.to_cpu())).collect();
             let ptrs: Vec<*const u32> = up.iter().map(|c| c.device_ptr).collect();
-            let mut scratch = Collect { band: self.band, ..Default::default() };
+            let mut scratch = Collect { reg: self.reg, ..Default::default() };
             match which {
                 0 => {
                     let mut e = air.chan.clone();
                     e.gkr = false;
-                    scratch.push_dev(which, log_rows, looks, &e, &ptrs);
+                    scratch.push_dev(which, log_rows, unit_of(looks), &e, &[], &ptrs);
                 }
                 1 => {
                     let mut e = air.key.clone();
                     e.gkr = false;
-                    scratch.push_dev(which, log_rows, looks, &e, &ptrs);
+                    scratch.push_dev(which, log_rows, unit_of(looks), &e, &[], &ptrs);
                 }
                 3 => {
                     let mut e = air.row.clone();
                     e.gkr = false;
-                    scratch.push_dev(which, log_rows, looks, &e, &ptrs);
+                    scratch.push_dev(which, log_rows, unit_of(looks), &e, &[], &ptrs);
                 }
                 _ => panic!("band component {which} has no eval"),
             }
@@ -610,6 +817,61 @@ mod feedimpl {
             let frac = |look: usize, vr: usize| {
                 crate::attn_trace::look_frac(&looks[look], vr, cols, pre, exp, ranges)
             };
+            let n_dev = self.dev_layers.len();
+            let mut cells = 0usize;
+            for (k, inst) in self.insts[first..].iter().enumerate() {
+                let got = &self.dev_layers[n_dev - (self.insts.len() - first) + k];
+                let want = input_layer(inst, &frac);
+                let cmp = |tag: &str,
+                           g: &Mle<CudaBackend, stwo::core::fields::qm31::SecureField>,
+                           w: &Mle<
+                    stwo::prover::backend::simd::SimdBackend,
+                    stwo::core::fields::qm31::SecureField,
+                >| {
+                    let (a, b) = (g.to_cpu(), w.to_cpu());
+                    assert_eq!(a.len(), b.len(), "feedcheck: {tag} length");
+                    if let Some(i) = (0..a.len()).find(|i| a[*i] != b[*i]) {
+                        panic!(
+                            "feedcheck: instance {k} {tag} differs at {i}: \
+                             the feed says {:?}, the host builder {:?}",
+                            a[i], b[i]
+                        );
+                    }
+                    a.len()
+                };
+                match (got, &want) {
+                    (
+                        Layer::LogUpSingles { denominators: g },
+                        Layer::LogUpSingles { denominators: w },
+                    ) => cells += cmp("denominators", g, w),
+                    (
+                        Layer::LogUpGeneric { numerators: gn, denominators: gd },
+                        Layer::LogUpGeneric { numerators: wn, denominators: wd },
+                    ) => {
+                        cells += cmp("numerators", gn, wn);
+                        cells += cmp("denominators", gd, wd);
+                    }
+                    _ => panic!("feedcheck: instance {k} has a different layer kind"),
+                }
+            }
+            eprintln!(
+                "feedcheck: {} fed instances, {cells} cells match the host builder",
+                self.insts.len() - first
+            );
+        }
+
+        /// The same check for a family whose fractions arrive as a table
+        /// (B11 stream U, lever 3: the dequant regions).
+        pub fn check_fed_flat(
+            &self,
+            first: usize,
+            flat: &[Vec<(
+                stwo::prover::backend::simd::qm31::PackedSecureField,
+                stwo::prover::backend::simd::qm31::PackedSecureField,
+            )>],
+        ) {
+            use stwo::prover::backend::Column as _;
+            let frac = |look: usize, vr: usize| flat[vr][look];
             let n_dev = self.dev_layers.len();
             let mut cells = 0usize;
             for (k, inst) in self.insts[first..].iter().enumerate() {
@@ -1094,9 +1356,17 @@ where
 pub fn mix_shape(channel: &mut impl Channel, sites: &[Site]) {
     let mut felts = vec![SecureField::from_u32_unchecked(0x51, 0x47, 0x4b, 0x52)];
     for s in sites {
+        // B11 stream U, lever 3: the family joins the separator, because two
+        // families' region indices are unrelated and a transcript that could
+        // not tell `band0/chan` from `deq0` would be mixing the same felt for
+        // two different shapes.
+        let (fam, reg) = match s.reg {
+            crate::gkrlink::Reg::Band(b) => (0u32, b as u32),
+            crate::gkrlink::Reg::Deq(m) => (1u32, m as u32),
+        };
         felts.push(SecureField::from_u32_unchecked(
-            s.band as u32,
-            s.which as u32,
+            reg,
+            (fam << 8) | s.which as u32,
             s.log_rows,
             s.n_looks() as u32,
         ));
@@ -1163,7 +1433,7 @@ pub fn cmd(args: &[String]) {
     let pow = crate::attn_air::Powers::new(f[0], f[1], f[2], &sh, &l.chan, &l.key, &l.out, l.rw);
 
     let mut collect = Collect::with_direct(true);
-    collect.band = 0;
+    collect.reg = crate::gkrlink::Reg::Band(0);
     let t0 = Instant::now();
     let inter = crate::attn_trace::interaction_phase(
         &a, &l, &cfg, &pow, &rel_exp, &rels, &com, &widths, true, !a.corner,
@@ -1305,7 +1575,7 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
         // ---- the channel region: the key and query range checks, all unit
         if cfg.range_check {
             out.push(Site {
-                band: b,
+                reg: crate::gkrlink::Reg::Band(b),
                 which: 0,
                 log_rows: lc.g.log_rows,
                 unit: vec![true; lc.pk + lc.pq],
@@ -1323,16 +1593,31 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
         if cfg.range_check {
             unit.extend(vec![true; lk.pv]);
         }
-        out.push(Site { band: b, which: 1, log_rows: lk.g.log_rows, unit });
+        out.push(Site { reg: crate::gkrlink::Reg::Band(b), which: 1,
+                        log_rows: lk.g.log_rows, unit });
 
         // ---- the per-token region: four denominator limbs per token. A corner
         // band has none -- the pair lives on its prefix band.
         if !*corner {
             out.push(Site {
-                band: b,
+                reg: crate::gkrlink::Reg::Band(b),
                 which: 3,
                 log_rows: l.log_row,
                 unit: vec![true; 4 * l.rw],
+            });
+        }
+    }
+    // ---- B11 stream U, lever 3: the dequant family, one site per region, in
+    // the plan's matmul order -- which is the order `interaction_phase` reaches
+    // them in, so the collector's arrival order is this order and `same_sites`
+    // is what says so.
+    if plan.p.gkr_dequant {
+        for (m, sp) in plan.specs.iter().enumerate() {
+            out.push(Site {
+                reg: crate::gkrlink::Reg::Deq(m),
+                which: 0,
+                log_rows: plan.mat_lays[m].log_rows,
+                unit: crate::dequant::look_units(sp),
             });
         }
     }
@@ -1346,7 +1631,7 @@ pub fn same_sites(a: &[Site], b: &[Site]) -> Result<(), String> {
         return Err(format!("{} sites against {}", a.len(), b.len()));
     }
     for (i, (x, y)) in a.iter().zip(b).enumerate() {
-        if x.band != y.band || x.which != y.which || x.log_rows != y.log_rows
+        if x.reg != y.reg || x.which != y.which || x.log_rows != y.log_rows
             || x.unit != y.unit
         {
             return Err(format!(

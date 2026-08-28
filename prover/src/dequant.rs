@@ -77,6 +77,26 @@ relation!(NormRel, 6);
 relation!(FracRel, 3);
 relation!(MulRel, 4);
 relation!(PairRel, 2);
+
+// B11 stream U, lever 3: the drawn elements, for the GKR link's affine weights.
+// `combine(v) = sum alpha_i v_i - z`, so these two are everything the link needs
+// to write a lookup's denominator as an affine form over the columns it reads --
+// the same accessors stream S added to `ExpRel` and `RangeRel`.
+impl NormRel {
+    pub fn parts(&self) -> (SecureField, &[SecureField]) {
+        (self.0.z, &self.0.alpha_powers)
+    }
+}
+impl FracRel {
+    pub fn parts(&self) -> (SecureField, &[SecureField]) {
+        (self.0.z, &self.0.alpha_powers)
+    }
+}
+impl MulRel {
+    pub fn parts(&self) -> (SecureField, &[SecureField]) {
+        (self.0.z, &self.0.alpha_powers)
+    }
+}
 // one range-relation type across the whole crate, so a composed proof's range
 // tables serve the attention bands and the dequant regions alike
 pub use crate::attn_air::RangeRel;
@@ -195,6 +215,35 @@ impl Spec {
                "q_bits": self.q_bits, "rem_bits": self.rem_bits,
                "den_bound_bits": self.rem_bits - 1})
     }
+}
+
+/// B11 stream U, lever 3: the numerator kind of every lookup this region's
+/// evaluator emits, in `add_to_relation` order -- which is the order
+/// `plogup::paired` batches them in and therefore the order the GKR's input
+/// layer holds them in.
+///
+/// Unit everywhere except the `chain` variant's two `mul` lookups, whose
+/// multiplicity is the committed `nz` (a zero result skips the lookup rather
+/// than needing a table row). Only `pow2` and `chain` are reachable, exactly as
+/// in `layer::mat_logup`'s hand-written builder, which answers `unreachable!()`
+/// for the rest.
+pub fn look_units(sp: &Spec) -> Vec<bool> {
+    let mut u = vec![];
+    for _ in 0..sp.per_row {
+        u.push(true); // norm
+        u.push(true); // frac
+        match sp.variant {
+            Variant::Pow2 => u.push(true),
+            Variant::Chain => {
+                for _ in 0..2 {
+                    u.push(false); // mul, at multiplicity `nz`
+                    u.push(true); // the output exponent's range check
+                }
+            }
+            v => panic!("the dequant GKR arm has no looks for variant {}", v.name()),
+        }
+    }
+    u
 }
 
 /// The distinct range-table widths a spec needs, sorted (the draw order).
@@ -395,6 +444,13 @@ pub struct DequantEval {
     pub yside: Option<YSide>,
     /// stream E: the output-side claim, when this region publishes one
     pub oside: Option<OSide>,
+    /// B11 stream U, lever 3: this region's lookups are proved by the batched
+    /// GKR instead of committed running-sum columns, so the AIR emits neither
+    /// the relation entries nor the interaction masks they would allocate. The
+    /// trace masks stay exactly where they were -- the committed order is the
+    /// mask order by construction here (`Map`), and stream S's lesson is that
+    /// the allocator must keep it.
+    pub gkr: bool,
 }
 
 impl DequantEval {
@@ -445,10 +501,12 @@ impl FrameworkEval for DequantEval {
                     let off = m31_u32(1 << (b0 + b1 - 1));
                     let lo = eval.next_trace_mask();
                     let hi = (acc + E::F::from(off) - lo.clone()) * m31_u32(1 << b0).inverse();
-                    eval.add_to_relation(RelationEntry::new(
-                        self.rel(b0), E::EF::one(), core::slice::from_ref(&lo)));
-                    eval.add_to_relation(RelationEntry::new(
-                        self.rel(b1), E::EF::one(), core::slice::from_ref(&hi)));
+                    if !self.gkr {
+                        eval.add_to_relation(RelationEntry::new(
+                            self.rel(b0), E::EF::one(), core::slice::from_ref(&lo)));
+                        eval.add_to_relation(RelationEntry::new(
+                            self.rel(b1), E::EF::one(), core::slice::from_ref(&hi)));
+                    }
                 }
                 // ---- one rounding straight to int8: no bf16 anywhere
                 //
@@ -518,11 +576,14 @@ impl FrameworkEval for DequantEval {
                     let mag = acc.clone() - (acc * sg.clone()) * two;
                     eval.add_constraint(mag - (m2.clone() * ph.clone() + r.clone()));
 
-                    eval.add_to_relation(RelationEntry::new(
-                        &self.norm, E::EF::one(),
-                        &[m2, ph.clone(), st.clone(), m7.clone(), ef.clone(), nz.clone()]));
-                    eval.add_to_relation(RelationEntry::new(
-                        &self.frac, E::EF::one(), &[ph, r, st]));
+                    if !self.gkr {
+                        eval.add_to_relation(RelationEntry::new(
+                            &self.norm, E::EF::one(),
+                            &[m2, ph.clone(), st.clone(), m7.clone(), ef.clone(),
+                              nz.clone()]));
+                        eval.add_to_relation(RelationEntry::new(
+                            &self.frac, E::EF::one(), &[ph, r, st]));
+                    }
 
                     match sp.variant {
                         // the scale is 2^j: one exponent add, one range check, and
@@ -533,8 +594,10 @@ impl FrameworkEval for DequantEval {
                             eval.add_constraint(
                                 eo.clone() - ef - nz.clone() * (shared[0].clone() + jw));
                             outs.push((sg.clone(), nz.clone(), m7.clone(), eo.clone()));
-                            eval.add_to_relation(RelationEntry::new(
-                                self.rel(8), E::EF::one(), core::slice::from_ref(&eo)));
+                            if !self.gkr {
+                                eval.add_to_relation(RelationEntry::new(
+                                    self.rel(8), E::EF::one(), core::slice::from_ref(&eo)));
+                            }
                             // y = sg 2^15 + eo 2^7 + m7 is degree 1, so the consumer
                             // reads it as an expression and it is never a column.
                         }
@@ -554,16 +617,20 @@ impl FrameworkEval for DequantEval {
                                 let eo = eval.next_trace_mask();
                                 // gated at multiplicity `nz`: a zero result skips
                                 // the lookup entirely rather than needing a row
-                                eval.add_to_relation(RelationEntry::new(
-                                    &self.mul, E::EF::from(nz.clone()),
-                                    &[m_in, ms, po.clone(), ca.clone()]));
+                                if !self.gkr {
+                                    eval.add_to_relation(RelationEntry::new(
+                                        &self.mul, E::EF::from(nz.clone()),
+                                        &[m_in, ms, po.clone(), ca.clone()]));
+                                }
                                 eval.add_constraint(
                                     eo.clone()
                                         - nz.clone() * (e_in + es + ca - E::F::from(m31_u32(127))),
                                 );
                                 eval.add_constraint(po.clone() - po.clone() * nz.clone());
-                                eval.add_to_relation(RelationEntry::new(
-                                    self.rel(8), E::EF::one(), core::slice::from_ref(&eo)));
+                                if !self.gkr {
+                                    eval.add_to_relation(RelationEntry::new(
+                                        self.rel(8), E::EF::one(), core::slice::from_ref(&eo)));
+                                }
                                 m_in = po;
                                 e_in = eo;
                             }
@@ -636,7 +703,9 @@ impl FrameworkEval for DequantEval {
             eval.add_constraint(u.clone() - u_prev * mult - f * oact);
             eval.add_constraint((u - o.claimed) * oend);
         }
-        eval.finalize_logup_in_pairs();
+        if !self.gkr {
+            eval.finalize_logup_in_pairs();
+        }
         eval
     }
 }
@@ -1452,6 +1521,8 @@ pub fn run(w: &Witness, sp: &Spec, tamper: Option<Tamper>) -> Outcome {
             qnz: qnz_rel.clone(),
             rels: rels.clone(),
             yside: None, oside: None,
+            // the standalone dequant probe has no GKR arm to hand its lookups to
+            gkr: false,
         },
         use_sum,
     );

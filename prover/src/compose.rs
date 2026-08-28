@@ -162,6 +162,14 @@ pub struct Params {
     /// identical to one from a crate that never had it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub gkr_bands: bool,
+    /// B11 stream U, lever 3: the same for the *dequant* family, composing with
+    /// `gkr_bands` rather than replacing it -- the two families' instances join
+    /// one `prove_batch` call and their heights one link. A flag and not an env
+    /// mode for the same reason: it changes the proof, and its oracle is its
+    /// own. Skipped when false, so every statement written without it is byte
+    /// identical to one from a crate that never had it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gkr_dequant: bool,
     /// Stream H: the layer's residual-stream input and output are each committed
     /// in a tree of their own, so that two chunks' boundaries can be compared
     /// from bytes.  Needs the wiring family, since the boundary *is* its two
@@ -606,6 +614,13 @@ impl Plan {
                 corner.push(true);
             }
         }
+        // B11 stream U, lever 3: the two flags compose, they do not replace one
+        // another -- the dequant family's instances join the *same*
+        // `prove_batch` call and its heights the same link. Asking for the
+        // second family without the first is a configuration error, and a loud
+        // one: the arm's shape assumes the bands' collector exists.
+        assert!(!p.gkr_dequant || p.gkr_bands,
+                "--gkr-dequant composes with --gkr-bands; it does not replace it");
         let lays: Vec<Layouts> = shapes.iter().map(|sh| Layouts::choose(sh, &cfg)).collect();
 
         let mut widths = vec![p.k_bits, p.q_bits, 8, p.z_lo_bits, p.z_hi_bits, p.ao_rem_bits];
@@ -820,7 +835,10 @@ impl Plan {
         } else {
             self.corner.iter().map(|c| if *c { 2 } else { 3 }).sum::<usize>()
         })
-            + 1 + self.p.mats.len() + self.walks.len()
+            + 1
+            // B11 stream U, lever 3: the same for the dequant family
+            + if self.p.gkr_dequant { 0 } else { self.p.mats.len() }
+            + self.walks.len()
             + self.glue.as_ref().map(|g| g.regions.len()).unwrap_or(0)
             + usize::from(self.argmax_mat().is_some())
     }
@@ -1077,10 +1095,13 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     }
 
     // B11 stream S, lever 3: the link components allocate right after the
-    // bands, matching where the prover commits their columns; the tie is
-    // built from the spans the allocator just handed out.
+    // bands, matching where the prover commits their columns.
+    //
+    // B11 stream U, lever 3: the *tie* is built lower down, after the dequant
+    // components exist, because a dequant region's folded weights name columns
+    // in that region's own span. The allocation order -- what the statement
+    // depends on -- is unchanged; only where the tie reads the spans back moves.
     let mut links = vec![];
-    let mut link_tie = None;
     if let Some(hl) = link {
         for l in hl {
             links.push(FrameworkComponent::<crate::gkrlink::LinkEval>::new(
@@ -1091,49 +1112,6 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 SecureField::zero(),
             ));
         }
-        let span_of = |locs: &[stwo::core::pcs::TreeSubspan], tree: usize| {
-            locs.iter().find(|sp| sp.tree_index == tree)
-                .map(|sp| sp.col_start)
-                .expect("a component with no span in the tree the tie reads")
-        };
-        // band -> index into `rows` (prefix bands only)
-        let mut row_of = vec![usize::MAX; plan.corner.len()];
-        let mut ri = 0usize;
-        for (b, corner) in plan.corner.iter().enumerate() {
-            if !*corner {
-                row_of[b] = ri;
-                ri += 1;
-            }
-        }
-        let mut pre_idx = vec![];
-        let mut heights = vec![];
-        for (l, comp) in hl.iter().zip(&links) {
-            let t2 = span_of(comp.trace_locations(), 2);
-            let mut terms = vec![];
-            for (band, c, w) in &l.weights {
-                let (tree, g) = match c {
-                    crate::gkrlink::RCol::Chan(i) =>
-                        (1, span_of(chans[*band].trace_locations(), 1) + i),
-                    crate::gkrlink::RCol::Key(i) =>
-                        (1, span_of(keys[*band].trace_locations(), 1) + i),
-                    crate::gkrlink::RCol::Row(i) =>
-                        (1, span_of(rows[row_of[*band]].trace_locations(), 1) + i),
-                    crate::gkrlink::RCol::Msk(i) => {
-                        let want = crate::attn_air::msk_id(*band, *i).id;
-                        let g = ids.iter().position(|x| x.id == want)
-                            .expect("a corner mask the preprocessed tree does not carry");
-                        pre_idx.push(g);
-                        (0, g)
-                    }
-                };
-                terms.push((tree, g, *w));
-            }
-            heights.push(crate::gkrlink::TieHeight {
-                h: l.h, mle_point: l.mle_point.clone(), konst: l.konst, terms,
-                q_at: t2, coeff_at: t2 + 4,
-            });
-        }
-        link_tie = Some(crate::gkrlink::LinkTie { heights, pre_idx });
     }
 
     let (rv_pow_ao, rv_step_ao) = powers(rv, plan.ao_lay.per_row);
@@ -1201,9 +1179,89 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         kind,
                     }
                 }),
+                // B11 stream U, lever 3: under the flag this region's lookups
+                // are the batched GKR's, so the AIR emits none of them and the
+                // interaction masks they would allocate are not there to claim.
+                gkr: p.gkr_dequant,
             },
-            next_use(claims),
+            // the use sum belongs to whoever owns the lookups: with the
+            // collector owning them there is no claimed sum in `use_sums` for
+            // this region at all, exactly as stream S did for the bands
+            if p.gkr_dequant { SecureField::zero() } else { next_use(claims) },
         ));
+    }
+
+    // B11 stream S, lever 3, moved down by stream U: the tie, from the spans
+    // the allocator handed out above.
+    let mut link_tie = None;
+    if let Some(hl) = link {
+        let span_of = |locs: &[stwo::core::pcs::TreeSubspan], tree: usize| {
+            locs.iter().find(|sp| sp.tree_index == tree)
+                .map(|sp| sp.col_start)
+                .expect("a component with no span in the tree the tie reads")
+        };
+        // band -> index into `rows` (prefix bands only)
+        let mut row_of = vec![usize::MAX; plan.corner.len()];
+        let mut ri = 0usize;
+        for (b, corner) in plan.corner.iter().enumerate() {
+            if !*corner {
+                row_of[b] = ri;
+                ri += 1;
+            }
+        }
+        let mut pre_idx = vec![];
+        let mut heights = vec![];
+        for (l, comp) in hl.iter().zip(&links) {
+            let t2 = span_of(comp.trace_locations(), 2);
+            let mut terms = vec![];
+            for (reg, c, w) in &l.weights {
+                use crate::gkrlink::{RCol, Reg};
+                let band = match reg {
+                    Reg::Band(b) => *b,
+                    // B11 stream U, lever 3: a dequant region is one component,
+                    // so its own span is the whole resolution -- the mask index
+                    // *is* the column index within it (`dequant::Map`).
+                    Reg::Deq(m) => {
+                        let (tree, g) = match c {
+                            RCol::Deq(i) =>
+                                (1, span_of(mats[*m].trace_locations(), 1) + i),
+                            RCol::DeqPre(sl) => {
+                                let want =
+                                    crate::dequant::chan_col(&p.mats[*m].name, "m", *sl).id;
+                                let g = ids.iter().position(|x| x.id == want)
+                                    .expect("a dequant weight-scale column missing \
+                                             from the preprocessed tree");
+                                pre_idx.push(g);
+                                (0, g)
+                            }
+                            _ => panic!("a band column named on a dequant region"),
+                        };
+                        terms.push((tree, g, *w));
+                        continue;
+                    }
+                };
+                let (tree, g) = match c {
+                    RCol::Chan(i) => (1, span_of(chans[band].trace_locations(), 1) + i),
+                    RCol::Key(i) => (1, span_of(keys[band].trace_locations(), 1) + i),
+                    RCol::Row(i) =>
+                        (1, span_of(rows[row_of[band]].trace_locations(), 1) + i),
+                    RCol::Msk(i) => {
+                        let want = crate::attn_air::msk_id(band, *i).id;
+                        let g = ids.iter().position(|x| x.id == want)
+                            .expect("a corner mask the preprocessed tree does not carry");
+                        pre_idx.push(g);
+                        (0, g)
+                    }
+                    _ => panic!("a dequant column named on a band"),
+                };
+                terms.push((tree, g, *w));
+            }
+            heights.push(crate::gkrlink::TieHeight {
+                h: l.h, mle_point: l.mle_point.clone(), konst: l.konst, terms,
+                q_at: t2, coeff_at: t2 + 4,
+            });
+        }
+        link_tie = Some(crate::gkrlink::LinkTie { heights, pre_idx });
     }
 
     let mut walks = vec![];
@@ -2358,7 +2416,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // `int/bands` minus `int/bands_build` comes to is the accounting.
         let t_ib = std::time::Instant::now();
         if let Some(g) = gkr.as_mut() {
-            g.band = b;
+            g.reg = crate::gkrlink::Reg::Band(b);
         }
         let it = attn_trace::interaction_phase(a, l, &plan.cfg, &pow, &rels.exp, &rels.ranges,
                                                &band_committed[b], &plan.widths, false,
@@ -2372,6 +2430,30 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         claims.use_sums.extend(it.use_sums.iter().map(|v| qm(*v)));
     }
     crate::util::m4_add("int/bands", m4_t.elapsed().as_secs_f64());
+    // B11 stream U, lever 3: the dequant family's sites, collected here rather
+    // than where its interaction columns are built.
+    //
+    // The GKR proof lands at a fixed transcript position -- after tree 1 and the
+    // relation challenges, before the interaction tree's own commit -- and the
+    // dequant regions' interaction columns come *after* that position in the
+    // tree's column order. Their fractions do not: a region's fractions are a
+    // function of its committed base and preprocessed columns alone, and those
+    // have existed since tree 1. So the collection runs here, in the plan's
+    // matmul order, which is `sites_of`'s order and the order the interaction
+    // loop below reaches them in; `mat_interaction` then simply stops building
+    // the LogUp columns. Nothing in the tree moves except the columns that
+    // leave, which is exactly the shape stream S gave the bands -- and it is
+    // why the link's own columns stay where S put them, between the bands and
+    // `attnout`, in both flag configurations.
+    if p.gkr_dequant {
+        let g = gkr.as_mut().expect("--gkr-dequant needs --gkr-bands");
+        let m4_t = std::time::Instant::now();
+        for (mi, (m, reg)) in layer.mats.iter().zip(&mat_regions).enumerate() {
+            let eval = crate::layer::deq_logup_eval(m, reg, rv, s, &rels);
+            crate::gkrband::deq_site(g, mi, &eval, reg);
+        }
+        crate::util::m4_add("int/deq_gkr", m4_t.elapsed().as_secs_f64());
+    }
     // B11 stream Q: the bands' fractional sums, proved by one batched GKR at the
     // transcript position the verifier will replay -- after tree 1 and the
     // relation challenges, before the interaction tree's own commit. The sums it
@@ -2426,18 +2508,37 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // host mirror to fold, so the fold reaches them where they are. The
         // causal-mask columns are preprocessed and always host-built, and a
         // corner band is always host-filled, so one height can mix the two.
-        let src_of = |band: usize, c: &crate::gkrlink::RCol| {
+        let src_of = |reg: crate::gkrlink::Reg, c: &crate::gkrlink::RCol| {
+            use crate::gkrlink::{RCol, Reg, Src};
+            // B11 stream U, lever 3: the same resolution for the second family.
+            // A dequant region's own `base` and `pre` are the columns its masks
+            // name, in committed order, and under a device fill they live where
+            // the fill left them -- so this is `band_committed`'s two lines with
+            // the region's own vectors in place of the band's spans.
+            if let Reg::Deq(m) = reg {
+                let r = &mat_regions[m];
+                let chan_w = if r.spec.variant == DeqVariant::Chain { 2 } else { 1 };
+                return match (c, &r.dev) {
+                    (RCol::Deq(i), Some(d)) => Src::Dev(d.base[*i].device_ptr),
+                    (RCol::Deq(i), None) => Src::Host(&r.base[*i]),
+                    (RCol::DeqPre(sl), Some(d)) => Src::Dev(d.pre[chan_w * sl].device_ptr),
+                    (RCol::DeqPre(sl), None) => Src::Host(&r.pre[chan_w * sl]),
+                    _ => panic!("a band column named on a dequant region"),
+                };
+            }
+            let Reg::Band(band) = reg else { unreachable!() };
             let com = &band_committed[band];
             let dev = band_dev[band].as_ref();
             let base = |i: usize| match dev {
-                Some(d) => crate::gkrlink::Src::Dev(d.base[i].device_ptr),
-                None => crate::gkrlink::Src::Host(&com.base[i]),
+                Some(d) => Src::Dev(d.base[i].device_ptr),
+                None => Src::Host(&com.base[i]),
             };
             match c {
-                crate::gkrlink::RCol::Chan(i) => base(com.at[0] + i),
-                crate::gkrlink::RCol::Key(i) => base(com.at[1] + i),
-                crate::gkrlink::RCol::Row(i) => base(com.at[3] + i),
-                crate::gkrlink::RCol::Msk(i) => crate::gkrlink::Src::Host(&com.pre[msk0 + i]),
+                RCol::Chan(i) => base(com.at[0] + i),
+                RCol::Key(i) => base(com.at[1] + i),
+                RCol::Row(i) => base(com.at[3] + i),
+                RCol::Msk(i) => Src::Host(&com.pre[msk0 + i]),
+                _ => panic!("a dequant column named on a band"),
             }
         };
         // B11 stream S, the link's own control: `B11_LINKMUT=<k>` bends one
@@ -2446,9 +2547,39 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // -- the only thing that can reject it is the verifier deriving the
         // honest fold from the GKR artifact. Off, nothing is touched.
         if let Ok(spec) = std::env::var("B11_LINKMUT") {
-            let at: usize = spec.parse::<usize>().unwrap_or(0) % hl.len();
-            eprintln!("linkmut: height 2^{}, first folded weight bent", hl[at].h);
-            hl[at].weights[0].2 += SecureField::one();
+            // B11 stream U, lever 3: `<k>` bends height `k`'s first folded
+            // weight, as stream S wrote it; `<k>:deq` bends the first weight on
+            // that height that belongs to a *dequant* region instead. The
+            // weights are keyed by `(region, column)` and `Reg::Band` sorts
+            // before `Reg::Deq`, so at a height both families share the plain
+            // form always lands on a band -- and a control that cannot be aimed
+            // at the new family would not be a control for it.
+            let is_deq = |w: &(crate::gkrlink::Reg, crate::gkrlink::RCol, SecureField)| {
+                matches!(w.0, crate::gkrlink::Reg::Deq(_))
+            };
+            let (at, w) = if spec == "deq" {
+                // self-aiming: the first dequant weight anywhere in the fold. A
+                // height's weights are keyed by `(region, column)` and
+                // `Reg::Band` sorts first, so this finds the family without the
+                // caller having to know which heights it landed on.
+                let at = hl.iter().position(|h| h.weights.iter().any(is_deq))
+                    .expect("linkmut: the fold carries no dequant column to bend");
+                (at, hl[at].weights.iter().position(is_deq).unwrap())
+            } else {
+                let (num, fam) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
+                let at: usize = num.parse::<usize>().unwrap_or(0) % hl.len();
+                let w = if fam == "deq" {
+                    hl[at].weights.iter().position(is_deq).unwrap_or_else(|| panic!(
+                        "linkmut: height 2^{} carries no dequant column to bend",
+                        hl[at].h))
+                } else {
+                    0
+                };
+                (at, w)
+            };
+            eprintln!("linkmut: height 2^{}, folded weight {w} bent ({:?} {:?})",
+                      hl[at].h, hl[at].weights[w].0, hl[at].weights[w].1);
+            hl[at].weights[w].2 += SecureField::one();
             hl[at].claim = crate::gkrlink::fold_total(&hl[at], &src_of);
             hl[at].shift = hl[at].claim
                 / SecureField::from(M31::from_u32_unchecked(1u32 << hl[at].h));
@@ -2481,12 +2612,17 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             oside_w(w_glue, lam_glue, m.tokens, m.n_out, reg.lay.per_row,
                     plan.oside_kind(&m.name))
         });
-        let it = mat_interaction(m, reg, rv, s, &rels, ow.as_ref());
+        let it = mat_interaction(m, reg, rv, s, &rels, ow.as_ref(), p.gkr_dequant);
         inter_all.extend(it.cols);
         inter_mark(&format!("dequant/{}", m.name), &inter_all, &mut inter_seen,
                    &mut inter_split);
         claims.mat_h.push(qm(it.claimed_h));
-        claims.use_sums.push(qm(it.use_sum));
+        // B11 stream U, lever 3: with the collector owning this region's
+        // lookups there is no claimed sum to carry -- the GKR's per-site sum
+        // stands exactly where it stood, in `sums_cancel`.
+        if !p.gkr_dequant {
+            claims.use_sums.push(qm(it.use_sum));
+        }
         if let Some(c) = it.claimed_out {
             if m.name == "lm_head" {
                 claims.head_key.push(qm(c));
