@@ -61,6 +61,19 @@ use crate::attn_witness::Variant;
 relation!(ExpRel, 2);
 relation!(RangeRel, 1);
 
+impl ExpRel {
+    /// the drawn elements, for the GKR link's affine weights (B11 stream S)
+    pub fn parts(&self) -> (SecureField, &[SecureField]) {
+        (self.0.z, &self.0.alpha_powers)
+    }
+}
+impl RangeRel {
+    /// the drawn elements, for the GKR link's affine weights (B11 stream S)
+    pub fn parts(&self) -> (SecureField, &[SecureField]) {
+        (self.0.z, &self.0.alpha_powers)
+    }
+}
+
 pub fn id(s: impl Into<String>) -> PreProcessedColumnId {
     PreProcessedColumnId { id: s.into() }
 }
@@ -239,6 +252,10 @@ pub struct ChanEval {
     pub rel_k: RangeRel,
     pub rel_q: RangeRel,
     pub range_check: bool,
+    /// B11 stream S, lever 1: the region's lookups are proved by the batched
+    /// GKR instead of committed running-sum columns, so the AIR emits neither
+    /// the relation entries nor the interaction masks they would allocate.
+    pub gkr: bool,
 }
 
 impl FrameworkEval for ChanEval {
@@ -292,7 +309,7 @@ impl FrameworkEval for ChanEval {
         eval.add_constraint(acc.clone() - acc_prev * mult - (u * v) * last);
         eval.add_constraint((acc - self.claimed) * end);
 
-        if self.range_check {
+        if self.range_check && !self.gkr {
             for kp in &ks {
                 eval.add_to_relation(RelationEntry::new(&self.rel_k, E::EF::one(),
                                                         core::slice::from_ref(kp)));
@@ -326,6 +343,9 @@ pub struct KeyEval {
     /// the split variant's remainder table
     pub rel_split: Option<RangeRel>,
     pub range_check: bool,
+    /// B11 stream S, lever 1: the region's lookups are proved by the batched
+    /// GKR instead of committed running-sum columns (see `ChanEval::gkr`).
+    pub gkr: bool,
     /// B10 step 3: this is the *causal corner*, the S x S grid of the decoded
     /// tokens against each other.  It reads its own selectors, one causal-mask
     /// column per token slot, and the instance-boundary multiplier `kappa`.  Its
@@ -445,32 +465,34 @@ impl FrameworkEval for KeyEval {
         eval.add_constraint((av - self.claimed_av) * end.clone());
         eval.add_constraint((sn - self.claimed_sn) * end);
 
-        // the exp lookups: index and numerator together, arity 2
-        for i in 0..q {
-            let key = match self.variant {
-                Variant::Bf16x => aux[i].clone(),
-                _ => idx[i].clone(),
-            };
-            // a masked slot is looked up at multiplicity zero: it never entered the
-            // numerator fold, and its shift may be negative (the row maximum is over
-            // the keys the token *did* attend to), so it is not a table row at all.
-            eval.add_to_relation(RelationEntry::new(&self.rel_exp, E::EF::from(vis(i)),
-                                                    &[key, num[i].clone()]));
-        }
-        // the remainder the table's granularity leaves behind, when there is one
-        if let Some(rel) = &self.rel_split {
-            for ai in aux.iter() {
-                eval.add_to_relation(RelationEntry::new(rel, E::EF::one(),
-                                                        core::slice::from_ref(ai)));
+        if !self.gkr {
+            // the exp lookups: index and numerator together, arity 2
+            for i in 0..q {
+                let key = match self.variant {
+                    Variant::Bf16x => aux[i].clone(),
+                    _ => idx[i].clone(),
+                };
+                // a masked slot is looked up at multiplicity zero: it never entered the
+                // numerator fold, and its shift may be negative (the row maximum is over
+                // the keys the token *did* attend to), so it is not a table row at all.
+                eval.add_to_relation(RelationEntry::new(&self.rel_exp, E::EF::from(vis(i)),
+                                                        &[key, num[i].clone()]));
             }
-        }
-        if self.range_check {
-            for vp in &vals {
-                eval.add_to_relation(RelationEntry::new(&self.rel_v, E::EF::one(),
-                                                        core::slice::from_ref(vp)));
+            // the remainder the table's granularity leaves behind, when there is one
+            if let Some(rel) = &self.rel_split {
+                for ai in aux.iter() {
+                    eval.add_to_relation(RelationEntry::new(rel, E::EF::one(),
+                                                            core::slice::from_ref(ai)));
+                }
             }
+            if self.range_check {
+                for vp in &vals {
+                    eval.add_to_relation(RelationEntry::new(&self.rel_v, E::EF::one(),
+                                                            core::slice::from_ref(vp)));
+                }
+            }
+            eval.finalize_logup_in_pairs();
         }
-        eval.finalize_logup_in_pairs();
         eval
     }
 }
@@ -558,6 +580,9 @@ pub struct RowEval {
     pub z_min: u32,
     pub rel_lo: RangeRel,
     pub rel_hi: RangeRel,
+    /// B11 stream S, lever 1: the region's lookups are proved by the batched
+    /// GKR instead of committed running-sum columns (see `ChanEval::gkr`).
+    pub gkr: bool,
 }
 
 impl FrameworkEval for RowEval {
@@ -615,21 +640,23 @@ impl FrameworkEval for RowEval {
         // on, stated in the AIR instead of assumed from a blind worst case; the
         // lower bound is what stops a prover from shifting the whole row into
         // underflow, where every numerator is zero and the softmax is 0/0.
-        let inv = M31::from_u32_unchecked(1 << self.z_lo_bits).inverse();
-        let zmin = M31::from_u32_unchecked(self.z_min);
-        for i in 0..self.rw {
-            let hi = (zs[i].clone() - los[i].clone()) * inv;
-            let hi2 = (zs[i].clone() - E::F::from(zmin) - los2[i].clone()) * inv;
-            eval.add_to_relation(RelationEntry::new(&self.rel_lo, E::EF::one(),
-                                                    core::slice::from_ref(&los[i])));
-            eval.add_to_relation(RelationEntry::new(&self.rel_hi, E::EF::one(),
-                                                    core::slice::from_ref(&hi)));
-            eval.add_to_relation(RelationEntry::new(&self.rel_lo, E::EF::one(),
-                                                    core::slice::from_ref(&los2[i])));
-            eval.add_to_relation(RelationEntry::new(&self.rel_hi, E::EF::one(),
-                                                    core::slice::from_ref(&hi2)));
+        if !self.gkr {
+            let inv = M31::from_u32_unchecked(1 << self.z_lo_bits).inverse();
+            let zmin = M31::from_u32_unchecked(self.z_min);
+            for i in 0..self.rw {
+                let hi = (zs[i].clone() - los[i].clone()) * inv;
+                let hi2 = (zs[i].clone() - E::F::from(zmin) - los2[i].clone()) * inv;
+                eval.add_to_relation(RelationEntry::new(&self.rel_lo, E::EF::one(),
+                                                        core::slice::from_ref(&los[i])));
+                eval.add_to_relation(RelationEntry::new(&self.rel_hi, E::EF::one(),
+                                                        core::slice::from_ref(&hi)));
+                eval.add_to_relation(RelationEntry::new(&self.rel_lo, E::EF::one(),
+                                                        core::slice::from_ref(&los2[i])));
+                eval.add_to_relation(RelationEntry::new(&self.rel_hi, E::EF::one(),
+                                                        core::slice::from_ref(&hi2)));
+            }
+            eval.finalize_logup_in_pairs();
         }
-        eval.finalize_logup_in_pairs();
         eval
     }
 }

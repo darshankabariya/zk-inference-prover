@@ -902,7 +902,11 @@ fn lower_impl<E: FrameworkEval>(
 
     // The column map, verified in section 14.2: `ExprEvaluator` numbers mask
     // columns with one counter across all interactions, so the j-th column of
-    // interaction i is the j-th smallest idx seen there.
+    // interaction i is the j-th smallest idx *claimed* there. B11 stream S:
+    // ranked over the evaluator's claim log rather than over the constraints'
+    // references, because the GKR arm's band evals keep base-column claims no
+    // constraint reads (the trace allocator must stay aligned with the
+    // committed order); an unclaimed reference is still an error, below.
     let mut seen = BTreeSet::new();
     for x in ev.ext_intermediates.values() {
         collect_cols_ext(x, &mut seen);
@@ -913,12 +917,13 @@ fn lower_impl<E: FrameworkEval>(
     let n_int = info.mask_offsets.len().max(3);
     let mut colmap = vec![HashMap::new(); n_int];
     for i in 0..n_int {
-        let idxs: Vec<usize> = seen.iter().filter(|(t, _)| *t == i).map(|(_, x)| *x).collect();
+        let idxs: Vec<usize> = ev.claimed.iter().enumerate()
+            .filter(|(_, t)| **t == i).map(|(x, _)| x).collect();
         if let Some(cols) = info.mask_offsets.get(i) {
             assert_eq!(
                 idxs.len(),
                 cols.len(),
-                "interaction {i}: {} symbolic columns, {} billed",
+                "interaction {i}: {} claimed columns, {} billed",
                 idxs.len(),
                 cols.len()
             );
@@ -928,6 +933,10 @@ fn lower_impl<E: FrameworkEval>(
             let j = if mutate == Mutate::ColShift && i == 1 && n > 1 { (j + 1) % n } else { j };
             colmap[i].insert(idx, j);
         }
+    }
+    for (t, idx) in &seen {
+        assert!(colmap.get(*t).is_some_and(|m| m.contains_key(idx)),
+                "interaction {t}: constraint references column {idx} that was never claimed");
     }
 
     let pre_ids: Vec<String> = info.preprocessed_columns.iter().map(|c| c.id.clone()).collect();
@@ -2230,9 +2239,9 @@ pub fn emit_cmd(args: &[String]) {
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b03);
     fill_tie_claims(&plan, &mut claims, 0x7135_2b03);
-    let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
-
-    // family -> shapes, in first-seen order; a shape is a fingerprint. Seeded
+    let link = plan.p.gkr_bands.then(|| crate::gkrlink::link_for(&plan, 0x0b65_1157));
+    let b = crate::compose::build_components_linked(&plan, &rels, f[0], f[1], f[2], f[3], f[4],
+                                                    f[5], &claims, link.as_deref());  // family -> shapes, in first-seen order; a shape is a fingerprint. Seeded
     // from every shape a previous emit run saw, so one library serves every
     // design point (see `Ir`'s note).
     let store = dir.join("shapes.json");
@@ -2303,6 +2312,9 @@ pub fn emit_cmd(args: &[String]) {
         // than `chans`, so it is walked on its own
         for i in 0..b.rows.len() {
             go!(b.rows[i], format!("row_band{i}"));
+        }
+        for i in 0..b.links.len() {
+            go!(b.links[i], format!("link{i}"));
         }
         go!(b.ao, "attnout".to_string());
         for i in 0..b.mats.len() {
@@ -2972,6 +2984,9 @@ pub fn gen_emit_cmd(args: &[String]) {
         // than `chans`, so it is walked on its own
         for i in 0..b.rows.len() {
             go!(b.rows[i], format!("row_band{i}"));
+        }
+        for i in 0..b.links.len() {
+            go!(b.links[i], format!("link{i}"));
         }
         go!(b.ao, "attnout".to_string());
         for i in 0..b.mats.len() {

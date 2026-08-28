@@ -26,7 +26,7 @@
 //!
 //! There is no prover-side struct comparison anywhere on the accept path.
 
-use num_traits::Zero;
+use num_traits::{One, Zero};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -797,14 +797,29 @@ impl Plan {
         if self.argmax_mat().is_some() {
             ids.extend(crate::argmax::AM_SEL.iter().map(|n| crate::argmax::id(n)));
         }
+        // B11 stream S, lever 3: the link heights' boundary selectors, after
+        // everything -- they exist only on the GKR arm, so the flag-off tree
+        // is untouched
+        if self.p.gkr_bands {
+            for h in crate::gkrlink::link_heights(self) {
+                ids.push(crate::gkrlink::first_id(h));
+                ids.push(crate::gkrlink::second_id(h));
+            }
+        }
         ids
     }
 
     /// The number of components that carry lookups, in `use_sums` order.
     pub fn n_use(&self) -> usize {
         // chan + grid + per-token per prefix band; a corner band has no per-token
-        // region (the pair shares the prefix band's), so it contributes two
-        self.corner.iter().map(|c| if *c { 2 } else { 3 }).sum::<usize>()
+        // region (the pair shares the prefix band's), so it contributes two.
+        // B11 stream S, lever 1: on the GKR arm the bands' sums are proved by
+        // the GKR and never enter `use_sums`.
+        (if self.p.gkr_bands {
+            0
+        } else {
+            self.corner.iter().map(|c| if *c { 2 } else { 3 }).sum::<usize>()
+        })
             + 1 + self.p.mats.len() + self.walks.len()
             + self.glue.as_ref().map(|g| g.regions.len()).unwrap_or(0)
             + usize::from(self.argmax_mat().is_some())
@@ -820,6 +835,12 @@ pub struct BuiltComponents {
     pub chans: Vec<FrameworkComponent<ChanEval>>,
     pub keys: Vec<FrameworkComponent<KeyEval>>,
     pub rows: Vec<FrameworkComponent<RowEval>>,
+    /// B11 stream S, lever 3: one univariate IOP per link height, and the tie
+    /// component that pins its columns to the base columns at OODS. Empty and
+    /// `None` off the GKR arm (and on the emit and probe paths, which have no
+    /// artifact to derive them from).
+    pub links: Vec<FrameworkComponent<crate::gkrlink::LinkEval>>,
+    pub link_tie: Option<crate::gkrlink::LinkTie>,
     pub ao: FrameworkComponent<AttnOutEval>,
     pub mats: Vec<FrameworkComponent<DequantEval>>,
     pub walks: Vec<FrameworkComponent<WalkEval>>,
@@ -892,6 +913,12 @@ impl BuiltComponents {
                 ri += 1;
             }
         }
+        for l in &self.links {
+            v.push(l);
+        }
+        if let Some(t) = &self.link_tie {
+            v.push(t);
+        }
         v.push(&self.ao);
         for m in &self.mats {
             v.push(m);
@@ -924,6 +951,12 @@ impl BuiltComponents {
                 v.push(&self.rows[ri]);
                 ri += 1;
             }
+        }
+        for l in &self.links {
+            v.push(l);
+        }
+        if let Some(t) = &self.link_tie {
+            v.push(t);
         }
         v.push(&self.ao);
         for m in &self.mats {
@@ -976,9 +1009,21 @@ fn inter_mark(
 /// the parsed claims — the verifier's route, also used by the prover so the two
 /// sides cannot diverge.
 #[allow(clippy::too_many_arguments)]
+/// `build_components` without link parameters: the AIR probe and any caller
+/// that runs before a GKR artifact exists. On the GKR arm the prove and
+/// verify paths call `build_components_linked` with the derived heights.
+#[allow(clippy::too_many_arguments)]
 pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField,
                         rv: SecureField, r_corner: SecureField, w_glue: SecureField,
                         lam_glue: SecureField, claims: &Claims) -> BuiltComponents {
+    build_components_linked(plan, rels, r, s, rv, r_corner, w_glue, lam_glue, claims, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField,
+                        rv: SecureField, r_corner: SecureField, w_glue: SecureField,
+                        lam_glue: SecureField, claims: &Claims,
+                        link: Option<&[crate::gkrlink::HeightLink]>) -> BuiltComponents {
     let p = &plan.p;
     let ids = plan.pre_ids();
     let alloc = &mut TraceLocationAllocator::new_with_preprocessed_columns(&ids);
@@ -995,12 +1040,14 @@ pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField
         let l = &plan.lays[b];
         let pow = plan.powers(b, r, s, rv, r_corner);
         let bc = claims.bands[b];
+        // B11 stream S, lever 1: on the GKR arm a band component carries no
+        // LogUp, so there is no claimed sum to hand it and none to consume.
         chans.push(FrameworkComponent::<ChanEval>::new(
             alloc,
             ChanEval { tag: b, lay: l.chan, pow: pow.clone(), off, claimed: unqm(bc[0]),
                        rel_k: rels.range(p.k_bits).clone(), rel_q: rels.range(p.q_bits).clone(),
-                       range_check: true },
-            next_use(claims),
+                       range_check: true, gkr: p.gkr_bands },
+            if p.gkr_bands { SecureField::zero() } else { next_use(claims) },
         ));
         keys.push(FrameworkComponent::<KeyEval>::new(
             alloc,
@@ -1011,8 +1058,8 @@ pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField
                           AttnVariant::IntSplit(k) => Some(rels.range(k).clone()),
                           _ => None,
                       },
-                      range_check: true, corner: plan.corner[b] },
-            next_use(claims),
+                      range_check: true, gkr: p.gkr_bands, corner: plan.corner[b] },
+            if p.gkr_bands { SecureField::zero() } else { next_use(claims) },
         ));
         if !plan.corner[b] {
             rows.push(FrameworkComponent::<RowEval>::new(
@@ -1022,11 +1069,71 @@ pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField
                           claimed_am: unqm(bc[4]), claimed_az: unqm(bc[5]),
                           z_lo_bits: p.z_lo_bits, z_min: p.z_min,
                           rel_lo: rels.range(p.z_lo_bits).clone(),
-                          rel_hi: rels.range(p.z_hi_bits).clone() },
-                next_use(claims),
+                          rel_hi: rels.range(p.z_hi_bits).clone(), gkr: p.gkr_bands },
+                if p.gkr_bands { SecureField::zero() } else { next_use(claims) },
             ));
         }
         pows.push(pow);
+    }
+
+    // B11 stream S, lever 3: the link components allocate right after the
+    // bands, matching where the prover commits their columns; the tie is
+    // built from the spans the allocator just handed out.
+    let mut links = vec![];
+    let mut link_tie = None;
+    if let Some(hl) = link {
+        for l in hl {
+            links.push(FrameworkComponent::<crate::gkrlink::LinkEval>::new(
+                alloc,
+                crate::gkrlink::LinkEval {
+                    h: l.h, mle_point: l.mle_point.clone(), shift: l.shift,
+                },
+                SecureField::zero(),
+            ));
+        }
+        let span_of = |locs: &[stwo::core::pcs::TreeSubspan], tree: usize| {
+            locs.iter().find(|sp| sp.tree_index == tree)
+                .map(|sp| sp.col_start)
+                .expect("a component with no span in the tree the tie reads")
+        };
+        // band -> index into `rows` (prefix bands only)
+        let mut row_of = vec![usize::MAX; plan.corner.len()];
+        let mut ri = 0usize;
+        for (b, corner) in plan.corner.iter().enumerate() {
+            if !*corner {
+                row_of[b] = ri;
+                ri += 1;
+            }
+        }
+        let mut pre_idx = vec![];
+        let mut heights = vec![];
+        for (l, comp) in hl.iter().zip(&links) {
+            let t2 = span_of(comp.trace_locations(), 2);
+            let mut terms = vec![];
+            for (band, c, w) in &l.weights {
+                let (tree, g) = match c {
+                    crate::gkrlink::RCol::Chan(i) =>
+                        (1, span_of(chans[*band].trace_locations(), 1) + i),
+                    crate::gkrlink::RCol::Key(i) =>
+                        (1, span_of(keys[*band].trace_locations(), 1) + i),
+                    crate::gkrlink::RCol::Row(i) =>
+                        (1, span_of(rows[row_of[*band]].trace_locations(), 1) + i),
+                    crate::gkrlink::RCol::Msk(i) => {
+                        let want = crate::attn_air::msk_id(*band, *i).id;
+                        let g = ids.iter().position(|x| x.id == want)
+                            .expect("a corner mask the preprocessed tree does not carry");
+                        pre_idx.push(g);
+                        (0, g)
+                    }
+                };
+                terms.push((tree, g, *w));
+            }
+            heights.push(crate::gkrlink::TieHeight {
+                h: l.h, mle_point: l.mle_point.clone(), konst: l.konst, terms,
+                q_at: t2, coeff_at: t2 + 4,
+            });
+        }
+        link_tie = Some(crate::gkrlink::LinkTie { heights, pre_idx });
     }
 
     let (rv_pow_ao, rv_step_ao) = powers(rv, plan.ao_lay.per_row);
@@ -1226,8 +1333,9 @@ pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField
         )
     });
 
-    BuiltComponents { chans, keys, rows, ao, mats, walks, glue, exp_t, tables, gtables, argmax,
-                      pows, has_rows: plan.corner.iter().map(|c| !*c).collect() }
+    BuiltComponents { chans, keys, rows, links, link_tie, ao, mats, walks, glue, exp_t, tables,
+                      gtables, argmax, pows,
+                      has_rows: plan.corner.iter().map(|c| !*c).collect() }
 }
 
 /// Stream E: the argmax side's tie weights -- the mirror of the head dequant's
@@ -2103,6 +2211,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         pre_all.extend(r.pre.iter().map(AnyCol::Host));
         base_all.extend(r.base.iter().map(AnyCol::Host));
     }
+    // B11 stream S, lever 3: the link heights' boundary selectors close the
+    // preprocessed tree, matching `pre_ids` -- GKR arm only
+    if p.gkr_bands {
+        for h in crate::gkrlink::link_heights(&plan) {
+            pre_all.extend(crate::gkrlink::boundary_cols(h)
+                .into_iter().map(crate::device::AnyCol::OwnedHost));
+        }
+    }
     crate::util::m4_add("gen/refs", m4_t.elapsed().as_secs_f64());
     let trace_secs = trace_secs + t0.elapsed().as_secs_f64();
 
@@ -2209,8 +2325,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // sites. Collecting is additive -- it reads the committed columns and
     // writes nothing the committed path can see -- so the flag-off pass is the
     // pass it always was.
-    let mut gkr: Option<Box<crate::gkrband::Collect>> =
-        p.gkr_bands.then(|| Box::new(crate::gkrband::Collect::with_direct(false)));
+    let mut gkr: Option<Box<crate::gkrband::Collect>> = p.gkr_bands.then(|| {
+        let mut g = crate::gkrband::Collect::with_direct(false);
+        // B11 stream S, lever 1: on the composed arm the collector owns the
+        // sums -- the committed running-sum columns leave with it, and the
+        // GKR's per-site sums stand in for them in the cancellation.
+        g.replace = true;
+        Box::new(g)
+    });
     let m4_t = std::time::Instant::now();
     let mut row_i = 0usize;
     for (b, a) in layer.bands.iter().enumerate() {
@@ -2287,6 +2409,48 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             b[i] -= 1;
         }
         claims.gkr = Some(b);
+    }
+    // B11 stream S, lever 3: one univariate IOP per height ties the GKR's
+    // input-layer claims to the committed base columns. The fold challenge is
+    // drawn right after the sumcheck -- the verifier draws at the same spot --
+    // and the columns join the interaction tree right after the bands, where
+    // the link components allocate their spans.
+    let mut link_hl: Option<Vec<crate::gkrlink::HeightLink>> = None;
+    if let Some(pr) = gkr_proved.as_ref() {
+        let m4_t = std::time::Instant::now();
+        let alpha = sess.draw_felts(1)[0];
+        let mut hl = crate::gkrlink::link_params(&plan, &rels, &pr.insts, &pr.artifact, alpha)
+            .expect("the prover's own GKR artifact fails the link derivation");
+        let msk0 = crate::attn_air::CHAN_SEL.len() + crate::attn_air::CORNER_SEL.len();
+        let col_of = |band: usize, c: &crate::gkrlink::RCol| -> &Eval {
+            let com = &band_committed[band];
+            match c {
+                crate::gkrlink::RCol::Chan(i) => &com.base[com.at[0] + i],
+                crate::gkrlink::RCol::Key(i) => &com.base[com.at[1] + i],
+                crate::gkrlink::RCol::Row(i) => &com.base[com.at[3] + i],
+                crate::gkrlink::RCol::Msk(i) => &com.pre[msk0 + i],
+            }
+        };
+        // B11 stream S, the link's own control: `B11_LINKMUT=<k>` bends one
+        // folded weight and re-derives the claim from the bent column, so the
+        // prover's every self-check passes and the proof is *self-consistent*
+        // -- the only thing that can reject it is the verifier deriving the
+        // honest fold from the GKR artifact. Off, nothing is touched.
+        if let Ok(spec) = std::env::var("B11_LINKMUT") {
+            let at: usize = spec.parse::<usize>().unwrap_or(0) % hl.len();
+            eprintln!("linkmut: height 2^{}, first folded weight bent", hl[at].h);
+            hl[at].weights[0].2 += SecureField::one();
+            hl[at].claim = crate::gkrlink::eq_total(&hl[at], &col_of);
+            hl[at].shift = hl[at].claim
+                / SecureField::from(M31::from_u32_unchecked(1u32 << hl[at].h));
+        }
+        for l in &hl {
+            let cols = crate::gkrlink::build_height_cols(l, &col_of);
+            inter_all.extend(crate::device::host_cols(cols));
+        }
+        inter_mark("gkrlink", &inter_all, &mut inter_seen, &mut inter_split);
+        crate::util::m4_add("int/link", m4_t.elapsed().as_secs_f64());
+        link_hl = Some(hl);
     }
     let m4_t = std::time::Instant::now();
     let aoi = ao_interaction(&layer.ao, &aor, r, s, rv, p.c, &rels, &m4e_air.ao.eval);
@@ -2620,7 +2784,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
 
     // ---- components, prove ----------------------------------------------------
     let m4_t = std::time::Instant::now();
-    let built = build_components(&plan, &rels, r, s, rv, r_corner, w_glue, lam_glue, &claims);
+    let built = build_components_linked(&plan, &rels, r, s, rv, r_corner, w_glue, lam_glue,
+                                        &claims, link_hl.as_deref());
     crate::util::m4_add("wall/build_components", m4_t.elapsed().as_secs_f64());
     let sizes: Vec<Vec<u32>> = sess
         .ops
@@ -2800,28 +2965,32 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // sumcheck moves the channel, so a verifier that skipped it would diverge
     // at OODS; that is the shape of the failure if the two ever drift.
     let mut gkr_sums: Vec<SecureField> = vec![];
+    let mut link_hl: Option<Vec<crate::gkrlink::HeightLink>> = None;
     if plan.p.gkr_bands {
         let Some(bytes) = claims.gkr.as_ref() else {
             return Verdict::rejected("the statement asks for the GKR arm and carries no GKR proof");
         };
         let sites = crate::gkrband::sites_of(&plan);
-        match crate::gkrband::verify(&mut ch, &sites, bytes) {
-            Ok((sums, _artifact, _insts)) => gkr_sums = sums,
+        let (sums, artifact, insts) = match crate::gkrband::verify(&mut ch, &sites, bytes) {
+            Ok(v) => v,
             Err(e) => return Verdict::rejected(&format!("the bands' GKR proof: {e}")),
+        };
+        gkr_sums = sums;
+        // B11 stream S, lever 1: the bands' sums never enter `use_sums` on
+        // this arm -- the committed running-sum columns are gone. The GKR's
+        // per-site sums join the cancellation directly below, standing exactly
+        // where the claimed sums stood, and the sumcheck the channel just
+        // replayed is what certifies them.
+        if gkr_sums.len() != sites.len() {
+            return Verdict::rejected("the GKR proved a different number of sites than the plan has");
         }
-        // The sums the GKR proved have to be the ones the statement then feeds
-        // to `sums_cancel`, or the sumcheck is about some other numbers. The
-        // band sites come first in `use_sums`, in the order
-        // `interaction_phase` pushes them, which is the order `sites_of`
-        // rebuilds -- per band: channel, grid, per-token.
-        if gkr_sums.len() > claims.use_sums.len() {
-            return Verdict::rejected("more GKR sites than the statement has use sums");
-        }
-        if let Some(i) = (0..gkr_sums.len())
-            .find(|i| gkr_sums[*i] != unqm(claims.use_sums[*i]))
-        {
-            return Verdict::rejected(&format!(
-                "the GKR's sum for {} is not the one the statement uses", sites[i].tag()));
+        // B11 stream S, lever 3: the fold challenge, at the same transcript
+        // position the prover drew it, then the per-height parameters the tie
+        // constraints assert. A malformed artifact is a rejection here.
+        let alpha = ch.draw_secure_felts(1)[0];
+        match crate::gkrlink::link_params(&plan, &rels, &insts, &artifact, alpha) {
+            Ok(hl) => link_hl = Some(hl),
+            Err(e) => return Verdict::rejected(&format!("the bands' GKR link: {e}")),
         }
     } else if claims.gkr.is_some() {
         return Verdict::rejected("the statement carries a GKR proof the flag did not ask for");
@@ -2844,7 +3013,8 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     ch.mix_felts(&claims.flat());
 
     // ---- components from the parsed statement ----------------------------------
-    let built = build_components(&plan, &rels, r, s, rv, r_corner, w_glue, lam_glue, &claims);
+    let built = build_components_linked(&plan, &rels, r, s, rv, r_corner, w_glue, lam_glue,
+                                        &claims, link_hl.as_deref());
     let components = built.components();
     // the AIR's own column sizes must agree with the committed ones
     let derived = TreeVec::concat_cols(components.iter().map(|c| c.trace_log_degree_bounds()));
@@ -2856,11 +3026,15 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let error = vres.err().map(|e| format!("{e:?}"));
 
     // ---- claimed sums and identities -------------------------------------------
+    // B11 stream S, lever 1: on the GKR arm the bands' fractional sums arrive
+    // from the GKR's output claims instead of `use_sums`; the cancellation is
+    // the same global identity over the same fractions either way.
     let total = claims
         .use_sums
         .iter()
         .chain(claims.table_sums.iter())
-        .fold(SecureField::zero(), |a, b| a + unqm(*b));
+        .fold(SecureField::zero(), |a, b| a + unqm(*b))
+        + gkr_sums.iter().fold(SecureField::zero(), |a, b| a + *b);
     let sums_cancel = total == SecureField::zero();
 
     let mut qk_ok = vec![];

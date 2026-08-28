@@ -26,6 +26,7 @@ mod devacc;
 mod devwfill;
 mod devgfill;
 mod gkrband;
+mod gkrlink;
 mod gencudakernels;
 mod cudakernels;
 mod exprprobe;

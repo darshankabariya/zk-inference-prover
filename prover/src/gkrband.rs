@@ -20,30 +20,27 @@
 //! region is a natural GKR instance: its input layer is an MLE over
 //! `log2(n_looks) + log_rows` variables. Two details decide the layout.
 //!
-//! *The lookups are paired before they reach the circuit* (B11 stream R,
-//! lever 1). The committed path already combines consecutive lookups into one
-//! fraction per pair -- `plogup::paired`, the same batching
-//! `finalize_logup_in_pairs` asserts -- and a LogUp GKR's own bottom layer
-//! performs the identical combination. Feeding the circuit unpaired therefore
-//! pays a whole extra input layer to recompute what `paired` already defines.
-//! The input layer here is built from the *paired* fractions instead: one
-//! entry per pair, the odd tail unpaired, which removes the bottom layer of
-//! every tree and halves the sumcheck. The claimed sums are unchanged --
-//! fraction addition is exact -- and `look_frac` through `paired` stays the
-//! one definition of the fraction on both arms.
+//! *The lookups reach the circuit unpaired* (B11 stream S, lever 3; it undoes
+//! stream R's outside-the-circuit pairing). The input layer holds one entry
+//! per look -- numerator `1` or `1 - mask`, denominator `combine(cols) - z`,
+//! both *affine* in the committed columns -- which is what lets the `mle_eval`
+//! link (memo section 4) tie the GKR's input-layer claims to the committed
+//! base columns. R's pairing is not lost: fraction addition is exactly the
+//! GKR's gate, so the pairing the committed path performs in `plogup::paired`
+//! is now the circuit's own first layer, sumchecked inside the proof instead
+//! of precomputed outside it. That first layer is the price of soundness, and
+//! it is measured, not assumed.
 //!
-//! *The entry axis wants a power of two.* Padding a 66-entry channel region up
+//! *The entry axis wants a power of two.* Padding a 66-look channel region up
 //! to 128 would nearly double its sumcheck. Instead a region is split along the
-//! binary decomposition of its entry count -- 66 becomes a 64-entry instance
-//! and a 2-entry one -- which pads nothing and costs only instance bookkeeping.
+//! binary decomposition of its look count -- 66 becomes a 64-look instance
+//! and a 2-look one -- which pads nothing and costs only instance bookkeeping.
 //!
-//! *The numerators come in two kinds.* A fully paired entry is generic even
-//! when both its lookups have numerator one -- the combined numerator is
-//! `d0 + d1` -- so paired entries live in `Layer::LogUpGeneric` instances. Only
-//! an odd tail keeps its lookup's own kind: a unit tail becomes a
-//! `Layer::LogUpSingles` instance and stores no numerators at all. A region
-//! therefore contributes up to two groups of instances, and the split is by
-//! numerator kind first, binary decomposition second.
+//! *The numerators come in two kinds.* A unit look stores no numerators at all
+//! (`Layer::LogUpSingles`); a corner grid's exp looks carry `1 - mask` and
+//! live in `Layer::LogUpGeneric` instances. A region therefore contributes up
+//! to two groups of instances, and the split is by numerator kind first,
+//! binary decomposition second.
 //!
 //! ## One `prove_batch` per chunk
 //!
@@ -97,26 +94,28 @@ impl Site {
     pub fn n_looks(&self) -> usize {
         self.unit.len()
     }
-    /// How many paired entries the site's lookups become: `plogup::paired`'s
-    /// column count, the odd tail unpaired.
+    /// B11 stream S, lever 3: the input layer holds the *unpaired* looks, one
+    /// entry each, so the GKR's input-layer claims are affine in the committed
+    /// columns and the `mle_eval` link (memo section 4) can tie them down.
+    /// Stream R's pairing is not lost -- fraction addition is exactly the
+    /// GKR's gate, so the pairing is now the circuit's own first layer,
+    /// sumchecked instead of precomputed outside the proof.
     pub fn n_ents(&self) -> usize {
-        self.n_looks().div_ceil(2)
+        self.n_looks()
     }
-    /// Whether entry `c` keeps a unit numerator. A fully paired entry never
-    /// does -- combining `(1, d0)` and `(1, d1)` gives numerator `d0 + d1` --
-    /// so only an odd tail whose lone lookup is unit stays unit.
+    /// Whether entry `c` (one look now) has a unit numerator.
     pub fn ent_unit(&self, c: usize) -> bool {
-        2 * c + 1 == self.n_looks() && self.unit[2 * c]
+        self.unit[c]
     }
 }
 
-/// One GKR instance: a set of one site's paired entries whose count is a power
-/// of two, over that site's rows.
+/// One GKR instance: a set of one site's looks whose count is a power of two,
+/// over that site's rows.
 #[derive(Clone, Debug)]
 pub struct Inst {
     /// index into the site list
     pub site: usize,
-    /// which of the site's paired entries this instance covers
+    /// which of the site's looks this instance covers
     pub ents: Vec<usize>,
     pub log_rows: u32,
     /// every numerator in this instance is one
@@ -127,7 +126,7 @@ impl Inst {
     pub fn n_variables(&self) -> usize {
         self.ents.len().ilog2() as usize + self.log_rows as usize
     }
-    /// Paired fractions: what the input layer holds and the sumcheck runs over.
+    /// Unpaired fractions: what the input layer holds and the sumcheck runs over.
     pub fn fractions(&self) -> usize {
         self.ents.len() << self.log_rows
     }
@@ -171,8 +170,8 @@ pub fn gates(insts: &[Inst]) -> Vec<Gate> {
 
 /// Build one instance's input layer from a packed fraction source.
 ///
-/// `frac(ent, vec_row)` is `plogup::paired`'s output -- the numerator and
-/// denominator of one *paired* entry at one packed row, `look_frac` underneath
+/// `frac(ent, vec_row)` is `look_frac` directly -- the numerator and
+/// denominator of one *look* at one packed row, unpaired
 /// -- so the fractions proved here are the same function of the same committed
 /// columns that the committed running-sum columns are built from. Nothing is
 /// re-derived and nothing is fed unpaired.
@@ -232,6 +231,12 @@ pub struct Collect {
     pub direct: Vec<SecureField>,
     /// fill `direct` as sites arrive; off for a proving run, on for the test
     pub want_direct: bool,
+    /// B11 stream S, lever 1: the arm owns the bands' fractional sums, so
+    /// `interaction_phase` builds no committed running-sum columns and pushes
+    /// no use sums at the collected sites -- the GKR proves the same sums and
+    /// `verify_composed` feeds them to `sums_cancel` directly. Off, collecting
+    /// stays purely additive, which is what the self-test relies on.
+    pub replace: bool,
 }
 
 impl Collect {
@@ -258,13 +263,14 @@ impl Collect {
             unit: looks.iter().map(crate::attn_trace::look_is_unit).collect(),
         };
         let at = self.sites.len();
-        // `paired` batches consecutive lookups exactly as the committed path
-        // does, so `frac(ent, vr)` is the paired entry's fraction and both arms
-        // keep reading one definition -- `look_frac` through `paired`.
-        let (n_ents, frac) = crate::plogup::paired(looks.len(), |look: usize, vr: usize| {
+        // B11 stream S, lever 3: the looks feed the circuit *unpaired* -- one
+        // input-layer entry per look, `look_frac` read directly, so the
+        // input-layer claims stay affine in the committed columns and the
+        // `mle_eval` link can tie them down. The circuit's own first layer now
+        // does the pairing stream R precomputed outside the proof.
+        let frac = |look: usize, vr: usize| {
             crate::attn_trace::look_frac(&looks[look], vr, cols, pre, exp, ranges)
-        });
-        debug_assert_eq!(n_ents, site.n_ents());
+        };
         let mut direct = SecureField::zero();
         for inst in plan(std::slice::from_ref(&site)) {
             let inst = Inst { site: at, ..inst };
@@ -439,11 +445,11 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
     let n_instances = c.insts.len();
 
     #[cfg(feature = "cuda")]
-    let (proof, arm, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases) = {
+    let (proof, artifact, arm, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases) = {
         if std::env::var("B11_GKR_HOST").map(|v| v != "0").unwrap_or(false) {
             let t1 = Instant::now();
-            let (proof, _artifact) = prove_batch(channel, c.layers);
-            (proof, "host simd", 0.0, 0.0, 0.0, t1.elapsed().as_secs_f64(), None)
+            let (proof, artifact) = prove_batch(channel, c.layers);
+            (proof, artifact, "host simd", 0.0, 0.0, 0.0, t1.elapsed().as_secs_f64(), None)
         } else {
             use stwo::prover::backend::cuda::lookups::gkr::prof;
             let t0 = Instant::now();
@@ -461,19 +467,19 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             let reshape_secs = t0.elapsed().as_secs_f64();
             prof::reset();
             let t1 = Instant::now();
-            let (proof, _artifact) = prove_batch(channel, layers);
+            let (proof, artifact) = prove_batch(channel, layers);
             dev::sync();
             let prove_secs = t1.elapsed().as_secs_f64();
             let phases = prof::on().then(prof::snapshot);
-            (proof, "device", upload_secs, reshape_secs, prewarm_secs, prove_secs, phases)
+            (proof, artifact, "device", upload_secs, reshape_secs, prewarm_secs, prove_secs, phases)
         }
     };
     #[cfg(not(feature = "cuda"))]
-    let (proof, arm, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases) = {
+    let (proof, artifact, arm, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases) = {
         let t1 = Instant::now();
-        let (proof, _artifact) = prove_batch(channel, c.layers);
+        let (proof, artifact) = prove_batch(channel, c.layers);
         let phases: Option<Vec<(&'static str, f64, u64)>> = None;
-        (proof, "host simd", 0.0, 0.0, 0.0, t1.elapsed().as_secs_f64(), phases)
+        (proof, artifact, "host simd", 0.0, 0.0, 0.0, t1.elapsed().as_secs_f64(), phases)
     };
 
     let sums = sums_of(c.sites.len(), &c.insts, &proof.output_claims_by_instance);
@@ -482,6 +488,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
     let assembly_secs = t2.elapsed().as_secs_f64();
     Proved {
         proof,
+        artifact,
         sums,
         cost: Cost {
             layers_secs: c.layers_secs,
@@ -511,9 +518,9 @@ pub struct Cost {
     /// `prove_batch`: the circuit evaluation and every layer's sumcheck
     pub prove_secs: f64,
     pub n_instances: usize,
-    /// paired fractions: the entries the input layers hold (B11 stream R)
+    /// the fractions the input layers hold -- unpaired since B11 stream S
     pub fractions: usize,
-    /// one per lookup, before `paired` -- what stream Q's numbers counted
+    /// one per lookup -- equal to `fractions` since the input went unpaired
     pub unpaired: usize,
     /// the serialised `GkrBatchProof`
     pub proof_bytes: usize,
@@ -566,6 +573,10 @@ impl Cost {
 
 pub struct Proved {
     pub proof: GkrBatchProof,
+    /// B11 stream S, lever 3: the OOD point and input-layer claims the link's
+    /// columns are built from -- the same artifact the verifier re-derives
+    /// from the proof.
+    pub artifact: GkrArtifact,
     /// one claimed fractional sum per site, in site order -- what the committed
     /// running-sum columns claim today
     pub sums: Vec<SecureField>,
@@ -633,7 +644,7 @@ pub fn verify(
 /// The claimed sum of one instance, read straight off its input layer.
 ///
 /// This is the reference the GKR is checked against in the self-test: the plain
-/// sum of `num / den` over every paired entry, by inversion, with no sumcheck
+/// sum of `num / den` over every entry, by inversion, with no sumcheck
 /// involved. It is `O(size)` and only for the test.
 pub fn direct_sum<F>(inst: &Inst, frac: &F) -> SecureField
 where
