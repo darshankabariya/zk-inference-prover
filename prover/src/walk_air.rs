@@ -71,6 +71,12 @@ pub struct WalkEval {
     pub claimed: Vec<SecureField>,
     pub rel_act: RangeRel,
     pub range_check: bool,
+    /// B11 stream V, lever 4: this region's range checks are proved by the
+    /// batched GKR instead of committed running-sum columns, so the AIR emits
+    /// neither the relation entries nor the interaction masks they would
+    /// allocate. `range_check` still says whether the checks exist at all; this
+    /// says who owns them.
+    pub gkr: bool,
 }
 
 impl FrameworkEval for WalkEval {
@@ -129,7 +135,7 @@ impl FrameworkEval for WalkEval {
             eval.add_constraint(acc.clone() - acc_prev * notzero.clone() - (u * v.clone()) * last.clone());
             eval.add_constraint((acc - self.claimed[m]) * end.clone());
         }
-        if self.range_check {
+        if self.range_check && !self.gkr {
             for a in &acts {
                 eval.add_to_relation(RelationEntry::new(&self.rel_act, E::EF::one(),
                                                         core::slice::from_ref(a)));
@@ -159,6 +165,8 @@ pub struct AttnOutEval {
     pub claimed_den: SecureField,
     pub qnz: PairRel,
     pub rel_rem: RangeRel,
+    /// B11 stream V, lever 4: as `WalkEval::gkr`.
+    pub gkr: bool,
 }
 
 impl FrameworkEval for AttnOutEval {
@@ -207,11 +215,14 @@ impl FrameworkEval for AttnOutEval {
                 d.clone() - (mag * num) * two + (qm.clone() * two - E::F::one()) * denp.clone(),
             );
             let dp = denp * two - E::F::one() - d.clone();
-            eval.add_to_relation(RelationEntry::new(&self.qnz, E::EF::one(), &[qm, nz2]));
-            eval.add_to_relation(RelationEntry::new(
-                &self.rel_rem, E::EF::one(), core::slice::from_ref(&d)));
-            eval.add_to_relation(RelationEntry::new(
-                &self.rel_rem, E::EF::one(), core::slice::from_ref(&dp)));
+            if !self.gkr {
+                eval.add_to_relation(RelationEntry::new(&self.qnz, E::EF::one(),
+                                                        &[qm, nz2]));
+                eval.add_to_relation(RelationEntry::new(
+                    &self.rel_rem, E::EF::one(), core::slice::from_ref(&d)));
+                eval.add_to_relation(RelationEntry::new(
+                    &self.rel_rem, E::EF::one(), core::slice::from_ref(&dp)));
+            }
         }
 
         let [z_prev, z] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
@@ -232,7 +243,9 @@ impl FrameworkEval for AttnOutEval {
         eval.add_constraint(dz.clone() - dz_prev * dmult - E::EF::from(den * last));
         eval.add_constraint((h - self.claimed_out) * end.clone());
         eval.add_constraint((dz - self.claimed_den) * end);
-        eval.finalize_logup_in_pairs();
+        if !self.gkr {
+            eval.finalize_logup_in_pairs();
+        }
         eval
     }
 }

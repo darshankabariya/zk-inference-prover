@@ -306,6 +306,18 @@ pub enum RCol {
     /// offline, so its mantissa enters the `mul` lookup from the preprocessed
     /// side while everything else in the lookup is committed.
     DeqPre(usize),
+    /// B11 stream V: a glue region's `i`-th trace mask. The index is the
+    /// region's own committed column index, which *is* the mask index: the
+    /// evaluator reads its masks in `Prog` order and the fill writes the
+    /// columns in the same order, which is what lets `glue_interaction`'s
+    /// builder index `r.base` by what `Prog` returns.
+    Glue(usize),
+    /// B11 stream V: a walk group's `i`-th trace mask. The activations are the
+    /// region's first `pq` committed columns, which is the slice
+    /// `walk_interaction`'s builder range-checks.
+    Walk(usize),
+    /// B11 stream V: the attention-output region's `i`-th trace mask.
+    Ao(usize),
 }
 
 /// Which region a site's looks and a folded weight's column belong to: the
@@ -323,6 +335,12 @@ pub enum Reg {
     Band(usize),
     /// dequant region `m`, in the plan's matmul order
     Deq(usize),
+    /// B11 stream V: glue region `g`, in the plan's region order
+    Glue(usize),
+    /// B11 stream V: walk group `w`, in the plan's walk order
+    Walk(usize),
+    /// B11 stream V: the attention-output region, of which there is one
+    Ao,
 }
 
 impl Default for Reg {
@@ -338,6 +356,9 @@ impl Reg {
         match self {
             Reg::Band(b) => format!("band{b}"),
             Reg::Deq(m) => format!("deq{m}"),
+            Reg::Glue(g) => format!("glue{g}"),
+            Reg::Walk(w) => format!("walk{w}"),
+            Reg::Ao => "attnout".to_string(),
         }
     }
 }
@@ -502,6 +523,18 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
     if plan.p.gkr_dequant {
         out.extend(deq_looks(plan, rels));
     }
+    // B11 stream V, lever 3: the glue family, after dequant, which is memo
+    // section 8's order and therefore the order `sites_of` derives and the
+    // interaction pass collects in.
+    if plan.p.gkr_glue {
+        out.extend(glue_looks(plan, rels));
+    }
+    if plan.p.gkr_walks {
+        out.extend(walk_looks(plan, rels));
+    }
+    if plan.p.gkr_attnout {
+        out.extend(ao_looks(plan, rels));
+    }
     out
 }
 
@@ -595,6 +628,467 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
         });
     }
     out
+}
+
+/// The glue family's lookup sites as affine forms.
+///
+/// B11 stream V, lever 3. This mirrors `glue::glue_interaction`'s `fr` closure
+/// look for look and column for column -- that closure is the ground truth for
+/// the *order*, because `plogup::paired` batches in it and the generated kernel
+/// lowers `GlueEval::evaluate` in it, so all three agree or `B7_M4_LOGUPIR=2`
+/// fails. Every value a glue lookup reads is one of the region's own committed
+/// trace masks or the constant zero -- `usize::MAX` is the `+0` operand, which
+/// contributes no term at all -- so every denominator is affine in committed
+/// columns exactly as memo section 4 needs, and every numerator is the literal
+/// one, which puts every glue instance in `Layer::LogUpSingles`.
+///
+/// Three of the six kinds read a *pair* of masks two apart (`c(a + 2)` is the
+/// unary's output beside its input) and one reads an affine combination rather
+/// than a bare column (`Pow`'s first slot is `ef - etop + DMAX`, the same shape
+/// the per-token region's high limbs take). Neither is new: the fold has
+/// carried weighted combinations since stream S.
+///
+/// `gkrlink::ir_looks` derives the same forms from the fraction IR, and
+/// `B11_GKR_AFFINE=1` compares the two. This one is what both the prover and
+/// the *verifier* run, because it needs the plan and the drawn relations and
+/// nothing else -- the verifier has no evaluator to lower.
+pub fn glue_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
+                  -> Vec<SiteLooks> {
+    use crate::glue::{Kind, UnKind};
+    let Some(gp) = plan.glue.as_ref() else { return vec![] };
+    let Some(gr) = rels.glue.as_ref() else { return vec![] };
+    let one = SecureField::one();
+    let dmax = SecureField::from(M31::from_u32_unchecked(crate::glue::DMAX));
+    let mut out = vec![];
+    for (g, r) in gp.regions.iter().enumerate() {
+        let prog = &r.prog;
+        // `combine(v) = sum alpha_i v_i - z` over the slots, where a slot is
+        // itself an affine form over the region's masks. `None` is the constant
+        // zero the `+0` operand passes, and `alpha_i * 0` is not a term.
+        let rel = |z: SecureField, al: &[SecureField], slots: &[Option<Affine>]| {
+            let mut den = Affine { terms: vec![], k: -z };
+            for (i, sl) in slots.iter().enumerate() {
+                let Some(sl) = sl else { continue };
+                for (c, w) in &sl.terms {
+                    den.terms.push((*c, *w * al[i]));
+                }
+                den.k += sl.k * al[i];
+            }
+            den.terms.retain(|(_, w)| !w.is_zero());
+            den
+        };
+        // one of the region's committed masks, or the constant zero
+        let col = |x: usize| -> Option<Affine> {
+            (x != usize::MAX).then(|| Affine::col(RCol::Glue(x), one))
+        };
+        let unit = |den: Affine| LinkLook { num: None, den };
+        let mut looks = vec![];
+
+        // ---- the leaves: one look per committed leaf, `VAL` or the group's
+        // unary. A unary group commits its output beside its input, which is
+        // the `+2` here and in the builder.
+        for (gi, grp) in prog.groups.iter().enumerate() {
+            for i in 0..grp.n {
+                let b = prog.leaf_at(gi, i);
+                if grp.un == UnKind::None {
+                    let (z, al) = gr.val.parts();
+                    looks.push(unit(rel(z, al, &[col(b), col(b + 1)])));
+                } else {
+                    let k = gr.uns.iter().position(|x| *x == grp.un)
+                        .expect("a glue group's unary kind is not in the plan's union");
+                    let (z, al) = gr.un[k].parts();
+                    looks.push(unit(rel(z, al,
+                        &[col(b), col(b + 1), col(b + 2), col(b + 3)])));
+                }
+            }
+        }
+
+        // ---- the slots: five looks per Add-tree slot, two per Mul slot
+        let sticky = plan.round.needs_sticky();
+        let k = 8 + usize::from(sticky);
+        for (si, (sa, sb)) in prog.slots.iter().enumerate() {
+            let b = prog.slot_at(si, plan.round);
+            let (o0, o1) = prog.out_cols(si, plan.round);
+            match prog.kind {
+                Kind::Add => {
+                    let ea = prog.src_cols(sa, plan.round).map(|c| c.1);
+                    let eb = prog.src_cols(sb, plan.round).map(|c| c.1);
+                    // `ef - etop + DMAX`: an affine form in two committed masks
+                    // with a constant, not a bare column
+                    let align = |ef: Option<usize>| {
+                        let mut a = Affine { terms: vec![], k: dmax };
+                        if let Some(e) = ef {
+                            a.terms.push((RCol::Glue(e), one));
+                        }
+                        a.terms.push((RCol::Glue(b + 2), -one));
+                        Some(a)
+                    };
+                    let (z, al) = gr.pow.parts();
+                    looks.push(unit(rel(z, al, &[align(ea), col(b)])));
+                    looks.push(unit(rel(z, al, &[align(eb), col(b + 1)])));
+                    let st = sticky.then(|| Affine::col(RCol::Glue(b + 8), one));
+                    let (z, al) = gr.norm.parts();
+                    looks.push(unit(rel(z, al, &[col(b + 5), col(b + 6), st.clone(),
+                                                 col(b + k), col(b + k + 1),
+                                                 col(b + k + 2)])));
+                    let (z, al) = gr.frac.parts();
+                    looks.push(unit(rel(z, al, &[col(b + 6), col(b + 7), st])));
+                    let (z, al) = gr.val.parts();
+                    looks.push(unit(rel(z, al, &[col(o0), col(o1)])));
+                }
+                Kind::Mul => {
+                    let ca = prog.src_cols(sa, plan.round).map(|c| c.0)
+                        .unwrap_or(usize::MAX);
+                    let cb = prog.src_cols(sb, plan.round).map(|c| c.0)
+                        .unwrap_or(usize::MAX);
+                    let (z, al) = gr.smul.parts();
+                    looks.push(unit(rel(z, al, &[col(ca), col(cb), col(b),
+                                                 col(b + 1), col(b + 2)])));
+                    let (z, al) = gr.val.parts();
+                    looks.push(unit(rel(z, al, &[col(o0), col(o1)])));
+                }
+            }
+        }
+        out.push(SiteLooks {
+            reg: Reg::Glue(g),
+            which: 0,
+            log_rows: r.log_rows,
+            looks,
+        });
+    }
+    out
+}
+
+/// The walks' lookup sites as affine forms.
+///
+/// B11 stream V, lever 4. One 8-bit range check per query slot, over the
+/// region's first `pq` committed columns -- which is exactly what
+/// `layer::walk_interaction`'s `fr` reads and what `WalkEval::evaluate` adds.
+/// Every numerator is the literal one, so every walk instance is
+/// `Layer::LogUpSingles`. This is the whole family: the `v`, `u` and `acc`
+/// columns beside them are Horner accumulators, they are 38.9% of this family's
+/// interaction cells, and none of them is a lookup.
+pub fn walk_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
+                  -> Vec<SiteLooks> {
+    let one = SecureField::one();
+    plan.walks
+        .iter()
+        .enumerate()
+        .map(|(w, wp)| SiteLooks {
+            reg: Reg::Walk(w),
+            which: 0,
+            log_rows: wp.lay.g.log_rows,
+            looks: (0..wp.lay.pq)
+                .map(|i| LinkLook {
+                    num: None,
+                    den: range_den(rels.range(8), Affine::col(RCol::Walk(i), one)),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// The attention-output region's lookup sites as affine forms.
+///
+/// B11 stream V, lever 4. Three looks per channel slot in the AIR's order --
+/// the `(qm, nz2)` pair check, then the error `d`, then the excluded bound
+/// `dp = 2 denp - 1 - d`. The third is the one worth naming: `dp` is not a
+/// committed column at all, it is an *affine form* over two of them, which is
+/// the same shape the per-token region's high limbs take and the reason memo
+/// section 4's collapse does not care. Every numerator is the literal one.
+pub fn ao_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
+                -> Vec<SiteLooks> {
+    let one = SecureField::one();
+    let two = SecureField::from(M31::from_u32_unchecked(2));
+    let lay = plan.ao_lay;
+    let (qz, qal) = rels.qnz.parts();
+    let rem = rels.range(plan.p.ao_rem_bits);
+    let mut looks = vec![];
+    for sl in 0..lay.per_row {
+        // `ao_interaction`'s own indexing: slot `sl` starts at `1 + 6 * sl`,
+        // and the builder reads `+2`, `+3`, `+4` and `+5` off it
+        let c0 = 1 + 6 * sl;
+        looks.push(LinkLook {
+            num: None,
+            den: Affine {
+                terms: vec![(RCol::Ao(c0 + 2), qal[0]), (RCol::Ao(c0 + 3), qal[1])],
+                k: -qz,
+            },
+        });
+        looks.push(LinkLook {
+            num: None,
+            den: range_den(rem, Affine::col(RCol::Ao(c0 + 5), one)),
+        });
+        looks.push(LinkLook {
+            num: None,
+            den: range_den(rem, Affine {
+                terms: vec![(RCol::Ao(c0 + 4), two), (RCol::Ao(c0 + 5), -one)],
+                k: -one,
+            }),
+        });
+    }
+    vec![SiteLooks { reg: Reg::Ao, which: 0, log_rows: lay.log_rows, looks }]
+}
+
+/// How many looks a glue region has, from its program alone.
+///
+/// The verifier's `sites_of` needs the look count and the numerator kinds
+/// without an evaluator to lower, and this is the count `glue_looks` produces:
+/// one per committed leaf, then five per Add-tree slot or two per Mul slot.
+/// Every one is unit.
+pub fn glue_look_count(prog: &crate::glue::Prog) -> usize {
+    let per_slot = match prog.kind {
+        crate::glue::Kind::Add => 5,
+        crate::glue::Kind::Mul => 2,
+    };
+    prog.groups.iter().map(|g| g.n).sum::<usize>() + per_slot * prog.slots.len()
+}
+
+// ------------------------------------------------------------------------
+// B11 stream V, lever 2: whether a family's lookups can be linked at all.
+// ------------------------------------------------------------------------
+
+/// One node's value as an affine form over the columns the IR loads.
+///
+/// `terms` is keyed by `(tree, column)` -- the same pair `Ir::Op::Load` carries
+/// -- so the mapper that turns it into an `RCol` is the only family-specific
+/// part of the derivation.
+#[derive(Clone, Debug, Default)]
+pub struct AffForm {
+    pub terms: BTreeMap<(usize, usize), SecureField>,
+    pub k: SecureField,
+}
+
+impl AffForm {
+    fn konst(k: SecureField) -> Self {
+        AffForm { terms: BTreeMap::new(), k }
+    }
+    fn is_const(&self) -> bool {
+        self.terms.is_empty()
+    }
+    fn scaled(&self, w: SecureField) -> Self {
+        AffForm {
+            terms: self.terms.iter().map(|(c, v)| (*c, *v * w)).collect(),
+            k: self.k * w,
+        }
+    }
+    fn add(&self, o: &Self, sign: SecureField) -> Self {
+        let mut terms = self.terms.clone();
+        for (c, v) in &o.terms {
+            let e = terms.entry(*c).or_insert_with(SecureField::zero);
+            *e += *v * sign;
+            if e.is_zero() {
+                terms.remove(c);
+            }
+        }
+        AffForm { terms, k: self.k + o.k * sign }
+    }
+}
+
+/// Every node's affine form, or the first reason it has none.
+///
+/// One pass in dependency order, which `Ir` guarantees ("every operand is the
+/// index of an earlier instruction"). A product is affine only when one side is
+/// a constant -- which is what makes `2 * dp - 1 - lo` and
+/// `a_ef - etop + DMAX` affine and a genuine product of two masks not.
+fn aff_nodes(ir: &crate::cudagen::Ir) -> Vec<Result<AffForm, String>> {
+    use crate::cudagen::Op;
+    let basis = |i: usize| SecureField::from_m31_array(std::array::from_fn(|j| {
+        if i == j { M31::one() } else { M31::zero() }
+    }));
+    let mut out: Vec<Result<AffForm, String>> = Vec::with_capacity(ir.ops.len());
+    for op in &ir.ops {
+        let v = (|| -> Result<AffForm, String> {
+            let get = |i: usize| -> Result<AffForm, String> {
+                out[i].clone()
+            };
+            Ok(match op {
+                Op::Load { tree, col, off } => {
+                    // tree 0 is preprocessed and tree 1 the committed base; an
+                    // interaction column is one this proof is still building,
+                    // and a nonzero offset is a different polynomial than the
+                    // one the univariate IOP evaluates at the row point.
+                    if *tree > 1 {
+                        return Err(format!("reads interaction tree {tree} column {col}"));
+                    }
+                    if *off != 0 {
+                        return Err(format!(
+                            "reads tree {tree} column {col} at offset {off}"));
+                    }
+                    AffForm {
+                        terms: [((*tree, *col), SecureField::one())].into_iter().collect(),
+                        k: SecureField::zero(),
+                    }
+                }
+                Op::ConstM31(v) => {
+                    AffForm::konst(SecureField::from(M31::from_u32_unchecked(*v)))
+                }
+                Op::Scalar(k) => AffForm::konst(
+                    *ir.scalars.get(*k)
+                        .ok_or_else(|| "a scalar slot the blob does not have".to_string())?),
+                // the logup shift is a runtime argument, and it enters the
+                // constraint half and never a lookup
+                Op::CumsumShift => return Err("reads the logup shift".into()),
+                Op::AddB(a, b) | Op::AddE(a, b) => {
+                    get(*a)?.add(&get(*b)?, SecureField::one())
+                }
+                Op::SubB(a, b) | Op::SubE(a, b) => {
+                    get(*a)?.add(&get(*b)?, -SecureField::one())
+                }
+                Op::MulB(a, b) | Op::MulE(a, b) => {
+                    let (x, y) = (get(*a)?, get(*b)?);
+                    if x.is_const() {
+                        y.scaled(x.k)
+                    } else if y.is_const() {
+                        x.scaled(y.k)
+                    } else {
+                        return Err(format!(
+                            "multiplies two column forms ({} by {} terms)",
+                            x.terms.len(), y.terms.len()));
+                    }
+                }
+                Op::NegB(a) | Op::NegE(a) => get(*a)?.scaled(-SecureField::one()),
+                // four base values into one extension value: a fixed linear
+                // combination over the extension basis, so it stays affine
+                Op::Pack(a, b, c, d) => {
+                    let mut f = AffForm::default();
+                    for (j, n) in [*a, *b, *c, *d].into_iter().enumerate() {
+                        f = f.add(&get(n)?.scaled(basis(j)), SecureField::one());
+                    }
+                    f
+                }
+            })
+        })();
+        out.push(v);
+    }
+    out
+}
+
+/// Every look's `(numerator, denominator)` as affine forms.
+///
+/// This is memo section 4's precondition, decided rather than asserted, and it
+/// is also the link's own derivation: the same walk answers "can this family be
+/// linked" and "what are the weights". `link_looks` states the bands' and
+/// dequant's forms by hand -- those two are recorded and their digests gate
+/// every change -- and the families stream V adds take them from here, so a
+/// family's link cannot drift from the builder the kernel was compiled from.
+///
+/// The arm is sound only because an instance's input-layer claim collapses to
+/// one affine combination of committed-column MLEs at the row part of the OOD
+/// point. That needs three things of every look, and all three are properties
+/// of the fraction rather than of the prover: the denominator affine in what it
+/// reads; everything it reads a committed base mask or a preprocessed column,
+/// at this row and no other; and the numerator the constant one or itself
+/// affine in those same columns (dequant's committed `nz` is the precedent).
+pub fn aff_looks(ir: &crate::cudagen::Ir) -> Vec<Result<(AffForm, AffForm), String>> {
+    let nodes = aff_nodes(ir);
+    ir.fracs
+        .iter()
+        .map(|(n, d)| {
+            let den = nodes[*d].clone().map_err(|e| format!("denominator {e}"))?;
+            let num = nodes[*n].clone().map_err(|e| format!("numerator {e}"))?;
+            Ok((num, den))
+        })
+        .collect()
+}
+
+/// The family's looks as the link wants them, from the IR.
+///
+/// `map` names the column a `(tree, index)` pair is; it is the only
+/// family-specific part. A look whose numerator is the literal one becomes a
+/// unit look, which is what puts its instance in `Layer::LogUpSingles`.
+pub fn ir_looks<F: Fn(usize, usize) -> RCol>(
+    tag: &str,
+    ir: &crate::cudagen::Ir,
+    map: F,
+) -> Vec<LinkLook> {
+    let one = SecureField::one();
+    let conv = |f: &AffForm| Affine {
+        terms: f.terms.iter().map(|((t, c), w)| (map(*t, *c), *w)).collect(),
+        k: f.k,
+    };
+    aff_looks(ir)
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let (num, den) = r.unwrap_or_else(|e| panic!(
+                "{tag}: look {i} cannot be linked -- {e}. The affinity check \
+                 (`B11_GKR_AFFINE=1`) is what this family's arm was built on."));
+            LinkLook {
+                num: (!(num.is_const() && num.k == one)).then(|| conv(&num)),
+                den: conv(&den),
+            }
+        })
+        .collect()
+}
+
+/// The numerator kinds, in `add_to_relation` order.
+///
+/// A family's `look_units` list, derived rather than written down: the
+/// collector needs it to split a site into unit and non-unit instances, and
+/// `gkrband::plan` needs the two to agree with what the fractions actually are.
+pub fn ir_units(ir: &crate::cudagen::Ir) -> Vec<bool> {
+    let one = SecureField::one();
+    aff_looks(ir)
+        .into_iter()
+        .map(|r| matches!(&r, Ok((n, _)) if n.is_const() && n.k == one))
+        .collect()
+}
+
+/// One evaluator's verdict, for the record.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Affinity {
+    pub family: String,
+    pub region: String,
+    pub n_looks: usize,
+    /// the numerator kinds, in `add_to_relation` order
+    pub units: Vec<bool>,
+    pub ok: bool,
+    /// the looks that could not be linked, with the reason
+    pub bad: Vec<(usize, String)>,
+    /// `(tree, column)` pairs the looks read, deduplicated -- the columns the
+    /// link would have to name
+    pub reads: Vec<(usize, usize)>,
+    /// the widest denominator, in columns
+    pub max_den_terms: usize,
+}
+
+/// Decide one lowered evaluator's looks, for the record.
+pub fn affinity_of(family: &str, region: &str, ir: &crate::cudagen::Ir) -> Affinity {
+    let looks = aff_looks(ir);
+    let mut bad = vec![];
+    let mut reads: Vec<(usize, usize)> = vec![];
+    let mut units = vec![];
+    let mut max_den = 0usize;
+    let one = SecureField::one();
+    for (i, r) in looks.iter().enumerate() {
+        match r {
+            Err(e) => {
+                bad.push((i, e.clone()));
+                units.push(false);
+            }
+            Ok((n, d)) => {
+                units.push(n.is_const() && n.k == one);
+                max_den = max_den.max(d.terms.len());
+                for c in d.terms.keys().chain(n.terms.keys()) {
+                    if !reads.contains(c) {
+                        reads.push(*c);
+                    }
+                }
+            }
+        }
+    }
+    reads.sort_unstable();
+    Affinity {
+        family: family.to_string(),
+        region: region.to_string(),
+        n_looks: looks.len(),
+        units,
+        ok: bad.is_empty(),
+        bad,
+        reads,
+        max_den_terms: max_den,
+    }
 }
 
 // ------------------------------------------------------------------------

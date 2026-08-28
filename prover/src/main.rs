@@ -627,6 +627,9 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // not an env mode, because it changes the proof.
         gkr_bands: flag(args, "--gkr-bands"),
         gkr_dequant: flag(args, "--gkr-dequant"),
+        gkr_glue: flag(args, "--gkr-glue"),
+        gkr_walks: flag(args, "--gkr-walks"),
+        gkr_attnout: flag(args, "--gkr-attnout"),
     }
 }
 

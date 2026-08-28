@@ -80,10 +80,28 @@ fn m4b_acc() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, M4BMap
 
 pub fn m4_add(name: &'static str, secs: f64) {
     let k = m4_chunk();
+    // B11 stream V, lever 1: the same call that accumulates a phase's seconds
+    // stamps its *end* on the memory timeline. `m4_add` already runs once per
+    // phase and never per row, and it already carries the names the wall report
+    // uses, so the timeline needs no second set of boundaries -- a phase's
+    // bracket is this mark and the one before it. Off (no `B11_MEMMARK`) this
+    // is one `OnceLock` read and no allocation.
+    if stwo::prover::lookups::gkr_prover::memmark::on() {
+        stwo::prover::lookups::gkr_prover::memmark::mark(&format!("{name} {secs:.6}"));
+    }
     let mut g = m4_acc().lock().unwrap();
     let e = g.entry(k).or_default().entry(name).or_insert((0, 0.0));
     e.0 += 1;
     e.1 += secs;
+}
+
+/// One boundary on the memory timeline that is not a phase's end.
+///
+/// `m4_add` covers every phase the wall report names; this is for the few
+/// places where the interesting instant is a *start* -- the GKR's input layers
+/// arriving on the card, say -- or where a phase is not timed at all.
+pub fn m4_mark(name: &str) {
+    stwo::prover::lookups::gkr_prover::memmark::mark(name);
 }
 
 /// B11 stream F: the byte counter beside the timer.
@@ -146,6 +164,12 @@ pub fn m4_parmin() -> u32 {
 /// Milestone 4's switches, read once. `=0` turns one off; the default is on.
 pub fn m4_switch(name: &str) -> bool {
     std::env::var(name).map(|v| v != "0").unwrap_or(true)
+}
+
+/// The opposite default: a switch that is off unless the environment asks for
+/// it. True means "not asked for", so a caller reads it as the early return.
+pub fn m4_switch_off(name: &str) -> bool {
+    !std::env::var(name).map(|v| v != "0").unwrap_or(false)
 }
 
 /// Milestone 4's tri-state modes, read once. A mode selects a path that has

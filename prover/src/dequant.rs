@@ -97,6 +97,13 @@ impl MulRel {
         (self.0.z, &self.0.alpha_powers)
     }
 }
+// B11 stream V, lever 4: the attention-output region's `(qm, nz2)` pair check
+// is the first lookup any family's link has needed from this relation.
+impl PairRel {
+    pub fn parts(&self) -> (SecureField, &[SecureField]) {
+        (self.0.z, &self.0.alpha_powers)
+    }
+}
 // one range-relation type across the whole crate, so a composed proof's range
 // tables serve the attention bands and the dequant regions alike
 pub use crate::attn_air::RangeRel;

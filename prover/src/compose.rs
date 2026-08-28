@@ -170,6 +170,15 @@ pub struct Params {
     /// identical to one from a crate that never had it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub gkr_dequant: bool,
+    /// B11 stream V, lever 3: the glue family's lookups proved by the same
+    /// batched GKR, under `--gkr-glue`. Composes with `--gkr-bands` and, like
+    /// dequant's, is a loud configuration error without it.
+    pub gkr_glue: bool,
+    /// B11 stream V, lever 4: the walks' 8-bit activation range checks, and the
+    /// attention-output region's three lookups per slot, under `--gkr-walks`
+    /// and `--gkr-attnout`. Both compose with `--gkr-bands`.
+    pub gkr_walks: bool,
+    pub gkr_attnout: bool,
     /// Stream H: the layer's residual-stream input and output are each committed
     /// in a tree of their own, so that two chunks' boundaries can be compared
     /// from bytes.  Needs the wiring family, since the boundary *is* its two
@@ -621,6 +630,12 @@ impl Plan {
         // one: the arm's shape assumes the bands' collector exists.
         assert!(!p.gkr_dequant || p.gkr_bands,
                 "--gkr-dequant composes with --gkr-bands; it does not replace it");
+        assert!(!p.gkr_glue || p.gkr_bands,
+                "`--gkr-glue` extends the bands' GKR arm; it needs `--gkr-bands`");
+        assert!(!p.gkr_walks || p.gkr_bands,
+                "`--gkr-walks` extends the bands' GKR arm; it needs `--gkr-bands`");
+        assert!(!p.gkr_attnout || p.gkr_bands,
+                "`--gkr-attnout` extends the bands' GKR arm; it needs `--gkr-bands`");
         let lays: Vec<Layouts> = shapes.iter().map(|sh| Layouts::choose(sh, &cfg)).collect();
 
         let mut widths = vec![p.k_bits, p.q_bits, 8, p.z_lo_bits, p.z_hi_bits, p.ao_rem_bits];
@@ -838,8 +853,11 @@ impl Plan {
             + 1
             // B11 stream U, lever 3: the same for the dequant family
             + if self.p.gkr_dequant { 0 } else { self.p.mats.len() }
-            + self.walks.len()
-            + self.glue.as_ref().map(|g| g.regions.len()).unwrap_or(0)
+            + if self.p.gkr_walks { 0 } else { self.walks.len() }
+            // B11 stream V, levers 3 and 4: and the same for glue and attnout
+            + if self.p.gkr_glue { 0 }
+              else { self.glue.as_ref().map(|g| g.regions.len()).unwrap_or(0) }
+            - usize::from(self.p.gkr_attnout)
             + usize::from(self.argmax_mat().is_some())
     }
     pub fn n_table_sums(&self) -> usize {
@@ -1132,8 +1150,9 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             claimed_den: unqm(claims.ao_den),
             qnz: rels.qnz.clone(),
             rel_rem: rels.range(p.ao_rem_bits).clone(),
+            gkr: p.gkr_attnout,
         },
-        next_use(claims),
+        if p.gkr_attnout { SecureField::zero() } else { next_use(claims) },
     );
 
     let mut mats = vec![];
@@ -1191,7 +1210,74 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         ));
     }
 
-    // B11 stream S, lever 3, moved down by stream U: the tie, from the spans
+
+    let mut walks = vec![];
+    for (wi, w) in plan.walks.iter().enumerate() {
+        let (rv_pow, rv_step) = powers(rv, w.lay.pk);
+        let (s_pow, s_step) = powers(s, w.lay.pq);
+        walks.push(FrameworkComponent::<WalkEval>::new(
+            alloc,
+            WalkEval {
+                tag: w.name.clone(),
+                g: w.lay.g,
+                pk: w.lay.pk,
+                pq: w.lay.pq,
+                n_mats: w.mats.len(),
+                rv_pow,
+                rv_step,
+                s_pow,
+                s_step,
+                claimed: claims.walk_acc[wi].iter().map(|x| unqm(*x)).collect(),
+                rel_act: rels.range(8).clone(),
+                range_check: true,
+                gkr: p.gkr_walks,
+            },
+            if p.gkr_walks { SecureField::zero() } else { next_use(claims) },
+        ));
+    }
+
+    // B10 step 2: the wiring family, between the walks and the shared tables --
+    // the order the prover commits its columns in, so the two cannot diverge
+    let mut glue = vec![];
+    if let (Some(gp), Some(gr)) = (&plan.glue, &rels.glue) {
+        let ties = gp.ties(w_glue, lam_glue, claims);
+        for (i, r) in gp.regions.iter().enumerate() {
+            glue.push(FrameworkComponent::<GlueEval>::new(
+                alloc,
+                GlueEval {
+                    log_rows: r.log_rows,
+                    tag: r.tag.clone(),
+                    prog: r.prog.clone(),
+                    round: plan.round,
+                    norm: gr.norm.clone(),
+                    frac: gr.frac.clone(),
+                    pow: gr.pow.clone(),
+                    smul: gr.smul.clone(),
+                    un: gr.un.clone(),
+                    uns: gr.uns.clone(),
+                    val: gr.val.clone(),
+                    tie: Some(ties[i].clone()),
+                    // Stream H: a region carries a boundary side when the plan
+                    // named it one.  The sides are registered in `stream_in`,
+                    // `stream_out` order and the components in region order, so
+                    // the tree a side lands in is the same for prover and
+                    // verifier without either being told.
+                    bound: plan.bounds.iter().find(|s| s.region == i).map(|s| s.bound),
+                    // B11 stream V, lever 3: under the flag this region's
+                    // lookups are the batched GKR's, so the AIR emits none of
+                    // them and the interaction masks they would allocate are
+                    // not there to claim.
+                    gkr: p.gkr_glue,
+                },
+                // the use sum belongs to whoever owns the lookups: with the
+                // collector owning them there is no claimed sum in `use_sums`
+                // for this region at all, exactly as stream U did for dequant
+                if p.gkr_glue { SecureField::zero() } else { next_use(claims) },
+            ));
+        }
+    }
+
+    // B11 stream S, lever 3, moved down by streams U and V: the tie, from the spans
     // the allocator handed out above.
     let mut link_tie = None;
     if let Some(hl) = link {
@@ -1218,6 +1304,30 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 use crate::gkrlink::{RCol, Reg};
                 let band = match reg {
                     Reg::Band(b) => *b,
+                    // B11 stream V, lever 3: a glue region is one component, so
+                    // its own span is the whole resolution -- the mask index
+                    // *is* the column index within it, which is `Prog`'s order.
+                    Reg::Glue(g) => {
+                        let RCol::Glue(i) = c else {
+                            panic!("a non-glue column named on a glue region")
+                        };
+                        terms.push((1, span_of(glue[*g].trace_locations(), 1) + i, *w));
+                        continue;
+                    }
+                    Reg::Walk(k) => {
+                        let RCol::Walk(i) = c else {
+                            panic!("a non-walk column named on a walk region")
+                        };
+                        terms.push((1, span_of(walks[*k].trace_locations(), 1) + i, *w));
+                        continue;
+                    }
+                    Reg::Ao => {
+                        let RCol::Ao(i) = c else {
+                            panic!("a non-attnout column named on the attnout region")
+                        };
+                        terms.push((1, span_of(ao.trace_locations(), 1) + i, *w));
+                        continue;
+                    }
                     // B11 stream U, lever 3: a dequant region is one component,
                     // so its own span is the whole resolution -- the mask index
                     // *is* the column index within it (`dequant::Map`).
@@ -1262,63 +1372,6 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             });
         }
         link_tie = Some(crate::gkrlink::LinkTie { heights, pre_idx });
-    }
-
-    let mut walks = vec![];
-    for (wi, w) in plan.walks.iter().enumerate() {
-        let (rv_pow, rv_step) = powers(rv, w.lay.pk);
-        let (s_pow, s_step) = powers(s, w.lay.pq);
-        walks.push(FrameworkComponent::<WalkEval>::new(
-            alloc,
-            WalkEval {
-                tag: w.name.clone(),
-                g: w.lay.g,
-                pk: w.lay.pk,
-                pq: w.lay.pq,
-                n_mats: w.mats.len(),
-                rv_pow,
-                rv_step,
-                s_pow,
-                s_step,
-                claimed: claims.walk_acc[wi].iter().map(|x| unqm(*x)).collect(),
-                rel_act: rels.range(8).clone(),
-                range_check: true,
-            },
-            next_use(claims),
-        ));
-    }
-
-    // B10 step 2: the wiring family, between the walks and the shared tables --
-    // the order the prover commits its columns in, so the two cannot diverge
-    let mut glue = vec![];
-    if let (Some(gp), Some(gr)) = (&plan.glue, &rels.glue) {
-        let ties = gp.ties(w_glue, lam_glue, claims);
-        for (i, r) in gp.regions.iter().enumerate() {
-            glue.push(FrameworkComponent::<GlueEval>::new(
-                alloc,
-                GlueEval {
-                    log_rows: r.log_rows,
-                    tag: r.tag.clone(),
-                    prog: r.prog.clone(),
-                    round: plan.round,
-                    norm: gr.norm.clone(),
-                    frac: gr.frac.clone(),
-                    pow: gr.pow.clone(),
-                    smul: gr.smul.clone(),
-                    un: gr.un.clone(),
-                    uns: gr.uns.clone(),
-                    val: gr.val.clone(),
-                    tie: Some(ties[i].clone()),
-                    // Stream H: a region carries a boundary side when the plan
-                    // named it one.  The sides are registered in `stream_in`,
-                    // `stream_out` order and the components in region order, so
-                    // the tree a side lands in is the same for prover and
-                    // verifier without either being told.
-                    bound: plan.bounds.iter().find(|s| s.region == i).map(|s| s.bound),
-                },
-                next_use(claims),
-            ));
-        }
     }
 
     let exp_t = FrameworkComponent::<ExpTableEval>::new(
@@ -2367,6 +2420,47 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                                    &crate::exprprobe::claims_for(&plan, 0x0b65_4b05));
     crate::util::m4_add("int/air", m4e_t.elapsed().as_secs_f64());
 
+    // B11 stream V, lever 2: whether each family's looks can be linked at all,
+    // decided from the same fraction IR the generated kernel runs.
+    //
+    // The model in `band_split.py --families` counted columns; the arm needs the
+    // *looks*, and memo section 4's collapse is a property of the fraction. So
+    // this lowers every family's evaluator -- the un-ablated one, the shape the
+    // feed asks for -- and reports, per region, whether every denominator is
+    // affine in committed base masks and preprocessed columns at this row, and
+    // which numerators are the literal one. It is the family's own `look_units`
+    // list, derived rather than written down, and a family that fails here gets
+    // a named stop in the record and no arm.
+    //
+    // `B11_GKR_AFFINE=1` only. It lowers a dozen evaluators and proves nothing,
+    // so it never runs under a wall number.
+    let affinity: Vec<crate::gkrlink::Affinity> = if crate::util::m4_switch_off("B11_GKR_AFFINE") {
+        vec![]
+    } else {
+        let m4a_t = std::time::Instant::now();
+        let mut out = vec![];
+        for (m, reg) in layer.mats.iter().zip(&mat_regions) {
+            let ev = crate::layer::deq_logup_eval(m, reg, rv, s, &rels);
+            let ir = crate::devfrac::ir_of(&ev, reg.lay.log_rows);
+            out.push(crate::gkrlink::affinity_of(
+                "dequant", &format!("dequant/{}", m.name), &ir));
+        }
+        for (i, reg) in glue_regions.iter().enumerate() {
+            let ir = crate::devfrac::ir_of(&m4e_air.glue[i].eval, reg.log_rows);
+            out.push(crate::gkrlink::affinity_of(
+                "glue", &format!("glue/{}", reg.tag), &ir));
+        }
+        for (wi, reg) in walk_regions.iter().enumerate() {
+            let ir = crate::devfrac::ir_of(&m4e_air.walks[wi].eval, reg.lay.g.log_rows);
+            out.push(crate::gkrlink::affinity_of(
+                "walks", &format!("walk/{}", reg.name), &ir));
+        }
+        let ir = crate::devfrac::ir_of(&m4e_air.ao.eval, aor.lay.log_rows);
+        out.push(crate::gkrlink::affinity_of("attnout", "attnout", &ir));
+        crate::util::m4_add("int/affine", m4a_t.elapsed().as_secs_f64());
+        out
+    };
+
     // ---- interaction ----------------------------------------------------------
     let t1 = std::time::Instant::now();
     let mut inter_all: Vec<crate::device::AnyCol<'static>> = vec![];
@@ -2454,6 +2548,50 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
         crate::util::m4_add("int/deq_gkr", m4_t.elapsed().as_secs_f64());
     }
+    // B11 stream V, lever 3: the glue family's sites, collected here for the
+    // same reason -- the GKR proof lands before the interaction tree's own
+    // commit and the glue regions' interaction columns come after that position
+    // in the tree's column order, while their *fractions* are a function of
+    // committed base columns that have existed since tree 1. The order is the
+    // plan's region order, which is `sites_of`'s and the order the interaction
+    // loop below reaches them in.
+    //
+    // The evaluator is the component's own with the ablation undone. Stream U
+    // rebuilt dequant's from the plan; cloning the built one and clearing `gkr`
+    // is the same lowering by construction rather than by inspection, which is
+    // the property `B7_M4_LOGUPIR=2` exists to check for the committed half.
+    if p.gkr_glue {
+        let g = gkr.as_mut().expect("--gkr-glue needs --gkr-bands");
+        let m4_t = std::time::Instant::now();
+        for (i, reg) in glue_regions.iter().enumerate() {
+            let mut ev = m4e_air.glue[i].eval.clone();
+            ev.gkr = false;
+            crate::gkrband::glue_site(g, i, &ev, reg);
+        }
+        crate::util::m4_add("int/glue_gkr", m4_t.elapsed().as_secs_f64());
+    }
+    // B11 stream V, lever 4: the walks, then attnout -- memo section 8's order,
+    // which is `sites_of`'s and the order the interaction loop reaches them in.
+    // Both evaluators are the components' own with the ablation undone, as the
+    // glue family's is.
+    if p.gkr_walks {
+        let g = gkr.as_mut().expect("--gkr-walks needs --gkr-bands");
+        let m4_t = std::time::Instant::now();
+        for (wi, reg) in walk_regions.iter().enumerate() {
+            let mut ev = m4e_air.walks[wi].eval.clone();
+            ev.gkr = false;
+            crate::gkrband::walk_site(g, wi, &ev, reg);
+        }
+        crate::util::m4_add("int/walk_gkr", m4_t.elapsed().as_secs_f64());
+    }
+    if p.gkr_attnout {
+        let g = gkr.as_mut().expect("--gkr-attnout needs --gkr-bands");
+        let m4_t = std::time::Instant::now();
+        let mut ev = m4e_air.ao.eval.clone();
+        ev.gkr = false;
+        crate::gkrband::ao_site(g, &ev, &aor);
+        crate::util::m4_add("int/ao_gkr", m4_t.elapsed().as_secs_f64());
+    }
     // B11 stream Q: the bands' fractional sums, proved by one batched GKR at the
     // transcript position the verifier will replay -- after tree 1 and the
     // relation challenges, before the interaction tree's own commit. The sums it
@@ -2515,6 +2653,33 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             // name, in committed order, and under a device fill they live where
             // the fill left them -- so this is `band_committed`'s two lines with
             // the region's own vectors in place of the band's spans.
+            // B11 stream V, lever 3: the same resolution for the glue family.
+            // A glue region's own `base` and `pre` are the columns its masks
+            // name, in committed order, and under a device fill they live where
+            // the fill left them.
+            if let Reg::Glue(g) = reg {
+                let r = &glue_regions[g];
+                return match (c, &r.dev) {
+                    (RCol::Glue(i), Some(d)) => Src::Dev(d.base[*i].device_ptr),
+                    (RCol::Glue(i), None) => Src::Host(&r.base[*i]),
+                    _ => panic!("a non-glue column named on a glue region"),
+                };
+            }
+            if let Reg::Walk(w) = reg {
+                let r = &walk_regions[w];
+                return match (c, &r.dev) {
+                    (RCol::Walk(i), Some(d)) => Src::Dev(d.base[*i].device_ptr),
+                    (RCol::Walk(i), None) => Src::Host(&r.base[*i]),
+                    _ => panic!("a non-walk column named on a walk region"),
+                };
+            }
+            if let Reg::Ao = reg {
+                return match (c, &aor.dev) {
+                    (RCol::Ao(i), Some(d)) => Src::Dev(d.base[*i].device_ptr),
+                    (RCol::Ao(i), None) => Src::Host(&aor.base[*i]),
+                    _ => panic!("a non-attnout column named on the attnout region"),
+                };
+            }
             if let Reg::Deq(m) = reg {
                 let r = &mat_regions[m];
                 let chan_w = if r.spec.variant == DeqVariant::Chain { 2 } else { 1 };
@@ -2557,7 +2722,33 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             let is_deq = |w: &(crate::gkrlink::Reg, crate::gkrlink::RCol, SecureField)| {
                 matches!(w.0, crate::gkrlink::Reg::Deq(_))
             };
-            let (at, w) = if spec == "deq" {
+            // B11 stream V, lever 3: and the same self-aim for the glue family.
+            // `Reg::Band` sorts before `Reg::Deq` before `Reg::Glue`, so at a
+            // height that several families share the plain form always lands on
+            // a band and a control that cannot be aimed at the new family would
+            // not be a control for it.
+            let is_glue = |w: &(crate::gkrlink::Reg, crate::gkrlink::RCol, SecureField)| {
+                matches!(w.0, crate::gkrlink::Reg::Glue(_))
+            };
+            let is_walk = |w: &(crate::gkrlink::Reg, crate::gkrlink::RCol, SecureField)| {
+                matches!(w.0, crate::gkrlink::Reg::Walk(_))
+            };
+            let is_ao = |w: &(crate::gkrlink::Reg, crate::gkrlink::RCol, SecureField)| {
+                matches!(w.0, crate::gkrlink::Reg::Ao)
+            };
+            let (at, w) = if spec == "walks" {
+                let at = hl.iter().position(|h| h.weights.iter().any(is_walk))
+                    .expect("linkmut: the fold carries no walk column to bend");
+                (at, hl[at].weights.iter().position(is_walk).unwrap())
+            } else if spec == "attnout" {
+                let at = hl.iter().position(|h| h.weights.iter().any(is_ao))
+                    .expect("linkmut: the fold carries no attnout column to bend");
+                (at, hl[at].weights.iter().position(is_ao).unwrap())
+            } else if spec == "glue" {
+                let at = hl.iter().position(|h| h.weights.iter().any(is_glue))
+                    .expect("linkmut: the fold carries no glue column to bend");
+                (at, hl[at].weights.iter().position(is_glue).unwrap())
+            } else if spec == "deq" {
                 // self-aiming: the first dequant weight anywhere in the fold. A
                 // height's weights are keyed by `(region, column)` and
                 // `Reg::Band` sorts first, so this finds the family without the
@@ -2571,6 +2762,10 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 let w = if fam == "deq" {
                     hl[at].weights.iter().position(is_deq).unwrap_or_else(|| panic!(
                         "linkmut: height 2^{} carries no dequant column to bend",
+                        hl[at].h))
+                } else if fam == "glue" {
+                    hl[at].weights.iter().position(is_glue).unwrap_or_else(|| panic!(
+                        "linkmut: height 2^{} carries no glue column to bend",
                         hl[at].h))
                 } else {
                     0
@@ -2596,12 +2791,15 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         link_hl = Some(hl);
     }
     let m4_t = std::time::Instant::now();
-    let aoi = ao_interaction(&layer.ao, &aor, r, s, rv, p.c, &rels, &m4e_air.ao.eval);
+    let aoi = ao_interaction(&layer.ao, &aor, r, s, rv, p.c, &rels, &m4e_air.ao.eval,
+                            p.gkr_attnout);
     inter_all.extend(aoi.cols);
     inter_mark("attnout", &inter_all, &mut inter_seen, &mut inter_split);
     claims.ao_out = qm(aoi.claimed_out);
     claims.ao_den = qm(aoi.claimed_den);
-    claims.use_sums.push(qm(aoi.use_sum));
+    if !p.gkr_attnout {
+        claims.use_sums.push(qm(aoi.use_sum));
+    }
     crate::util::m4_add("int/attnout", m4_t.elapsed().as_secs_f64());
     let m4_t = std::time::Instant::now();
     for (m, reg) in layer.mats.iter().zip(&mat_regions) {
@@ -2675,13 +2873,16 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let m4_t = std::time::Instant::now();
     for (wi, reg) in walk_regions.iter().enumerate() {
         let t_iw = std::time::Instant::now();
-        let it = walk_interaction(layer, reg, rv, s, &rels, true, &m4e_air.walks[wi].eval);
+        let it = walk_interaction(layer, reg, rv, s, &rels, true,
+                                  &m4e_air.walks[wi].eval, p.gkr_walks);
         crate::util::m4_add("int/walks_build", t_iw.elapsed().as_secs_f64());
         inter_all.extend(it.cols);
         inter_mark(&format!("walk/{}", reg.name), &inter_all, &mut inter_seen,
                    &mut inter_split);
         claims.walk_acc.push(it.claimed.iter().map(|v| qm(*v)).collect());
-        claims.use_sums.push(qm(it.use_sum));
+        if !p.gkr_walks {
+            claims.use_sums.push(qm(it.use_sum));
+        }
     }
     crate::util::m4_add("int/walks", m4_t.elapsed().as_secs_f64());
     let m4_t = std::time::Instant::now();
@@ -2692,13 +2893,18 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         for (i, reg) in glue_regions.iter().enumerate() {
             let t_ig = std::time::Instant::now();
             let it = crate::glue::glue_interaction(reg, gr, Some(&specs[i]),
-                                                   &m4e_air.glue[i].eval);
+                                                   &m4e_air.glue[i].eval, p.gkr_glue);
             crate::util::m4_add("int/glue_build", t_ig.elapsed().as_secs_f64());
             inter_all.extend(it.cols);
             inter_mark(&format!("glue/{}", reg.tag), &inter_all, &mut inter_seen,
                        &mut inter_split);
             claims.glue_ties.push(it.claimed.iter().map(|v| qm(*v)).collect());
-            claims.use_sums.push(qm(it.use_sum));
+            // B11 stream V, lever 3: with the collector owning this region's
+            // lookups there is no claimed sum to carry -- the GKR's per-site
+            // sum stands exactly where it stood, in `sums_cancel`.
+            if !p.gkr_glue {
+                claims.use_sums.push(qm(it.use_sum));
+            }
         }
     }
     crate::util::m4_add("int/glue", m4_t.elapsed().as_secs_f64());
@@ -2884,6 +3090,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // share a scoped GKR over the bands alone would cover.
         "interaction_split": inter_split,
         "interaction_by_family": inter_by_family,
+        // B11 stream V, lever 2: the affinity verdict per region, or an empty
+        // list when `B11_GKR_AFFINE` did not ask for it.
+        "affinity": affinity,
         // B11 stream Q: what the GKR arm proved and what it cost, or null with
         // the flag off. Reported beside `interaction_by_family` because the two
         // are the same question from the two sides.

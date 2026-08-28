@@ -2200,7 +2200,7 @@ pub struct AoInteraction {
 #[allow(clippy::too_many_arguments)]
 pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureField,
                       rv: SecureField, c_ctx: usize, rels: &crate::compose::Rels,
-                      air: &crate::walk_air::AttnOutEval) -> AoInteraction {
+                      air: &crate::walk_air::AttnOutEval, gkr: bool) -> AoInteraction {
     use stwo::prover::backend::simd::qm31::PackedQM31;
     use stwo_constraint_framework::Relation;
     let lay = r.lay;
@@ -2299,6 +2299,17 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
             }
         }
     };
+    // B11 stream V, lever 4: as the walks, and for the same reason. The `z`,
+    // `h` and `dz` accumulators stay.
+    if gkr {
+        let _ = fr;
+        return AoInteraction {
+            cols: cols.into_inner(),
+            claimed_out,
+            claimed_den,
+            use_sum: SecureField::zero(),
+        };
+    }
     let (lcols, use_sum) = crate::devfrac::frac_cols(
         air, "attnout", lay.log_rows,
         crate::devfrac::cols_of(&r.pre, r.dev.as_ref().map(|d| &d.pre[..])),
@@ -2464,7 +2475,7 @@ pub struct WalkInteraction {
 
 pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: SecureField,
                         rels: &crate::compose::Rels, range_check: bool,
-                        air: &crate::walk_air::WalkEval) -> WalkInteraction {
+                        air: &crate::walk_air::WalkEval, gkr: bool) -> WalkInteraction {
     use stwo::prover::backend::simd::qm31::PackedQM31;
     use stwo_constraint_framework::Relation;
     let lay = r.lay;
@@ -2553,7 +2564,12 @@ pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: Se
         }
     };
     let mut use_sum = SecureField::zero();
-    if range_check {
+    // B11 stream V, lever 4: under `--gkr-walks` this group's range checks were
+    // handed to the collector before the GKR proof ran, in `compose`'s own pass,
+    // so there are no running-sum columns to build and no claimed sum to carry.
+    // The `v`, `u` and `acc` columns above stay: they are Horner accumulators
+    // and 38.9% of this family's interaction cells, which the forecast priced.
+    if range_check && !gkr {
         let one = PackedQM31::broadcast(SecureField::one());
         let fr = |i: usize, vr: usize| (one, rels.range(8).combine(&[r.base[i].data[vr]]));
         let (lcols, s) = crate::devfrac::frac_cols(

@@ -115,6 +115,31 @@ relation!(SMulRel, 5);
 relation!(UnRel, 4);
 relation!(ValRel, 2);
 
+// B11 stream V, lever 3: the drawn elements, for the GKR link's affine weights.
+// `combine(v) = sum alpha_i v_i - z`, so these two are everything the link needs
+// to write a lookup's denominator as an affine form over the columns it reads --
+// the same accessors stream S added to `ExpRel` and stream U to `NormRel`.
+impl PowRel {
+    pub fn parts(&self) -> (SecureField, &[SecureField]) {
+        (self.0.z, &self.0.alpha_powers)
+    }
+}
+impl SMulRel {
+    pub fn parts(&self) -> (SecureField, &[SecureField]) {
+        (self.0.z, &self.0.alpha_powers)
+    }
+}
+impl UnRel {
+    pub fn parts(&self) -> (SecureField, &[SecureField]) {
+        (self.0.z, &self.0.alpha_powers)
+    }
+}
+impl ValRel {
+    pub fn parts(&self) -> (SecureField, &[SecureField]) {
+        (self.0.z, &self.0.alpha_powers)
+    }
+}
+
 pub const POW_COLS: [&str; 2] = ["b10_pow_u", "b10_pow_p"];
 pub const SMUL_COLS: [&str; 5] =
     ["b10_smul_a", "b10_smul_b", "b10_smul_c", "b10_smul_cy", "b10_smul_nz"];
@@ -577,6 +602,13 @@ pub struct GlueEval {
     pub uns: Vec<UnKind>,
     pub val: ValRel,
     pub tie: Option<Tie>,
+    /// B11 stream V, lever 3: this region's lookups are proved by the batched
+    /// GKR instead of committed running-sum columns, so the AIR emits neither
+    /// the relation entries nor the interaction masks they would allocate. The
+    /// trace masks stay exactly where they were -- stream S's lesson is that
+    /// the allocator must keep the committed order, and here the order is
+    /// `Prog`'s, which the collector reads the same way.
+    pub gkr: bool,
     /// Stream H: when this region carries one side of the layer's boundary, the
     /// tree that side is committed in and which of the region's value sequences
     /// it holds.  `None` on every region of a chunk proved with the boundary
@@ -625,16 +657,20 @@ impl FrameworkEval for GlueEval {
                 ins.push((i_sm.clone(), i_ef.clone()));
                 if g.un == UnKind::None {
                     // nothing else pins a committed pair to a legal bf16 value
-                    eval.add_to_relation(RelationEntry::new(
-                        &self.val, E::EF::one(), &[i_sm, i_ef]));
+                    if !self.gkr {
+                        eval.add_to_relation(RelationEntry::new(
+                            &self.val, E::EF::one(), &[i_sm, i_ef]));
+                    }
                     uns.push((E::F::zero(), E::F::zero()));
                 } else {
                     let o_sm = eval.next_trace_mask();
                     let o_ef = eval.next_trace_mask();
-                    eval.add_to_relation(RelationEntry::new(
-                        &self.un[kinds.iter().position(|x| *x == g.un).unwrap()],
-                        E::EF::one(),
-                        &[i_sm, i_ef, o_sm.clone(), o_ef.clone()]));
+                    if !self.gkr {
+                        eval.add_to_relation(RelationEntry::new(
+                            &self.un[kinds.iter().position(|x| *x == g.un).unwrap()],
+                            E::EF::one(),
+                            &[i_sm, i_ef, o_sm.clone(), o_ef.clone()]));
+                    }
                     uns.push((o_sm, o_ef));
                 }
             }
@@ -675,12 +711,14 @@ impl FrameworkEval for GlueEval {
                     // the two alignments.  `u < 0` rows carry pow = 0, so an
                     // operand far below the anchor drops -- and the anchor
                     // constraint keeps the dropped one the smaller.
-                    eval.add_to_relation(RelationEntry::new(
-                        &self.pow, E::EF::one(),
-                        &[a_ef.clone() - etop.clone() + E::F::from(dmax), pa.clone()]));
-                    eval.add_to_relation(RelationEntry::new(
-                        &self.pow, E::EF::one(),
-                        &[b_ef - etop.clone() + E::F::from(dmax), pb.clone()]));
+                    if !self.gkr {
+                        eval.add_to_relation(RelationEntry::new(
+                            &self.pow, E::EF::one(),
+                            &[a_ef.clone() - etop.clone() + E::F::from(dmax), pa.clone()]));
+                        eval.add_to_relation(RelationEntry::new(
+                            &self.pow, E::EF::one(),
+                            &[b_ef - etop.clone() + E::F::from(dmax), pb.clone()]));
+                    }
                     eval.add_constraint(
                         (pa.clone() - E::F::from(pmax)) * (pb.clone() - E::F::from(pmax)));
                     // acc = mag (1 - 2 sg): the exact sum, scaled by 2^(DMAX-etop)
@@ -688,11 +726,14 @@ impl FrameworkEval for GlueEval {
                     eval.add_constraint(a_sm * pa + b_sm * pb - mag.clone()
                                         + (mag.clone() * sg.clone()) * two);
                     eval.add_constraint(mag - m2.clone() * ph.clone() - r.clone());
-                    eval.add_to_relation(RelationEntry::new(
-                        &self.norm, E::EF::one(),
-                        &[m2, ph.clone(), st.clone(), m7n.clone(), efn.clone(), nzn.clone()]));
-                    eval.add_to_relation(RelationEntry::new(
-                        &self.frac, E::EF::one(), &[ph, r, st]));
+                    if !self.gkr {
+                        eval.add_to_relation(RelationEntry::new(
+                            &self.norm, E::EF::one(),
+                            &[m2, ph.clone(), st.clone(), m7n.clone(), efn.clone(),
+                              nzn.clone()]));
+                        eval.add_to_relation(RelationEntry::new(
+                            &self.frac, E::EF::one(), &[ph, r, st]));
+                    }
                     // the zero result has one sign, as B6.5's fold does
                     eval.add_constraint(sg.clone() * (E::F::one() - nzn.clone()));
                     eval.add_constraint(
@@ -705,8 +746,10 @@ impl FrameworkEval for GlueEval {
                     // -- the check B6's dequant pays for its exponent field and
                     // the add did not, and the one thing between a sound gadget
                     // and a gadget that cannot prove what bf16 cannot represent.
-                    eval.add_to_relation(RelationEntry::new(
-                        &self.val, E::EF::one(), &[c_sm.clone(), c_ef.clone()]));
+                    if !self.gkr {
+                        eval.add_to_relation(RelationEntry::new(
+                            &self.val, E::EF::one(), &[c_sm.clone(), c_ef.clone()]));
+                    }
                     outs.push((c_sm, c_ef));
                 }
                 Kind::Mul => {
@@ -714,13 +757,17 @@ impl FrameworkEval for GlueEval {
                     let cy = eval.next_trace_mask();
                     let nzc = eval.next_trace_mask();
                     let c_ef = eval.next_trace_mask();
-                    eval.add_to_relation(RelationEntry::new(
-                        &self.smul, E::EF::one(),
-                        &[a_sm, b_sm, c_sm.clone(), cy.clone(), nzc.clone()]));
+                    if !self.gkr {
+                        eval.add_to_relation(RelationEntry::new(
+                            &self.smul, E::EF::one(),
+                            &[a_sm, b_sm, c_sm.clone(), cy.clone(), nzc.clone()]));
+                    }
                     eval.add_constraint(
                         c_ef.clone() - nzc * (a_ef + b_ef + cy - E::F::from(c127)));
-                    eval.add_to_relation(RelationEntry::new(
-                        &self.val, E::EF::one(), &[c_sm.clone(), c_ef.clone()]));
+                    if !self.gkr {
+                        eval.add_to_relation(RelationEntry::new(
+                            &self.val, E::EF::one(), &[c_sm.clone(), c_ef.clone()]));
+                    }
                     outs.push((c_sm, c_ef));
                 }
             }
@@ -771,7 +818,9 @@ impl FrameworkEval for GlueEval {
                 eval.add_constraint((h - spec.claimed) * end.clone());
             }
         }
-        eval.finalize_logup_in_pairs();
+        if !self.gkr {
+            eval.finalize_logup_in_pairs();
+        }
         eval
     }
 }
@@ -1662,7 +1711,7 @@ fn tie_specs(r: &GlueRegion, t: &Tie) -> (Vec<crate::devacc::FAccGTie>, Vec<Secu
 /// router. The ties stay on the host: they are a serial Horner fold over the
 /// region's own values, which is `devacc`'s shape and not this stream's.
 pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>,
-                        air: &GlueEval) -> GlueInteraction {
+                        air: &GlueEval, gkr: bool) -> GlueInteraction {
     use stwo::prover::backend::simd::m31::PackedM31;
     let prog = &r.prog;
     let round = r.round;
@@ -1798,6 +1847,21 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>,
     // so this is `Cols::Host` and the opt-in `B7_M4_LOGUPIR` decides. When
     // `gen/glue` puts them on the card the same call takes the kernel
     // unconditionally, which is how the two levers compose.
+    // B11 stream V, lever 3: under `--gkr-glue` the region's fractions were
+    // handed to the collector before the GKR proof ran, in `compose`'s own pass
+    // -- see the comment there for why the two are in different places -- so
+    // there are no running-sum columns to build and no claimed sum to carry.
+    // The tie columns above are untouched: they are Horner accumulators, they
+    // are 0.4% of this family's interaction cells, and nothing about them is a
+    // lookup.
+    if gkr {
+        let _ = fr;
+        return GlueInteraction {
+            cols: cols.into_inner(),
+            use_sum: SecureField::zero(),
+            claimed,
+        };
+    }
     let (lcols, use_sum) = crate::devfrac::frac_cols(
         air, &format!("glue {}", r.tag), r.log_rows,
         crate::devfrac::cols_of(&r.pre, r.dev.as_ref().map(|d| &d.pre[..])),
@@ -2147,8 +2211,11 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
         smul: rels.smul.clone(), un: rels.un.clone(), uns: rels.uns.clone(),
         val: rels.val.clone(),
         tie: if notie { None } else { Some(tie0.clone()) }, bound: None,
+        // the standalone gadget has no GKR arm; the flag lives in `compose`
+        gkr: false,
     };
-    let it = glue_interaction(&region, &rels, if notie { None } else { Some(&tie0) }, &air0);
+    let it = glue_interaction(&region, &rels, if notie { None } else { Some(&tie0) },
+                              &air0, false);
     let inter_cells = it.cols.len() << region.log_rows;
     let tie = Tie {
         lam,
@@ -2199,7 +2266,7 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
                    norm: rels.norm.clone(), frac: rels.frac.clone(), pow: rels.pow.clone(),
                    smul: rels.smul.clone(), un: rels.un.clone(), uns: rels.uns.clone(),
                    val: rels.val.clone(),
-                   tie: if notie { None } else { Some(tie) }, bound: None },
+                   tie: if notie { None } else { Some(tie) }, bound: None, gkr: false },
         it.use_sum,
     );
     let tcomps: Vec<FrameworkComponent<GTableEval>> = tkinds

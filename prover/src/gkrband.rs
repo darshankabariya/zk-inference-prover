@@ -69,6 +69,7 @@ use stwo::prover::lookups::gkr_verifier::{
     Gate, GkrArtifact, GkrBatchProof, GkrError, partially_verify_batch,
 };
 use stwo::prover::lookups::mle::Mle;
+use stwo_constraint_framework::FrameworkEval;
 
 use crate::attn_witness::Variant as AttnVariant;
 
@@ -96,6 +97,9 @@ impl Site {
             crate::gkrlink::Reg::Band(b) =>
                 format!("band{b}/{}", ["chan", "key", "out", "row"][self.which]),
             crate::gkrlink::Reg::Deq(m) => format!("deq{m}"),
+            crate::gkrlink::Reg::Glue(g) => format!("glue{g}"),
+            crate::gkrlink::Reg::Walk(w) => format!("walk{w}"),
+            crate::gkrlink::Reg::Ao => "attnout".to_string(),
         }
     }
     pub fn n_looks(&self) -> usize {
@@ -255,6 +259,13 @@ pub struct Collect {
     /// `verify_composed` feeds them to `sums_cancel` directly. Off, collecting
     /// stays purely additive, which is what the self-test relies on.
     pub replace: bool,
+    /// B11 stream V, lever 1: what each fed site would need to build its input
+    /// layers a second time -- the dispatch key, the committed column pointers
+    /// and the scalar blob, all of which outlive the GKR. `prove_batch` frees a
+    /// dropped input layer as soon as its first halving exists and asks for it
+    /// back in the last round; this is what answers.
+    #[cfg(feature = "cuda")]
+    pub feeds: Vec<feedimpl::FeedPlan>,
 }
 
 impl Collect {
@@ -470,47 +481,186 @@ pub fn deq_site(
     eval: &crate::dequant::DequantEval,
     r: &crate::layer::MatRegion,
 ) {
-    c.reg = crate::gkrlink::Reg::Deq(reg);
-    let log_rows = r.lay.log_rows;
-    let unit = crate::dequant::look_units(&r.spec);
+    fam_site(c, FamSite {
+        reg: crate::gkrlink::Reg::Deq(reg),
+        tag: format!("deq{reg}"),
+        mut_env: "B11_DEQMUT",
+        mut_key: reg,
+        log_rows: r.lay.log_rows,
+        unit: crate::dequant::look_units(&r.spec),
+        pre: &r.pre,
+        base: &r.base,
+        #[cfg(feature = "cuda")]
+        dev: r.dev.as_ref().map(|d| (&d.pre[..], &d.base[..])),
+    }, eval);
+}
+
+/// B11 stream V, lever 3: one glue region's lookups, wherever its columns are.
+///
+/// `glue_interaction` stops building running-sum columns under `--gkr-glue` and
+/// `compose` calls this in the collection pass instead. Every glue look is unit
+/// -- the numerator is the literal one at all six kinds -- so every instance is
+/// `Layer::LogUpSingles`, and the unit list is asserted against the fraction
+/// IR's own numerators rather than assumed: `gkrlink::glue_look_count` is what
+/// the *verifier* derives, `ir_units` is what the fractions are, and the two
+/// disagreeing is a stop before a proof rather than after one.
+pub fn glue_site(
+    c: &mut Collect,
+    reg: usize,
+    eval: &crate::glue::GlueEval,
+    r: &crate::glue::GlueRegion,
+) {
+    let log_rows = r.log_rows;
     let ir = crate::scalars::cached_ir(eval, log_rows, log_rows, true, || {
         crate::devfrac::ir_of(eval, log_rows)
     });
-    // `mat_logup_ir`'s prefix rule, asserted the same way: an o-side region
-    // commits three extra preprocessed selectors that belong to the *argmax*
-    // component, `DequantEval` never reads them, and they sit after the ones
-    // the IR loads -- so the prefix is exactly what to supply.
+    let want = crate::gkrlink::glue_look_count(&r.prog);
+    let units = crate::gkrlink::ir_units(&ir);
+    assert_eq!(units.len(), want,
+               "glue/{}: the fraction IR has {} lookups, the plan's program {want}",
+               r.tag, units.len());
+    assert!(units.iter().all(|u| *u),
+            "glue/{}: a lookup's numerator is not the constant one, so the site's              instance split is not the one `sites_of` derives", r.tag);
+    fam_site(c, FamSite {
+        reg: crate::gkrlink::Reg::Glue(reg),
+        tag: format!("glue/{}", r.tag),
+        mut_env: "B11_GLUEMUT",
+        mut_key: reg,
+        log_rows,
+        unit: units,
+        pre: &r.pre,
+        base: &r.base,
+        #[cfg(feature = "cuda")]
+        dev: r.dev.as_ref().map(|d| (&d.pre[..], &d.base[..])),
+    }, eval);
+}
+
+/// B11 stream V, lever 4: one walk group's range checks.
+pub fn walk_site(
+    c: &mut Collect,
+    reg: usize,
+    eval: &crate::walk_air::WalkEval,
+    r: &crate::layer::WalkRegion,
+) {
+    fam_site(c, FamSite {
+        reg: crate::gkrlink::Reg::Walk(reg),
+        tag: format!("walk/{}", r.name),
+        mut_env: "B11_WALKMUT",
+        mut_key: reg,
+        log_rows: r.lay.g.log_rows,
+        unit: vec![true; r.lay.pq],
+        pre: &r.pre,
+        base: &r.base,
+        #[cfg(feature = "cuda")]
+        dev: r.dev.as_ref().map(|d| (&d.pre[..], &d.base[..])),
+    }, eval);
+}
+
+/// B11 stream V, lever 4: the attention-output region's three looks per slot.
+pub fn ao_site(
+    c: &mut Collect,
+    eval: &crate::walk_air::AttnOutEval,
+    r: &crate::layer::AoRegion,
+) {
+    fam_site(c, FamSite {
+        reg: crate::gkrlink::Reg::Ao,
+        tag: "attnout".to_string(),
+        mut_env: "B11_AOMUT",
+        mut_key: 0,
+        log_rows: r.lay.log_rows,
+        unit: vec![true; 3 * r.lay.per_row],
+        pre: &r.pre,
+        base: &r.base,
+        #[cfg(feature = "cuda")]
+        dev: r.dev.as_ref().map(|d| (&d.pre[..], &d.base[..])),
+    }, eval);
+}
+
+/// One family region's column sources, as `fam_site` needs them.
+///
+/// B11 stream V, lever 3: stream U wrote this resolution once, for dequant. The
+/// three families this stream adds want it unchanged -- the same prefix rule,
+/// the same feed-or-host decision, the same two controls -- and the way to keep
+/// them the same is to have one copy rather than four. `deq_site` is now the
+/// first caller and its recorded digests are what say the extraction moved
+/// nothing.
+pub struct FamSite<'a> {
+    pub reg: crate::gkrlink::Reg,
+    /// what a control's message calls this region
+    pub tag: String,
+    /// the environment variable that bends one of this family's fractions
+    pub mut_env: &'static str,
+    /// the region index that variable names
+    pub mut_key: usize,
+    pub log_rows: u32,
+    pub unit: Vec<bool>,
+    /// the host mirrors; empty when the fill left the columns on the card
+    pub pre: &'a [crate::common::Eval],
+    pub base: &'a [crate::common::Eval],
+    #[cfg(feature = "cuda")]
+    pub dev: Option<(&'a [stwo::stwo_cuda::base_field_vec::BaseFieldVec],
+                     &'a [stwo::stwo_cuda::base_field_vec::BaseFieldVec])>,
+}
+
+/// One family region's lookups, wherever its columns are.
+///
+/// This is `feed_site`'s shape for a family that is not the bands. A family's
+/// interaction builder calls it in place of its own LogUp build under that
+/// family's flag: the region's fractions become GKR input layers instead of
+/// committed running-sum columns, and its claimed sum leaves `use_sums` for
+/// `sums_cancel`.
+///
+/// The fractions come from the region's own fraction IR, which is the lowering
+/// of the *un-ablated* evaluator -- stream T's precedent, and the reason the
+/// kernel store already carries these fingerprints: under the flag the
+/// evaluator emits no lookups at all and its IR would be empty. One definition
+/// of the fraction, three readers: this, the family's hand-written builder (the
+/// one `B7_M4_LOGUPIR=2` compares against) and `gkrlink`'s affine forms.
+pub fn fam_site<E: FrameworkEval>(c: &mut Collect, s: FamSite<'_>, eval: &E) {
+    let (reg, log_rows) = (s.reg, s.log_rows);
+    let tag = &s.tag;
+    c.reg = reg;
+    let unit = s.unit;
+    let ir = crate::scalars::cached_ir(eval, log_rows, log_rows, true, || {
+        crate::devfrac::ir_of(eval, log_rows)
+    });
+    // `mat_logup_ir`'s prefix rule, asserted the same way: an o-side dequant
+    // region commits three extra preprocessed selectors that belong to the
+    // *argmax* component, its evaluator never reads them, and they sit after
+    // the ones the IR loads -- so the prefix is exactly what to supply. A
+    // family whose regions carry no spare preprocessed columns passes it
+    // unchanged.
     let np = ir.cols[0];
     let prefix = |n: usize| {
         assert!(n >= np,
-                "deq{reg}: the region has {n} preprocessed columns, fewer than the \
+                "{tag}: the region has {n} preprocessed columns, fewer than the \
                  {np} its fraction IR loads");
         np
     };
-    // `B11_DEQMUT` bends one of *this region's* fractions, which is a statement
-    // about the host builder's values, so it takes the host path even where the
-    // fill left the columns on the card. Nothing else in the run moves.
-    let mutating = std::env::var("B11_DEQMUT").ok()
-        .and_then(|v| v.parse::<usize>().ok()) == Some(reg);
+    // The family's own control bends one of *this region's* fractions, which is
+    // a statement about the host builder's values, so it takes the host path
+    // even where the fill left the columns on the card. Nothing else moves.
+    let mutating = std::env::var(s.mut_env).ok()
+        .and_then(|v| v.parse::<usize>().ok()) == Some(s.mut_key);
     #[cfg(feature = "cuda")]
-    if let Some(d) = &r.dev {
+    if let Some((dpre, dbase)) = s.dev {
         // The prover's path: the columns are on the card and so are the
         // fractions. The two controls below both need the host builder's values
         // -- one to bend them, one to compare against -- so each takes the
         // region off the feed and neither is on the prover's path.
         if !mutating && !feedcheck_on() {
             let pp: Vec<*const u32> =
-                d.pre[..prefix(d.pre.len())].iter().map(|x| x.device_ptr).collect();
-            let bp: Vec<*const u32> = d.base.iter().map(|x| x.device_ptr).collect();
+                dpre[..prefix(dpre.len())].iter().map(|x| x.device_ptr).collect();
+            let bp: Vec<*const u32> = dbase.iter().map(|x| x.device_ptr).collect();
             c.push_dev(0, log_rows, unit, eval, &pp, &bp);
             return;
         }
-        eprintln!("deq{reg}: off the feed for a control, columns downloaded");
+        eprintln!("{tag}: off the feed for a control, columns downloaded");
     }
     // The host builder's inputs: the region's own columns. Only the controls
     // reach here with a device fill, and the download they need is theirs.
     #[cfg(feature = "cuda")]
-    let down = r.dev.as_ref().map(|d| {
+    let down = s.dev.map(|(dpre, dbase)| {
         // `common::eval_of` takes values in *coset* order and permutes them into
         // the committed one; a device column is already committed order, so the
         // download reinterprets rather than permutes -- the same construction
@@ -521,14 +671,14 @@ pub fn deq_site(
                 domain,
                 stwo::prover::backend::simd::column::BaseColumn::from_iter(c.to_vec()))
         };
-        (d.pre[..prefix(d.pre.len())].iter().map(ev).collect::<Vec<_>>(),
-         d.base.iter().map(ev).collect::<Vec<_>>())
+        (dpre[..prefix(dpre.len())].iter().map(ev).collect::<Vec<_>>(),
+         dbase.iter().map(ev).collect::<Vec<_>>())
     });
     #[cfg(not(feature = "cuda"))]
     let down: Option<(Vec<crate::common::Eval>, Vec<crate::common::Eval>)> = None;
     let (hpre, hbase) = match &down {
         Some((pp, bb)) => (&pp[..], &bb[..]),
-        None => (&r.pre[..prefix(r.pre.len())], &r.base[..]),
+        None => (&s.pre[..prefix(s.pre.len())], s.base),
     };
     let mut flat = deq_fracs(&ir, log_rows, hpre, hbase);
     // `B11_FEEDCHECK=1`: the feed over an uploaded copy of the very columns the
@@ -551,7 +701,7 @@ pub fn deq_site(
     }
     // B11 stream U, lever 3: the family's own instance-aimed control.
     //
-    // `B11_DEQMUT=<k>` bends one denominator of dequant region `k`'s input
+    // `<FAM>MUT=<k>` bends one denominator of this family's region `k`'s input
     // layer -- one fraction of one look of one row -- and changes nothing else.
     // The GKR then proves the bent layer honestly, so its sumcheck is internally
     // consistent and every claim it yields is the claim of the layer it saw; the
@@ -561,11 +711,9 @@ pub fn deq_site(
     // soundness rests on for this family -- the GKR's input layer and the
     // committed columns are one function -- and this is what says it is load
     // bearing rather than assumed.
-    if let Ok(spec) = std::env::var("B11_DEQMUT") {
-        if spec.parse::<usize>().unwrap_or(0) == reg {
-            eprintln!("deqmut: dequant region {reg}, look 0 of row 0, denominator bent");
-            flat[0][0].1 += PackedSecureField::broadcast(SecureField::one());
-        }
+    if mutating {
+        eprintln!("{}: {tag}, look 0 of row 0, denominator bent", s.mut_env);
+        flat[0][0].1 += PackedSecureField::broadcast(SecureField::one());
     }
     c.push_flat(0, log_rows, unit, &flat);
 }
@@ -608,6 +756,151 @@ mod feedimpl {
     use stwo_constraint_framework::FrameworkEval;
 
     use super::{Collect, Inst, Site, input_layer, plan, unit_of};
+
+    /// One fed site's launch, kept so it can be launched a second time.
+    ///
+    /// B11 stream V, lever 1. Every field is a value or a device pointer into a
+    /// *committed* column -- tree 0 and tree 1 -- and those live from their
+    /// commit until the proof ends, which is strictly longer than the GKR. The
+    /// site is kept whole because `plan` derives the instance split from it, so
+    /// the re-feed produces the same instances in the same order with the same
+    /// entry-to-slot map; the layers it returns are bit-identical to the ones
+    /// the first launch produced, and the transcript cannot tell the two apart.
+    pub struct FeedPlan {
+        site: Site,
+        /// this site's index in `Collect::sites`, which its instances carry.
+        /// Not the plan's own index: a host-built site takes a slot in `sites`
+        /// and none here.
+        site_at: usize,
+        /// the global instance indices this launch fills, in `plan` order
+        pub insts: Vec<usize>,
+        family: String,
+        shape: u32,
+        fingerprint: u32,
+        pre_ptrs: Vec<*const u32>,
+        base_ptrs: Vec<*const u32>,
+        sc: Vec<u32>,
+    }
+
+    impl FeedPlan {
+        /// Allocate this site's input layers and fill them with one launch.
+        ///
+        /// `at` is the site index the instances carry. The layers are allocated
+        /// first and their slots handed to the kernel, so the write-back *is*
+        /// the MLE layout: look `e` of instance `j` at position `p` is written
+        /// at `p << log_rows` of that instance's column, which is exactly where
+        /// `input_layer` puts it on the host. Nothing is copied, permuted or
+        /// reshaped afterwards -- the permutation the plan's unit/non-unit
+        /// split induces lives in the pointer table.
+        pub fn fill(&self) -> (Vec<Layer<CudaBackend>>, Vec<Inst>) {
+            let at = self.site_at;
+            let n_rows = 1usize << self.site.log_rows;
+            let n_looks = self.site.n_looks();
+            let mut num_at = vec![std::ptr::null_mut::<u32>(); n_looks];
+            let mut den_at = vec![std::ptr::null_mut::<u32>(); n_looks];
+            let mut layers = vec![];
+            let mut insts = vec![];
+            for inst in plan(std::slice::from_ref(&self.site)) {
+                let inst = Inst { site: at, ..inst };
+                let n = inst.fractions();
+                let den = SecureFieldVec::new_uninitialized(n);
+                let dp = den.device_ptr as *mut u32;
+                for (p, e) in inst.ents.iter().enumerate() {
+                    den_at[*e] = unsafe { dp.add(4 * p * n_rows) };
+                }
+                let layer = if inst.unit {
+                    Layer::LogUpSingles { denominators: Mle::new(den) }
+                } else {
+                    let num = SecureFieldVec::new_uninitialized(n);
+                    let np = num.device_ptr as *mut u32;
+                    for (p, e) in inst.ents.iter().enumerate() {
+                        num_at[*e] = unsafe { np.add(4 * p * n_rows) };
+                    }
+                    Layer::LogUpGeneric {
+                        numerators: Mle::new(num),
+                        denominators: Mle::new(den),
+                    }
+                };
+                layers.push(layer);
+                insts.push(inst);
+            }
+            assert!(den_at.iter().all(|p| !p.is_null()),
+                    "the feed's plan left a look with no denominator slot");
+            let cname = CString::new(self.family.clone()).unwrap();
+            unsafe {
+                gen_b65_feed_dispatch(
+                    cname.as_ptr(),
+                    self.shape,
+                    self.fingerprint,
+                    self.pre_ptrs.as_ptr(),
+                    self.pre_ptrs.len() as u32,
+                    self.base_ptrs.as_ptr(),
+                    self.base_ptrs.len() as u32,
+                    self.sc.as_ptr(),
+                    (self.sc.len() / 4) as u32,
+                    num_at.as_ptr(),
+                    den_at.as_ptr(),
+                    n_rows as u32,
+                    n_looks as u32,
+                );
+            }
+            (layers, insts)
+        }
+    }
+
+    /// The GKR's answer when it asks for a dropped input layer back.
+    ///
+    /// One launch fills every instance of a site, so the first instance of a
+    /// site to be asked for builds all of that site's layers and the rest are
+    /// handed the ones already built. The cache is `RefCell` because
+    /// `InputRefeed` takes `&self`: `prove_batch` holds the layers it is
+    /// folding and can only borrow this.
+    pub struct Refeed<'a> {
+        feeds: &'a [FeedPlan],
+        /// which feed plan owns each instance, and `None` for an instance the
+        /// host built and uploaded -- those are not dropped and never asked for
+        owner: Vec<Option<usize>>,
+        built: std::cell::RefCell<Vec<Option<Layer<CudaBackend>>>>,
+        pub calls: std::cell::Cell<usize>,
+    }
+
+    impl<'a> Refeed<'a> {
+        /// `n` is the instance count; `sites_of` gives each fed instance's site.
+        pub fn new(feeds: &'a [FeedPlan], n: usize) -> Self {
+            let mut owner = vec![None; n];
+            for (f, fp) in feeds.iter().enumerate() {
+                for i in &fp.insts {
+                    owner[*i] = Some(f);
+                }
+            }
+            Refeed {
+                feeds,
+                owner,
+                built: std::cell::RefCell::new((0..n).map(|_| None).collect()),
+                calls: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl stwo::prover::lookups::gkr_prover::InputRefeed<CudaBackend> for Refeed<'_> {
+        fn droppable(&self, instance: usize) -> bool {
+            self.owner[instance].is_some()
+        }
+
+        fn refeed(&self, instance: usize) -> Layer<CudaBackend> {
+            let f = self.owner[instance].expect("a host instance was never dropped");
+            if self.built.borrow()[instance].is_none() {
+                let fp = &self.feeds[f];
+                let (layers, _) = fp.fill();
+                self.calls.set(self.calls.get() + 1);
+                let mut b = self.built.borrow_mut();
+                for (k, l) in fp.insts.iter().zip(layers) {
+                    b[*k] = Some(l);
+                }
+            }
+            self.built.borrow_mut()[instance].take().expect("the re-feed built no layer here")
+        }
+    }
 
     unsafe extern "C" {
         /// The generated fraction kernel's unpaired variant, behind the same
@@ -663,36 +956,6 @@ mod feedimpl {
             let n_rows = 1usize << log_rows;
             let n_looks = site.n_looks();
 
-            let mut num_at = vec![std::ptr::null_mut::<u32>(); n_looks];
-            let mut den_at = vec![std::ptr::null_mut::<u32>(); n_looks];
-            for inst in plan(std::slice::from_ref(&site)) {
-                let inst = Inst { site: at, ..inst };
-                let n = inst.fractions();
-                let den = SecureFieldVec::new_uninitialized(n);
-                let dp = den.device_ptr as *mut u32;
-                for (p, e) in inst.ents.iter().enumerate() {
-                    den_at[*e] = unsafe { dp.add(4 * p * n_rows) };
-                }
-                let layer = if inst.unit {
-                    Layer::LogUpSingles { denominators: Mle::new(den) }
-                } else {
-                    let num = SecureFieldVec::new_uninitialized(n);
-                    let np = num.device_ptr as *mut u32;
-                    for (p, e) in inst.ents.iter().enumerate() {
-                        num_at[*e] = unsafe { np.add(4 * p * n_rows) };
-                    }
-                    Layer::LogUpGeneric {
-                        numerators: Mle::new(num),
-                        denominators: Mle::new(den),
-                    }
-                };
-                self.dev_layers.push(layer);
-                self.on_dev.push(true);
-                self.insts.push(inst);
-            }
-            assert!(den_at.iter().all(|p| !p.is_null()),
-                    "the feed's plan left a look with no denominator slot");
-
             // The IR, and the kernel compiled for it. Same lowering, same
             // fingerprint and same shape id as the committed arm's paired
             // kernel: the two differ only in the write-back.
@@ -734,25 +997,32 @@ mod feedimpl {
             let sc: Vec<u32> =
                 ir.scalars.iter().flat_map(|s| s.to_m31_array().map(|x| x.0)).collect();
             let nulls = vec![std::ptr::null::<u32>(); ir.cols[0]];
-            let pre_ptrs = if pre_ptrs.is_empty() { &nulls[..] } else { pre_ptrs };
-            let cname = CString::new(family).unwrap();
-            unsafe {
-                gen_b65_feed_dispatch(
-                    cname.as_ptr(),
-                    shape as u32,
-                    ir.fingerprint(),
-                    pre_ptrs.as_ptr(),
-                    pre_ptrs.len() as u32,
-                    base_ptrs.as_ptr(),
-                    base_ptrs.len() as u32,
-                    sc.as_ptr(),
-                    ir.scalars.len() as u32,
-                    num_at.as_ptr(),
-                    den_at.as_ptr(),
-                    n_rows as u32,
-                    n_looks as u32,
-                );
-            }
+            let pre = if pre_ptrs.is_empty() { nulls } else { pre_ptrs.to_vec() };
+
+            // B11 stream V, lever 1: the launch is now `FeedPlan::fill`, and
+            // everything it needs is plain data that outlives the GKR -- the
+            // dispatch key, the committed columns' device pointers, the scalar
+            // blob, and the site, whose instance split `plan` reproduces. So
+            // the second call in the last round is the first call again, and
+            // "idempotent" is a property of the code rather than a hope.
+            let fp = FeedPlan {
+                site: site.clone(),
+                site_at: at,
+                insts: (0..plan(std::slice::from_ref(&site)).len())
+                    .map(|k| self.insts.len() + k)
+                    .collect(),
+                family: family.to_string(),
+                shape: shape as u32,
+                fingerprint: ir.fingerprint(),
+                pre_ptrs: pre,
+                base_ptrs: base_ptrs.to_vec(),
+                sc,
+            };
+            let (layers, insts) = fp.fill();
+            self.dev_layers.extend(layers);
+            self.on_dev.extend(std::iter::repeat_n(true, insts.len()));
+            self.insts.extend(insts);
+            self.feeds.push(fp);
             self.sites.push(site);
             self.direct.push(stwo::core::fields::qm31::SecureField::default());
             self.feed_secs += t0.elapsed().as_secs_f64();
@@ -1099,13 +1369,14 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
     let n_fed = c.on_dev.iter().filter(|d| **d).count();
 
     #[cfg(feature = "cuda")]
-    let (proof, artifact, arm, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases) = {
+    let (proof, artifact, arm, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases,
+         refeeds) = {
         if std::env::var("B11_GKR_HOST").map(|v| v != "0").unwrap_or(false) {
             assert_eq!(n_fed, 0,
                        "`B11_GKR_HOST=1` proves on the host, which needs every input                         layer there, and the device feed built {n_fed} of them");
             let t1 = Instant::now();
             let (proof, artifact) = prove_batch(channel, c.layers);
-            (proof, artifact, "host simd", 0.0, 0.0, 0.0, t1.elapsed().as_secs_f64(), None)
+            (proof, artifact, "host simd", 0.0, 0.0, 0.0, t1.elapsed().as_secs_f64(), None, 0)
         } else {
             use stwo::prover::backend::cuda::lookups::gkr::prof;
             let t0 = Instant::now();
@@ -1128,6 +1399,11 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
                 .collect();
             dev::sync();
             let upload_secs = t0.elapsed().as_secs_f64();
+            // B11 stream V, lever 1: three boundaries the wall report does not
+            // name, because until this stream nothing asked *when* the card was
+            // fullest. Every input layer is resident here; the towers are not
+            // built yet.
+            crate::util::m4_mark("gkr/inputs_resident");
             // Once per process in production -- the pool keeps its high-water
             // mark across chunks -- so it is timed and reported, not counted
             // among the arm's per-chunk adds. Before the reshape, so no later
@@ -1145,21 +1421,39 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             } else {
                 0.0
             };
+            crate::util::m4_mark("gkr/prewarmed");
             prof::reset();
             let t1 = Instant::now();
-            let (proof, artifact) = prove_batch(channel, layers);
+            // B11 stream V, lever 1: the fed instances' input layers are freed
+            // as their first halving is produced and re-fed in the last round,
+            // which is the only round that reads them. The uploaded instances
+            // -- a host-filled corner band's -- have no feed behind them, so
+            // `Refeed::droppable` says no and they are held as stream Q held
+            // them. `B11_GKR_REFEED=0` puts every input layer back for the
+            // whole run: the same binary, the before against the after.
+            let refeed = crate::util::m4_switch("B11_GKR_REFEED")
+                .then(|| feedimpl::Refeed::new(&c.feeds, n_instances));
+            let (proof, artifact) = stwo::prover::lookups::gkr_prover::prove_batch_refeed(
+                channel,
+                layers,
+                refeed.as_ref().map(|r| r as &dyn stwo::prover::lookups::gkr_prover::InputRefeed<_>),
+            );
             dev::sync();
             let prove_secs = t1.elapsed().as_secs_f64();
+            let refeeds = refeed.as_ref().map(|r| r.calls.get()).unwrap_or(0);
+            crate::util::m4_mark("gkr/proved");
             let phases = prof::on().then(prof::snapshot);
-            (proof, artifact, "device", upload_secs, reshape_secs, prewarm_secs, prove_secs, phases)
+            (proof, artifact, "device", upload_secs, reshape_secs, prewarm_secs, prove_secs,
+             phases, refeeds)
         }
     };
     #[cfg(not(feature = "cuda"))]
-    let (proof, artifact, arm, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases) = {
+    let (proof, artifact, arm, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases,
+         refeeds) = {
         let t1 = Instant::now();
         let (proof, artifact) = prove_batch(channel, c.layers);
         let phases: Option<Vec<(&'static str, f64, u64)>> = None;
-        (proof, artifact, "host simd", 0.0, 0.0, 0.0, t1.elapsed().as_secs_f64(), phases)
+        (proof, artifact, "host simd", 0.0, 0.0, 0.0, t1.elapsed().as_secs_f64(), phases, 0)
     };
 
     let sums = sums_of(c.sites.len(), &c.insts, &proof.output_claims_by_instance);
@@ -1185,6 +1479,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             prewarm_secs,
             assembly_secs,
             phases,
+            refeeds,
             // the caller adds what it measured around the whole call
             total_secs: c.layers_secs + c.feed_secs + prove_secs,
         },
@@ -1227,6 +1522,9 @@ pub struct Cost {
     pub assembly_secs: f64,
     /// the device sumcheck's phase split, when `B11_GKR_PROF=1`
     pub phases: Option<Vec<(&'static str, f64, u64)>>,
+    /// B11 stream V, lever 1: how many feed launches the last round asked for,
+    /// one per fed site. Zero under `B11_GKR_REFEED=0` and on the host arm.
+    pub refeeds: usize,
     /// everything the arm costs where the committed path costs its LogUp build:
     /// the input layers plus `prove_batch`
     pub total_secs: f64,
@@ -1244,6 +1542,7 @@ impl Cost {
             "prove_secs": self.prove_secs,
             "total_secs": self.total_secs,
             "proof_bytes": self.proof_bytes,
+            "refeeds": self.refeeds,
             "arm": self.arm,
             "upload_secs": self.upload_secs,
             "reshape_secs": self.reshape_secs,
@@ -1360,9 +1659,16 @@ pub fn mix_shape(channel: &mut impl Channel, sites: &[Site]) {
         // families' region indices are unrelated and a transcript that could
         // not tell `band0/chan` from `deq0` would be mixing the same felt for
         // two different shapes.
+        // B11 stream V, lever 3: the glue family takes the next code, 2. Bands
+        // stay 0 and dequant 1, so a bands-only or bands+dequant statement
+        // mixes exactly the felts stream U's did -- which is what the four
+        // bands and two dequant wall digests gate.
         let (fam, reg) = match s.reg {
             crate::gkrlink::Reg::Band(b) => (0u32, b as u32),
             crate::gkrlink::Reg::Deq(m) => (1u32, m as u32),
+            crate::gkrlink::Reg::Glue(g) => (2u32, g as u32),
+            crate::gkrlink::Reg::Walk(w) => (3u32, w as u32),
+            crate::gkrlink::Reg::Ao => (4u32, 0u32),
         };
         felts.push(SecureField::from_u32_unchecked(
             reg,
@@ -1620,6 +1926,42 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
                 unit: crate::dequant::look_units(sp),
             });
         }
+    }
+    // ---- B11 stream V, lever 3: the glue family, after dequant -- memo
+    // section 8's order, which is the order the interaction pass collects in.
+    // Every glue look is unit, and the count comes from the region's program,
+    // which is what the verifier has; `glue_site` asserts the fractions agree.
+    if plan.p.gkr_glue {
+        if let Some(gp) = plan.glue.as_ref() {
+            for (g, r) in gp.regions.iter().enumerate() {
+                out.push(Site {
+                    reg: crate::gkrlink::Reg::Glue(g),
+                    which: 0,
+                    log_rows: r.log_rows,
+                    unit: vec![true; crate::gkrlink::glue_look_count(&r.prog)],
+                });
+            }
+        }
+    }
+    // ---- B11 stream V, lever 4: the walks, then attnout -- memo section 8's
+    // order again. Both are all-unit and both counts come from the plan.
+    if plan.p.gkr_walks {
+        for (w, wp) in plan.walks.iter().enumerate() {
+            out.push(Site {
+                reg: crate::gkrlink::Reg::Walk(w),
+                which: 0,
+                log_rows: wp.lay.g.log_rows,
+                unit: vec![true; wp.lay.pq],
+            });
+        }
+    }
+    if plan.p.gkr_attnout {
+        out.push(Site {
+            reg: crate::gkrlink::Reg::Ao,
+            which: 0,
+            log_rows: plan.ao_lay.log_rows,
+            unit: vec![true; 3 * plan.ao_lay.per_row],
+        });
     }
     out
 }
