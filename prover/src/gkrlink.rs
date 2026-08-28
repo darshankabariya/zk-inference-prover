@@ -692,6 +692,7 @@ pub fn build_height_cols<'a>(hl: &HeightLink,
     out.extend(coords_to_evals(h, coeff_col.into_secure_column_by_coords()));
     out.extend(coords_to_evals(h, eq_mle.into_evals().into_secure_column_by_coords()));
     out.extend(coords_to_evals(h, prefix));
+    check_height_cols(hl, &out);
     out
 }
 
@@ -811,8 +812,14 @@ impl Component for LinkTie {
                 tie_coeff -= *w * mask[*tree][*col][0];
             }
             evaluation_accumulator.accumulate(denom_inverse * tie_coeff);
-            // the committed carry-quotient column is the succinct one
-            let tie_q = ext(t.q_at) - eval_carry_quotient_col(&t.mle_point, point);
+            // the committed carry-quotient column is the succinct one. The
+            // lifted protocol samples a 2^h column's polynomial at the point
+            // doubled down to its own domain, so the analytic side evaluates
+            // at the same mapped point -- the coefficient tie above needs no
+            // mapping because every column it compares shares one height and
+            // therefore one lift.
+            let mapped = point.repeated_double(max_log_degree_bound - t.h);
+            let tie_q = ext(t.q_at) - eval_carry_quotient_col(&t.mle_point, mapped);
             evaluation_accumulator.accumulate(denom_inverse * tie_q);
         }
     }
@@ -883,4 +890,56 @@ pub fn eq_total<'a>(hl: &HeightLink, col_of: &dyn Fn(usize, &RCol) -> &'a Eval) 
         total += *w * acc.to_array().iter().fold(SecureField::zero(), |a, b| a + *b);
     }
     total
+}
+
+/// `B11_LINKCHECK=1`: evaluate the height's constraints pointwise on the CPU
+/// and name the first violated relation. A development probe for the composed
+/// run -- the constraints here are the same expressions `LinkEval` hands the
+/// framework, walked in coset order over the committed values.
+pub fn check_height_cols(hl: &HeightLink, cols: &[Eval]) {
+    if std::env::var("B11_LINKCHECK").map(|v| v != "1").unwrap_or(true) {
+        return;
+    }
+    let h = hl.h;
+    let n = 1usize << h;
+    let at = |group: usize, coset_i: usize| -> SecureField {
+        let s = bit_reverse_index(coset_index_to_circle_domain_index(coset_i, h), h);
+        let (vr, lane) = (s / 16, s % 16);
+        SecureField::from_m31_array([0, 1, 2, 3].map(|k| {
+            cols[group * 4 + k].data[vr].to_array()[lane]
+        }))
+    };
+    let (q, coeff, eqc, prefix) = (0usize, 1usize, 2usize, 3usize);
+    // the eq boundaries
+    if at(eqc, 0) != hl.mle_point.eq_0_p {
+        eprintln!("linkcheck 2^{h}: eq[coset 0] = {:?}, want eq_0_p {:?}",
+                  at(eqc, 0), hl.mle_point.eq_0_p);
+    }
+    if at(eqc, 1) != hl.mle_point.eq_1_p {
+        eprintln!("linkcheck 2^{h}: eq[coset 1] = {:?}, want eq_1_p {:?}",
+                  at(eqc, 1), hl.mle_point.eq_1_p);
+    }
+    // the eq steps: curr == next_next * q(curr), wrapping mod the domain
+    let mut bad_step = 0usize;
+    for i in 0..n {
+        let expect = at(eqc, (i + 2) % n) * at(q, i);
+        if at(eqc, i) != expect && bad_step < 3 {
+            eprintln!("linkcheck 2^{h}: eq step at coset {i}: {:?} != next_next*q {:?}",
+                      at(eqc, i), expect);
+            bad_step += 1;
+        }
+    }
+    // the prefix recurrence: curr - prev == coeff*eq - shift, wrapping
+    let mut bad_pre = 0usize;
+    for i in 0..n {
+        let prev = at(prefix, (i + n - 1) % n);
+        let diff = at(prefix, i) - prev;
+        let want = at(coeff, i) * at(eqc, i) - hl.shift;
+        if diff != want && bad_pre < 3 {
+            eprintln!("linkcheck 2^{h}: prefix at coset {i}: diff {:?} != term {:?}",
+                      diff, want);
+            bad_pre += 1;
+        }
+    }
+    eprintln!("linkcheck 2^{h}: done ({bad_step} step, {bad_pre} prefix violations shown)");
 }
