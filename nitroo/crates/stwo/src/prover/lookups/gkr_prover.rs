@@ -1,4 +1,61 @@
 //! GKR batch prover for Grand Product and LogUp lookup arguments.
+
+/// B11 stream V, lever 1: the memory timeline's mark sink.
+///
+/// The card's peak under the GKR flags is sampled from outside the process by
+/// `nvidia-smi`, which says how high the pool's reservation went but nothing
+/// about when or why. `B11_MEMMARK=<path>` makes every call here append one
+/// `<epoch seconds> <name>` line to that file, on the same wall clock the
+/// sampler stamps its samples with, so a reporter can say which phase owned the
+/// card at the peak instead of modelling it. The switch off -- the default --
+/// `mark` reads one `OnceLock` and returns, and nothing is opened.
+///
+/// The sink lives in the fork because two crates write to it: this file marks
+/// the sumcheck's own rounds, and the prover crate marks the phases around
+/// them. Both append single short lines to one descriptor, which the kernel
+/// keeps whole, so the interleaving is by time and not by writer.
+pub mod memmark {
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+
+    fn sink() -> Option<&'static Mutex<std::fs::File>> {
+        static S: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+        S.get_or_init(|| {
+            let p = std::env::var("B11_MEMMARK").ok()?;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+                .ok()
+                .map(Mutex::new)
+        })
+        .as_ref()
+    }
+
+    /// Whether the timeline is being recorded at all.
+    pub fn on() -> bool {
+        sink().is_some()
+    }
+
+    /// One mark, stamped with the wall clock the sampler uses.
+    ///
+    /// The device's work is queued, so a mark says when the *host* reached a
+    /// boundary. Run the timeline with `B11_GKR_PROF=1`, which synchronises the
+    /// device around every sumcheck phase, and the two agree to within one
+    /// launch.
+    pub fn mark(name: &str) {
+        let Some(f) = sink() else { return };
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        if let Ok(mut g) = f.lock() {
+            let _ = writeln!(g, "{t:.6} {name}");
+            let _ = g.flush();
+        }
+    }
+}
+
 use std::borrow::Cow;
 use std::iter::{successors, zip};
 use std::ops::Deref;
@@ -473,6 +530,33 @@ impl<'a, B: GkrOps> GkrMultivariatePolyOracle<'a, B> {
 #[error("polynomial is not constant")]
 pub struct NotConstantPolyError;
 
+/// A source that can rebuild an instance's input layer, byte for byte.
+///
+/// B11 stream V, lever 1. `gen_layers` materialises every layer of every
+/// instance before the first sumcheck round, and the input layer is the largest
+/// of them -- for a `LogUpSingles` instance it is exactly a third of its own
+/// tower, and it is not read again until the *last* round, because every
+/// instance consumes its layers smallest first. Measured on an H100 at
+/// C=16384, the towers took the card from 33,607 MiB to 49,543 and the rounds
+/// to 51,335, and nothing afterwards raised the mark by more than 90 MiB: the
+/// arm's peak is this construction and nothing else.
+///
+/// So an input layer whose values can be *rebuilt* need not be held across the
+/// rounds that do not read it. This is the interface for rebuilding one: the
+/// prover's device feed lowers an evaluator over columns that stay committed
+/// for the whole proof, so calling it twice is idempotent by construction and
+/// the transcript cannot tell. Nothing here changes what is proved -- the
+/// layers are the same layers, at the same indices, with the same values.
+pub trait InputRefeed<B: GkrOps> {
+    /// Whether instance `i`'s input layer may be freed once its first halving
+    /// exists. False keeps stream Q's behaviour for that instance.
+    fn droppable(&self, instance: usize) -> bool;
+
+    /// Rebuild instance `i`'s input layer. Called once per dropped instance, in
+    /// the last round, and only for instances `droppable` returned true for.
+    fn refeed(&self, instance: usize) -> Layer<B>;
+}
+
 /// Batch proves lookup circuits with GKR.
 ///
 /// The input layers should be committed to the channel before calling this function.
@@ -480,6 +564,19 @@ pub struct NotConstantPolyError;
 pub fn prove_batch<B: GkrOps>(
     channel: &mut impl Channel,
     input_layer_by_instance: Vec<Layer<B>>,
+) -> (GkrBatchProof, GkrArtifact) {
+    prove_batch_refeed(channel, input_layer_by_instance, None)
+}
+
+/// The same, with the input layers held only where they cannot be rebuilt.
+///
+/// See [`InputRefeed`]. With `refeed` `None` this is exactly [`prove_batch`],
+/// and every path that has no feed behind it -- the host arm, the fork's own
+/// tests -- takes that branch.
+pub fn prove_batch_refeed<B: GkrOps>(
+    channel: &mut impl Channel,
+    input_layer_by_instance: Vec<Layer<B>>,
+    refeed: Option<&dyn InputRefeed<B>>,
 ) -> (GkrBatchProof, GkrArtifact) {
     let n_instances = input_layer_by_instance.len();
     let n_layers_by_instance = input_layer_by_instance
@@ -489,10 +586,38 @@ pub fn prove_batch<B: GkrOps>(
     let n_layers = *n_layers_by_instance.iter().max().unwrap();
 
     // Evaluate all instance circuits and collect the layer values.
+    //
+    // B11 stream V, lever 1: where an input layer can be rebuilt it is freed as
+    // soon as the halving that reads it has been produced, and *before* the
+    // rest of that instance's tower is allocated -- so the pages it gives back
+    // are on the pool's free list while the next instance's tower asks for
+    // pages, instead of being held across every round that does not read them.
+    // `dropped` says, per instance, that the reversed iterator will run one
+    // short and the last round must ask the feed for the layer back.
+    let mut dropped = vec![false; n_instances];
+    memmark::mark("gkr/towers_begin");
     let mut layers_by_instance = input_layer_by_instance
         .into_iter()
-        .map(|input_layer| gen_layers(input_layer).into_iter().rev())
+        .enumerate()
+        .map(|(i, input_layer)| {
+            let drop_input = refeed.is_some_and(|r| r.droppable(i));
+            dropped[i] = drop_input;
+            let ls = if drop_input {
+                gen_layers_above_input(input_layer)
+            } else {
+                gen_layers(input_layer)
+            };
+            if memmark::on() {
+                memmark::mark(&format!(
+                    "gkr/tower{i}_2^{}{}",
+                    n_layers_by_instance[i],
+                    if drop_input { "_dropped" } else { "" }
+                ));
+            }
+            ls.into_iter().rev()
+        })
         .collect_vec();
+    memmark::mark("gkr/towers_end");
 
     let mut output_claims_by_instance = vec![None; n_instances];
     let mut layer_masks_by_instance = (0..n_instances).map(|_| Vec::new()).collect_vec();
@@ -502,6 +627,9 @@ pub fn prove_batch<B: GkrOps>(
     let mut claims_to_verify_by_instance = vec![None; n_instances];
 
     for layer in 0..n_layers {
+        if memmark::on() {
+            memmark::mark(&format!("gkr/round{layer}"));
+        }
         let n_remaining_layers = n_layers - layer;
 
         // Check all the instances for output layers.
@@ -530,7 +658,22 @@ pub fn prove_batch<B: GkrOps>(
         // Create the multivariate polynomial oracles used with sumcheck.
         for (instance, claims_to_verify) in claims_to_verify_by_instance.iter().enumerate() {
             if let Some(claims_to_verify) = claims_to_verify {
-                let layer = layers_by_instance[instance].next().unwrap();
+                // Every instance reaches its input layer in the same, last
+                // round: it activates at `n_layers - n_i` holding its output
+                // layer and takes one more each round after. So a dropped
+                // instance's iterator runs out exactly here, once, and the
+                // whole batch's re-feed is a single event -- by which time the
+                // rest of every tower has been consumed and its pages are back
+                // on the pool's free list.
+                let layer = match layers_by_instance[instance].next() {
+                    Some(l) => l,
+                    None => {
+                        debug_assert!(dropped[instance]);
+                        refeed
+                            .expect("an instance's input layer is gone and there is no feed")
+                            .refeed(instance)
+                    }
+                };
                 sumcheck_oracles.push(layer.into_multivariate_poly(instance_lambda, &eq_evals));
                 sumcheck_claims.push(random_linear_combination(claims_to_verify, instance_lambda));
                 sumcheck_instances.push(instance);
@@ -563,6 +706,8 @@ pub fn prove_batch<B: GkrOps>(
         }
     }
 
+    memmark::mark("gkr/rounds_end");
+
     let output_claims_by_instance = output_claims_by_instance
         .into_iter()
         .map(Option::unwrap)
@@ -593,6 +738,29 @@ fn gen_layers<B: GkrOps>(input_layer: Layer<B>) -> Vec<Layer<B>> {
     let n_variables = input_layer.n_variables();
     let layers = successors(Some(input_layer), |layer| layer.next_layer()).collect_vec();
     assert_eq!(layers.len(), n_variables + 1);
+    layers
+}
+
+/// The same circuit without its input layer, which is freed here.
+///
+/// B11 stream V, lever 1. The one thing that matters is the order: the first
+/// halving is produced while the input is still live, the input is dropped
+/// immediately after, and only then is the rest of the tower allocated. So an
+/// instance's transient is its input plus one halving -- for a `LogUpSingles`
+/// instance those are the same size, because halving a unit-numerator layer
+/// produces a generic one and doubles the bytes per entry -- and its resting
+/// cost is the tower without the input. An input layer of one variable has no
+/// halving above it and nothing is dropped; the caller's `dropped` flag is
+/// still set, and the last round re-feeds it like any other.
+fn gen_layers_above_input<B: GkrOps>(input_layer: Layer<B>) -> Vec<Layer<B>> {
+    let n_variables = input_layer.n_variables();
+    let first = input_layer.next_layer();
+    drop(input_layer);
+    let layers = match first {
+        Some(l) => successors(Some(l), |layer| layer.next_layer()).collect_vec(),
+        None => vec![],
+    };
+    assert_eq!(layers.len(), n_variables);
     layers
 }
 
