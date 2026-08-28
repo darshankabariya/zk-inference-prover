@@ -803,8 +803,14 @@ impl Plan {
     /// The number of components that carry lookups, in `use_sums` order.
     pub fn n_use(&self) -> usize {
         // chan + grid + per-token per prefix band; a corner band has no per-token
-        // region (the pair shares the prefix band's), so it contributes two
-        self.corner.iter().map(|c| if *c { 2 } else { 3 }).sum::<usize>()
+        // region (the pair shares the prefix band's), so it contributes two.
+        // B11 stream S, lever 1: on the GKR arm the bands' sums are proved by
+        // the GKR and never enter `use_sums`.
+        (if self.p.gkr_bands {
+            0
+        } else {
+            self.corner.iter().map(|c| if *c { 2 } else { 3 }).sum::<usize>()
+        })
             + 1 + self.p.mats.len() + self.walks.len()
             + self.glue.as_ref().map(|g| g.regions.len()).unwrap_or(0)
             + usize::from(self.argmax_mat().is_some())
@@ -995,12 +1001,14 @@ pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField
         let l = &plan.lays[b];
         let pow = plan.powers(b, r, s, rv, r_corner);
         let bc = claims.bands[b];
+        // B11 stream S, lever 1: on the GKR arm a band component carries no
+        // LogUp, so there is no claimed sum to hand it and none to consume.
         chans.push(FrameworkComponent::<ChanEval>::new(
             alloc,
             ChanEval { tag: b, lay: l.chan, pow: pow.clone(), off, claimed: unqm(bc[0]),
                        rel_k: rels.range(p.k_bits).clone(), rel_q: rels.range(p.q_bits).clone(),
-                       range_check: true },
-            next_use(claims),
+                       range_check: true, gkr: p.gkr_bands },
+            if p.gkr_bands { SecureField::zero() } else { next_use(claims) },
         ));
         keys.push(FrameworkComponent::<KeyEval>::new(
             alloc,
@@ -1011,8 +1019,8 @@ pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField
                           AttnVariant::IntSplit(k) => Some(rels.range(k).clone()),
                           _ => None,
                       },
-                      range_check: true, corner: plan.corner[b] },
-            next_use(claims),
+                      range_check: true, gkr: p.gkr_bands, corner: plan.corner[b] },
+            if p.gkr_bands { SecureField::zero() } else { next_use(claims) },
         ));
         if !plan.corner[b] {
             rows.push(FrameworkComponent::<RowEval>::new(
@@ -1022,8 +1030,8 @@ pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField
                           claimed_am: unqm(bc[4]), claimed_az: unqm(bc[5]),
                           z_lo_bits: p.z_lo_bits, z_min: p.z_min,
                           rel_lo: rels.range(p.z_lo_bits).clone(),
-                          rel_hi: rels.range(p.z_hi_bits).clone() },
-                next_use(claims),
+                          rel_hi: rels.range(p.z_hi_bits).clone(), gkr: p.gkr_bands },
+                if p.gkr_bands { SecureField::zero() } else { next_use(claims) },
             ));
         }
         pows.push(pow);
@@ -2209,8 +2217,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // sites. Collecting is additive -- it reads the committed columns and
     // writes nothing the committed path can see -- so the flag-off pass is the
     // pass it always was.
-    let mut gkr: Option<Box<crate::gkrband::Collect>> =
-        p.gkr_bands.then(|| Box::new(crate::gkrband::Collect::with_direct(false)));
+    let mut gkr: Option<Box<crate::gkrband::Collect>> = p.gkr_bands.then(|| {
+        let mut g = crate::gkrband::Collect::with_direct(false);
+        // B11 stream S, lever 1: on the composed arm the collector owns the
+        // sums -- the committed running-sum columns leave with it, and the
+        // GKR's per-site sums stand in for them in the cancellation.
+        g.replace = true;
+        Box::new(g)
+    });
     let m4_t = std::time::Instant::now();
     let mut row_i = 0usize;
     for (b, a) in layer.bands.iter().enumerate() {
@@ -2809,19 +2823,13 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
             Ok((sums, _artifact, _insts)) => gkr_sums = sums,
             Err(e) => return Verdict::rejected(&format!("the bands' GKR proof: {e}")),
         }
-        // The sums the GKR proved have to be the ones the statement then feeds
-        // to `sums_cancel`, or the sumcheck is about some other numbers. The
-        // band sites come first in `use_sums`, in the order
-        // `interaction_phase` pushes them, which is the order `sites_of`
-        // rebuilds -- per band: channel, grid, per-token.
-        if gkr_sums.len() > claims.use_sums.len() {
-            return Verdict::rejected("more GKR sites than the statement has use sums");
-        }
-        if let Some(i) = (0..gkr_sums.len())
-            .find(|i| gkr_sums[*i] != unqm(claims.use_sums[*i]))
-        {
-            return Verdict::rejected(&format!(
-                "the GKR's sum for {} is not the one the statement uses", sites[i].tag()));
+        // B11 stream S, lever 1: the bands' sums never enter `use_sums` on
+        // this arm -- the committed running-sum columns are gone. The GKR's
+        // per-site sums join the cancellation directly below, standing exactly
+        // where the claimed sums stood, and the sumcheck the channel just
+        // replayed is what certifies them.
+        if gkr_sums.len() != sites.len() {
+            return Verdict::rejected("the GKR proved a different number of sites than the plan has");
         }
     } else if claims.gkr.is_some() {
         return Verdict::rejected("the statement carries a GKR proof the flag did not ask for");
@@ -2856,11 +2864,15 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let error = vres.err().map(|e| format!("{e:?}"));
 
     // ---- claimed sums and identities -------------------------------------------
+    // B11 stream S, lever 1: on the GKR arm the bands' fractional sums arrive
+    // from the GKR's output claims instead of `use_sums`; the cancellation is
+    // the same global identity over the same fractions either way.
     let total = claims
         .use_sums
         .iter()
         .chain(claims.table_sums.iter())
-        .fold(SecureField::zero(), |a, b| a + unqm(*b));
+        .fold(SecureField::zero(), |a, b| a + unqm(*b))
+        + gkr_sums.iter().fold(SecureField::zero(), |a, b| a + *b);
     let sums_cancel = total == SecureField::zero();
 
     let mut qk_ok = vec![];

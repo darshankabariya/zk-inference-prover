@@ -211,7 +211,7 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
         alloc,
         ChanEval { tag: 0, lay: l.chan, pow: pow.clone(), off, claimed: inter.claimed_chan,
                    rel_k: rels[ridx(a.k_bits)].clone(), rel_q: rels[ridx(a.q_bits)].clone(),
-                   range_check: cfg.range_check },
+                   range_check: cfg.range_check, gkr: false },
         if cfg.range_check { next_use() } else { SecureField::zero() },
     );
     let key = FrameworkComponent::<KeyEval>::new(
@@ -224,7 +224,7 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
                       Variant::IntSplit(b) => Some(rels[ridx(b)].clone()),
                       _ => None,
                   },
-                  range_check: cfg.range_check, corner: a.corner },
+                  range_check: cfg.range_check, gkr: false, corner: a.corner },
         next_use(),
     );
     let out = FrameworkComponent::<OutEval>::new(
@@ -239,7 +239,7 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
                   claimed_am: inter.claimed_am, claimed_az: inter.claimed_az,
                   z_lo_bits: cfg.z_lo_bits, z_min: cfg.z_min,
                   rel_lo: rels[ridx(cfg.z_lo_bits)].clone(),
-                  rel_hi: rels[ridx(cfg.z_hi_bits)].clone() },
+                  rel_hi: rels[ridx(cfg.z_hi_bits)].clone(), gkr: false },
         next_use(),
     );
     let exp_tbl = FrameworkComponent::<ExpTableEval>::new(

@@ -673,6 +673,11 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     let ridx = |b: u32| widths.iter().position(|w| *w == b).unwrap();
     let mut cols = crate::device::ColSink::new();
     let mut use_sums = vec![];
+    // B11 stream S, lever 1: when the collector owns the sums, the committed
+    // LogUp running-sum columns are not built at all and nothing is pushed
+    // onto `use_sums` -- the batched GKR proves the same sums and the verifier
+    // feeds them to `sums_cancel` where the claimed sums stood.
+    let gkr_owns = gkr.as_deref().is_some_and(|g| g.replace);
 
     // B7a milestone 4 (section 3 row 1): the accumulators, wherever they are.
     // The kernels read this region's *own committed columns*, so the device
@@ -774,11 +779,13 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         if let Some(g) = gkr.as_deref_mut() {
             g.push(0, lc.g.log_rows, &looks, &com.base, &com.pre, exp, ranges);
         }
-        let (c, s) = crate::devfrac::band_cols(
-            air, 0, lc.g.log_rows, &com.at, &com.base,
-            || logup_cols(lc.g.log_rows, &looks, &com.base, &com.pre, exp, ranges));
-        cols.extend_any(c);
-        use_sums.push(s);
+        if !gkr_owns {
+            let (c, s) = crate::devfrac::band_cols(
+                air, 0, lc.g.log_rows, &com.at, &com.base,
+                || logup_cols(lc.g.log_rows, &looks, &com.base, &com.pre, exp, ranges));
+            cols.extend_any(c);
+            use_sums.push(s);
+        }
     }
 
     // ---- grid region -------------------------------------------------------
@@ -909,11 +916,13 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         if let Some(g) = gkr.as_deref_mut() {
             g.push(1, lk.g.log_rows, &looks, &com.base, &com.pre, exp, ranges);
         }
-        let (c, s) = crate::devfrac::band_cols(
-            air, 1, lk.g.log_rows, &com.at, &com.base,
-            || logup_cols(lk.g.log_rows, &looks, &com.base, &com.pre, exp, ranges));
-        cols.extend_any(c);
-        use_sums.push(s);
+        if !gkr_owns {
+            let (c, s) = crate::devfrac::band_cols(
+                air, 1, lk.g.log_rows, &com.at, &com.base,
+                || logup_cols(lk.g.log_rows, &looks, &com.base, &com.pre, exp, ranges));
+            cols.extend_any(c);
+            use_sums.push(s);
+        }
     }
 
     // ---- A.V outputs (absent when the attnout region carries the claim) -----
@@ -1041,11 +1050,13 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         if let Some(g) = gkr.as_deref_mut() {
             g.push(3, l.log_row, &looks, &all, &com.pre, exp, ranges);
         }
-        let (c, s) = crate::devfrac::band_cols(
-            air, 3, l.log_row, &com.at, &com.base,
-            || logup_cols(l.log_row, &looks, &all, &com.pre, exp, ranges));
-        cols.extend_any(c);
-        use_sums.push(s);
+        if !gkr_owns {
+            let (c, s) = crate::devfrac::band_cols(
+                air, 3, l.log_row, &com.at, &com.base,
+                || logup_cols(l.log_row, &looks, &all, &com.pre, exp, ranges));
+            cols.extend_any(c);
+            use_sums.push(s);
+        }
     }
     }
 

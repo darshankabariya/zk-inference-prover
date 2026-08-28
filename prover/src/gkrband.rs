@@ -232,6 +232,12 @@ pub struct Collect {
     pub direct: Vec<SecureField>,
     /// fill `direct` as sites arrive; off for a proving run, on for the test
     pub want_direct: bool,
+    /// B11 stream S, lever 1: the arm owns the bands' fractional sums, so
+    /// `interaction_phase` builds no committed running-sum columns and pushes
+    /// no use sums at the collected sites -- the GKR proves the same sums and
+    /// `verify_composed` feeds them to `sums_cancel` directly. Off, collecting
+    /// stays purely additive, which is what the self-test relies on.
+    pub replace: bool,
 }
 
 impl Collect {
