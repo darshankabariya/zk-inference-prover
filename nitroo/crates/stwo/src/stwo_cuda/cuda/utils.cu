@@ -87,9 +87,13 @@ uint32_t cuda_get_uint32_t(uint32_t *device_ptr, size_t index) {
     return value;
 }
 
-qm31 cuda_get_secure_field(qm31 *device_ptr, size_t index) {
+// B11 stream R: the parameter type has to match the extern "C" declaration in
+// utils.cuh (`uint32_t *`), or C++ compiles this as a separate mangled
+// overload and the extern "C" symbol stays undefined -- latent until the GKR
+// port made `Column::at` reachable on the device backend.
+qm31 cuda_get_secure_field(uint32_t *device_ptr, size_t index) {
     qm31 value = {};
-    cuda_mem_copy_device_to_host<qm31>(device_ptr + index, &value, 1);
+    cuda_mem_copy_device_to_host<qm31>(((qm31 *)device_ptr) + index, &value, 1);
     return value;
 }
 

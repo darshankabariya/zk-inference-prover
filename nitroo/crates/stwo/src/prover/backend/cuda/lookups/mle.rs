@@ -19,8 +19,9 @@ impl MleOps<BaseField> for CudaBackend {
     where
         Self: MleOps<SecureField>,
     {
+        let _t = super::gkr::prof::scope(super::gkr::prof::FIX);
         let evals_size = mle.len();
-        let result_evals = SecureFieldVec::new_uninitialized(evals_size >> 1);
+        let result_evals = super::gkr::alloc_secure(evals_size >> 1);
         unsafe {
             interface::bindings::fix_first_variable_base_field(
                 mle.into_evals().device_ptr,
@@ -41,8 +42,9 @@ impl MleOps<SecureField> for CudaBackend {
     where
         Self: MleOps<SecureField>,
     {
+        let _t = super::gkr::prof::scope(super::gkr::prof::FIX);
         let evals_size = mle.len();
-        let result_evals = SecureFieldVec::new_uninitialized(evals_size >> 1);
+        let result_evals = super::gkr::alloc_secure(evals_size >> 1);
         unsafe {
             interface::bindings::fix_first_variable_secure_field(
                 mle.into_evals().device_ptr,

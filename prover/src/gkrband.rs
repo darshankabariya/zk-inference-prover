@@ -20,17 +20,30 @@
 //! region is a natural GKR instance: its input layer is an MLE over
 //! `log2(n_looks) + log_rows` variables. Two details decide the layout.
 //!
-//! *The look axis wants a power of two.* Padding a 132-look channel region up
-//! to 256 would nearly double its sumcheck. Instead a region is split along the
-//! binary decomposition of its look count -- 132 becomes a 128-look instance and
-//! a 4-look one -- which pads nothing and costs only instance bookkeeping.
+//! *The lookups are paired before they reach the circuit* (B11 stream R,
+//! lever 1). The committed path already combines consecutive lookups into one
+//! fraction per pair -- `plogup::paired`, the same batching
+//! `finalize_logup_in_pairs` asserts -- and a LogUp GKR's own bottom layer
+//! performs the identical combination. Feeding the circuit unpaired therefore
+//! pays a whole extra input layer to recompute what `paired` already defines.
+//! The input layer here is built from the *paired* fractions instead: one
+//! entry per pair, the odd tail unpaired, which removes the bottom layer of
+//! every tree and halves the sumcheck. The claimed sums are unchanged --
+//! fraction addition is exact -- and `look_frac` through `paired` stays the
+//! one definition of the fraction on both arms.
 //!
-//! *The numerators come in two kinds.* Most band lookups have numerator one, so
-//! their instances are `Layer::LogUpSingles` and store no numerators at all. The
-//! corner bands' visibility lookups carry `1 - mask`, so those looks are split
-//! off into their own instances. A region therefore contributes up to two groups
-//! of instances, and the split is by numerator kind first, binary decomposition
-//! second.
+//! *The entry axis wants a power of two.* Padding a 66-entry channel region up
+//! to 128 would nearly double its sumcheck. Instead a region is split along the
+//! binary decomposition of its entry count -- 66 becomes a 64-entry instance
+//! and a 2-entry one -- which pads nothing and costs only instance bookkeeping.
+//!
+//! *The numerators come in two kinds.* A fully paired entry is generic even
+//! when both its lookups have numerator one -- the combined numerator is
+//! `d0 + d1` -- so paired entries live in `Layer::LogUpGeneric` instances. Only
+//! an odd tail keeps its lookup's own kind: a unit tail becomes a
+//! `Layer::LogUpSingles` instance and stores no numerators at all. A region
+//! therefore contributes up to two groups of instances, and the split is by
+//! numerator kind first, binary decomposition second.
 //!
 //! ## One `prove_batch` per chunk
 //!
@@ -84,16 +97,27 @@ impl Site {
     pub fn n_looks(&self) -> usize {
         self.unit.len()
     }
+    /// How many paired entries the site's lookups become: `plogup::paired`'s
+    /// column count, the odd tail unpaired.
+    pub fn n_ents(&self) -> usize {
+        self.n_looks().div_ceil(2)
+    }
+    /// Whether entry `c` keeps a unit numerator. A fully paired entry never
+    /// does -- combining `(1, d0)` and `(1, d1)` gives numerator `d0 + d1` --
+    /// so only an odd tail whose lone lookup is unit stays unit.
+    pub fn ent_unit(&self, c: usize) -> bool {
+        2 * c + 1 == self.n_looks() && self.unit[2 * c]
+    }
 }
 
-/// One GKR instance: a set of one site's lookups whose count is a power of two,
-/// over that site's rows.
+/// One GKR instance: a set of one site's paired entries whose count is a power
+/// of two, over that site's rows.
 #[derive(Clone, Debug)]
 pub struct Inst {
     /// index into the site list
     pub site: usize,
-    /// which of the site's lookups this instance covers
-    pub looks: Vec<usize>,
+    /// which of the site's paired entries this instance covers
+    pub ents: Vec<usize>,
     pub log_rows: u32,
     /// every numerator in this instance is one
     pub unit: bool,
@@ -101,16 +125,17 @@ pub struct Inst {
 
 impl Inst {
     pub fn n_variables(&self) -> usize {
-        self.looks.len().ilog2() as usize + self.log_rows as usize
+        self.ents.len().ilog2() as usize + self.log_rows as usize
     }
+    /// Paired fractions: what the input layer holds and the sumcheck runs over.
     pub fn fractions(&self) -> usize {
-        self.looks.len() << self.log_rows
+        self.ents.len() << self.log_rows
     }
 }
 
 /// The instances the sites become, in site order.
 ///
-/// Within a site the unit-numerator lookups come first, then the rest; each
+/// Within a site the unit-numerator entries come first, then the rest; each
 /// group is cut into power-of-two blocks largest first. The order is a pure
 /// function of the site list, so the prover and the verifier derive the same
 /// instance list from the plan and nothing about it travels in the proof.
@@ -118,7 +143,7 @@ pub fn plan(sites: &[Site]) -> Vec<Inst> {
     let mut out = vec![];
     for (i, s) in sites.iter().enumerate() {
         for unit in [true, false] {
-            let group: Vec<usize> = (0..s.n_looks()).filter(|j| s.unit[*j] == unit).collect();
+            let group: Vec<usize> = (0..s.n_ents()).filter(|c| s.ent_unit(*c) == unit).collect();
             let mut at = 0usize;
             // largest block first: the highest set bit of what is left
             let mut left = group.len();
@@ -126,7 +151,7 @@ pub fn plan(sites: &[Site]) -> Vec<Inst> {
                 let take = 1usize << (usize::BITS - 1 - left.leading_zeros());
                 out.push(Inst {
                     site: i,
-                    looks: group[at..at + take].to_vec(),
+                    ents: group[at..at + take].to_vec(),
                     log_rows: s.log_rows,
                     unit,
                 });
@@ -146,27 +171,28 @@ pub fn gates(insts: &[Inst]) -> Vec<Gate> {
 
 /// Build one instance's input layer from a packed fraction source.
 ///
-/// `frac(look, vec_row)` is the same closure `plogup::paired` drives -- the
-/// numerator and denominator of one lookup at one packed row -- so the fractions
-/// proved here are the same function of the same committed columns that the
-/// committed running-sum columns are built from. Nothing is re-derived.
+/// `frac(ent, vec_row)` is `plogup::paired`'s output -- the numerator and
+/// denominator of one *paired* entry at one packed row, `look_frac` underneath
+/// -- so the fractions proved here are the same function of the same committed
+/// columns that the committed running-sum columns are built from. Nothing is
+/// re-derived and nothing is fed unpaired.
 fn input_layer<F>(inst: &Inst, frac: &F) -> Layer<SimdBackend>
 where
     F: Fn(usize, usize) -> (PackedSecureField, PackedSecureField) + Sync,
 {
     let n_vec_row = 1usize << (inst.log_rows - LOG_N_LANES);
-    let n_vec = inst.looks.len() * n_vec_row;
+    let n_vec = inst.ents.len() * n_vec_row;
     let length = inst.fractions();
 
-    // `(look, row)` in that order, so the leading `log2(n_looks)` variables are
-    // the look axis. The link in the memo reduces the input-layer claim over
+    // `(entry, row)` in that order, so the leading `log2(n_ents)` variables are
+    // the entry axis. The link in the memo reduces the input-layer claim over
     // exactly this split.
     let build = |pick: fn(&(PackedSecureField, PackedSecureField)) -> PackedSecureField| {
         let data: Vec<PackedSecureField> = (0..n_vec)
             .into_par_iter()
             .map(|k| {
                 let (b, vr) = (k / n_vec_row, k % n_vec_row);
-                pick(&frac(inst.looks[b], vr))
+                pick(&frac(inst.ents[b], vr))
             })
             .collect();
         SecureColumn { data, length }
@@ -232,9 +258,13 @@ impl Collect {
             unit: looks.iter().map(crate::attn_trace::look_is_unit).collect(),
         };
         let at = self.sites.len();
-        let frac = |look: usize, vr: usize| {
+        // `paired` batches consecutive lookups exactly as the committed path
+        // does, so `frac(ent, vr)` is the paired entry's fraction and both arms
+        // keep reading one definition -- `look_frac` through `paired`.
+        let (n_ents, frac) = crate::plogup::paired(looks.len(), |look: usize, vr: usize| {
             crate::attn_trace::look_frac(&looks[look], vr, cols, pre, exp, ranges)
-        };
+        });
+        debug_assert_eq!(n_ents, site.n_ents());
         let mut direct = SecureField::zero();
         for inst in plan(std::slice::from_ref(&site)) {
             let inst = Inst { site: at, ..inst };
@@ -250,16 +280,206 @@ impl Collect {
     }
 }
 
+/// B11 stream R: the device arm's layer plumbing.
+///
+/// The collected input layers are host (simd) columns; the sumcheck runs on
+/// `CudaBackend`. The upload is timed on its own line because on the composed
+/// cuda arm it is a stand-in: `gen_b65_dispatch` computes these very fractions
+/// on the device already, so a resident arm pays a device-side *reshape* (one
+/// pass moving the paired fractions into MLE layout), not a PCIe transfer. The
+/// reshape's cost is measured directly -- one device-to-device copy of every
+/// layer -- and reported beside the upload so neither is assumed.
+#[cfg(feature = "cuda")]
+pub mod dev {
+    use stwo::prover::backend::Column as _;
+    use stwo::prover::backend::cuda::CudaBackend;
+    use stwo::prover::backend::simd::SimdBackend;
+    use stwo::prover::lookups::gkr_prover::Layer;
+    use stwo::prover::lookups::mle::Mle;
+    use stwo::stwo_cuda::base_field_vec::BaseFieldVec;
+    use stwo::stwo_cuda::secure_field_vec::SecureFieldVec;
+
+    pub fn sync() {
+        unsafe { stwo::stwo_cuda::bindings::gkr_device_synchronize() };
+    }
+
+    pub fn upload_layer(l: &Layer<SimdBackend>) -> Layer<CudaBackend> {
+        let up = |m: &Mle<SimdBackend, stwo::core::fields::qm31::SecureField>| {
+            Mle::new(SecureFieldVec::from_vec(m.to_cpu()))
+        };
+        match l {
+            Layer::GrandProduct(mle) => Layer::GrandProduct(up(mle)),
+            Layer::LogUpGeneric { numerators, denominators } => Layer::LogUpGeneric {
+                numerators: up(numerators),
+                denominators: up(denominators),
+            },
+            Layer::LogUpMultiplicities { numerators, denominators } => {
+                Layer::LogUpMultiplicities {
+                    numerators: Mle::new(BaseFieldVec::from_vec(numerators.to_cpu())),
+                    denominators: up(denominators),
+                }
+            }
+            Layer::LogUpSingles { denominators } => Layer::LogUpSingles {
+                denominators: up(denominators),
+            },
+        }
+    }
+
+    /// Grow the device memory pool once, ahead of the circuit evaluation.
+    ///
+    /// `gen_layers` materialises every GKR layer of every instance before the
+    /// first sumcheck round, and nothing is freed until the rounds consume
+    /// them -- so without this, every one of its allocations extends the
+    /// pool's high-water mark and pays the driver's synchronous mapping cost,
+    /// which profiling showed as ~0.5-1.5 ms per `next_layer` call regardless
+    /// of size. One big allocation maps the same memory in one driver call;
+    /// freeing it hands the range to the pool's free list.
+    pub fn prewarm(layers: &[Layer<CudaBackend>]) -> f64 {
+        use stwo::stwo_cuda::bindings;
+        let input_qm31: usize = layers
+            .iter()
+            .map(|l| match l {
+                Layer::GrandProduct(m) => m.len(),
+                Layer::LogUpGeneric { numerators, denominators } => {
+                    numerators.len() + denominators.len()
+                }
+                Layer::LogUpMultiplicities { denominators, .. } => 2 * denominators.len(),
+                Layer::LogUpSingles { denominators } => denominators.len(),
+            })
+            .sum();
+        // every level of every tree sums to under 2x the input layer; the
+        // halved trees are generic (num + den) even where the input was
+        // singles, so budget 4x, plus the eq tables and slack
+        let budget = 4 * input_qm31 + (1 << 22);
+        let t = std::time::Instant::now();
+        unsafe {
+            let p = bindings::gkr_alloc_qm31(budget as u32);
+            bindings::cuda_free_memory(p as *const std::ffi::c_void);
+        }
+        // Launch every kernel the sumcheck uses once, on two elements. The
+        // first launch of a kernel pays its module load -- measured at ~88 ms
+        // for the first `next_layer` of a process, against ~13 us for every
+        // call after it -- and the chunk loop pays that once per *process*,
+        // not per chunk, exactly like `wall/cuda_init`.
+        let two = SecureFieldVec::from_vec(vec![
+            stwo::core::fields::qm31::SecureField::from_u32_unchecked(1, 0, 0, 0),
+            stwo::core::fields::qm31::SecureField::from_u32_unchecked(2, 0, 0, 0),
+        ]);
+        let two_base = BaseFieldVec::from_vec(vec![
+            stwo::core::fields::m31::M31::from_u32_unchecked(1),
+            stwo::core::fields::m31::M31::from_u32_unchecked(2),
+        ]);
+        let out = |n: usize| SecureFieldVec::new_uninitialized(n);
+        let (o1, o2, o3) = (out(1), out(1), out(2));
+        let lambda = stwo::stwo_cuda::bindings::CudaSecureField::zero;
+        unsafe {
+            bindings::gkr_next_layer_grand_product(two.device_ptr, o1.device_ptr, 1);
+            bindings::gkr_next_layer_logup_generic(
+                two.device_ptr, two.device_ptr, o1.device_ptr, o2.device_ptr, 1);
+            bindings::gkr_next_layer_logup_multiplicities(
+                two_base.device_ptr, two.device_ptr, o1.device_ptr, o2.device_ptr, 1);
+            bindings::gkr_next_layer_logup_singles(
+                two.device_ptr, o1.device_ptr, o2.device_ptr, 1);
+            bindings::gkr_sum_grand_product(two.device_ptr, two.device_ptr, 1, o3.device_ptr, 1);
+            bindings::gkr_sum_logup_generic(
+                two.device_ptr, two.device_ptr, two.device_ptr, lambda(), 1, o3.device_ptr, 1);
+            bindings::gkr_sum_logup_multiplicities(
+                two_base.device_ptr, two.device_ptr, two.device_ptr, lambda(), 1,
+                o3.device_ptr, 1);
+            bindings::gkr_sum_logup_singles(
+                two.device_ptr, two.device_ptr, lambda(), 1, o3.device_ptr, 1);
+            bindings::fix_first_variable_secure_field(
+                two.device_ptr, 2, lambda(), o1.device_ptr);
+            bindings::fix_first_variable_base_field(
+                two_base.device_ptr, 2, lambda(), o1.device_ptr);
+            bindings::gen_eq_evals(
+                lambda(),
+                two.device_ptr as *const stwo::stwo_cuda::bindings::CudaSecureField,
+                0,
+                o1.device_ptr as *const stwo::stwo_cuda::bindings::CudaSecureField,
+                1,
+            );
+        }
+        sync();
+        t.elapsed().as_secs_f64()
+    }
+
+    /// One device-to-device pass over every layer column: what putting already
+    /// resident fractions into MLE layout costs. The copies are dropped; only
+    /// the time is kept.
+    pub fn reshape_pass(layers: &[Layer<CudaBackend>]) {
+        let copy = |src: &SecureFieldVec| {
+            let mut dst = SecureFieldVec::new_uninitialized(src.len());
+            dst.copy_from(src);
+        };
+        for l in layers {
+            match l {
+                Layer::GrandProduct(m) => copy(m),
+                Layer::LogUpGeneric { numerators, denominators } => {
+                    copy(numerators);
+                    copy(denominators);
+                }
+                Layer::LogUpMultiplicities { denominators, .. } => copy(denominators),
+                Layer::LogUpSingles { denominators } => copy(denominators),
+            }
+        }
+    }
+}
+
 /// Prove everything a `Collect` gathered, in one batched GKR.
+///
+/// On the cuda build the sumcheck runs on the device -- that is the arm this
+/// build exists to measure -- unless `B11_GKR_HOST=1` pins it to the host simd
+/// backend for an on-box comparison. The proof bytes are the same either way,
+/// which is the port's digest gate.
 pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
     mix_shape(channel, &c.sites);
     let fractions = c.insts.iter().map(|i| i.fractions()).sum();
+    let unpaired = c.sites.iter().map(|s| s.n_looks() << s.log_rows).sum();
     let n_instances = c.insts.len();
-    let t1 = Instant::now();
-    let (proof, _artifact) = prove_batch(channel, c.layers);
-    let prove_secs = t1.elapsed().as_secs_f64();
+
+    #[cfg(feature = "cuda")]
+    let (proof, arm, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases) = {
+        if std::env::var("B11_GKR_HOST").map(|v| v != "0").unwrap_or(false) {
+            let t1 = Instant::now();
+            let (proof, _artifact) = prove_batch(channel, c.layers);
+            (proof, "host simd", 0.0, 0.0, 0.0, t1.elapsed().as_secs_f64(), None)
+        } else {
+            use stwo::prover::backend::cuda::lookups::gkr::prof;
+            let t0 = Instant::now();
+            let layers: Vec<_> = c.layers.iter().map(dev::upload_layer).collect();
+            dev::sync();
+            let upload_secs = t0.elapsed().as_secs_f64();
+            // Once per process in production -- the pool keeps its high-water
+            // mark across chunks -- so it is timed and reported, not counted
+            // among the arm's per-chunk adds. Before the reshape, so no later
+            // allocation pays the pool's first-touch mapping.
+            let prewarm_secs = dev::prewarm(&layers);
+            let t0 = Instant::now();
+            dev::reshape_pass(&layers);
+            dev::sync();
+            let reshape_secs = t0.elapsed().as_secs_f64();
+            prof::reset();
+            let t1 = Instant::now();
+            let (proof, _artifact) = prove_batch(channel, layers);
+            dev::sync();
+            let prove_secs = t1.elapsed().as_secs_f64();
+            let phases = prof::on().then(prof::snapshot);
+            (proof, "device", upload_secs, reshape_secs, prewarm_secs, prove_secs, phases)
+        }
+    };
+    #[cfg(not(feature = "cuda"))]
+    let (proof, arm, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases) = {
+        let t1 = Instant::now();
+        let (proof, _artifact) = prove_batch(channel, c.layers);
+        let phases: Option<Vec<(&'static str, f64, u64)>> = None;
+        (proof, "host simd", 0.0, 0.0, 0.0, t1.elapsed().as_secs_f64(), phases)
+    };
+
     let sums = sums_of(c.sites.len(), &c.insts, &proof.output_claims_by_instance);
+    let t2 = Instant::now();
     let proof_bytes = serde_json::to_vec(&proof).map(|b| b.len()).unwrap_or(0);
+    let assembly_secs = t2.elapsed().as_secs_f64();
     Proved {
         proof,
         sums,
@@ -268,7 +488,14 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             prove_secs,
             n_instances,
             fractions,
+            unpaired,
             proof_bytes,
+            arm,
+            upload_secs,
+            reshape_secs,
+            prewarm_secs,
+            assembly_secs,
+            phases,
             // the caller adds what it measured around the whole call
             total_secs: c.layers_secs + prove_secs,
         },
@@ -284,9 +511,28 @@ pub struct Cost {
     /// `prove_batch`: the circuit evaluation and every layer's sumcheck
     pub prove_secs: f64,
     pub n_instances: usize,
+    /// paired fractions: the entries the input layers hold (B11 stream R)
     pub fractions: usize,
+    /// one per lookup, before `paired` -- what stream Q's numbers counted
+    pub unpaired: usize,
     /// the serialised `GkrBatchProof`
     pub proof_bytes: usize,
+    /// where the sumcheck ran: "host simd" or "device"
+    pub arm: &'static str,
+    /// host-to-device transfer of the collected layers (device arm only). On a
+    /// composed cuda arm the fractions are already resident, so this line is a
+    /// stand-in and `reshape_secs` is the honest input cost.
+    pub upload_secs: f64,
+    /// one device-to-device pass over every layer: putting already resident
+    /// fractions into MLE layout
+    pub reshape_secs: f64,
+    /// growing the device pool to the circuit's high-water mark, once per
+    /// process in production (the pool persists across chunks)
+    pub prewarm_secs: f64,
+    /// serialising the proof
+    pub assembly_secs: f64,
+    /// the device sumcheck's phase split, when `B11_GKR_PROF=1`
+    pub phases: Option<Vec<(&'static str, f64, u64)>>,
     /// everything the arm costs where the committed path costs its LogUp build:
     /// the input layers plus `prove_batch`
     pub total_secs: f64,
@@ -294,14 +540,27 @@ pub struct Cost {
 
 impl Cost {
     pub fn json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "instances": self.n_instances,
             "fractions": self.fractions,
+            "unpaired": self.unpaired,
             "layers_secs": self.layers_secs,
             "prove_secs": self.prove_secs,
             "total_secs": self.total_secs,
             "proof_bytes": self.proof_bytes,
-        })
+            "arm": self.arm,
+            "upload_secs": self.upload_secs,
+            "reshape_secs": self.reshape_secs,
+            "prewarm_secs": self.prewarm_secs,
+            "assembly_secs": self.assembly_secs,
+        });
+        if let Some(ph) = &self.phases {
+            v["phases"] = ph
+                .iter()
+                .map(|(n, s, c)| serde_json::json!({"phase": n, "secs": s, "calls": c}))
+                .collect();
+        }
+        v
     }
 }
 
@@ -374,18 +633,18 @@ pub fn verify(
 /// The claimed sum of one instance, read straight off its input layer.
 ///
 /// This is the reference the GKR is checked against in the self-test: the plain
-/// sum of `num / den` over every fraction, by batch inversion, with no sumcheck
+/// sum of `num / den` over every paired entry, by inversion, with no sumcheck
 /// involved. It is `O(size)` and only for the test.
 pub fn direct_sum<F>(inst: &Inst, frac: &F) -> SecureField
 where
     F: Fn(usize, usize) -> (PackedSecureField, PackedSecureField) + Sync,
 {
     let n_vec_row = 1usize << (inst.log_rows - LOG_N_LANES);
-    let packed: PackedSecureField = (0..inst.looks.len() * n_vec_row)
+    let packed: PackedSecureField = (0..inst.ents.len() * n_vec_row)
         .into_par_iter()
         .map(|k| {
             let (b, vr) = (k / n_vec_row, k % n_vec_row);
-            let (n, d) = frac(inst.looks[b], vr);
+            let (n, d) = frac(inst.ents[b], vr);
             n * d.inverse()
         })
         .reduce(|| PackedSecureField::zero(), |a, b| a + b);
@@ -435,6 +694,10 @@ pub fn cmd(args: &[String]) {
     use crate::attn_witness::{Attn, Variant};
     use crate::layout::Shape;
     use stwo::core::channel::Blake2sM31Channel;
+
+    // The first CUDA call in the process pays context creation and the fatbin
+    // load; on the cuda build the sumcheck below must not be billed for it.
+    crate::util::m4_touch_device();
 
     let src = crate::src_of(args);
     let sh = Shape {
@@ -529,7 +792,7 @@ pub fn cmd(args: &[String]) {
         .insts
         .iter()
         .map(|i| serde_json::json!({
-            "site": sites[i.site].tag(), "looks": i.looks.len(),
+            "site": sites[i.site].tag(), "entries": i.ents.len(),
             "log_rows": i.log_rows, "n_variables": i.n_variables(),
             "unit": i.unit, "fractions": i.fractions(),
         }))
