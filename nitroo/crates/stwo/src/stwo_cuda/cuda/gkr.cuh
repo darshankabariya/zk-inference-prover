@@ -50,4 +50,10 @@ qm31 *gkr_alloc_qm31(uint32_t n);
 extern "C"
 void gkr_read_partials(const qm31 *dev, uint32_t n_pairs, qm31 *out_host);
 
+// B11 stream T: the link's coefficient column, `konst + sum_j w_j * col_j`,
+// folded over device-resident base columns.
+extern "C"
+void b65_link_coeff(m31 **cols, const qm31 *w_host, unsigned n_cols, qm31 k,
+                    qm31 *out, unsigned n_rows);
+
 #endif // GKR_H

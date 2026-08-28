@@ -635,27 +635,90 @@ fn coords_to_evals(h: u32, c: SecureColumnByCoords<SimdBackend>) -> Vec<Eval> {
     c.columns.into_iter().map(|col| CircleEvaluation::new(domain, col)).collect()
 }
 
-/// Build one height's committed columns. `col_of` resolves a referenced
-/// column against this chunk's committed data (the prover's ground truth);
-/// the tie constraints are what force it to agree with the verifier's own
-/// resolution through the component spans.
-pub fn build_height_cols<'a>(hl: &HeightLink,
-                             col_of: &dyn Fn(usize, &RCol) -> &'a Eval) -> Vec<Eval> {
+/// Where one referenced column of the fold lives.
+///
+/// B11 stream T: under a device fill a band's committed base columns have no
+/// host mirror, so the fold has to reach them where they are. A corner band is
+/// always host-filled and the causal-mask columns are always host-built, so a
+/// single height can mix the two -- which costs nothing, because field addition
+/// is exact and associative and the two partial folds add up to the same column
+/// whichever order they are taken in.
+pub enum Src<'a> {
+    Host(&'a Eval),
+    /// a device-resident base column, as the fill left it
+    Dev(*const u32),
+}
+
+/// The folded coefficient column: `konst + sum_j w_j * col_j`, pointwise.
+///
+/// The device-resident terms are combined by one kernel launch and brought
+/// back; the host-resident ones are added on the host. With every column on the
+/// host this is exactly the loop `build_height_cols` used to open with.
+pub fn fold_coeff<'a, F: Fn(usize, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
+                                                      -> SecureColumn {
     let h = hl.h;
     assert!(h >= LOG_N_LANES, "a link height below the SIMD lane count");
     let n_vec = 1usize << (h - LOG_N_LANES);
 
-    // the coefficient column: the folded affine combination, pointwise
-    let mut coeff = vec![PackedSecureField::broadcast(hl.konst); n_vec];
+    let mut host: Vec<(&Eval, SecureField)> = vec![];
+    let mut dev: Vec<(*const u32, SecureField)> = vec![];
     for (band, c, w) in &hl.weights {
-        let e: &Eval = col_of(*band, c);
-        assert_eq!(e.len(), 1usize << h, "column height disagrees with the fold");
-        let w = PackedSecureField::broadcast(*w);
+        match src_of(*band, c) {
+            Src::Host(e) => {
+                assert_eq!(e.len(), 1usize << h, "column height disagrees with the fold");
+                host.push((e, *w));
+            }
+            Src::Dev(p) => dev.push((p, *w)),
+        }
+    }
+
+    // the device half, with the constant folded in there so it is added once
+    let mut coeff = if dev.is_empty() {
+        vec![PackedSecureField::broadcast(hl.konst); n_vec]
+    } else {
+        #[cfg(not(feature = "cuda"))]
+        panic!("a link column is on the device on a build without the cuda feature");
+        #[cfg(feature = "cuda")]
+        fold_dev(h, hl.konst, &dev)
+    };
+    for (e, w) in host {
+        let w = PackedSecureField::broadcast(w);
         for (vr, slot) in coeff.iter_mut().enumerate() {
             *slot += w * e.data[vr];
         }
     }
-    let coeff_col = SecureColumn { data: coeff, length: 1 << h };
+    SecureColumn { data: coeff, length: 1 << h }
+}
+
+/// The device half of the fold: one launch of the link's affine combine over
+/// the resident columns, then one download of the folded column.
+#[cfg(feature = "cuda")]
+fn fold_dev(h: u32, konst: SecureField, terms: &[(*const u32, SecureField)])
+            -> Vec<PackedSecureField> {
+    use stwo::stwo_cuda::secure_field_vec::SecureFieldVec;
+    unsafe extern "C" {
+        fn b65_link_coeff(cols: *const *const u32, w_host: *const u32, n_cols: u32,
+                          k: [u32; 4], out: *const u32, n_rows: u32);
+    }
+    let n_rows = 1usize << h;
+    let cols: Vec<*const u32> = terms.iter().map(|(p, _)| *p).collect();
+    let w: Vec<u32> =
+        terms.iter().flat_map(|(_, w)| w.to_m31_array().map(|x| x.0)).collect();
+    let out = SecureFieldVec::new_uninitialized(n_rows);
+    unsafe {
+        b65_link_coeff(cols.as_ptr(), w.as_ptr(), cols.len() as u32,
+                       konst.to_m31_array().map(|x| x.0), out.device_ptr, n_rows as u32);
+    }
+    out.to_vec().into_iter().collect::<SecureColumn>().data
+}
+
+/// Build one height's committed columns from its folded coefficient column.
+/// The fold resolves referenced columns against this chunk's committed data
+/// (the prover's ground truth); the tie constraints are what force it to agree
+/// with the verifier's own resolution through the component spans.
+pub fn build_height_cols(hl: &HeightLink, coeff_col: SecureColumn) -> Vec<Eval> {
+    let h = hl.h;
+    assert_eq!(coeff_col.length, 1usize << h, "the folded column is the wrong height");
 
     // the eq column at the row point, and the shifted prefix sum of
     // coeff * eq (upstream `build_trace`, function for function)
@@ -876,20 +939,14 @@ pub fn link_for(plan: &crate::compose::Plan, seed: u64) -> Vec<HeightLink> {
 /// claim equals. The `B11_LINKMUT` control bends one weight and then makes its
 /// own columns self-consistent with this total, so everything the prover can
 /// check still holds and only the verifier's side of the link can reject.
-pub fn eq_total<'a>(hl: &HeightLink, col_of: &dyn Fn(usize, &RCol) -> &'a Eval) -> SecureField {
-    let h = hl.h;
-    let n_vec = 1usize << (h - LOG_N_LANES);
+pub fn eq_total(hl: &HeightLink, coeff: &SecureColumn) -> SecureField {
+    let n_vec = 1usize << (hl.h - LOG_N_LANES);
     let eq_mle = SimdBackend::gen_eq_evals(&hl.point, SecureField::one());
-    let mut total = hl.konst; // sum_r eq(r,x) = 1, so the constant passes through
-    for (band, c, w) in &hl.weights {
-        let e: &Eval = col_of(*band, c);
-        let mut acc = PackedSecureField::broadcast(SecureField::zero());
-        for vr in 0..n_vec {
-            acc += eq_mle.data[vr] * e.data[vr];
-        }
-        total += *w * acc.to_array().iter().fold(SecureField::zero(), |a, b| a + *b);
+    let mut acc = PackedSecureField::broadcast(SecureField::zero());
+    for vr in 0..n_vec {
+        acc += eq_mle.data[vr] * coeff.data[vr];
     }
-    total
+    acc.to_array().iter().fold(SecureField::zero(), |a, b| a + *b)
 }
 
 /// `B11_LINKCHECK=1`: evaluate the height's constraints pointwise on the CPU

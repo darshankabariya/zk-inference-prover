@@ -777,7 +777,12 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             looks.push(Look::Range(ridx(a.q_bits), base0 + lc.pk + p));
         }
         if let Some(g) = gkr.as_deref_mut() {
-            g.push(0, lc.g.log_rows, &looks, &com.base, &com.pre, exp, ranges);
+            // B11 stream T: where this band's fill left its columns on the
+            // device there is no host column to read, so the feed computes the
+            // same fractions there instead. A host-filled band -- a corner --
+            // takes the host builder, unchanged.
+            crate::gkrband::feed_site(g, air, 0, lc.g.log_rows, &looks, &com.at,
+                                      &com.base, &com.pre, exp, ranges);
         }
         if !gkr_owns {
             let (c, s) = crate::devfrac::band_cols(
@@ -914,7 +919,12 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             }
         }
         if let Some(g) = gkr.as_deref_mut() {
-            g.push(1, lk.g.log_rows, &looks, &com.base, &com.pre, exp, ranges);
+            // B11 stream T: where this band's fill left its columns on the
+            // device there is no host column to read, so the feed computes the
+            // same fractions there instead. A host-filled band -- a corner --
+            // takes the host builder, unchanged.
+            crate::gkrband::feed_site(g, air, 1, lk.g.log_rows, &looks, &com.at,
+                                      &com.base, &com.pre, exp, ranges);
         }
         if !gkr_owns {
             let (c, s) = crate::devfrac::band_cols(
@@ -1048,7 +1058,12 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             looks.push(Look::Range(ridx(cfg.z_hi_bits), hi_base + l.rw + i));
         }
         if let Some(g) = gkr.as_deref_mut() {
-            g.push(3, l.log_row, &looks, &all, &com.pre, exp, ranges);
+            // B11 stream T: where this band's fill left its columns on the
+            // device there is no host column to read, so the feed computes the
+            // same fractions there instead. A host-filled band -- a corner --
+            // takes the host builder, unchanged.
+            crate::gkrband::feed_site(g, air, 3, l.log_row, &looks, &com.at,
+                                      &all, &com.pre, exp, ranges);
         }
         if !gkr_owns {
             let (c, s) = crate::devfrac::band_cols(

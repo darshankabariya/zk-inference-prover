@@ -2422,14 +2422,29 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         let mut hl = crate::gkrlink::link_params(&plan, &rels, &pr.insts, &pr.artifact, alpha)
             .expect("the prover's own GKR artifact fails the link derivation");
         let msk0 = crate::attn_air::CHAN_SEL.len() + crate::attn_air::CORNER_SEL.len();
-        let col_of = |band: usize, c: &crate::gkrlink::RCol| -> &Eval {
+        // B11 stream T: a band whose fill left its columns on the device has no
+        // host mirror to fold, so the fold reaches them where they are. The
+        // causal-mask columns are preprocessed and always host-built, and a
+        // corner band is always host-filled, so one height can mix the two.
+        let src_of = |band: usize, c: &crate::gkrlink::RCol| {
             let com = &band_committed[band];
+            let dev = band_dev[band].as_ref();
+            let base = |i: usize| match dev {
+                Some(d) => crate::gkrlink::Src::Dev(d.base[i].device_ptr),
+                None => crate::gkrlink::Src::Host(&com.base[i]),
+            };
             match c {
-                crate::gkrlink::RCol::Chan(i) => &com.base[com.at[0] + i],
-                crate::gkrlink::RCol::Key(i) => &com.base[com.at[1] + i],
-                crate::gkrlink::RCol::Row(i) => &com.base[com.at[3] + i],
-                crate::gkrlink::RCol::Msk(i) => &com.pre[msk0 + i],
+                crate::gkrlink::RCol::Chan(i) => base(com.at[0] + i),
+                crate::gkrlink::RCol::Key(i) => base(com.at[1] + i),
+                crate::gkrlink::RCol::Row(i) => base(com.at[3] + i),
+                crate::gkrlink::RCol::Msk(i) => crate::gkrlink::Src::Host(&com.pre[msk0 + i]),
             }
+        };
+        let fold = |l: &crate::gkrlink::HeightLink| {
+            let t = std::time::Instant::now();
+            let c = crate::gkrlink::fold_coeff(l, &src_of);
+            crate::util::m4_add("int/link_fold", t.elapsed().as_secs_f64());
+            c
         };
         // B11 stream S, the link's own control: `B11_LINKMUT=<k>` bends one
         // folded weight and re-derives the claim from the bent column, so the
@@ -2440,12 +2455,16 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             let at: usize = spec.parse::<usize>().unwrap_or(0) % hl.len();
             eprintln!("linkmut: height 2^{}, first folded weight bent", hl[at].h);
             hl[at].weights[0].2 += SecureField::one();
-            hl[at].claim = crate::gkrlink::eq_total(&hl[at], &col_of);
+            let bent = fold(&hl[at]);
+            hl[at].claim = crate::gkrlink::eq_total(&hl[at], &bent);
             hl[at].shift = hl[at].claim
                 / SecureField::from(M31::from_u32_unchecked(1u32 << hl[at].h));
         }
         for l in &hl {
-            let cols = crate::gkrlink::build_height_cols(l, &col_of);
+            let coeff = fold(l);
+            let t = std::time::Instant::now();
+            let cols = crate::gkrlink::build_height_cols(l, coeff);
+            crate::util::m4_add("int/link_cols", t.elapsed().as_secs_f64());
             inter_all.extend(crate::device::host_cols(cols));
         }
         inter_mark("gkrlink", &inter_all, &mut inter_seen, &mut inter_split);

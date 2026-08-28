@@ -298,3 +298,38 @@ void gkr_read_partials(const qm31 *dev, uint32_t n_pairs, qm31 *out_host) {
     ASSERT_CUDA_SUCCESS(cudaStreamSynchronize(0));
     memcpy(out_host, pinned, 2 * n_pairs * sizeof(qm31));
 }
+
+// B11 stream T: the link's coefficient column, folded where its columns are.
+//
+// `gkrlink::build_height_cols` needs `konst + sum_j w_j * col_j` pointwise over
+// the base columns the fold references. Under a device fill those columns have
+// no host mirror, so the fold happens here: the same affine combine the feed
+// kernel computes per look, under the link's own weights. The accumulation
+// order is the caller's weight order, which is the host builder's -- and field
+// addition is exact either way, so the column is the same column.
+__global__ void b65_link_coeff_kernel(m31 **__restrict__ cols,
+                                      const qm31 *__restrict__ w,
+                                      unsigned n_cols, qm31 k,
+                                      qm31 *__restrict__ out, unsigned n_rows) {
+    const unsigned row = threadIdx.x + blockDim.x * blockIdx.x;
+    if (row >= n_rows) return;
+    qm31 acc = k;
+    for (unsigned j = 0; j < n_cols; ++j) {
+        acc = add(acc, mul(cols[j][row], w[j]));
+    }
+    out[row] = acc;
+}
+
+void b65_link_coeff(m31 **cols, const qm31 *w_host, unsigned n_cols, qm31 k,
+                    qm31 *out, unsigned n_rows) {
+    cudaGetLastError();
+    m31 **d_cols = n_cols ? clone_to_device<m31 *>(cols, n_cols) : nullptr;
+    qm31 *d_w = n_cols ? clone_to_device<qm31>((qm31 *)w_host, n_cols) : nullptr;
+    const unsigned block = n_rows < 256u ? n_rows : 256u;
+    const unsigned blocks = (n_rows + block - 1u) / block;
+    b65_link_coeff_kernel<<<blocks, block>>>(d_cols, d_w, n_cols, k, out, n_rows);
+    ASSERT_CUDA_SUCCESS(cudaDeviceSynchronize());
+    ASSERT_CUDA_SUCCESS(cudaGetLastError());
+    if (d_cols) cuda_free_memory(d_cols);
+    if (d_w) cuda_free_memory(d_w);
+}

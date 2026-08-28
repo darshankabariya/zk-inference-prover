@@ -223,9 +223,20 @@ pub struct Collect {
     /// `interaction_phase` with no `BandAir` to carry its index
     pub band: usize,
     pub sites: Vec<Site>,
+    /// the host-built input layers, in the order the host sites arrived
     pub layers: Vec<Layer<SimdBackend>>,
+    /// B11 stream T: the device feed's input layers, in the order the fed sites
+    /// arrived. `on_dev` says, per instance and in instance order, which of the
+    /// two lists holds it -- the instance order is the transcript's, so the two
+    /// are interleaved back together and never sorted.
+    #[cfg(feature = "cuda")]
+    pub dev_layers: Vec<Layer<stwo::prover::backend::cuda::CudaBackend>>,
+    /// per instance, in instance order: the device feed built this one
+    pub on_dev: Vec<bool>,
     pub insts: Vec<Inst>,
     pub layers_secs: f64,
+    /// B11 stream T: the feed's launches, apart from the host builds
+    pub feed_secs: f64,
     /// the claimed sum of each site, summed directly from its fractions rather
     /// than through the sumcheck -- the self-test's reference
     pub direct: Vec<SecureField>,
@@ -278,11 +289,369 @@ impl Collect {
                 direct += direct_sum(&inst, &frac);
             }
             self.layers.push(input_layer(&inst, &frac));
+            self.on_dev.push(false);
             self.insts.push(inst);
         }
         self.sites.push(site);
         self.direct.push(direct);
         self.layers_secs += t0.elapsed().as_secs_f64();
+    }
+}
+
+/// B11 stream T: one site's fractions, computed where its columns already are.
+///
+/// This is the call `interaction_phase` makes at each of the three band sites,
+/// in place of `Collect::push` alone. When the band's fill left its columns on
+/// the device there is nothing on the host to read -- `com.base` is empty and
+/// the collector's own `look_frac` would index straight out of it, which is
+/// what stream S's empty-env control recorded -- so the fractions are computed
+/// by the *feed*: the generated fraction kernel's unpaired variant, one launch
+/// per site, writing each look straight into the GKR instance layer that holds
+/// it, in MLE layout. Otherwise the host builder runs exactly as before.
+///
+/// `at` is the committed side's component split; the device's own copy has to
+/// agree with it, because the base columns the kernel reads are named by it.
+#[allow(clippy::too_many_arguments)]
+/// `B11_FEEDCHECK=1`: run the feed beside the host builder and compare. Opt-in,
+/// spelled the way `B11_LINKCHECK` is -- `util::m4_switch` reads "on unless set
+/// to 0", which is the wrong default for a probe that costs an upload and a
+/// full cell-for-cell comparison.
+fn feedcheck_on() -> bool {
+    std::env::var("B11_FEEDCHECK").map(|v| v == "1").unwrap_or(false)
+}
+
+/// Whether `cols` actually holds this component's committed span. A
+/// device-filled band has no host columns at all -- but the per-token site
+/// passes a list that always carries its two derived high-limb blocks, so
+/// "non-empty" is not the question; "long enough to hold the span" is.
+fn host_span(at: &[usize], which: usize, cols: &[crate::common::Eval]) -> bool {
+    cols.len() >= at[which + 1]
+}
+
+pub fn feed_site(
+    c: &mut Collect,
+    air: Option<&crate::devfrac::BandAir<'_>>,
+    which: usize,
+    log_rows: u32,
+    looks: &[crate::attn_trace::Look],
+    at: &[usize],
+    cols: &[crate::common::Eval],
+    pre: &[crate::common::Eval],
+    exp: &crate::attn_air::ExpRel,
+    ranges: &[crate::attn_air::RangeRel],
+) {
+    let dev = air.and_then(|a| a.dev);
+    let Some(d) = dev else {
+        // `B11_FEEDCHECK=1` with the band on the host: run the feed anyway over
+        // an *uploaded* copy of the same committed columns and compare every
+        // cell against the host builder, then throw the fed layers away. The
+        // upload is the check's, exactly as `B7_M4_LOGUPIR=3` pays one; nothing
+        // on the prover's path moves, so this can run in the regime that has
+        // host columns to compare against -- which the fed regime, by
+        // definition, does not.
+        #[cfg(feature = "cuda")]
+        if feedcheck_on() && host_span(at, which, cols) && air.is_some() {
+            c.feed_check(air.unwrap(), which, log_rows, looks, at, cols, pre, exp, ranges);
+        }
+        c.push(which, log_rows, looks, cols, pre, exp, ranges);
+        return;
+    };
+    let air = air.expect("a band with device columns and no AIR");
+    assert_eq!(at, &d.at[..],
+               "the committed component split disagrees with the device fill's");
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (air, which, log_rows, looks, exp, ranges);
+        panic!("a band's columns are on the device on a build without the cuda feature");
+    }
+    #[cfg(feature = "cuda")]
+    {
+        let (lo, hi) = (at[which], at[which + 1]);
+        let base: Vec<*const u32> = d.base[lo..hi].iter().map(|c| c.device_ptr).collect();
+        // The fractions the feed computes are the ones the *committed* arm would
+        // have built, so the evaluator it lowers is the un-ablated one: stream
+        // S's lever 1 makes the flag-on evaluator emit no lookups at all, and
+        // its fraction IR would be empty. Flipping the flag back for the
+        // lowering reproduces the flag-off fingerprint exactly, which is why the
+        // kernel store already carries this shape.
+        let first = c.insts.len();
+        match which {
+            0 => {
+                let mut e = air.chan.clone();
+                e.gkr = false;
+                c.push_dev(which, log_rows, looks, &e, &base);
+            }
+            1 => {
+                let mut e = air.key.clone();
+                e.gkr = false;
+                c.push_dev(which, log_rows, looks, &e, &base);
+            }
+            3 => {
+                let mut e = air.row.clone();
+                e.gkr = false;
+                c.push_dev(which, log_rows, looks, &e, &base);
+            }
+            _ => panic!("band component {which} has no eval"),
+        }
+        // `B11_FEEDCHECK=1`: the same check `B7_M4_LOGUPIR=2` is for the paired
+        // kernel -- every cell of every instance against the host builder, which
+        // needs host columns and so only runs in a regime that has them.
+        if feedcheck_on() && host_span(at, which, cols) {
+            c.check_fed(first, looks, cols, pre, exp, ranges);
+        }
+    }
+}
+
+/// B11 stream T: the device feed's host half.
+#[cfg(feature = "cuda")]
+mod feedimpl {
+    use std::ffi::{c_char, CString};
+
+    use stwo::prover::backend::cuda::CudaBackend;
+    use stwo::prover::lookups::gkr_prover::Layer;
+    use stwo::prover::lookups::mle::Mle;
+    use stwo::stwo_cuda::secure_field_vec::SecureFieldVec;
+    use stwo_constraint_framework::FrameworkEval;
+
+    use super::{Collect, Inst, Site, input_layer, plan};
+
+    unsafe extern "C" {
+        /// The generated fraction kernel's unpaired variant, behind the same
+        /// per-family dispatcher key the paired one uses. `num_at` and `den_at`
+        /// carry one device pointer per *look*, aimed at that look's slot in the
+        /// GKR instance layer; a null numerator slot is a singles instance,
+        /// which stores no numerators at all.
+        fn gen_b65_feed_dispatch(
+            family: *const c_char,
+            shape: u32,
+            fingerprint: u32,
+            pre_cols: *const *const u32,
+            n_pre: u32,
+            base_cols: *const *const u32,
+            n_base: u32,
+            sc_host: *const u32,
+            n_sc: u32,
+            num_at: *const *mut u32,
+            den_at: *const *mut u32,
+            n_rows: u32,
+            n_looks: u32,
+        );
+    }
+
+    impl Collect {
+        /// One site's input layers, allocated on the device and filled by one
+        /// feed launch.
+        ///
+        /// The layers are allocated first and their slots handed to the kernel,
+        /// so the write-back *is* the MLE layout: look `e` of instance `j` at
+        /// position `p` is written at `p << log_rows` of that instance's column,
+        /// which is exactly where `input_layer` puts it on the host. Nothing is
+        /// copied, permuted or reshaped afterwards -- the permutation the plan's
+        /// unit/non-unit split induces lives in the pointer table.
+        pub fn push_dev<E: FrameworkEval>(
+            &mut self,
+            which: usize,
+            log_rows: u32,
+            looks: &[crate::attn_trace::Look],
+            eval: &E,
+            base_ptrs: &[*const u32],
+        ) {
+            let t0 = std::time::Instant::now();
+            let site = Site {
+                band: self.band,
+                which,
+                log_rows,
+                unit: looks.iter().map(crate::attn_trace::look_is_unit).collect(),
+            };
+            let at = self.sites.len();
+            let n_rows = 1usize << log_rows;
+            let n_looks = site.n_looks();
+
+            let mut num_at = vec![std::ptr::null_mut::<u32>(); n_looks];
+            let mut den_at = vec![std::ptr::null_mut::<u32>(); n_looks];
+            for inst in plan(std::slice::from_ref(&site)) {
+                let inst = Inst { site: at, ..inst };
+                let n = inst.fractions();
+                let den = SecureFieldVec::new_uninitialized(n);
+                let dp = den.device_ptr as *mut u32;
+                for (p, e) in inst.ents.iter().enumerate() {
+                    den_at[*e] = unsafe { dp.add(4 * p * n_rows) };
+                }
+                let layer = if inst.unit {
+                    Layer::LogUpSingles { denominators: Mle::new(den) }
+                } else {
+                    let num = SecureFieldVec::new_uninitialized(n);
+                    let np = num.device_ptr as *mut u32;
+                    for (p, e) in inst.ents.iter().enumerate() {
+                        num_at[*e] = unsafe { np.add(4 * p * n_rows) };
+                    }
+                    Layer::LogUpGeneric {
+                        numerators: Mle::new(num),
+                        denominators: Mle::new(den),
+                    }
+                };
+                self.dev_layers.push(layer);
+                self.on_dev.push(true);
+                self.insts.push(inst);
+            }
+            assert!(den_at.iter().all(|p| !p.is_null()),
+                    "the feed's plan left a look with no denominator slot");
+
+            // The IR, and the kernel compiled for it. Same lowering, same
+            // fingerprint and same shape id as the committed arm's paired
+            // kernel: the two differ only in the write-back.
+            let ir = crate::scalars::cached_ir(eval, log_rows, log_rows, true, || {
+                crate::devfrac::ir_of(eval, log_rows)
+            });
+            let family = eval.cuda_eval_name();
+            assert_eq!(ir.fracs.len(), n_looks,
+                       "{family}: the fraction IR has {} lookups, the site {n_looks}",
+                       ir.fracs.len());
+            assert_eq!(ir.cols[1], base_ptrs.len(),
+                       "{family}: base column count");
+            // The bands read the base tree alone (18.7's measurement, asserted
+            // per shape here as `devfrac::assert_supplied` asserts it there): a
+            // preprocessed load would index a null.
+            assert!(
+                !ir.ops.iter().any(|o| matches!(*o, crate::cudagen::Op::Load { tree: 0, .. })),
+                "{family}: the feed's IR loads a preprocessed column, which the \
+                 bands' fractions never did"
+            );
+            let (shape, kernel_looks) = crate::gencudakernels::gen_shape_of(
+                family, ir.fingerprint())
+                .unwrap_or_else(|| panic!(
+                    "no feed kernel for {family} fingerprint {:#010x} ({n_looks} lookups): \
+                     regenerate with `b65 genemit --families {family}` and rebuild \
+                     libstwo_cuda.a", ir.fingerprint()));
+            assert_eq!(kernel_looks, n_looks, "{family}: the kernel's look count");
+
+            let sc: Vec<u32> =
+                ir.scalars.iter().flat_map(|s| s.to_m31_array().map(|x| x.0)).collect();
+            let pre_ptrs = vec![std::ptr::null::<u32>(); ir.cols[0]];
+            let cname = CString::new(family).unwrap();
+            unsafe {
+                gen_b65_feed_dispatch(
+                    cname.as_ptr(),
+                    shape as u32,
+                    ir.fingerprint(),
+                    pre_ptrs.as_ptr(),
+                    pre_ptrs.len() as u32,
+                    base_ptrs.as_ptr(),
+                    base_ptrs.len() as u32,
+                    sc.as_ptr(),
+                    ir.scalars.len() as u32,
+                    num_at.as_ptr(),
+                    den_at.as_ptr(),
+                    n_rows as u32,
+                    n_looks as u32,
+                );
+            }
+            self.sites.push(site);
+            self.direct.push(stwo::core::fields::qm31::SecureField::default());
+            self.feed_secs += t0.elapsed().as_secs_f64();
+        }
+
+        /// `B11_FEEDCHECK=1` on a host-filled band: the feed over an uploaded
+        /// copy of this site's committed columns, against the host builder,
+        /// cell for cell. The fed layers are the check's and are dropped.
+        #[allow(clippy::too_many_arguments)]
+        pub fn feed_check(
+            &self,
+            air: &crate::devfrac::BandAir<'_>,
+            which: usize,
+            log_rows: u32,
+            looks: &[crate::attn_trace::Look],
+            at: &[usize],
+            cols: &[crate::common::Eval],
+            pre: &[crate::common::Eval],
+            exp: &crate::attn_air::ExpRel,
+            ranges: &[crate::attn_air::RangeRel],
+        ) {
+            use stwo::prover::backend::Column as _;
+            use stwo::stwo_cuda::base_field_vec::BaseFieldVec;
+            let (lo, hi) = (at[which], at[which + 1]);
+            let up: Vec<BaseFieldVec> =
+                cols[lo..hi].iter().map(|e| BaseFieldVec::from_vec(e.values.to_cpu())).collect();
+            let ptrs: Vec<*const u32> = up.iter().map(|c| c.device_ptr).collect();
+            let mut scratch = Collect { band: self.band, ..Default::default() };
+            match which {
+                0 => {
+                    let mut e = air.chan.clone();
+                    e.gkr = false;
+                    scratch.push_dev(which, log_rows, looks, &e, &ptrs);
+                }
+                1 => {
+                    let mut e = air.key.clone();
+                    e.gkr = false;
+                    scratch.push_dev(which, log_rows, looks, &e, &ptrs);
+                }
+                3 => {
+                    let mut e = air.row.clone();
+                    e.gkr = false;
+                    scratch.push_dev(which, log_rows, looks, &e, &ptrs);
+                }
+                _ => panic!("band component {which} has no eval"),
+            }
+            scratch.check_fed(0, looks, cols, pre, exp, ranges);
+        }
+
+        /// `B11_FEEDCHECK=1`: every fed instance from `first` on, cell for cell
+        /// against the host builder reading the same committed columns.
+        pub fn check_fed(
+            &self,
+            first: usize,
+            looks: &[crate::attn_trace::Look],
+            cols: &[crate::common::Eval],
+            pre: &[crate::common::Eval],
+            exp: &crate::attn_air::ExpRel,
+            ranges: &[crate::attn_air::RangeRel],
+        ) {
+            use stwo::prover::backend::Column as _;
+            let frac = |look: usize, vr: usize| {
+                crate::attn_trace::look_frac(&looks[look], vr, cols, pre, exp, ranges)
+            };
+            let n_dev = self.dev_layers.len();
+            let mut cells = 0usize;
+            for (k, inst) in self.insts[first..].iter().enumerate() {
+                let got = &self.dev_layers[n_dev - (self.insts.len() - first) + k];
+                let want = input_layer(inst, &frac);
+                let cmp = |tag: &str,
+                           g: &Mle<CudaBackend, stwo::core::fields::qm31::SecureField>,
+                           w: &Mle<
+                    stwo::prover::backend::simd::SimdBackend,
+                    stwo::core::fields::qm31::SecureField,
+                >| {
+                    let (a, b) = (g.to_cpu(), w.to_cpu());
+                    assert_eq!(a.len(), b.len(), "feedcheck: {tag} length");
+                    if let Some(i) = (0..a.len()).find(|i| a[*i] != b[*i]) {
+                        panic!(
+                            "feedcheck: instance {k} {tag} differs at {i}: \
+                             the feed says {:?}, the host builder {:?}",
+                            a[i], b[i]
+                        );
+                    }
+                    a.len()
+                };
+                match (got, &want) {
+                    (
+                        Layer::LogUpSingles { denominators: g },
+                        Layer::LogUpSingles { denominators: w },
+                    ) => cells += cmp("denominators", g, w),
+                    (
+                        Layer::LogUpGeneric { numerators: gn, denominators: gd },
+                        Layer::LogUpGeneric { numerators: wn, denominators: wd },
+                    ) => {
+                        cells += cmp("numerators", gn, wn);
+                        cells += cmp("denominators", gd, wd);
+                    }
+                    _ => panic!("feedcheck: instance {k} has a different layer kind"),
+                }
+            }
+            eprintln!(
+                "feedcheck: {} fed instances, {cells} cells match the host builder",
+                self.insts.len() - first
+            );
+        }
     }
 }
 
@@ -444,16 +813,36 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
     let unpaired = c.sites.iter().map(|s| s.n_looks() << s.log_rows).sum();
     let n_instances = c.insts.len();
 
+    let n_fed = c.on_dev.iter().filter(|d| **d).count();
+
     #[cfg(feature = "cuda")]
     let (proof, artifact, arm, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases) = {
         if std::env::var("B11_GKR_HOST").map(|v| v != "0").unwrap_or(false) {
+            assert_eq!(n_fed, 0,
+                       "`B11_GKR_HOST=1` proves on the host, which needs every input                         layer there, and the device feed built {n_fed} of them");
             let t1 = Instant::now();
             let (proof, artifact) = prove_batch(channel, c.layers);
             (proof, artifact, "host simd", 0.0, 0.0, 0.0, t1.elapsed().as_secs_f64(), None)
         } else {
             use stwo::prover::backend::cuda::lookups::gkr::prof;
             let t0 = Instant::now();
-            let layers: Vec<_> = c.layers.iter().map(dev::upload_layer).collect();
+            // B11 stream T: a fed instance is already device-resident in MLE
+            // layout and crosses nothing; only a host-built one -- a corner
+            // band, whose fill stays on the host -- is uploaded. The two lists
+            // interleave back into instance order, which is the transcript's.
+            let mut hs = c.layers.iter();
+            let mut ds = c.dev_layers.into_iter();
+            let layers: Vec<_> = c
+                .on_dev
+                .iter()
+                .map(|d| {
+                    if *d {
+                        ds.next().expect("an instance marked device-built has no layer")
+                    } else {
+                        dev::upload_layer(hs.next().expect("a host instance has no layer"))
+                    }
+                })
+                .collect();
             dev::sync();
             let upload_secs = t0.elapsed().as_secs_f64();
             // Once per process in production -- the pool keeps its high-water
@@ -461,10 +850,18 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             // among the arm's per-chunk adds. Before the reshape, so no later
             // allocation pays the pool's first-touch mapping.
             let prewarm_secs = dev::prewarm(&layers);
-            let t0 = Instant::now();
-            dev::reshape_pass(&layers);
-            dev::sync();
-            let reshape_secs = t0.elapsed().as_secs_f64();
+            // The reshape pass was stream R's *measurement* of what an arm whose
+            // fractions were already resident would pay to put them into MLE
+            // layout. The feed writes that layout directly, so where it ran
+            // there is no pass to time and none to pay.
+            let reshape_secs = if n_fed == 0 {
+                let t0 = Instant::now();
+                dev::reshape_pass(&layers);
+                dev::sync();
+                t0.elapsed().as_secs_f64()
+            } else {
+                0.0
+            };
             prof::reset();
             let t1 = Instant::now();
             let (proof, artifact) = prove_batch(channel, layers);
@@ -492,6 +889,8 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
         sums,
         cost: Cost {
             layers_secs: c.layers_secs,
+            feed_secs: c.feed_secs,
+            n_fed,
             prove_secs,
             n_instances,
             fractions,
@@ -504,7 +903,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             assembly_secs,
             phases,
             // the caller adds what it measured around the whole call
-            total_secs: c.layers_secs + prove_secs,
+            total_secs: c.layers_secs + c.feed_secs + prove_secs,
         },
         insts: c.insts,
     }
@@ -513,8 +912,13 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
 /// What proving the bands' lookups cost, apart from the proof itself.
 #[derive(Default, Clone, Debug)]
 pub struct Cost {
-    /// building every instance's input layer
+    /// building every instance's input layer on the host
     pub layers_secs: f64,
+    /// B11 stream T: the device feed's launches -- the same input layers, built
+    /// where the columns already are, straight into MLE layout
+    pub feed_secs: f64,
+    /// how many instances the feed built
+    pub n_fed: usize,
     /// `prove_batch`: the circuit evaluation and every layer's sumcheck
     pub prove_secs: f64,
     pub n_instances: usize,
@@ -552,6 +956,8 @@ impl Cost {
             "fractions": self.fractions,
             "unpaired": self.unpaired,
             "layers_secs": self.layers_secs,
+            "feed_secs": self.feed_secs,
+            "fed_instances": self.n_fed,
             "prove_secs": self.prove_secs,
             "total_secs": self.total_secs,
             "proof_bytes": self.proof_bytes,
