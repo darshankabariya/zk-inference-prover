@@ -2419,19 +2419,33 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     if let Some(pr) = gkr_proved.as_ref() {
         let m4_t = std::time::Instant::now();
         let alpha = sess.draw_felts(1)[0];
-        let hl = crate::gkrlink::link_params(&plan, &rels, &pr.insts, &pr.artifact, alpha)
+        let mut hl = crate::gkrlink::link_params(&plan, &rels, &pr.insts, &pr.artifact, alpha)
             .expect("the prover's own GKR artifact fails the link derivation");
         let msk0 = crate::attn_air::CHAN_SEL.len() + crate::attn_air::CORNER_SEL.len();
+        let col_of = |band: usize, c: &crate::gkrlink::RCol| -> &Eval {
+            let com = &band_committed[band];
+            match c {
+                crate::gkrlink::RCol::Chan(i) => &com.base[com.at[0] + i],
+                crate::gkrlink::RCol::Key(i) => &com.base[com.at[1] + i],
+                crate::gkrlink::RCol::Row(i) => &com.base[com.at[3] + i],
+                crate::gkrlink::RCol::Msk(i) => &com.pre[msk0 + i],
+            }
+        };
+        // B11 stream S, the link's own control: `B11_LINKMUT=<k>` bends one
+        // folded weight and re-derives the claim from the bent column, so the
+        // prover's every self-check passes and the proof is *self-consistent*
+        // -- the only thing that can reject it is the verifier deriving the
+        // honest fold from the GKR artifact. Off, nothing is touched.
+        if let Ok(spec) = std::env::var("B11_LINKMUT") {
+            let at: usize = spec.parse::<usize>().unwrap_or(0) % hl.len();
+            eprintln!("linkmut: height 2^{}, first folded weight bent", hl[at].h);
+            hl[at].weights[0].2 += SecureField::one();
+            hl[at].claim = crate::gkrlink::eq_total(&hl[at], &col_of);
+            hl[at].shift = hl[at].claim
+                / SecureField::from(M31::from_u32_unchecked(1u32 << hl[at].h));
+        }
         for l in &hl {
-            let cols = crate::gkrlink::build_height_cols(l, &|band, c| {
-                let com = &band_committed[band];
-                match c {
-                    crate::gkrlink::RCol::Chan(i) => &com.base[com.at[0] + i],
-                    crate::gkrlink::RCol::Key(i) => &com.base[com.at[1] + i],
-                    crate::gkrlink::RCol::Row(i) => &com.base[com.at[3] + i],
-                    crate::gkrlink::RCol::Msk(i) => &com.pre[msk0 + i],
-                }
-            });
+            let cols = crate::gkrlink::build_height_cols(l, &col_of);
             inter_all.extend(crate::device::host_cols(cols));
         }
         inter_mark("gkrlink", &inter_all, &mut inter_seen, &mut inter_split);

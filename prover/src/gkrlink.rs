@@ -861,3 +861,23 @@ pub fn link_for(plan: &crate::compose::Plan, seed: u64) -> Vec<HeightLink> {
         })
         .collect()
 }
+
+/// The eq-weighted total of the folded coefficient column -- what the honest
+/// claim equals. The `B11_LINKMUT` control bends one weight and then makes its
+/// own columns self-consistent with this total, so everything the prover can
+/// check still holds and only the verifier's side of the link can reject.
+pub fn eq_total<'a>(hl: &HeightLink, col_of: &dyn Fn(usize, &RCol) -> &'a Eval) -> SecureField {
+    let h = hl.h;
+    let n_vec = 1usize << (h - LOG_N_LANES);
+    let eq_mle = SimdBackend::gen_eq_evals(&hl.point, SecureField::one());
+    let mut total = hl.konst; // sum_r eq(r,x) = 1, so the constant passes through
+    for (band, c, w) in &hl.weights {
+        let e: &Eval = col_of(*band, c);
+        let mut acc = PackedSecureField::broadcast(SecureField::zero());
+        for vr in 0..n_vec {
+            acc += eq_mle.data[vr] * e.data[vr];
+        }
+        total += *w * acc.to_array().iter().fold(SecureField::zero(), |a, b| a + *b);
+    }
+    total
+}
