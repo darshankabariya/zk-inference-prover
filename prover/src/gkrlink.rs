@@ -56,7 +56,7 @@ use stwo::prover::backend::simd::column::SecureColumn;
 use stwo::prover::backend::simd::m31::LOG_N_LANES;
 use stwo::prover::backend::simd::prefix_sum::inclusive_prefix_sum;
 use stwo::prover::backend::simd::qm31::PackedSecureField;
-use stwo::prover::backend::Column;
+use stwo::prover::backend::{Col, Column};
 use stwo::prover::lookups::gkr_prover::GkrOps;
 use stwo::prover::lookups::gkr_verifier::GkrArtifact;
 use stwo::prover::lookups::utils::eq;
@@ -615,7 +615,7 @@ pub fn boundary_cols(h: u32) -> [Eval; 2] {
     let domain = CanonicCoset::new(h).circle_domain();
     let size = 1usize << h;
     [0usize, 1].map(|coset_i| {
-        let mut packed = stwo::prover::backend::simd::column::BaseColumn::zeros(size);
+        let mut packed = Col::<SimdBackend, BaseField>::zeros(size);
         packed.set(bit_reverse_index(coset_index_to_circle_domain_index(coset_i, h), h),
                    M31::one());
         CircleEvaluation::new(domain, packed)
