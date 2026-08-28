@@ -39,6 +39,7 @@
 use std::collections::BTreeMap;
 
 use num_traits::{One, Zero};
+use rayon::prelude::*;
 use stwo::core::circle::{CirclePoint, Coset};
 use stwo::core::constraints::{coset_vanishing, point_vanishing};
 use stwo::core::fields::{Field, FieldExpOps};
@@ -178,8 +179,16 @@ fn gen_carry_quotient_col(eval_point: &MleEvalPoint) -> SecureColumnByCoords<Sim
     let log_size = eval_point.n_variables() as u32;
     let size = 1usize << log_size;
     let half_coset_size = size / 2;
-    let mut col = SecureColumnByCoords::<SimdBackend>::zeros(size);
 
+    // B11 stream T: upstream scatters straight into the packed
+    // `SecureColumnByCoords`, and `set` on that is four strided lane writes
+    // behind a divide -- 80 ns a row, which at the wall point's 3.5 M link rows
+    // was 0.142 s, 40% of the whole link build. The scatter goes into a flat
+    // vector instead and the packing is one linear pass afterwards. Every index
+    // is still written exactly once with the value it was written with before
+    // (`i * 2` and `i * 2 + 1` over the half coset cover the domain once), so
+    // this is the same column; the digest is what says so.
+    let mut vals = vec![SecureField::zero(); size];
     for i in 0..half_coset_size {
         let half_coset0_index = coset_index_to_circle_domain_index(i * 2, log_size);
         let half_coset1_index = coset_index_to_circle_domain_index(i * 2 + 1, log_size);
@@ -187,10 +196,10 @@ fn gen_carry_quotient_col(eval_point: &MleEvalPoint) -> SecureColumnByCoords<Sim
         let half_coset1_index_bit_rev = bit_reverse_index(half_coset1_index, log_size);
 
         let n_trailing_ones = i.trailing_ones() as usize;
-        col.set(half_coset0_index_bit_rev, half0[n_trailing_ones]);
-        col.set(half_coset1_index_bit_rev, half1[n_trailing_ones]);
+        vals[half_coset0_index_bit_rev] = half0[n_trailing_ones];
+        vals[half_coset1_index_bit_rev] = half1[n_trailing_ones];
     }
-    col
+    vals.into_iter().collect()
 }
 
 /// Evaluates the succinct carry-quotients column at `p` (upstream
@@ -722,12 +731,17 @@ pub fn build_height_cols(hl: &HeightLink, coeff_col: SecureColumn) -> Vec<Eval> 
 
     // the eq column at the row point, and the shifted prefix sum of
     // coeff * eq (upstream `build_trace`, function for function)
+    let t = std::time::Instant::now();
     let eq_mle = SimdBackend::gen_eq_evals(&hl.point, SecureField::one());
+    crate::util::m4_add("int/link_eq", t.elapsed().as_secs_f64());
     assert_eq!(eq_mle.len(), 1usize << h);
+    let t = std::time::Instant::now();
+    // B11 stream T: one packed multiply per lane group, in parallel -- the same
+    // products in the same slots, which is all the digest asks of it.
     let mut terms: Vec<PackedSecureField> = coeff_col
         .data
-        .iter()
-        .zip(&eq_mle.data)
+        .par_iter()
+        .zip(eq_mle.data.par_iter())
         .map(|(a, b)| *a * *b)
         .collect();
     // the prefix-sum boundary is the claim itself: assert it here, loudly,
@@ -739,22 +753,27 @@ pub fn build_height_cols(hl: &HeightLink, coeff_col: SecureColumn) -> Vec<Eval> 
     assert_eq!(total, hl.claim,
                "the folded coefficient column disagrees with the GKR claim at height {h}");
     let shift = PackedSecureField::broadcast(hl.shift);
-    for t in terms.iter_mut() {
-        *t -= shift;
-    }
+    terms.par_iter_mut().for_each(|t| *t -= shift);
     let shifted = SecureColumn { data: terms, length: 1 << h };
+    crate::util::m4_add("int/link_terms", t.elapsed().as_secs_f64());
+    let t = std::time::Instant::now();
     let prefix_coords = shifted
         .into_secure_column_by_coords()
         .columns
         .map(inclusive_prefix_sum);
     let prefix = SecureColumnByCoords { columns: prefix_coords };
+    crate::util::m4_add("int/link_prefix", t.elapsed().as_secs_f64());
 
+    let t = std::time::Instant::now();
     let q = gen_carry_quotient_col(&hl.mle_point);
+    crate::util::m4_add("int/link_q", t.elapsed().as_secs_f64());
 
+    let t = std::time::Instant::now();
     let mut out = coords_to_evals(h, q);
     out.extend(coords_to_evals(h, coeff_col.into_secure_column_by_coords()));
     out.extend(coords_to_evals(h, eq_mle.into_evals().into_secure_column_by_coords()));
     out.extend(coords_to_evals(h, prefix));
+    crate::util::m4_add("int/link_split", t.elapsed().as_secs_f64());
     check_height_cols(hl, &out);
     out
 }
