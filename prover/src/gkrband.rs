@@ -725,11 +725,32 @@ pub mod dev {
         // every level of every tree sums to under 2x the input layer; the
         // halved trees are generic (num + den) even where the input was
         // singles, so budget 4x, plus the eq tables and slack
-        let budget = 4 * input_qm31 + (1 << 22);
+        // B11 stream T: the pre-grow is **off** by default now, and the reason
+        // is the feed. Stream R budgeted four times the input layer in one
+        // allocation so that `gen_layers`' own allocations would not each extend
+        // the pool's high-water mark -- worth it when the input layers arrived by
+        // upload. The feed allocates every input layer before this runs, so the
+        // pool is already at size and the extra budget only raises the mark:
+        // measured on the card at C=16384, the arm's peak is 57,185 MiB with the
+        // 4x pre-grow and 44,705 MiB without, against 46,337 MiB flag off -- so
+        // the pre-grow alone was 12.4 GiB, and it turned a 1.6 GiB saving into a
+        // 10.6 GiB regression. The wall is the same either way (2.050 s against
+        // 2.068 s) and at C=4096 the peak is unmoved (33,109 MiB both ways).
+        // `B11_GKR_POOL=<n>` puts stream R's budget back at factor n.
+        //
+        // The *kernel* half of prewarm below is untouched: that is the module
+        // load, which is what R's pass 4 actually measured at -59%.
+        let factor: usize = std::env::var("B11_GKR_POOL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let budget = factor * input_qm31 + (1 << 22);
         let t = std::time::Instant::now();
-        unsafe {
-            let p = bindings::gkr_alloc_qm31(budget as u32);
-            bindings::cuda_free_memory(p as *const std::ffi::c_void);
+        if factor > 0 {
+            unsafe {
+                let p = bindings::gkr_alloc_qm31(budget as u32);
+                bindings::cuda_free_memory(p as *const std::ffi::c_void);
+            }
         }
         // Launch every kernel the sumcheck uses once, on two elements. The
         // first launch of a kernel pays its module load -- measured at ~88 ms
