@@ -152,18 +152,11 @@ pub struct LogupProbe {
     pub inner: ExprEvaluator,
     /// one per `add_to_relation`, in call order
     pub mults: Vec<ExtExpr>,
-    /// every mask claim as `(interaction, cur_var_index)`, in claim order.
-    /// B11 stream S: a component may claim a mask no constraint reads (the
-    /// GKR arm's band evals keep their base-column claims so the trace
-    /// allocator stays aligned with the committed order), so the column map
-    /// below has to rank columns by what was *claimed*, not by what the
-    /// constraints happen to reference.
-    pub claims: Vec<(usize, usize)>,
 }
 
 impl LogupProbe {
     pub fn new() -> Self {
-        Self { inner: ExprEvaluator::new(), mults: vec![], claims: vec![] }
+        Self { inner: ExprEvaluator::new(), mults: vec![] }
     }
 }
 
@@ -182,7 +175,6 @@ impl EvalAtRow for LogupProbe {
         interaction: usize,
         offsets: [isize; N],
     ) -> [Self::F; N] {
-        self.claims.push((interaction, self.inner.cur_var_index));
         self.inner.next_interaction_mask(interaction, offsets)
     }
 
@@ -191,16 +183,10 @@ impl EvalAtRow for LogupProbe {
         interaction: usize,
         offsets: [isize; N],
     ) -> [Self::EF; N] {
-        // the inner evaluator claims four base columns per extension mask
-        for k in 0..4 {
-            self.claims.push((interaction, self.inner.cur_var_index + k));
-        }
         self.inner.next_extension_interaction_mask(interaction, offsets)
     }
 
     fn next_trace_mask(&mut self) -> Self::F {
-        self.claims.push((stwo_constraint_framework::ORIGINAL_TRACE_IDX,
-                          self.inner.cur_var_index));
         self.inner.next_trace_mask()
     }
 
@@ -894,7 +880,6 @@ fn lower_impl<E: FrameworkEval>(
     // alone would have produced; `mults` is the one thing it adds.
     let probe = eval.evaluate(LogupProbe::new());
     let mults = probe.mults;
-    let claims = probe.claims;
     let ev = probe.inner;
     let info = eval.evaluate(InfoEvaluator::new(log_size, vec![], claimed_sum));
     let rels = relation_entries(eval);
@@ -918,7 +903,7 @@ fn lower_impl<E: FrameworkEval>(
     // The column map, verified in section 14.2: `ExprEvaluator` numbers mask
     // columns with one counter across all interactions, so the j-th column of
     // interaction i is the j-th smallest idx *claimed* there. B11 stream S:
-    // ranked over the probe's claim log rather than over the constraints'
+    // ranked over the evaluator's claim log rather than over the constraints'
     // references, because the GKR arm's band evals keep base-column claims no
     // constraint reads (the trace allocator must stay aligned with the
     // committed order); an unclaimed reference is still an error, below.
@@ -932,9 +917,8 @@ fn lower_impl<E: FrameworkEval>(
     let n_int = info.mask_offsets.len().max(3);
     let mut colmap = vec![HashMap::new(); n_int];
     for i in 0..n_int {
-        let idxs: Vec<usize> = claims.iter().filter(|(t, _)| *t == i).map(|(_, x)| *x).collect();
-        debug_assert!(idxs.windows(2).all(|w| w[0] < w[1]),
-                      "claim order and column-counter order disagree");
+        let idxs: Vec<usize> = ev.claimed.iter().enumerate()
+            .filter(|(_, t)| **t == i).map(|(x, _)| x).collect();
         if let Some(cols) = info.mask_offsets.get(i) {
             assert_eq!(
                 idxs.len(),

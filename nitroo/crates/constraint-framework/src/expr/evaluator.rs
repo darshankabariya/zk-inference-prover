@@ -66,6 +66,12 @@ pub struct ExprEvaluator {
     pub logup: FormalLogupAtRow,
     pub intermediates: HashMap<String, BaseExpr>,
     pub ext_intermediates: HashMap<String, ExtExpr>,
+    /// The interaction of every mask claim, indexed by column index: entry
+    /// `i` is the interaction `cur_var_index == i` was claimed for. Every
+    /// claim funnels through `next_interaction_mask` (extension masks and the
+    /// LogUp machinery included), so this is the complete billed-column list
+    /// even when a claimed column is never referenced by a constraint.
+    pub claimed: Vec<usize>,
     // Save all intermediate names by order they can be assigned.
     ordered_intermediates: Vec<String>,
 }
@@ -85,6 +91,7 @@ impl ExprEvaluator {
             // TODO(alont) unify both intermediate types.
             intermediates: HashMap::new(),
             ext_intermediates: HashMap::new(),
+            claimed: vec![],
             ordered_intermediates: vec![],
         }
     }
@@ -210,6 +217,7 @@ impl EvalAtRow for ExprEvaluator {
             let col = ColumnExpr::from((interaction, self.cur_var_index, offsets[i]));
             BaseExpr::Col(col)
         });
+        self.claimed.push(interaction);
         self.cur_var_index += 1;
         res
     }
