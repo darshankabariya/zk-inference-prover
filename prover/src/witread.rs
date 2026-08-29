@@ -53,6 +53,12 @@ pub enum Kind {
     /// Building the objects the regions read: the scores, the exp table, the
     /// numerators, the denominators, the A.V outputs, the per-band tables.
     Construct,
+    /// Stream W: getting and giving back the memory the four above run in.
+    /// A chunk builds and frees several GB of `Vec` and stream P could not see
+    /// any of it -- every allocation sat between two scopes rather than inside
+    /// one. This kind exists so that the seconds either show up here or are
+    /// shown not to be here, which is what decides whether an arena is the fix.
+    Alloc,
 }
 
 impl Kind {
@@ -62,6 +68,7 @@ impl Kind {
             Kind::Decode => "decode_secs",
             Kind::Check => "check_secs",
             Kind::Construct => "construct_secs",
+            Kind::Alloc => "alloc_secs",
         }
     }
 }
@@ -110,6 +117,14 @@ pub enum Site {
     Av,
     /// a prefix band's total denominator over the pair
     ZzTotal,
+    /// Stream W: `--tight-table`'s two passes over every band's shifts -- the
+    /// largest exp-table key the layer looks up, and then the count of keys the
+    /// shrunk table can no longer hold. Both run in `main.rs`'s `tighten_of`,
+    /// after `Layer::load` has returned and inside the same `build_secs`, which
+    /// is why stream P's split could not see them.
+    Tighten,
+    /// Stream W: one big buffer got, or given back.
+    Alloc,
     /// the per-band loop's own work, outside the sites above
     Bands,
     /// the seven matmuls and the head, assembled
@@ -119,13 +134,14 @@ pub enum Site {
 }
 
 impl Site {
-    pub const ALL: [Site; 23] = [
+    pub const ALL: [Site; 25] = [
         Site::ReadFile, Site::ReadManifest,
         Site::DecodeU16, Site::DecodeI32, Site::DecodeI8, Site::DecodeI16,
         Site::DecodeTrunc, Site::DecodeRecast, Site::DecodeGather,
         Site::CheckRule21, Site::CheckTableEq, Site::CheckTorchNum,
         Site::ManifestParse, Site::Scores, Site::Maxima, Site::Table,
         Site::Numerators, Site::Denominator, Site::Av, Site::ZzTotal,
+        Site::Tighten, Site::Alloc,
         Site::Bands, Site::Mats, Site::AttnOut,
     ];
 
@@ -135,6 +151,7 @@ impl Site {
             Site::DecodeU16 | Site::DecodeI32 | Site::DecodeI8 | Site::DecodeI16
             | Site::DecodeTrunc | Site::DecodeRecast | Site::DecodeGather => Kind::Decode,
             Site::CheckRule21 | Site::CheckTableEq | Site::CheckTorchNum => Kind::Check,
+            Site::Alloc => Kind::Alloc,
             _ => Kind::Construct,
         }
     }
@@ -161,6 +178,8 @@ impl Site {
             Site::Denominator => "construct/denominator",
             Site::Av => "construct/av",
             Site::ZzTotal => "construct/zz_total",
+            Site::Tighten => "construct/tighten",
+            Site::Alloc => "alloc/pool",
             Site::Bands => "construct/bands",
             Site::Mats => "construct/mats",
             Site::AttnOut => "construct/attnout",
@@ -291,7 +310,7 @@ impl Split {
     /// already carries `build_secs`. The keys sit beside it rather than under
     /// it, which is how every other phase in this program is reported.
     pub fn merge_into(&self, j: &mut Value) {
-        for k in [Kind::Read, Kind::Decode, Kind::Check, Kind::Construct] {
+        for k in [Kind::Read, Kind::Decode, Kind::Check, Kind::Construct, Kind::Alloc] {
             j[k.key()] = json!(self.kind(k));
         }
         j["build_attributed_secs"] = json!(self.total());

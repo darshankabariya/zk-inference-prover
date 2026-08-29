@@ -42,6 +42,87 @@ fn read<T: Copy + Send>(path: &str, width: usize, site: Site,
     Ok(raw.par_chunks_exact(width).map(conv).collect())
 }
 
+/// One half of a layer's attention witness: the keys, the values and torch's
+/// own numerators, over either the cache's context or the causal corner.
+pub struct Half {
+    pub kk16: Vec<i16>,
+    pub vv8: Vec<u8>,
+    pub num32: Vec<i32>,
+}
+
+impl Half {
+    /// The three files of one half, read and widened once.  `tag` is the
+    /// suffix the corner's copies carry (`kkc.i16` against `kk.i16`).
+    fn read(dir: &str, k: &str, v: &str, n: &str) -> Result<Self, String> {
+        Ok(Self {
+            kk16: read(&format!("{dir}/{k}"), 2, Site::DecodeI16,
+                       |b| i16::from_le_bytes([b[0], b[1]]))?,
+            vv8: witread::read_file(&format!("{dir}/{v}"))?,
+            num32: read(&format!("{dir}/{n}"), 4, Site::DecodeI32,
+                        |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))?,
+        })
+    }
+}
+
+/// Stream W: one layer's attention columns, read and widened **once**.
+///
+/// A layer's six bands -- three over the cache's context, three over the causal
+/// corner -- each called `Attn::load`, and each of them opened `qq.i16`, its
+/// own half's `kk`, `vv` and `num`, and `mm.i32` for itself before gathering
+/// its slice out of them.  At the sequence's sizes that made a chunk read
+/// **1,502 MB where 740 MB exists**, with all 268 MB of `num.i32` read three
+/// times over, and the read was the largest single site left after stream P
+/// (19.0 s of an 81.9 s pipelined build, `briefs/p-witread.md` (6) item 1).
+///
+/// This is not a format change and it does not touch `extract.py`: the same
+/// files hold the same bytes in the same layout, and the same gathers run over
+/// the same images.  What changed is how many times each image is built.
+/// `Layer::load` reads one of these and hands it to every band; the bands
+/// gather out of it exactly as they gathered out of their private copies, so
+/// every array `Attn::build` receives is element-for-element the array it
+/// received before.
+pub struct LayerRaw {
+    /// The queries.  Both halves of a band read the same `qq.i16` -- the corner
+    /// is the same tokens attending to a different set of keys -- so this was
+    /// read six times a layer.
+    pub qq16: Vec<i16>,
+    /// The joint row maximum, on a `--corner` dump.  Read by both halves of
+    /// every band, for the same reason.
+    pub mm32: Option<Vec<i32>>,
+    pub pre: Option<Half>,
+    pub cor: Option<Half>,
+}
+
+impl LayerRaw {
+    /// Read what the bands this layer will build actually want.  A dump with no
+    /// corner has no second half and no `mm.i32`; a single band asked for on
+    /// its own (`Attn::get`'s probe path) reads its own half and no other, so
+    /// that path reads exactly the bytes it read before this existed.
+    pub fn read(dir: &str, man: &serde_json::Value, prefix: bool, corner: bool)
+                -> Result<Self, String> {
+        let has_corner = man["corner"].as_bool().unwrap_or(false);
+        Ok(Self {
+            qq16: read(&format!("{dir}/qq.i16"), 2, Site::DecodeI16,
+                       |b| i16::from_le_bytes([b[0], b[1]]))?,
+            mm32: has_corner
+                .then(|| read(&format!("{dir}/mm.i32"), 4, Site::DecodeI32,
+                              |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])))
+                .transpose()?,
+            pre: prefix.then(|| Half::read(dir, "kk.i16", "vv.i8", "num.i32")).transpose()?,
+            cor: corner.then(|| Half::read(dir, "kkc.i16", "vvc.i8", "numc.i32"))
+                .transpose()?,
+        })
+    }
+
+    fn half(&self, corner: bool) -> Result<&Half, String> {
+        let h = if corner { &self.cor } else { &self.pre };
+        h.as_ref().ok_or_else(|| {
+            format!("the layer image holds no {} half",
+                    if corner { "corner" } else { "prefix" })
+        })
+    }
+}
+
 /// The exp table the last band asked for, kept so the next band does not derive
 /// it again.
 ///
@@ -319,6 +400,22 @@ impl Attn {
     pub fn load(dir: &str, head: usize, sh: Shape, variant: Variant, nmax: u32,
                 log_table: u32, master: Option<f64>, corner: bool) -> Result<Self, String> {
         let man: serde_json::Value = witread::read_json(&format!("{dir}/manifest.json"))?;
+        let raw = LayerRaw::read(dir, &man, !corner, corner)?;
+        Self::load_from(&raw, &man, head, sh, variant, nmax, log_table, master, corner)
+    }
+
+    /// The same band, out of a layer image its caller already holds.
+    ///
+    /// Stream W: this is where the signature change lands.  `Layer::load` reads
+    /// one `LayerRaw` and one `manifest.json` for the whole layer and calls
+    /// this six times; `load` above keeps the one-band entry point for the
+    /// probe path, by reading an image of exactly one band's worth.  Neither
+    /// path changed a value: the gathers below are the gathers that were here,
+    /// over arrays with the same contents.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_from(raw: &LayerRaw, man: &serde_json::Value, head: usize, sh: Shape,
+                     variant: Variant, nmax: u32, log_table: u32, master: Option<f64>,
+                     corner: bool) -> Result<Self, String> {
         let g = |k: &str| man[k].as_u64().ok_or(format!("manifest: missing {k}"));
         let (nh, s0, c0, hd0) = (g("heads")? as usize, g("s")? as usize,
                                  g("c")? as usize, g("hd")? as usize);
@@ -344,26 +441,16 @@ impl Attn {
         // half's keys and recomputing it per band would give two different ones.
         let has_corner = man["corner"].as_bool().unwrap_or(false);
         if corner && !has_corner {
-            return Err(format!("{dir} was not extracted with --corner"));
+            return Err("the dump was not extracted with --corner".to_string());
         }
-        let (c0, ktag, vtag, ntag) = if corner {
-            (s0, "kkc.i16", "vvc.i8", "numc.i32")
-        } else {
-            (c0, "kk.i16", "vv.i8", "num.i32")
-        };
+        let c0 = if corner { s0 } else { c0 };
         if corner && sh.c != s0 {
             return Err(format!("the corner is square: S={s0}, asked for C={}", sh.c));
         }
-        let qq16 = read(&format!("{dir}/qq.i16"), 2, Site::DecodeI16,
-                        |b| i16::from_le_bytes([b[0], b[1]]))?;
-        let kk16 = read(&format!("{dir}/{ktag}"), 2, Site::DecodeI16,
-                        |b| i16::from_le_bytes([b[0], b[1]]))?;
-        let vv8 = witread::read_file(&format!("{dir}/{vtag}"))?;
-        let num32 = read(&format!("{dir}/{ntag}"), 4, Site::DecodeI32,
-                         |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))?;
+        let qq16 = &raw.qq16;
+        let Half { kk16, vv8, num32 } = raw.half(corner)?;
         let mm_in: Option<Vec<i64>> = if has_corner {
-            let mm32 = read(&format!("{dir}/mm.i32"), 4, Site::DecodeI32,
-                            |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))?;
+            let mm32 = raw.mm32.as_ref().ok_or("the layer image holds no `mm.i32`")?;
             let _s = witread::scope(Site::DecodeGather);
             Some((0..sh.insts * sh.s)
                 .map(|i| mm32[hh(i / sh.s) * s0 + i % sh.s] as i64)
@@ -511,8 +598,29 @@ impl Attn {
         // the denominator, the A.V output -- is over the visible half alone.
         let vis = |i: usize| !corner || i % nc <= (i / nc) % ns;
         // exact integer scores, one (instance, token) row at a time
-        let mut sc = vec![0i64; ni * ns * nc];
+        //
+        // Stream W: the allocation is timed apart from the loop that fills it.
+        // These bare `vec![]`s sat between two of stream P's scopes and so were
+        // charged to neither -- at the sequence's sizes this one alone is a
+        // quarter of a gigabyte -- and naming them is what says whether the
+        // 15 s the split could not attribute is allocation or is not.
+        let mut sc = {
+            let _s = witread::scope(Site::Alloc);
+            vec![0i64; ni * ns * nc]
+        };
         let scores = witread::scope(Site::Scores);
+        // Stream W measured this loop three ways and moved it none of them, so
+        // it is the loop stream P left. The record is `briefs/w-genbuild.md`,
+        // lever 3: eight independent accumulators instead of one (it is not
+        // waiting on the accumulator chain), blocking the token axis so a key
+        // row serves eight tokens (it is not streaming K), and faulting the
+        // output in beforehand (0.33 s of 12.1 s). What is left is the 9.6 G
+        // integer multiply-accumulates themselves, and the device route that
+        // would remove them is barred by *when* the answer is wanted: every
+        // consumer of the shift -- the table sizing, the numerators, the
+        // denominator, the A.V outputs, `check/torch_num` and `--tight-table`
+        // -- runs inside `Layer::load`, before `compose::generate` first
+        // touches the card, and this loader is also the SimdBackend arm's.
         sc.par_chunks_mut(nc).enumerate().for_each(|(ti, row)| {
             let (inst, t) = (ti / ns, ti % ns);
             let qrow = &qq[(inst * ns + t) * nhd..(inst * ns + t + 1) * nhd];
@@ -634,8 +742,10 @@ impl Attn {
         }
 
         // the committed index, and the numerator the table gives for it
-        let mut xx = vec![0u16; ni * ns * nc];
-        let mut num = vec![0i64; ni * ns * nc];
+        let (mut xx, mut num) = {
+            let _s = witread::scope(Site::Alloc);
+            (vec![0u16; ni * ns * nc], vec![0i64; ni * ns * nc])
+        };
         let numerators = witread::scope(Site::Numerators);
         // Stream P: one (instance, token) row per task. Every entry is written
         // from its own index and no task reads what another writes, so the two
@@ -779,8 +889,23 @@ impl Attn {
     /// each separately, which over-counts whenever the largest raw shift does not
     /// come from the lowest-exponent head (measured: every layer of b10-final,
     /// `experiments/b10/out/oversize/`).
+    /// Stream W: in parallel, for the same reason stream P's maxima are.
+    ///
+    /// This and the `off_table` count in `retable` below are the two passes
+    /// `--tight-table` makes over every shift a layer holds -- 76 M entries a
+    /// chunk at the sequence's sizes, twice -- and they ran serially, in
+    /// `main.rs`'s `tighten_of`, after `Layer::load` had returned. They were
+    /// therefore inside `build_secs` and inside no scope, which is most of the
+    /// 15 s stream P's split could not attribute (`construct/tighten`, 9.79 s
+    /// of a 68.9 s pipelined build; allocation, the term the brief expected,
+    /// measured 0.46 s).
+    ///
+    /// An integer maximum is associative and commutative, so which order the
+    /// reduction takes cannot change the value -- the same argument that
+    /// licensed stream P's change 4 -- and the scope stays on the thread that
+    /// opens it, in `Layer::key_bits`, with none opened in the workers.
     pub fn key_max(&self) -> i64 {
-        (0..self.dd.len()).filter(|g| self.visible(*g))
+        (0..self.dd.len()).into_par_iter().filter(|g| self.visible(*g))
             .map(|g| self.table_key(g)).max().unwrap_or(0)
     }
     pub fn key_bits(&self) -> u32 {
@@ -795,7 +920,11 @@ impl Attn {
         assert!(bits <= self.log_table, "retable only shrinks: {bits} > {}", self.log_table);
         self.table.truncate(1usize << bits);
         self.log_table = bits;
-        self.off_table = (0..self.dd.len()).filter(|g| self.visible(*g))
+        // Stream W: the second of the two passes, in parallel on the same
+        // grounds -- a count is a sum, and the order it is added in cannot
+        // change it. The predicate is per entry and reads nothing another
+        // entry writes.
+        self.off_table = (0..self.dd.len()).into_par_iter().filter(|g| self.visible(*g))
             .filter(|g| {
                 let k = self.table_key(*g);
                 k < 0 || k as usize >= self.table.len()

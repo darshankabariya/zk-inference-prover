@@ -25,7 +25,7 @@ use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
 use num_traits::{One, Zero};
 
-use crate::attn_witness::{Attn, Src, Variant};
+use crate::attn_witness::{Attn, LayerRaw as AttnRaw, Src, Variant};
 use crate::bf16;
 use crate::common::{Eval, eval_of, m31_u32};
 use crate::dequant::{Map, Spec, Variant as DeqVariant};
@@ -347,6 +347,18 @@ impl Layer {
         // beside the prefix rectangle, and it rides as one more band per prefix
         // band -- same `insts`, same head offset, `C = S`.
         let has_corner = man["corner"].as_bool().unwrap_or(false);
+        // Stream W: the layer's attention columns, read and widened once for
+        // every band that will gather out of them.  Each of the six bands used
+        // to open these files for itself -- `qq.i16` and `mm.i32` six times, a
+        // half's `kk`, `vv` and `num` three times each -- so a chunk read
+        // 1,502 MB where 740 MB exists and the read was the largest single
+        // site stream P left (`briefs/p-witread.md` (6) item 1).  Nothing
+        // about the bytes or the layout changed; the same gathers now run over
+        // one image instead of over three copies of it.
+        let raw = {
+            let _s = witread::scope(Site::Bands);
+            AttnRaw::read(dir, &man, true, has_corner)?
+        };
         let mut bands = vec![];
         let mut head_offsets = vec![];
         let mut sizes = vec![];
@@ -356,8 +368,8 @@ impl Layer {
             for insts in band_sizes {
                 let sh = Shape { s, c, hd, insts: *insts };
                 let src = Src { head: off, ..cfg.clone() };
-                bands.push(Attn::load(dir, off, sh, variant, src.nmax, src.log_table, master,
-                                      false)?);
+                bands.push(Attn::load_from(&raw, &man, off, sh, variant, src.nmax,
+                                           src.log_table, master, false)?);
                 head_offsets.push(off);
                 sizes.push(*insts);
                 off += insts;
@@ -370,8 +382,8 @@ impl Layer {
                 for insts in band_sizes {
                     let sh = Shape { s, c: s, hd, insts: *insts };
                     let src = Src { head: off, ..cfg.clone() };
-                    bands.push(Attn::load(dir, off, sh, variant, src.nmax, src.log_table,
-                                          master, true)?);
+                    bands.push(Attn::load_from(&raw, &man, off, sh, variant, src.nmax,
+                                               src.log_table, master, true)?);
                     head_offsets.push(off);
                     sizes.push(*insts);
                     off += insts;
@@ -414,6 +426,10 @@ impl Layer {
                         on {bad} of {} (head, token) rows -- the extractor and the AIR do \
                         not agree about the causal mask", nh * s);
         }
+        // The image has served every band it will serve, and it is a third of a
+        // gigabyte.  Freeing it here rather than at the end of the function
+        // keeps the layer's high-water mark where it was before this stream.
+        drop(raw);
         let band_sizes = &sizes[..];
         // one master table serves every band: same rows, same contents.  With a
         // layer-wide `master` this holds by construction; without one (a dump whose
@@ -1039,6 +1055,7 @@ impl Layer {
     /// Returns `(before, after)` in table bits, and leaves `off_table` on each band
     /// recounted against the new size (zero whenever `bits >= key_bits`).
     pub fn set_master_table(&mut self, bits: u32) -> (u32, u32) {
+        let _s = witread::scope(Site::Tighten);
         let before = self.bands.iter().map(|b| b.log_table).max().unwrap_or(0);
         let after = bits.clamp(1, before);
         for b in self.bands.iter_mut() {
@@ -1049,6 +1066,7 @@ impl Layer {
 
     /// The largest exp-table key any band of this layer looks up, in bits.
     pub fn key_bits(&self) -> u32 {
+        let _s = witread::scope(Site::Tighten);
         self.bands.iter().map(|b| b.key_bits()).max().unwrap_or(1)
     }
 

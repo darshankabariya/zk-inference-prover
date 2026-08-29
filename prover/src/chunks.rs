@@ -658,6 +658,12 @@ pub fn chunks_cmd(args: &[String]) {
         "decode_sum": loop_split.kind(crate::witread::Kind::Decode),
         "check_sum": loop_split.kind(crate::witread::Kind::Check),
         "construct_sum": loop_split.kind(crate::witread::Kind::Construct),
+        // Stream W: getting and giving back the arrays the four kinds above run
+        // in. It is its own kind rather than a site under `construct` because
+        // what the record has to be able to say is whether the seconds stream P
+        // could not attribute are allocation, and a term folded into another
+        // kind cannot answer that either way.
+        "alloc_sum": loop_split.kind(crate::witread::Kind::Alloc),
         "build_split": loop_split.json(),
         "setup_build_split": setup_split.json(),
         "gen_sum": gens.iter().sum::<f64>(),
