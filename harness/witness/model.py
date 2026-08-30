@@ -24,9 +24,9 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from quant import (BF16, INT8_MAX, bf16_away, int_gemm, int_gemm_exact,
-                   qscale, qscale_per_channel, qscale_per_token, quantize,
-                   reduce_sum, round_hafz, store, weight_dtype)
+from quant import (BF16, INT8_MAX, INT_MM_MIN_ROWS, bf16_away, int_gemm,
+                   int_gemm_exact, qscale, qscale_per_channel, qscale_per_token,
+                   quantize, reduce_sum, round_hafz, store, weight_dtype)
 
 
 @dataclass
@@ -100,6 +100,22 @@ class Spec:
     # matmul kinds held out of int8 ("q","k","v","o","gate","up","down","lm_head"):
     # attributes the quantization loss to individual matrices
     fp32_matmuls: tuple = ()
+    # --- stream Y: requantization probes ------------------------------------
+    # Width of the attention-output requant.  `attn_out_int8` folds the softmax
+    # division, the value scale and o's requantize into a single rounding; this
+    # widens that rounding's target from int8 to `attn_out_bits`, so `o_proj`
+    # consumes the A.V product at a wider integer width -- the delayed form of
+    # the requant.  8 is exactly the b10-final path.
+    attn_out_bits: int = 8
+    # Matmul kinds whose output the consumer requantizes with nothing genuinely
+    # nonlinear between: their dequant chain is delayed away, i.e. the output is
+    # carried as the exact product `acc * s_x * s_w` (fp64, no bf16 waypoint,
+    # no rounding) and the consumer's own quantize becomes the single rounding
+    # -- B6's `int8` dequant variant is the gadget this models.  "v" (only the
+    # KV cache between the dequant and the A.V quantize) and "up" (the SwiGLU
+    # product is linear in up's operand) are the sites; the product `g * up`
+    # also stays unrounded when "up" is delayed.
+    delay_matmuls: tuple = ()
 
     def asdict(self):
         return {"linear": self.linear, "nonlinear": self.nonlinear, "reduce": self.reduce,
@@ -112,7 +128,9 @@ class Spec:
                 "dequant": self.dequant, "dequant_round": self.dequant_round,
                 "attn_out_int8": self.attn_out_int8,
                 "attn_out_pow2": self.attn_out_pow2,
-                "pow2_matmuls": list(self.pow2_matmuls)}
+                "pow2_matmuls": list(self.pow2_matmuls),
+                "attn_out_bits": self.attn_out_bits,
+                "delay_matmuls": list(self.delay_matmuls)}
 
 
 class Recorder:
@@ -140,6 +158,9 @@ class Linear:
     def __init__(self, w, bias, name, spec, static_scale=None, device="cpu"):
         w = w.to(device).t().contiguous().float()
         self.name, self.spec = name, spec
+        # the matmul kind ("q", "v", "up", ...) -- stream Y's delayed
+        # requantization is a per-kind knob
+        self.delayed = name.rsplit(".", 1)[-1] in spec.delay_matmuls
         self.n_in, self.n_out = w.shape
         self.bias = None if bias is None else bias.to(device).clone().float()
         self.static_scale = None if static_scale is None else static_scale.to(device)
@@ -171,10 +192,17 @@ class Linear:
             # the activation was quantized by its producer (the attention output's
             # single rounding straight to int8), so there is nothing to requantize
             qx, s_x = pre
-            acc = int_gemm(qx, self.qw)
+            qmax_pre = (1 << (self.spec.attn_out_bits - 1)) - 1
+            if qmax_pre > INT8_MAX:
+                # a widened attention output: `torch._int_mm` clips its operand
+                # to int8, so the wider operand takes the exact fp64 path
+                acc = int_gemm_exact(qx, self.qw, qmax_pre * INT8_MAX * self.n_in)
+            else:
+                acc = int_gemm(qx, self.qw)
             m.note(self.name, acc)
             if m.rec is not None:
-                m.rec.add(f"{self.name}/qx", qx.to(torch.int8))
+                m.rec.add(f"{self.name}/qx",
+                          qx.to(torch.int8 if qmax_pre <= INT8_MAX else torch.int16))
                 m.rec.add(f"{self.name}/acc", acc.to(torch.int32))
                 m.rec.add(f"{self.name}/s_x", s_x.to(BF16).expand(qx.shape[0], 1))
             y = m.dequant(acc, s_x, self.s_w)
@@ -182,17 +210,33 @@ class Linear:
             s_x = (self.static_scale if self.spec.linear == "static"
                    else qscale_per_token(x, self.p2))
             qx = quantize(x, s_x)
-            acc = int_gemm(qx, self.qw)
+            if self.delayed:
+                # stream Y: the consumer requantizes this output, so the dequant
+                # chain is delayed away.  The accumulator is taken exactly (the
+                # fp32 rounding `int_gemm` ends with would perturb it above 2^24)
+                # and the output is the exact product -- no bf16 waypoint; the
+                # consumer's quantize is the one rounding left.
+                if self.qw.dtype == torch.int8:
+                    rows = qx.shape[0]
+                    a = qx.to(torch.int8)
+                    if rows < INT_MM_MIN_ROWS:
+                        a = torch.nn.functional.pad(a, (0, 0, 0, INT_MM_MIN_ROWS - rows))
+                    acc = torch._int_mm(a, self.qw)[:rows].double()
+                else:
+                    acc = (qx.to(self.qw.dtype) @ self.qw).double()
+            else:
+                acc = int_gemm(qx, self.qw)
             m.note(self.name, acc)
             if m.rec is not None:
                 m.rec.add(f"{self.name}/x", x.to(BF16))
                 m.rec.add(f"{self.name}/qx", qx.to(torch.int8))
                 m.rec.add(f"{self.name}/acc", acc.to(torch.int32))
                 m.rec.add(f"{self.name}/s_x", s_x.to(BF16).expand(x.shape[0], 1))
-            y = m.dequant(acc, s_x, self.s_w)
+            y = (acc * s_x * self.s_w if self.delayed
+                 else m.dequant(acc, s_x, self.s_w))
         if self.bias is not None:
             y = y + self.bias
-        return m.store(y) if store_out else y
+        return m.store(y) if store_out and not self.delayed else y
 
 
 class Cache:
@@ -459,14 +503,18 @@ class Model:
             # because O, Z are integers and the rounding happens once, at the end.
             real = o.double() * s_v.double() / z.double()
             flat = real.transpose(0, 1).reshape(ss, self.nh * self.hd)
-            s_o = qscale(flat.abs().amax(-1, keepdim=True).float(), -1, INT8_MAX,
+            # stream Y: `attn_out_bits` widens the fold's target -- the same
+            # single rounding, to a wider integer `o_proj` consumes as-is
+            qmax_o = (1 << (self.spec.attn_out_bits - 1)) - 1
+            s_o = qscale(flat.abs().amax(-1, keepdim=True).float(), -1, qmax_o,
                          self.spec.pow2_scales in ("all", "linear")
                          or self.spec.attn_out_pow2)
-            q = round_hafz(flat / s_o.double()).clamp_(-INT8_MAX, INT8_MAX).float()
+            q = round_hafz(flat / s_o.double()).clamp_(-qmax_o, qmax_o).float()
             if self.clamped is not None:
-                self.tally("attnout", flat.float() / s_o, INT8_MAX)
+                self.tally("attnout", flat.float() / s_o, qmax_o)
             if self.rec is not None:
-                self.rec.add(f"L{li}.attnq", q.to(torch.int8))
+                self.rec.add(f"L{li}.attnq",
+                             q.to(torch.int8 if qmax_o <= INT8_MAX else torch.int16))
                 self.rec.add(f"L{li}.s_o", s_o.to(BF16))
                 self.rec.add(f"L{li}.zz", z.transpose(0, 1).reshape(ss, self.nh)
                              .to(torch.int32))
@@ -582,7 +630,11 @@ class Model:
                 self.rec.add(f"L{i}.xmid", x.to(BF16))
             h = self.rmsnorm(x, l["norm2"], f"L{i}.norm2")
             g = self.unary(f"L{i}.silu", l["gate"](h, self), torch.nn.functional.silu)
-            d_out = l["down"](self.store(g * l["up"](h, self)), self)
+            # stream Y: with up's requant delayed, the SwiGLU product also stays
+            # exact -- down's per-token quantize is the chain's single rounding
+            gu = g * l["up"](h, self)
+            d_out = l["down"](gu if "up" in self.spec.delay_matmuls
+                              else self.store(gu), self)
             x = self.store(x + d_out)
             if self.rec is not None:
                 self.rec.add(f"L{i}.d_out", d_out.to(BF16))

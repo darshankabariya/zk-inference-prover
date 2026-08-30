@@ -183,6 +183,42 @@ SPECS["b10-final"] = replace(SPECS["b10-glue"], pow2_matmuls=("lm_head",))
 # B10's own list: one spec, scored against B8's fp32 and `b6-design-p2o` rows
 B10_SPECS = ["b10-design", "b10-design-even", "b10-glue", "b10-final"]
 
+# --- stream Y: requantization probes (briefs/y-requant.md) --------------------
+# The dequant -> bf16 -> requant round trips the witness pays for, attacked at
+# the spec level.  Every y-* spec is `b10-final` plus exactly one knob;
+# `b10-final` stays frozen and nothing downstream (extraction, witnesses,
+# proofs) consumes a y-* spec in stream Y.
+#
+# The attention-output site: `b10-final` already folds the softmax division,
+# the value scale and o's requantize into one rounding straight to int8
+# (`attn_out_int8`), and B8 priced that rounding's int8 coarseness at +1.0 ppl
+# (the `int-attnout` ladder step).  Delaying the requant means `o_proj`
+# consumes the A.V product at a wider integer width instead of a fresh int8 --
+# the same fold, the same single rounding, a wider target.  On o's accumulator
+# the window is (b - 1) + 7 + log2(4096) <= 29 (B4's offset limb window) or
+# <= 30 (M31's own, with the committed sign bit): w10 and w11 stay inside
+# B4's window, w12 is the widest that fits M31 at all, and w16 is out of the
+# field -- a quality diagnostic only, never a candidate.
+for _b in (10, 11, 12, 16):
+    SPECS[f"y-attnout-w{_b}"] = replace(SPECS["b10-final"], attn_out_bits=_b)
+
+# The two delay sites in the layer dataflow with nothing genuinely nonlinear
+# between the dequant and the next quantize: v (only the KV cache between --
+# storage, not an op) and up (the SwiGLU product is linear in up's operand, so
+# the product too stays exact until down's per-token quantize).  The chain's
+# three roundings (and, for up, the product's bf16 rounding) leave the witness;
+# the consumer's quantize is the one rounding left -- B6's `int8` dequant
+# variant (`q = round(acc * num / den)`, 9.06 cells/acc against the chain's
+# 26.12) is the gadget this models.
+SPECS["y-delay-v"] = replace(SPECS["b10-final"], delay_matmuls=("v",))
+SPECS["y-delay-up"] = replace(SPECS["b10-final"], delay_matmuls=("up",))
+
+# Stream Y's rows: the two baselines re-measured fresh, then one knob per spec.
+# The composed row (`y-delay-all`, over the sites that survive alone) is added
+# only once the single-site rows are in -- B10's pattern.
+Y_SPECS = ["fp32", "b10-final", "y-attnout-w10", "y-attnout-w11",
+           "y-attnout-w12", "y-attnout-w16", "y-delay-v", "y-delay-up"]
+
 # B5's probes, kept apart so B1's own table stays what B1 measured
 B5_SPECS = ["qk-int12", "pow2-scales", "int-softmax", "int-softmax-12",
             "int-softmax-p2qk", "int-softmax-12p2", "int-softmax-pow2",
