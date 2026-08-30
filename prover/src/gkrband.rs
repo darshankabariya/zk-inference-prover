@@ -1423,6 +1423,13 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             };
             crate::util::m4_mark("gkr/prewarmed");
             prof::reset();
+            // B11 stream X, lever 1: the fork's own split of what `prove_batch`
+            // spends *between* the backend's four phases -- towers, oracles,
+            // the sumcheck call, the masks and the channel. Reported beside
+            // them because the question this stream asks is which term grows
+            // with the instance count, and the backend cannot see the terms
+            // that do not launch a kernel.
+            stwo::prover::lookups::gkr_prover::roundprof::reset();
             let t1 = Instant::now();
             // B11 stream V, lever 1: the fed instances' input layers are freed
             // as their first halving is produced and re-fed in the last round,
@@ -1442,7 +1449,11 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             let prove_secs = t1.elapsed().as_secs_f64();
             let refeeds = refeed.as_ref().map(|r| r.calls.get()).unwrap_or(0);
             crate::util::m4_mark("gkr/proved");
-            let phases = prof::on().then(prof::snapshot);
+            let phases = prof::on().then(|| {
+                let mut v = prof::snapshot();
+                v.extend(stwo::prover::lookups::gkr_prover::roundprof::snapshot());
+                v
+            });
             (proof, artifact, "device", upload_secs, reshape_secs, prewarm_secs, prove_secs,
              phases, refeeds)
         }

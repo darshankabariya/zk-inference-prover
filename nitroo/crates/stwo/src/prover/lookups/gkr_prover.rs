@@ -56,6 +56,99 @@ pub mod memmark {
     }
 }
 
+/// B11 stream X, lever 1: what [`prove_batch_refeed`] spends outside the
+/// backend's four phases.
+///
+/// The cuda backend already splits its own work into eq evals, layer halvings,
+/// round sums and variable fixes -- and stream T fused the last two *across the
+/// instances a round is live on*, so neither of them can be the per-instance
+/// cost the small families' ns-per-fraction points at. What the backend's split
+/// cannot see is everything between its calls: building each instance's tower,
+/// assembling the round's oracles, the host arithmetic inside
+/// `sumcheck::prove_batch`, and the layer masks -- which are one blocking
+/// device-to-host copy per column per instance per round, the one thing left in
+/// this file that runs once for every *instance* a round touches.
+///
+/// The accumulators are process-wide and the timers are host-side: on
+/// `B11_GKR_PROF=1` the backend synchronises around its own phases, so by the
+/// time control is back here the device is quiet and a wall-clock scope
+/// measures what it says it measures. `sumcheck` is the whole
+/// `sumcheck::prove_batch` call and therefore *contains* the backend's round
+/// sums and variable fixes; the difference between them is the host
+/// bookkeeping, which is the point of reporting both.
+///
+/// Off -- the default -- every scope is one `OnceLock` read and a `None`.
+pub mod roundprof {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+
+    pub const TOWERS: usize = 0;
+    pub const ORACLES: usize = 1;
+    pub const SUMCHECK: usize = 2;
+    pub const MASKS: usize = 3;
+    pub const CHANNEL: usize = 4;
+    pub const NAMES: [&str; 5] = ["towers", "oracles", "sumcheck", "masks", "channel"];
+
+    static NANOS: [AtomicU64; 5] = [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ];
+    static CALLS: [AtomicU64; 5] = [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ];
+
+    pub fn on() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| std::env::var("B11_GKR_PROF").map(|v| v != "0").unwrap_or(false))
+    }
+
+    pub struct Scope {
+        phase: usize,
+        start: std::time::Instant,
+    }
+
+    pub fn scope(phase: usize) -> Option<Scope> {
+        on().then(|| Scope {
+            phase,
+            start: std::time::Instant::now(),
+        })
+    }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            NANOS[self.phase].fetch_add(self.start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            CALLS[self.phase].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn reset() {
+        for i in 0..NANOS.len() {
+            NANOS[i].store(0, Ordering::Relaxed);
+            CALLS[i].store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// `(phase, seconds, calls)` for every phase, in a fixed order.
+    pub fn snapshot() -> Vec<(&'static str, f64, u64)> {
+        (0..NAMES.len())
+            .map(|i| {
+                (
+                    NAMES[i],
+                    NANOS[i].load(Ordering::Relaxed) as f64 / 1e9,
+                    CALLS[i].load(Ordering::Relaxed),
+                )
+            })
+            .collect()
+    }
+}
+
 use std::borrow::Cow;
 use std::iter::{successors, zip};
 use std::ops::Deref;
@@ -596,6 +689,7 @@ pub fn prove_batch_refeed<B: GkrOps>(
     // short and the last round must ask the feed for the layer back.
     let mut dropped = vec![false; n_instances];
     memmark::mark("gkr/towers_begin");
+    let _t = roundprof::scope(roundprof::TOWERS);
     let mut layers_by_instance = input_layer_by_instance
         .into_iter()
         .enumerate()
@@ -617,6 +711,7 @@ pub fn prove_batch_refeed<B: GkrOps>(
             ls.into_iter().rev()
         })
         .collect_vec();
+    drop(_t);
     memmark::mark("gkr/towers_end");
 
     let mut output_claims_by_instance = vec![None; n_instances];
@@ -643,14 +738,18 @@ pub fn prove_batch_refeed<B: GkrOps>(
         }
 
         // Seed the channel with layer claims.
-        for claims_to_verify in claims_to_verify_by_instance.iter().flatten() {
-            channel.mix_felts(claims_to_verify);
+        {
+            let _t = roundprof::scope(roundprof::CHANNEL);
+            for claims_to_verify in claims_to_verify_by_instance.iter().flatten() {
+                channel.mix_felts(claims_to_verify);
+            }
         }
 
         let eq_evals = EqEvals::generate(&ood_point);
         let sumcheck_alpha = channel.draw_secure_felt();
         let instance_lambda = channel.draw_secure_felt();
 
+        let _t = roundprof::scope(roundprof::ORACLES);
         let mut sumcheck_oracles = Vec::new();
         let mut sumcheck_claims = Vec::new();
         let mut sumcheck_instances = Vec::new();
@@ -680,21 +779,32 @@ pub fn prove_batch_refeed<B: GkrOps>(
             }
         }
 
+        drop(_t);
+        let _t = roundprof::scope(roundprof::SUMCHECK);
         let (sumcheck_proof, sumcheck_ood_point, constant_poly_oracles, _) =
             sumcheck::prove_batch(sumcheck_claims, sumcheck_oracles, sumcheck_alpha, channel);
+        drop(_t);
 
         sumcheck_proofs.push(sumcheck_proof);
 
+        // One `try_into_mask` per instance the round was live on, and each is a
+        // `to_cpu` per column: a blocking device-to-host copy of two field
+        // elements. B11 stream X, lever 1 -- the count is what matters here, not
+        // the bytes.
+        let _t = roundprof::scope(roundprof::MASKS);
         let masks = constant_poly_oracles
             .into_iter()
             .map(|oracle| oracle.try_into_mask().unwrap())
             .collect_vec();
+        drop(_t);
 
         // Seed the channel with the layer masks.
+        let _t = roundprof::scope(roundprof::CHANNEL);
         for (&instance, mask) in zip(&sumcheck_instances, &masks) {
             channel.mix_felts(mask.columns().as_flattened());
             layer_masks_by_instance[instance].push(mask.clone());
         }
+        drop(_t);
 
         let challenge = channel.draw_secure_felt();
         ood_point = sumcheck_ood_point;

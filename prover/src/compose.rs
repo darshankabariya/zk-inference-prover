@@ -935,6 +935,44 @@ impl BuiltComponents {
         tasks.push(Box::new(move || crate::cudagen::prewarm(ao)));
         let exp_t = &self.exp_t.eval;
         tasks.push(Box::new(move || crate::cudagen::prewarm(exp_t)));
+        // B11 stream X: the list has to be *every* dispatched component, and
+        // until here it was eight of thirteen -- the glue, the glue's tables,
+        // the links and the argmax were dispatched but never prewarmed.
+        //
+        // That is a correctness matter and not a speed one. `cudagen`'s blob
+        // cache is keyed by the evaluator's address, on the stated assumption
+        // that an address is "stable for as long as its `FrameworkComponent`
+        // lives -- i.e. for the whole proof". The pipelined loop proves 32
+        // chunks in one process, so a chunk's components are dropped and the
+        // next chunk's are allocated over the same addresses. A component that
+        // *is* prewarmed overwrites the stale entry at its address before
+        // anything dispatches it, so it is safe by construction; a component
+        // that is dispatched but never prewarmed can only ever *read* an entry
+        // some other family wrote in an earlier chunk. Measured on the H100 at
+        // C=4096 over the 32-chunk pipelined loop, that happened twice in nine
+        // runs, and both times in exactly one of the five families missing
+        // here: `evaluate_b65_glue_eval: scalar count` and
+        // `evaluate_b65_g_table_eval: shape id out of range`. Both are the
+        // generated dispatch's own checks, so the failure is fail-stop and
+        // cannot reach a digest -- which is why every completed run has always
+        // reproduced stream O's references. Completing the list restores the
+        // invariant the cache's comment already claims.
+        for c in &self.glue {
+            let e = &c.eval;
+            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        }
+        for c in &self.gtables {
+            let e = &c.eval;
+            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        }
+        for c in &self.links {
+            let e = &c.eval;
+            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        }
+        if let Some(c) = &self.argmax {
+            let e = &c.eval;
+            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        }
         tasks.par_iter().for_each(|t| t());
     }
 
@@ -2434,6 +2472,20 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     //
     // `B11_GKR_AFFINE=1` only. It lowers a dozen evaluators and proves nothing,
     // so it never runs under a wall number.
+    // B11 stream X: the table components' names and heights in the order
+    // `m4e_air.tables` holds them -- norm, frac, mul, qnz, then one per range
+    // width. The glue's tables are not here and cannot be: they have no
+    // generated kernel and so no lowered evaluator to decide, which is a gap
+    // the record names rather than one the checker hides.
+    let table_heights: Vec<(String, u32)> = [
+        ("table/norm".to_string(), plan.log_norm),
+        ("table/frac".to_string(), plan.log_frac),
+        ("table/mul".to_string(), plan.log_mul),
+        ("table/qnz".to_string(), p.ao_q_bits),
+    ]
+    .into_iter()
+    .chain(plan.widths.iter().map(|w| (format!("table/range{w}"), *w)))
+    .collect();
     let affinity: Vec<crate::gkrlink::Affinity> = if crate::util::m4_switch_off("B11_GKR_AFFINE") {
         vec![]
     } else {
@@ -2457,6 +2509,19 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
         let ir = crate::devfrac::ir_of(&m4e_air.ao.eval, aor.lay.log_rows);
         out.push(crate::gkrlink::affinity_of("attnout", "attnout", &ir));
+        // B11 stream X, lever 2 step 2: the shared tables' provide sides, which
+        // are 47% of what stream V left in the interaction tree. Their fraction
+        // is `-multiplicity / (z - combine(row))` -- one look a row, a
+        // non-unit numerator the way dequant's `mul` lookups have one -- and
+        // the question the checker answers is whether the denominator is affine
+        // in committed base masks and preprocessed columns at this row and no
+        // other. A look the fold cannot carry is a named stop and a result.
+        let ir = crate::devfrac::ir_of(&m4e_air.exp_t.eval, p.log_table);
+        out.push(crate::gkrlink::affinity_of("table", "table/exp", &ir));
+        for (tr, ev) in table_heights.iter().zip(&m4e_air.tables) {
+            let ir = crate::devfrac::ir_of(&ev.eval, tr.1);
+            out.push(crate::gkrlink::affinity_of("table", &tr.0, &ir));
+        }
         crate::util::m4_add("int/affine", m4a_t.elapsed().as_secs_f64());
         out
     };
@@ -2909,6 +2974,15 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     crate::util::m4_add("int/glue", m4_t.elapsed().as_secs_f64());
 
+    // B11 stream X, lever 2: one entry per table region, in the order the
+    // interaction pass emits them. `interaction_split` already records what
+    // each region *cost*; this records what it *is* -- the height, which
+    // decides both what an arm could remove and whether the link already pays
+    // for that height, and how many committed key columns the relation
+    // combines, which is the read set a link would have to name. It is the
+    // block `band_split.py`'s family model needs and the only one the tables
+    // did not have, and it is metadata: nothing reads it back.
+    let mut table_regions: Vec<Value> = vec![];
     let m4_t = std::time::Instant::now();
     // the tables' own sides, in table order
     {
@@ -2926,6 +3000,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                          htab(&base_mults, 0)));
         inter_all.extend(c);
         inter_mark("table/exp", &inter_all, &mut inter_seen, &mut inter_split);
+        table_regions.push(json!({"region": "table/exp", "log_rows": p.log_table,
+                                  "key_cols": 2, "looks": 1}));
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
             &m4e_air.tables[0].eval, "table norm", plan.log_norm,
@@ -2936,6 +3012,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             });
         inter_all.extend(c);
         inter_mark("table/norm", &inter_all, &mut inter_seen, &mut inter_split);
+        table_regions.push(json!({"region": "table/norm", "log_rows": plan.log_norm,
+                                  "key_cols": 6, "looks": 1}));
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
             &m4e_air.tables[1].eval, "table frac", plan.log_frac,
@@ -2946,6 +3024,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             });
         inter_all.extend(c);
         inter_mark("table/frac", &inter_all, &mut inter_seen, &mut inter_split);
+        table_regions.push(json!({"region": "table/frac", "log_rows": plan.log_frac,
+                                  "key_cols": 3, "looks": 1}));
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
             &m4e_air.tables[2].eval, "table mul", plan.log_mul,
@@ -2956,6 +3036,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             });
         inter_all.extend(c);
         inter_mark("table/mul", &inter_all, &mut inter_seen, &mut inter_split);
+        table_regions.push(json!({"region": "table/mul", "log_rows": plan.log_mul,
+                                  "key_cols": 4, "looks": 1}));
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
             &m4e_air.tables[3].eval, "table qnz", p.ao_q_bits,
@@ -2966,6 +3048,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             });
         inter_all.extend(c);
         inter_mark("table/qnz", &inter_all, &mut inter_seen, &mut inter_split);
+        table_regions.push(json!({"region": "table/qnz", "log_rows": p.ao_q_bits,
+                                  "key_cols": 2, "looks": 1}));
         claims.table_sums.push(qm(sum));
         for (t, w) in plan.widths.iter().enumerate() {
             let (c, sum) = crate::devfrac::frac_cols(
@@ -2977,6 +3061,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             inter_all.extend(c);
             inter_mark(&format!("table/range{w}"), &inter_all, &mut inter_seen,
                        &mut inter_split);
+            table_regions.push(json!({"region": format!("table/range{w}"),
+                                      "log_rows": *w, "key_cols": 1, "looks": 1}));
             claims.table_sums.push(qm(sum));
         }
         // The glue's tables have no device path (and no generated kernels), so
@@ -2998,6 +3084,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 inter_all.extend(crate::device::host_cols(c));
                 inter_mark(&format!("table/glue{t}"), &inter_all, &mut inter_seen,
                            &mut inter_split);
+                table_regions.push(json!({"region": format!("table/glue{t}"),
+                                          "log_rows": lr, "key_cols": refs.len(),
+                                          "looks": 1}));
                 claims.table_sums.push(qm(sum));
             }
         }
@@ -3090,6 +3179,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // share a scoped GKR over the bands alone would cover.
         "interaction_split": inter_split,
         "interaction_by_family": inter_by_family,
+        // B11 stream X, lever 2: the tables' own sides as a family block, the
+        // shape `mats` and `walk_weights` have, and the heights the link pays
+        // for at this configuration. The second is what turns the first into a
+        // decision: a family joins a height the link already carries for
+        // nothing, and pays 16 committed columns over 2^h for a height it
+        // brings with it.
+        "tables": table_regions,
+        "link_heights": crate::gkrlink::link_heights(&plan),
         // B11 stream V, lever 2: the affinity verdict per region, or an empty
         // list when `B11_GKR_AFFINE` did not ask for it.
         "affinity": affinity,

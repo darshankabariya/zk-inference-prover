@@ -63,10 +63,23 @@ fn partials_ptr() -> *const u32 {
     PARTIALS.with(|p| *p)
 }
 
-/// The most instances one fused round writes partials for. A batch beyond this
-/// falls back to the per-instance loop rather than overrunning the buffer --
-/// the composed arm's batch is fifteen.
-const GKR_SUM_MAX_INSTANCES: usize = 64;
+/// The most instances one fused round writes partials for in a single launch.
+///
+/// B11 stream X, lever 1. Stream T wrote this as 64 with "the composed arm's
+/// batch is fifteen" beside it, and a batch beyond it fell back to the
+/// per-instance loop -- the exact round trip the fusion exists to remove.
+/// Streams U and V then took the batch to 46, 76 and 86 instances, and from 76
+/// on every round with more than 64 live oracles has been paying one launch and
+/// one blocking copy home per instance: measured on the H100 at C=4096 with all
+/// five flags, 12,092 round-sum calls against 347 rounds, an average of 35
+/// per round where there should be one.
+///
+/// So the number is now a *chunk* size and not a cliff. A batch larger than it
+/// is launched in groups of this many, which keeps the partials scratch bounded
+/// and makes the size fallback unreachable; 256 is chosen so the composed arm's
+/// 86 instances are one launch with room for the families after it, and costs
+/// `2 * 264 * 256` field elements of scratch -- about 2 MiB, once per thread.
+const GKR_SUM_MAX_INSTANCES: usize = 256;
 
 unsafe extern "C" {
     /// B11 stream T: one round's sums for every live instance, in one launch.
@@ -277,7 +290,10 @@ impl GkrOps for CudaBackend {
     /// on the answer. The oracles a round is live on all have the same number of
     /// variables and share one `eq` table and one `lambda` -- the conditions are
     /// checked here, not assumed, and a batch that fails any of them takes the
-    /// per-instance loop. The kernel's per-thread arithmetic is the
+    /// per-instance loop. **Size is no longer one of those conditions**: B11
+    /// stream X made the instance cap a chunk size, because from 76 instances on
+    /// it was sending whole rounds back down the loop this exists to replace.
+    /// The kernel's per-thread arithmetic is the
     /// single-instance kernels' arithmetic term for term, so every round
     /// polynomial is the field element it was before: this is a scheduling
     /// change, and the proof digest is what says so.
@@ -300,7 +316,7 @@ impl GkrOps for CudaBackend {
         let Some(first) = hs.first() else { return vec![] };
         let n_variables = first.n_variables();
         let n_inst = hs.len();
-        if n_inst < 2 || n_inst > GKR_SUM_MAX_INSTANCES || n_variables == 0 {
+        if n_inst < 2 || n_variables == 0 {
             return fallback();
         }
         let eq_ptr = first.eq_evals.as_ref().device_ptr;
@@ -317,51 +333,60 @@ impl GkrOps for CudaBackend {
         let n_terms = 1usize << (n_variables - 1);
         let n_blocks = n_terms.div_ceil(256).min(GKR_SUM_MAX_BLOCKS).max(1);
 
-        let mut a: Vec<*const std::ffi::c_void> = Vec::with_capacity(n_inst);
-        let mut b: Vec<*const u32> = Vec::with_capacity(n_inst);
-        let mut kind: Vec<u32> = Vec::with_capacity(n_inst);
-        for h in hs {
-            let (ap, bp, k) = match &h.input_layer {
-                Layer::GrandProduct(mle) => (mle.device_ptr as *const _, std::ptr::null(), 0u32),
-                Layer::LogUpGeneric {
-                    numerators,
-                    denominators,
-                } => (numerators.device_ptr as *const _, denominators.device_ptr, 1),
-                Layer::LogUpMultiplicities {
-                    numerators,
-                    denominators,
-                } => (numerators.device_ptr as *const _, denominators.device_ptr, 2),
-                Layer::LogUpSingles { denominators } => {
-                    (std::ptr::null(), denominators.device_ptr, 3)
-                }
-            };
-            a.push(ap);
-            b.push(bp);
-            kind.push(k);
-        }
-
+        // One copy home per group of at most `GKR_SUM_MAX_INSTANCES`, which for
+        // every batch the composed arm has ever built is one copy for the whole
+        // round. The grouping is a scheduling decision and nothing else: each
+        // instance's partials are the same field elements the same kernel body
+        // produced before, summed on the host in the same order, so the round
+        // polynomial is the polynomial it was.
         let partials = partials_ptr();
-        unsafe {
-            gkr_sum_batch(
-                a.as_ptr(),
-                b.as_ptr(),
-                kind.as_ptr(),
-                n_inst as u32,
-                eq_ptr,
-                lambda.into(),
-                n_terms as u32,
-                partials,
-                n_blocks as u32,
-            );
-        }
-
-        // One copy home for the round. Field addition is exact and associative,
-        // so adding each instance's block partials on the host changes nothing.
-        let pairs = n_blocks * n_inst;
-        let mut host: Vec<SecureField> = Vec::with_capacity(2 * pairs);
-        unsafe {
-            host.set_len(2 * pairs);
-            bindings::gkr_read_partials(partials, pairs as u32, host.as_mut_ptr() as *mut u32);
+        let mut host: Vec<SecureField> = Vec::with_capacity(2 * n_blocks * n_inst);
+        unsafe { host.set_len(2 * n_blocks * n_inst) };
+        for (g, group) in hs.chunks(GKR_SUM_MAX_INSTANCES).enumerate() {
+            let base = g * GKR_SUM_MAX_INSTANCES;
+            let mut a: Vec<*const std::ffi::c_void> = Vec::with_capacity(group.len());
+            let mut b: Vec<*const u32> = Vec::with_capacity(group.len());
+            let mut kind: Vec<u32> = Vec::with_capacity(group.len());
+            for h in group {
+                let (ap, bp, k) = match &h.input_layer {
+                    Layer::GrandProduct(mle) => {
+                        (mle.device_ptr as *const _, std::ptr::null(), 0u32)
+                    }
+                    Layer::LogUpGeneric {
+                        numerators,
+                        denominators,
+                    } => (numerators.device_ptr as *const _, denominators.device_ptr, 1),
+                    Layer::LogUpMultiplicities {
+                        numerators,
+                        denominators,
+                    } => (numerators.device_ptr as *const _, denominators.device_ptr, 2),
+                    Layer::LogUpSingles { denominators } => {
+                        (std::ptr::null(), denominators.device_ptr, 3)
+                    }
+                };
+                a.push(ap);
+                b.push(bp);
+                kind.push(k);
+            }
+            let pairs = n_blocks * group.len();
+            unsafe {
+                gkr_sum_batch(
+                    a.as_ptr(),
+                    b.as_ptr(),
+                    kind.as_ptr(),
+                    group.len() as u32,
+                    eq_ptr,
+                    lambda.into(),
+                    n_terms as u32,
+                    partials,
+                    n_blocks as u32,
+                );
+                bindings::gkr_read_partials(
+                    partials,
+                    pairs as u32,
+                    host[2 * base * n_blocks..].as_mut_ptr() as *mut u32,
+                );
+            }
         }
 
         hs.iter()
