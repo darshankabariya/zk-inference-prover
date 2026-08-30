@@ -213,11 +213,22 @@ for _b in (10, 11, 12, 16):
 SPECS["y-delay-v"] = replace(SPECS["b10-final"], delay_matmuls=("v",))
 SPECS["y-delay-up"] = replace(SPECS["b10-final"], delay_matmuls=("up",))
 
-# Stream Y's rows: the two baselines re-measured fresh, then one knob per spec.
-# The composed row (`y-delay-all`, over the sites that survive alone) is added
-# only once the single-site rows are in -- B10's pattern.
+# The composed rows, from the sites that survived alone (all three did:
+# w10/w11/w12 all past the attention-output site's -0.5% bracket, `y-delay-v`
+# at -1.10% +- 0.28, `y-delay-up` free at +0.11% +- 0.28).  Two compositions
+# because the fork is window-keyed: w12 is the widest attention output M31
+# carries at all (needs the committed sign-bit reading), w11 the widest that
+# stays inside B4's offset limb window.
+SPECS["y-delay-all"] = replace(SPECS["b10-final"], delay_matmuls=("v", "up"),
+                               attn_out_bits=12)
+SPECS["y-delay-all-w11"] = replace(SPECS["b10-final"], delay_matmuls=("v", "up"),
+                                   attn_out_bits=11)
+
+# Stream Y's rows: the two baselines re-measured fresh, then one knob per spec,
+# then the composed rows -- B10's pattern.
 Y_SPECS = ["fp32", "b10-final", "y-attnout-w10", "y-attnout-w11",
-           "y-attnout-w12", "y-attnout-w16", "y-delay-v", "y-delay-up"]
+           "y-attnout-w12", "y-attnout-w16", "y-delay-v", "y-delay-up",
+           "y-delay-all", "y-delay-all-w11"]
 
 # B5's probes, kept apart so B1's own table stays what B1 measured
 B5_SPECS = ["qk-int12", "pow2-scales", "int-softmax", "int-softmax-12",
