@@ -28,6 +28,20 @@ from quant import (BF16, INT8_MAX, INT_MM_MIN_ROWS, bf16_away, int_gemm,
                    int_gemm_exact, qscale, qscale_per_channel, qscale_per_token,
                    quantize, reduce_sum, round_hafz, store, weight_dtype)
 
+# The Gemma-3 text tower, the only family here that is not Qwen2/Llama shaped.
+# Everything it needs beyond the shared path is a *branch* on the checkpoint's
+# own config, never an edit to the arithmetic the frozen spec's numbers were
+# measured with (briefs/e5a-gemma.md):
+#   * the embedding is multiplied by sqrt(hidden_size) before the first layer;
+#   * every RMSNorm gain is `1 + w`, not `w`;
+#   * Q and K are RMSNormed per head before RoPE (QK-norm);
+#   * four norms per layer -- the two extra ones sit *after* the attention and
+#     after the MLP, before the residual add;
+#   * layers alternate local (sliding-window) and global attention, each type
+#     with its own RoPE theta;
+#   * the activation is GELU-tanh, not SiLU, and the logits may be softcapped.
+GEMMA3 = "gemma3_text"
+
 
 @dataclass
 class Spec:
@@ -295,6 +309,11 @@ def llama3_inv_freq(inv, rp):
     return torch.where(mid, (1 - smooth) * scaled / factor + smooth * scaled, scaled)
 
 
+def is_pow2(x):
+    """Is the float `x` an exact power of two?"""
+    return math.frexp(x)[0] == 0.5
+
+
 class Model:
     def __init__(self, path, spec, static_scales=None, track_acc=False, attn_scales=None,
                  device=None):
@@ -306,6 +325,20 @@ class Model:
         hf = AutoModelForCausalLM.from_pretrained(path, dtype=torch.bfloat16)
         hf.eval()
         c = hf.config
+        # a multimodal checkpoint keeps the language model one level down
+        c = getattr(c, "text_config", None) or c
+        base = getattr(hf.model, "language_model", hf.model)
+        family = str(getattr(c, "model_type", ""))
+        self.gemma = family == GEMMA3
+        if family.startswith("gemma") and not self.gemma:
+            raise NotImplementedError(
+                f"model_type {family}: only {GEMMA3} is implemented -- Gemma-4 is a "
+                f"different architecture, see briefs/e5a-gemma.md")
+        if self.gemma:
+            if getattr(c, "attn_logit_softcapping", None):
+                raise NotImplementedError("attn_logit_softcapping")
+            if getattr(c, "use_bidirectional_attention", False):
+                raise NotImplementedError("use_bidirectional_attention")
         self.spec, self.cfg, self.device = spec, c, device
         self.d, self.L = c.hidden_size, c.num_hidden_layers
         self.nh, self.nkv = c.num_attention_heads, c.num_key_value_heads
@@ -325,24 +358,48 @@ class Model:
         # argument is a bit window of the score only while `s_q s_k a` is a power
         # of two -- so the scale is folded into W_q before quantization, as a
         # deployment would carry it, and the attention scale becomes 1.
-        log2_hd = self.hd.bit_length() - 1
-        assert 1 << log2_hd == self.hd, self.hd
-        self.q_fold = self.hd ** -0.5 if log2_hd % 2 else None
-        self.attn_scale = 1.0 if self.q_fold else self.hd ** -0.5
+        self.qn_fold = None        # Gemma only: folded into the Q-norm gain instead
+        if self.gemma:
+            # Gemma divides by sqrt(query_pre_attn_scalar), which is not always the
+            # head dim (27B uses 168 against hd = 128).  That scale cannot be folded
+            # into W_q the way it is below -- Q-norm is scale-invariant and would
+            # undo it -- so it goes into the Q-norm gain, the first constant after
+            # the normalization, whenever it is not already a power of two.
+            a = float(getattr(c, "query_pre_attn_scalar", None) or self.hd) ** -0.5
+            self.qn_fold = None if is_pow2(a) else a
+            self.q_fold, self.attn_scale = None, (1.0 if self.qn_fold else a)
+        else:
+            log2_hd = self.hd.bit_length() - 1
+            assert 1 << log2_hd == self.hd, self.hd
+            self.q_fold = self.hd ** -0.5 if log2_hd % 2 else None
+            self.attn_scale = 1.0 if self.q_fold else self.hd ** -0.5
+
+        # the MLP's gate activation: SiLU (Qwen2/Llama) or GELU-tanh (Gemma)
+        act = str(getattr(c, "hidden_activation", None) or "silu")
+        if self.gemma and act != "gelu_pytorch_tanh":
+            raise NotImplementedError(f"hidden_activation {act}")
+        self.act = ((lambda t: torch.nn.functional.gelu(t, approximate="tanh"))
+                    if self.gemma else torch.nn.functional.silu)
 
         ss = static_scales or {}
-        self.emb = hf.model.embed_tokens.weight.data.to(device).clone()   # kept bf16
+        self.emb = base.embed_tokens.weight.data.to(device).clone()   # kept bf16
+        # Gemma's normalizer on the embedding lookup.  sqrt(d) is held at fp32 --
+        # a model constant, exactly the value HF forms -- and the product is stored.
+        self.embed_scale = float(self.d) ** 0.5 if self.gemma else None
         self.layers = []
         for i in range(self.L):
-            b = hf.model.layers[i]
+            b = base.layers[i]
             a, mlp = b.self_attn, b.mlp
             lin = lambda w, mod, n: Linear(w, None if mod.bias is None else mod.bias.data,
                                            f"L{i}.{n}", self.spec_for(n), ss.get(f"L{i}.{n}"),
                                            device)
+            # Gemma's RMSNorm gain is `1 + w`, kept at fp32: it is a property of the
+            # model, not of the quantization, and bf16 would round it away.
+            g1 = lambda mod: mod.weight.data.to(device).float() + 1.0
             qw = a.q_proj.weight.data
             if self.q_fold:
                 qw = qw.to(device).float() * self.q_fold
-            self.layers.append(dict(
+            ld = dict(
                 norm1=b.input_layernorm.weight.data.to(device).clone().float(),
                 norm2=b.post_attention_layernorm.weight.data.to(device).clone().float(),
                 q=lin(qw, a.q_proj, "q"), k=lin(a.k_proj.weight.data, a.k_proj, "k"),
@@ -350,9 +407,18 @@ class Model:
                 o=lin(a.o_proj.weight.data, a.o_proj, "o"),
                 gate=lin(mlp.gate_proj.weight.data, mlp.gate_proj, "gate"),
                 up=lin(mlp.up_proj.weight.data, mlp.up_proj, "up"),
-                down=lin(mlp.down_proj.weight.data, mlp.down_proj, "down")))
-            hf.model.layers[i] = torch.nn.Identity()   # release the checkpoint copy as we go
-        self.final_norm = hf.model.norm.weight.data.to(device).clone().float()
+                down=lin(mlp.down_proj.weight.data, mlp.down_proj, "down"))
+            if self.gemma:
+                ld["norm1"] = ld["norm1"] + 1.0
+                ld["norm2"] = ld["norm2"] + 1.0
+                ld.update(norm3=g1(b.pre_feedforward_layernorm),
+                          norm4=g1(b.post_feedforward_layernorm),
+                          qn=g1(a.q_norm) * (self.qn_fold or 1.0), kn=g1(a.k_norm))
+            self.layers.append(ld)
+            base.layers[i] = torch.nn.Identity()   # release the checkpoint copy as we go
+        self.final_norm = base.norm.weight.data.to(device).clone().float()
+        if self.gemma:
+            self.final_norm = self.final_norm + 1.0
         self.tied = bool(getattr(c, "tie_word_embeddings", True))
         head_w = self.emb if self.tied else hf.lm_head.weight.data
         self.head = Linear(head_w, None, "lm_head", self.spec_for("lm_head"), ss.get("lm_head"),
@@ -361,7 +427,26 @@ class Model:
 
         self.eps = self.store(torch.tensor(float(c.rms_norm_eps), device=device))
         self.inv_d = self.store(torch.tensor(1.0 / self.d, device=device))
-        rp = dict(c.rope_parameters)
+        # Gemma's QK-norm reduces over the head dim, not the hidden size
+        self.inv_hd = self.store(torch.tensor(1.0 / self.hd, device=device))
+        self.layer_types = list(c.layer_types) if self.gemma else None
+        self.sliding_window = int(c.sliding_window) if self.gemma else None
+        self.softcap = ((float(getattr(c, "final_logit_softcapping", None) or 0.0) or None)
+                        if self.gemma else None)
+        if self.gemma:
+            # one table per layer type: the local and global layers use two thetas
+            self.inv_freqs = {t: self.inv_freq_of(dict(c.rope_parameters[t])).to(device)
+                              for t in set(self.layer_types)}
+            self.inv_freq = None
+        else:
+            self.inv_freq = self.inv_freq_of(dict(c.rope_parameters)).to(device)
+        if torch.device(device).type == "cuda":
+            # the fp32 copies made while quantizing are freed; give the allocator's
+            # reserve back so several models can share the GPU (B8's task lanes)
+            torch.cuda.empty_cache()
+
+    def inv_freq_of(self, rp):
+        """RoPE inverse frequencies from one `rope_parameters` entry, in fp64."""
         theta = float(rp["rope_theta"])
         inv = 1.0 / (theta ** (torch.arange(0, self.hd, 2, dtype=torch.float64) / self.hd))
         rope_type = rp.get("rope_type", "default")
@@ -369,11 +454,7 @@ class Model:
             inv = llama3_inv_freq(inv, rp)
         elif rope_type != "default":
             raise NotImplementedError(f"rope_type {rope_type}")
-        self.inv_freq = inv.to(device)
-        if torch.device(device).type == "cuda":
-            # the fp32 copies made while quantizing are freed; give the allocator's
-            # reserve back so several models can share the GPU (B8's task lanes)
-            torch.cuda.empty_cache()
+        return inv
 
     # -- primitives -------------------------------------------------------
     def spec_for(self, kind):
@@ -416,13 +497,17 @@ class Model:
     def red(self, which):
         return "bf16" if self.spec.reduce in ("bf16", f"bf16-{which}") else "fp32"
 
-    def rmsnorm(self, x, w, key):
-        ms = self.store(reduce_sum(self.store(x * x), -1, True, self.red("norm")) * self.inv_d)
+    def rmsnorm(self, x, w, key, inv_d=None):
+        # `inv_d` overrides 1/hidden_size for Gemma's QK-norm, the same reduction
+        # over the head dim; the default keeps every existing call bit-identical.
+        ms = self.store(reduce_sum(self.store(x * x), -1, True, self.red("norm"))
+                        * (self.inv_d if inv_d is None else inv_d))
         r = self.unary(f"{key}.rsqrt", self.store(ms + self.eps), torch.rsqrt)
         return self.store(self.store(x * r) * w)
 
-    def rope(self, pos):
-        ang = pos.double().unsqueeze(-1) * self.inv_freq.unsqueeze(0)
+    def rope(self, pos, layer_type=None):
+        inv = self.inv_freq if layer_type is None else self.inv_freqs[layer_type]
+        ang = pos.double().unsqueeze(-1) * inv.unsqueeze(0)
         ang = torch.cat([ang, ang], dim=-1)
         return self.store(ang.cos().float()), self.store(ang.sin().float())
 
@@ -588,6 +673,45 @@ class Model:
         return out.transpose(0, 1).reshape(s, self.nh * self.hd), None
 
     # -- forward ----------------------------------------------------------
+    def gemma_layer(self, i, l, x, cache, rot, mask):
+        """One Gemma-3 decoder layer.
+
+        The same seven matmuls, the same attention and the same recorder as the
+        shared path; what differs is around them.  Four norms instead of two --
+        the two extra ones normalize the attention output and the MLP output
+        *before* the residual add -- Q and K are RMSNormed per head before RoPE,
+        and the activation is GELU-tanh.  `rot` and `mask` are this layer type's
+        (local or global) RoPE table and mask, chosen by the caller.
+        """
+        cos, sin = rot
+        if self.rec is not None:
+            self.rec.add(f"L{i}.xin", x.to(BF16))
+        h = self.rmsnorm(x, l["norm1"], f"L{i}.norm1")
+        q = l["q"](h, self).view(-1, self.nh, self.hd)
+        k = l["k"](h, self).view(-1, self.nkv, self.hd)
+        v = l["v"](h, self).view(-1, self.nkv, self.hd)
+        q = self.rmsnorm(q, l["qn"], f"L{i}.qnorm", self.inv_hd)
+        k = self.rmsnorm(k, l["kn"], f"L{i}.knorm", self.inv_hd)
+        q = self.rotate(q, cos.unsqueeze(1), sin.unsqueeze(1))
+        k = self.rotate(k, cos.unsqueeze(1), sin.unsqueeze(1))
+        kk, vv = cache.append(i, k, v)
+        a_out, a_pre = self.attention(q, kk, vv, mask, i)
+        o_out = self.rmsnorm(l["o"](a_out, self, pre=a_pre), l["norm2"], f"L{i}.norm2")
+        x = self.store(x + o_out)
+        if self.rec is not None:
+            self.rec.add(f"L{i}.o_out", o_out.to(BF16))
+            self.rec.add(f"L{i}.xmid", x.to(BF16))
+        h = self.rmsnorm(x, l["norm3"], f"L{i}.norm3")
+        g = self.unary(f"L{i}.gelu", l["gate"](h, self), self.act)
+        gu = g * l["up"](h, self)
+        d_out = l["down"](gu if "up" in self.spec.delay_matmuls else self.store(gu), self)
+        d_out = self.rmsnorm(d_out, l["norm4"], f"L{i}.norm4")
+        x = self.store(x + d_out)
+        if self.rec is not None:
+            self.rec.add(f"L{i}.d_out", d_out.to(BF16))
+            self.rec.add(f"L{i}.x", x.to(BF16))     # committed residual stream
+        return x
+
     def forward(self, ids, cache=None, pos=None, seq=None):
         """Logits for `ids`, appended to `cache`.
 
@@ -606,9 +730,23 @@ class Model:
         # (S, C): True where a key is hidden from a query -- another sequence, or
         # a later position (causal, absolute positions)
         mask = (all_seq.unsqueeze(0) != seq.unsqueeze(1)) | (all_pos.unsqueeze(0) > pos.unsqueeze(1))
-        cos, sin = self.rope(pos)
-        x = self.emb[ids].float()
+        if self.gemma:
+            # one RoPE table and one mask per layer type: a local layer sees only
+            # the last `sliding_window` positions (a key is visible iff its
+            # position is > the query's minus the window), a global one sees all
+            rot = {t: self.rope(pos, t) for t in set(self.layer_types)}
+            masks = {t: (mask if t == "full_attention" else
+                         mask | (all_pos.unsqueeze(0) <= pos.unsqueeze(1) - self.sliding_window))
+                     for t in set(self.layer_types)}
+            x = self.store(self.emb[ids].float() * self.embed_scale)
+        else:
+            cos, sin = self.rope(pos)
+            x = self.emb[ids].float()
         for i, l in enumerate(self.layers):
+            if self.gemma:
+                t = self.layer_types[i]
+                x = self.gemma_layer(i, l, x, cache, rot[t], masks[t])
+                continue
             # B10 step 2: the glue's witness is the residual stream at the three
             # points the two adds join, plus each add's second operand.  Nothing
             # numeric moves -- these are recordings of values the forward pass
@@ -641,4 +779,10 @@ class Model:
                 self.rec.add(f"L{i}.x", x.to(BF16))     # committed residual stream
         cache.append_meta(pos, seq)
         h = self.rmsnorm(x, self.final_norm, "final_norm")
-        return self.head(h, self, store_out=not self.spec.fp32_logits), cache
+        logits = self.head(h, self, store_out=not self.spec.fp32_logits)
+        if self.softcap is not None:
+            # Gemma's tanh softcap on the logits (null on Gemma-3-270M, 30.0 on
+            # Gemma-4-31B); two more correctly-rounded ops, one table among them
+            logits = self.store(self.unary("logit_cap", self.store(logits / self.softcap),
+                                           torch.tanh) * self.softcap)
+        return logits, cache
