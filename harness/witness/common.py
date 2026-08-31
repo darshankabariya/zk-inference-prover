@@ -224,6 +224,13 @@ SPECS["y-delay-all"] = replace(SPECS["b10-final"], delay_matmuls=("v", "up"),
 SPECS["y-delay-all-w11"] = replace(SPECS["b10-final"], delay_matmuls=("v", "up"),
                                    attn_out_bits=11)
 
+# --- stream Z: the wired composition (briefs/z-delaywire.md) -------------------
+# `up` stopped at the gate (its real fused gadget is not cheaper than the chain
+# on either denomination), so the candidate the AIR proves is v + w12 -- a
+# composition stream Y never measured.  One row, Y's floor discipline.
+SPECS["y-delay-vw12"] = replace(SPECS["b10-final"], delay_matmuls=("v",),
+                                attn_out_bits=12)
+
 # Stream Y's rows: the two baselines re-measured fresh, then one knob per spec,
 # then the composed rows -- B10's pattern.
 Y_SPECS = ["fp32", "b10-final", "y-attnout-w10", "y-attnout-w11",

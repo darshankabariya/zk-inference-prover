@@ -147,6 +147,17 @@ pub struct Params {
     pub ao_target: usize,
     pub ao_q_bits: u32,
     pub ao_rem_bits: u32,
+    /// Stream Z: the fold's two data-derived pins, present only on a statement
+    /// with a `fold` matmul (a witness whose manifest declares one).  Zero --
+    /// and skipped in the serialization, so every pre-change statement is
+    /// byte-identical -- everywhere else.  `fold_rem_bits` is the width of the
+    /// high remainder's range check (of `2 fdp`); `fold_alpha` is where the
+    /// divisor splits between the committed per-token `dent` and the
+    /// preprocessed per-channel `pj` (`dequant::Spec::fold_alpha`).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub fold_rem_bits: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub fold_alpha: u32,
     pub walk_p: usize,
     /// B10 step 2.  Absent on a witness `extract.py --glue` did not write.
     #[serde(default)]
@@ -228,6 +239,10 @@ pub struct GlueParams {
 }
 
 fn is_zero(v: &usize) -> bool {
+    *v == 0
+}
+
+fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
 
@@ -356,6 +371,9 @@ pub struct WalkPlan {
     pub name: String,
     pub mats: Vec<usize>,
     pub lay: WalkLayout,
+    /// Stream Z: the group's committed-activation range width -- 8 everywhere,
+    /// `ao_q_bits + 1` on `o`'s group when the attention output is widened.
+    pub act_bits: u32,
 }
 
 // ------------------------------------------------------------ the glue plan ----
@@ -642,6 +660,17 @@ impl Plan {
         if let AttnVariant::IntSplit(k) = attn_variant {
             widths.push(k);
         }
+        // Stream Z: a fold matmul range-checks its magnitude and low-remainder
+        // limbs at 13 bits, its low-product quotient at 16, and its high
+        // remainder at the pinned fold width; a widened attention output ranges
+        // `o`'s committed activations at `ao_q_bits + 1`.
+        if p.mats.iter().any(|m| m.variant == "fold") {
+            assert!(p.fold_rem_bits > 0, "a fold matmul needs --fold-rem-bits");
+            widths.extend([crate::dequant::FOLD_LIMB, 16, p.fold_rem_bits]);
+        }
+        if p.ao_q_bits > 7 {
+            widths.push(p.ao_q_bits + 1);
+        }
         widths.sort_unstable();
         widths.dedup();
 
@@ -649,6 +678,7 @@ impl Plan {
         let mut mat_lays = vec![];
         for m in &p.mats {
             let lay = MatLayout::choose_or_padded(m.n_out, m.tokens, p.deq_target);
+            let fold = m.variant == "fold";
             specs.push(Spec {
                 variant: DeqVariant::parse(&m.variant),
                 round,
@@ -656,7 +686,8 @@ impl Plan {
                 per_row: lay.per_row,
                 limb_bits: (16, 14),
                 q_bits: p.ao_q_bits,
-                rem_bits: p.ao_rem_bits,
+                rem_bits: if fold { p.fold_rem_bits } else { p.ao_rem_bits },
+                fold_alpha: if fold { p.fold_alpha } else { 0 },
             });
             mat_lays.push(lay);
         }
@@ -676,6 +707,8 @@ impl Plan {
                 name: name.to_string(),
                 mats: idx.clone(),
                 lay: WalkLayout::choose(n_in, n_out_max, p.mats[idx[0]].tokens, p.walk_p),
+                // stream Z: the widened attention output is `o`'s committed input
+                act_bits: if name == "o" && p.ao_q_bits > 7 { p.ao_q_bits + 1 } else { 8 },
             });
         }
         // table row counts, exactly as `Tables::new` builds them
@@ -1266,7 +1299,8 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 s_pow,
                 s_step,
                 claimed: claims.walk_acc[wi].iter().map(|x| unqm(*x)).collect(),
-                rel_act: rels.range(8).clone(),
+                rel_act: rels.range(w.act_bits).clone(),
+                act_off: 1 << (w.act_bits - 1),
                 range_check: true,
                 gkr: p.gkr_walks,
             },
@@ -1555,6 +1589,18 @@ pub struct ProverTamper {
     pub glue_add: Option<(usize, usize)>,
     /// Stream E: a tamper inside the composed argmax region
     pub argmax: Option<crate::argmax::Tamper>,
+    /// Stream Z, the four wired-site bends.  Each bends exactly one committed
+    /// cell after the honest value is derived, so the constraint that pins the
+    /// cell is the one that has to reject.  `fold_qm` bends a fold slot's
+    /// quotient by +1 (the high remainder leaves its range); `fold_dent`
+    /// doubles one row's committed `dent` (the `denp14 = dent pj` pin fails);
+    /// `ao_clamp` pushes one attnout quotient past the pair table's domain;
+    /// `walk_over` sets one committed activation of the widened walk to
+    /// `2^act_bits`, one past its range table.
+    pub fold_qm: Option<usize>,
+    pub fold_dent: Option<usize>,
+    pub ao_clamp: Option<usize>,
+    pub walk_over: Option<usize>,
 }
 
 pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Composed {
@@ -1666,7 +1712,11 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // and the proof is rejected by `sums_cancel` with every other check green.
     crate::devpre::note_host_fill(
         layer.bands.iter().any(|a| crate::devwfill::band_fill_mode(a) != 1)
-            || plan.argmax_mat().is_some(),
+            || plan.argmax_mat().is_some()
+            // stream Z: the fold region and the widened attention output's walk
+            // both fill on the host, whatever the switches say
+            || plan.specs.iter().any(|s| s.variant == DeqVariant::Fold)
+            || plan.walks.iter().any(|w| w.act_bits != 8),
     );
     let mut mult_exp = std::mem::take(&mut tables.m_exp);
     let mut mult_r = std::mem::take(&mut tables.m_r);
@@ -1733,14 +1783,16 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     crate::util::m4_add("gen/pre_bands", m4_t.elapsed().as_secs_f64());
 
     let m4_t = std::time::Instant::now();
-    let aor = ao_region(&layer.ao, p.ao_target, p.ao_q_bits, p.ao_rem_bits, &mut tables, None);
+    let aor = ao_region(&layer.ao, p.ao_target, p.ao_q_bits, p.ao_rem_bits, &mut tables,
+                        None, tamper.ao_clamp);
 
     crate::util::m4_add("gen/attnout", m4_t.elapsed().as_secs_f64());
 
     let m4_t = std::time::Instant::now();
     let mut mat_regions = vec![];
     for (m, sp) in layer.mats.iter().zip(&plan.specs) {
-        let r = mat_region(m, sp, &mut tables, plan.has_oside(&m.name));
+        let r = mat_region(m, sp, &mut tables, plan.has_oside(&m.name),
+                           (tamper.fold_qm, tamper.fold_dent));
         mat_regions.push(r);
     }
     let n_deq_base: usize = mat_regions
@@ -1776,7 +1828,8 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     let m4_t = std::time::Instant::now();
     let mut walk_regions = vec![];
     for w in &plan.walks {
-        let r = walk_region(layer, &w.name, &w.mats, p.walk_p, &mut tables, None);
+        let r = walk_region(layer, &w.name, &w.mats, p.walk_p, w.act_bits, &mut tables,
+                            None, tamper.walk_over.filter(|_| w.act_bits != 8));
         walk_regions.push(r);
     }
     crate::util::m4_add("gen/walks", m4_t.elapsed().as_secs_f64());

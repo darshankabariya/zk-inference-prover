@@ -70,6 +70,10 @@ pub struct WalkEval {
     /// one claimed inner product per matmul
     pub claimed: Vec<SecureField>,
     pub rel_act: RangeRel,
+    /// The committed activations' offset: 128 for the int8 walks, 2^11 for the
+    /// widened attention output's group (stream Z), whose activations are one
+    /// cell in `[1, 2^12)` against a 12-bit range table rather than two limbs.
+    pub act_off: u32,
     pub range_check: bool,
     /// B11 stream V, lever 4: this region's range checks are proved by the
     /// batched GKR instead of committed running-sum columns, so the AIR emits
@@ -119,7 +123,7 @@ impl FrameworkEval for WalkEval {
         }
         let off_sum: SecureField =
             self.s_pow.iter().fold(SecureField::zero(), |x, y| x + *y)
-                * SecureField::from_u32_unchecked(128, 0, 0, 0);
+                * SecureField::from_u32_unchecked(self.act_off, 0, 0, 0);
         vf = vf - off_sum;
         eval.add_constraint(v.clone() - (v_prev * self.s_step) * nofirst.clone() - vf);
 

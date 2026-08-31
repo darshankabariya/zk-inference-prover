@@ -293,7 +293,11 @@ if __name__ == "__main__":
                                                m.rec.cols[f"L{L}.vv"][:, P:].double())
         real_rect = out_rect * s_v.double().reshape(nh, 1, hd) / zz.double().unsqueeze(-1)
         flat_rect = real_rect.transpose(0, 1).reshape(S, nh * hd)
-        s_o_rect = pow2_ceil(flat_rect.abs().amax(-1, keepdim=True).clamp_min(1e-30) / 127.0)
+        # stream Z: the fold's target width is the spec's, not int8's -- the
+        # scale calibrates against `qmax_o` and the whole dump declares it
+        qmax_o = (1 << (spec.attn_out_bits - 1)) - 1
+        s_o_rect = pow2_ceil(flat_rect.abs().amax(-1, keepdim=True).clamp_min(1e-30)
+                             / float(qmax_o))
         s_o_fwd = m.rec.cols[f"L{L}.s_o"].float()                # (S, 1)
         jo = pow2_exponent(s_o_rect.reshape(-1).float())
         jo_fwd = pow2_exponent(s_o_fwd.reshape(-1))
@@ -303,7 +307,8 @@ if __name__ == "__main__":
         # the quotient the fold will build, so the precondition is checked here and
         # not four hours later inside a prover
         q_rect = round_hafz(flat_rect.abs() / s_o_rect.double())
-        assert int(q_rect.max()) <= 127, f"fold quotient {int(q_rect.max())} > 127"
+        assert int(q_rect.max()) <= qmax_o, \
+            f"fold quotient {int(q_rect.max())} > {qmax_o}"
         jo_bumped = int((jo != jo_fwd).sum())
         # the fold's exponent e = jv[h, ch] - jo[t]: its range decides the int8
         # gadget's num/den split (num = 2^max(e,0), den = Z * 2^max(-e,0))
@@ -321,8 +326,15 @@ if __name__ == "__main__":
             lin = m.layers[L][name]
             s_x = m.rec.cols[f"L{L}.{name}/s_x"]
             write(f"acc_{name}.i32", acc.numpy().astype(np.int32), digests)
-            write(f"qx_{name}.i8", m.rec.cols[f"L{L}.{name}/qx"].numpy().astype(np.int8),
-                  digests)
+            # stream Z: the widened attention output makes o's quantized input
+            # int16; the file name carries the storage width so a loader cannot
+            # misread it
+            if name == "o" and spec.attn_out_bits > 8:
+                write(f"qx_{name}.i16",
+                      m.rec.cols[f"L{L}.{name}/qx"].numpy().astype(np.int16), digests)
+            else:
+                write(f"qx_{name}.i8",
+                      m.rec.cols[f"L{L}.{name}/qx"].numpy().astype(np.int8), digests)
             write(f"qw_{name}.i8", lin.qw.detach().to("cpu").numpy().astype(np.int8),
                   digests)
             if f"L{L}.{name}/x" in m.rec.cols:
@@ -350,6 +362,48 @@ if __name__ == "__main__":
                   f"kmax {accs[name]['kmax_needed']} "
                   f"(worst case {accs[name]['kmax_worst_case']}), "
                   f"pow2 scales {accs[name]['scales_pow2']}")
+
+        # ---- stream Z: the fold's own identity, at the witness -------------------
+        # `y-delay-*` carries v's output as the exact product and the A.V quantize
+        # is the one rounding.  The AIR will prove exactly
+        # `round_hafz(acc s_x s_w / s_v)`, so that quantity is recomputed here from
+        # the dumped arrays alone and byte-compared against the recorder's own
+        # `vvc` (the S decoded tokens' values are the corner's) -- the identity
+        # gate's witness half, checked at extraction and not hours later.  The
+        # no-clamp precondition rides along: a clamped site has no honest witness.
+        fold_stats = {}
+        if "v" in spec.delay_matmuls:
+            assert a.corner, "the v fold's identity check reads the corner's vvc"
+            accv = m.rec.cols[f"L{L}.v/acc"].double()               # (S, nkv*hd)
+            linv = m.layers[L]["v"]
+            sxv = m.rec.cols[f"L{L}.v/s_x"].double()                # (S, 1)
+            swv = linv.s_w.detach().to("cpu").double().reshape(1, -1)
+            rep = nh * hd // linv.n_out
+            svq = s_v.detach().to("cpu").double().reshape(nh // rep, rep, hd)
+            assert bool((svq == svq[:, :1]).all()), "s_v disagrees inside a GQA group"
+            sv_flat = svq[:, 0].reshape(1, -1)                      # (1, nkv*hd)
+            qv = round_hafz(accv * sxv * swv / sv_flat)
+            assert int(qv.abs().max()) <= 127, \
+                f"v fold quotient {int(qv.abs().max())} > 127 -- a clamped site"
+            vvc = m.rec.cols[f"L{L}.vv"][:, P:].double()            # (nh, S, hd)
+            vvc_kv = vvc.reshape(nh // rep, rep, S, hd)[:, 0]       # (nkv, S, hd)
+            vvc_flat = vvc_kv.permute(1, 0, 2).reshape(S, -1)       # (S, nkv*hd)
+            assert bool((qv == vvc_flat).all()), \
+                "v fold identity: round_hafz(acc s_x s_w / s_v) != vvc"
+            gt = 134 - bf16_parts(m.rec.cols[f"L{L}.v/s_x"].reshape(-1))[1]
+            gc = 134 - bf16_parts(linv.s_w.reshape(-1))[1] \
+                + pow2_exponent(sv_flat.reshape(-1).float())
+            assert int(gt.min() + gc.min()) >= 14, "fold divisor below 2^14"
+            fold_stats = dict(
+                q_max=int(qv.abs().max()),
+                gt_min=int(gt.min()), gt_max=int(gt.max()),
+                gc_min=int(gc.min()), gc_max=int(gc.max()),
+                fold_rem_bits=int(gt.max() + gc.max() - 13),
+                fold_alpha=int(max(14 - gc.min(), 0)),
+            )
+            print(f"  v fold identity holds on {qv.numel():,} sites; "
+                  f"rem {fold_stats['fold_rem_bits']} bits, "
+                  f"alpha {fold_stats['fold_alpha']}")
 
         # ---- B10 step 2: the glue's columns -------------------------------------
         # Every one is a bf16 *pattern* column, which is what the wiring family
@@ -512,9 +566,15 @@ if __name__ == "__main__":
             # it on the *chain*, while `b2/cost_model.py` prices the design B8
             # licensed (power-of-two on the head, +0.02% at 8B).  That divergence
             # is named in `B10.md` §3; the manifest states what the dump is.
-            deq_variants={**{n: ("pow2" if _pow2_mat(spec, n) else "chain") for n in mats},
+            deq_variants={**{n: ("fold" if n in spec.delay_matmuls
+                                 else "pow2" if _pow2_mat(spec, n) else "chain")
+                             for n in mats},
                           **({"lm_head": ("pow2" if _pow2_mat(spec, "lm_head") else "chain")}
                              if a.head else {})},
+            # stream Z: the fold's target width and its measured divisor range --
+            # the witness is the knob, so the prover reads both from here
+            attn_out_bits=spec.attn_out_bits,
+            fold=fold_stats,
             dequant_round=spec.dequant_round,
             clamped={k: dict(over=v[0], total=v[1], frac=v[0] / v[1])
                      for k, v in (m.clamped or {}).items()},

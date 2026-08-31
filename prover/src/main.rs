@@ -83,6 +83,7 @@ fn spec_of(args: &[String], variant: &str, round: &str, per_row: usize) -> Spec 
         // `2 den` for the denominators B5 measured (Z max 38,848, blind bound 2^22)
         q_bits: arg_scalar(args, "--q-bits", 7u32),
         rem_bits: arg_scalar(args, "--rem-bits", 19u32),
+        fold_alpha: 0,
     }
 }
 
@@ -584,7 +585,11 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         kmax: arg_scalar(args, "--kmax", kmax),
         round: arg_strs(args, "--round", &["even"])[0].clone(),
         ao_target: arg_scalar(args, "--ao-per-row", 16usize),
-        ao_q_bits: 7,
+        // Stream Z: the witness is the knob.  A dump extracted at a wider
+        // attention output declares it in the manifest, and a dump that
+        // predates the knob reads back 8 -- so every pre-change statement is
+        // parameter-identical and the standing digests stand.
+        ao_q_bits: l.attn_out_bits - 1,
         // B9 step 1: `ao_rem_bits` and `kmax` are data-derived, so two real layers
         // of one model are two shapes and the chunk loop rejects the pair.  Both
         // are overridable now, so a driver can pin them at the model-wide worst
@@ -596,6 +601,23 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
             assert!(want >= l.ao.rem_bits(),
                     "--ao-rem-bits {want} is below this witness's {}", l.ao.rem_bits());
             want
+        },
+        // Stream Z: the fold's two pins, data-derived exactly as `ao_rem_bits`
+        // and overridable the same way so a driver can pin the model-wide worst
+        // case.  Zero -- absent from the serialized statement -- on a witness
+        // with no fold matmul.
+        fold_rem_bits: match l.fold_pins() {
+            Some((_, rem)) => {
+                let want = arg_scalar(args, "--fold-rem-bits", rem);
+                assert!(want >= rem,
+                        "--fold-rem-bits {want} is below this witness's {rem}");
+                want
+            }
+            None => 0,
+        },
+        fold_alpha: match l.fold_pins() {
+            Some((alpha, _)) => arg_scalar(args, "--fold-alpha", alpha),
+            None => 0,
         },
         walk_p: arg_scalar(args, "--p", 136usize),
         // B10 step 2: the wiring family rides on a witness `extract.py --glue`
@@ -773,6 +795,18 @@ fn compose_cmd(args: &[String]) {
     if let Some(i) = arg_str(args, "--corrupt-norm") {
         tamper.norm_row = Some(i.parse().expect("--corrupt-norm wants a table row"));
         eprintln!("compose: norm table row {i} flipped, witness rebuilt");
+    }
+    // Stream Z: the wired sites' bend controls.  Each bends one committed cell
+    // after the honest derivation; a rejected proof (a non-zero exit through the
+    // `accepts` assert below) is the pass.
+    for (key, slot) in [("--corrupt-fold-qm", &mut tamper.fold_qm),
+                        ("--corrupt-fold-dent", &mut tamper.fold_dent),
+                        ("--corrupt-ao-clamp", &mut tamper.ao_clamp),
+                        ("--corrupt-walk-act", &mut tamper.walk_over)] {
+        if let Some(i) = arg_str(args, key) {
+            *slot = Some(i.parse().unwrap_or_else(|_| panic!("{key} wants an index")));
+            eprintln!("compose: bend {key} at {i} armed (a rejection is the pass)");
+        }
     }
     let params = params_of(&l, args, &vname);
     eprintln!("compose: {} bands={:?} variant={} kmax={} rem={} p={}",
@@ -1088,6 +1122,7 @@ fn layer_clone(l: &layer::Layer) -> layer::Layer {
             name: m.name.clone(), variant: m.variant, n_in: m.n_in, n_out: m.n_out,
             tokens: m.tokens, acc: m.acc.clone(), qx: m.qx.clone(), qw: m.qw.clone(),
             jx: m.jx.clone(), jw: m.jw.clone(), sx: m.sx.clone(), sw: m.sw.clone(),
+            jv2: m.jv2.clone(),
         }).collect(),
         ao: layer::AttnOut { nh: l.ao.nh, s: l.ao.s, hd: l.ao.hd, acc: l.ao.acc.clone(),
                              den: l.ao.den.clone(), jo: l.ao.jo.clone(), jv: l.ao.jv.clone() },
@@ -1104,6 +1139,7 @@ fn layer_clone(l: &layer::Layer) -> layer::Layer {
         }),
         head_keys: l.head_keys.clone(),
         head_tok: l.head_tok.clone(),
+        attn_out_bits: l.attn_out_bits,
         source: l.source.clone(),
     }
 }

@@ -45,6 +45,7 @@
 //! | `pow2`  | `y = bf16(acc · 2^j)` | power-of-two scales: the multiply is an exponent add |
 //! | `chain` | `y = bf16(bf16(bf16(acc)·s_x)·s_w)` | general bf16 scales: two mantissa products |
 //! | `int8`  | `q = round(acc · num / den)` | the consumer requantises, so skip bf16 |
+//! | `fold`  | `q = round_hafz(acc · s_x s_w / s_v)` | stream Z: the delayed requantize, general bf16 `s_x s_w` over a power-of-two `s_v`, split into limbs because neither the product nor the remainder fits one check |
 //!
 //! `int8` is B5's review's suggestion made concrete: where a dequant's consumer is
 //! a matmul, folding the scale, the softmax division and the requantisation into a
@@ -139,7 +140,20 @@ pub enum Variant {
     Pow2,
     Chain,
     Int8,
+    /// Stream Z: the delayed requantize, `q = round_hafz(acc s_x s_w / s_v)` in
+    /// one rounding, with a general bf16 `s_x s_w` and a power-of-two `s_v`.
+    /// The `int8` form above cannot state it: the mantissa product widens the
+    /// honest `mag num` to ~2^42 and the divisor to ~2^25, so a single error
+    /// check leaves the field.  The statement here splits both -- the magnitude
+    /// into two 13-bit limbs and the remainder into a low 13-bit half and a
+    /// high half checked against the per-slot divisor -- and every term stays
+    /// below 2^30.  See `evaluate`'s `Fold` arm for the identity.
+    Fold,
 }
+
+/// The fold's limb width: the magnitude splits as `mag = m_lo + 2^13 m_hi` and
+/// the remainder's low half is the low 13 bits of `m_lo (128+ms)(128+mw)`.
+pub const FOLD_LIMB: u32 = 13;
 
 impl Variant {
     pub fn parse(s: &str) -> Self {
@@ -149,6 +163,7 @@ impl Variant {
             "pow2" => Variant::Pow2,
             "chain" => Variant::Chain,
             "int8" => Variant::Int8,
+            "fold" => Variant::Fold,
             other => panic!("unknown dequant variant {other:?}"),
         }
     }
@@ -159,10 +174,11 @@ impl Variant {
             Variant::Pow2 => "pow2",
             Variant::Chain => "chain",
             Variant::Int8 => "int8",
+            Variant::Fold => "fold",
         }
     }
     pub fn normalises(&self) -> bool {
-        !matches!(self, Variant::Limbs | Variant::Int8)
+        !matches!(self, Variant::Limbs | Variant::Int8 | Variant::Fold)
     }
 }
 
@@ -178,8 +194,17 @@ pub struct Spec {
     pub limb_bits: (u32, u32),
     /// `int8`: width of the quotient range check (7 = B1's clamp at 127)
     pub q_bits: u32,
-    /// `int8`: width of the rounding-error range check, i.e. of `2 den`
+    /// `int8`: width of the rounding-error range check, i.e. of `2 den`.
+    /// `fold`: width of the high remainder's check, i.e. of `2 denp14` -- the
+    /// per-slot divisor after the 14 low bits are split off.
     pub rem_bits: u32,
+    /// `fold`: how the divisor `2^G` splits between the committed per-token
+    /// `dent = 2^(G_t - alpha)` and the preprocessed per-channel
+    /// `pj = 2^(G_c - (14 - alpha))`.  Data-derived: `alpha <= min_t G_t` and
+    /// `14 - alpha <= min_c G_c` must both hold or the fill cannot build an
+    /// integer column, and together they are what guarantees `G >= 14` on
+    /// every slot.  Zero for every other variant.
+    pub fold_alpha: u32,
 }
 
 impl Spec {
@@ -190,6 +215,9 @@ impl Spec {
             // the product is bounded by the error check, not directly:
             // 2 pm = d + (2 qm - 1) den < 2^rem_bits + 2^q_bits * 2^(rem_bits-1)
             Variant::Int8 => 1u64 << (self.q_bits + self.rem_bits - 1),
+            // two 13-bit limbs, the low one range-checked, the high one bounded
+            // through the high-remainder identity
+            Variant::Fold => 1u64 << (2 * FOLD_LIMB),
             _ => 1u64 << (self.kmax + 9),
         }
     }
@@ -237,6 +265,12 @@ impl Spec {
 pub fn look_units(sp: &Spec) -> Vec<bool> {
     let mut u = vec![];
     for _ in 0..sp.per_row {
+        // stream Z: the fold has no normalisation core; its six looks -- the
+        // (q, nz) pair and five range checks -- are all at unit multiplicity
+        if sp.variant == Variant::Fold {
+            u.extend([true; 6]);
+            continue;
+        }
         u.push(true); // norm
         u.push(true); // frac
         match sp.variant {
@@ -253,11 +287,14 @@ pub fn look_units(sp: &Spec) -> Vec<bool> {
     u
 }
 
+
 /// The distinct range-table widths a spec needs, sorted (the draw order).
 pub fn range_widths(sp: &Spec) -> Vec<u32> {
     let mut w = match sp.variant {
         Variant::Limbs => vec![sp.limb_bits.0, sp.limb_bits.1],
         Variant::Int8 => vec![sp.rem_bits],
+        // the two limb widths and the high remainder's own width
+        Variant::Fold => vec![FOLD_LIMB, 16, sp.rem_bits],
         Variant::Round => vec![],
         // the output exponent field: what an over- or underflowing scale trips.
         // Sound, and incomplete outside bf16's normal range.
@@ -308,6 +345,17 @@ pub struct Fields {
     /// sign for sub-half quotients (B6 review, open gap 7)
     pub nz2: usize,
     pub d: usize,
+    /// `fold`: the magnitude's limbs (`mag = flo + 2^13 fhi`; there is no acc
+    /// column -- the Freivalds side reads `(flo + 2^13 fhi)(1 - 2 sg)`)
+    pub flo: usize,
+    pub fhi: usize,
+    /// `fold`: the low product's split, `flo (128+ms)(128+mw) = fa 2^13 + fb`
+    pub fa: usize,
+    pub fb: usize,
+    /// `fold`: the high remainder `fe = fhi mxw + fa - (2 qm - 1) fdp` and the
+    /// committed per-slot divisor `fdp = dent pj = 2^(G - 14)`
+    pub fe: usize,
+    pub fdp: usize,
 }
 
 const NONE: usize = usize::MAX;
@@ -317,13 +365,14 @@ impl Map {
         let sticky = sp.round.needs_sticky();
         let shared: Vec<usize> = match sp.variant {
             Variant::Pow2 | Variant::Int8 => vec![0],
-            Variant::Chain => vec![0, 1],
+            Variant::Chain | Variant::Fold => vec![0, 1],
             _ => vec![],
         };
         let mut f = Fields {
             acc: 0,
             sg: NONE, m2: NONE, ph: NONE, st: NONE, r: NONE, m7: NONE, ef: NONE, nz: NONE,
             eo: NONE, mul: [[NONE; 3]; 2], lo: NONE, qm: NONE, nz2: NONE, d: NONE,
+            flo: NONE, fhi: NONE, fa: NONE, fb: NONE, fe: NONE, fdp: NONE,
         };
         let mut k = 1usize;
         let take = |n: usize, k: &mut usize| {
@@ -338,6 +387,21 @@ impl Map {
                 f.qm = take(1, &mut k);
                 f.nz2 = take(1, &mut k);
                 f.d = take(1, &mut k);
+            }
+            // no acc column: the magnitude's limbs stand where it would, and
+            // the Freivalds side reads `(flo + 2^13 fhi)(1 - 2 sg)`
+            Variant::Fold => {
+                k = 0;
+                f.acc = NONE;
+                f.flo = take(1, &mut k);
+                f.fhi = take(1, &mut k);
+                f.sg = take(1, &mut k);
+                f.fa = take(1, &mut k);
+                f.fb = take(1, &mut k);
+                f.qm = take(1, &mut k);
+                f.nz2 = take(1, &mut k);
+                f.fe = take(1, &mut k);
+                f.fdp = take(1, &mut k);
             }
             _ => {
                 f.sg = take(1, &mut k);
@@ -499,6 +563,72 @@ impl FrameworkEval for DequantEval {
         // column nobody committed
         let mut outs: Vec<(E::F, E::F, E::F, E::F)> = vec![];
         for slot in 0..sp.per_row {
+            // ---- stream Z: the delayed requantize, one rounding, in limbs.
+            //
+            // `q = round_hafz(mag mxw / 2^G)` with `mxw = (128+ms)(128+mw)` the
+            // two scale significands and `2^G = 2^(G_t + G_c)` the power-of-two
+            // divisor `s_v 2^268 / 2^(es_x + ew)` -- exactly `acc s_x s_w / s_v`.
+            // The honest product is ~2^42 and the divisor ~2^25, so neither the
+            // `int8` error check nor any single lookup can carry it.  Split
+            // `mag = flo + 2^13 fhi` and `flo mxw = fa 2^13 + fb`; then
+            // `T = mag mxw = (fhi mxw + fa) 2^13 + fb`, and because the rounding
+            // error `d = 2T - (2 qm - 1) 2^G` is even and `G >= 14`,
+            //
+            //   d/2 = fe 2^13 + fb,   fe = fhi mxw + fa - (2 qm - 1) fdp,
+            //
+            // with `fdp = 2^(G-14)` committed per slot and pinned to
+            // `dent pj`.  `d in [0, 2^(G+1))` -- i.e. the rounding -- is exactly
+            // `fe in [0, 2 fdp)`, the ao fold's own two-sided check, and every
+            // term is below 2^30: `fhi mxw <= fe + a + (2 qm - 1) fdp` bounds the
+            // high limb through the identity, `flo mxw < 2^29` through its two
+            // ranged halves.
+            if sp.variant == Variant::Fold {
+                let ms = shared[0].clone();
+                let dent = shared[1].clone();
+                let mw = eval.get_preprocessed_column(chan_col(&self.tag, "m", slot));
+                let pj = eval.get_preprocessed_column(chan_col(&self.tag, "p", slot));
+                let flo = eval.next_trace_mask();
+                let fhi = eval.next_trace_mask();
+                let sg = eval.next_trace_mask();
+                let fa = eval.next_trace_mask();
+                let fb = eval.next_trace_mask();
+                let qm = eval.next_trace_mask();
+                let nz2 = eval.next_trace_mask();
+                let fe = eval.next_trace_mask();
+                let fdp = eval.next_trace_mask();
+                let limb = E::F::from(m31_u32(1 << FOLD_LIMB));
+                let c128 = E::F::from(m31_u32(128));
+                // the Freivalds side reads the accumulator as an expression
+                let mag = flo.clone() + fhi.clone() * limb.clone();
+                accs.push(mag.clone() - (mag * sg.clone()) * two);
+                eval.add_constraint(sg.clone() * sg.clone() - sg.clone());
+                // as the int8 form: sg = 0 whenever qm = 0
+                eval.add_constraint(sg * (E::F::one() - nz2.clone()));
+                eval.add_constraint(fdp.clone() - dent * pj);
+                let mxw = (ms + c128.clone()) * (mw + c128);
+                eval.add_constraint(
+                    flo.clone() * mxw.clone() - fa.clone() * limb - fb.clone());
+                eval.add_constraint(
+                    fe.clone() - fhi * mxw - fa.clone()
+                        + (qm.clone() * two - E::F::one()) * fdp.clone(),
+                );
+                let fep = fdp * two - E::F::one() - fe.clone();
+                if !self.gkr {
+                    eval.add_to_relation(RelationEntry::new(
+                        &self.qnz, E::EF::one(), &[qm, nz2]));
+                    eval.add_to_relation(RelationEntry::new(
+                        self.rel(FOLD_LIMB), E::EF::one(), core::slice::from_ref(&flo)));
+                    eval.add_to_relation(RelationEntry::new(
+                        self.rel(FOLD_LIMB), E::EF::one(), core::slice::from_ref(&fb)));
+                    eval.add_to_relation(RelationEntry::new(
+                        self.rel(16), E::EF::one(), core::slice::from_ref(&fa)));
+                    eval.add_to_relation(RelationEntry::new(
+                        self.rel(sp.rem_bits), E::EF::one(), core::slice::from_ref(&fe)));
+                    eval.add_to_relation(RelationEntry::new(
+                        self.rel(sp.rem_bits), E::EF::one(), core::slice::from_ref(&fep)));
+                }
+                continue;
+            }
             let acc = eval.next_trace_mask();
             accs.push(acc.clone());
             match sp.variant {
@@ -997,6 +1127,11 @@ pub fn run(w: &Witness, sp: &Spec, tamper: Option<Tamper>) -> Outcome {
     // `Spec::sound()` was reported, not asserted, so `--kmax 25` would run unsound
     // (B6 review).  Refuse instead.
     assert!(sp.sound(), "unsound spec: {:?} reads an integer window above p", sp.json());
+    // Stream Z: the fold's witness needs real per-token and per-channel bf16
+    // scales and a per-channel s_v, which the standalone bench witness does not
+    // carry.  The fold is exercised through the composed layer path only.
+    assert!(sp.variant != Variant::Fold,
+            "the standalone gadget bench has no fold witness; compose a layer instead");
     let t0 = std::time::Instant::now();
     let n = w.acc.len();
     let map = Map::new(sp);

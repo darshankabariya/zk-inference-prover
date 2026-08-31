@@ -31,14 +31,20 @@ def shape_of(d):
     shift = np.maximum(jo[None, :] - jv.min(-1)[:, None], 0)                           # (nh, S)
     rem = int(2 * (zz << shift).max())
     accs = man["accumulators"]
+    # stream Z: a dump extracted with a fold matmul carries the fold's own
+    # divisor range; the model-wide pins come off these exactly as `ao_rem_bits`
+    fold = man.get("fold") or {}
     return dict(
         layer=man["layer"], c=man["c"], s=man["s"],
         table_bits=man["master_table_bits"], spread=man["frac_spread"],
         d_bits=man["d_bits"], z_max=man["z_max"],
         ao_rem_bits=int(rem).bit_length(),
+        attn_out_bits=man.get("attn_out_bits", 8),
         kmax_needed=max(v["kmax_needed"] for v in accs.values()),
         kmax_blind=max(v["kmax_worst_case"] for v in accs.values()),
         fold_q_max=man["attn_out"]["fold_q_max"],
+        fold_rem_bits=fold.get("fold_rem_bits", 0),
+        fold_gt_min=fold.get("gt_min", 0), fold_gc_min=fold.get("gc_min", 0),
         slim=man.get("slim", False),
     )
 
@@ -58,6 +64,15 @@ if __name__ == "__main__":
                  kmax=max(r["kmax_blind"] for r in rows),
                  fold_q_max=max(r["fold_q_max"] for r in rows),
                  table_bits=hist)
+    # stream Z: the fold's model-wide pins.  `fold_rem_bits` is a plain maximum;
+    # `fold_alpha` must sit under every layer's min G_t while covering every
+    # layer's min G_c, which is a joint condition and is asserted, not assumed.
+    if any(r["fold_rem_bits"] for r in rows):
+        alpha = max(max(14 - r["fold_gc_min"], 0) for r in rows if r["fold_rem_bits"])
+        gt_lo = min(r["fold_gt_min"] for r in rows if r["fold_rem_bits"])
+        assert alpha <= gt_lo, f"fold: no alpha fits (need <= {gt_lo}, want {alpha})"
+        worst["fold_rem_bits"] = max(r["fold_rem_bits"] for r in rows)
+        worst["fold_alpha"] = alpha
     # 5.010 fresh cells per master-table row (B9 1.5), so what the tables cost
     # per-layer against forcing the model's largest on all of them
     per = {b: 5.010 * (1 << b) for b in tb}
@@ -66,7 +81,9 @@ if __name__ == "__main__":
     print(f"\nworst case: {json.dumps(worst)}")
     print(f"master table, per-layer {own / 1e9:.3f} G cells vs one shape at 2^{max(tb)} "
           f"{one / 1e9:.3f} G = x{one / own:.2f}")
-    assert all(r["fold_q_max"] <= 127 for r in rows), "a layer's fold quotient is past 127"
+    # stream Z: the attnout fold's quotient clamps at the dump's own width
+    assert all(r["fold_q_max"] <= (1 << (r["attn_out_bits"] - 1)) - 1 for r in rows), \
+        "a layer's fold quotient is past its clamp"
     out = os.path.join(os.path.dirname(base) or ".", "shapes.json")
     json.dump(dict(rows=rows, worst=worst), open(out, "w"), indent=1)
     print(f"-> {out}")

@@ -57,9 +57,21 @@ pub struct Mat {
     /// per-token / per-channel bf16 scales as (mantissa field, biased exponent)
     pub sx: Vec<(u32, u32)>,
     pub sw: Vec<(u32, u32)>,
+    /// Stream Z, the fold: the consumer's power-of-two scale exponent per
+    /// output channel (`s_v` for the `v` matmul, collapsed from the attention
+    /// witness's per-query-head copy).  Empty on every other variant.
+    pub jv2: Vec<i32>,
 }
 
 impl Mat {
+    /// The fold's divisor exponents (`dequant.rs`'s `Fold` arm): the token
+    /// side `G_t = 134 - es_x` and the channel side `G_c = 134 - ew + jv`.
+    pub fn fold_gt(&self, t: usize) -> i64 {
+        134 - self.sx[t].1 as i64
+    }
+    pub fn fold_gc(&self, c: usize) -> i64 {
+        134 - self.sw[c].1 as i64 + self.jv2[c] as i64
+    }
     /// The largest |acc|, and the `kmax` the shared normalisation table needs.
     pub fn kmax_needed(&self) -> u32 {
         let m = self.acc.iter().map(|a| a.unsigned_abs()).max().unwrap_or(0);
@@ -129,6 +141,9 @@ pub struct Layer {
     /// stream E: `tok_head.i32`, the token each row emits.  The argmax region's
     /// own input when it is composed; `None` unless the dump has a head.
     pub head_tok: Option<Vec<u32>>,
+    /// Stream Z: the attention-output fold's target width, from the manifest;
+    /// 8 on every dump that predates the knob.  `ao_q_bits` is this minus one.
+    pub attn_out_bits: u32,
 }
 
 pub struct GlueCols {
@@ -249,6 +264,14 @@ fn read_i8(path: &str) -> Result<Vec<i32>, String> {
     let raw = witread::read_file(path)?;
     let _s = witread::scope(Site::DecodeI8);
     Ok(raw.par_iter().map(|b| *b as i8 as i32).collect())
+}
+/// Stream Z: the widened attention output commits `qx_o` at int16 storage.
+fn read_i16(path: &str) -> Result<Vec<i32>, String> {
+    let raw = witread::read_file(path)?;
+    let _s = witread::scope(Site::DecodeI8);
+    Ok(raw.par_chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]) as i32)
+        .collect())
 }
 /// The same file as `i32`.  `read_i32` widens every value to `i64` and the
 /// columns that want `i32` then narrow it back, so this is a second pass over
@@ -462,6 +485,9 @@ impl Layer {
                 v[i] = (name, match d {
                     "pow2" => DeqVariant::Pow2,
                     "chain" => DeqVariant::Chain,
+                    // stream Z: the delayed requantize -- the manifest declares
+                    // it, so a fold witness cannot compose under the chain
+                    "fold" => DeqVariant::Fold,
                     other => return Err(format!("manifest: {name} has dequant {other}")),
                 });
             }
@@ -471,9 +497,16 @@ impl Layer {
         };
         let mut mats = vec![];
         let mats_scope = witread::scope(Site::Mats);
+        // Stream Z: a widened attention output stores `o`'s quantized input at
+        // int16.  The manifest says so; a dump without the key is int8.
+        let attn_out_bits = man["attn_out_bits"].as_u64().unwrap_or(8) as u32;
         for (name, var) in vars {
             let acc = read_i32(&format!("{dir}/acc_{name}.i32"))?;
-            let qx = read_i8(&format!("{dir}/qx_{name}.i8"))?;
+            let qx = if name == "o" && attn_out_bits > 8 {
+                read_i16(&format!("{dir}/qx_{name}.i16"))?
+            } else {
+                read_i8(&format!("{dir}/qx_{name}.i8"))?
+            };
             let qw = read_i8(&format!("{dir}/qw_{name}.i8"))?;
             let am = &man["accumulators"][name];
             let (n_in, n_out, tokens) = (am["n_in"].as_u64().unwrap() as usize,
@@ -491,7 +524,7 @@ impl Layer {
             let sx = pair(read_i32(&format!("{dir}/sx_{name}.i32"))?);
             let sw = pair(read_i32(&format!("{dir}/sw_{name}.i32"))?);
             mats.push(Mat { name: name.into(), variant: var, n_in, n_out, tokens,
-                            acc, qx, qw, jx, jw, sx, sw });
+                            acc, qx, qw, jx, jw, sx, sw, jv2: vec![] });
         }
         // B10 step 4: a dump written with `--head` carries `lm_head` as an eighth
         // matmul, in the same file layout as the seven, and declares its rung in
@@ -524,7 +557,7 @@ impl Layer {
             let sx = pair(read_i32(&format!("{dir}/sx_{name}.i32"))?);
             let sw = pair(read_i32(&format!("{dir}/sw_{name}.i32"))?);
             mats.push(Mat { name: name.into(), variant: var, n_in, n_out, tokens,
-                            acc, qx, qw, jx, jw, sx, sw });
+                            acc, qx, qw, jx, jw, sx, sw, jv2: vec![] });
         }
 
         drop(mats_scope);
@@ -550,6 +583,28 @@ impl Layer {
         let jv: Vec<i32> = read_i32_narrow(&format!("{dir}/jv.i32"))?;
         assert_eq!(jo.len(), s, "jo shape");
         assert_eq!(jv.len(), nh * hd, "jv shape");
+        // Stream Z: a fold matmul's consumer scale.  `jv.i32` is per query
+        // head; `v`'s output channels are per KV head, so the GQA groups must
+        // agree before one copy is kept.
+        for m in &mut mats {
+            if m.variant != DeqVariant::Fold {
+                continue;
+            }
+            assert_eq!(m.name, "v", "the fold's only wired site is v");
+            let rep = nh * hd / m.n_out;
+            assert!(rep >= 1 && m.n_out % hd == 0, "fold: v shape vs heads");
+            m.jv2 = (0..m.n_out)
+                .map(|c| {
+                    let (kvh, j) = (c / hd, c % hd);
+                    let v0 = jv[(kvh * rep) * hd + j];
+                    for g in 1..rep {
+                        assert_eq!(jv[(kvh * rep + g) * hd + j], v0,
+                                   "fold: jv disagrees inside a GQA group");
+                    }
+                    v0
+                })
+                .collect();
+        }
         let glue = GlueCols::load(dir, &man, s)?;
         // stream E: B1's key column, when the dump carries a head.  Read as
         // patterns; the comparison happens on the claim, not value by value.
@@ -572,7 +627,44 @@ impl Layer {
             glue,
             head_keys,
             head_tok,
+            attn_out_bits,
         })
+    }
+
+    /// Stream Z: the fold's two data-derived pins, `None` when no matmul is a
+    /// fold.  `alpha` splits the divisor `2^G = 2^(G_t + G_c)` between the
+    /// committed per-token `dent = 2^(G_t - alpha)` and the preprocessed
+    /// per-channel `pj = 2^(G_c - (14 - alpha))`; both halves must be integers
+    /// on every token and channel, which is exactly `alpha <= min_t G_t` and
+    /// `14 - alpha <= min_c G_c` -- and those two together put every slot's
+    /// `G` at 14 or more, which the limb identity needs.  `rem_bits` is the
+    /// width of the high remainder's range check, `bits(2^(max G - 13))`.
+    pub fn fold_pins(&self) -> Option<(u32, u32)> {
+        let mut alpha_hi = i64::MAX;   // min_t G_t
+        let mut beta_hi = i64::MAX;    // min_c G_c
+        let mut g_max = i64::MIN;
+        let mut any = false;
+        for m in &self.mats {
+            if m.variant != DeqVariant::Fold {
+                continue;
+            }
+            any = true;
+            let gt: Vec<i64> = (0..m.tokens).map(|t| m.fold_gt(t)).collect();
+            let gc: Vec<i64> = (0..m.n_out).map(|c| m.fold_gc(c)).collect();
+            alpha_hi = alpha_hi.min(gt.iter().copied().min().unwrap());
+            beta_hi = beta_hi.min(gc.iter().copied().min().unwrap());
+            g_max = g_max.max(gt.iter().copied().max().unwrap()
+                              + gc.iter().copied().max().unwrap());
+        }
+        if !any {
+            return None;
+        }
+        assert!(alpha_hi + beta_hi >= 14,
+                "fold: min G_t + min G_c = {} < 14 -- the divisor cannot split",
+                alpha_hi + beta_hi);
+        let alpha = (14 - beta_hi).max(0).min(alpha_hi);
+        let rem = (g_max - 13).max(1) as u32;
+        Some((alpha as u32, rem))
     }
 
     /// A small, self-consistent synthetic layer, for the container selftest.
@@ -690,6 +782,7 @@ impl Layer {
                 jw: (0..no).map(|_| -(rng.random_range(14..20) as i32)).collect(),
                 sx: (0..s).map(|_| (rng.random_range(0..128), rng.random_range(100..120))).collect(),
                 sw: (0..no).map(|_| (rng.random_range(0..128), rng.random_range(100..120))).collect(),
+                jv2: vec![],
             });
         }
         // attnout from the bands, with scales that keep the quotient inside int8
@@ -728,7 +821,7 @@ impl Layer {
         Self { bands, band_sizes: band_sizes_all, head_offsets, mats,
                ao: AttnOut { nh, s, hd, acc, den, jo, jv },
                source: format!("synthetic layer (seed={seed})"), glue: None,
-               head_keys: None, head_tok: None }
+               head_keys: None, head_tok: None, attn_out_bits: 8 }
     }
 }
 
@@ -1214,7 +1307,8 @@ impl MatRegion {
 /// Build one matmul's dequant region: witness columns in the compose layout,
 /// multiplicities bumped into the shared tables.  Mirrors `dequant::run`'s
 /// witness loop without the tampers (compose probes corrupt the layer witness).
-pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool) -> MatRegion {
+pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool,
+                  fold_bend: (Option<usize>, Option<usize>)) -> MatRegion {
     assert!(spec.sound(), "unsound spec for {}", m.name);
     let lay = MatLayout::choose_or_padded(m.n_out, m.tokens, spec.per_row);
     let mut spec = spec.clone();
@@ -1228,7 +1322,15 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool) -> Mat
     // B7a milestone 4 (19.6): which fill runs. 1 is the device's alone -- the
     // region has no host columns at all and `pre`/`base` stay empty -- and 2
     // builds both and asserts every cell equal before either is used.
-    let m4c = crate::util::m4b_mode("B7_M4_FILL");
+    //
+    // Stream Z: the fold has no device fill; its region takes the host path
+    // whatever the switch says (the corner bands' pattern), and
+    // `devpre::note_host_fill` is told in `generate`.
+    let m4c = if spec.variant == DeqVariant::Fold {
+        0
+    } else {
+        crate::util::m4b_mode("B7_M4_FILL")
+    };
     let m4c_want = m4c == 2;
     if m4c == 1 {
         // B11 stream M: `oside` is the region's, not `with_want`'s. The two
@@ -1256,6 +1358,10 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool) -> Mat
         frac: Vec<(usize, u32)>,
         mul: Vec<(usize, u32)>,
         r8: Vec<(i64, u32)>,
+        /// stream Z, the fold: the (q, nz) pair table and the width-keyed
+        /// range bumps (13, 16 and the fold's own remainder width)
+        qnz: Vec<(i64, u32)>,
+        rw: Vec<((u32, i64), u32)>,
         ref_bad: usize,
         /// B7a milestone 4 (19.6): the f64 cross-check's own bf16 answer per
         /// (row, slot), so `B7_M4_FILL=2` can compare the one part of the fill
@@ -1274,19 +1380,22 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool) -> Mat
             let mut bf2 = std::collections::HashMap::new();
             let mut bm = std::collections::HashMap::new();
             let mut br = std::collections::HashMap::new();
+            let mut bq = std::collections::HashMap::new();
+            let mut brw = std::collections::HashMap::new();
             let mut ref_bad = 0usize;
             let mut want = vec![0u16; if m4c_want { len * lay.per_row } else { 0 }];
             for jj in 0..len {
                 let j = start + jj;
                 fill_mat_row(m, &spec, &lay, &map, tref, j, jj, &mut local,
-                             &mut bn, &mut bf2, &mut bm, &mut br, &mut ref_bad,
-                             &mut want);
+                             &mut bn, &mut bf2, &mut bm, &mut br, &mut bq, &mut brw,
+                             &mut ref_bad, &mut want, fold_bend);
             }
             let collect = |h: std::collections::HashMap<usize, u32>| {
                 h.into_iter().collect::<Vec<_>>()
             };
             (local, Bumps { norm: collect(bn), frac: collect(bf2), mul: collect(bm),
-                            r8: br.into_iter().collect(), ref_bad, want })
+                            r8: br.into_iter().collect(), qnz: bq.into_iter().collect(),
+                            rw: brw.into_iter().collect(), ref_bad, want })
         })
         .collect();
     let mut ref_bad = 0usize;
@@ -1308,6 +1417,24 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool) -> Mat
             } else {
                 tables.off_table += *n as usize;
                 tables.note_off("deq_eo", *v, *n as usize);
+            }
+        }
+        // stream Z, the fold: the pair-table and width-keyed range bumps
+        for (v, n) in &b.qnz {
+            if *v >= 0 && (*v as usize) < tables.m_qnz.len() {
+                tables.m_qnz[*v as usize] += n;
+            } else {
+                tables.off_table += *n as usize;
+                tables.note_off("fold_qnz", *v, *n as usize);
+            }
+        }
+        for ((w, v), n) in &b.rw {
+            let t = tables.ridx(*w);
+            if *v >= 0 && (*v as usize) < tables.m_r[t].len() {
+                tables.m_r[t][*v as usize] += n;
+            } else {
+                tables.off_table += *n as usize;
+                tables.note_off("fold_rem", *v, *n as usize);
             }
         }
         ref_bad += b.ref_bad;
@@ -1337,6 +1464,22 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool) -> Mat
                         m31_u32(if pick == 0 { mw } else { ew })
                     }).collect()));
                 }
+            }
+            // stream Z, the fold: the weight-scale mantissa and the channel
+            // half of the divisor, `pj = 2^(G_c - (14 - alpha))`
+            DeqVariant::Fold => {
+                pre.push(eval_of(lay.log_rows, (0..rows).map(|j| {
+                    let (_, b) = lay.at(m.tokens, j);
+                    m31_u32(m.sw[b * lay.per_row + s].0)
+                }).collect()));
+                let beta = 14 - spec.fold_alpha as i64;
+                pre.push(eval_of(lay.log_rows, (0..rows).map(|j| {
+                    let (_, b) = lay.at(m.tokens, j);
+                    let gc = m.fold_gc(b * lay.per_row + s);
+                    assert!(gc >= beta, "{}: fold channel divisor 2^{gc} below {beta}",
+                            m.name);
+                    m31_of(1i64 << (gc - beta))
+                }).collect()));
             }
             _ => unreachable!(),
         }
@@ -1501,13 +1644,17 @@ pub fn deq_ref_a(a: i64, m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
 /// accumulators, written into a block-local column slice, with table
 /// multiplicities accumulated block-locally (merged by `mat_region`).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Tables,
                 j: usize, jj: usize, local: &mut [Vec<M31>],
                 bn: &mut std::collections::HashMap<usize, u32>,
                 bf2: &mut std::collections::HashMap<usize, u32>,
                 bm: &mut std::collections::HashMap<usize, u32>,
                 br: &mut std::collections::HashMap<i64, u32>,
-                ref_bad: &mut usize, wref: &mut [u16]) {
+                bq: &mut std::collections::HashMap<i64, u32>,
+                brw: &mut std::collections::HashMap<(u32, i64), u32>,
+                ref_bad: &mut usize, wref: &mut [u16],
+                fold_bend: (Option<usize>, Option<usize>)) {
     let f = map.f;
     let sticky = spec.round.needs_sticky();
     // An inert lead row is filled as a row of *zero* accumulators against token 0's
@@ -1519,6 +1666,81 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
         Some((t, b)) => (t, b, false),
         None => (0, 0, true),
     };
+    // ---- stream Z: the fold's own fill (see `dequant.rs`'s `Fold` arm) ------
+    if spec.variant == DeqVariant::Fold {
+        let _ = tables;
+        let (ms, es) = m.sx[t];
+        let alpha = spec.fold_alpha as i64;
+        let gt = m.fold_gt(t);
+        assert!(gt >= alpha, "{}: fold token divisor 2^{gt} below alpha {alpha}", m.name);
+        assert!(es <= 134, "{}: s_x at 2^{} is above 1 -- outside the fold's window",
+                m.name, es);
+        local[map.shared[0]][jj] = m31_u32(ms);
+        let dent_bent = i64::from(!inert && fold_bend.1 == Some(t));
+        local[map.shared[1]][jj] = m31_of(1i64 << (gt - alpha + dent_bent));
+        for s in 0..lay.per_row {
+            let c = b * lay.per_row + s;
+            let a = if inert { 0 } else { m.acc[t * m.n_out + c] };
+            let (mw, _) = m.sw[c];
+            let gc = m.fold_gc(c);
+            assert!(gc >= 14 - alpha,
+                    "{}: fold channel divisor 2^{gc} below {}", m.name, 14 - alpha);
+            let g = (gt + gc) as u32;
+            let mxw = (128 + ms as i64) * (128 + mw as i64);
+            let sg = u32::from(a < 0);
+            let mag = a.unsigned_abs() as i64;
+            assert!(mag < 1i64 << (2 * crate::dequant::FOLD_LIMB),
+                    "{}: fold |acc| {mag} above the two-limb window", m.name);
+            let limb = (1i64 << crate::dequant::FOLD_LIMB) - 1;
+            let (flo, fhi) = (mag & limb, mag >> crate::dequant::FOLD_LIMB);
+            let lo_prod = flo * mxw;
+            let (fa, fb) = (lo_prod >> crate::dequant::FOLD_LIMB, lo_prod & limb);
+            // `round_hafz` on the magnitude: half away from zero
+            let tt = (mag as i128) * (mxw as i128);
+            let mut qm = ((tt + (1i128 << (g - 1))) >> g) as i64;
+            // stream Z's bend control: one quotient moved by +1, everything else
+            // honest -- the high remainder leaves [0, 2 fdp) and must reject
+            let bent = !inert && fold_bend.0 == Some(t * m.n_out + c);
+            if bent {
+                qm += 1;
+            }
+            let fdp = 1i64 << (g - 14);
+            let fe = fhi * mxw + fa - (2 * qm - 1) * fdp;
+            debug_assert!(bent || (0..2 * fdp).contains(&fe),
+                          "{}: fold remainder", m.name);
+            let set = |off: usize, v: M31, local: &mut [Vec<M31>]| {
+                local[map.at(s, off)][jj] = v;
+            };
+            set(f.flo, m31_of(flo), local);
+            set(f.fhi, m31_of(fhi), local);
+            set(f.sg, m31_u32(sg), local);
+            set(f.fa, m31_of(fa), local);
+            set(f.fb, m31_of(fb), local);
+            set(f.qm, m31_of(qm), local);
+            set(f.nz2, m31_u32(u32::from(qm != 0)), local);
+            set(f.fe, m31_of(fe), local);
+            set(f.fdp, m31_of(fdp), local);
+            // the identity gate's cross-check: the harness's own arithmetic,
+            // exact in f64 (the product is 42 bits), against the fill's integers
+            let sxf = (128.0 + ms as f64) * (es as f64 - 134.0).exp2();
+            let (mws, ews) = m.sw[c];
+            let swf = (128.0 + mws as f64) * (ews as f64 - 134.0).exp2();
+            let svf = (m.jv2[c] as f64).exp2();
+            let realq = a as f64 * sxf * swf / svf;
+            let want = (realq.abs() + 0.5).floor() as i64
+                * if realq < 0.0 { -1 } else { 1 };
+            if want != qm * (1 - 2 * sg as i64) {
+                *ref_bad += 1;
+            }
+            *bq.entry(qm).or_default() += 1;
+            *brw.entry((crate::dequant::FOLD_LIMB, flo)).or_default() += 1;
+            *brw.entry((crate::dequant::FOLD_LIMB, fb)).or_default() += 1;
+            *brw.entry((16, fa)).or_default() += 1;
+            *brw.entry((spec.rem_bits, fe)).or_default() += 1;
+            *brw.entry((spec.rem_bits, 2 * fdp - 1 - fe)).or_default() += 1;
+        }
+        return;
+    }
     match spec.variant {
         DeqVariant::Pow2 => local[map.shared[0]][jj] = m31_of(m.jx[t] as i64),
         DeqVariant::Chain => {
@@ -1934,12 +2156,20 @@ fn mat_logup(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
     if r.dev.is_some() {
         return mat_logup_ir(m, r, rv, s_ch, rels, true);
     }
-    let m4b = crate::util::m4b_mode("B7_M4_LOGUPIR");
+    // Stream Z: the fold's fill is on the host and so is its LogUp -- the
+    // hand-written builder below carries its looks, and no generated fraction
+    // kernel is asked for.
+    let m4b = if r.spec.variant == DeqVariant::Fold {
+        0
+    } else {
+        crate::util::m4b_mode("B7_M4_LOGUPIR")
+    };
     let from_ir = (m4b > 0).then(|| mat_logup_ir(m, r, rv, s_ch, rels, m4b >= 3));
     // 2 checks the interpreter against the hand-written builder, 4 the kernel.
     if m4b == 1 || m4b == 3 {
         return from_ir.unwrap();
     }
+    use stwo::prover::backend::simd::m31::PackedM31;
     use stwo::prover::backend::simd::qm31::PackedQM31;
     use stwo_constraint_framework::Relation;
     let map = &r.map;
@@ -1948,12 +2178,16 @@ fn mat_logup(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
     let sticky = sp.round.needs_sticky();
     let one = PackedQM31::broadcast(SecureField::one());
     // pre layout: per-slot chan cols first (1 or 2 per slot), then selectors
-    let chan_w = if sp.variant == DeqVariant::Chain { 2 } else { 1 };
+    let chan_w = if matches!(sp.variant, DeqVariant::Chain | DeqVariant::Fold) { 2 } else { 1 };
     enum L {
         Norm([Src2; 6]),
         Frac([Src2; 3]),
         Mul([Src2; 4], Src2),
         Range(u32, Src2),
+        /// stream Z, the fold: the (q, nz) pair check, and the derived
+        /// complement `2 fdp - 1 - fe` into the fold's remainder table
+        Pair([Src2; 2]),
+        Rem2(u32, Src2, Src2),
     }
     #[derive(Clone, Copy)]
     enum Src2 {
@@ -1963,6 +2197,18 @@ fn mat_logup(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
     }
     let mut looks: Vec<L> = vec![];
     for s in 0..sp.per_row {
+        // stream Z, the fold: no normalisation core -- its six looks stand alone,
+        // in the AIR's `add_to_relation` order
+        if sp.variant == DeqVariant::Fold {
+            looks.push(L::Pair([Src2::B(map.at(s, f.qm)), Src2::B(map.at(s, f.nz2))]));
+            looks.push(L::Range(crate::dequant::FOLD_LIMB, Src2::B(map.at(s, f.flo))));
+            looks.push(L::Range(crate::dequant::FOLD_LIMB, Src2::B(map.at(s, f.fb))));
+            looks.push(L::Range(16, Src2::B(map.at(s, f.fa))));
+            looks.push(L::Range(sp.rem_bits, Src2::B(map.at(s, f.fe))));
+            looks.push(L::Rem2(sp.rem_bits, Src2::B(map.at(s, f.fdp)),
+                               Src2::B(map.at(s, f.fe))));
+            continue;
+        }
         let st = if sticky { Src2::B(map.at(s, f.st)) } else { Src2::Zero };
         looks.push(L::Norm([Src2::B(map.at(s, f.m2)), Src2::B(map.at(s, f.ph)), st,
                             Src2::B(map.at(s, f.m7)), Src2::B(map.at(s, f.ef)),
@@ -2005,6 +2251,16 @@ fn mat_logup(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
                 (PackedQM31::from(get(*m, vr)), rels.mul.combine(&v))
             }
             L::Range(b, s) => (one, rels.range(*b).combine(&[get(*s, vr)])),
+            L::Pair(c) => {
+                let v: Vec<_> = c.iter().map(|s| get(*s, vr)).collect();
+                (one, rels.qnz.combine(&v))
+            }
+            L::Rem2(b, fdp, fe) => {
+                let two = PackedM31::broadcast(M31::from_u32_unchecked(2));
+                let onep = PackedM31::broadcast(M31::from_u32_unchecked(1));
+                let v = get(*fdp, vr) * two - onep - get(*fe, vr);
+                (one, rels.range(*b).combine(&[v]))
+            }
         }
     };
     let (n_pairs, fpair) = crate::plogup::paired(looks.len(), fr);
@@ -2055,12 +2311,13 @@ impl AoRegion {
 
 /// Column order per slot: acc, sg, qm, nz2, denp, d (after the shared den col).
 pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32,
-                 tables: &mut Tables, corrupt: Option<usize>) -> AoRegion {
+                 tables: &mut Tables, corrupt: Option<usize>,
+                 corrupt_q: Option<usize>) -> AoRegion {
     let lay = AoLayout::choose(ao.nh, ao.s, ao.hd, per_row_target);
     let rows = 1usize << lay.log_rows;
     let pr = lay.per_row;
     // B7a milestone 4 (section 3 row 1): the same three-value mode.
-    let m4d = crate::util::m4b_mode("B7_M4_WFILL");
+    let m4d = if corrupt_q.is_some() { 0 } else { crate::util::m4b_mode("B7_M4_WFILL") };
     assert!(m4d == 0 || corrupt.is_none(),
             "attnout: the device fill has no `corrupt` path");
     if m4d == 1 {
@@ -2114,7 +2371,12 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                     // an integer below p, or the field reading is ambiguous
                     assert!(2 * pm < (1i64 << 31) - 1 && 2 * denp < (1i64 << 31) - 1,
                             "attnout fold outgrows the field: pm={pm} denp={denp}");
-                    let qm = (2 * pm + denp) / (2 * denp);
+                    let mut qm = (2 * pm + denp) / (2 * denp);
+                    // stream Z's bend control: one quotient pushed past the pair
+                    // table's domain (the clamp), everything else derived from it
+                    if corrupt_q == Some(idx) {
+                        qm = 1i64 << q_bits;
+                    }
                     let sg = i64::from(a < 0 && qm != 0);
                     let d = if a < 0 && qm == 0 { denp - 2 * pm }
                             else { 2 * pm - (2 * qm - 1) * denp };
@@ -2346,6 +2608,9 @@ pub struct WalkRegion {
     pub name: String,
     pub lay: WalkLayout,
     pub mats: Vec<usize>,
+    /// Stream Z: the activation cells' range width (8, or 12 for the widened
+    /// attention output's group).  The offset is `2^(act_bits - 1)`.
+    pub act_bits: u32,
     /// Under `B7_M4_WFILL=1` these are the *mirror* -- the device columns, back
     /// on the host, because `walk_interaction` still reads them there. The
     /// commitment takes `dev`, so they never go back up.
@@ -2367,16 +2632,20 @@ impl WalkRegion {
     }
 }
 
-/// Build one walk group's region: activations committed (offset +128), weights
-/// preprocessed, byte-range multiplicities bumped.
+/// Build one walk group's region: activations committed (offset
+/// `2^(act_bits-1)`), weights preprocessed, range multiplicities bumped at
+/// `act_bits` -- 8 everywhere but the widened attention output's group.
 pub fn walk_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: usize,
-                   tables: &mut Tables, corrupt_qx: Option<usize>) -> WalkRegion {
+                   act_bits: u32, tables: &mut Tables,
+                   corrupt_qx: Option<usize>, oversize_qx: Option<usize>) -> WalkRegion {
     let m0 = &layer.mats[mat_idx[0]];
     let n_in = m0.n_in;
     let tokens = m0.tokens;
     let n_out_max = mat_idx.iter().map(|i| layer.mats[*i].n_out).max().unwrap();
     let lay = WalkLayout::choose(n_in, n_out_max, tokens, p_target);
     let rows = 1usize << lay.g.log_rows;
+    let off = 1i32 << (act_bits - 1);
+    let qmax = off - 1;
     for i in mat_idx {
         assert_eq!(layer.mats[*i].n_in, n_in, "walk group mixes input widths");
         // q/k/v (and gate/up) must share one committed input
@@ -2386,7 +2655,12 @@ pub fn walk_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: usize
     // B7a milestone 4 (section 3 row 1): which fill runs. 1 is the device's
     // alone -- `pre` and `base` become the mirror the interaction reads -- and
     // 2 builds both and asserts every cell equal before either is used.
-    let m4d = crate::util::m4b_mode("B7_M4_WFILL");
+    //
+    // Stream Z: the device fill packs activations as int8 and bumps the 8-bit
+    // table in its kernel, so a wide group takes the host fill whatever the
+    // switch says -- the corner bands' pattern, and `devpre::note_host_fill`
+    // is told in `generate`.
+    let m4d = if act_bits == 8 { crate::util::m4b_mode("B7_M4_WFILL") } else { 0 };
     assert!(m4d == 0 || corrupt_qx.is_none(),
             "{name}: the device walk fill has no `corrupt_qx` path");
     if m4d == 1 {
@@ -2394,7 +2668,7 @@ pub fn walk_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: usize
         // B7a milestone 4 (section 3 row 1): no mirror. `walk_interaction` reads
         // the device columns now, and nothing else reads a device region's host
         // columns -- `base_cells` counts them off `dev`.
-        return WalkRegion { name: name.into(), lay, mats: mat_idx.to_vec(),
+        return WalkRegion { name: name.into(), lay, mats: mat_idx.to_vec(), act_bits,
                             pre: vec![], base: vec![],
                             n_weights: mat_idx.iter().map(|i| layer.mats[*i].qw.len()).sum(),
                             dev: Some(dev) };
@@ -2415,16 +2689,19 @@ pub fn walk_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: usize
                         let idx = t * n_in + k;
                         let mut x = m0.qx[idx];
                         if corrupt_qx == Some(idx) {
-                            x = if x < 127 { x + 1 } else { x - 1 };
+                            x = if x < qmax { x + 1 } else { x - 1 };
                         }
-                        x + 128
+                        // stream Z's bend control: one committed activation set
+                        // one past its range table -- the o-limb window
+                        if oversize_qx == Some(idx) { x = off } // x + off = 2^act_bits
+                        x + off
                     } else {
-                        128
+                        off
                     }
                 }
-                None => 128,
+                None => off,
             };
-            tables.bump_r(8, v as i64);
+            tables.bump_r(act_bits, v as i64);
             *slot = m31_of(v as i64);
         }
         base.push(eval_of(lay.g.log_rows, col));
@@ -2474,7 +2751,7 @@ pub fn walk_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: usize
 the 8-bit range multiplicities all match",
                   base.len(), pre.len(), (base.len() + pre.len()) << lay.g.log_rows);
     }
-    WalkRegion { name: name.into(), lay, mats: mat_idx.to_vec(), pre, base,
+    WalkRegion { name: name.into(), lay, mats: mat_idx.to_vec(), act_bits, pre, base,
                  n_weights: mat_idx.iter().map(|i| layer.mats[*i].qw.len()).sum(),
                  dev: None }
 }
@@ -2589,7 +2866,8 @@ pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: Se
     // and 38.9% of this family's interaction cells, which the forecast priced.
     if range_check && !gkr {
         let one = PackedQM31::broadcast(SecureField::one());
-        let fr = |i: usize, vr: usize| (one, rels.range(8).combine(&[r.base[i].data[vr]]));
+        let fr = |i: usize, vr: usize|
+            (one, rels.range(r.act_bits).combine(&[r.base[i].data[vr]]));
         let (lcols, s) = crate::devfrac::frac_cols(
             air, &format!("walk {}", r.name), lay.g.log_rows,
             crate::devfrac::cols_of(&r.pre, r.dev.as_ref().map(|d| &d.pre[..])),
