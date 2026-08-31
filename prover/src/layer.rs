@@ -314,7 +314,15 @@ pub fn mat_variants(layout: &str) -> [(&str, DeqVariant); 7] {
     match layout {
         "" | "b65" => MAT_VARIANTS,
         "b10" | "chain" => MAT_VARIANTS_CHAIN,
-        other => panic!("unknown dequant layout {other} (b65 | b10)"),
+        // stream Z: the wired layout on a synthetic layer -- the chain
+        // everywhere, the delayed requantize on v.  A smoke shape for the fold's
+        // AIR, fill and LogUp before a real witness is anywhere near it.
+        "zfold" => {
+            let mut v = MAT_VARIANTS_CHAIN;
+            v[2] = ("v", DeqVariant::Fold);
+            v
+        }
+        other => panic!("unknown dequant layout {other} (b65 | b10 | zfold)"),
     }
 }
 
@@ -784,6 +792,21 @@ impl Layer {
                 sw: (0..no).map(|_| (rng.random_range(0..128), rng.random_range(100..120))).collect(),
                 jv2: vec![],
             });
+            // stream Z: a fold matmul's scales must keep every quotient inside
+            // the pair table -- the divisor covers the blind-worst accumulator.
+            // `G_t` sits in [16, 18] and the channel side makes up the rest.
+            if var == DeqVariant::Fold {
+                let m = mats.last_mut().unwrap();
+                let worst = (127i64 * 127 * m.n_in as i64) << 16;
+                let g_min = (64 - worst.leading_zeros() as i64) - 7 + 1;
+                m.sx = (0..s)
+                    .map(|_| (rng.random_range(0..128), 118 - rng.random_range(0..3)))
+                    .collect();
+                let gc = (g_min - 16).max(1);
+                m.jv2 = m.sw.iter()
+                    .map(|(_, ew)| (gc + rng.random_range(0..2) - 134 + *ew as i64) as i32)
+                    .collect();
+            }
         }
         // attnout from the bands, with scales that keep the quotient inside int8
         // B10 step 3: `+=`, not `=`.  With the corner riding as a second set of

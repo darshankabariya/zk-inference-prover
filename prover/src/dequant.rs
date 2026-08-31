@@ -598,12 +598,16 @@ impl FrameworkEval for DequantEval {
                 let fdp = eval.next_trace_mask();
                 let limb = E::F::from(m31_u32(1 << FOLD_LIMB));
                 let c128 = E::F::from(m31_u32(128));
-                // the Freivalds side reads the accumulator as an expression
+                // the Freivalds side reads the accumulator as an expression.
+                // Unlike the int8 form there is no `sg (1 - nz2)` pin: the fold
+                // commits the *magnitude* (in limbs), so the Freivalds identity
+                // itself pins `sg` for every nonzero accumulator -- including
+                // the sub-half quotients int8's gap-7 fix was for -- and at
+                // zero the expression is zero under either sign.
                 let mag = flo.clone() + fhi.clone() * limb.clone();
                 accs.push(mag.clone() - (mag * sg.clone()) * two);
                 eval.add_constraint(sg.clone() * sg.clone() - sg.clone());
-                // as the int8 form: sg = 0 whenever qm = 0
-                eval.add_constraint(sg * (E::F::one() - nz2.clone()));
+                let _ = sg;
                 eval.add_constraint(fdp.clone() - dent * pj);
                 let mxw = (ms + c128.clone()) * (mw + c128);
                 eval.add_constraint(

@@ -528,6 +528,11 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
         arg_scalar(args, "--s", 32usize), arg_scalar(args, "--ctx", 128usize),
         arg_scalar(args, "--hd", 64usize), &bands, variant, &src,
         arg_scalar(args, "--nin", 64usize), arg_scalar(args, "--nout", 48usize), src.seed);
+    // Stream Z: exercise the widened attention output on a synthetic layer --
+    // a real dump declares its width in the manifest, a synthetic one takes it
+    // here.  The int8-calibrated synthetic data stays complete at any wider
+    // width, so this widens only the table domain and the o walk.
+    l.attn_out_bits = arg_scalar(args, "--synth-ao-bits", l.attn_out_bits);
     tighten_of(&mut l, args);
     (l, vname)
 }

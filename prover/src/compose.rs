@@ -823,6 +823,12 @@ impl Plan {
                         ids.push(chan_col(&m.name, "m", s));
                         ids.push(chan_col(&m.name, "e", s));
                     }
+                    // stream Z: the weight-scale mantissa and the channel half
+                    // of the divisor, `mat_region`'s order
+                    DeqVariant::Fold => {
+                        ids.push(chan_col(&m.name, "m", s));
+                        ids.push(chan_col(&m.name, "p", s));
+                    }
                     _ => unreachable!(),
                 }
             }
