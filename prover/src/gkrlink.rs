@@ -811,7 +811,9 @@ pub fn walk_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
             looks: (0..wp.lay.pq)
                 .map(|i| LinkLook {
                     num: None,
-                    den: range_den(rels.range(8), Affine::col(RCol::Walk(i), one)),
+                    // stream Z: the widened attention output's group ranges its
+                    // activations at act_bits, not 8
+                    den: range_den(rels.range(wp.act_bits), Affine::col(RCol::Walk(i), one)),
                 })
                 .collect(),
         })
