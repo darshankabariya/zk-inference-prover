@@ -420,7 +420,7 @@ Measured on the SIMD reference, one layer of the 8B shape at `C = S`
 |---|---|---|---|---|---|---|
 | 512 | 1.050 G | 23.13 M | 2.2% | 306.8 M | 0/0/0 | True |
 | 1024 | **1.807 G** | 79.82 M | **4.4%** | 613.5 M | 0/0/0 | True |
-| 2048 | — | — | — | — | — | **killed at 133.8 GB RSS** |
+| 2048 | — | — | — | — | — | **killed at 127.6 GiB RSS** (133,799,684 KiB; GNU `time`'s field is KiB, and the box cap is 128 GiB -- it died 0.40 GiB short) |
 
 S=2048 does not fit: the box holds a 128 GiB host cap (b7/README §4), and the
 SIMD reference reached it. The plan's "S=2,048 only if it fits" is answered: it
