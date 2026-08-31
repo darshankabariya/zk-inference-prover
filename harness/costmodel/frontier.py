@@ -54,41 +54,66 @@ def rel(p):
 
 
 # ---------------------------------------------------------------- constants --
-# What this module needs that it cannot compute.  Stream W0 is producing
-# `experiments/paper/constants.json`; until it lands, the entries below carry the
-# same fields it will (value, unit, grade, source) so that the swap is a lookup
-# change and nothing else.  `value: None` means *required and not yet known* --
-# every column that needs it prints `n/a`.
-CONSTANTS_JSON = ROOT / "paper" / "constants.json"
+# Stream W0's freeze, `experiments/paper/constants.json`, read through its own
+# module.  Nothing measured, cited or agreed is written down here: this module
+# names the keys it needs and fails loudly on a `null`.  When the freeze is
+# absent (an older checkout) the fallbacks below carry the same fields, so the
+# swap is a lookup change and nothing else.
+PAPER = ROOT / "paper"
+CONSTANTS_JSON = PAPER / "constants.json"
 
-NEEDED = {
-    # dollars.  The paper prices GPU time at citable reference market rates, not
-    # at what we paid: sponsored access is neither reproducible nor comparable for
-    # a reader, and a zero denominator would make $/Mtok meaningless.  So the
-    # `*_reference_*` keys are the only ones this module ever reads.
-    "h100_reference_usd_per_hour": dict(
-        value=3.39, unit="USD/GPU-hour", grade="[web]",
-        source="Novita on-demand H100, given by the user 2026-08-31"),
-    "h200_reference_usd_per_hour": dict(
-        value=None, unit="USD/GPU-hour", grade="[pending]",
-        source="not yet chosen; the H200 we measure on is sponsored (Amodo) and "
-               "its actual rate is not a publishable reference rate"),
+# The keys this module consumes, and nothing else.
+#   dollars -- the `*_reference_*` pair only.  `*_actual_*` exists in the freeze
+#   marked not-for-publication (the H200 we measure on is sponsored, so its
+#   actual rate is 0.00) and this module must never read it.
+#   the grid -- E1's own composed-chunk solve, plus the other values in
+#   circulation, which section (2) reconciles rather than averages.
+KEYS = dict(
+    h100_usd_per_hour="cost.h100_reference_usd_per_hour",
+    h200_usd_per_hour="cost.h200_reference_usd_per_hour",
+    alpha="attention_grid.e1_composed_solve",
+    alpha_w0_32layers="attention_grid.composed_chunk_fresh_slope_32layers",
+    alpha_w0_l16="attention_grid.composed_chunk_fresh_slope",
+    alpha_b5="attention_grid.b5_standalone_alpha",
+    alpha_base="attention_grid.composed_chunk_base_slope",
+    alpha_inter="attention_grid.composed_chunk_interaction_slope",
+)
+
+# Deliberately all `None`: a market rate moves, and a stale copy of one sitting in
+# this file would price the table at a number nobody cited.  Without the freeze the
+# dollar columns print `n/a`, which is the correct answer.
+FALLBACK = {
+    "cost.h100_reference_usd_per_hour": dict(
+        value=None, unit="USD/GPU-h", grade="pending", card="H100",
+        source="frontier.py fallback; there is no reference rate without the freeze"),
+    "cost.h200_reference_usd_per_hour": dict(
+        value=None, unit="USD/GPU-h", grade="pending", card="H200",
+        source="frontier.py fallback; there is no reference rate without the freeze"),
 }
 
 
 def load_constants():
-    """`experiments/paper/constants.json` if it exists, else the local table.
+    """The freeze if it is there, the fallbacks if it is not.
 
-    Only `*_reference_*` dollar keys are read.  `*_actual_*` keys exist in W0's
-    file marked not-for-publication and this module must never consume them."""
-    table = {k: dict(v, origin="frontier.py (W0's file absent)") for k, v in NEEDED.items()}
+    Returns `{alias: entry}`, each entry carrying the freeze's own value / unit /
+    grade / card / source, plus the key it came from and where it was read."""
+    doc = None
     if CONSTANTS_JSON.exists():
-        doc = json.loads(CONSTANTS_JSON.read_text())
-        for k in NEEDED:
-            if k in doc:
-                e = doc[k] if isinstance(doc[k], dict) else dict(value=doc[k])
-                table[k] = dict(NEEDED[k], **e, origin=rel(CONSTANTS_JSON))
-    return table
+        sys.path.insert(0, str(ROOT))
+        import paper.constants as frozen                       # noqa: E402
+        doc = frozen
+    out = {}
+    for alias, key in KEYS.items():
+        if doc is not None:
+            e = dict(doc.get(key))
+            e["origin"] = rel(CONSTANTS_JSON)
+        else:
+            e = dict(FALLBACK.get(key, dict(value=None, unit="", grade="pending",
+                                            card="none", source="not frozen")))
+            e["origin"] = "frontier.py fallback (the freeze is absent)"
+        e["key"] = key
+        out[alias] = e
+    return out
 
 
 # ------------------------------------------------------- measured artifacts --
@@ -147,9 +172,16 @@ def h100_card():
     ch, s = res["chunks"], res["summary"]
     fresh = sum(c["cells"]["fresh"] for c in ch)
     proof = sum(c["proof_bytes"] for c in ch)
+    # W0's freeze names FOUR boundaries and they are not interchangeable.
+    # `whole wall` = trace gen + interaction gen + stwo + serialize, summed per
+    # chunk -- it has NEVER counted the witness read or the layer build.
+    # `loop_secs` = the one-process chunk loop's own wall, which DOES count them,
+    # and which here is pipelined (one chunk ahead), so the prove hides behind the
+    # next chunk's generation.  Neither is a subset of the other and a reader
+    # comparing our pipelined numbers to our sequence numbers needs both named.
     secs = dict(commit=s["commit_sum"], **{"stwo total": s["stwo_sum"],
                                            "whole wall": s["whole_sum"],
-                                           "pipelined loop": s["loop_secs"]})
+                                           "loop_secs": s["loop_secs"]})
     return dict(card="H100", tokens=TOKENS, per_ctx={4096: dict(
         fresh=fresh, cells_per_token=fresh / TOKENS, proof_bytes=proof,
         mib_per_token=proof / 2 ** 20 / TOKENS, chunks=len(ch),
@@ -158,9 +190,13 @@ def h100_card():
         peak_mib=max(c.get("mem_after_prove", 0) for c in ch) / 2 ** 20,
         peak_chunk_cells=max(c["cells"]["fresh"] for c in ch),
         source=rel(H100_LOOP))},
-        note="32 layer chunks, no head; the fourth boundary `pipelined loop` is "
-             "wider than `whole wall` (it counts the witness read) and smaller "
-             "(the prove hides behind the next chunk's generation)")
+        note="32 layer chunks, no head, pipelined (`B7_M5_PIPE=1`).  `loop_secs` "
+             "is W0's FOURTH boundary and is not `whole wall`: it counts the "
+             "witness read and the layer build, which `whole wall` has never "
+             "counted, and it hides the prove behind the next chunk's generation. "
+             "Here it is both wider (112.89 -> it counts more work) and faster "
+             "(96.33 s -> it overlaps), which is exactly why the two must not be "
+             "compared as if one were a subset of the other.")
 
 
 # ------------------------------------------------------------- the shapes ----
@@ -506,13 +542,24 @@ def main(argv=None):
     batch = args.logup_batch if args.logup_batch is not None else cm.BATCH
     if batch not in cm.LOGUP_MARGINAL:
         sys.exit(f"--logup-batch {batch} not measured; have {sorted(cm.LOGUP_MARGINAL)}")
-    usd = {"H100": consts["h100_reference_usd_per_hour"]["value"],
-           "H200": consts["h200_reference_usd_per_hour"]["value"]}
+    usd = {"H100": consts["h100_usd_per_hour"]["value"],
+           "H200": consts["h200_usd_per_hour"]["value"]}
     h200, h100 = h200_card(), h100_card()
     cards = {"H200": h200, "H100": h100}
     llama8b = next(s for s in SHAPES if s["name"] == "Llama-3.1-8B")
     cal = calibrate(h200, llama8b, batch=batch)
-    alpha = cal["alpha"]
+    # The grid constant is the freeze's, not this run's.  The solve is still done
+    # (it is the derivation the freeze's own entry cites) and the two are asserted
+    # equal, so a drift in either would fail here rather than pass silently.
+    frozen_alpha = consts["alpha"]["value"]
+    if frozen_alpha is not None:
+        if abs(frozen_alpha - cal["alpha"]) > 0.01:
+            sys.exit(f"the freeze's {consts['alpha']['key']} = {frozen_alpha} no longer "
+                     f"matches this module's own solve {cal['alpha']:.4f}; one of the two "
+                     "moved and the disagreement must be resolved, not averaged")
+        alpha = frozen_alpha
+    else:
+        alpha = cal["alpha"]
     fit = prefill_fit()
     mib_per_chunk = (h200["per_ctx"][4096]["proof_bytes"] / 2 ** 20
                      / h200["per_ctx"][4096]["chunks"] / TOKENS)
@@ -523,10 +570,34 @@ def main(argv=None):
 
     # --- the ledger ----------------------------------------------------------
     print("\nthe constants this table stands on (nothing below is typed in twice)")
-    src = "experiments/paper/constants.json" if CONSTANTS_JSON.exists() else "not present"
-    print(f"  W0's constants file: {src}")
+    src = rel(CONSTANTS_JSON) if CONSTANTS_JSON.exists() else "NOT PRESENT (fallbacks)"
+    print(f"  W0's freeze: {src}")
     for k, v in consts.items():
-        print(f"    {k:<34} {str(v['value']):>8} {v['unit']:<14} {v['grade']:<10} {v['source']}")
+        print(f"    {v['key']:<52} {str(v['value']):>8}  [{v['grade']}]")
+    for alias in ("h100_usd_per_hour", "h200_usd_per_hour"):
+        e = consts[alias]
+        print(f"    {e['card']} ${e['value']}/GPU-h  [{e['grade']}]  {e['source']}")
+    print("  Both rates are published list prices from ONE provider, ONE tier and ONE page")
+    print("  date, so the H100/H200 ratio is not a cross-provider artifact.  Secure Cloud")
+    print("  is deliberate: Community Cloud is cheaper ($2.69 / $3.59) and using the higher")
+    print("  tier is the conservative choice for a cost claim -- it makes proving look more")
+    print("  expensive, not less.  The H100 figure is the SXM page, matching our box")
+    print("  (H100 80GB HBM3 SXM, 81,559 MiB); RunPod's PCIe page is $2.89 Secure and is a")
+    print("  different part.  Sanity check, not used in any column: our actual Novita cost")
+    print("  is $3.39/h, within 3% of the list price, so the reference is realistic rather")
+    print("  than cherry-picked.  The H200's `*_actual_*` key is 0.00 (sponsored access) and")
+    print("  this module never reads an `*_actual_*` key.  Grade both $ columns [web].")
+
+    print("\nthe four boundaries, kept apart (W0's freeze names all four)")
+    print("  commit      interpolate + LDE + Merkle over the committed trees")
+    print("  stwo total  commit + prove_ex (constraint eval, quotients, OODS, FRI)")
+    print("  whole wall  trace gen + interaction gen + stwo + serialize, summed per")
+    print("              chunk.  Has NEVER counted the witness read or the layer build.")
+    print("  loop_secs   the one-process chunk loop's own wall, which DOES count them,")
+    print("              pipelined one chunk ahead so the prove hides behind the next")
+    print("              chunk's generation.  A FOURTH boundary, not a superset and not")
+    print("              a subset of `whole wall` -- on the H100 below it counts more")
+    print("              work and still finishes sooner.  W/X/Z/O all report here.")
     for name, card in cards.items():
         for ctx, ref in sorted(card["per_ctx"].items()):
             bs = "  ".join(f"{b} {m['cells_s']/1e9:.3f} G/s" for b, m in ref["boundaries"].items())
@@ -534,6 +605,8 @@ def main(argv=None):
                   f"{ref['cells_per_token']/1e6:7.2f} M cells/token   {bs}")
             print(f"    {'':<14} {ref['source']}")
         print(f"    {'':<14} {card['note']}")
+    print("    the H200 sequence ran one process per chunk, so it has no `loop_secs`;")
+    print("    the H100 loop has no head chunk.  Neither gap is fillable by arithmetic.")
 
     # --- calibration ---------------------------------------------------------
     print("\nthe calibration: one free parameter, two measured points, one residual dof")
@@ -553,6 +626,51 @@ def main(argv=None):
     print(f"  with the one constant replaced it is {min(cal['residual'].values()):+.2%} to "
           f"{max(cal['residual'].values()):+.2%}, and that is a *check*, not a fit:")
     print("  the slope fixes alpha and the two levels are then predicted, not matched.")
+
+    # --- the three composed-slope values, reconciled -------------------------
+    lo, hi = sorted(cal["measured"])
+    Lnh = llama8b["groups"][0]["layers"] * llama8b["nh"]
+    non_grid = (model_cells(llama8b, hi, alpha=0.0, batch=batch)["total"]
+                - model_cells(llama8b, lo, alpha=0.0, batch=batch)["total"]) / (hi - lo) / Lnh
+    meas_slope = (cal["measured"][hi] - cal["measured"][lo]) / (hi - lo) / Lnh
+    w0_32, w0_l16 = consts["alpha_w0_32layers"]["value"], consts["alpha_w0_l16"]["value"]
+    head_share = meas_slope - w0_32
+    print("\n  the three composed-slope values in circulation are the SAME measurement")
+    print("  under three bookkeepings, and they reconcile exactly -- nothing to average:")
+    print(f"    {meas_slope:.4f}   measured slope of the whole 33-chunk sequence, head included")
+    print(f"  = {w0_32:.4f}   W0's 32-layer raw slope (`composed_chunk_fresh_slope_32layers`)")
+    print(f"  + {head_share:.4f}   the head chunk's own growth in C, divided by L*nh")
+    print(f"    {alpha:.4f}   = {meas_slope:.4f} - {non_grid:.4f}, the model's own KV-cache")
+    print("             slope, which it charges as a separate term and must not charge twice")
+    print(f"    {w0_l16:.4f}   W0's L16-alone slope: one layer, the same quantity, "
+          f"{w0_l16 / w0_32 - 1:+.1%} on the 32-layer figure")
+    print(f"    {consts['alpha_base']['value']:.3f} base + {consts['alpha_inter']['value']:.3f} "
+          "interaction -- the base side agrees with B9's 2.25 and B10's 2.750,")
+    print("             so the whole 4.00-vs-5.9 disagreement is interaction cells")
+    print("\n  what each candidate does to the model's two levels:")
+    print(f"  {'candidate':<44} {'alpha':>7} {'4K':>9} {'16K':>9} {'spread':>8}")
+    for label, a in (("E1 solve: measured slope less the model's kv", alpha),
+                     ("W0 32-layer raw slope, charged as-is", w0_32),
+                     ("W0 L16 raw slope, charged as-is", w0_l16),
+                     ("W0 32-layer less the model's kv", w0_32 - non_grid),
+                     ("B5 standalone -- what the model shipped with",
+                      consts["alpha_b5"]["value"])):
+        r = {c: model_cells(llama8b, c, alpha=a, batch=batch)["total"]
+             / cal["measured"][c] - 1 for c in (lo, hi)}
+        print(f"  {label:<44} {a:>7.3f} {r[lo]:>+8.2%} {r[hi]:>+8.2%} "
+              f"{abs(r[hi] - r[lo]):>7.2%}")
+    print(f"\n  This module uses {alpha:.3f}, from the freeze's `{consts['alpha']['key']}`.")
+    print("  Why that one and not the 32-layer figure: this is a whole-model cost model")
+    print("  that charges the committed KV cache as its OWN term, so its grid constant has")
+    print(f"  to be the measured slope MINUS that term ({non_grid:.4f}); charging {w0_32:.3f} directly")
+    print("  double-counts the KV cells, which is a modelling defect rather than a residual,")
+    print("  and it shows up as the widest context spread of the three (see the table).")
+    print(f"  What {alpha:.3f} gets wrong instead, and it is named rather than modelled: it folds")
+    print(f"  the head chunk's own growth in C ({head_share:.4f} per L*nh at 8B) into a per-(layer,")
+    print("  head) term, so it over-scales on deep/wide shapes.  Sized: about +1.3% of")
+    print("  cells/token at 405B and C=16K, against +2.3% for the KV double-count.  Both")
+    print("  are inside the 2.2% spread between the three values, so no frontier row's")
+    print("  ordering or cards-for-20 changes whichever of the three is chosen.")
 
     # --- the shapes ----------------------------------------------------------
     print("\n(1) the shapes, and each one's own parameter check")
@@ -611,6 +729,38 @@ def main(argv=None):
     print("  proof.  It is NOT in the fresh count the measured rates divide, and it is")
     print("  where MoE's x E lands hardest -- see (4).")
 
+    print("\n(2a) what the old grid constant cost: every row at B5's 4.00 against the")
+    print("     composed slope.  This is exactly the error in section 6.3's dense table,")
+    print("     since every figure there was produced with 4.00.")
+    b5 = consts["alpha_b5"]["value"]
+    print(f"  {'model':<18} {'cells/tok 4K @4.00':>19} {'@' + f'{alpha:.3f}':>10} {'delta':>7}"
+          f" {'delta 16K':>10}   {'H200 commit tok/s 4K':>22} {'cards@20':>10}")
+    grid_delta = {}
+    for shape in SHAPES:
+        row = {}
+        for ctx in (4096, 16384):
+            row[ctx] = dict(
+                old=model_cells(shape, ctx, seq=args.seq, seq_batch=args.seq_batch,
+                                alpha=b5, batch=batch)["total"],
+                new=model_cells(shape, ctx, seq=args.seq, seq_batch=args.seq_batch,
+                                alpha=alpha, batch=batch)["total"])
+            row[ctx]["delta"] = row[ctx]["new"] / row[ctx]["old"] - 1
+        cs = h200["per_ctx"][4096]["boundaries"]["commit"]["cells_s"]
+        old, new = row[4096]["old"], row[4096]["new"]
+        row["tok_s_old"], row["tok_s_new"] = cs / old, cs / new
+        grid_delta[shape["name"]] = {str(k): v for k, v in row.items()}
+        print(f"  {shape['name']:<18} {g(old):>19} {g(new):>10} {row[4096]['delta']:>+6.1%}"
+              f" {row[16384]['delta']:>+9.1%}   {cs / old:>9.3f} -> {cs / new:<9.3f}"
+              f"{math.ceil(20 / (cs / old)):>4} -> {math.ceil(20 / (cs / new)):<4}")
+    d4 = [v["4096"]["delta"] for v in grid_delta.values()]
+    d16 = [v["16384"]["delta"] for v in grid_delta.values()]
+    print(f"  The old constant understated cells/token by {min(d4):.1%}-{max(d4):.1%} at C=4K")
+    print(f"  and {min(d16):.1%}-{max(d16):.1%} at C=16K, so it overstated every tok/s and")
+    print("  understated every cards-for-20 count.  The error grows with the context, which")
+    print("  is the whole point: the constant that was wrong is the one on the context term.")
+    print("  The 8B row is the exception the freeze names -- our 30.2 tok/s there is a")
+    print("  measurement, not a model output, so only its model column moves.")
+
     print("\n(2b) proof bytes: two estimates that disagree, and neither is measured above 8B")
     print(f"  {'model':<18} {'by chunk count':>15} {'by 0.15 MiB/B-active':>22} {'ratio':>8}")
     for r in priced:
@@ -638,8 +788,12 @@ def main(argv=None):
         for ctx in sorted(card["per_ctx"]):
             print(f"  C={ctx}")
             bnames = list(card["per_ctx"][ctx]["boundaries"])
+            # the widest boundary this card actually has: `loop_secs` where it was
+            # measured, `whole wall` where it was not.  They are DIFFERENT
+            # boundaries and the header says which one the dollars are priced at.
+            money = "loop_secs" if "loop_secs" in bnames else "whole wall"
             hdr = "".join(f"{b:>17}" for b in bnames)
-            print(f"  {'model':<18}{hdr}   {'MiB/token':>10} {'$/Mtok (wall)':>14}")
+            print(f"  {'model':<18}{hdr}   {'MiB/token':>10} {'$/Mtok @ ' + money:>19}")
             for r in priced:
                 e = r["contexts"][ctx]
                 cells = e["cards"].get(cardname)
@@ -649,10 +803,9 @@ def main(argv=None):
                 for b in bnames:
                     m = cells[b]
                     cs += f"{m['tok_s']:>9.3f}/{m['cards_for_target']:<7}"
-                wall = cells.get("pipelined loop") or cells.get("whole wall")
-                dollars = wall["usd_per_mtok"]
+                dollars = cells[money]["usd_per_mtok"]
                 print(f"  {r['name']:<18}{cs}   {e['mib_per_token_chunks']:>10.2f} "
-                      + (f"{dollars:>14,.0f}" if dollars else f"{'n/a':>14}"))
+                      + (f"{dollars:>19,.0f}" if dollars else f"{'n/a':>19}"))
             print("   (each cell is tok/s on one card / cards needed for the target)")
 
     # --- MoE and the batch knob ----------------------------------------------
@@ -747,12 +900,12 @@ def main(argv=None):
         print("  committed cells by the figures above -- so every tok/s in (3) divides and")
         print("  every $/Mtok multiplies by them, at the same N.")
         print(f"\n  {'model':<18} {'C=4K x':>8} {'cells/token':>12} {'H100 tok/s':>11} "
-              f"{'$/Mtok':>10}   (E11 at N=4096, S=1024, whole wall)")
+              f"{'$/Mtok':>10}   (E11 at N=4096, S=1024, H100 loop_secs)")
         fac = e11[(4096, 1024)]["factor"]
         for r in priced:
             e = r["contexts"][4096]
             c = e["cells_per_token"] * fac
-            h = h100["per_ctx"][4096]["boundaries"]["pipelined loop"]["cells_s"] / c
+            h = h100["per_ctx"][4096]["boundaries"]["loop_secs"]["cells_s"] / c
             d = usd_per_mtok(h, usd["H100"])
             print(f"  {r['name']:<18} {fac:>7.2f}x {g(c):>12} {h:>11.4f} "
                   + (f"{d:>10,.0f}" if d else f"{'n/a':>10}"))
@@ -809,7 +962,7 @@ def main(argv=None):
              for k, v in moe_rows.items()},
         batch_tok_s=batch_rows,
         e11={f"{c}/{s}": v for (c, s), v in (e11 or {}).items()},
-        chunk_fit=fits)
+        chunk_fit=fits, grid_constant_delta=grid_delta)
     pathlib.Path(args.json).write_text(json.dumps(doc, indent=1, default=str))
     print(f"\nwrote {rel(args.json)}")
     return doc
