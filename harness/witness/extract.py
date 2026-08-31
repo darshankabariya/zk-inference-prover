@@ -376,6 +376,11 @@ if __name__ == "__main__":
             assert a.corner, "the v fold's identity check reads the corner's vvc"
             accv = m.rec.cols[f"L{L}.v/acc"].double()               # (S, nkv*hd)
             linv = m.layers[L]["v"]
+            # the fold's statement is `round_hafz(acc s_x s_w / s_v)` and nothing
+            # else -- a v_proj bias (Qwen) sits between the product and the
+            # quantize, and no bias-free gadget can state that site
+            assert linv.bias is None, \
+                "v_proj carries a bias -- the fold cannot state this model's v site"
             sxv = m.rec.cols[f"L{L}.v/s_x"].double()                # (S, 1)
             swv = linv.s_w.detach().to("cpu").double().reshape(1, -1)
             rep = nh * hd // linv.n_out
