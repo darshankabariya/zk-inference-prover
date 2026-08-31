@@ -231,6 +231,11 @@ impl Spec {
     pub fn sound(&self) -> bool {
         match self.variant {
             Variant::Limbs => self.limb_bits.0 + self.limb_bits.1 <= 30,
+            // the high-remainder identity's no-wrap wall:
+            // (2 qm - 1) fdp + fe < 2^(q_bits + rem_bits) + 2^rem_bits < p
+            Variant::Fold => {
+                self.max_abs() <= P as u64 && self.q_bits + self.rem_bits <= 30
+            }
             _ => self.max_abs() <= P as u64,
         }
     }
@@ -268,7 +273,7 @@ pub fn look_units(sp: &Spec) -> Vec<bool> {
         // stream Z: the fold has no normalisation core; its six looks -- the
         // (q, nz) pair and five range checks -- are all at unit multiplicity
         if sp.variant == Variant::Fold {
-            u.extend([true; 6]);
+            u.extend([true; 8]);
             continue;
         }
         u.push(true); // norm
@@ -293,8 +298,9 @@ pub fn range_widths(sp: &Spec) -> Vec<u32> {
     let mut w = match sp.variant {
         Variant::Limbs => vec![sp.limb_bits.0, sp.limb_bits.1],
         Variant::Int8 => vec![sp.rem_bits],
-        // the two limb widths and the high remainder's own width
-        Variant::Fold => vec![FOLD_LIMB, 16, sp.rem_bits],
+        // the limb widths, the high remainder's width, the true quotient's
+        // domain and the clamp's 7 bits
+        Variant::Fold => vec![FOLD_LIMB, 16, sp.rem_bits, sp.q_bits, 7],
         Variant::Round => vec![],
         // the output exponent field: what an over- or underflowing scale trips.
         // Sound, and incomplete outside bf16's normal range.
@@ -356,6 +362,9 @@ pub struct Fields {
     /// committed per-slot divisor `fdp = dent pj = 2^(G - 14)`
     pub fe: usize,
     pub fdp: usize,
+    /// `fold`: the clamped output `qc = min(qm, 127)` -- what the consumer and
+    /// the harness recorder actually hold; `qm` stays the true rounding
+    pub qc: usize,
 }
 
 const NONE: usize = usize::MAX;
@@ -372,7 +381,7 @@ impl Map {
             acc: 0,
             sg: NONE, m2: NONE, ph: NONE, st: NONE, r: NONE, m7: NONE, ef: NONE, nz: NONE,
             eo: NONE, mul: [[NONE; 3]; 2], lo: NONE, qm: NONE, nz2: NONE, d: NONE,
-            flo: NONE, fhi: NONE, fa: NONE, fb: NONE, fe: NONE, fdp: NONE,
+            flo: NONE, fhi: NONE, fa: NONE, fb: NONE, fe: NONE, fdp: NONE, qc: NONE,
         };
         let mut k = 1usize;
         let take = |n: usize, k: &mut usize| {
@@ -399,7 +408,7 @@ impl Map {
                 f.fa = take(1, &mut k);
                 f.fb = take(1, &mut k);
                 f.qm = take(1, &mut k);
-                f.nz2 = take(1, &mut k);
+                f.qc = take(1, &mut k);
                 f.fe = take(1, &mut k);
                 f.fdp = take(1, &mut k);
             }
@@ -593,7 +602,7 @@ impl FrameworkEval for DequantEval {
                 let fa = eval.next_trace_mask();
                 let fb = eval.next_trace_mask();
                 let qm = eval.next_trace_mask();
-                let nz2 = eval.next_trace_mask();
+                let qc = eval.next_trace_mask();
                 let fe = eval.next_trace_mask();
                 let fdp = eval.next_trace_mask();
                 let limb = E::F::from(m31_u32(1 << FOLD_LIMB));
@@ -607,8 +616,11 @@ impl FrameworkEval for DequantEval {
                 let mag = flo.clone() + fhi.clone() * limb.clone();
                 accs.push(mag.clone() - (mag * sg.clone()) * two);
                 eval.add_constraint(sg.clone() * sg.clone() - sg.clone());
-                let _ = sg;
                 eval.add_constraint(fdp.clone() - dent * pj);
+                // the clamp the consumer holds: qc = min(qm, 127).  With
+                // qm - qc and qc both ranged, exactly one root survives.
+                eval.add_constraint(
+                    (qm.clone() - qc.clone()) * (qc.clone() - E::F::from(m31_u32(127))));
                 let mxw = (ms + c128.clone()) * (mw + c128);
                 eval.add_constraint(
                     flo.clone() * mxw.clone() - fa.clone() * limb - fb.clone());
@@ -617,9 +629,14 @@ impl FrameworkEval for DequantEval {
                         + (qm.clone() * two - E::F::one()) * fdp.clone(),
                 );
                 let fep = fdp * two - E::F::one() - fe.clone();
+                let qd = qm.clone() - qc.clone();
                 if !self.gkr {
                     eval.add_to_relation(RelationEntry::new(
-                        &self.qnz, E::EF::one(), &[qm, nz2]));
+                        self.rel(sp.q_bits), E::EF::one(), core::slice::from_ref(&qm)));
+                    eval.add_to_relation(RelationEntry::new(
+                        self.rel(7), E::EF::one(), core::slice::from_ref(&qc)));
+                    eval.add_to_relation(RelationEntry::new(
+                        self.rel(sp.q_bits), E::EF::one(), core::slice::from_ref(&qd)));
                     eval.add_to_relation(RelationEntry::new(
                         self.rel(FOLD_LIMB), E::EF::one(), core::slice::from_ref(&flo)));
                     eval.add_to_relation(RelationEntry::new(

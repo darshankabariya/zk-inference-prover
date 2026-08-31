@@ -383,26 +383,32 @@ if __name__ == "__main__":
             assert bool((svq == svq[:, :1]).all()), "s_v disagrees inside a GQA group"
             sv_flat = svq[:, 0].reshape(1, -1)                      # (1, nkv*hd)
             qv = round_hafz(accv * sxv * swv / sv_flat)
-            assert int(qv.abs().max()) <= 127, \
-                f"v fold quotient {int(qv.abs().max())} > 127 -- a clamped site"
+            # the AIR proves the true rounding and the clamp beside it, so the
+            # completeness precondition is the quotient *domain*, not 127
+            q_dom = (1 << (spec.attn_out_bits - 1)) - 1
+            assert int(qv.abs().max()) <= q_dom, \
+                f"v fold quotient {int(qv.abs().max())} past the {q_dom} domain"
+            clamped = int((qv.abs() > 127).sum())
+            q_true_max = int(qv.abs().max())
+            qv = qv.clamp(-127, 127)
             vvc = m.rec.cols[f"L{L}.vv"][:, P:].double()            # (nh, S, hd)
             vvc_kv = vvc.reshape(nh // rep, rep, S, hd)[:, 0]       # (nkv, S, hd)
             vvc_flat = vvc_kv.permute(1, 0, 2).reshape(S, -1)       # (S, nkv*hd)
             assert bool((qv == vvc_flat).all()), \
-                "v fold identity: round_hafz(acc s_x s_w / s_v) != vvc"
+                "v fold identity: clamp(round_hafz(acc s_x s_w / s_v)) != vvc"
             gt = 134 - bf16_parts(m.rec.cols[f"L{L}.v/s_x"].reshape(-1))[1]
             gc = 134 - bf16_parts(linv.s_w.reshape(-1))[1] \
                 + pow2_exponent(sv_flat.reshape(-1).float())
             assert int(gt.min() + gc.min()) >= 14, "fold divisor below 2^14"
             fold_stats = dict(
-                q_max=int(qv.abs().max()),
+                q_max=q_true_max, clamped=clamped,
                 gt_min=int(gt.min()), gt_max=int(gt.max()),
                 gc_min=int(gc.min()), gc_max=int(gc.max()),
                 fold_rem_bits=int(gt.max() + gc.max() - 13),
                 fold_alpha=int(max(14 - gc.min(), 0)),
             )
-            print(f"  v fold identity holds on {qv.numel():,} sites; "
-                  f"rem {fold_stats['fold_rem_bits']} bits, "
+            print(f"  v fold identity holds on {qv.numel():,} sites "
+                  f"({clamped} clamped); rem {fold_stats['fold_rem_bits']} bits, "
                   f"alpha {fold_stats['fold_alpha']}")
 
         # ---- B10 step 2: the glue's columns -------------------------------------

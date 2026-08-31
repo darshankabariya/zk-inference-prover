@@ -793,11 +793,14 @@ impl Layer {
                 jv2: vec![],
             });
             // stream Z: a fold matmul's scales must keep every quotient inside
-            // the pair table -- the divisor covers the blind-worst accumulator.
-            // `G_t` sits in [16, 18] and the channel side makes up the rest.
+            // its domain and the remainder width inside the field wall at any
+            // attention-output width the shape composes with -- the divisor is
+            // sized off the accumulators this layer actually drew.  `G_t` sits
+            // in [16, 18] and the channel side makes up the rest.
             if var == DeqVariant::Fold {
                 let m = mats.last_mut().unwrap();
-                let worst = (127i64 * 127 * m.n_in as i64) << 16;
+                let amax = m.acc.iter().map(|a| a.unsigned_abs()).max().unwrap().max(1);
+                let worst = (amax as i64) << 16;
                 let g_min = (64 - worst.leading_zeros() as i64) - 7 + 1;
                 m.sx = (0..s)
                     .map(|_| (rng.random_range(0..128), 118 - rng.random_range(0..3)))
@@ -1727,6 +1730,7 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
             if bent {
                 qm += 1;
             }
+            let qc = qm.min(127);
             let fdp = 1i64 << (g - 14);
             let fe = fhi * mxw + fa - (2 * qm - 1) * fdp;
             debug_assert!(bent || (0..2 * fdp).contains(&fe),
@@ -1740,7 +1744,7 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
             set(f.fa, m31_of(fa), local);
             set(f.fb, m31_of(fb), local);
             set(f.qm, m31_of(qm), local);
-            set(f.nz2, m31_u32(u32::from(qm != 0)), local);
+            set(f.qc, m31_of(qc), local);
             set(f.fe, m31_of(fe), local);
             set(f.fdp, m31_of(fdp), local);
             // the identity gate's cross-check: the harness's own arithmetic,
@@ -1750,12 +1754,14 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
             let swf = (128.0 + mws as f64) * (ews as f64 - 134.0).exp2();
             let svf = (m.jv2[c] as f64).exp2();
             let realq = a as f64 * sxf * swf / svf;
-            let want = (realq.abs() + 0.5).floor() as i64
+            let want = (realq.abs() + 0.5).floor().min(127.0) as i64
                 * if realq < 0.0 { -1 } else { 1 };
-            if want != qm * (1 - 2 * sg as i64) {
+            if want != qc * (1 - 2 * sg as i64) {
                 *ref_bad += 1;
             }
-            *bq.entry(qm).or_default() += 1;
+            *brw.entry((spec.q_bits, qm)).or_default() += 1;
+            *brw.entry((7, qc)).or_default() += 1;
+            *brw.entry((spec.q_bits, qm - qc)).or_default() += 1;
             *brw.entry((crate::dequant::FOLD_LIMB, flo)).or_default() += 1;
             *brw.entry((crate::dequant::FOLD_LIMB, fb)).or_default() += 1;
             *brw.entry((16, fa)).or_default() += 1;
@@ -2207,10 +2213,10 @@ fn mat_logup(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
         Frac([Src2; 3]),
         Mul([Src2; 4], Src2),
         Range(u32, Src2),
-        /// stream Z, the fold: the (q, nz) pair check, and the derived
-        /// complement `2 fdp - 1 - fe` into the fold's remainder table
-        Pair([Src2; 2]),
+        /// stream Z, the fold: the derived complement `2 fdp - 1 - fe` and
+        /// the clamp gap `qm - qc`, each into its range table
         Rem2(u32, Src2, Src2),
+        Diff(u32, Src2, Src2),
     }
     #[derive(Clone, Copy)]
     enum Src2 {
@@ -2223,7 +2229,10 @@ fn mat_logup(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
         // stream Z, the fold: no normalisation core -- its six looks stand alone,
         // in the AIR's `add_to_relation` order
         if sp.variant == DeqVariant::Fold {
-            looks.push(L::Pair([Src2::B(map.at(s, f.qm)), Src2::B(map.at(s, f.nz2))]));
+            looks.push(L::Range(sp.q_bits, Src2::B(map.at(s, f.qm))));
+            looks.push(L::Range(7, Src2::B(map.at(s, f.qc))));
+            looks.push(L::Diff(sp.q_bits, Src2::B(map.at(s, f.qm)),
+                               Src2::B(map.at(s, f.qc))));
             looks.push(L::Range(crate::dequant::FOLD_LIMB, Src2::B(map.at(s, f.flo))));
             looks.push(L::Range(crate::dequant::FOLD_LIMB, Src2::B(map.at(s, f.fb))));
             looks.push(L::Range(16, Src2::B(map.at(s, f.fa))));
@@ -2274,9 +2283,9 @@ fn mat_logup(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
                 (PackedQM31::from(get(*m, vr)), rels.mul.combine(&v))
             }
             L::Range(b, s) => (one, rels.range(*b).combine(&[get(*s, vr)])),
-            L::Pair(c) => {
-                let v: Vec<_> = c.iter().map(|s| get(*s, vr)).collect();
-                (one, rels.qnz.combine(&v))
+            L::Diff(b, x, y) => {
+                let v = get(*x, vr) - get(*y, vr);
+                (one, rels.range(*b).combine(&[v]))
             }
             L::Rem2(b, fdp, fe) => {
                 let two = PackedM31::broadcast(M31::from_u32_unchecked(2));
