@@ -354,6 +354,18 @@ MAXARG_CELLS_B65 = ((B65C["requant_max"] - B65C["requant_only"])
                     if B65C and B65C.get("requant_max") else 0.0)
 MAXARG_CELLS_BUILT = B10A["marginal"] if B10A else 0.0
 MAXARG_CELLS = MAXARG_CELLS_BUILT or MAXARG_CELLS_B65
+# E1 / B9 probe 2 (`b9/moe.py`, and `b9/out/moe.json`'s `routing`): the MoE
+# routing-selection argument, priced **by analogy** because nobody has built it.
+# No AIR in this project ties a committed row to a routed instance, so neither
+# number below is a measurement of this gadget -- each is the nearest gadget that
+# was measured, and the model prints them as such.
+#   (a) selection: a LogUp multiset tying each token's FFN rows to the instance of
+#       the expert it was routed to -- B4's packed pair table at 2 cells/lookup
+#       plus the committed expert id.
+#   (b) top-k: an argmax over the router's `E` logits per token -- B6.5's max
+#       argument, `requant_max - requant_only`.
+ROUTE_SEL_CELLS = 3.0
+ROUTE_MAX_CELLS = MAXARG_CELLS_B65 or 3.36
 # `dequant` is the per-accumulator cost of reading the integer *and* rounding it;
 # it subsumes B4's limb term, so `cells_per_token` charges this instead of that.
 DEQUANT_CELLS_PER_ACC = (B6C or {}).get("chain") or 0.0
@@ -525,11 +537,18 @@ def sum_order(n, order):
     raise SystemExit(f"unknown sum order {order}")
 
 
-def glue_cells(cfg, order="tree"):
+def glue_cells(cfg, order="tree", topk=1, final_norm=True):
     """B6.5 open gap 1, per decoded token: what the wiring between the regions
     costs, per gadget.  `d`-wide terms are the residual stream's width, `dff`-wide
-    the SwiGLU's."""
+    the SwiGLU's.
+
+    `topk` (E1): with a top-k MoE router a token passes through `topk` experts, so
+    the SwiGLU is `topk` times as wide.  The norms and the residual adds are on the
+    residual stream and do not move.  `final_norm=False` drops the model-level norm
+    so that a two-group model (dense layers + MoE layers) can be summed without
+    counting it twice."""
     L, d, nh, nkv, hd, dff, vocab = cfg
+    dff = topk * dff
     so = sum_order(d, order)
     # (a) RMSNorm, twice per layer plus the final one.  Per channel: the square
     # (one unary table), its share of the reduction, and the two multiplies
@@ -538,7 +557,7 @@ def glue_cells(cfg, order="tree"):
     # into one region per `(residue, token)` row, so the stream is committed once
     # and read by both -- which is a saving on the *leaves*, not on the ops, and
     # the table below counts ops.
-    norms = 2 * L + 1
+    norms = 2 * L + (1 if final_norm else 0)
     sq = norms * d * UNARY_CELLS
     red = norms * so["adds"] * ADD_CELLS
     scale = norms * 2 * d * MUL_CELLS
@@ -565,19 +584,61 @@ def glue_cells(cfg, order="tree"):
 
 
 def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
-                    head_dequant=None):
+                    head_dequant=None, experts=1, topk=1, seq_batch=1,
+                    head=True, attn_accs_per_layer=None,
+                    attn_params_per_layer=None):
+    """Committed (fresh) cells per decoded token.
+
+    `batch` is the **LogUp lookup-batch size** -- how many lookups share one
+    interaction column, measured in `b2/out/logup.json`.  It is NOT a sequence
+    batch.  E1's sequence-batch knob is `seq_batch`, below; the two are unrelated
+    and the names must stay apart (E1/E6a).
+
+    E1's three additions:
+
+      * `experts` / `topk` -- a mixture of experts.  A proof walks **every** expert
+        the chunk's tokens touch, in full, because Freivalds' weight-side cost is
+        per weight and exactly invariant to how many tokens used it (B9 probe 2:
+        218.63 M preprocessed cells for the 8B FFN whether the expert served 512
+        tokens or 64).  So the FFN's *weight* terms scale with `experts` while its
+        *per-token* terms scale with `topk`, and against a dense model with the
+        same active parameters the weight side is x experts/topk.
+      * `seq_batch` (B) -- how many decoded **sequences** one proof covers.  The
+        per-proof terms (the walk, the preprocessed read) amortise over
+        `seq * seq_batch` tokens rather than `seq`.  This is the MoE counter: at
+        `B ~ experts/topk` each expert sees `seq` tokens again, so its walk is
+        amortised exactly as a dense matmul's is at B = 1.
+      * `attn_accs_per_layer` / `attn_params_per_layer` -- overrides for
+        attention shapes the GQA formulas do not describe (MLA's q/kv low-rank
+        pair, which commits a different accumulator count and a different weight
+        count from `(nh + 2 nkv) hd`).
+
+    `head=False` drops the model-level terms (the `lm_head`'s accumulators, its
+    lookups and the token tie) so that a model whose layers are not all alike can
+    be summed group by group without counting the head more than once.
+    """
     L, d, nh, nkv, hd, dff, vocab = cfg
-    acc_layer = L * ((nh + 2 * nkv) * hd + d + 2 * dff + d)
+    if not head:
+        vocab = 0
+    # the FFN, per token: `topk` experts of width `dff` are actually evaluated
+    dff_active = topk * dff
+    tokens = (seq * seq_batch) if seq else None
+    attn_accs = (attn_accs_per_layer if attn_accs_per_layer is not None
+                 else (nh + 2 * nkv) * hd + d)
+    acc_layer = L * (attn_accs + 2 * dff_active + topk * d)
     acc = acc_layer + vocab
-    act = L * (2 * d + nh * hd + dff) + d
-    nl = L * (2 * dff + 4 * d)
+    act = L * (2 * d + nh * hd + dff_active) + d
+    nl = L * (2 * dff_active + 4 * d)
     # B5: the whole (token, key) grid at the measured alpha, lookup included
     attn = (alpha if alpha is not None else ALPHA) * L * nh * ctx
-    n_lookups = L * (2 * dff + 2 * (2 * d + 1)) + vocab
+    n_lookups = L * (2 * dff_active + 2 * (2 * d + 1)) + vocab
     logup = n_lookups * LOGUP_MARGINAL[batch]
     # B3: the weight walk's accumulators, and a range check per int8 activation.
-    params = n_params(cfg)
-    walk = WEIGHT_WALK_CELLS_PER_WEIGHT * params / seq if seq else 0.0
+    # The walk is a per-*proof* cost, so it divides by the tokens the proof covers
+    # -- `seq * seq_batch`, not `seq`.
+    params = n_params(cfg, experts=experts, walked=True, head=head,
+                      attn_params_per_layer=attn_params_per_layer)
+    walk = WEIGHT_WALK_CELLS_PER_WEIGHT * params / tokens if seq else 0.0
     # B4: the packed pair table halves B3's per-activation range check
     rng_cells = B4C["range_marginal"] if B4C else LOGUP_MARGINAL[batch]
     rng = act * rng_cells if seq else 0.0
@@ -598,7 +659,7 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     attn_out = L * nh * hd * (ATTNOUT_CELLS_PER_ACC or 0.0) if seq else 0.0
     # B6.5: the requantize + max argument, once per *distinct* matmul input
     # (q/k/v share one, gate/up share one; o's input is already int8 via the fold)
-    requant = (L * (2 * d + dff) + d) * REQUANT_CELLS if seq else 0.0
+    requant = (L * (2 * d + dff_active) + d) * REQUANT_CELLS if seq else 0.0
     # B10 step 4: the token tie.  Proving that the emitted token *is* the argmax
     # means showing no other logit is larger, which is one comparison per
     # vocabulary entry per token -- the max argument's own per-value price.  The
@@ -609,22 +670,33 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     # B5: the committed quantized KV cache and queries, and their range checks
     # (2 cells for int11/int12 K and Q, 1 for a pair-packed int8 V), plus the
     # per-token softmax scalars (max, denominator, its limb and two lookups)
+    # the KV cache is written once per token and read by every later token in the
+    # chunk, so it amortises over the chunk's own tokens (`seq`) and not over the
+    # sequences a batched proof carries -- each sequence has its own cache.
     kv_vals = 2.0 * L * nkv * hd * ctx / seq if seq else 0.0
     q_vals = L * nh * hd
     kv = kv_vals + q_vals + (1.5 * kv_vals + 2.0 * q_vals if seq else 0.0)
     softmax_rows = 5.0 * L * nh
+    # E1 / B9 probe 2: the routing-selection gadget, priced by analogy and built by
+    # nobody.  Per token per layer: one LogUp multiset entry tying the token's rows
+    # to each chosen expert's instance (`ROUTE_SEL_CELLS`), and an argmax over the
+    # router's `experts` logits (`ROUTE_MAX_CELLS`, B6.5's max argument).
+    route = (L * (topk * ROUTE_SEL_CELLS + experts * ROUTE_MAX_CELLS)
+             if experts > 1 else 0.0)
     total = (acc + act + nl + attn + logup + walk + rng + limbs + kv + softmax_rows
-             + attn_out + requant + argmax)
+             + attn_out + requant + argmax + route)
     return dict(acc=acc, act=act, nl=nl, attn=attn, logup=logup, n_lookups=n_lookups,
                 walk=walk, range=rng, limbs=limbs, kv=kv, softmax_rows=softmax_rows,
-                attn_out=attn_out, requant=requant, argmax=argmax, dequant_per_acc=per_acc,
+                attn_out=attn_out, requant=requant, argmax=argmax, route=route,
+                dequant_per_acc=per_acc,
                 head_per_acc=head_acc, n_acc=acc, n_acc_layer=acc_layer,
-                flat=acc + act + nl, total=total,
+                flat=acc + act + nl, total=total, walked_params=params,
+                tokens_per_proof=tokens,
                 # committed offline, but read once per proof by the walk
-                preprocessed=PREPROCESSED_PER_WEIGHT * params / seq if seq else 0.0)
+                preprocessed=PREPROCESSED_PER_WEIGHT * params / tokens if seq else 0.0)
 
 
-def lm_head_chunk(cfg, seq):
+def lm_head_chunk(cfg, seq, seq_batch=1):
     """B10 step 4: what the `lm_head` chunk costs, split the way it is built.
 
     One chunk after the final norm, covering `seq` decoded tokens:
@@ -653,35 +725,50 @@ def lm_head_chunk(cfg, seq):
     """
     _, d, _, _, _, _, vocab = cfg
     weights = vocab * d
-    accs = vocab * seq
+    accs = vocab * seq * seq_batch
     walk = weights * WEIGHT_WALK_CELLS_PER_WEIGHT
     pre = weights * PREPROCESSED_PER_WEIGHT
     deq = accs * HEAD_DEQUANT_PER_ACC
     arg = accs * MAXARG_CELLS
     return dict(weights=weights, accumulators=accs, walk=walk, preprocessed=pre,
                 dequant=deq, argmax=arg, fresh=walk + deq + arg,
-                per_token=(walk + deq + arg) / seq)
+                per_token=(walk + deq + arg) / (seq * seq_batch))
 
 
-def n_params(cfg):
+def n_params(cfg, experts=1, topk=1, walked=False, head=True,
+             attn_params_per_layer=None):
+    """Weights in the shape.  `walked=True` returns what one *proof* walks -- every
+    expert in full, because the walk is per weight and does not amortise over the
+    tokens that used it (B9 probe 2).  `walked=False` returns the **active**
+    parameters, `topk` experts per token, which is the number a serving system
+    quotes and the one a like-for-like dense comparison uses."""
     L, d, nh, nkv, hd, dff, vocab = cfg
-    return vocab * d + L * (d * nh * hd + 2 * d * nkv * hd + nh * hd * d + 3 * d * dff)
+    attn = (attn_params_per_layer if attn_params_per_layer is not None
+            else d * nh * hd + 2 * d * nkv * hd + nh * hd * d)
+    n_ffn = experts if walked else topk
+    return (vocab * d if head else 0) + L * (attn + n_ffn * 3 * d * dff)
 
 
-def ops_per_token(cfg, ctx, seq):
+def ops_per_token(cfg, ctx, seq, experts=1, topk=1, seq_batch=1):
     """In-circuit M31 multiplies, the E6b Freivalds model (freivalds.py)."""
     L, d, nh, nkv, hd, dff, vocab = cfg
-    params = n_params(cfg)
-    mats = [(d, (nh + 2 * nkv) * hd), (nh * hd, d), (d, 2 * dff), (dff, d)]
+    params = n_params(cfg, experts=experts, walked=True)
+    dff_active = topk * dff
+    mats = [(d, (nh + 2 * nkv) * hd), (nh * hd, d), (d, 2 * dff_active), (dff_active, d)]
     io = sum(a + b for a, b in mats)
     ext = 4  # QM31 = 4 x M31
-    weight_pass = ext * params / seq
+    weight_pass = ext * params / (seq * seq_batch)
     per_tok_io = ext * L * io
     attn = 3 * ext * L * nh * ctx
-    lookups = L * nh * ctx + L * (2 * dff + 2 * (2 * d + 1)) + vocab
+    lookups = L * nh * ctx + L * (2 * dff_active + 2 * (2 * d + 1)) + vocab
     return dict(total=weight_pass + per_tok_io + attn + lookups, weight_pass=weight_pass,
                 params=params, naive_cells=params + L * 2 * nh * hd * ctx)
 
+
+# the LogUp lookup-batch size the model charges: the cheapest measured batching.
+# This is the `batch` argument of `cells_per_token`, and it has nothing to do with
+# batching *sequences* into one proof, which is `seq_batch` (E1/E6a).
+BATCH = min(LOGUP_MARGINAL, key=LOGUP_MARGINAL.get)
 
 QWEN = (24, 896, 14, 2, 64, 4864, 151936)      # B1's model
 LLAMA8B = (32, 4096, 32, 8, 128, 14336, 128256)  # B8/B9/B10's rung
@@ -696,401 +783,409 @@ def g(x, unit=""):
     return f"{x:.2f} {unit}"
 
 
-print("=" * 78)
-print("B2 cost model - measured stwo constants -> per-token prover budget")
-print("=" * 78)
-print(f"platform: {ENV['arch']}/{ENV['os']}, {ENV['threads']} threads, "
-      f"{ENV['simd_n_lanes']} SIMD lanes")
-print(f"security: blowup {SEC['blowup_factor']}, {SEC['n_queries']} FRI queries, "
-      f"{SEC['pow_bits']} PoW bits -> {SEC['security_bits_conjectured']} bits conjectured, "
-      f"{SEC['hash']}")
-print()
-print("measured constants")
-print(f"  trace commit  2^{CP['log_size']} rows x {CP['n_cols']} cols   "
-      f"{g(COMMIT_CELLS_S)}cells/s   (commit path only, peak over the wide traces)")
-print(f"  whole proof   2^{E2E['log_size']} rows x {E2E['n_cols']} cols   "
-      f"{g(E2E_CELLS_S)}cells/s   (prove() end to end, still rising with size)")
-print(f"  M31 mul       SIMD, {ENV['threads']} threads              {g(M31_MUL_S)}op/s")
-print(f"  QM31 mul      SIMD, {ENV['threads']} threads              {g(QM31_MUL_S)}op/s")
-for b in sorted(LOGUP_MARGINAL):
-    print(f"  LogUp batch {b} into 2^{logup['result']['log_table']} table      "
-          f"{LOGUP_MARGINAL[b]:.0f} extra cells/lookup, {LOGUP_NS[b]:.0f} ns/lookup")
-if B3C:
-    print(f"  r^T W walk    B3, {B3C['weights_per_row']} weights/row     "
-          f"{WEIGHT_WALK_CELLS_PER_WEIGHT:.3f} fresh cells/weight "
-          f"(12/p; {PREPROCESSED_PER_WEIGHT:.2f} preprocessed cells/weight read per proof)")
-else:
-    print("  r^T W walk    NOT MEASURED -- run experiments/b3/run_all.sh; "
-          "the walk is charged 0 cells below")
-if B4C:
-    print(f"  limb decomp   B4, variant {B4C['limb_variant']:<9}      "
-          f"{B4C['cells_per_acc']:.2f} cells/accumulator "
-          f"(sound up to K = {B4C['max_k']:,})")
-    print(f"  int8 range    B4, packed pair table    "
-          f"{B4C['range_marginal']:.2f} cells/activation "
-          f"(B3's one-lookup-per-byte: {B4C['range_marginal_b3']:.2f})")
-    if B4C["lookup_cells"]:
-        print(f"  bf16 lookup   B4, 2^16 table          "
-              f"{B4C['lookup_cells']:.2f} cells/application, witness included")
-else:
-    print("  limb decomp   NOT MEASURED -- run experiments/b4/run_all.sh; "
-          "the dequant is charged 0 cells below")
-if B5C:
-    for v, c in sorted(B5C.items()):
-        print(f"  attention     B5, {v:<8}            "
-              f"{c['alpha_grid']:.2f} cells/(head,key,token) on the grid, "
-              f"{c['alpha_marginal']:.2f} marginal (one head, S={c['s']}, hd={c['hd']})")
-else:
-    print("  attention     NOT MEASURED -- run experiments/b5/run_all.sh; the model "
-          "charges B2's assumed 5 cells/key below")
-if B6C:
-    print(f"  dequant       B6, general bf16 scales  "
-          f"{B6C['chain']:.2f} cells/accumulator "
-          f"(power-of-two scales: {B6C['pow2']:.2f}; B4's integer reading alone: "
-          f"{B6C['limbs']:.2f})")
-    print(f"  attn output   B6, straight to int8     "
-          f"{B6C['int8']:.2f} cells/element "
-          f"(vs a bf16 dequant + reciprocal + requantize)")
-    if B6C["pack"]:
-        pk = B6C["pack"]
-        print(f"  packing       B6, {pk['insts'][0]}-{pk['insts'][-1]} instances, "
-              f"{pk['variant']}")
-        print(f"                {pk['columns']} committed columns, flat; proof "
-              f"{pk['proof_bytes'][0] / 1024:.0f}-{max(pk['proof_bytes']) / 1024:.0f} KiB, "
-              f"i.e. {pk['per_inst'][0] / 1024:.0f} -> {pk['per_inst'][-1] / 1024:.1f} KiB "
-              f"per instance; grid alpha {pk['alpha_grid']:.2f}, block alpha "
-              f"{pk['alpha_block'][0]:.2f} -> {pk['alpha_block'][-1]:.2f} as the shared "
-              f"tables amortise")
-else:
-    print("  dequant       NOT MEASURED -- run experiments/b6/run_all.sh; the model "
-          "falls back to B4's limb term")
-print()
-
-# --- validate the cells model against B1's actual witness ---------------------
-man = B1 / "manifest.json"
-if man.exists():
-    w = json.loads(man.read_text())["witness"]
-    steps = json.loads(man.read_text())["sequence"]["steps"]
-    kinds = w["values_by_kind"]
-    b1_flat = sum(v for k, v in kinds.items() if k != "attention") / steps
-    model_flat = cells_per_token(QWEN, 0, 1)["flat"]
-    print(f"model check vs B1's witness (Qwen2.5-0.5B, context-independent cells/token):")
-    print(f"  B1 measured {b1_flat:,.0f}   model {model_flat:,.0f}   "
-          f"ratio {model_flat / b1_flat:.3f}")
+def report():
+    """The B2 script's own report.  Guarded so that `frontier.py` (E1) and any
+    other caller can import this module for its constants and its model without
+    printing 200 lines first."""
+    print("=" * 78)
+    print("B2 cost model - measured stwo constants -> per-token prover budget")
+    print("=" * 78)
+    print(f"platform: {ENV['arch']}/{ENV['os']}, {ENV['threads']} threads, "
+          f"{ENV['simd_n_lanes']} SIMD lanes")
+    print(f"security: blowup {SEC['blowup_factor']}, {SEC['n_queries']} FRI queries, "
+          f"{SEC['pow_bits']} PoW bits -> {SEC['security_bits_conjectured']} bits conjectured, "
+          f"{SEC['hash']}")
     print()
-
-BATCH = min(LOGUP_MARGINAL, key=LOGUP_MARGINAL.get)  # cheapest measured batching
-print(f"Gemma-3-27B proxy, S={SEQ}, LogUp batch {BATCH} -- the largest blowup 2 allows, "
-      f"since batch b needs degree-(b+1) constraints")
-for ctx in (4096, TARGET_CTX):
-    c = cells_per_token(GEMMA, ctx, BATCH, SEQ)
-    o = ops_per_token(GEMMA, ctx, SEQ)
-    t_commit = c["total"] / COMMIT_CELLS_S
-    t_e2e = c["total"] / E2E_CELLS_S
-    t_field = o["total"] / M31_MUL_S
-    print()
-    print(f"  ctx={ctx}")
-    print(f"    committed cells/token  {g(c['total'])}  "
-          f"(attention {c['attn'] / c['total'] * 100:.0f}%, "
-          f"LogUp columns {c['logup'] / c['total'] * 100:.0f}%, "
-          f"layer I/O {c['flat'] / c['total'] * 100:.0f}%, "
-          f"weight walk {c['walk'] / c['total'] * 100:.0f}%, "
-          f"int8 range {c['range'] / c['total'] * 100:.0f}%, "
-          f"dequant {c['limbs'] / c['total'] * 100:.0f}%, "
-          f"requant {c['requant'] / c['total'] * 100:.0f}%, "
-          f"KV cache {c['kv'] / c['total'] * 100:.0f}%)")
-    print(f"    + preprocessed         {g(c['preprocessed'])}cells/token of weight trace, "
-          f"committed offline but read once per proof (B3)")
-    print(f"    in-circuit M31 mul/tok {g(o['total'])}  "
-          f"(weight pass {o['weight_pass'] / o['total'] * 100:.0f}%)")
-    print(f"    on this box            commit-limited {1 / (t_commit + t_field):5.2f} tok/s"
-          f"   |  measured end-to-end rate {1 / (t_e2e + t_field):5.2f} tok/s")
-
-c = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ)
-o = ops_per_token(GEMMA, TARGET_CTX, SEQ)
-need_cells = c["total"] * TARGET_TOKS
-need_ops = o["total"] * TARGET_TOKS
-print()
-print(f"what {TARGET_TOKS:.0f} tok/s at ctx={TARGET_CTX} requires:")
-print(f"  trace commitment   {g(need_cells)}cells/s")
-print(f"    vs commit path only   {g(COMMIT_CELLS_S)}cells/s  ->  "
-      f"x{need_cells / COMMIT_CELLS_S:,.0f} short")
-print(f"    vs whole-proof rate   {g(E2E_CELLS_S)}cells/s  ->  "
-      f"x{need_cells / E2E_CELLS_S:,.0f} short")
-print(f"  in-circuit field   {g(need_ops)}M31 mul/s  "
-      f"measured {g(M31_MUL_S)}op/s  ->  "
-      + (f"x{need_ops / M31_MUL_S:,.1f} short" if need_ops > M31_MUL_S
-         else f"already {M31_MUL_S / need_ops:,.1f}x headroom"))
-print(f"  commit-every-MAC   {g(o['naive_cells'] * TARGET_TOKS)}cells/s "
-      f"= {o['naive_cells'] * TARGET_TOKS * 4 / 1e12:,.1f} TB/s of trace  ->  impossible")
-if B3C:
-    print()
-    print(f"B3's weight walk, folded in (measured on {B3C['shape']} at S={B3C['s']}):")
-    print(f"  {WEIGHT_WALK_CELLS_PER_WEIGHT:.3f} fresh cells/weight at "
-          f"{B3C['weights_per_row']} weights/row  ->  "
-          f"{g(c['walk'])}cells/token, {c['walk'] / c['total'] * 100:.1f}% of the total")
-    print("  the whole measured trade-off (cells/weight, fresh cells/token):")
-    print("    " + "  ".join(f"{cw:.3f}->{g(fpt)}" for cw, fpt in B3C["range_all"]))
-    print(f"  int8 byte-range checks add {g(c['range'])}cells/token "
-          f"({c['range'] / c['total'] * 100:.1f}%), also new")
-if B4C:
-    print()
-    print(f"B4's terms, folded in:")
-    # B4's own number, not the dequant that superseded it: the model charges one or
-    # the other, and `c` above already charges B6's.
-    b4c = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, dequant=LIMB_CELLS_PER_ACC)
-    print(f"  limb decomposition {LIMB_CELLS_PER_ACC:.2f} cells/accumulator "
-          f"({B4C['limb_variant']})  ->  {g(b4c['limbs'])}cells/token, "
-          f"{b4c['limbs'] / b4c['total'] * 100:.1f}% of what the model was before B6"
-          + (f" -- superseded by B6's {DEQUANT_CELLS_PER_ACC:.2f}, which proves the "
-             f"rounding as well" if B6C else ""))
-    print(f"  packed int8 range check {B4C['range_marginal']:.0f} instead of "
-          f"{B4C['range_marginal_b3']:.0f} cells/activation  ->  {g(c['range'])}cells/token "
-          f"(B3 charged {g(c['act'] * B4C['range_marginal_b3'])})")
-    print(f"  the 2^30 limb bound caps a dot product at K = {B4C['max_k']:,} terms "
-          f"(p/2 alone would allow 66,572); this model's widest matmul is "
-          f"dff = {GEMMA[5]:,}")
+    print("measured constants")
+    print(f"  trace commit  2^{CP['log_size']} rows x {CP['n_cols']} cols   "
+          f"{g(COMMIT_CELLS_S)}cells/s   (commit path only, peak over the wide traces)")
+    print(f"  whole proof   2^{E2E['log_size']} rows x {E2E['n_cols']} cols   "
+          f"{g(E2E_CELLS_S)}cells/s   (prove() end to end, still rising with size)")
+    print(f"  M31 mul       SIMD, {ENV['threads']} threads              {g(M31_MUL_S)}op/s")
+    print(f"  QM31 mul      SIMD, {ENV['threads']} threads              {g(QM31_MUL_S)}op/s")
+    for b in sorted(LOGUP_MARGINAL):
+        print(f"  LogUp batch {b} into 2^{logup['result']['log_table']} table      "
+              f"{LOGUP_MARGINAL[b]:.0f} extra cells/lookup, {LOGUP_NS[b]:.0f} ns/lookup")
+    if B3C:
+        print(f"  r^T W walk    B3, {B3C['weights_per_row']} weights/row     "
+              f"{WEIGHT_WALK_CELLS_PER_WEIGHT:.3f} fresh cells/weight "
+              f"(12/p; {PREPROCESSED_PER_WEIGHT:.2f} preprocessed cells/weight read per proof)")
+    else:
+        print("  r^T W walk    NOT MEASURED -- run experiments/b3/run_all.sh; "
+              "the walk is charged 0 cells below")
+    if B4C:
+        print(f"  limb decomp   B4, variant {B4C['limb_variant']:<9}      "
+              f"{B4C['cells_per_acc']:.2f} cells/accumulator "
+              f"(sound up to K = {B4C['max_k']:,})")
+        print(f"  int8 range    B4, packed pair table    "
+              f"{B4C['range_marginal']:.2f} cells/activation "
+              f"(B3's one-lookup-per-byte: {B4C['range_marginal_b3']:.2f})")
+        if B4C["lookup_cells"]:
+            print(f"  bf16 lookup   B4, 2^16 table          "
+                  f"{B4C['lookup_cells']:.2f} cells/application, witness included")
+    else:
+        print("  limb decomp   NOT MEASURED -- run experiments/b4/run_all.sh; "
+              "the dequant is charged 0 cells below")
+    if B5C:
+        for v, c in sorted(B5C.items()):
+            print(f"  attention     B5, {v:<8}            "
+                  f"{c['alpha_grid']:.2f} cells/(head,key,token) on the grid, "
+                  f"{c['alpha_marginal']:.2f} marginal (one head, S={c['s']}, hd={c['hd']})")
+    else:
+        print("  attention     NOT MEASURED -- run experiments/b5/run_all.sh; the model "
+              "charges B2's assumed 5 cells/key below")
     if B6C:
-        print("  B6's normalisation recovers K <= 66,572 for free: the sign is an "
-              "explicit committed bit there, so the whole 2^30 window is magnitude")
-    print(f"  plan's threshold was 0.25 cells/weight for the 181 M picture to stand: "
-          f"{'stands' if WEIGHT_WALK_CELLS_PER_WEIGHT <= 0.25 else 'DOES NOT stand'}")
-    print(f"  on top, {g(c['preprocessed'])}cells/token of preprocessed weight trace are "
-          f"read per proof")
-    print(f"  ({(c['preprocessed'] + c['total']) / c['total'] - 1:.0%} more cells to walk than "
-          f"the fresh count if a preprocessed cell costs the same as a fresh one; its "
-          f"interpolate/LDE/Merkle share is offline, only quotients and OODS are not)")
-if B6C:
+        print(f"  dequant       B6, general bf16 scales  "
+              f"{B6C['chain']:.2f} cells/accumulator "
+              f"(power-of-two scales: {B6C['pow2']:.2f}; B4's integer reading alone: "
+              f"{B6C['limbs']:.2f})")
+        print(f"  attn output   B6, straight to int8     "
+              f"{B6C['int8']:.2f} cells/element "
+              f"(vs a bf16 dequant + reciprocal + requantize)")
+        if B6C["pack"]:
+            pk = B6C["pack"]
+            print(f"  packing       B6, {pk['insts'][0]}-{pk['insts'][-1]} instances, "
+                  f"{pk['variant']}")
+            print(f"                {pk['columns']} committed columns, flat; proof "
+                  f"{pk['proof_bytes'][0] / 1024:.0f}-{max(pk['proof_bytes']) / 1024:.0f} KiB, "
+                  f"i.e. {pk['per_inst'][0] / 1024:.0f} -> {pk['per_inst'][-1] / 1024:.1f} KiB "
+                  f"per instance; grid alpha {pk['alpha_grid']:.2f}, block alpha "
+                  f"{pk['alpha_block'][0]:.2f} -> {pk['alpha_block'][-1]:.2f} as the shared "
+                  f"tables amortise")
+    else:
+        print("  dequant       NOT MEASURED -- run experiments/b6/run_all.sh; the model "
+              "falls back to B4's limb term")
     print()
-    print("B6's terms, folded in:")
-    ch = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, dequant=B6C["chain"])
-    p2 = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, dequant=B6C["pow2"])
-    b4 = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, dequant=B6C["limbs"])
-    print(f"  {ch['n_acc'] / 1e6:.2f} M accumulators/token, each one read as an integer "
-          f"*and* rounded to bf16")
-    print(f"    general bf16 scales  {B6C['chain']:.2f} cells/acc  ->  "
-          f"{g(ch['limbs'])}cells/token, {ch['limbs'] / ch['total'] * 100:.0f}% of "
-          f"{g(ch['total'])}  (B1: -0.48% perplexity, i.e. free)")
-    print(f"    power-of-two scales  {B6C['pow2']:.2f} cells/acc  ->  "
-          f"{g(p2['limbs'])}cells/token, {p2['limbs'] / p2['total'] * 100:.0f}% of "
-          f"{g(p2['total'])}  (B1: +2.29% perplexity)")
-    print(f"    B4's integer reading alone was {B6C['limbs']:.2f}  ->  {g(b4['total'])}, "
-          f"so the rounding B4 scoped out is {ch['total'] / b4['total'] - 1:+.0%} of the "
-          f"whole per-token budget")
-    print(f"  attention output straight to int8: {g(ch['attn_out'])}cells/token at "
-          f"{B6C['int8']:.2f} cells/element")
+
+    # --- validate the cells model against B1's actual witness ---------------------
+    man = B1 / "manifest.json"
+    if man.exists():
+        w = json.loads(man.read_text())["witness"]
+        steps = json.loads(man.read_text())["sequence"]["steps"]
+        kinds = w["values_by_kind"]
+        b1_flat = sum(v for k, v in kinds.items() if k != "attention") / steps
+        model_flat = cells_per_token(QWEN, 0, 1)["flat"]
+        print(f"model check vs B1's witness (Qwen2.5-0.5B, context-independent cells/token):")
+        print(f"  B1 measured {b1_flat:,.0f}   model {model_flat:,.0f}   "
+              f"ratio {model_flat / b1_flat:.3f}")
+        print()
+
+    print(f"Gemma-3-27B proxy, S={SEQ}, LogUp batch {BATCH} -- the largest blowup 2 allows, "
+          f"since batch b needs degree-(b+1) constraints")
+    for ctx in (4096, TARGET_CTX):
+        c = cells_per_token(GEMMA, ctx, BATCH, SEQ)
+        o = ops_per_token(GEMMA, ctx, SEQ)
+        t_commit = c["total"] / COMMIT_CELLS_S
+        t_e2e = c["total"] / E2E_CELLS_S
+        t_field = o["total"] / M31_MUL_S
+        print()
+        print(f"  ctx={ctx}")
+        print(f"    committed cells/token  {g(c['total'])}  "
+              f"(attention {c['attn'] / c['total'] * 100:.0f}%, "
+              f"LogUp columns {c['logup'] / c['total'] * 100:.0f}%, "
+              f"layer I/O {c['flat'] / c['total'] * 100:.0f}%, "
+              f"weight walk {c['walk'] / c['total'] * 100:.0f}%, "
+              f"int8 range {c['range'] / c['total'] * 100:.0f}%, "
+              f"dequant {c['limbs'] / c['total'] * 100:.0f}%, "
+              f"requant {c['requant'] / c['total'] * 100:.0f}%, "
+              f"KV cache {c['kv'] / c['total'] * 100:.0f}%)")
+        print(f"    + preprocessed         {g(c['preprocessed'])}cells/token of weight trace, "
+              f"committed offline but read once per proof (B3)")
+        print(f"    in-circuit M31 mul/tok {g(o['total'])}  "
+              f"(weight pass {o['weight_pass'] / o['total'] * 100:.0f}%)")
+        print(f"    on this box            commit-limited {1 / (t_commit + t_field):5.2f} tok/s"
+              f"   |  measured end-to-end rate {1 / (t_e2e + t_field):5.2f} tok/s")
+
+    c = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ)
+    o = ops_per_token(GEMMA, TARGET_CTX, SEQ)
+    need_cells = c["total"] * TARGET_TOKS
+    need_ops = o["total"] * TARGET_TOKS
     print()
-    print("B8's layout, the default above (B9 step 0):")
-    print(f"  {c['n_acc_layer'] / 1e6:.2f} M layer accumulators at "
-          f"{c['dequant_per_acc']:.2f} cells (the chain, Round::Away) and "
-          f"{GEMMA[6] / 1e3:.0f} k `lm_head` accumulators at {c['head_per_acc']:.2f} "
-          f"(power-of-two)")
-    print(f"    -> {g(c['limbs'])}cells/token against {g(ch['limbs'])} chain-everywhere: "
-          f"{g(c['total'])} per token, {c['total'] / ch['total'] - 1:+.1%}")
-    mix = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, dequant=B6C["pow2"],
-                          head_dequant=B6C["pow2"])
-    print(f"    B6.5's mixed layout spanned {g(mix['total'])}-{g(ch['total'])} per token "
-          f"({g(mix['total'] * TARGET_TOKS)}-{g(ch['total'] * TARGET_TOKS)}cells/s for "
-          f"{TARGET_TOKS:.0f} tok/s); B8's attribution retires that range -- pow2 on the "
-          f"layer costs +3.67% perplexity at 8B, so there is one layout, not a band")
+    print(f"what {TARGET_TOKS:.0f} tok/s at ctx={TARGET_CTX} requires:")
+    print(f"  trace commitment   {g(need_cells)}cells/s")
+    print(f"    vs commit path only   {g(COMMIT_CELLS_S)}cells/s  ->  "
+          f"x{need_cells / COMMIT_CELLS_S:,.0f} short")
+    print(f"    vs whole-proof rate   {g(E2E_CELLS_S)}cells/s  ->  "
+          f"x{need_cells / E2E_CELLS_S:,.0f} short")
+    print(f"  in-circuit field   {g(need_ops)}M31 mul/s  "
+          f"measured {g(M31_MUL_S)}op/s  ->  "
+          + (f"x{need_ops / M31_MUL_S:,.1f} short" if need_ops > M31_MUL_S
+             else f"already {M31_MUL_S / need_ops:,.1f}x headroom"))
+    print(f"  commit-every-MAC   {g(o['naive_cells'] * TARGET_TOKS)}cells/s "
+          f"= {o['naive_cells'] * TARGET_TOKS * 4 / 1e12:,.1f} TB/s of trace  ->  impossible")
+    if B3C:
+        print()
+        print(f"B3's weight walk, folded in (measured on {B3C['shape']} at S={B3C['s']}):")
+        print(f"  {WEIGHT_WALK_CELLS_PER_WEIGHT:.3f} fresh cells/weight at "
+              f"{B3C['weights_per_row']} weights/row  ->  "
+              f"{g(c['walk'])}cells/token, {c['walk'] / c['total'] * 100:.1f}% of the total")
+        print("  the whole measured trade-off (cells/weight, fresh cells/token):")
+        print("    " + "  ".join(f"{cw:.3f}->{g(fpt)}" for cw, fpt in B3C["range_all"]))
+        print(f"  int8 byte-range checks add {g(c['range'])}cells/token "
+              f"({c['range'] / c['total'] * 100:.1f}%), also new")
+    if B4C:
+        print()
+        print(f"B4's terms, folded in:")
+        # B4's own number, not the dequant that superseded it: the model charges one or
+        # the other, and `c` above already charges B6's.
+        b4c = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, dequant=LIMB_CELLS_PER_ACC)
+        print(f"  limb decomposition {LIMB_CELLS_PER_ACC:.2f} cells/accumulator "
+              f"({B4C['limb_variant']})  ->  {g(b4c['limbs'])}cells/token, "
+              f"{b4c['limbs'] / b4c['total'] * 100:.1f}% of what the model was before B6"
+              + (f" -- superseded by B6's {DEQUANT_CELLS_PER_ACC:.2f}, which proves the "
+                 f"rounding as well" if B6C else ""))
+        print(f"  packed int8 range check {B4C['range_marginal']:.0f} instead of "
+              f"{B4C['range_marginal_b3']:.0f} cells/activation  ->  {g(c['range'])}cells/token "
+              f"(B3 charged {g(c['act'] * B4C['range_marginal_b3'])})")
+        print(f"  the 2^30 limb bound caps a dot product at K = {B4C['max_k']:,} terms "
+              f"(p/2 alone would allow 66,572); this model's widest matmul is "
+              f"dff = {GEMMA[5]:,}")
+        if B6C:
+            print("  B6's normalisation recovers K <= 66,572 for free: the sign is an "
+                  "explicit committed bit there, so the whole 2^30 window is magnitude")
+        print(f"  plan's threshold was 0.25 cells/weight for the 181 M picture to stand: "
+              f"{'stands' if WEIGHT_WALK_CELLS_PER_WEIGHT <= 0.25 else 'DOES NOT stand'}")
+        print(f"  on top, {g(c['preprocessed'])}cells/token of preprocessed weight trace are "
+              f"read per proof")
+        print(f"  ({(c['preprocessed'] + c['total']) / c['total'] - 1:.0%} more cells to walk than "
+              f"the fresh count if a preprocessed cell costs the same as a fresh one; its "
+              f"interpolate/LDE/Merkle share is offline, only quotients and OODS are not)")
+    if B6C:
+        print()
+        print("B6's terms, folded in:")
+        ch = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, dequant=B6C["chain"])
+        p2 = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, dequant=B6C["pow2"])
+        b4 = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, dequant=B6C["limbs"])
+        print(f"  {ch['n_acc'] / 1e6:.2f} M accumulators/token, each one read as an integer "
+              f"*and* rounded to bf16")
+        print(f"    general bf16 scales  {B6C['chain']:.2f} cells/acc  ->  "
+              f"{g(ch['limbs'])}cells/token, {ch['limbs'] / ch['total'] * 100:.0f}% of "
+              f"{g(ch['total'])}  (B1: -0.48% perplexity, i.e. free)")
+        print(f"    power-of-two scales  {B6C['pow2']:.2f} cells/acc  ->  "
+              f"{g(p2['limbs'])}cells/token, {p2['limbs'] / p2['total'] * 100:.0f}% of "
+              f"{g(p2['total'])}  (B1: +2.29% perplexity)")
+        print(f"    B4's integer reading alone was {B6C['limbs']:.2f}  ->  {g(b4['total'])}, "
+              f"so the rounding B4 scoped out is {ch['total'] / b4['total'] - 1:+.0%} of the "
+              f"whole per-token budget")
+        print(f"  attention output straight to int8: {g(ch['attn_out'])}cells/token at "
+              f"{B6C['int8']:.2f} cells/element")
+        print()
+        print("B8's layout, the default above (B9 step 0):")
+        print(f"  {c['n_acc_layer'] / 1e6:.2f} M layer accumulators at "
+              f"{c['dequant_per_acc']:.2f} cells (the chain, Round::Away) and "
+              f"{GEMMA[6] / 1e3:.0f} k `lm_head` accumulators at {c['head_per_acc']:.2f} "
+              f"(power-of-two)")
+        print(f"    -> {g(c['limbs'])}cells/token against {g(ch['limbs'])} chain-everywhere: "
+              f"{g(c['total'])} per token, {c['total'] / ch['total'] - 1:+.1%}")
+        mix = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, dequant=B6C["pow2"],
+                              head_dequant=B6C["pow2"])
+        print(f"    B6.5's mixed layout spanned {g(mix['total'])}-{g(ch['total'])} per token "
+              f"({g(mix['total'] * TARGET_TOKS)}-{g(ch['total'] * TARGET_TOKS)}cells/s for "
+              f"{TARGET_TOKS:.0f} tok/s); B8's attribution retires that range -- pow2 on the "
+              f"layer costs +3.67% perplexity at 8B, so there is one layout, not a band")
+        print()
+        print("the numerator width, and the window the AIR as built certifies:")
+        print(f"  {'bits':>4} {'nmax':>5} {'Z bits':>7} {'z_hi':>5} {'|A.V| <':>10}  "
+              f"B4 limb 2^29   sign-bit 2^30")
+        for nb in (8, 9, 10, 11):
+            w = attn_window(nb, TARGET_CTX)
+            print(f"  {nb:>4} {w['nmax']:>5} {w['z_bits']:>7} {w['z_hi_bits']:>5} "
+                  f"{'2^' + str(w['av_bound'].bit_length() - 1):>10}  "
+                  f"{'fits' if w['fits_limb_2p29'] else 'OVER':>12}   "
+                  f"{'fits' if w['fits_sign_2p30'] else 'OVER':>13}")
+        print("  8 bits is the last width B4's offset limb variant covers; 9 fits only the")
+        print("  sign-bit reading (B6's chain, and the fold's committed `sg`), and 10 leaves")
+        print("  M31 altogether at C = 16K.  The cell price of the extra bit is zero per")
+        print("  accumulator: no column moves, only two shared range tables widen by one bit")
+        print("  (the denominator's high limb 2^6 -> 2^7 rows, the fold's remainder table x2).")
+    if B65C:
+        print()
+        print("B6.5's terms, folded in:")
+        print(f"  requantize + max argument: {B65C['requant_max']:.2f} cells/value measured "
+              f"({B65C['requant_only']:.2f} without the max argument), charged at "
+              f"{REQUANT_CELLS:.2f} (the committed q is already in `act`)")
+        print(f"    -> {g(c['requant'])}cells/token, "
+              f"{c['requant'] / c['total'] * 100:.1f}% of {g(c['total'])} "
+              f"-- inside the plan's +5-15% guess")
+        for (v, m), cells in sorted(B65C["by_variant"].items()):
+            print(f"    {v:<5} {'with' if m else 'no  '} max argument  {cells:.2f} cells/value")
+        if B65C.get("compose"):
+            cp = B65C["compose"]
+            print(f"  the composed layer proof: {g(cp['fresh'])}fresh cells, "
+                  f"{cp['columns']} columns, {cp['proof_bytes'] / 2**20:.2f} MiB, "
+                  f"accepted by the serialized-statement verifier alone")
+
+    # --- B10 step 2: the glue's price table ----------------------------------------
     print()
-    print("the numerator width, and the window the AIR as built certifies:")
-    print(f"  {'bits':>4} {'nmax':>5} {'Z bits':>7} {'z_hi':>5} {'|A.V| <':>10}  "
-          f"B4 limb 2^29   sign-bit 2^30")
-    for nb in (8, 9, 10, 11):
-        w = attn_window(nb, TARGET_CTX)
-        print(f"  {nb:>4} {w['nmax']:>5} {w['z_bits']:>7} {w['z_hi_bits']:>5} "
-              f"{'2^' + str(w['av_bound'].bit_length() - 1):>10}  "
-              f"{'fits' if w['fits_limb_2p29'] else 'OVER':>12}   "
-              f"{'fits' if w['fits_sign_2p30'] else 'OVER':>13}")
-    print("  8 bits is the last width B4's offset limb variant covers; 9 fits only the")
-    print("  sign-bit reading (B6's chain, and the fold's committed `sg`), and 10 leaves")
-    print("  M31 altogether at C = 16K.  The cell price of the extra bit is zero per")
-    print("  accumulator: no column moves, only two shared range tables widen by one bit")
-    print("  (the denominator's high limb 2^6 -> 2^7 rows, the fold's remainder table x2).")
-if B65C:
+    print("B10 step 2 -- the glue between the regions (B6.5 open gap 1), priced")
+    SRC = "b65/out/glue.json, measured" if B10G and B10G.get("add") else "from the construction"
+    print(f"  bf16 unary (2^16 table)  {UNARY_CELLS:.2f} cells/application  ({SRC}; B4's "
+          f"packed {(B4C or {}).get('lookup_cells', 0):.2f} in a pattern layout)")
+    print(f"  bf16 multiply            {MUL_CELLS:.2f} cells/product       ({SRC}; B6's "
+          f"ladder implies (chain {DEQUANT_AWAY_PER_ACC:.2f} - pow2 "
+          f"{DEQUANT_POW2_AWAY_PER_ACC:.2f}) / 2 = "
+          f"{(DEQUANT_AWAY_PER_ACC - DEQUANT_POW2_AWAY_PER_ACC) / 2:.2f})")
+    print(f"  bf16 add                 {ADD_CELLS:.2f} cells/add           ({SRC}; the "
+          f"construction says {ADD_CELLS_MODEL:.2f}, B4 section 9 guessed 12-15 and built none)")
+    if B10G and B10G.get("value"):
+        print(f"  one committed bf16 value {B10G['value']:.2f} cells                (`sm`, `ef`: "
+              "two columns, which is what keeps every constraint degree 2)")
     print()
-    print("B6.5's terms, folded in:")
-    print(f"  requantize + max argument: {B65C['requant_max']:.2f} cells/value measured "
-          f"({B65C['requant_only']:.2f} without the max argument), charged at "
-          f"{REQUANT_CELLS:.2f} (the committed q is already in `act`)")
-    print(f"    -> {g(c['requant'])}cells/token, "
-          f"{c['requant'] / c['total'] * 100:.1f}% of {g(c['total'])} "
-          f"-- inside the plan's +5-15% guess")
-    for (v, m), cells in sorted(B65C["by_variant"].items()):
-        print(f"    {v:<5} {'with' if m else 'no  '} max argument  {cells:.2f} cells/value")
-    if B65C.get("compose"):
-        cp = B65C["compose"]
-        print(f"  the composed layer proof: {g(cp['fresh'])}fresh cells, "
-              f"{cp['columns']} columns, {cp['proof_bytes'] / 2**20:.2f} MiB, "
-              f"accepted by the serialized-statement verifier alone")
-
-# --- B10 step 2: the glue's price table ----------------------------------------
-print()
-print("B10 step 2 -- the glue between the regions (B6.5 open gap 1), priced")
-SRC = "b65/out/glue.json, measured" if B10G and B10G.get("add") else "from the construction"
-print(f"  bf16 unary (2^16 table)  {UNARY_CELLS:.2f} cells/application  ({SRC}; B4's "
-      f"packed {(B4C or {}).get('lookup_cells', 0):.2f} in a pattern layout)")
-print(f"  bf16 multiply            {MUL_CELLS:.2f} cells/product       ({SRC}; B6's "
-      f"ladder implies (chain {DEQUANT_AWAY_PER_ACC:.2f} - pow2 "
-      f"{DEQUANT_POW2_AWAY_PER_ACC:.2f}) / 2 = "
-      f"{(DEQUANT_AWAY_PER_ACC - DEQUANT_POW2_AWAY_PER_ACC) / 2:.2f})")
-print(f"  bf16 add                 {ADD_CELLS:.2f} cells/add           ({SRC}; the "
-      f"construction says {ADD_CELLS_MODEL:.2f}, B4 section 9 guessed 12-15 and built none)")
-if B10G and B10G.get("value"):
-    print(f"  one committed bf16 value {B10G['value']:.2f} cells                (`sm`, `ef`: "
-          "two columns, which is what keeps every constraint degree 2)")
-print()
-print("  the RMSNorm reduction: three orders, the same adds, different shapes")
-print(f"  {'order':<11} {'adds (d=4096)':>14} {'regions':>8} {'worst drift':>12}")
-for o in ("tree", "two-level", "running"):
-    so = sum_order(4096, o)
-    print(f"  {o:<11} {so['adds']:>14,} {so['regions']:>8} "
-          f"{so['err_ulps'] / 512.0:>11.1%}")
-print("  (drift = worst-case relative error of the reduction, err_ulps x 2^-9; B1's")
-print("   `reduce=\"bf16-norm\"` is the tree, and B1 scores it at 22.758 against the")
-print("   base spec's 22.835 at 0.5B -- the fp32 sum `b10-design` specifies is not")
-print("   reproducible by any bf16-add gadget, so proving the norm pins the order)")
-for dr in (B10G or {}).get("drift") or []:
-    print(f"  measured on Qwen-0.5B layer 12, {dr['norm']}, d={dr['d']}: of {dr['tokens']} "
-          f"real tokens the tree's `ms + eps`")
-    print(f"  is bit-identical to B1's fp32 reduction on {dr['identical']} and differs on "
-          f"{dr['differ']}, by at most")
-    print(f"  {dr['worst_ulps']} ulp ({dr['worst_relative']:.2%} relative) -- the whole "
-          "numeric content of the spec change;")
-    print(f"  and the composed two-level regions reproduce `tree_sum`'s own root on "
-          f"{dr['two_level_matches_tree_sum']} of {dr['two_level_checked']}")
-print()
-CHUNKS = {}
-if (B10 / "prove8b.json").exists():
-    try:
-        pt = json.loads((B10 / "prove8b.json").read_text())["result"]["point"]
-        CHUNKS["Llama-3.1-8B"] = (pt["cells"]["fresh"], pt["params"]["s"], pt["params"]["c"])
-    except (ValueError, KeyError):
-        pass
-if B65C and B65C.get("compose"):
-    CHUNKS["Qwen2.5-0.5B"] = (B65C["compose"]["fresh"], SEQ, 1024)
-GLUE_MODELS = [("Qwen2.5-0.5B", QWEN), ("Llama-3.1-8B", LLAMA8B), ("Gemma-3-27B", GEMMA)]
-print("  cells per decoded token, per gadget (the tree order), and per layer chunk")
-print(f"  {'model':<13} {'gadget':<21} {'cells/token':>12} {'per layer':>11} "
-      f"{'chunk S=512':>12} {'% of chunk':>10}")
-for name, cfg in GLUE_MODELS:
-    gl = glue_cells(cfg, "tree")
-    L, d, dff = cfg[0], cfg[1], cfg[5]
-    chunk = CHUNKS.get(name)
-    rows = [("(a) RMSNorm x2", gl["norm"]), ("      of it, the sum", gl["norm_reduce"]),
-            ("(b) SwiGLU", gl["swiglu"]), ("(c) residual adds", gl["resid"]),
-            ("(d) requantize place", gl["requant_place"]),
-            ("glue, total", gl["total"]), ("the stub it replaces", gl["stub"]),
-            ("glue, net", gl["net"])]
-    print(f"  {name:<13} {f'L={L} d={d} dff={dff}':<21}"
-          + (f" {'':>12} {'':>11} {g(chunk[0]):>12}   the chunk, S={chunk[1]} C={chunk[2]}"
-             if chunk else ""))
-    for label, v in rows:
-        per_layer = v / L
-        per_chunk = per_layer * SEQ
-        pc = f"{per_chunk / chunk[0] * 100:9.1f}%" if chunk else f"{'--':>10}"
-        print(f"  {'':<13} {label:<21} {g(v):>12} {g(per_layer):>11} "
-              f"{g(per_chunk):>12} {pc:>10}")
-gl27 = glue_cells(GEMMA, "tree")
-print()
-print(f"  at 27B the glue is {g(gl27['net'])}cells/token net of the stub, i.e. "
-      f"{gl27['net'] / c['total']:+.1%} on {g(c['total'])} -> {g(c['total'] + gl27['net'])}, "
-      f"and {TARGET_TOKS:.0f} tok/s needs "
-      f"{g((c['total'] + gl27['net']) * TARGET_TOKS)}cells/s")
-print("  the requantize's placement is the one gadget with no cell of its own: "
-      f"{g(c['requant'])}cells/token")
-print(f"  are already charged for it ({REQUANT_CELLS:.2f}/value on every distinct matmul "
-      "input), and wiring it")
-print("  between a dequant's output and a walk's input is AIR work, not trace")
-
-# --- B10 step 4: the `lm_head` chunk and the token tie -------------------------
-print()
-print("B10 step 4 -- the `lm_head` chunk, one per 512-token continuation:")
-print(f"  the argmax is priced at {MAXARG_CELLS:.3f} cells/comparison -- the gadget B10 "
-      f"built and proved")
-if B10A:
-    print(f"  (b10/out/argmax_v8k.json, vocab {B10A['vocab']:,}: {B10A['total']:.3f} "
-          f"fresh cells/comparison whole,")
-    print(f"   {MAXARG_CELLS_BUILT:.3f} net of the gadget's own fixed table side, "
-          f"{B10A['base']:.3f} of it base)")
-print(f"  the other candidate, not used: {MAXARG_CELLS_B65:.3f} cells/comparison, inferred "
-      f"from B6.5's")
-print("  requant_max - requant_only (b65/out/requant_*.json) -- the same *shape* of gadget,"
-      " run over")
-print("  the vocabulary instead of a matmul input's row, but not this build of it")
-print("  (the tie `sum_i sel_i * i` rides free on a column the argument already commits)")
-print()
-print(f"  {'model':<10} {'vocab':>9} {'walk':>10} {'dequant':>10} {'argmax':>10} "
-      f"{'fresh':>10} {'preproc':>10}")
-for name, cfg in (("Qwen-0.5B", QWEN), ("Llama-8B", LLAMA8B), ("Gemma-27B", GEMMA)):
-    h = lm_head_chunk(cfg, SEQ)
-    print(f"  {name:<10} {cfg[6]:>9,} {g(h['walk']):>10} {g(h['dequant']):>10} "
-          f"{g(h['argmax']):>10} {g(h['fresh']):>10} {g(h['preprocessed']):>10}")
-h8 = lm_head_chunk(LLAMA8B, SEQ)
-print(f"  at 8B the dequant is {h8['dequant'] / h8['fresh']:.0%} of the chunk and the "
-      f"argmax {h8['argmax'] / h8['fresh']:.0%};")
-print("  comparing the *accumulators* before the dequant would remove most of the "
-      "first, and is")
-print("  the plan's own rider -- it is sound only where the per-channel scales "
-      "are shared, and")
-print("  B1 decodes on the rounded logits, so it has to match those.")
-hg = lm_head_chunk(GEMMA, SEQ)
-print(f"  against the per-token budget: the head is {g(hg['per_token'])}cells/token at "
-      f"27B, {hg['per_token'] / c['total']:.1%} of {g(c['total'])}")
-
-if B5C:
+    print("  the RMSNorm reduction: three orders, the same adds, different shapes")
+    print(f"  {'order':<11} {'adds (d=4096)':>14} {'regions':>8} {'worst drift':>12}")
+    for o in ("tree", "two-level", "running"):
+        so = sum_order(4096, o)
+        print(f"  {o:<11} {so['adds']:>14,} {so['regions']:>8} "
+              f"{so['err_ulps'] / 512.0:>11.1%}")
+    print("  (drift = worst-case relative error of the reduction, err_ulps x 2^-9; B1's")
+    print("   `reduce=\"bf16-norm\"` is the tree, and B1 scores it at 22.758 against the")
+    print("   base spec's 22.835 at 0.5B -- the fp32 sum `b10-design` specifies is not")
+    print("   reproducible by any bf16-add gadget, so proving the norm pins the order)")
+    for dr in (B10G or {}).get("drift") or []:
+        print(f"  measured on Qwen-0.5B layer 12, {dr['norm']}, d={dr['d']}: of {dr['tokens']} "
+              f"real tokens the tree's `ms + eps`")
+        print(f"  is bit-identical to B1's fp32 reduction on {dr['identical']} and differs on "
+              f"{dr['differ']}, by at most")
+        print(f"  {dr['worst_ulps']} ulp ({dr['worst_relative']:.2%} relative) -- the whole "
+              "numeric content of the spec change;")
+        print(f"  and the composed two-level regions reproduce `tree_sum`'s own root on "
+              f"{dr['two_level_matches_tree_sum']} of {dr['two_level_checked']}")
     print()
-    print("B5's terms, folded in:")
-    v1 = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, alpha=ALPHA_V1)
-    print(f"  attention grid at {ALPHA:.2f} cells/(head,key,token) (integer softmax) "
-          f"-> {g(c['attn'])}cells/token, {c['attn'] / c['total'] * 100:.0f}% of the total")
-    print(f"  v1 (committed bf16 exp input) is {ALPHA_V1:.2f} -> {g(v1['attn'])}, "
-          f"i.e. {v1['total'] / c['total'] - 1:+.1%} on the whole per-token budget")
-    print(f"  committed KV cache + queries and their range checks: {g(c['kv'])}cells/token "
-          f"({c['kv'] / c['total'] * 100:.1f}%), a term no earlier model had")
-    print(f"  per-token softmax scalars (max, denominator, its limbs): "
-          f"{g(c['softmax_rows'])}cells/token")
-print()
-print("proof size / verification, measured at blowup 2 and "
-      f"{SEC['n_queries']} queries:")
-for p in fri["result"]["points"]:
-    print(f"  2^{p['log_size']} rows x {p['n_cols']} cols   "
-          f"{p['proof_bytes'] / 1024:6.1f} KiB   verify {p['verify_secs'] * 1e3:5.2f} ms   "
-          f"{p['n_fri_query_positions']} query positions, "
-          f"{p['n_fri_inner_layers']} FRI layers")
-
-
-if commit_host:
-    hp, hl = peak(wide(commit_host)), largest(wide(commit_host))
+    CHUNKS = {}
+    if (B10 / "prove8b.json").exists():
+        try:
+            pt = json.loads((B10 / "prove8b.json").read_text())["result"]["point"]
+            CHUNKS["Llama-3.1-8B"] = (pt["cells"]["fresh"], pt["params"]["s"], pt["params"]["c"])
+        except (ValueError, KeyError):
+            pass
+    if B65C and B65C.get("compose"):
+        CHUNKS["Qwen2.5-0.5B"] = (B65C["compose"]["fresh"], SEQ, 1024)
+    GLUE_MODELS = [("Qwen2.5-0.5B", QWEN), ("Llama-3.1-8B", LLAMA8B), ("Gemma-3-27B", GEMMA)]
+    print("  cells per decoded token, per gadget (the tree order), and per layer chunk")
+    print(f"  {'model':<13} {'gadget':<21} {'cells/token':>12} {'per layer':>11} "
+          f"{'chunk S=512':>12} {'% of chunk':>10}")
+    for name, cfg in GLUE_MODELS:
+        gl = glue_cells(cfg, "tree")
+        L, d, dff = cfg[0], cfg[1], cfg[5]
+        chunk = CHUNKS.get(name)
+        rows = [("(a) RMSNorm x2", gl["norm"]), ("      of it, the sum", gl["norm_reduce"]),
+                ("(b) SwiGLU", gl["swiglu"]), ("(c) residual adds", gl["resid"]),
+                ("(d) requantize place", gl["requant_place"]),
+                ("glue, total", gl["total"]), ("the stub it replaces", gl["stub"]),
+                ("glue, net", gl["net"])]
+        print(f"  {name:<13} {f'L={L} d={d} dff={dff}':<21}"
+              + (f" {'':>12} {'':>11} {g(chunk[0]):>12}   the chunk, S={chunk[1]} C={chunk[2]}"
+                 if chunk else ""))
+        for label, v in rows:
+            per_layer = v / L
+            per_chunk = per_layer * SEQ
+            pc = f"{per_chunk / chunk[0] * 100:9.1f}%" if chunk else f"{'--':>10}"
+            print(f"  {'':<13} {label:<21} {g(v):>12} {g(per_layer):>11} "
+                  f"{g(per_chunk):>12} {pc:>10}")
+    gl27 = glue_cells(GEMMA, "tree")
     print()
-    print("host run (same binary and toolchain, outside the 8 GiB VM), for the trace")
-    print("sizes the container cannot hold:")
-    print(f"  peak     2^{hp['log_size']} x {hp['n_cols']}   {g(hp['base_cells_per_sec']['total'])}cells/s"
-          f"  ->  x{need_cells / hp['base_cells_per_sec']['total']:,.0f} short of {TARGET_TOKS:.0f} tok/s")
-    print(f"  largest  2^{hl['log_size']} x {hl['n_cols']}   {g(hl['base_cells_per_sec']['total'])}cells/s"
-          f"  ->  x{need_cells / hl['base_cells_per_sec']['total']:,.0f} short")
-    same = [(d, h) for d in wide(commit) for h in wide(commit_host)
-            if d["log_size"] == h["log_size"] and d["n_cols"] == h["n_cols"]]
-    if same:
-        ratios = [h["base_cells_per_sec"]["total"] / d["base_cells_per_sec"]["total"]
-                  for d, h in same]
-        print(f"  VM overhead on the {len(same)} overlapping points: host is "
-              f"{min(ratios):.2f}-{max(ratios):.2f}x the container")
+    print(f"  at 27B the glue is {g(gl27['net'])}cells/token net of the stub, i.e. "
+          f"{gl27['net'] / c['total']:+.1%} on {g(c['total'])} -> {g(c['total'] + gl27['net'])}, "
+          f"and {TARGET_TOKS:.0f} tok/s needs "
+          f"{g((c['total'] + gl27['net']) * TARGET_TOKS)}cells/s")
+    print("  the requantize's placement is the one gadget with no cell of its own: "
+          f"{g(c['requant'])}cells/token")
+    print(f"  are already charged for it ({REQUANT_CELLS:.2f}/value on every distinct matmul "
+          "input), and wiring it")
+    print("  between a dequant's output and a walk's input is AIR work, not trace")
 
-# --- B7b's ladder, re-read against this denominator (B9 step 0) ----------------
-# The three boundaries B7a section 5 defines, measured on the H100 at B7b's
-# largest chunk (2.217 G cells, the 7B shape at C = 16K; b7/README 26.5).  They
-# are constants of that run, not of this model -- what moves here is the
-# denominator they are divided into.
-B7B_CHUNK_CELLS = 2.217e9
-B7B = [("commit path", 4.45e9), ("stwo total (commit + prove_ex)", 2.89e9),
-       ("whole wall (generation + stwo + serialize)", 1.46e9)]
-print()
-print(f"B7b's ladder at 27B/ctx={TARGET_CTX}, re-read against {g(c['total'])}cells/token")
-print(f"({g(need_cells)}cells/s for {TARGET_TOKS:.0f} tok/s, measured at B7b's "
-      f"{B7B_CHUNK_CELLS / 1e9:.3f} G chunk):")
-for name, rate_ in B7B:
-    print(f"  {name:<42} {rate_ / 1e9:.2f} G cells/s   x{need_cells / rate_:.1f}   "
-          f"{rate_ / c['total']:5.2f} tok/s  (x{TARGET_TOKS / (rate_ / c['total']):.0f} "
-          f"off {TARGET_TOKS:.0f})")
+    # --- B10 step 4: the `lm_head` chunk and the token tie -------------------------
+    print()
+    print("B10 step 4 -- the `lm_head` chunk, one per 512-token continuation:")
+    print(f"  the argmax is priced at {MAXARG_CELLS:.3f} cells/comparison -- the gadget B10 "
+          f"built and proved")
+    if B10A:
+        print(f"  (b10/out/argmax_v8k.json, vocab {B10A['vocab']:,}: {B10A['total']:.3f} "
+              f"fresh cells/comparison whole,")
+        print(f"   {MAXARG_CELLS_BUILT:.3f} net of the gadget's own fixed table side, "
+              f"{B10A['base']:.3f} of it base)")
+    print(f"  the other candidate, not used: {MAXARG_CELLS_B65:.3f} cells/comparison, inferred "
+          f"from B6.5's")
+    print("  requant_max - requant_only (b65/out/requant_*.json) -- the same *shape* of gadget,"
+          " run over")
+    print("  the vocabulary instead of a matmul input's row, but not this build of it")
+    print("  (the tie `sum_i sel_i * i` rides free on a column the argument already commits)")
+    print()
+    print(f"  {'model':<10} {'vocab':>9} {'walk':>10} {'dequant':>10} {'argmax':>10} "
+          f"{'fresh':>10} {'preproc':>10}")
+    for name, cfg in (("Qwen-0.5B", QWEN), ("Llama-8B", LLAMA8B), ("Gemma-27B", GEMMA)):
+        h = lm_head_chunk(cfg, SEQ)
+        print(f"  {name:<10} {cfg[6]:>9,} {g(h['walk']):>10} {g(h['dequant']):>10} "
+              f"{g(h['argmax']):>10} {g(h['fresh']):>10} {g(h['preprocessed']):>10}")
+    h8 = lm_head_chunk(LLAMA8B, SEQ)
+    print(f"  at 8B the dequant is {h8['dequant'] / h8['fresh']:.0%} of the chunk and the "
+          f"argmax {h8['argmax'] / h8['fresh']:.0%};")
+    print("  comparing the *accumulators* before the dequant would remove most of the "
+          "first, and is")
+    print("  the plan's own rider -- it is sound only where the per-channel scales "
+          "are shared, and")
+    print("  B1 decodes on the rounded logits, so it has to match those.")
+    hg = lm_head_chunk(GEMMA, SEQ)
+    print(f"  against the per-token budget: the head is {g(hg['per_token'])}cells/token at "
+          f"27B, {hg['per_token'] / c['total']:.1%} of {g(c['total'])}")
+
+    if B5C:
+        print()
+        print("B5's terms, folded in:")
+        v1 = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ, alpha=ALPHA_V1)
+        print(f"  attention grid at {ALPHA:.2f} cells/(head,key,token) (integer softmax) "
+              f"-> {g(c['attn'])}cells/token, {c['attn'] / c['total'] * 100:.0f}% of the total")
+        print(f"  v1 (committed bf16 exp input) is {ALPHA_V1:.2f} -> {g(v1['attn'])}, "
+              f"i.e. {v1['total'] / c['total'] - 1:+.1%} on the whole per-token budget")
+        print(f"  committed KV cache + queries and their range checks: {g(c['kv'])}cells/token "
+              f"({c['kv'] / c['total'] * 100:.1f}%), a term no earlier model had")
+        print(f"  per-token softmax scalars (max, denominator, its limbs): "
+              f"{g(c['softmax_rows'])}cells/token")
+    print()
+    print("proof size / verification, measured at blowup 2 and "
+          f"{SEC['n_queries']} queries:")
+    for p in fri["result"]["points"]:
+        print(f"  2^{p['log_size']} rows x {p['n_cols']} cols   "
+              f"{p['proof_bytes'] / 1024:6.1f} KiB   verify {p['verify_secs'] * 1e3:5.2f} ms   "
+              f"{p['n_fri_query_positions']} query positions, "
+              f"{p['n_fri_inner_layers']} FRI layers")
+
+
+    if commit_host:
+        hp, hl = peak(wide(commit_host)), largest(wide(commit_host))
+        print()
+        print("host run (same binary and toolchain, outside the 8 GiB VM), for the trace")
+        print("sizes the container cannot hold:")
+        print(f"  peak     2^{hp['log_size']} x {hp['n_cols']}   {g(hp['base_cells_per_sec']['total'])}cells/s"
+              f"  ->  x{need_cells / hp['base_cells_per_sec']['total']:,.0f} short of {TARGET_TOKS:.0f} tok/s")
+        print(f"  largest  2^{hl['log_size']} x {hl['n_cols']}   {g(hl['base_cells_per_sec']['total'])}cells/s"
+              f"  ->  x{need_cells / hl['base_cells_per_sec']['total']:,.0f} short")
+        same = [(d, h) for d in wide(commit) for h in wide(commit_host)
+                if d["log_size"] == h["log_size"] and d["n_cols"] == h["n_cols"]]
+        if same:
+            ratios = [h["base_cells_per_sec"]["total"] / d["base_cells_per_sec"]["total"]
+                      for d, h in same]
+            print(f"  VM overhead on the {len(same)} overlapping points: host is "
+                  f"{min(ratios):.2f}-{max(ratios):.2f}x the container")
+
+    # --- B7b's ladder, re-read against this denominator (B9 step 0) ----------------
+    # The three boundaries B7a section 5 defines, measured on the H100 at B7b's
+    # largest chunk (2.217 G cells, the 7B shape at C = 16K; b7/README 26.5).  They
+    # are constants of that run, not of this model -- what moves here is the
+    # denominator they are divided into.
+    B7B_CHUNK_CELLS = 2.217e9
+    B7B = [("commit path", 4.45e9), ("stwo total (commit + prove_ex)", 2.89e9),
+           ("whole wall (generation + stwo + serialize)", 1.46e9)]
+    print()
+    print(f"B7b's ladder at 27B/ctx={TARGET_CTX}, re-read against {g(c['total'])}cells/token")
+    print(f"({g(need_cells)}cells/s for {TARGET_TOKS:.0f} tok/s, measured at B7b's "
+          f"{B7B_CHUNK_CELLS / 1e9:.3f} G chunk):")
+    for name, rate_ in B7B:
+        print(f"  {name:<42} {rate_ / 1e9:.2f} G cells/s   x{need_cells / rate_:.1f}   "
+              f"{rate_ / c['total']:5.2f} tok/s  (x{TARGET_TOKS / (rate_ / c['total']):.0f} "
+              f"off {TARGET_TOKS:.0f})")
+
+
+
+if __name__ == "__main__":
+    report()
