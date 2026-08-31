@@ -577,6 +577,36 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
         let (fz, al_frac) = rels.frac.parts();
         let (mz, al_mul) = rels.mul.parts();
         for s in 0..sp.per_row {
+            // stream Z: the fold has no normalisation core; its eight range
+            // looks stand alone, in the AIR's `add_to_relation` order
+            // (`dequant.rs`'s `Fold` arm)
+            if sp.variant == crate::dequant::Variant::Fold {
+                let two = one + one;
+                let lim = crate::dequant::FOLD_LIMB;
+                looks.push(LinkLook { num: None, den: range_den(
+                    rels.range(sp.q_bits), Affine::col(RCol::Deq(map.at(s, f.qm)), one)) });
+                looks.push(LinkLook { num: None, den: range_den(
+                    rels.range(7), Affine::col(RCol::Deq(map.at(s, f.qc)), one)) });
+                looks.push(LinkLook { num: None, den: range_den(
+                    rels.range(sp.q_bits),
+                    Affine { terms: vec![(RCol::Deq(map.at(s, f.qm)), one),
+                                         (RCol::Deq(map.at(s, f.qc)), -one)],
+                             k: SecureField::zero() }) });
+                looks.push(LinkLook { num: None, den: range_den(
+                    rels.range(lim), Affine::col(RCol::Deq(map.at(s, f.flo)), one)) });
+                looks.push(LinkLook { num: None, den: range_den(
+                    rels.range(lim), Affine::col(RCol::Deq(map.at(s, f.fb)), one)) });
+                looks.push(LinkLook { num: None, den: range_den(
+                    rels.range(16), Affine::col(RCol::Deq(map.at(s, f.fa)), one)) });
+                looks.push(LinkLook { num: None, den: range_den(
+                    rels.range(sp.rem_bits), Affine::col(RCol::Deq(map.at(s, f.fe)), one)) });
+                looks.push(LinkLook { num: None, den: range_den(
+                    rels.range(sp.rem_bits),
+                    Affine { terms: vec![(RCol::Deq(map.at(s, f.fdp)), two),
+                                         (RCol::Deq(map.at(s, f.fe)), -one)],
+                             k: -one }) });
+                continue;
+            }
             let st = sticky.then(|| RCol::Deq(map.at(s, f.st)));
             looks.push(LinkLook {
                 num: None,
