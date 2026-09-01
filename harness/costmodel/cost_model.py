@@ -501,6 +501,90 @@ def attn_window(num_bits, ctx, z_lo_bits=Z_LO_BITS):
 ALPHA = (B5C["intexp"]["alpha_grid"] if B5C and "intexp" in B5C else 5.0)
 ALPHA_V1 = (B5C["bf16x"]["alpha_grid"] if B5C and "bf16x" in B5C else 5.0)
 
+# --- the attention band family, as a closed form in (S, C) ---------------------
+# Stream DD (2026-09-01) replaced B9's `p S^2` fit with a two-variable model of the
+# band family, and stream E1 re-derived its coefficients symbolically so they can
+# be evaluated at a shape that is not Llama-8B's.  Every line below is an identity
+# of the layout, read off `prover/src/attn_trace.rs:1167-1181` against
+# `prover/src/layout.rs`; nothing here is fitted.
+#
+#   region                        base                     interaction
+#   channel: keys   `Cells::kv`   pk*rows   = nh*hd*C      2*nh*hd*C  (K range LogUp)
+#                                                          + 12*nh*hd/ct*C (Horner)
+#   channel: queries              pq*rows   = nh*hd*S      2*nh*hd*S  (query range)
+#   grid: score + numerator       2q*rows   = 2*nh*S*C     2*nh*S*C   (exp/numerator)
+#                                                          + 24*nh/gt*S*C (Horner)
+#   grid: V values  `Cells::kv`   pv*rows   = nh*hd*C      2*nh*hd*C  (V range LogUp)
+#   per-token: max, denom, 2 limbs 4*nh*S                  (8*nh + 8*nh/rw)*S
+#   out (A.V)                     the `attnout` family, NOT `bands` -- charged
+#                                 separately by `cells_per_token`'s `attn_out`
+#
+# The layout identities the row counts come from, with `insts` summing to `nh`
+# over the bands (every term is linear in `insts`, so how the heads are banded is
+# cost-neutral -- 16/8/8 costs what 32 would):
+#   lc.g.rows = hd*insts*C/pk,  pk -> chan_target   (LayoutChan::choose)
+#   lk.g.rows =  C*insts*S/q,   q  -> grid_target   (LayoutKey::choose)
+#   rrows*rw  = nh*S                                (the per-token row region)
+#
+# Two things that are NOT derived and would move at another shape:
+#   * `grid_target` / `chan_target` / `rw` are run knobs, not constants.  The
+#     composed sequence used 64 / 128 / 16 and this model keeps them; a prover run
+#     at a frontier shape would `choose()` against the same targets, but the
+#     achieved `pk`/`q` are `div_ceil` results and only tile exactly when S, C, hd
+#     and `insts` are powers of two and the target divides.  Away from that the
+#     real cost is a few percent above this.
+#   * `Grid::new` caps `q` at `min(S, hd)` and `pk` at `min(C, S)`.  Below those
+#     caps the targets are met; above them the layout saturates and these
+#     expressions stop being exact.  `band_cells` reports when it saturates.
+GRID_TARGET, CHAN_TARGET, ROW_WIDTH = 64, 128, 16
+
+
+def band_cells(nh, hd, s, c, grid_target=GRID_TARGET, chan_target=CHAN_TARGET,
+               rw=ROW_WIDTH, rows_region=True):
+    """Committed cells of the attention band family at (S, C) for `nh` heads of
+    width `hd`.  Returns (base, interaction, saturated).
+
+    `rows_region=False` drops the per-token max/denominator region, which is what
+    a corner band does (`attn_trace.rs`, `with_rows = !a.corner`): the corner
+    shares the prefix band's one max and one denominator per token.
+
+    **`hd` here is the ATTENTION head width and `nh` the number of ATTENTION
+    heads.**  The AIR commits one K and one V column set per attention head, not
+    per KV group -- `LayoutChan`/`LayoutKey` are built from `Shape::chans()` and
+    `Shape::keys()`, both of which carry `insts` = attention heads.  So grouped
+    query attention buys this prover nothing on the committed KV side today; a
+    GQA-aware layout would divide the `C` term by `nh/nkv`, and at a frontier
+    shape that ratio is 8-32.  That is a named, unbuilt optimisation, not a
+    modelling choice."""
+    q = max(1, min(grid_target, s, hd))     # scores per grid row, capped by Grid::new
+    pk = max(1, min(chan_target, c, s))     # keys per channel row, same cap
+    row_w = min(rw, max(1, nh * s))
+    # a layer with no attention grid at all (a linear-attention block, priced
+    # here at C = 0) is not a saturated layout, it is an absent one
+    saturated = bool(s and c) and ((q != grid_target) or (pk != chan_target))
+    base = (2 * nh * s * c                       # score + numerator
+            + 2 * nh * hd * c                    # K (channel region) and V (grid)
+            + nh * hd * s                        # the queries
+            + (4 * nh * s if rows_region else 0))  # max, denominator, two limbs
+    inter = ((24.0 * nh / q) * s * c             # the grid's Horner
+             + 2 * nh * s * c                    # exp / numerator LogUp
+             + 2 * nh * hd * c                   # V range LogUp
+             + (12.0 * nh * hd / pk) * c         # the channel region's Horner
+             + 2 * nh * hd * c                   # K range LogUp
+             + 2 * nh * hd * s                   # query range LogUp
+             + ((8.0 * nh + 8.0 * nh / row_w) * s if rows_region else 0))
+    return base, inter, saturated
+
+
+def band_fresh(nh, hd, s, c, corner=True, **kw):
+    """The whole band family of one composed layer chunk: the prefix bands over
+    `c` keys, plus an S x S corner that carries no per-token region."""
+    b, i, sat = band_cells(nh, hd, s, c, **kw)
+    if corner:
+        b2, i2, s2 = band_cells(nh, hd, s, s, rows_region=False, **kw)
+        b, i, sat = b + b2, i + i2, sat or s2
+    return b + i, sat
+
 # ---------------------------------------------------------------- the model --
 # Committed cells per decoded token, in the shape B1's witness actually has.
 #   acc   one int32 accumulator per matmul output              (B1: 45.5% of cells)
@@ -586,7 +670,7 @@ def glue_cells(cfg, order="tree", topk=1, final_norm=True):
 def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
                     head_dequant=None, experts=1, topk=1, seq_batch=1,
                     head=True, attn_accs_per_layer=None,
-                    attn_params_per_layer=None):
+                    attn_params_per_layer=None, corner=True):
     """Committed (fresh) cells per decoded token.
 
     `batch` is the **LogUp lookup-batch size** -- how many lookups share one
@@ -629,8 +713,26 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     acc = acc_layer + vocab
     act = L * (2 * d + nh * hd + dff_active) + d
     nl = L * (2 * dff_active + 4 * d)
-    # B5: the whole (token, key) grid at the measured alpha, lookup included
-    attn = (alpha if alpha is not None else ALPHA) * L * nh * ctx
+    # The attention band family.  Two regimes, and the default is the band model.
+    #
+    # `alpha=<x>` keeps the LEGACY single-slope term, `x * L * nh * C`, which is
+    # what every figure before 2026-09-01 used.  It is retained only so the two
+    # can be printed side by side: a single cells-per-(head, key, token) number is
+    # *not* a price per grid entry.  Stream E7 showed the composed chunk's slope
+    # decomposes as 5.898 = 4.375 (the S*C term, per entry) + 1.5234 (the C-only
+    # K/V commitment, divided by S), so any single slope is only valid at the S it
+    # was solved at -- S=512 here -- and mis-scales in `hd`, `nh` and C together.
+    #
+    # The band model charges the two separately and subsumes what used to be three
+    # terms: `attn`, `kv` (the committed KV cache and queries) and `softmax_rows`.
+    # Charging any of those beside it double-counts.
+    legacy_alpha = alpha is not None
+    if legacy_alpha:
+        attn = alpha * L * nh * ctx
+        band_saturated = False
+    else:
+        per_layer, band_saturated = band_fresh(nh, hd, seq or 1, ctx, corner=corner)
+        attn = L * per_layer / (seq or 1)
     n_lookups = L * (2 * dff_active + 2 * (2 * d + 1)) + vocab
     logup = n_lookups * LOGUP_MARGINAL[batch]
     # B3: the weight walk's accumulators, and a range check per int8 activation.
@@ -673,10 +775,17 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     # the KV cache is written once per token and read by every later token in the
     # chunk, so it amortises over the chunk's own tokens (`seq`) and not over the
     # sequences a batched proof carries -- each sequence has its own cache.
-    kv_vals = 2.0 * L * nkv * hd * ctx / seq if seq else 0.0
-    q_vals = L * nh * hd
-    kv = kv_vals + q_vals + (1.5 * kv_vals + 2.0 * q_vals if seq else 0.0)
-    softmax_rows = 5.0 * L * nh
+    if legacy_alpha:
+        kv_vals = 2.0 * L * nkv * hd * ctx / seq if seq else 0.0
+        q_vals = L * nh * hd
+        kv = kv_vals + q_vals + (1.5 * kv_vals + 2.0 * q_vals if seq else 0.0)
+        softmax_rows = 5.0 * L * nh
+    else:
+        # both are inside `attn` now: the band family's `C` term IS the committed
+        # K and V (`Cells::kv`) with their range checks, its `S` term carries the
+        # queries, and its per-token row region carries the max, the denominator
+        # and their two limbs.
+        kv = softmax_rows = 0.0
     # E1 / B9 probe 2: the routing-selection gadget, priced by analogy and built by
     # nobody.  Per token per layer: one LogUp multiset entry tying the token's rows
     # to each chosen expert's instance (`ROUTE_SEL_CELLS`), and an argmax over the
@@ -688,6 +797,7 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     return dict(acc=acc, act=act, nl=nl, attn=attn, logup=logup, n_lookups=n_lookups,
                 walk=walk, range=rng, limbs=limbs, kv=kv, softmax_rows=softmax_rows,
                 attn_out=attn_out, requant=requant, argmax=argmax, route=route,
+                bands=attn, band_saturated=band_saturated, legacy_alpha=legacy_alpha,
                 dequant_per_acc=per_acc,
                 head_per_acc=head_acc, n_acc=acc, n_acc_layer=acc_layer,
                 flat=acc + act + nl, total=total, walked_params=params,
