@@ -3044,7 +3044,27 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch, s
 /// says the other ten are reachable by the same route.
 pub fn gen_emit_cmd(args: &[String]) {
     let (l, vname) = crate::layer_of(args);
-    let params = crate::params_of(&l, args, &vname);
+    let mut params = crate::params_of(&l, args, &vname);
+    // The GKR arm asks for no fraction shape of its own.  `gkrband::feed_site`
+    // lowers the *un-ablated* evaluator -- stream S's lever 1 makes a flag-on
+    // evaluator emit no lookups at all -- so every fingerprint the feed looks
+    // up is a flag-off one.  Lowering the ablated form here produced an empty
+    // IR and `emit_frac_family` asserts on it (open item 3).  Undo the ablation
+    // for the lowering: these are the shapes the feed will ask for.
+    if params.gkr_bands || params.gkr_dequant || params.gkr_glue
+        || params.gkr_walks || params.gkr_attnout
+    {
+        eprintln!(
+            "genemit: a GKR design point lowers the flag-off fractions -- \
+             those are the shapes the feed asks for"
+        );
+        params.gkr_bands = false;
+        params.gkr_dequant = false;
+        params.gkr_glue = false;
+        params.gkr_walks = false;
+        params.gkr_attnout = false;
+    }
+    let params = params;
     let plan = crate::compose::Plan::new(&params);
     let out = crate::arg_str(args, "--out").unwrap_or_else(|| "/root/b7/gen".to_string());
     let want: Vec<String> =
@@ -3076,11 +3096,25 @@ pub fn gen_emit_cmd(args: &[String]) {
         let prev: Vec<(String, String, Ir)> =
             serde_json::from_slice(&std::fs::read(&store).unwrap()).unwrap();
         let mut v: Vec<(String, Vec<(String, Ir)>)> = vec![];
+        let mut dropped = 0usize;
         for (family, name, ir) in prev {
+            // Open item 3: a GKR design point used to lower the ablated
+            // evaluator, whose fraction IR is empty, and the store was written
+            // before the emit validated it.  Such an entry poisons every later
+            // run -- the emit loop below covers carried families whatever
+            // `--families` says.  Drop them on the way in; the fixed lowering
+            // above re-adds the real shape.
+            if ir.fracs.is_empty() {
+                dropped += 1;
+                continue;
+            }
             match v.iter_mut().find(|(f, _)| *f == family) {
                 Some((_, s)) => s.push((name, ir)),
                 None => v.push((family, vec![(name, ir)])),
             }
+        }
+        if dropped > 0 {
+            eprintln!("genemit: dropped {dropped} stored shape(s) with no lookups");
         }
         eprintln!(
             "genemit: carrying {} shapes forward from {}",
@@ -3097,6 +3131,12 @@ pub fn gen_emit_cmd(args: &[String]) {
     {
         let mut add = |family: &str, name: String, ir: Ir| {
             if !want.iter().any(|w| w == family) {
+                return;
+            }
+            // A fraction kernel with no lookups is not a kernel; storing one is
+            // what open item 3 was.  `emit_frac_family` asserts on it.
+            if ir.fracs.is_empty() {
+                eprintln!("genemit: {family}/{name} lowers to no lookups -- not stored");
                 return;
             }
             let fp = ir.fingerprint();
@@ -3176,7 +3216,6 @@ pub fn gen_emit_cmd(args: &[String]) {
         .iter()
         .flat_map(|(f, s)| s.iter().map(move |(n, i)| (f.clone(), n.clone(), i.clone())))
         .collect();
-    std::fs::write(&store, serde_json::to_vec(&flat).unwrap()).unwrap();
 
     let mut manifest = vec![];
     let mut rs = String::from(
@@ -3216,6 +3255,12 @@ pub fn gen_emit_cmd(args: &[String]) {
             "segments": e.seg_instrs,
         }));
     }
+    // Open item 3: persist ONLY once every family has emitted.  The store used
+    // to be written before this loop, so a family that tripped
+    // `emit_frac_family`'s assert left its bad shape on disk and every later
+    // genemit -- on any binary, at any design point -- re-read and re-emitted
+    // it.  One aborted run poisoned the box.
+    std::fs::write(&store, serde_json::to_vec(&flat).unwrap()).unwrap();
     rs += "];\n\n\
            /// `(shape id, lookups)` for a family's fraction fingerprint.\n\
            pub fn gen_shape_of(name: &str, fp: u32) -> Option<(usize, usize)> {\n\
