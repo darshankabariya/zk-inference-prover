@@ -10,12 +10,31 @@
   "4096": 188220000.0,
   "16384": 300970000.0
  },
- "missing": [
-  2048
- ],
+ "missing": [],
  "rows": [
   {
+   "s": 256,
+   "src": "dd_s256.json",
+   "accepts": true,
+   "off_table": 0,
+   "fresh": 699961536,
+   "pre": 455065664,
+   "bands": 7372800,
+   "dequant": 153387008,
+   "inter": 455931648,
+   "walks": 8650752,
+   "leads": [
+    [
+     0,
+     0,
+     0
+    ]
+   ],
+   "wall": 64.554783363
+  },
+  {
    "s": 512,
+   "src": "prefill_s512.json",
    "accepts": true,
    "off_table": 0,
    "fresh": 1049829568,
@@ -35,6 +54,7 @@
   },
   {
    "s": 1024,
+   "src": "prefill_s1024.json",
    "accepts": true,
    "off_table": 0,
    "fresh": 1806844096,
@@ -51,6 +71,26 @@
     ]
    ],
    "wall": 86.905257054
+  },
+  {
+   "s": 2048,
+   "src": "dd_s2048.json",
+   "accepts": true,
+   "off_table": 0,
+   "fresh": 3542646976,
+   "pre": 652528192,
+   "bands": 293863424,
+   "dequant": 1227096064,
+   "inter": 1836771072,
+   "walks": 64749568,
+   "leads": [
+    [
+     0,
+     0,
+     0
+    ]
+   ],
+   "wall": 92.779002747
   }
  ],
  "target_cells_s": 15950000000.0,
@@ -84,9 +124,24 @@
   "alpha_fresh": 4.375,
   "delta_at_c_eq_s": 12416,
   "incumbent_p": 72.08333333333333,
+  "incumbent_pair": [
+   512,
+   1024
+  ],
   "checks": [
    {
-    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b9/out/prefill_s512.json",
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-afa02e9b5327db894/experiments/b9/out/dd_s256.json",
+    "s": 256,
+    "c": 256,
+    "corner": false,
+    "base_pred": 7372800,
+    "base_got": 7372800,
+    "inter_pred": 11440128,
+    "inter_got": 11440128,
+    "ok": true
+   },
+   {
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-afa02e9b5327db894/experiments/b9/out/prefill_s512.json",
     "s": 512,
     "c": 512,
     "corner": false,
@@ -97,7 +152,7 @@
     "ok": true
    },
    {
-    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b9/out/prefill_s1024.json",
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-afa02e9b5327db894/experiments/b9/out/prefill_s1024.json",
     "s": 1024,
     "c": 1024,
     "corner": false,
@@ -108,7 +163,18 @@
     "ok": true
    },
    {
-    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b10/out/seq5/seq_c4096_L0.json",
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-afa02e9b5327db894/experiments/b9/out/dd_s2048.json",
+    "s": 2048,
+    "c": 2048,
+    "corner": false,
+    "base_pred": 293863424,
+    "base_got": 293863424,
+    "inter_pred": 370442240,
+    "inter_got": 370442240,
+    "ok": true
+   },
+   {
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-afa02e9b5327db894/experiments/b10/out/seq5/seq_c4096_L0.json",
     "s": 512,
     "c": 4096,
     "corner": true,
@@ -119,7 +185,7 @@
     "ok": true
    },
    {
-    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b10/out/seq5/seq_c16384_L0.json",
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-afa02e9b5327db894/experiments/b10/out/seq5/seq_c16384_L0.json",
     "s": 512,
     "c": 16384,
     "corner": true,
@@ -130,7 +196,7 @@
     "ok": true
    },
    {
-    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b10/out/seq5/seq_c4096_L16.json",
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-afa02e9b5327db894/experiments/b10/out/seq5/seq_c4096_L16.json",
     "s": 512,
     "c": 4096,
     "corner": true,
@@ -141,7 +207,7 @@
     "ok": true
    },
    {
-    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b10/out/seq5/seq_c16384_L16.json",
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-afa02e9b5327db894/experiments/b10/out/seq5/seq_c16384_L16.json",
     "s": 512,
     "c": 16384,
     "corner": true,
@@ -152,7 +218,7 @@
     "ok": true
    },
    {
-    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b10/out/seq5/seq_c4096_L31.json",
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-afa02e9b5327db894/experiments/b10/out/seq5/seq_c4096_L31.json",
     "s": 512,
     "c": 4096,
     "corner": true,
@@ -163,7 +229,7 @@
     "ok": true
    },
    {
-    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b10/out/seq5/seq_c16384_L31.json",
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-afa02e9b5327db894/experiments/b10/out/seq5/seq_c16384_L31.json",
     "s": 512,
     "c": 16384,
     "corner": true,
@@ -180,7 +246,11 @@
   "per_token": 1225856.0,
   "band_sc": 140,
   "band_c": 24960,
-  "band_s": 12688
+  "band_s": 12688,
+  "fitted_pair": [
+   512,
+   1024
+  ]
  },
  "crossover": {
   "incumbent": 19211.27080822238,
