@@ -219,7 +219,7 @@ AIR does not expect.
 
 The crate's past lives, for anyone reading old records: `b65src` was the sync
 of `experiments/b65/bench` on a box; `b65_ref` and `b65_gpu` were the two
-trees `m2a_port.sh` derived from it; `b65base` was a previous-commit identity
+trees `m2a_port.sh` derived from it; `b65base` was a previous-commit bit-for-bit
 control whose recipe was never recorded. Records written before 2026-08-24
 refer to those names. The full port provenance (fork commit, the recorded
 Merkle-channel deviation, the `line_fold_step` rename) is in the m2a scripts'

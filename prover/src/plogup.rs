@@ -75,7 +75,7 @@ fn invert_and_scale(nums: Vec<PackedQM31>, dens: Vec<PackedQM31>) -> Vec<PackedQ
 /// per column would re-run that pass `n_cols` times. This takes the row-major
 /// producer, applies `paired`'s batching, and hands the result to exactly the
 /// same phases `build` uses -- `invert_and_scale` and `finish` -- so the
-/// output is the same function of the same inputs and the bit-identity claim
+/// output is the same function of the same inputs and the bit-for-bit claim
 /// above covers both entry points.
 ///
 /// `f(vr, dst)` fills `dst` with the `n_looks` fractions of packed row `vr`, in

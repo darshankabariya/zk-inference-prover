@@ -639,7 +639,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // stream takes at the reduction's first level; it has to divide `d`.
         // Stream E's two regions are opt-in: `--norm-tails` wires `h = (x r) w`
         // and `--swiglu` the `silu(gate) * up` product.  Off, the composition is
-        // the pre-change one cell for cell, which is what the identity control
+        // the pre-change one cell for cell, which is what the bit-for-bit control
         // checks.
         glue: l.glue.as_ref().filter(|_| !flag(args, "--no-glue")).map(|g| {
             compose::GlueParams {
@@ -656,7 +656,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         }),
         // Stream H: the boundary commitment, off unless asked for either way --
         // by the flag on the command line or by `B10_BOUNDS` in the environment.
-        // Off is what makes the recorded digest the identity line.
+        // Off is what makes the recorded digest the bit-for-bit line.
         bounds: flag(args, "--bounds") || bounds::enabled(),
         // Stream AA (E11): the K/V boundary trees, and the prefix tiling they
         // need.  Opt-in and skipped in the serialization, so a statement
