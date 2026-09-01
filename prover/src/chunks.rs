@@ -57,6 +57,36 @@
 //! plan line gives it, which is what `bounds-chain` reads back to join two
 //! chunks. It is the same pair of files the one-shot `compose` path writes.
 
+//! # B12 stream DD: the plan grows a token-block axis
+//!
+//! E11 proves the prompt as well as the output, so the plan stops being one
+//! block's 32 layers and becomes `B` blocks of them: 257 chunks at a 4096+512
+//! sequence, 1025 at 16384+512. Nothing about a block reaches this file --
+//! `Params.c` is read off each witness's own manifest and a block is a
+//! directory (`o_plan.py`), so the loop already proves a prompt chunk as
+//! readily as a decode one. Two things do not scale with it, and both are
+//! answered by `--plan-slice LO:HI`:
+//!
+//! * **Nothing is proved until everything is.** `rows` holds every chunk's
+//!   `Composed` *and* its serialized bytes until the loop is over, because the
+//!   verifier runs afterwards on purpose -- it is the CPU's wall and not the
+//!   prover's. At 33 chunks that is the 615 MiB the sequence already pays. At
+//!   1025 it is ~19 GiB of proof bytes plus the `Proof` structs they were
+//!   serialized from, held for hours. `ser_bytes_held` reports the serialized
+//!   half so a runner sees it rather than meets it.
+//! * **Prompt chunks are independent and this loop is serial.** A chunk's
+//!   layer is built when the chunk is generated and dropped when it is proved,
+//!   and the only ordering in the whole file is the pipeline's one-ahead
+//!   channel. So a plan splits across processes -- or across cards -- with no
+//!   coordination beyond who takes which slice, and `--ser-dir` reassembles
+//!   them by tag.
+//!
+//! A slice is proved exactly as the same chunks are proved in a whole run:
+//! `last_use` and `unique` are computed over the *slice*, so a shape that
+//! repeats outside it is not kept for a chunk this process will never see, and
+//! each chunk reports its `plan_index` in the whole file beside its `chunk`
+//! index in this process.
+
 //! # B11 stream P: what `build_secs` is made of
 //!
 //! `build_secs` is one number for four different kinds of work, and on the
@@ -155,6 +185,33 @@ struct ChunkSpec {
     /// this line appears once in the whole plan, so its preprocessed tree is
     /// worth neither caching nor cloning
     unique: bool,
+    /// Stream DD: which line of the plan *file* this is. Equal to the chunk
+    /// index in a whole run and offset by the slice's start otherwise, so two
+    /// processes proving two halves of one sequence report chunks that can be
+    /// put back in order.
+    idx: usize,
+}
+
+/// Stream DD: which lines of the plan this process proves, as `LO:HI` with
+/// either end optional (`--plan-slice 128:` is the second half of a 257-chunk
+/// sequence). Half-open, so `0:32` and `32:64` partition without overlap.
+fn slice_of(args: &[String], n: usize) -> (usize, usize) {
+    let Some(spec) = arg_str(args, "--plan-slice") else { return (0, n) };
+    let (a, b) = spec
+        .split_once(':')
+        .unwrap_or_else(|| panic!("compose-chunks: --plan-slice {spec} is not LO:HI"));
+    let parse = |s: &str, dflt: usize| {
+        if s.is_empty() {
+            dflt
+        } else {
+            s.parse().unwrap_or_else(|_| panic!("compose-chunks: --plan-slice {spec}"))
+        }
+    };
+    let (lo, hi) = (parse(a, 0), parse(b, n));
+    assert!(lo <= hi && hi <= n,
+            "compose-chunks: --plan-slice {lo}:{hi} against a plan of {n} chunks");
+    assert!(lo < hi, "compose-chunks: --plan-slice {lo}:{hi} names no chunks");
+    (lo, hi)
 }
 
 /// Read a plan. One chunk per line; `#` starts a comment and blank lines are
@@ -168,12 +225,21 @@ fn plan_of(path: &str, args: &[String]) -> Vec<ChunkSpec> {
         .filter(|l| !l.is_empty())
         .collect();
     assert!(!tails.is_empty(), "compose-chunks: the plan at {path} names no chunks");
+    // Stream DD: the slice this process proves. Everything below is computed
+    // over it and not over the file, because `last_use` decides whether a
+    // preprocessed tree is handed back and a tree kept for a chunk in another
+    // process's slice is a tree kept until this one exits.
+    let (lo, hi) = slice_of(args, tails.len());
+    let all = tails;
+    let tails = &all[lo..hi];
     tails
         .iter()
         .enumerate()
         .map(|(i, tail)| {
             let mut a: Vec<String> = tail.split_whitespace().map(str::to_string).collect();
-            let tag = arg_str(&a, "--ser-tag").unwrap_or_else(|| format!("chunk{i}"));
+            // the plan index, not `i`: two slices writing into one `--ser-dir`
+            // must not both call their first untagged chunk `chunk0`
+            let tag = arg_str(&a, "--ser-tag").unwrap_or_else(|| format!("chunk{}", lo + i));
             // `--plan-end` closes the line. Nothing reads it; it is there so
             // that a bare flag written last on a line cannot pair with the
             // first shared argument and be mistaken for its value.
@@ -185,6 +251,7 @@ fn plan_of(path: &str, args: &[String]) -> Vec<ChunkSpec> {
                 tag,
                 last_use: !tails[i + 1..].contains(tail),
                 unique: tails.iter().filter(|t| *t == tail).count() == 1,
+                idx: lo + i,
             }
         })
         .collect()
@@ -283,6 +350,15 @@ impl Source {
         }
     }
 
+    /// Stream DD: this chunk's line in the plan *file*. The same as `k` unless
+    /// `--plan-slice` is proving part of one.
+    fn plan_index(&self, k: usize) -> usize {
+        match self {
+            Source::Cycle { .. } => k,
+            Source::Plan(v) => v[k].idx,
+        }
+    }
+
     /// Whether this chunk's preprocessed tree can be handed back once it has
     /// been proved. Never in the cycling loop, where the whole point is that
     /// the next chunk takes it.
@@ -350,6 +426,12 @@ unsafe impl Send for SendGen<'_> {}
 struct Row {
     k: usize,
     li: usize,
+    /// Stream DD: the plan-file line and the `--ser-tag` it carries. The tag is
+    /// what names this chunk's bytes on disk and, on a sequence, the only place
+    /// its token block is written down (`B<b>L<k>`); reporting it is what lets
+    /// a chain driver read the run's own JSON instead of re-deriving the order.
+    plan_index: usize,
+    tag: String,
     source: String,
     vname: String,
     params: Params,
@@ -427,8 +509,13 @@ pub fn chunks_cmd(args: &[String]) {
     let setup_secs = t_setup.elapsed().as_secs_f64();
     let setup_split = crate::witread::since(&snap_setup);
     eprintln!(
-        "compose-chunks: {n} chunks over {} layer(s) [{}], pipe={pipe} \
+        "compose-chunks: {n} chunks{} over {} layer(s) [{}], pipe={pipe} \
          ircache={} precache={}; setup {setup_secs:.1} s",
+        match &src {
+            Source::Plan(v) if !v.is_empty() =>
+                format!(" (plan lines {}..{})", v[0].idx, v[v.len() - 1].idx + 1),
+            _ => String::new(),
+        },
         src.n_layers(),
         src.describe(),
         crate::scalars::mode(),
@@ -469,6 +556,8 @@ pub fn chunks_cmd(args: &[String]) {
             let row = Row {
                 k,
                 li: src.li(k),
+                plan_index: src.plan_index(k),
+                tag: src.tag(k),
                 source: built.layer().source.clone(),
                 vname: built.vname().to_string(),
                 params: built.params().clone(),
@@ -537,6 +626,8 @@ pub fn chunks_cmd(args: &[String]) {
                 let row = Row {
                     k,
                     li: src.li(k),
+                    plan_index: src.plan_index(k),
+                    tag: src.tag(k),
                     source: built.layer().source.clone(),
                     vname: built.vname().to_string(),
                     params: built.params().clone(),
@@ -578,11 +669,20 @@ pub fn chunks_cmd(args: &[String]) {
     let mut prove_mem: Vec<u64> = vec![];
     let mut builds: Vec<f64> = vec![];
     let mut gens: Vec<f64> = vec![];
+    // Stream DD: what the plan's chunks cost between them, and what this
+    // process was still holding when the loop ended.
+    let mut fresh_all: Vec<f64> = vec![];
+    let mut ser_bytes_held: usize = 0;
+    let mut tags: Vec<String> = vec![];
     let head_source = rows[0].source.clone();
     let head_vname = rows[0].vname.clone();
     let head_params = rows[0].params.clone();
     for r in rows {
         crate::util::m4_set_chunk(r.k as u64);
+        ser_bytes_held += r.ser.claims_bytes.len()
+            + r.ser.fixed_bytes.len()
+            + r.ser.proof_bytes.as_ref().map_or(0, |b| b.len());
+        tags.push(r.tag.clone());
         let (mut j, accepts) = crate::compose_finish(r.out, r.ser, &r.params);
         assert!(accepts, "compose-chunks: chunk {} rejected: {j}", r.k);
         assert_eq!(j["ref_mismatch"], 0, "chunk {}: witness disagrees with the f64 reference", r.k);
@@ -595,6 +695,11 @@ pub fn chunks_cmd(args: &[String]) {
         j["upload_scope"] = json!(if pipe { "loop-cumulative" } else { "chunk" });
         j["chunk"] = json!(r.k);
         j["layer"] = json!(r.li);
+        // Stream DD: under a plan `layer` is the chunk's index and says nothing
+        // about the model once a plan has more than one token block in it. The
+        // tag does, and the plan index puts a slice back in the file's order.
+        j["plan_index"] = json!(r.plan_index);
+        j["ser_tag"] = json!(r.tag);
         j["layer_source"] = json!(r.source);
         j["chunk_secs"] = json!(r.secs);
         j["build_secs"] = json!(r.build_secs);
@@ -620,6 +725,7 @@ pub fn chunks_cmd(args: &[String]) {
         prove_mem.push(r.mem_after_prove);
         builds.push(r.build_secs);
         gens.push(r.gen_secs);
+        fresh_all.push(j["cells"]["fresh"].as_f64().unwrap_or(0.0));
         chunks.push(j);
     }
     let fresh = chunks[0]["cells"]["fresh"].as_f64().unwrap();
@@ -640,6 +746,27 @@ pub fn chunks_cmd(args: &[String]) {
         "commit_median_rest": med(&rest(&commits)),
         "gen_median_rest": med(&rest(&wholes)) - med(&rest(&stwos)),
         "fresh_cells": fresh,
+        // Stream DD: `fresh_cells` is chunk 0's, which was the whole story when
+        // every chunk of a plan was one layer of one block. On a sequence chunk
+        // 0 is the *smallest* -- the shortest prefix -- so the sequence's own
+        // cost is the sum, and the rate below is still chunk 0's by design.
+        "fresh_sum": fresh_all.iter().sum::<f64>(),
+        "fresh_min": fresh_all.iter().cloned().fold(f64::INFINITY, f64::min),
+        "fresh_max": fresh_all.iter().cloned().fold(0.0f64, f64::max),
+        // Which lines of the plan file this process proved, and the tags it
+        // wrote. A sequence split over several processes is reassembled from
+        // these and from `--ser-dir`, and nothing else has to agree.
+        "plan_slice": match &src {
+            Source::Plan(v) if !v.is_empty() => json!([v[0].idx, v[v.len() - 1].idx + 1]),
+            _ => Value::Null,
+        },
+        "ser_tags": tags,
+        // What the loop was still holding when it ended: every chunk's
+        // statement and proof bytes, because the verifier runs after the loop
+        // and not inside it. 615 MiB at 33 chunks, ~4.8 GiB at 257, ~19 GiB at
+        // 1025 -- and the `Proof` structs they came from are resident beside
+        // them. This is the number that says when a plan has to be sliced.
+        "ser_bytes_held": ser_bytes_held,
         // A plan's chunks have different shapes, so the sum is the sequence's
         // wall and the medians above are a mixture rather than a rate.
         "whole_sum": wholes.iter().sum::<f64>(),
