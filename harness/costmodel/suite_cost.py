@@ -12,9 +12,10 @@ Two accountings, both reported:
   regime 1  per-position: every proved position is charged one measured
             C=4096 decoded token at the named boundary.  The paper's unit,
             and the only one made of measurements alone.
-  regime 2  per-proof: one proof per eval item, priced in cells from B9's
-            causal-rectangle fit plus the composed grid slope, converted at
-            the measured G cells/s of the named boundary.  [projected]
+  regime 2  per-proof: one proof per eval item, priced in cells from stream
+            DD's exact (S, C) band model plus a shared-table floor solved
+            against our own measured composed chunk, converted at the
+            measured G cells/s of the named boundary.  [projected]
 
 Dollar figures use the `*_reference_*` cost keys only (freeze rule 4).
 """
@@ -85,47 +86,65 @@ def usd_per_position(tok_s, usd_h):
 
 # -- regime 2: cells for one proof of one item ----------------------------
 def cell_model():
-    """Coefficients, each traceable to a frozen entry.
+    """The whole layer chunk in (S, C), composed from frozen pieces.
 
-    B9's measured causal-rectangle fit, per LAYER chunk of S positions:
-        fresh(S) = A + B*S + Q*S^2            A=326e6, B=1.37e6, Q=72.1
-    The composed decode chunk (our own measurement), per LAYER chunk of
-    S=512 decoded tokens over a declared band of C keys:
-        fresh(C) = I + G*heads*C*S            G = composed_chunk_fresh_slope_32layers
-    I is solved from the measured C=4096 point.  The cross-check is that the
-    two models agree where they should: I (a decode chunk with no band left,
-    i.e. the corner alone) against the fit at S=512.
+        chunk_fresh(S, C) = fixed + per_token*S + band_fresh(S, C)
+        band_fresh(S, C)  = 140*S*C + 24,960*C + 12,688*S
+
+    The band half is stream DD's exact closed form
+    (`attention_grid.band_model_fresh_coeffs`) -- structural, not fitted, and
+    reproduced to the cell on eight artifacts including composed 8B chunks at
+    C != S.  It REPLACES the retired `326 M + 1.37 M*S + 72.1*S^2` fit, whose
+    S^2 coefficient (72.083) ran +12.6% against the true 64 because it charged
+    the band family's whole linear term to the quadratic.
+
+    `per_token` is `design.prefill_chunk_remainder[1]`, DD's two-point fit of
+    everything the band family does not cover.  Its `[0]` partner is the same
+    floor for B9's SYNTHETIC probe chunk; our composed layer statement also
+    carries the glue, both residual adds and the committed residual streams,
+    so `fixed` is solved separately against our own measured chunk at C=4096.
+    Predicting C=16384 from it lands at -0.63% -- a held-out check, whose
+    residual is the composed chunk's own small C-growth outside the family.
     """
     S = v("spec.decoded_tokens")
-    L = 32
-    heads = 32
-    G = v("attention_grid.composed_chunk_fresh_slope_32layers")
-    per_layer_c4096 = v("cells.c4096.fresh_layers32") / L
-    per_layer_c16384 = v("cells.c16384.fresh_layers32") / L
-    slope_check = (per_layer_c16384 - per_layer_c4096) / ((16384 - 4096) * heads * S)
-    I = per_layer_c4096 - G * heads * 4096 * S
-    A, B, Q = 326e6, 1.37e6, 72.1        # B9's fit, as quoted in the freeze
-    head_per_token = v("cells.c4096.fresh_head") / S
-    return dict(L=L, heads=heads, G=G, I=I, A=A, B=B, Q=Q, S=S,
-                slope_check=slope_check, per_layer_c4096=per_layer_c4096,
-                head_per_token=head_per_token, fit_at_512=A + B * S + Q * S * S)
+    sc, bc, bs = v("attention_grid.band_model_fresh_coeffs")
+    fixed_b9, per_token = v("design.prefill_chunk_remainder")
+    return dict(
+        L=32, S=S, sc=sc, bc=bc, bs=bs,
+        per_token=per_token,
+        fixed=v("attention_grid.chunk_model_fixed_composed"),
+        fixed_b9=fixed_b9,
+        head_per_token=v("cells.c4096.fresh_head") / S,
+        per_layer_c4096=v("cells.c4096.fresh_layers32") / 32,
+        per_layer_c16384=v("cells.c16384.fresh_layers32") / 32,
+    )
 
 
-def cells_decode_item(m, n_prompt, n_gen):
+def band_fresh(m, S, C):
+    """The attention band family's fresh cells: S query tokens over C keys."""
+    return m["sc"] * S * C + m["bc"] * C + m["bs"] * S
+
+
+def cells_decode_item(m, n_prompt, n_gen, fixed=None):
     """One proof of one item under the v1 decode-only statement: n_gen decoded
     positions (1 for a multiple-choice item) over a DECLARED band of n_prompt
-    keys.  The per-chunk shared tables are paid once per layer, per item."""
+    keys, plus the corner in which those positions attend to each other.  The
+    per-chunk shared tables are paid once per layer, per item."""
     Sn = max(n_gen, 1)
-    per_layer = (m["A"] + m["B"] * Sn + m["G"] * m["heads"] * n_prompt * Sn
-                 + m["Q"] * Sn * Sn)
+    f = m["fixed"] if fixed is None else fixed
+    per_layer = (f + m["per_token"] * Sn
+                 + band_fresh(m, Sn, n_prompt) + band_fresh(m, Sn, Sn))
     return m["L"] * per_layer + m["head_per_token"] * Sn
 
 
-def cells_e11_item(m, n_prompt, n_gen):
+def cells_e11_item(m, n_prompt, n_gen, fixed=None):
     """One proof of one item under E11: one causal rectangle over the whole
-    concatenated prompt+output, N = n_prompt + n_gen positions."""
+    concatenated prompt+output, N = n_prompt + n_gen positions attending over
+    its own N keys.  One block: every item in this suite is under the S~1K
+    block size, so `design.e11_chunking_net_pct` does not bite here."""
     N = n_prompt + n_gen
-    per_layer = m["A"] + m["B"] * N + m["Q"] * N * N
+    f = m["fixed"] if fixed is None else fixed
+    per_layer = f + m["per_token"] * N + band_fresh(m, N, N)
     return m["L"] * per_layer + m["head_per_token"] * N
 
 
@@ -215,12 +234,20 @@ def main():
     print("3. REGIME 2 -- one proof per item, priced in cells  [projected]")
     print("=" * 86)
     m = cell_model()
-    print(f"   composed slope, from the freeze   {m['G']:.4f} cells/(head,key,token)")
-    print(f"   re-solved from the two contexts   {m['slope_check']:.4f}   (cross-check)")
-    print(f"   decode chunk at C=4096, per layer {m['per_layer_c4096'] / 1e9:.4f} G")
-    print(f"   its band-free intercept I         {m['I'] / 1e9:.4f} G")
-    print(f"   B9's fit at S=512                 {m['fit_at_512'] / 1e9:.4f} G   "
-          f"(the two agree to {abs(m['fit_at_512'] - m['I']) / m['I'] * 100:.1f}%)")
+    held = (m["fixed"] + m["per_token"] * m["S"] + band_fresh(m, m["S"], 16384)
+            + band_fresh(m, m["S"], m["S"]))
+    print(f"   band model (frozen, exact)        {m['sc']}*S*C + {m['bc']:,}*C + {m['bs']:,}*S")
+    print(f"   per_token (prefill_chunk_remainder)  {m['per_token']:,.0f} cells/token/layer")
+    print(f"   fixed, solved on our C=4096 chunk {m['fixed'] / 1e6:,.1f} M   "
+          f"(b9 probe's own floor {m['fixed_b9'] / 1e6:,.1f} M, "
+          f"{m['fixed'] / m['fixed_b9'] - 1:+.1%})")
+    print(f"   HELD OUT at C=16384: model {held:,.0f}  measured "
+          f"{m['per_layer_c16384']:,.0f}   {held / m['per_layer_c16384'] - 1:+.4%}")
+    print(f"   band alpha_fresh {m['sc'] / 32:.3f} + its C-term aliased at S=512 "
+          f"{m['bc'] / (32 * m['S']):.4f} = "
+          f"{v('attention_grid.composed_slope_explained_by_band_model'):.4f}")
+    print(f"   against the frozen composed slope "
+          f"{v('attention_grid.composed_chunk_fresh_slope')} -- so 5.898 is NOT a per-entry price")
     print()
     cd = {t: sum(cells_decode_item(m, p, g if t == "ifeval" else 1)
                  for p, g in acc[t]["lengths"]) for t in TASKS}
