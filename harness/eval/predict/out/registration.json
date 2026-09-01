@@ -88,7 +88,7 @@
    "boundary": "n/a",
    "card": "none",
    "context": "n/a",
-   "grade": "measured",
+   "grade": "derived",
    "value": 4.0
   },
   "attention_grid.band_model_alpha_fresh": {
@@ -166,7 +166,7 @@
    "boundary": "n/a",
    "card": "none",
    "context": "n/a",
-   "grade": "measured",
+   "grade": "derived",
    "value": 4.0
   },
   "model_constants.attnout_int8_cells_per_acc": {
@@ -331,11 +331,11 @@
    "finding": "Every `cells_per_token.27b.*` row in paper/constants.json reproduces EXACTLY when the cost model is re-run with the legacy alpha=4.00 path, and not otherwise. Re-running the same shape on the band model -- the composed-chunk value W0's freeze ruled the paper must use (eval-plan.md 7.5(e)) -- raises them as below. E4 reports this and does not patch it: `paper/constants.json` is owned elsewhere this session.",
    "grades_still_wrong": [
     {
-     "grade": "measured",
+     "grade": "derived",
      "key": "attention_grid.b5_standalone_alpha"
     },
     {
-     "grade": "measured",
+     "grade": "derived",
      "key": "model_constants.attention_cells_per_head_key_token"
     }
    ],
@@ -357,11 +357,12 @@
    }
   }
  },
- "prediction_block_sha256": "55b776d08c79efbabc77948dacf24b01d4c05b808616a5a8e8c3739d02779f51",
+ "prediction_block_sha256": "028ef596b431c4343c1f004d6b98f6ff3ab668723773a90ea58c3997664837dc",
+ "prediction_sha256": "bdf9d51a438301b9af407f3cc964879b5d7cc848df0e26ba1a5797a827d7e3a1",
  "provenance": {
   "inputs_sha256": {
    "experiments/b2/cost_model.py": "31a1e26a2e5653fde3c575a0a93e1510ca29cd0c9072452f478b2f3ffa2a1bb6",
-   "experiments/paper/constants.json": "6f36aea42b3786e4ca783ebf80a8ffbfe3c5e55c561bd2ddefc4f7ab49ae09d0"
+   "experiments/paper/constants.json": "0552169e1bd20cd7442e334cb00f242b5830b444915715117cb2186f7eea97a7"
   },
   "no_measurement_exists": "At registration there is NO witness, NO proof and NO cell count for Qwen2.5-3B / 14B / 32B anywhere in this repo or on either box. The only scales ever extracted are Qwen2.5-0.5B (experiments/b65/out/) and Llama-3.1-8B (experiments/b8, b9, b10). The H200 queue at registration time is bring-up -> E8 seq6 -> E2 measurement -> E4 extraction, and E8 is the item in progress; the H100 is on E11's third fit point. Neither box has been asked for any number in this file.",
   "predictor": {

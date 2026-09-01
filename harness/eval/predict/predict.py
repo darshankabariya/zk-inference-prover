@@ -447,11 +447,17 @@ def main():
     chk = selfcheck()
     reg = build()
     anc = anchors()
-    block = dict(schema="e4-registration/1", provenance=provenance(),
-                 shapes=reg, bracket=BRACKET, anchors=anc,
-                 bands_selfcheck_8b=chk, frozen_inputs=frozen_inputs())
+    # The falsifiable content, hashed ALONE.  This must not move when an
+    # unrelated constant is edited, or the hash cannot answer the only question
+    # a later reader asks of it: is this the prediction that was registered?
+    content = dict(schema="e4-registration/1", shapes=reg, bracket=BRACKET,
+                   anchors=anc, bands_selfcheck_8b=chk,
+                   frozen_inputs=frozen_inputs())
+    content_digest = hashlib.sha256(canonical(content)).hexdigest()
+    block = dict(content, provenance=provenance())
     digest = hashlib.sha256(canonical(block)).hexdigest()
-    doc = dict(block, prediction_block_sha256=digest,
+    doc = dict(block, prediction_sha256=content_digest,
+               prediction_block_sha256=digest,
                implied_tok_s_secondary=implied_tok_s(reg),
                integrator_notes=integrator_notes(reg),
                reference_8b_chunk=dict(cells=REF8B, source=REF8B_SOURCE))
@@ -493,7 +499,8 @@ def main():
               f"{r['rerun_alpha_4p00']:>13,.0f}   band model {r['rerun_band_model']:>13,.0f}"
               f"  ({r['understated_pct']:+.2f}% understated)")
     print()
-    print(f"prediction block sha256: {digest}")
+    print(f"prediction sha256 (content only): {content_digest}")
+    print(f"prediction block sha256 (incl. provenance): {digest}")
     if a.json:
         os.makedirs(os.path.join(HERE, "out"), exist_ok=True)
         p = os.path.join(HERE, "out", "registration.json")
