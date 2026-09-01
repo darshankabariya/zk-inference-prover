@@ -258,6 +258,15 @@ pub fn commit_pre(a: &Attn, l: &Layouts, with_out: bool, with_rows: bool)
             }));
         }
     }
+    // Stream CC (E11): the inert-lead-row selector, last of the grid's block and
+    // committed only when the grid has such rows.  Placed after the mask columns
+    // so `msk0` -- `CHAN_SEL.len() + CORNER_SEL.len()`, in two other files -- is
+    // the index it always was.  On a prefix band there are no mask columns, so it
+    // lands at slot 8 of the key group, which is where `devpre`'s `b65p_sel`
+    // writes it.
+    if crate::attn_air::act_id(0, a.corner, lk.g.lead).is_some() {
+        pre.push(sel(lk.g.log_rows, &|j| lk.g.row(j).is_some()));
+    }
 
     if with_out {
         let och = |j: usize| lo.g.row(j).map(|(_, c)| c);
@@ -805,9 +814,21 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     }
 
     // ---- grid region -------------------------------------------------------
-    // Stream CC (E11), a DIAGNOSTIC and not a design point -- see the inert-row
-    // branch of `grid_inner` below.  Off unless `B65_PAD_NF=1`.
-    let pad_nf = std::env::var("B65_PAD_NF").as_deref() == Ok("1");
+    // Stream CC (E11): the host arm's aimed corruption for the inert-lead-row
+    // guard, the twin of `b65_acc.cu`'s `nomask:grid` on the arm that has no
+    // card.  See the inert-row branch of `grid_inner` below.  Off unless
+    // `B12_GRIDMUT=padnf`.
+    //
+    // This replaces `B65_PAD_NF=1`, which was the same branch pointing the other
+    // way: before the AIR carried `act` it made a padded shape *accept*, and it
+    // is recorded that way in `briefs/cc-maskgrid.md` and in
+    // `notes/design-notes.md`.  It now makes a padded shape *reject*, so it does
+    // not keep the old name.
+    let pad_nf = match std::env::var("B12_GRIDMUT").as_deref() {
+        Ok("padnf") => true,
+        Ok("") | Err(_) => false,
+        Ok(other) => panic!("unknown B12_GRIDMUT {other:?}"),
+    };
     let n = if m4g_host { lk.g.rows } else { 0 };
     let (mut zs, mut hs) = (vec![SecureField::zero(); n], vec![SecureField::zero(); n]);
     let (mut zn, mut wv) = (vec![SecureField::zero(); n], vec![SecureField::zero(); n]);
@@ -848,20 +869,23 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
                 }
             }
         } else if pad_nf {
-            // Stream CC (E11): an INERT lead row.  `commit_base` pads the
-            // numerator column with `a.table[0]` -- index 0 is a real table row,
-            // which is what keeps the exp lookup's multiplicities exact -- but
-            // the AIR's numerator fold has no selector that is zero here, so it
-            // reads that pad into `zn` while this builder contributes nothing.
-            // That single disagreement is why an honest witness at a padded key
-            // grid returns `ConstraintsNotSatisfied`.  Mirroring the pad here is
-            // inert for the claims: `last` is zero on an inert row, so this `zn`
-            // reaches neither `av` nor `sn`, and `nofirst` is zero on the first
-            // real row of every group, so it does not carry forward either.
+            // Stream CC (E11), the CORRUPTION: an INERT lead row's numerator pad
+            // enters the sum.  `commit_base` pads the numerator column with
+            // `a.table[0]` -- index 0 is a real table row, which is what keeps
+            // the exp lookup's multiplicities exact -- and the honest builder
+            // contributes no term at all here, which is what `KeyEval`'s `act`
+            // factor now says.  Adding the term back is the one way this guard
+            // could be missing, and the proof must be rejected for it.
             //
-            // OFF by default and gated behind `B65_PAD_NF=1`, because the twin
-            // in `b65_acc.cu` (`nf` is gated by `act || B65A_MUT_NOMASK`) has not
-            // moved with it and `nomask` is aimed at exactly this difference.
+            // It is genuinely aimed: it is confined to `lead` rows out of
+            // `g.rows`, it moves no committed cell, and it changes `zn` only on
+            // rows that no accumulator reads -- `last` is zero on an inert row,
+            // so this `zn` reaches neither `av` nor `sn`, and `nofirst` is zero
+            // on the first real row of every group, so it does not carry
+            // forward.  The *only* thing left for it to break is the constraint
+            // the guard adds.  On a grid that tiles exactly there is no such row
+            // and the mutation is vacuous, which is a finding and not a pass
+            // (B7a section 5 rule 5).
             let pad = SecureField::from(m31_of(a.table[0] as i64));
             for i in 0..lk.q {
                 nf += pow.sg_pow[i] * pad;
@@ -1139,6 +1163,8 @@ pub fn pre_exp_x(a: &Attn, l: &Layouts) -> usize {
         } else {
             crate::attn_air::KEY_SEL.len()
         }
+        // stream CC (E11): the inert-lead-row selector, when the grid has one
+        + usize::from(crate::attn_air::act_id(0, a.corner, l.key.g.lead).is_some())
         + crate::attn_air::OUT_SEL.len()
         + crate::attn_air::ROW_SEL.len()
 }
@@ -1191,7 +1217,8 @@ pub fn cells(a: &Attn, l: &Layouts, cfg: &Cfg) -> Cells {
         crate::attn_air::CORNER_SEL.len() + lk.q       // + one mask column per slot
     } else {
         crate::attn_air::KEY_SEL.len()
-    };
+    // stream CC (E11): + the inert-lead-row selector, when the grid has one
+    } + usize::from(crate::attn_air::act_id(0, a.corner, lk.g.lead).is_some());
     let pre = crate::attn_air::CHAN_SEL.len() * lc.g.rows
         + key_sel * lk.g.rows
         + crate::attn_air::OUT_SEL.len() * lo.g.rows

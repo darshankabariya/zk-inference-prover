@@ -281,6 +281,12 @@ extern "C" void b65_fill_pre_table(const unsigned *const *counters,
 // | 3 | `j + 1 == rows` | `j + 1 == rows` | |
 // | 4 | ISTART | `j > 0 && !LAST` | |
 // | 5 | | `j > 0 && LAST` | |
+//
+// Stream CC (E11) adds a ninth key column, `ACTIVE` itself, when the grid leaves
+// inert lead rows -- `cfg.n_cols == 9` is how this side is told.  It is the
+// AIR's numerator-fold guard, and it is `act` unmodified, which is the whole
+// point: the accumulator in `b65_acc.cu` has gated `nf` on the same bit since it
+// was written, so what lands in tree 0 is the predicate the fold already used.
 // | 6 | | ISTART | |
 // | 7 | | the key scale, inverted, per instance | |
 __global__ void b65p_sel(const unsigned *__restrict__ flags,
@@ -354,6 +360,17 @@ __global__ void b65p_sel(const unsigned *__restrict__ flags,
         }
     }
     cols[7][i] = sc;
+
+    // Stream CC (E11): the inert-lead-row selector, present only when the grid
+    // has such rows.  `noactive` is "the `None` arm forgotten", and forgetting it
+    // here is writing 1 on an inert row -- the same defect the mutation already
+    // injects into `last`, on the column that now carries the numerator fold's
+    // guard, so one control covers both faces of it.
+    if (cfg.n_cols > 8u) {
+        const bool act_col =
+            b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOACTIVE, cfg.fam) ? true : act;
+        cols[8][i] = (m31)(act_col ? 1u : 0u);
+    }
 }
 
 extern "C" void b65_fill_sel(const unsigned *flags, m31 *const *cols,
