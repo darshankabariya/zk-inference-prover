@@ -72,5 +72,158 @@
    "split_x": 43.88013282247765,
    "naive_x_e6c": 349.4368977127598
   }
- }
+ },
+ "band_model": {
+  "base_form": "2*NH*S*C + 2*hd*NH*C + hd*NH*S + 4*NH*S",
+  "inter_form": "76*S*C + 16768*C + 8464*S",
+  "s_c_base": 64,
+  "s_c_fresh": 140,
+  "c_base": 8192,
+  "s_base": 4224,
+  "alpha_base": 2.0,
+  "alpha_fresh": 4.375,
+  "delta_at_c_eq_s": 12416,
+  "incumbent_p": 72.08333333333333,
+  "checks": [
+   {
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b9/out/prefill_s512.json",
+    "s": 512,
+    "c": 512,
+    "corner": false,
+    "base_pred": 23134208,
+    "base_got": 23134208,
+    "inter_pred": 32841728,
+    "inter_got": null,
+    "ok": true
+   },
+   {
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b9/out/prefill_s1024.json",
+    "s": 1024,
+    "c": 1024,
+    "corner": false,
+    "base_pred": 79822848,
+    "base_got": 79822848,
+    "inter_pred": 105529344,
+    "inter_got": null,
+    "ok": true
+   },
+   {
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b10/out/seq5/seq_c4096_L0.json",
+    "s": 512,
+    "c": 4096,
+    "corner": true,
+    "base_pred": 193003520,
+    "base_got": 193003520,
+    "inter_pred": 265101312,
+    "inter_got": 265101312,
+    "ok": true
+   },
+   {
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b10/out/seq5/seq_c16384_L0.json",
+    "s": 512,
+    "c": 16384,
+    "corner": true,
+    "base_pred": 696320000,
+    "base_got": 696320000,
+    "inter_pred": 949297152,
+    "inter_got": 949297152,
+    "ok": true
+   },
+   {
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b10/out/seq5/seq_c4096_L16.json",
+    "s": 512,
+    "c": 4096,
+    "corner": true,
+    "base_pred": 193003520,
+    "base_got": 193003520,
+    "inter_pred": 265101312,
+    "inter_got": 265101312,
+    "ok": true
+   },
+   {
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b10/out/seq5/seq_c16384_L16.json",
+    "s": 512,
+    "c": 16384,
+    "corner": true,
+    "base_pred": 696320000,
+    "base_got": 696320000,
+    "inter_pred": 949297152,
+    "inter_got": 949297152,
+    "ok": true
+   },
+   {
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b10/out/seq5/seq_c4096_L31.json",
+    "s": 512,
+    "c": 4096,
+    "corner": true,
+    "base_pred": 193003520,
+    "base_got": 193003520,
+    "inter_pred": 265101312,
+    "inter_got": 265101312,
+    "ok": true
+   },
+   {
+    "artifact": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-af6636107bed60beb/experiments/b10/out/seq5/seq_c16384_L31.json",
+    "s": 512,
+    "c": 16384,
+    "corner": true,
+    "base_pred": 696320000,
+    "base_got": 696320000,
+    "inter_pred": 949297152,
+    "inter_got": 949297152,
+    "ok": true
+   }
+  ]
+ },
+ "chunk_model": {
+  "fixed": 366215360.0,
+  "per_token": 1225856.0,
+  "band_sc": 140,
+  "band_c": 24960,
+  "band_s": 12688
+ },
+ "crossover": {
+  "incumbent": 19211.27080822238,
+  "structural_base": 21416.36339515991,
+  "structural_fresh": 8784.961575562995
+ },
+ "chunking": {
+  "4096": {
+   "chunks": 4,
+   "one_shot": 7890337984.0,
+   "chunked": 8261534464.0,
+   "fixed_pct": 13.92394194301728,
+   "kv_pct": 1.943569975214892,
+   "grid_pct": -11.163068575593226,
+   "net_pct": 4.704443342638953,
+   "published_pct": 13.7
+  },
+  "16384": {
+   "chunks": 16,
+   "one_shot": 58648428736.0,
+   "chunked": 49592667136.0,
+   "fixed_pct": 9.366372669125074,
+   "kv_pct": 5.22961120374797,
+   "grid_pct": -30.036741272808854,
+   "net_pct": -15.440757399935812,
+   "published_pct": 11.6
+  }
+ },
+ "e11": {
+  "4096": {
+   "prompt_cells": 264369102848.0,
+   "x_prompt": 5.21498596962215,
+   "x_total": 6.21498596962215,
+   "x_square": 4.56218715832721,
+   "decode_cells": 50694115840
+  },
+  "16384": {
+   "prompt_cells": 1586965348352.0,
+   "x_prompt": 17.549630096766265,
+   "x_total": 18.549630096766265,
+   "x_square": 10.23036585319936,
+   "decode_cells": 90427281920
+  }
+ },
+ "e11_chunk_s": 1024
 }
