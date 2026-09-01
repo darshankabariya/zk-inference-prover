@@ -20,6 +20,7 @@ Two accountings, both reported:
 Dollar figures use the `*_reference_*` cost keys only (freeze rule 4).
 """
 
+import glob
 import json
 import os
 import statistics
@@ -29,15 +30,32 @@ from constants import get, value as v
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 B8 = os.path.join(HERE, os.pardir, "b8", "out", "tasks")
+E5T = os.path.join(HERE, os.pardir, "b8", "out", "e5t", "tasks")
 SEC_PER_H = 3600.0
 SPECS = ("fp32", "dynamic-int8", "b6-design", "b6-design-p2o", "b65-design", "static")
 TASKS = ("gpqa", "mmlu_pro", "ifeval")
+FROZEN_SPEC = "b10-final"       # `spec.name`; E5t scored it on this same corpus
 
 
 # -- token accounting, straight off B8's per-item rows ---------------------
 def rows(task, spec):
     p = os.path.join(B8, f"{task}.{spec}.0of1.jsonl")
     return [json.loads(line) for line in open(p) if line.strip()]
+
+
+def e5t_ifeval(spec):
+    """Stream E5t's per-item IFEval rows for one spec, across its shards.
+
+    The suite is priced under the spec the paper freezes, so the generated-token
+    count is the EXACT sum of `n_gen` over these 541 rows -- not a rounded mean
+    times an item count, which is what `suite.ifeval.generated_tokens` held
+    before E5t's artifacts existed.
+    """
+    rows = []
+    for f in sorted(glob.glob(os.path.join(E5T, f"ifeval.{spec}.*of*.jsonl"))):
+        rows += [json.loads(ln) for ln in open(f) if ln.strip()]
+    assert len(rows) == 541, f"e5t ifeval.{spec}: {len(rows)} rows, expected 541"
+    return rows
 
 
 def accounting(spec="b6-design-p2o"):
@@ -193,20 +211,26 @@ def main():
     for s in SPECS:
         a = accs[s]["ifeval"]
         print(f"   {s:16s} {a['gen']:9,d}  (mean {a['gen_mean']:.2f})")
-    b10_mean = 382
-    b10_gen = b10_mean * acc["ifeval"]["items"]
-    print(f"   {'b10-design':16s} {b10_gen:9,d}  (mean {b10_mean}, "
-          f"experiments/b10/out/tasks.md; rounded to the integer, so +/-0.13%)")
+    e5t = {s: sum(r["n_gen"] for r in e5t_ifeval(s))
+           for s in ("b10-design", FROZEN_SPEC)}
+    for s, g in e5t.items():
+        print(f"   {s:16s} {g:9,d}  (mean {g / 541:.3f}, "
+              f"b8/out/e5t/tasks/ifeval.{s}.*of3.jsonl -- EXACT sum)")
+    frozen_gen = e5t[FROZEN_SPEC]
+    print(f"   the retired entry: 382 x 541 = {382 * 541:,d} -- b10-design's mean "
+          f"ROUNDED to the integer, {382 * 541 / e5t['b10-design'] - 1:+.3%} against")
+    print(f"   b10-design's own exact sum and {382 * 541 / frozen_gen - 1:+.3%} against "
+          f"the frozen {FROZEN_SPEC}.")
     print()
     longest = max(max(p + g for p, g in acc[t]["lengths"]) for t in TASKS)
     print(f"longest sequence anywhere in the suite: {longest:,d} tokens "
           f"-> the whole suite fits inside C=4096")
     print()
 
-    # headline uses b10-design's IFEval generation: the freeze's task-row spec
-    dec = (tot["items"] - acc["ifeval"]["items"]) + b10_gen
-    e11 = tot["prompt"] + b10_gen
-    print(f"HEADLINE POSITIONS (b10-design IFEval generation):")
+    # headline uses the FROZEN spec's own exact IFEval generation (stream E5t)
+    dec = (tot["items"] - acc["ifeval"]["items"]) + frozen_gen
+    e11 = tot["prompt"] + frozen_gen
+    print(f"HEADLINE POSITIONS ({FROZEN_SPEC} IFEval generation, exact sum):")
     print(f"   decode-only {dec:,d}    E11 {e11:,d}    ratio {e11 / dec:.3f}x")
     print()
 
