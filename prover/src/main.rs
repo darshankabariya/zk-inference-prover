@@ -108,6 +108,10 @@ pub fn src_of(args: &[String]) -> Src {
         // B10 step 3: prove the band as the causal corner instead of the prefix
         // rectangle.  `--ctx` must equal `--s`; the mask is `key <= token`.
         corner: args.iter().any(|a| a == "--corner"),
+        // Stream AA (E11): `--kv-bind` also tiles the declared prefix into
+        // blocks of S keys, which is a witness-side decision as much as a plan
+        // one -- see `briefs/aa-kvbind.md`.
+        tile: args.iter().any(|a| a == "--kv-bind"),
     }
 }
 
@@ -563,9 +567,13 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
     // more band per prefix band, with the same `insts` and head offset, and the
     // plan rebuilds them from the flag rather than from the list.
     let n_pre = l.bands.iter().filter(|b| !b.corner).count();
+    // Stream AA (E11): with `--kv-bind` the declared prefix is `l.nsub` bands of
+    // `S` keys per head band group, so the chunk's context is the sub-band's
+    // times `nsub` and the head band list takes every `nsub`-th entry.  Both are
+    // the identity when `nsub == 1`, which is every run without the flag.
     compose::Params {
-        s: l.ao.s, c: b0.shape.c, hd: l.ao.hd, nh: l.ao.nh,
-        bands: l.band_sizes[..n_pre].to_vec(),
+        s: l.ao.s, c: b0.shape.c * l.nsub, hd: l.ao.hd, nh: l.ao.nh,
+        bands: l.band_sizes[..n_pre].iter().step_by(l.nsub).copied().collect(),
         corner: l.bands.len() > n_pre,
         // Stream E: the head's order-key claim.  Not under `--no-glue`'s gate,
         // because a head dump has no wiring columns to switch off.
@@ -650,6 +658,11 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // by the flag on the command line or by `B10_BOUNDS` in the environment.
         // Off is what makes the recorded digest the identity line.
         bounds: flag(args, "--bounds") || bounds::enabled(),
+        // Stream AA (E11): the K/V boundary trees, and the prefix tiling they
+        // need.  Opt-in and skipped in the serialization, so a statement
+        // written without it is byte identical to one from a crate that never
+        // had the feature.
+        kv_bind: flag(args, "--kv-bind"),
         // B11 stream Q: opt in to the LogUp-GKR arm for the bands. A flag and
         // not an env mode, because it changes the proof.
         gkr_bands: flag(args, "--gkr-bands"),
@@ -1097,6 +1110,29 @@ fn compose_probes_cmd(args: &[String]) {
                 "an argmax on keys that are not the head's output accepted");
     }
 
+    // 12. Stream AA (E11): one cell of a K/V boundary tree moved *alone*, the
+    //     region it is tied to left exactly as it was.  Nothing else in the
+    //     chunk changes, so the only thing that can reject is `ChanEval`'s /
+    //     `KeyEval`'s equality constraint -- and that is precisely the statement
+    //     that the boundary root is *bound to the proof* and not merely appended
+    //     to it.  A stream that cannot make this reject has not bound the root.
+    //
+    //     Every side is probed, not just the first: an out side and an in side
+    //     are written by different sets of bands, and a binding that held on one
+    //     and not the other would chain a chunk to a prefix it never proved.
+    if params.kv_bind {
+        let n_sides = compose::Plan::new(&params).kv.len();
+        assert!(n_sides > 0, "--kv-bind produced no K/V boundary sides");
+        for k in 0..n_sides {
+            let side = compose::Plan::new(&params).bounds.len() + k;
+            assert!(!probe(&format!("kv: one cell of K/V boundary side {k}, region untouched"),
+                           &l,
+                           &compose::ProverTamper { bounds: Some((side, 4321)),
+                                                    ..Default::default() },
+                           "the K/V boundary equality constraint"),
+                    "a K/V boundary column that disagrees with its region accepted");
+        }
+    }
     // 8. a tampered claim in the serialized statement: the replayed transcript
     //    diverges and stwo's verify rejects
     {
@@ -1123,6 +1159,7 @@ fn layer_clone(l: &layer::Layer) -> layer::Layer {
         bands: l.bands.iter().map(attn_clone).collect(),
         band_sizes: l.band_sizes.clone(),
         head_offsets: l.head_offsets.clone(),
+        nsub: l.nsub,
         mats: l.mats.iter().map(|m| layer::Mat {
             name: m.name.clone(), variant: m.variant, n_in: m.n_in, n_out: m.n_out,
             tokens: m.tokens, acc: m.acc.clone(), qx: m.qx.clone(), qw: m.qw.clone(),

@@ -196,6 +196,21 @@ pub struct Params {
     /// stream ties; absent, and a chunk composes exactly as it did before.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bounds: bool,
+    /// Stream AA (E11): the chunk's keys and values are committed in boundary
+    /// trees of their own, one **out** side and one **in** side per head band
+    /// group, so that "the keys chunk `(L, b+1)` attended to are the ones chunk
+    /// `(L, b)` proved" is checkable from serialized bytes by root equality --
+    /// the token axis's version of what `bounds` does for the layer axis.
+    ///
+    /// It implies `corner`, and it *tiles the declared prefix into sub-bands of
+    /// exactly `S` keys* (layout design A), because a V column's height is a
+    /// function of the chunk's own `C` and a producer's corner V column and a
+    /// consumer's untiled prefix V column can therefore never be equal.  So the
+    /// flag changes the band decomposition, not only the tree count.  Skipped
+    /// when false, so every statement written without it is byte identical to
+    /// one from a crate that never had the feature.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kv_bind: bool,
     /// Stream E: publish the head's order-key claim.  It sits here rather than in
     /// `GlueParams` because a head dump carries no wiring columns at all -- the
     /// two features share the tie challenge, not the witness.
@@ -607,6 +622,23 @@ pub struct Plan {
     /// plan settles that once so the prover and the verifier cannot disagree
     /// about how many trees the transcript has.
     pub bounds: Vec<crate::bounds::Side>,
+    /// Stream AA: the K/V boundary sides, or empty.  They follow `bounds` in the
+    /// tree order, so turning either feature on does not move the other's tree
+    /// indices.
+    pub kv: Vec<crate::bounds::KvSide>,
+    /// Stream AA, per band: which head band group it belongs to.  Without
+    /// `kv_bind` this is the band's own index modulo the prefix count, which is
+    /// exactly the prefix/corner pairing `verify_composed` used to spell as
+    /// `b - n_pre`; with it, a group is one prefix *sub-band per key block* plus
+    /// the chunk's own corner.
+    pub group: Vec<usize>,
+    /// Stream AA, per band: does it carry the group's per-token region (the row
+    /// maxima and the denominator)?  There is one such region per head band
+    /// group -- one row maximum and one denominator per *token*, not per key
+    /// block -- so with the prefix tiled it is the group's first sub-band's, and
+    /// every other band of the group rides on it exactly as a corner band
+    /// always has.
+    pub rows_band: Vec<bool>,
 }
 
 impl Plan {
@@ -622,23 +654,55 @@ impl Plan {
             z_hi_bits: p.z_hi_bits,
             z_min: p.z_min,
         };
+        // Stream AA (E11), layout design A: with `--kv-bind` the declared
+        // prefix is tiled into `c / s` sub-bands of exactly `S` keys each -- the
+        // shape the corner band already has -- instead of one rectangle of `c`
+        // keys.  The tiling is not an optimisation, it is the precondition for
+        // pointwise K/V binding: `LayoutKey` puts one row group per
+        // `(instance, key)`, so a V column's *height* is a function of the
+        // chunk's own `c`, and a producer's corner V column and a consumer's
+        // untiled prefix V column are different heights and can never be equal.
+        // Tiled at `S`, a consumer's sub-band `b` is the same `Shape` -- and so
+        // the same `Grid`, `LayoutChan` and `LayoutKey` -- as the producer's
+        // corner, and the two column lists coincide by construction rather than
+        // by argument.  See `briefs/aa-kvbind.md`.
+        assert!(!p.kv_bind || p.corner,
+                "`--kv-bind` tiles the prefix beside the chunk's own block; it needs `--corner`");
+        assert!(!p.kv_bind || p.c % p.s == 0,
+                "`--kv-bind` tiles the prefix in blocks of S: C={} is not a multiple of S={}",
+                p.c, p.s);
+        // with the flag off this is 1, so the loop below builds exactly the one
+        // prefix band per head band it always built
+        let nsub = if p.kv_bind { p.c / p.s } else { 1 };
+        let sub_c = if p.kv_bind { p.s } else { p.c };
         let mut head_offsets = vec![];
         let mut off = 0;
         let mut shapes = vec![];
-        for insts in &p.bands {
-            head_offsets.push(off);
+        let mut group = vec![];
+        let mut rows_band = vec![];
+        for (g, insts) in p.bands.iter().enumerate() {
+            for k in 0..nsub {
+                head_offsets.push(off);
+                shapes.push(Shape { s: p.s, c: sub_c, hd: p.hd, insts: *insts });
+                group.push(g);
+                // one per-token region per head band group, on its first band
+                rows_band.push(k == 0);
+            }
             off += insts;
-            shapes.push(Shape { s: p.s, c: p.c, hd: p.hd, insts: *insts });
         }
         assert_eq!(off, p.nh, "bands must cover every head");
         let mut corner = vec![false; shapes.len()];
         if p.corner {
             let mut off = 0;
-            for insts in &p.bands {
+            for (g, insts) in p.bands.iter().enumerate() {
                 head_offsets.push(off);
                 off += insts;
                 shapes.push(Shape { s: p.s, c: p.s, hd: p.hd, insts: *insts });
                 corner.push(true);
+                group.push(g);
+                // block 0 of a sequence has no declared prefix at all, so its
+                // solo corner is the group's only band and carries the region
+                rows_band.push(nsub == 0);
             }
         }
         // B11 stream U, lever 3: the two flags compose, they do not replace one
@@ -654,6 +718,14 @@ impl Plan {
                 "`--gkr-walks` extends the bands' GKR arm; it needs `--gkr-bands`");
         assert!(!p.gkr_attnout || p.gkr_bands,
                 "`--gkr-attnout` extends the bands' GKR arm; it needs `--gkr-bands`");
+        // Stream AA: the bands' GKR arm still gates the per-token region on
+        // `plan.corner` in two places of its own (`gkrband.rs`, `gkrlink.rs`),
+        // which is the pairing `--kv-bind` generalises.  Composing the two is a
+        // follow-on and not a hazard to leave silent, so it is a loud
+        // configuration error until that arm learns `rows_band`.
+        assert!(!(p.kv_bind && p.gkr_bands),
+                "`--kv-bind` and `--gkr-bands` do not compose yet: the GKR arm still pairs \
+                 bands by `corner`");
         let lays: Vec<Layouts> = shapes.iter().map(|sh| Layouts::choose(sh, &cfg)).collect();
 
         let mut widths = vec![p.k_bits, p.q_bits, 8, p.z_lo_bits, p.z_hi_bits, p.ao_rem_bits];
@@ -724,14 +796,34 @@ impl Plan {
             (Some(g), true) => crate::bounds::sides(g),
             _ => vec![],
         };
+        // Stream AA: the K/V sides follow stream H's, so the two features'
+        // tree indices are independent of each other.  `bounds::kv_layout`
+        // rederives exactly this arithmetic from `Fixed.params` alone, which is
+        // how the pair check finds the roots without building a plan.
+        let kv = if p.kv_bind {
+            let kb: Vec<crate::bounds::KvBand> = (0..shapes.len())
+                .map(|b| crate::bounds::KvBand {
+                    group: group[b],
+                    corner: corner[b],
+                    pk: lays[b].chan.pk,
+                    pv: lays[b].key.pv,
+                    chan_rows: lays[b].chan.g.rows,
+                    key_rows: lays[b].key.g.rows,
+                })
+                .collect();
+            crate::bounds::kv_sides(crate::bounds::FIRST_TREE + bounds.len(), &kb)
+        } else {
+            vec![]
+        };
         Self { p: p.clone(), attn_variant, round, shapes, lays, cfg, head_offsets, corner, specs,
-               mat_lays, ao_lay, walks, widths, log_norm, log_frac, log_mul, glue, bounds }
+               mat_lays, ao_lay, walks, widths, log_norm, log_frac, log_mul, glue, bounds,
+               kv, group, rows_band }
     }
 
     /// How many trees the transcript commits: the three that were always there,
     /// plus one per boundary side.
     pub fn n_trees(&self) -> usize {
-        3 + self.bounds.len()
+        3 + self.bounds.len() + self.kv.len()
     }
 
     /// Tree 0's column ids, in exactly the order the prover commits them.
@@ -751,6 +843,23 @@ impl Plan {
         } else {
             Powers::new(r, s, rv, sh, &l.chan, &l.key, &l.out, l.rw)
         }
+    }
+
+    /// The exponent of the global per-head instance weight `r^{·}`.
+    ///
+    /// Every region that packs heads has to carry the same one: the bands'
+    /// `Powers::r_c` and `sn_c`, the per-token region's `mu`, the attention
+    /// output region's `mu_den`, and `verify_composed`'s own `r_c^{head}` fold.
+    /// Untiled it is the context width `C`, because a prefix band's key Horner
+    /// walks exactly `C` keys per instance and so produces `r^C` for free.
+    ///
+    /// Stream AA: with `--kv-bind` every band is `c = S`, so the same Horner
+    /// produces `r^S` for free, and the global weight moves with it.  That is
+    /// what keeps design A free of any new AIR mechanism -- a prefix sub-band
+    /// needs no `iend`/`kappa` conversion, its natural instance stride *is* the
+    /// global one, and it keeps `KEY_SEL` and CC's frozen per-slot content.
+    pub fn head_weight_c(&self) -> usize {
+        if self.p.kv_bind { self.p.s } else { self.p.c }
     }
 
     /// How many secure felts the transcript draws after the relations, and where
@@ -806,7 +915,11 @@ impl Plan {
             } else {
                 ids.extend(KEY_SEL.iter().map(|n| band_id(b, n)));
             }
-            if !self.corner[b] {
+            // Stream AA: the predicate is "does this band carry the per-token
+            // region", not "is it a prefix band".  With `--kv-bind` off the two
+            // are the same predicate on the same bands, so this id sequence is
+            // the one tree 0 always had.
+            if self.rows_band[b] {
                 ids.extend(ROW_SEL.iter().map(|n| band_id(b, n)));
             }
         }
@@ -887,7 +1000,10 @@ impl Plan {
         (if self.p.gkr_bands {
             0
         } else {
-            self.corner.iter().map(|c| if *c { 2 } else { 3 }).sum::<usize>()
+            // stream AA: three sums for a band that carries the per-token
+            // region, two for one that rides on its group's -- with `--kv-bind`
+            // off, `rows_band` is `!corner` and this is the sum it always was
+            self.rows_band.iter().map(|r| if *r { 3 } else { 2 }).sum::<usize>()
         })
             + 1
             // B11 stream U, lever 3: the same for the dequant family
@@ -1159,7 +1275,10 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             alloc,
             ChanEval { tag: b, lay: l.chan, pow: pow.clone(), off, claimed: unqm(bc[0]),
                        rel_k: rels.range(p.k_bits).clone(), rel_q: rels.range(p.q_bits).clone(),
-                       range_check: true, gkr: p.gkr_bands },
+                       range_check: true, gkr: p.gkr_bands,
+                       // stream AA: empty unless `--kv-bind`, so the IR, the
+                       // fingerprint and the proof are unmoved with it off
+                       bound_k: crate::bounds::kv_bounds_of(&plan.kv, b, l.chan.pk) },
             if p.gkr_bands { SecureField::zero() } else { next_use(claims) },
         ));
         keys.push(FrameworkComponent::<KeyEval>::new(
@@ -1171,10 +1290,13 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                           AttnVariant::IntSplit(k) => Some(rels.range(k).clone()),
                           _ => None,
                       },
-                      range_check: true, gkr: p.gkr_bands, corner: plan.corner[b] },
+                      range_check: true, gkr: p.gkr_bands, corner: plan.corner[b],
+                      bound_v: crate::bounds::kv_bounds_of(&plan.kv, b, l.key.pv) },
             if p.gkr_bands { SecureField::zero() } else { next_use(claims) },
         ));
-        if !plan.corner[b] {
+        // stream AA: "carries the per-token region", which with `--kv-bind` off
+        // is `!corner[b]` on the same bands
+        if plan.rows_band[b] {
             rows.push(FrameworkComponent::<RowEval>::new(
                 alloc,
                 RowEval { tag: b, log_rows: l.log_row, rw: l.rw, pow: pow.clone(),
@@ -1211,7 +1333,9 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
 
     let (rv_pow_ao, rv_step_ao) = powers(rv, plan.ao_lay.per_row);
     let (_, rv_hd) = powers(rv, p.hd);
-    let (_, r_c) = powers(r, p.c);
+    // stream AA: the global per-head instance weight, `r^C` untiled and `r^S`
+    // under `--kv-bind` -- see `Plan::head_weight_c`
+    let (_, r_c) = powers(r, plan.head_weight_c());
     let (_, s_span) = powers(s, p.s - 1);
     let ao = FrameworkComponent::<AttnOutEval>::new(
         alloc,
@@ -1364,11 +1488,11 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 .map(|sp| sp.col_start)
                 .expect("a component with no span in the tree the tie reads")
         };
-        // band -> index into `rows` (prefix bands only)
-        let mut row_of = vec![usize::MAX; plan.corner.len()];
+        // band -> index into `rows` (the bands that carry a per-token region)
+        let mut row_of = vec![usize::MAX; plan.rows_band.len()];
         let mut ri = 0usize;
-        for (b, corner) in plan.corner.iter().enumerate() {
-            if !*corner {
+        for (b, has) in plan.rows_band.iter().enumerate() {
+            if *has {
                 row_of[b] = ri;
                 ri += 1;
             }
@@ -1524,7 +1648,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
 
     BuiltComponents { chans, keys, rows, links, link_tie, ao, mats, walks, glue, exp_t, tables,
                       gtables, argmax, pows,
-                      has_rows: plan.corner.iter().map(|c| !*c).collect() }
+                      has_rows: plan.rows_band.clone() }
 }
 
 /// Stream E: the argmax side's tie weights -- the mirror of the head dequant's
@@ -1567,6 +1691,10 @@ pub struct Composed {
     /// Stream H: what the boundary trees cost this chunk, or null when the flag
     /// was off and there are none
     pub bounds: Value,
+    /// Stream AA: the same for the K/V boundary trees -- per side, its tree,
+    /// its head band group, whether it is the out or the in side, the bands
+    /// that wrote it, its columns and its cells.  Null without `--kv-bind`.
+    pub kv_bounds: Value,
 }
 
 /// Tampers that need a hook inside the prover (everything else corrupts the
@@ -1586,6 +1714,11 @@ pub struct ProverTamper {
     /// and side 1 the output.  Nothing else in the chunk changes, so what has to
     /// reject is that side's equality constraint: the probe that says the root
     /// is bound to the proof and not merely appended to it.
+    ///
+    /// Stream AA: the side index runs over `plan.bounds` and then over
+    /// `plan.kv`, so side `plan.bounds.len() + j` is the `j`th K/V side --
+    /// which for a chunk with a prefix is group `j / 2`'s out side when `j` is
+    /// even and its in side when `j` is odd.
     pub bounds: Option<(usize, usize)>,
     /// Stream E: corrupt the wiring family's own copy of a dequant output --
     /// `(region index, value index)` into `o_out` for `gn1` or `d_out` for
@@ -1665,9 +1798,13 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     let t0 = std::time::Instant::now();
     let plan = Plan::new(params);
     let p = &plan.p;
-    assert_eq!(layer.band_sizes[..p.bands.len()], p.bands[..],
-               "layer bands disagree with params");
+    // stream AA: with the prefix tiled, `band_sizes` is no longer `p.bands`
+    // followed by the corners -- it is one entry per *band*, which is what the
+    // plan's shapes are.  Comparing against those is the same check untiled and
+    // the right one tiled.
     assert_eq!(layer.bands.len(), plan.shapes.len(), "layer bands disagree with the plan");
+    assert!(layer.band_sizes.iter().zip(&plan.shapes).all(|(n, sh)| *n == sh.insts),
+            "layer bands disagree with params");
     assert_eq!(layer.bands[0].log_table, p.log_table, "exp table rows disagree");
 
     let mut tables = Tables::new(layer.bands[0].table.clone(), p.log_table, p.kmax,
@@ -1718,6 +1855,10 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // and the proof is rejected by `sums_cancel` with every other check green.
     crate::devpre::note_host_fill(
         layer.bands.iter().any(|a| crate::devwfill::band_fill_mode(a) != 1)
+            // stream AA: a band that does not carry the per-token region fills
+            // on the host too (`commit_base_any`), and `band_fill_mode` has no
+            // way to know that -- it is told the `Attn`, not the plan
+            || plan.rows_band.iter().any(|r| !*r)
             || plan.argmax_mat().is_some()
             // stream Z: the fold region and the widened attention output's walk
             // both fill on the host, whatever the switches say
@@ -1738,12 +1879,12 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         let pre = if crate::devpre::mode() == 1 && !a.corner {
             vec![]
         } else {
-            attn_trace::commit_pre(a, l, false, !a.corner)
+            attn_trace::commit_pre(a, l, false, plan.rows_band[b])
         };
         let (base, at, dev) =
             attn_trace::commit_base_any(a, l, &plan.cfg, &plan.widths, &mut mult_exp,
                                         &mut mult_r, &mut tables.off_table, false,
-                                        !a.corner);
+                                        plan.rows_band[b]);
         band_dev.push(dev);
         band_committed.push(Committed { pre, base, at, off_table: 0 });
     }
@@ -1776,7 +1917,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             let corner_dev = a.corner && band_dev[b].is_some();
             ((!a.corner && (pre_mode >= 1 || band_dev[b].is_some())) || corner_dev)
                 .then(|| crate::devpre::band_dev(a, &plan.lays[b], pre_mode >= 1 && !a.corner,
-                                                 !a.corner))
+                                                 plan.rows_band[b]))
         })
         .collect();
     if pre_mode == 2 {
@@ -2245,7 +2386,9 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // its layout), so its bumps sit in the host multiplicity arrays and
             // reach the table through the patch rows -- no device counter to sum.
             let Some(d) = band_dev[b].as_ref() else {
-                assert!(a.corner, "B7_M4_WFILL=1 but a non-corner band is host-built");
+                assert!(a.corner || !plan.rows_band[b],
+                        "B7_M4_WFILL=1 but a band that carries the per-token region is \
+                         host-built");
                 continue;
             };
             if plan.cfg.range_check {
@@ -2617,7 +2760,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // `build_components` gives a corner band no row component, and a corner
         // band's fractions never take the device route -- so it gets no BandAir,
         // and the row index counts prefix bands only.
-        let air = (!a.corner).then(|| {
+        let air = plan.rows_band[b].then(|| {
             let ri = row_i;
             row_i += 1;
             crate::devfrac::BandAir {
@@ -2638,7 +2781,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
         let it = attn_trace::interaction_phase(a, l, &plan.cfg, &pow, &rels.exp, &rels.ranges,
                                                &band_committed[b], &plan.widths, false,
-                                               !a.corner, air.as_ref(), gkr.as_deref_mut());
+                                               plan.rows_band[b], air.as_ref(),
+                                               gkr.as_deref_mut());
         crate::util::m4_add("int/bands_build", t_ib.elapsed().as_secs_f64());
         inter_all.extend(it.cols);
         inter_mark(&format!("band{b}{}", if a.corner { " (corner)" } else { "" }),
@@ -2915,7 +3059,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         link_hl = Some(hl);
     }
     let m4_t = std::time::Instant::now();
-    let aoi = ao_interaction(&layer.ao, &aor, r, s, rv, p.c, &rels, &m4e_air.ao.eval,
+    let aoi = ao_interaction(&layer.ao, &aor, r, s, rv, plan.head_weight_c(), &rels,
+                            &m4e_air.ao.eval,
                             p.gkr_attnout);
     inter_all.extend(aoi.cols);
     inter_mark("attnout", &inter_all, &mut inter_seen, &mut inter_split);
@@ -3292,6 +3437,37 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
         crate::bounds::report(&plan.bounds)
     };
+    // Stream AA: the K/V sides, in the same position and for the same reason,
+    // right after stream H's.  A side's columns are the *very columns tree 1
+    // committed*, cloned band by band in component-registration order --
+    // `[band's K][band's V]` -- so byte-identity with the region is by
+    // construction and not by a second copy of `attn_trace`'s index map.
+    let kv_report = if plan.kv.is_empty() {
+        json!(null)
+    } else {
+        for (i, side) in plan.kv.iter().enumerate() {
+            let mut cols: Vec<Eval> = vec![];
+            for b in &side.bands {
+                let com = &band_committed[*b];
+                assert!(!com.base.is_empty(),
+                        "--kv-bind needs the band fill on the host: the K/V boundary tree is a \
+                         copy of the committed columns, and with B7_M4_WFILL_BAND=1 band {b} \
+                         has none on this side of the bus");
+                let (l, at) = (&plan.lays[*b], &com.at);
+                let n_aux = if plan.attn_variant == AttnVariant::IntExp { 0 } else { l.key.q };
+                let v0 = at[1] + 2 * l.key.q + n_aux;
+                cols.extend(com.base[at[0]..at[0] + l.chan.pk].iter().cloned());
+                cols.extend(com.base[v0..v0 + l.key.pv].iter().cloned());
+            }
+            assert_eq!(cols.len(), side.columns, "a K/V side's width disagrees with its plan");
+            // the tamper indexes the sides as one list, stream H's first
+            let tam = bounds_tamper
+                .filter(|(s, _)| *s == plan.bounds.len() + i)
+                .map(|(_, c)| c);
+            sess.commit(crate::bounds::kv_cols(cols, tam));
+        }
+        crate::bounds::kv_report(&plan.kv)
+    };
     crate::util::m4_add("wall/commit_bounds", m4_t.elapsed().as_secs_f64());
     sess.mix(&claims.flat());
 
@@ -3359,6 +3535,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         n_columns,
         glue_ties_ok,
         bounds: bounds_report,
+        kv_bounds: kv_report,
     }
 }
 
@@ -3393,6 +3570,11 @@ pub struct Verdict {
     /// one proof alone gets them here so it never has to re-derive anything.
     pub bound_in: Option<String>,
     pub bound_out: Option<String>,
+    /// Stream AA: every boundary tree's root, stream H's two first and then the
+    /// K/V sides in `plan.kv`'s order.  A verifier reading one proof alone gets
+    /// them here so it never has to re-derive anything; `bounds::chain_check`
+    /// reads the same roots straight out of `proof.commitments`.
+    pub bound_roots: Vec<String>,
     pub error: Option<String>,
     pub verify_secs: f64,
 }
@@ -3411,7 +3593,7 @@ impl Verdict {
                sizes_ok: false, glue_ok: vec![false], deq_out_ok: vec![false],
                head_tie_ok: false,
                stream_in: None, stream_out: None,
-               bound_in: None, bound_out: None,
+               bound_in: None, bound_out: None, bound_roots: vec![],
                error: Some(msg.to_string()), verify_secs: 0.0 }
     }
 }
@@ -3518,6 +3700,13 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     for t in 3..plan.n_trees() {
         vcs.commit(proof.commitments[t], &fixed.sizes[t], &mut ch);
     }
+    // Stream AA: every boundary tree's root, in the prover's order -- stream H's
+    // two, then the K/V sides.  `bound_in`/`bound_out` stay as the first pair so
+    // that H's and I's probe JSON does not move; `Verdict` is *output* and not
+    // `Fixed`, so neither field touches the digest.
+    let bound_roots: Vec<String> = (crate::bounds::FIRST_TREE..plan.n_trees())
+        .map(|t| format!("{:?}", proof.commitments[t]))
+        .collect();
     let (bound_in, bound_out) = match plan.bounds.len() {
         2 => (Some(format!("{:?}", proof.commitments[3])),
               Some(format!("{:?}", proof.commitments[4]))),
@@ -3558,31 +3747,42 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // and one denominator per *token*, and both live on the prefix band -- so its
     // Q.K^T identity is read against the prefix band's `am`, and its numerator sum
     // is added to the prefix band's before the denominator identity is checked.
-    let n_pre = plan.p.bands.len();
+    // Stream AA: the corner's `b - n_pre` pairing generalises to "which head
+    // band group is this band in", because with `--kv-bind` a group is one
+    // prefix sub-band *per key block* plus the chunk's own corner, not a pair.
+    // `plan.group` and `plan.rows_band` are that generalisation and with the
+    // flag off they name exactly the bands the two lines below named.
+    let row_of: Vec<usize> = (0..plan.p.bands.len())
+        .map(|g| {
+            (0..plan.shapes.len())
+                .find(|b| plan.group[*b] == g && plan.rows_band[*b])
+                .expect("every head band group carries one per-token region")
+        })
+        .collect();
     let (_, rv_hd) = powers(rv, p.hd);
-    let (_, r_c) = powers(r, p.c);
+    let (_, r_c) = powers(r, plan.head_weight_c());
     for (b, bc) in claims.bands.iter().enumerate() {
         let pow = &built.pows[b];
         let (chan, hs, av) = (unqm(bc[0]), unqm(bc[1]), unqm(bc[2]));
-        // a corner band's row maximum is the prefix band's, by construction: it has
-        // no `am` of its own to disagree with
-        let am = unqm(claims.bands[if plan.corner[b] { b - n_pre } else { b }][4]);
+        // a band without a per-token region reads its group's row maximum, by
+        // construction: it has no `am` of its own to disagree with
+        let am = unqm(claims.bands[row_of[plan.group[b]]][4]);
         qk_ok.push(pow.r_sum * am - hs == chan);
-        // fold this band's A.V claim by its head offset; the denominator claim is
-        // the prefix band's alone, and the corner's `sn` joins it below
+        // fold this band's A.V claim by its head offset; the denominator claim
+        // is the group's row band's alone, and every other band's `sn` joins it
+        // below
         let woff_out = rv_hd.pow(plan.head_offsets[b] as u128);
         av_sum += woff_out * av;
-        if !plan.corner[b] {
+        if plan.rows_band[b] {
             az_sum += r_c.pow(plan.head_offsets[b] as u128) * unqm(bc[5]);
         }
     }
-    let den_ok: Vec<bool> = (0..n_pre)
-        .map(|b| {
-            let mut sn = unqm(claims.bands[b][3]);
-            if plan.p.corner {
-                sn += unqm(claims.bands[b + n_pre][3]);
-            }
-            sn == unqm(claims.bands[b][5])
+    let den_ok: Vec<bool> = (0..plan.p.bands.len())
+        .map(|g| {
+            let sn = (0..plan.shapes.len())
+                .filter(|b| plan.group[*b] == g)
+                .fold(SecureField::zero(), |a, b| a + unqm(claims.bands[b][3]));
+            sn == unqm(claims.bands[row_of[g]][5])
         })
         .collect();
     let av_ok = av_sum == unqm(claims.ao_out);
@@ -3640,6 +3840,6 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
 
     Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
               head_tie_ok,
-              sizes_ok, glue_ok, stream_in, stream_out, bound_in, bound_out, error,
+              sizes_ok, glue_ok, stream_in, stream_out, bound_in, bound_out, bound_roots, error,
               verify_secs: t0.elapsed().as_secs_f64() }
 }
