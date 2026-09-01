@@ -31,6 +31,7 @@ mod gencudakernels;
 mod cudakernels;
 mod exprprobe;
 mod dequant;
+mod embed;
 mod glue;
 mod layer;
 mod layout;
@@ -510,6 +511,141 @@ fn argmax_probes_cmd(args: &[String]) {
                                  "ties_in_witness": w.ties}));
 }
 
+
+// ------------------------------------------------------------------ embed ----
+
+/// Stream BB: the embedding gadget on its own, and its cells price.
+///
+/// `--witness DIR` proves it on the dump's own `embed.u16`, `tok_in.i32` and
+/// the wiring family's `xin`; without one it runs a synthetic block, which is
+/// a shape check and nothing more -- the record says so wherever a synthetic
+/// number appears.
+fn embed_cmd(args: &[String]) {
+    let target: usize = arg_scalar(args, "--embed-per-row", 256usize);
+    let w = match arg_str(args, "--witness") {
+        Some(dir) => {
+            let (l, _) = {
+                let mut a = args.to_vec();
+                a.push("--witness".into());
+                a.push(dir.clone());
+                layer_of(&a)
+            };
+            let g = l.glue.as_ref().expect("embed needs a witness extracted with --glue");
+            let tab = l.embed_tab.as_ref().expect("embed needs embed.u16 in the dump");
+            let tok = l.tok_in.as_ref().expect("embed needs tok_in.i32 in the dump");
+            let vocab = tab.len() / g.d;
+            eprintln!("embed on the dump's own table: {} positions of {} channels, \
+                       vocabulary {vocab}", g.tokens, g.d);
+            embed::EWitness::from_cols(g.tokens, g.d, vocab, tab.clone(), tok.clone(),
+                                       g.xin.clone())
+                .expect("the dump's embedding columns")
+        }
+        None => embed::EWitness::synthetic(
+            arg_scalar(args, "--tokens", 16usize),
+            arg_scalar(args, "--d", 128usize),
+            arg_scalar(args, "--vocab", 512usize),
+            arg_scalar(args, "--seed", 11u64)),
+    };
+    let (o, lay) = embed::run(&w, target, None);
+    if !o.accepts() {
+        eprintln!("  REJECTED: stark={} sums={} off={} tie={}", o.proven.stark_ok,
+                  o.sums.cancels(), o.off_table, o.tie_ok);
+    }
+    assert!(o.accepts(), "honest embedding proof rejected");
+    // the forecast at the two real vocabularies, beside the measured point, so
+    // the record never has to re-derive the arithmetic
+    let price = json!({
+        "llama8b": embed::price(4096, 512, 128_256, target),
+        "qwen05b": embed::price(896, 512, 151_936, target),
+    });
+    // What the emit chain will see, at the *real* shapes: an emit is a box slot,
+    // so the two kernels' sizes are worth knowing before one is booked.  This
+    // lowers the two evaluators and reports the IR; it proves nothing and runs
+    // no prover.
+    let shapes: Vec<serde_json::Value> = [4096usize, 896]
+        .iter()
+        .flat_map(|d| {
+            let vocab = if *d == 4096 { 128_256usize } else { 151_936 };
+            let l = embed::EmbLayout::choose(*d, 512, vocab, target);
+            let rel = {
+                let mut ch = stwo::core::channel::Blake2sM31Channel::default();
+                stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_BB01);
+                embed::EmbRel::draw(&mut ch, l.arity())
+            };
+            let rk = {
+                let mut ch = stwo::core::channel::Blake2sM31Channel::default();
+                stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_BB02);
+                attn_air::RangeRel::draw(&mut ch)
+            };
+            let felt = |a: u32| stwo::core::fields::qm31::SecureField::from_m31_array(
+                [common::m31_u32(a), common::m31_u32(a + 1),
+                 common::m31_u32(a + 2), common::m31_u32(a + 3)]);
+            let mut tie = embed::tie_w(felt(7), felt(101), *d, 512, &l);
+            tie.claimed = felt(1_000_003);
+            tie.claimed_tok = felt(2_000_003);
+            let use_eval = embed::EmbedEval { log_rows: l.log_use, per_row: l.pe,
+                                              rel: rel.clone(), rel_ef: rk, tie };
+            let tab_eval = embed::EmbTableEval { log_rows: l.log_tab, per_row: l.pe, rel };
+            let one = |name: &str, ir: cudagen::Ir| json!({
+                "family": name, "d": d, "vocab": vocab,
+                "layout": l.json(512, vocab),
+                "fingerprint": format!("{:#010x}", ir.fingerprint()),
+                "instructions": ir.ops.len(), "constraints": ir.constraints.len(),
+                "scalars": ir.scalars.len(), "m31_muls_per_row": ir.m31_muls(),
+                "loads_per_row": ir.loads(),
+            });
+            vec![
+                one("b65_embed_eval",
+                    cudagen::lower(&use_eval, stwo::core::fields::qm31::SecureField::default(),
+                                   l.log_use, l.log_use + 1)),
+                one("b65_emb_table_eval",
+                    cudagen::lower(&tab_eval, stwo::core::fields::qm31::SecureField::default(),
+                                   l.log_tab, l.log_tab + 1)),
+            ]
+        })
+        .collect();
+    emit("embed", json!({"point": o.json(&w, &lay), "price_forecast": price,
+                         "emit_shapes": shapes}));
+}
+
+/// What the gadget rejects, and which half of the argument each probe aims at.
+fn embed_probes_cmd(args: &[String]) {
+    let target: usize = arg_scalar(args, "--embed-per-row", 256usize);
+    let w = embed::EWitness::synthetic(
+        arg_scalar(args, "--tokens", 16usize),
+        arg_scalar(args, "--d", 128usize),
+        arg_scalar(args, "--vocab", 512usize),
+        arg_scalar(args, "--seed", 11u64));
+    let cases: Vec<(&str, &str, embed::Tamper)> = vec![
+        ("one token id moved, the committed row left alone", "the embedding lookup",
+         embed::Tamper::Tok(3)),
+        ("one token id moved *and* its row recomputed from the table",
+         "the tie to the layer's residual-stream input", embed::Tamper::TokRow(5)),
+        ("one committed channel of the stream changed", "the embedding lookup",
+         embed::Tamper::Val(777)),
+    ];
+    let mut out = vec![];
+    for (name, by, bad) in &cases {
+        eprintln!("embed probe {name}");
+        let (o, lay) = embed::run(&w, target, Some(*bad));
+        out.push(json!({"probe": name, "expect_reject_by": by, "rejected": !o.accepts(),
+                        "result": o.json(&w, &lay)}));
+        assert!(!o.accepts(), "{name} must be rejected");
+    }
+    // The table probe is the pinned-root probe and the standalone harness has no
+    // pinned root to check against, so it is *expected to accept here* and the
+    // composed run is where it bites. Running it anyway is what says so.
+    let (o, lay) = embed::run(&w, target, Some(embed::Tamper::Table(4321)));
+    out.push(json!({"probe": "one cell of the committed table changed, witness rebuilt",
+                    "expect_reject_by": "the pinned preprocessed root (composed only)",
+                    "rejected": !o.accepts(), "accepts_standalone": o.accepts(),
+                    "result": o.json(&w, &lay)}));
+    assert!(o.accepts(),
+            "the table probe must be internally consistent -- only the pinned root sees it");
+    emit("embed_probes", json!({"probes": out, "tokens": w.tokens, "d": w.d,
+                                "vocab": w.vocab}));
+}
+
 // ----------------------------------------------------------------- compose ----
 
 /// Build the layer witness: real from `--witness`, else a small synthetic one.
@@ -670,6 +806,29 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         gkr_glue: flag(args, "--gkr-glue"),
         gkr_walks: flag(args, "--gkr-walks"),
         gkr_attnout: flag(args, "--gkr-attnout"),
+        // Stream BB (E11): the embedding gadget.  `--embed` needs the wiring
+        // columns (its tie's counterparty is their `stream_in` claim) and the
+        // dump's `embed.u16` / `tok_in.i32`; it panics on a dump without them
+        // rather than standing anything in.  Zero -- absent from the serialized
+        // statement -- everywhere else.
+        embed_vocab: if flag(args, "--embed") {
+            let g = l.glue.as_ref()
+                .expect("--embed needs a witness extracted with --glue");
+            let tab = l.embed_tab.as_ref()
+                .expect("--embed needs embed.u16 in the dump");
+            assert!(l.tok_in.is_some(), "--embed needs tok_in.i32 in the dump");
+            assert_eq!(tab.len() % g.d, 0,
+                       "embed.u16 holds {} values, which is not a multiple of d = {}",
+                       tab.len(), g.d);
+            tab.len() / g.d
+        } else {
+            0
+        },
+        embed_per_row: if flag(args, "--embed") {
+            arg_scalar(args, "--embed-per-row", 256usize)
+        } else {
+            0
+        },
     }
 }
 
@@ -1137,6 +1296,37 @@ fn compose_probes_cmd(args: &[String]) {
                     "a K/V boundary column that disagrees with its region accepted");
         }
     }
+    // 7b. Stream BB: the embedding gadget's three probes, when the run asked for
+    //     it.  The second is the aimed corruption -- the id moved to a different
+    //     valid entry with the committed row recomputed to match, so the region
+    //     is internally consistent and every constraint inside it holds; the tie
+    //     to the layer's residual-stream input is the only thing that can see it.
+    if params.embed_vocab > 0 {
+        for (name, expect, t) in [
+            ("embedding: one token id moved, the committed row left alone",
+             "the embedding lookup (sums do not cancel)", embed::Tamper::Tok(3)),
+            ("embedding: one token id moved to another valid entry, its row \
+              recomputed to match",
+             "the tie to the layer's residual-stream input", embed::Tamper::TokRow(5)),
+            ("embedding: one committed channel of the stream changed",
+             "the embedding lookup (sums do not cancel)", embed::Tamper::Val(777)),
+        ] {
+            assert!(!probe(name, &l,
+                           &compose::ProverTamper { embed: Some(t), ..Default::default() },
+                           expect),
+                    "{name} accepted");
+        }
+        // and the table probe, which is the pinned-root probe: the region
+        // rebuilds the stream from the corrupted table, so every internal check
+        // passes and only tree 0's root disagrees
+        assert!(!probe("embedding: one cell of the committed table changed, witness rebuilt",
+                       &l,
+                       &compose::ProverTamper { embed: Some(embed::Tamper::Table(4321)),
+                                                ..Default::default() },
+                       "the pinned preprocessed root"),
+                "a corrupted embedding table accepted");
+    }
+
     // 8. a tampered claim in the serialized statement: the replayed transcript
     //    diverges and stwo's verify rejects
     {
@@ -1186,6 +1376,8 @@ fn layer_clone(l: &layer::Layer) -> layer::Layer {
         head_keys: l.head_keys.clone(),
         head_tok: l.head_tok.clone(),
         attn_out_bits: l.attn_out_bits,
+        embed_tab: l.embed_tab.clone(),
+        tok_in: l.tok_in.clone(),
         source: l.source.clone(),
     }
 }
@@ -1521,6 +1713,8 @@ fn main() {
         "requant-probes" => requant_probes_cmd(&args),
         "argmax" => argmax_cmd(&args),
         "argmax-probes" => argmax_probes_cmd(&args),
+        "embed" => embed_cmd(&args),
+        "embed-probes" => embed_probes_cmd(&args),
         "glue" => glue_cmd(&args),
         "bounds" => bounds::cmd(&args),
         "bounds-chain" => bounds::chain_cmd(&args),
@@ -1530,7 +1724,7 @@ fn main() {
         other => {
             eprintln!("unknown subcommand {other:?}; \
                        expected tables|dequant|width|kmax|probes|pack|attn-probes|exprprobe|cudacheck|cudaemit|logupcheck|genemit|\
-                       argmax|argmax-probes|\
+                       argmax|argmax-probes|embed|embed-probes|\
                        compose|compose-probes|bounds-chain|psweep|requant|requant-probes|glue|glue-probes|selftest");
             std::process::exit(2);
         }

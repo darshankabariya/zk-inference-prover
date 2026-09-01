@@ -82,13 +82,18 @@ pub struct Rels {
     /// column per shared table.  Absent when the layer carries no glue, so a
     /// proof without it draws exactly what B6.5 drew.
     pub glue: Option<GlueRels>,
+    /// Stream BB: the embedding relation, drawn **last** so that a proof
+    /// without the gadget draws exactly what it always drew.  Its arity is the
+    /// channel block's width plus two, which is why it is not a `relation!`.
+    pub emb: Option<crate::embed::EmbRel>,
 }
 
 impl Rels {
     /// `uns` is the plan's unary-kind list: the relations are drawn one per
-    /// entry, in that order, and both sides index them by it.
+    /// entry, in that order, and both sides index them by it.  `emb` is the
+    /// embedding relation's arity, or `None` when the gadget is off.
     pub fn draw(ch: &mut Blake2sM31Channel, widths: &[u32],
-                uns: Option<&[crate::glue::UnKind]>) -> Self {
+                uns: Option<&[crate::glue::UnKind]>, emb: Option<usize>) -> Self {
         let exp = ExpRel::draw(ch);
         let norm = NormRel::draw(ch);
         let frac = FracRel::draw(ch);
@@ -104,7 +109,8 @@ impl Rels {
             un: ks.iter().map(|_| crate::glue::UnRel::draw(ch)).collect(),
             uns: ks.to_vec(),
         });
-        Self { exp, norm, frac, mul, qnz, widths: widths.to_vec(), ranges, glue }
+        let emb = emb.map(|n| crate::embed::EmbRel::draw(ch, n));
+        Self { exp, norm, frac, mul, qnz, widths: widths.to_vec(), ranges, glue, emb }
     }
     pub fn range(&self, bits: u32) -> &RangeRel {
         &self.ranges[self.widths.iter().position(|w| *w == bits).unwrap()]
@@ -224,6 +230,22 @@ pub struct Params {
     /// tie probe separates from the strict one
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub head_argmax_lax: bool,
+    /// Stream BB (E11): the embedding gadget's vocabulary, and zero when the
+    /// gadget is off -- which is what the plan reads as "no embedding region".
+    /// The gadget proves that the layer's committed residual-stream input is
+    /// row `tok[t]` of an embedding matrix pinned in tree 0, so it needs the
+    /// wiring family (its tie's counterparty is `glue_ties[stream_in]`) and it
+    /// belongs on the layer-0 chunk of a block.  Skipped when zero, so every
+    /// statement written without it is byte identical to one from a crate that
+    /// never had the feature.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub embed_vocab: usize,
+    /// Channels per row of both embedding regions.  It is the lookup tuple's
+    /// arity minus two, so it is the one number in the gadget the generated
+    /// kernel's per-row width depends on; `EmbLayout::choose` rounds it down to
+    /// `d` over a power of two.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub embed_per_row: usize,
 }
 
 /// The wiring family's two shape numbers.  `a` is how many rows one token's
@@ -306,6 +328,16 @@ pub struct Claims {
     /// `head_key` is what says it compared the head's own output
     #[serde(default)]
     pub am_key: Vec<[u32; 4]>,
+    /// stream BB: the embedding region's Horner claim over the residual stream
+    /// it proved.  Equal to `glue_ties[stream_in]` is what says the row it
+    /// proved is the row the layer consumed.
+    #[serde(default)]
+    pub embed_out: Vec<[u32; 4]>,
+    /// stream BB: the same region's claim over the committed token ids, so the
+    /// ids are a named value of the statement and a transcript anchor has
+    /// something to bind to.  Nothing inside this proof compares it.
+    #[serde(default)]
+    pub embed_tok: Vec<[u32; 4]>,
     /// B11 stream Q: the bands' batch GKR proof, as bytes, on the GKR arm only.
     /// It rides here because the statement already travels everywhere the proof
     /// does and `Claims::flat` -- what the transcript mixes -- reads only the
@@ -352,6 +384,10 @@ impl Claims {
         v.extend(self.deq_out.iter().map(|x| unqm(*x)));
         v.extend(self.head_key.iter().map(|x| unqm(*x)));
         v.extend(self.am_key.iter().map(|x| unqm(*x)));
+        // stream BB, appended last: empty unless the embedding gadget is on, so
+        // the transcript is unchanged without it
+        v.extend(self.embed_out.iter().map(|x| unqm(*x)));
+        v.extend(self.embed_tok.iter().map(|x| unqm(*x)));
         v
     }
 }
@@ -639,6 +675,11 @@ pub struct Plan {
     /// every other band of the group rides on it exactly as a corner band
     /// always has.
     pub rows_band: Vec<bool>,
+    /// Stream BB: the embedding gadget's two row counts and its block width, or
+    /// `None`.  Both sides derive it from `Params` alone, so the use region, the
+    /// table region, the preprocessed id list and the verifier cannot disagree
+    /// about the gadget's shape.
+    pub emb: Option<crate::embed::EmbLayout>,
 }
 
 impl Plan {
@@ -815,9 +856,19 @@ impl Plan {
         } else {
             vec![]
         };
+        // Stream BB (E11): the embedding gadget.  It ties to the wiring
+        // family's `stream_in` claim, so a statement that asks for it without
+        // the wiring family is a loud configuration error rather than a proof
+        // with nothing to compare against.
+        let emb = (p.embed_vocab > 0).then(|| {
+            let g = glue.as_ref()
+                .expect("`--embed` ties to the wiring family's stream input; it needs the glue");
+            assert!(p.embed_per_row > 0, "`--embed` needs a channel-block target");
+            crate::embed::EmbLayout::choose(g.t.d, p.s, p.embed_vocab, p.embed_per_row)
+        });
         Self { p: p.clone(), attn_variant, round, shapes, lays, cfg, head_offsets, corner, specs,
                mat_lays, ao_lay, walks, widths, log_norm, log_frac, log_mul, glue, bounds,
-               kv, group, rows_band }
+               kv, group, rows_band, emb }
     }
 
     /// How many trees the transcript commits: the three that were always there,
@@ -983,6 +1034,17 @@ impl Plan {
         if self.argmax_mat().is_some() {
             ids.extend(crate::argmax::AM_SEL.iter().map(|n| crate::argmax::id(n)));
         }
+        // stream BB: the embedding gadget's own columns -- the use region's four
+        // selectors and its block index, then the table's index pair and its
+        // `pe` value columns.  After the argmax and before the GKR arm's, so no
+        // family that exists today moves an index.
+        if let Some(l) = &self.emb {
+            ids.extend(crate::embed::EMB_SEL.iter().map(|n| crate::embed::id(n)));
+            ids.push(crate::embed::cb_id());
+            ids.push(crate::embed::tab_v_id());
+            ids.push(crate::embed::tab_cb_id());
+            ids.extend((0..l.pe).map(crate::embed::tab_e_id));
+        }
         // B11 stream S, lever 3: the link heights' boundary selectors, after
         // everything -- they exist only on the GKR arm, so the flag-off tree
         // is untouched
@@ -1018,9 +1080,13 @@ impl Plan {
               else { self.glue.as_ref().map(|g| g.regions.len()).unwrap_or(0) }
             - usize::from(self.p.gkr_attnout)
             + usize::from(self.argmax_mat().is_some())
+            // stream BB: the embedding gadget's use region, last of all
+            + usize::from(self.emb.is_some())
     }
     pub fn n_table_sums(&self) -> usize {
         5 + self.widths.len() + self.glue.as_ref().map(|g| g.n_tables()).unwrap_or(0)
+            // stream BB: the embedding table's own side, appended last
+            + usize::from(self.emb.is_some())
     }
 }
 
@@ -1045,6 +1111,10 @@ pub struct BuiltComponents {
     pub gtables: Vec<FrameworkComponent<GTableEval>>,
     /// stream E: the argmax region, last of all, so adding it moves nothing
     pub argmax: Option<FrameworkComponent<crate::argmax::ArgmaxEval>>,
+    /// stream BB: the embedding gadget's two components, after the argmax and
+    /// after everything else, in this order -- the use side then the table side
+    pub embed: Option<FrameworkComponent<crate::embed::EmbedEval>>,
+    pub emb_tab: Option<FrameworkComponent<crate::embed::EmbTableEval>>,
     pub pows: Vec<Powers>,
     /// per band, in `chans`/`keys` order: does it have a per-token region?  A
     /// corner band does not (B10 step 3), so `rows` is shorter than `chans` and
@@ -1132,6 +1202,20 @@ impl BuiltComponents {
             let e = &c.eval;
             tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
         }
+        // B11 stream BB: and the embedding gadget's two, in the commit that
+        // adds them. The list has to be every dispatched component: a
+        // component that is dispatched but never prewarmed can only read the
+        // blob some other family left at its address, and the pipelined loop
+        // reuses addresses across chunks. Stream X measured that failing twice
+        // in nine runs on the five families that were missing then.
+        if let Some(c) = &self.embed {
+            let e = &c.eval;
+            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        }
+        if let Some(c) = &self.emb_tab {
+            let e = &c.eval;
+            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        }
         tasks.par_iter().for_each(|t| t());
     }
 
@@ -1172,6 +1256,12 @@ impl BuiltComponents {
         if let Some(a) = &self.argmax {
             v.push(a);
         }
+        if let Some(e) = &self.embed {
+            v.push(e);
+        }
+        if let Some(e) = &self.emb_tab {
+            v.push(e);
+        }
         v
     }
     pub fn components(&self) -> Vec<&dyn Component> {
@@ -1210,6 +1300,12 @@ impl BuiltComponents {
         }
         if let Some(a) = &self.argmax {
             v.push(a);
+        }
+        if let Some(e) = &self.embed {
+            v.push(e);
+        }
+        if let Some(e) = &self.emb_tab {
+            v.push(e);
         }
         v
     }
@@ -1650,8 +1746,43 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         )
     });
 
+    // stream BB: the embedding gadget, after the argmax and after everything
+    // else.  The use region takes the last `use_sums` cursor position and the
+    // table region the last `table_sums` slot, which is what keeps both lists
+    // append-only.  Its tie reads the wiring family's own `w` and `lam`, so it
+    // draws no challenge of its own.
+    let (embed, emb_tab) = match (&plan.emb, &rels.emb) {
+        (Some(l), Some(er)) => {
+            let g = plan.glue.as_ref().expect("the embedding gadget needs the wiring family");
+            let mut tie = crate::embed::tie_w(w_glue, lam_glue, g.t.d, p.s, l);
+            tie.claimed =
+                claims.embed_out.first().copied().map(unqm).unwrap_or(SecureField::zero());
+            tie.claimed_tok =
+                claims.embed_tok.first().copied().map(unqm).unwrap_or(SecureField::zero());
+            let em = FrameworkComponent::<crate::embed::EmbedEval>::new(
+                alloc,
+                crate::embed::EmbedEval {
+                    log_rows: l.log_use,
+                    per_row: l.pe,
+                    rel: er.clone(),
+                    rel_ef: rels.range(crate::embed::EF_BITS).clone(),
+                    tie,
+                },
+                next_use(claims),
+            );
+            let et = FrameworkComponent::<crate::embed::EmbTableEval>::new(
+                alloc,
+                crate::embed::EmbTableEval { log_rows: l.log_tab, per_row: l.pe,
+                                             rel: er.clone() },
+                unqm(claims.table_sums[plan.n_table_sums() - 1]),
+            );
+            (Some(em), Some(et))
+        }
+        _ => (None, None),
+    };
+
     BuiltComponents { chans, keys, rows, links, link_tie, ao, mats, walks, glue, exp_t, tables,
-                      gtables, argmax, pows,
+                      gtables, argmax, embed, emb_tab, pows,
                       has_rows: plan.rows_band.clone() }
 }
 
@@ -1732,6 +1863,11 @@ pub struct ProverTamper {
     pub glue_add: Option<(usize, usize)>,
     /// Stream E: a tamper inside the composed argmax region
     pub argmax: Option<crate::argmax::Tamper>,
+    /// Stream BB: a tamper inside the composed embedding region.  `TokRow` is
+    /// the aimed one -- the id moved to another valid entry with the committed
+    /// row recomputed to match, so every constraint inside the region holds and
+    /// only the tie to the layer's `bin` rejects.
+    pub embed: Option<crate::embed::Tamper>,
     /// Stream Z, the four wired-site bends.  Each bends exactly one committed
     /// cell after the honest value is derived, so the constraint that pins the
     /// cell is the one that has to reject.  `fold_qm` bends a fold slot's
@@ -1774,6 +1910,8 @@ pub struct Gen {
     pub glue_b1: Value,
     /// stream E: the argmax region, when it is composed
     pub am_region: Option<crate::argmax::ARegion>,
+    /// stream BB: the embedding gadget's two regions, when it is composed
+    pub emb_region: Option<crate::embed::ERegion>,
     pub n_deq_base: usize,
     pub pre_tables: Vec<Option<Eval>>,
     pub base_mults: Vec<Option<Eval>>,
@@ -1864,6 +2002,9 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // way to know that -- it is told the `Attn`, not the plan
             || plan.rows_band.iter().any(|r| !*r)
             || plan.argmax_mat().is_some()
+            // stream BB: the embedding gadget has no device fill either, and
+            // its `ef` range checks bump the layer's own 8-bit table on the host
+            || plan.emb.is_some()
             // stream Z: the fold region and the widened attention output's walk
             // both fill on the host, whatever the switches say
             || plan.specs.iter().any(|s| s.variant == DeqVariant::Fold)
@@ -1975,6 +2116,32 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         r
     });
     crate::util::m4_add("gen/argmax", m4_t.elapsed().as_secs_f64());
+
+    // Stream BB: the embedding gadget.  Its use side commits the layer's own
+    // residual-stream input -- the wiring family's `gn1` group 0, value for
+    // value -- so that the tie it publishes and the one the wiring family
+    // publishes are two claims over the same sequence.  Its `ef` range lookups
+    // go on the layer's 8-bit table, exactly as the argmax's go on the 16-bit
+    // one.
+    let m4_t = std::time::Instant::now();
+    let emb_region = plan.emb.map(|l| {
+        let gc = layer.glue.as_ref()
+            .expect("`--embed` ties to the wiring family; extract with `--glue`");
+        let tab = layer.embed_tab.as_ref()
+            .expect("`--embed` needs `embed.u16` in the dump");
+        let tok = layer.tok_in.as_ref().expect("`--embed` needs `tok_in.i32` in the dump");
+        let w = crate::embed::EWitness::from_cols(
+            p.s, gc.d, p.embed_vocab, tab.clone(), tok.clone(), gc.xin.clone())
+            .expect("the dump's embedding columns");
+        let ri = tables.widths.iter().position(|w| *w == crate::embed::EF_BITS)
+            .expect("the embedding gadget needs the layer's 8-bit range table");
+        let mut m_ef = std::mem::take(&mut tables.m_r[ri]);
+        let r = crate::embed::region(&w, l, &mut m_ef, tamper.embed);
+        tables.m_r[ri] = m_ef;
+        tables.off_table += r.off_table;
+        r
+    });
+    crate::util::m4_add("gen/embed", m4_t.elapsed().as_secs_f64());
 
     let m4_t = std::time::Instant::now();
     let mut walk_regions = vec![];
@@ -2456,7 +2623,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     crate::util::m4_add("gen/tables_up", m4_t.elapsed().as_secs_f64());
     let trace_secs = t0.elapsed().as_secs_f64();
     Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
-          glue_regions, glue_tcols, glue_mcols, glue_b1, am_region,
+          glue_regions, glue_tcols, glue_mcols, glue_b1, am_region, emb_region,
           n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
           m4e_tabdev, trace_secs, pre_key, bounds_tamper: tamper.bounds }
 }
@@ -2465,7 +2632,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
 /// interaction, the components and the proof.
 pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
-              glue_regions, glue_tcols, glue_mcols, glue_b1, am_region,
+              glue_regions, glue_tcols, glue_mcols, glue_b1, am_region, emb_region,
               n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
               m4e_tabdev, trace_secs, pre_key, bounds_tamper } = g;
     let p = &plan.p;
@@ -2566,6 +2733,15 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         pre_all.extend(r.pre.iter().map(AnyCol::Host));
         base_all.extend(r.base.iter().map(AnyCol::Host));
     }
+    // stream BB: the embedding gadget closes both trees after the argmax, in
+    // the order `pre_ids` writes its ids and the order `components()` places
+    // its two components -- the use side, then the table side
+    if let Some(r) = emb_region.as_ref() {
+        pre_all.extend(r.pre.iter().map(AnyCol::Host));
+        pre_all.extend(r.tab_pre.iter().map(AnyCol::Host));
+        base_all.extend(r.base.iter().map(AnyCol::Host));
+        base_all.push(AnyCol::Host(&r.tab_mult));
+    }
     // B11 stream S, lever 3: the link heights' boundary selectors close the
     // preprocessed tree, matching `pre_ids` -- GKR arm only
     if p.gkr_bands {
@@ -2639,7 +2815,12 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             un: g.uns.iter().map(|_| sess.draw_relation(crate::glue::UnRel::draw)).collect(),
             uns: g.uns.clone(),
         });
-        Rels { exp, norm, frac, mul, qnz, widths: widths.clone(), ranges, glue }
+        // stream BB: last, so that the flag-off draw order is the one every
+        // recorded digest was taken under
+        let emb = plan.emb.map(|l| {
+            sess.draw_relation(|ch| crate::embed::EmbRel::draw(ch, l.arity()))
+        });
+        Rels { exp, norm, frac, mul, qnz, widths: widths.clone(), ranges, glue, emb }
     };
     let n_ch = plan.n_challenges();
     let ch = sess.draw_felts(n_ch);
@@ -3329,6 +3510,31 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         inter_mark("argmax", &inter_all, &mut inter_seen, &mut inter_split);
     }
     crate::util::m4_add("int/argmax", m4_t.elapsed().as_secs_f64());
+
+    // stream BB: the embedding gadget's interaction columns, last of all,
+    // because its two components are last of all.  Within the use region the
+    // AIR reads the two Horner accumulators before it finalizes its LogUp, so
+    // the tie columns come before the fraction columns here too; the table
+    // region's single column follows, matching the component order.
+    let m4_t = std::time::Instant::now();
+    if let (Some(r), Some(er)) = (emb_region.as_ref(), rels.emb.as_ref()) {
+        let mut tie = crate::embed::tie_w(w_glue, lam_glue, r.d, r.tokens, &r.lay);
+        let (tcols, hc, gc) = crate::embed::tie_cols(r, &tie);
+        tie.claimed = hc;
+        tie.claimed_tok = gc;
+        inter_all.extend(crate::device::host_cols(tcols));
+        claims.embed_out.push(qm(hc));
+        claims.embed_tok.push(qm(gc));
+        let (lcols, use_sum) =
+            crate::embed::logup(r, er, rels.range(crate::embed::EF_BITS));
+        inter_all.extend(crate::device::host_cols(lcols));
+        claims.use_sums.push(qm(use_sum));
+        let (tbcols, tab_sum) = crate::embed::table_side(r, er);
+        inter_all.extend(crate::device::host_cols(tbcols));
+        claims.table_sums.push(qm(tab_sum));
+        inter_mark("embed", &inter_all, &mut inter_seen, &mut inter_split);
+    }
+    crate::util::m4_add("int/embed", m4_t.elapsed().as_secs_f64());
     // an independent recomputation of every tie claim, from the region's witness
     // rather than from its trace: a tie is only worth something if it is checkable
     let glue_ties_ok = match (&plan.glue, &rels.glue) {
@@ -3380,6 +3586,22 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         })).collect::<Vec<_>>(),
         "glue_vs_b1": glue_b1,
         "head_key_vs_b1": head_key_b1,
+        // stream BB: what the embedding gadget costs this chunk, or null with
+        // the flag off.  Reported per position and per block so E1 folds it into
+        // the frontier table without re-deriving the layout.
+        "embed": emb_region.as_ref().map(|r| {
+            let (ur, tr) = (1usize << r.lay.log_use, 1usize << r.lay.log_tab);
+            let base = r.base.len() * ur + tr;
+            json!({
+                "layout": r.lay.json(r.tokens, r.vocab),
+                "columns": {"use_pre": r.pre.len(), "use_base": r.base.len(),
+                            "table_pre": r.tab_pre.len(), "table_base": 1},
+                "cells": {"preprocessed": r.pre_cells(), "base": base},
+                "base_per_position": base as f64 / r.tokens as f64,
+                "looks_per_use_row": r.n_looks(),
+                "off_table": r.off_table,
+            })
+        }),
         "interaction": inter_all.iter().map(|c| c.size()).sum::<usize>(),
         // B11 stream F step 3: the interaction set region by region, in the
         // order `inter_all` is built, plus the rollup by family. `tables` is the
@@ -3566,6 +3788,10 @@ pub struct Verdict {
     /// stream E: the argmax's key claim equals the head dequant's -- "the token
     /// this row emits is the maximum of the logits *this layer computed*"
     pub head_tie_ok: bool,
+    /// stream BB: the embedding region's claim equals the wiring family's
+    /// `stream_in` claim -- "the residual stream this layer consumed is row
+    /// `tok[t]` of the pinned embedding matrix".  True when the gadget is off.
+    pub embed_ok: bool,
     /// the layer's committed residual-stream input and output claims
     pub stream_in: Option<[u32; 4]>,
     pub stream_out: Option<[u32; 4]>,
@@ -3589,13 +3815,13 @@ impl Verdict {
             && self.sizes_ok && self.qk_ok.iter().all(|x| *x) && self.den_ok.iter().all(|x| *x)
 
             && self.walk_ok.iter().all(|x| *x) && self.glue_ok.iter().all(|x| *x)
-            && self.deq_out_ok.iter().all(|x| *x) && self.head_tie_ok
+            && self.deq_out_ok.iter().all(|x| *x) && self.head_tie_ok && self.embed_ok
     }
     fn rejected(msg: &str) -> Self {
         Self { stark_ok: false, root_ok: false, sums_cancel: false, qk_ok: vec![],
                den_ok: vec![], av_ok: false, den_link_ok: false, walk_ok: vec![],
                sizes_ok: false, glue_ok: vec![false], deq_out_ok: vec![false],
-               head_tie_ok: false,
+               head_tie_ok: false, embed_ok: false,
                stream_in: None, stream_out: None,
                bound_in: None, bound_out: None, bound_roots: vec![],
                error: Some(msg.to_string()), verify_secs: 0.0 }
@@ -3631,6 +3857,9 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
             g.regions.iter().zip(&claims.glue_ties).any(|(r, c)| r.ties.len() != c.len())
         })
         || fixed.sizes.len() != plan.n_trees()
+        // stream BB: one claim each, or none at all
+        || claims.embed_out.len() != usize::from(plan.emb.is_some())
+        || claims.embed_tok.len() != usize::from(plan.emb.is_some())
     {
         return Verdict::rejected("claims shape mismatch");
     }
@@ -3648,7 +3877,8 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let root_ok = format!("{:?}", proof.commitments[0]) == fixed.pre_root;
     vcs.commit(proof.commitments[0], &fixed.sizes[0], &mut ch);
     vcs.commit(proof.commitments[1], &fixed.sizes[1], &mut ch);
-    let rels = Rels::draw(&mut ch, &plan.widths, plan.glue.as_ref().map(|g| g.uns.as_slice()));
+    let rels = Rels::draw(&mut ch, &plan.widths, plan.glue.as_ref().map(|g| g.uns.as_slice()),
+                          plan.emb.map(|l| l.arity()));
     let n_ch = plan.n_challenges();
     let f = ch.draw_secure_felts(n_ch);
     let (r, s, rv) = (f[0], f[1], f[2]);
@@ -3842,8 +4072,19 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         true
     };
 
+    // stream BB: the embedding gadget's tie.  Both claims are Horner sums over
+    // the same sequence of stream values under the same weights, so equality is
+    // the whole statement -- and it is checked from the parsed claims alone.
+    let embed_ok = match (&plan.emb, &plan.glue) {
+        (Some(_), Some(g)) => {
+            claims.embed_out.first() == Some(&claims.glue_ties[g.stream_in.0][g.stream_in.1])
+        }
+        (Some(_), None) => false,
+        (None, _) => true,
+    };
+
     Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
-              head_tie_ok,
+              head_tie_ok, embed_ok,
               sizes_ok, glue_ok, stream_in, stream_out, bound_in, bound_out, bound_roots, error,
               verify_secs: t0.elapsed().as_secs_f64() }
 }

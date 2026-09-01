@@ -85,8 +85,11 @@ SHARE = None
 
 def is_shared(name):
     """Is this file the same for every token block of one layer?"""
+    # Stream BB: `embed.u16` is the model's embedding matrix -- the same bytes
+    # for every block of every layer, and 1.05 GB at 8B, so it is shared like
+    # the weights rather than copied per block.
     return (name.startswith(("qw_", "jw_", "sw_"))
-            or name in ("jv.i32", "w1.u16", "w2.u16"))
+            or name in ("jv.i32", "w1.u16", "w2.u16", "embed.u16"))
 
 
 class LastChunk(Recorder):
@@ -223,6 +226,12 @@ if __name__ == "__main__":
     p.add_argument("--glue", action="store_true",
                    help="also dump B10 step 2's wiring columns (residual stream, "
                         "norm weights and rsqrt/silu lookups)")
+    # Stream BB (E11): the embedding gadget's two inputs.  Only meaningful on a
+    # layer-0 dump -- `xin` is the embedding's output there and nothing else's --
+    # and the prover's `EWitness::from_cols` refuses a dump where it is not.
+    p.add_argument("--embed", action="store_true",
+                   help="also dump the embedding matrix and this block's input token "
+                        "ids (stream BB; layer 0 only)")
     p.add_argument("--head", action="store_true",
                    help="also dump B10 step 4's `lm_head` chunk (the accumulators, the "
                         "quantized weights, the logits' order keys and the emitted tokens)")
@@ -659,6 +668,45 @@ if __name__ == "__main__":
                 print(f"        rows emit the *next* token on {nxt}/{S - 1}; "
                       f"the same position on {same}/{S}")
 
+            # ---- Stream BB (E11): the embedding gadget's two inputs -----------------
+            # `embed.u16` is the table the residual stream entering layer 0 is a row
+            # of, as bf16 *patterns* -- the same encoding `xin.u16` carries, because
+            # the gadget's lookup compares the two cell for cell.  On a model that
+            # scales the embedding before layer 0 (Gemma's sqrt(d)) the scaled table
+            # is what `xin` is a row of, so that is what is written and the manifest
+            # says so.  `tok_in.i32` is this block's own input ids: row `t` of `xin`
+            # is position `base + t`.
+            emb = {}
+            if a.embed:
+                scale = getattr(m, "embed_scale", None)
+                etab = m.emb.detach().to("cpu")
+                if scale:
+                    etab = (etab.float() * float(scale)).to(BF16)
+                else:
+                    etab = etab.to(BF16)
+                epat = etab.contiguous().view(torch.int16).numpy().view(np.uint16)
+                write("embed.u16", epat, digests)
+                idn_e = ids.numpy().astype(np.int64)
+                write("tok_in.i32", idn_e[base:base + S].astype(np.int32), digests)
+                emb = dict(vocab=int(etab.shape[0]), d=int(etab.shape[1]),
+                           layer=int(L), block_base=int(base), tokens=int(S),
+                           embed_scale=(float(scale) if scale else None))
+                # the premise the prover then re-checks value by value: on a
+                # layer-0 dump `xin` *is* a row of this table
+                if a.glue and L == 0:
+                    xp = (m.rec.cols[f"L{L}.xin"].detach().to("cpu").contiguous().to(BF16)
+                          .view(torch.int16).numpy().view(np.uint16))
+                    want = epat.reshape(int(etab.shape[0]), -1)[idn_e[base:base + S]]
+                    canon = lambda v: np.where(v == 0x8000, 0, v)
+                    bad = int((canon(xp.reshape(S, -1)) != canon(want)).sum())
+                    emb["xin_mismatch"] = bad
+                    print(f"  embed vocab {etab.shape[0]:,} x {etab.shape[1]} "
+                          f"scale {scale} | xin mismatches {bad}")
+                else:
+                    print(f"  embed vocab {etab.shape[0]:,} x {etab.shape[1]} "
+                          f"scale {scale} | layer {L}: xin is not the embedding, "
+                          f"not checked")
+
             frac = (-torch.log2(sqk)).reshape(nh, -1)
             fpi = frac[:, 0].tolist()
             # B10 step 3: the master table is sized by the largest shift the prover
@@ -742,7 +790,7 @@ if __name__ == "__main__":
                 clamped={k: dict(over=v[0], total=v[1], frac=v[0] / v[1])
                          for k, v in (m.clamped or {}).items()},
                 ids_from=a.ids, slim=bool(SLIM),
-                glue=glue, head=head,
+                glue=glue, head=head, embed=emb,
                 torch=torch.__version__, files=digests,
             )
             json.dump(stats, open(os.path.join(OUT, "manifest.json"), "w"), indent=1)
