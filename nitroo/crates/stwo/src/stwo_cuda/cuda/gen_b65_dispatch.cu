@@ -20,3 +20,24 @@ extern "C" void gen_b65_dispatch(
                  family);
     std::abort();
 }
+
+// The unpaired variant, which B11 stream T added to the emitter and to
+// `prover/src/gkrband.rs` without adding it here. That omission cost the
+// stand-in the one property it exists for: from stream T until 2026-09-01 the
+// cuda arm did not LINK on a fork with no installed store
+// (`rust-lld: error: undefined symbol: gen_b65_feed_dispatch`), so every box
+// needed a kernel-store install before it could build both arms at all. The
+// generator emits exactly this fallthrough for zero families.
+extern "C" void gen_b65_feed_dispatch(
+    const char *family, unsigned, unsigned,
+    m31 **, unsigned,
+    m31 **, unsigned,
+    const qm31 *, unsigned,
+    qm31 **, qm31 **,
+    unsigned, unsigned) {
+    std::fprintf(stderr,
+                 "gen_b65_feed_dispatch: no feed kernel for family %s -- run "
+                 "`b65 genemit` and install it (m4b_kernels.py) first\n",
+                 family);
+    std::abort();
+}

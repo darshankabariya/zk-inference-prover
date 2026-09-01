@@ -7,7 +7,7 @@ built against. It is committed as source so that the whole prover — our crate
 in `../prover` plus the fork it builds on — is reproducible from this repo
 alone, with no patch scripts and no reliance on a box's checkout.
 
-Two changes are applied on top of the pristine import, each as its own commit
+Three changes are applied on top of the pristine import, each as its own commit
 so the delta to upstream stays readable in `git log -- nitroo/`:
 
 1. **B7a milestone 2b** (was `experiments/b7/gpu/m2b_fork.py`): `RelationEntry`
@@ -18,6 +18,17 @@ so the delta to upstream stays readable in `git log -- nitroo/`:
    `reduce_hashes_to_m31` Merkle reduction as a device kernel instead of a
    host round-trip, and FRI decommitment reads batched through
    `batch_at_multi`. All in `crates/stwo`.
+3. **The pre-emit stand-in's missing feed dispatcher** (2026-09-01):
+   `gen_b65_feed_dispatch`, declared in `cuda/gen_b65_dispatch.cuh` and defined
+   as an aborting fallthrough in `cuda/gen_b65_dispatch.cu`, matching what the
+   generator emits for zero families. B11 stream T added that symbol to the
+   emitter and to `../prover/src/gkrband.rs` but not to the stand-in, so from
+   stream T until this commit the cuda arm did **not link** on any tree with no
+   installed kernel store. Digest-neutral by construction: the only call path
+   reaches a family with no kernel, which already aborted. Gated on the
+   synthetic oracles `34e30fa70297e2a9` and `37421c358a7a0f21`, both arms
+   (`experiments/b7/README.md` §13.3); the 8B regression was not run — that box
+   has no witness set.
 
 The patch scripts themselves are retired; their docstrings survive in the two
 commit messages' file diffs and in git history.
