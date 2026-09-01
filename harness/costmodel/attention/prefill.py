@@ -20,6 +20,7 @@ times L; the runs prove one layer.
 """
 import json
 import pathlib
+import sys
 
 HERE = pathlib.Path(__file__).parent
 OUT = HERE / "out"
@@ -94,7 +95,10 @@ for r in rows:
           f"{r['bands'] / r['fresh'] * 100:>10.1f}% {g(r['dequant']):>10} "
           f"{str(r['leads']):>11} {str(r['accepts']):>8}")
 for s in missing:
-    print(f"  {s:>6} {'-- killed at 133.8 GB RSS: the box holds a 128 GiB host cap':>62}")
+    # GNU `time` reports "Maximum resident set size" in **KiB**: the s2048 run's
+    # 133,799,684 is 127.60 GiB, not "133.8 GB".  It died 0.40 GiB under the cap.
+    print(f"  {s:>6} {'-- killed at 127.60 GiB RSS (133,799,684 KiB), 0.40 GiB':>62}")
+    print(f"  {'':>6} {'under the box 128 GiB cap; signal 9 at composition-commit':>62}")
 
 # --- the corner, in both layouts ---------------------------------------------
 # The split: tokens in blocks of B.  For block i the keys below it are a full
@@ -147,6 +151,227 @@ if len(rows) >= 2:
     cross = (q + (q * q + 4 * p * fix) ** 0.5) / (2 * p)
     print(f"  S ~ {cross / 1000:.0f} k -- fresh = {g(fix)}+ {q:,.0f} S + {p:.1f} S^2, so the grid passes")
     print("  half the chunk only around the context the *decode* path already runs at.")
+    print("  -- but see the next section: that `p` is 12.6% high and the crossover moves.")
+
+# --- the S^2 coefficient: two models, only one of them a model ----------------
+# Stream DD, 2026-09-01.  The fit above reads `p` off the bands family alone as
+# d(bands)/d(S^2), i.e. it assumes `bands = p S^2` with no lower-order term.  The
+# data already refutes that: `bands / (NH S^2)` is 2.758 at S=512 and 2.379 at
+# S=1024, so a two-point marginal absorbs a linear term into the quadratic
+# coefficient.  Both models hit both measured points, so fit quality cannot
+# discriminate between them.  The mechanism can.
+#
+# Every coefficient below is an *identity of the layout*, read off
+# `prover/src/attn_trace.rs:1167-1172` (the committed base columns) and `:1173-1181`
+# (their LogUp/Horner interaction) with the layouts of `prover/src/layout.rs`.
+# With `grid_target = 64`, `chan_target = hd = 128`, `rw = 16` and S, C, hd and
+# `insts` all powers of two, every region tiles exactly (`lead_rows` 0/0/0 in both
+# artifacts) and the products are exact -- nothing here is fitted:
+#
+#   region                           committed base           interaction
+#   channel: keys     (`Cells::kv`)  pk*rows  = hd*NH*C       2*hd*NH*C + 384*C
+#   channel: queries                 pq*rows  = hd*NH*S       2*hd*NH*S
+#   grid: scores + numerators        2q*rows  = 2*NH*S*C      (12 + 64)*S*C
+#   grid: V values    (`Cells::kv`)  pv*rows  = hd*NH*C       2*hd*NH*C
+#   out (A.V)                        moved to the `attnout` region -- not in `bands`
+#   per-token: max, denom, 2 limbs   4*rw*rrows = 4*NH*S      8.5*rw*rrows = 272*S
+#
+# `bands` in `family_cells` is BASE ONLY -- `compose.rs:3216` sums each band
+# region's committed column domains -- which is why the fresh figures below are
+# larger than the `grid share` column at the top of this probe.
+if len(rows) < 2:
+    raise SystemExit("the structural section needs both the S=512 and S=1024 artifacts")
+NH_HD = NH * HD                      # 4096: one channel column per head, per token
+
+
+def band_base(s, c, rows_region=True):
+    """Committed base cells of the band family at (S, C).  Exact, not fitted."""
+    return (2 * NH * s * c                          #   64 S C  scores + numerators
+            + 2 * NH_HD * c                         # 8192 C    K and V = `Cells::kv`
+            + NH_HD * s                             # 4096 S    queries
+            + (4 * NH * s if rows_region else 0))   #  128 S    max, denom, two limbs
+
+
+def band_inter(s, c, rows_region=True):
+    """The same family's LogUp/Horner interaction cells.  Also exact."""
+    return (76 * s * c                              # 12 Horner + 64 exp/numerator LogUp
+            + (2 * NH_HD + 384 + 8192) * c          # 16,768 C: V range, chan Horner, K range
+            + 2 * NH_HD * s                         #  8,192 S: query range LogUp
+            + (272 * s if rows_region else 0))
+
+
+def band_fresh(s, c, rows_region=True):
+    return band_base(s, c, rows_region) + band_inter(s, c, rows_region)
+
+
+def bands_of(s, c, corner):
+    """A composed chunk's bands: the prefix bands, plus an S x S corner that
+    carries no per-token region (one max and one denominator per token, not per
+    band -- `attn_trace.rs`'s `with_rows = !a.corner`)."""
+    return (band_base(s, c) + (band_base(s, s, False) if corner else 0),
+            band_inter(s, c) + (band_inter(s, s, False) if corner else 0))
+
+
+gamma, delta = 2 * NH, 2 * NH_HD + NH_HD + 4 * NH
+print()
+print("the S^2 coefficient: `bands = p S^2` against `bands = gamma S C + ... `")
+print(f"  bands / (NH S^2) is {rows[0]['bands'] / (NH * rows[0]['s'] ** 2):.3f} at S={rows[0]['s']} and "
+      f"{rows[-1]['bands'] / (NH * rows[-1]['s'] ** 2):.3f} at S={rows[-1]['s']} -- not constant, so `bands` is")
+print("  not purely quadratic and the marginal read above absorbs a linear term.")
+print()
+print(f"  incumbent   bands = {p:.3f} S^2        (2 points, 2 unknowns, one degree of freedom spare)")
+print(f"  structural  bands = {gamma} S C + {2 * NH_HD:,} C + {NH_HD + 4 * NH:,} S")
+print(f"              at C = S that is {gamma} S^2 + {delta:,} S, hitting both points exactly with")
+print(f"              gamma = {gamma} = 2*NH (alpha = {gamma / NH:.3f} base cells per head-key-token:")
+print(f"              exactly two columns, the score and its numerator) and")
+print(f"              delta = {delta:,} = 2*hd*NH ({2 * NH_HD:,}: K and V, `Cells::kv`)")
+print(f"                                  + hd*NH ({NH_HD:,}: the query columns)")
+print(f"                                  + 4*NH ({4 * NH}: the per-token region).")
+print(f"  the incumbent p is {p / gamma - 1:+.1%} against gamma, because it charges delta*S to S^2.")
+print()
+print("  the control -- the closed form against every artifact that records a band count:")
+CHECKS = [(f"b9 prefill  S=C={s:<6d}", OUT / f"prefill_s{s}.json", s, s, False) for s in SS]
+SEQ5 = HERE.parent / "b10/out/seq5"
+CHECKS += [(f"seq5 8B L{L:<2d} S=512 C={c:<5d}", SEQ5 / f"seq_c{c}_L{L}.json", 512, c, True)
+           for L in (0, 16, 31) for c in (4096, 16384)]
+print(f"  {'artifact':25s} {'base predicted':>15} {'base measured':>15} "
+      f"{'inter predicted':>16} {'inter measured':>15}")
+band_checks = []
+for name, path, s_, c_, corner in CHECKS:
+    if not path.exists() or path.stat().st_size == 0:
+        print(f"  {name:25s} {'-- artifact absent or empty, check skipped':>47}")
+        continue
+    fc = json.loads(path.read_text())["result"]["point"]["family_cells"]
+    pb, pi = bands_of(s_, c_, corner)
+    gb = fc["bands"]
+    gi = fc.get("interaction_by_family", {}).get("bands", {}).get("cells")
+    band_checks.append(dict(artifact=str(path), s=s_, c=c_, corner=corner, base_pred=pb,
+                            base_got=gb, inter_pred=pi, inter_got=gi,
+                            ok=pb == gb and (gi is None or pi == gi)))
+    print(f"  {name:25s} {pb:>15,} {gb:>15,}{'' if pb == gb else ' MISMATCH'} "
+          f"{pi:>16,} {(f'{gi:,}' if gi is not None else '(not recorded)'):>15}"
+          f"{'' if gi is None or pi == gi else ' MISMATCH'}")
+print(f"  {sum(c['ok'] for c in band_checks)}/{len(band_checks)} exact to the cell, across two "
+      "harnesses, two cards and three contexts.")
+print()
+print("  **The paper should use the structural model, and this is not a choice of fit.**")
+print("  The linear term is the K/V commitment (`Cells::kv`: hd*NH per context key, twice)")
+print("  plus the query columns and the per-token region.  Its C-proportional half and its")
+print("  S-proportional half are indistinguishable at C = S -- and are separated exactly by")
+print("  the composed chunks at C = 4K and 16K above, on the REAL 8B witness.  A model in S")
+print("  alone cannot express chunked prefill at all, where every chunk has its own C.")
+
+# --- the whole chunk, in (S, C) ----------------------------------------------
+# `rest` is everything the band family does not cover: the mats, the dequant, the
+# walks, the attnout region and the tables.  Every one of them is per-token or
+# fixed -- none carries a C, because a chunk computes S new keys whatever its
+# prefix -- so a linear fit of `rest` in S is structurally the right shape.  It
+# is still a two-point fit, and that is where the remaining uncertainty lives.
+rest = {r["s"]: r["fresh"] - band_fresh(r["s"], r["s"]) for r in rows}
+q_star = (rest[rows[-1]["s"]] - rest[rows[0]["s"]]) / (rows[-1]["s"] - rows[0]["s"])
+f_star = rest[rows[0]["s"]] - q_star * rows[0]["s"]
+BAND_SC, BAND_C, BAND_S = 140, 24960, 12688      # band FRESH cells: base + interaction
+
+
+def fresh_of(s, c):
+    """Fresh cells of one prefill layer chunk at (S, C)."""
+    return f_star + q_star * s + band_fresh(s, c)
+
+
+print()
+print("the whole chunk, in (S, C) rather than in S alone")
+print(f"  fresh(S, C) = {g(f_star)}+ {q_star:,.0f} S  +  band_fresh(S, C)")
+print(f"  band_fresh  = {BAND_SC} S C + {BAND_C:,} C + {BAND_S:,} S   (base + interaction)")
+for r in rows:
+    got = fresh_of(r["s"], r["s"])
+    print(f"    S = C = {r['s']:>4}: model {got:>15,.0f}   measured {r['fresh']:>15,}   "
+          f"{got / r['fresh'] - 1:+.4%}")
+print(f"  the band family in FRESH cells is {BAND_SC / NH:.3f} per (head, key, token), against "
+      f"{ALPHA_CM:.2f} in the")
+print("  cost model and 5.898 for a composed chunk's context slope; the base-only "
+      f"{gamma / NH:.3f} is")
+print("  the figure comparable to B10's corner 2.750.  NOTE that the `grid share` column at")
+print(f"  the top of this probe divides a BASE count by a FRESH one: fresh against fresh the")
+print(f"  band family is {band_fresh(1024, 1024) / rows[-1]['fresh'] * 100:.1f}% of the S=1024 chunk, not "
+      f"{rows[-1]['bands'] / rows[-1]['fresh'] * 100:.1f}%.")
+
+
+def cross_of(a2, a1, a0):
+    return (-a1 + (a1 * a1 - 4 * a2 * a0) ** 0.5) / (2 * a2)
+
+
+x_str = cross_of(gamma, delta - q, -fix)                          # base-only, like for like
+x_fresh = cross_of(BAND_SC, BAND_S + BAND_C - q_star, -f_star)    # fresh against fresh
+print()
+print("the crossover -- where the attention family passes half the chunk")
+print(f"  incumbent   p S^2 = rest                     S ~ {cross:>8,.0f}")
+print(f"  structural  gamma S^2 + delta S = rest       S ~ {x_str:>8,.0f}   {x_str / cross - 1:+.1%}")
+print(f"  fresh against fresh (the one to quote)       S ~ {x_fresh:>8,.0f}   {x_fresh / cross - 1:+.1%}")
+print("  The first two compare a BASE band count against a fresh remainder, which is the top")
+print("  table's own inconsistency carried forward; the third counts the family's own")
+print("  interaction and lands well inside the context the decode path already runs at.")
+
+# --- chunking, and E11's multiple ---------------------------------------------
+# A prompt of N tokens proven in n = N/S chunks: chunk i covers S new tokens
+# against C = (i+1) S keys, its own block plus every earlier one.  The published
+# figure counts only the fixed term paid n times; the (S, C) model also sees the
+# two terms an S-only model cannot -- the prefix K/V RE-COMMITTED by every later
+# chunk, and the half of the causal rectangle the split does NOT commit.
+E11_S = 1024
+print()
+print(f"chunking a prompt of N tokens into blocks of S = {E11_S:,}, per layer chunk")
+print(f"  {'N':>6} {'one shot':>10} {'chunked':>10} {'fixed x n':>10} {'prefix K/V':>11} "
+      f"{'grid saved':>11} {'net':>8} {'published':>10}")
+chunk_rows = {}
+for n_tok, pub in ((4096, 13.7), (16384, 11.6)):
+    n = n_tok // E11_S
+    one = fresh_of(n_tok, n_tok)
+    tot = sum(fresh_of(E11_S, (i + 1) * E11_S) for i in range(n))
+    tri = n * (n + 1) / 2
+    fixed, kv = (n - 1) * f_star, BAND_C * E11_S * tri - BAND_C * n_tok
+    grid = BAND_SC * E11_S * E11_S * tri - BAND_SC * n_tok * n_tok
+    chunk_rows[n_tok] = dict(chunks=n, one_shot=one, chunked=tot, fixed_pct=fixed / one * 100,
+                             kv_pct=kv / one * 100, grid_pct=grid / one * 100,
+                             net_pct=(tot / one - 1) * 100, published_pct=pub)
+    print(f"  {n_tok:>6} {g(one):>10} {g(tot):>10} {fixed / one * 100:>9.1f}% "
+          f"{kv / one * 100:>10.1f}% {grid / one * 100:>10.1f}% {(tot / one - 1) * 100:>7.1f}% "
+          f"{pub:>9.1f}%")
+print("  The published +13.7 / +11.6 is the `fixed x n` column alone, and it reproduces to")
+print("  the decimal under the incumbent fit: it is the right term and the wrong total.")
+print("  Chunking also re-commits the prefix K/V once per later chunk, and it SAVES the half")
+print("  of the causal rectangle a one-shot proof commits inert.  At 16K the saving wins.")
+
+try:
+    sys.path.insert(0, str(HERE.parent))
+    from paper.constants import value as frozen
+    DECODE = {4096: frozen("cells.c4096.fresh_33chunks"),
+              16384: frozen("cells.c16384.fresh_33chunks")}
+except Exception as exc:                     # experiments/paper is optional here
+    DECODE, e11 = {}, {}
+    print(f"\n  (E11 multiple skipped -- {type(exc).__name__}: {exc})")
+e11 = {}
+if DECODE:
+    print()
+    print("E11's cells multiple: proving the prompt too, against seq5's MEASURED 512-token")
+    print("decode sequence (H200, 33 chunks, fresh cells).  32 layer chunks; head excluded.")
+    print(f"  {'C = N':>6} {'prompt cells':>13} {'x decode':>9} {'prompt+output':>14} "
+          f"{'x decode':>9} {'square-chunk read':>18}")
+    for n_tok in sorted(DECODE):
+        n = n_tok // E11_S
+        prompt = sum(fresh_of(E11_S, (i + 1) * E11_S) for i in range(n)) * L8B
+        square = fresh_of(E11_S, E11_S) * n * L8B      # what the S-only fit could express
+        e11[n_tok] = dict(prompt_cells=prompt, x_prompt=prompt / DECODE[n_tok],
+                          x_total=(prompt + DECODE[n_tok]) / DECODE[n_tok],
+                          x_square=square / DECODE[n_tok], decode_cells=DECODE[n_tok])
+        print(f"  {n_tok:>6} {g(prompt):>13} {prompt / DECODE[n_tok]:>8.2f}x "
+              f"{g(prompt + DECODE[n_tok]):>14} "
+              f"{(prompt + DECODE[n_tok]) / DECODE[n_tok]:>8.2f}x {square / DECODE[n_tok]:>17.2f}x")
+    print("  The published ~x4.5-5.5 at C=4K is the last column, and that column plus one: it")
+    print("  prices every prompt chunk as its own S = C = 1024 square, which is not a proof of")
+    print("  the sequence -- the fourth chunk must attend over all 4,096 keys, not its own")
+    print("  1,024.  With the real geometry it is x5.2 (prompt) / x6.2 (prompt+output) at 4K.")
+    print("  A head chunk per 512 prompt positions is NOT counted here, and was not counted in")
+    print("  the published band either; at 4K it would add ~8x `cells.c4096.fresh_head`.")
 
 # --- the overhead ratio -------------------------------------------------------
 print()
@@ -251,6 +476,17 @@ OUT.mkdir(exist_ok=True)
     # denominator is defined at, and E6c's own baseline beside the MFU one
     target_cells_s=TARGET_CELLS_S, e6c_ops=E6C_OPS,
     e6c_prod27_ms=2 * 27e9 / E6C_OPS * 1e3, prod27_ms=prod27_ms,
-    target_27b=target27), indent=1))
+    target_27b=target27,
+    # stream DD, 2026-09-01: the structural band model and what it moves
+    band_model=dict(
+        base_form="2*NH*S*C + 2*hd*NH*C + hd*NH*S + 4*NH*S",
+        inter_form="76*S*C + 16768*C + 8464*S",
+        s_c_base=gamma, s_c_fresh=BAND_SC, c_base=2 * NH_HD, s_base=NH_HD + 4 * NH,
+        alpha_base=gamma / NH, alpha_fresh=BAND_SC / NH,
+        delta_at_c_eq_s=delta, incumbent_p=p, checks=band_checks),
+    chunk_model=dict(fixed=f_star, per_token=q_star, band_sc=BAND_SC,
+                     band_c=BAND_C, band_s=BAND_S),
+    crossover=dict(incumbent=cross, structural_base=x_str, structural_fresh=x_fresh),
+    chunking=chunk_rows, e11=e11, e11_chunk_s=E11_S), indent=1))
 print()
 print(f"wrote {OUT / 'prefill.json'}")
