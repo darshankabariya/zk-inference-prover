@@ -1328,7 +1328,8 @@ pub fn cmd(args: &[String]) {
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_2B02);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                          plan.glue.as_ref().map(|g| g.uns.as_slice()));
+                                          plan.glue.as_ref().map(|g| g.uns.as_slice()),
+                                          plan.emb.map(|l| l.arity()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b02);
     fill_tie_claims(&plan, &mut claims, 0x7135_2b02);
@@ -2241,6 +2242,11 @@ fn fill_tie_claims(plan: &crate::compose::Plan, claims: &mut crate::compose::Cla
     }
     claims.head_key = vec![felt()];
     claims.am_key = vec![felt()];
+    // B11 stream BB: the embedding gadget's two claims are tie claims of
+    // exactly the shape this function exists for -- a zero here folds away and
+    // the emitted kernel would not match the proved one.
+    claims.embed_out = vec![felt()];
+    claims.embed_tok = vec![felt()];
 }
 
 /// `cudaemit`: lower every component, group by fingerprint into kernels, and
@@ -2262,7 +2268,8 @@ pub fn emit_cmd(args: &[String]) {
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_2B03);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                          plan.glue.as_ref().map(|g| g.uns.as_slice()));
+                                          plan.glue.as_ref().map(|g| g.uns.as_slice()),
+                                          plan.emb.map(|l| l.arity()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b03);
     fill_tie_claims(&plan, &mut claims, 0x7135_2b03);
@@ -2364,6 +2371,16 @@ pub fn emit_cmd(args: &[String]) {
         // instructions on the CPU per `lm_head` chunk until now.
         if let Some(am) = &b.argmax {
             go!(am, "argmax".to_string());
+        }
+        // B11 stream BB: the embedding gadget's two families, in *both* emit
+        // walks. The argmax went only into this one, so it has a constraint
+        // kernel and never a fraction kernel; adding a family here alone
+        // reproduces that gap exactly.
+        if let Some(em) = &b.embed {
+            go!(em, "embed".to_string());
+        }
+        if let Some(et) = &b.emb_tab {
+            go!(et, "emb_table".to_string());
         }
     }
 
@@ -2645,7 +2662,8 @@ pub fn logup_cmd(args: &[String]) {
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_4B04);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                          plan.glue.as_ref().map(|g| g.uns.as_slice()));
+                                          plan.glue.as_ref().map(|g| g.uns.as_slice()),
+                                          plan.emb.map(|l| l.arity()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b04);
     fill_tie_claims(&plan, &mut claims, 0x7135_4b04);
@@ -3043,7 +3061,8 @@ pub fn gen_emit_cmd(args: &[String]) {
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_4B05);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                          plan.glue.as_ref().map(|g| g.uns.as_slice()));
+                                          plan.glue.as_ref().map(|g| g.uns.as_slice()),
+                                          plan.emb.map(|l| l.arity()));
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b05);
     fill_tie_claims(&plan, &mut claims, 0x7135_4b05);
@@ -3140,6 +3159,15 @@ pub fn gen_emit_cmd(args: &[String]) {
         go!(b.exp_t, "exp_table".to_string());
         for i in 0..b.tables.len() {
             go!(b.tables[i], format!("table{i}"));
+        }
+        // B11 stream BB: the same two families here. This walk is the one the
+        // argmax is missing from (`$FAMS` names ten families and not
+        // `b65_argmax_eval`), which is why both arms are written in one commit.
+        if let Some(em) = &b.embed {
+            go!(em, "embed".to_string());
+        }
+        if let Some(et) = &b.emb_tab {
+            go!(et, "emb_table".to_string());
         }
     }
     let fresh: usize = fams.iter().map(|(_, s)| s.len()).sum::<usize>() - carried;

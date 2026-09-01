@@ -683,6 +683,9 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         // `Params::ties` reads these via `.get(..).unwrap_or(zero)`, so the
         // placeholder claims can stay empty without changing the IR's shape.
         glue_ties: vec![], deq_out: vec![], head_key: vec![], am_key: vec![],
+        // stream BB: the same, and `fill_tie_claims` gives them nonzero
+        // placeholders on the emit path so the emitted shape is the proved one
+        embed_out: vec![], embed_tok: vec![],
         // B11 stream Q: the GKR bundle is bytes, not a claim; nothing the
         // components lower reads it, so the placeholder statement carries none.
         gkr: None,
@@ -707,7 +710,8 @@ pub fn cmd(args: &[String]) {
         let mut ch = stwo::core::channel::Blake2sM31Channel::default();
         ch.mix_u64(0xB65_2B00 + u64::from(tag));
         let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                              plan.glue.as_ref().map(|g| g.uns.as_slice()));
+                                              plan.glue.as_ref().map(|g| g.uns.as_slice()),
+                                              plan.emb.map(|l| l.arity()));
         let f = ch.draw_secure_felts(6);
         (rels, f)
     };

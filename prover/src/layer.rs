@@ -150,6 +150,15 @@ pub struct Layer {
     /// Stream Z: the attention-output fold's target width, from the manifest;
     /// 8 on every dump that predates the knob.  `ao_q_bits` is this minus one.
     pub attn_out_bits: u32,
+    /// Stream BB (E11): the model's embedding matrix, `(vocab, d)` bf16
+    /// patterns, from `embed.u16`.  `None` unless the dump carries it, and
+    /// `--embed` then refuses to run -- there is no synthetic stand-in on the
+    /// composed path, because a stand-in that proves the wrong table reads as a
+    /// gadget that works.
+    pub embed_tab: Option<Vec<u16>>,
+    /// Stream BB: `tok_in.i32`, the vocabulary index of each of the block's
+    /// positions.  These are the ids the gadget commits.
+    pub tok_in: Option<Vec<u32>>,
 }
 
 pub struct GlueCols {
@@ -653,6 +662,14 @@ impl Layer {
             read_i32(&format!("{dir}/tok_head.i32")).ok()
                 .filter(|v| v.len() >= s)
                 .map(|v| v[..s].iter().map(|x| *x as u32).collect()));
+        // Stream BB (E11): the embedding matrix and the block's input ids, when
+        // the dump carries them.  Both are optional here and both are required
+        // by `--embed`; the flag panics on a dump without them rather than
+        // standing anything in.
+        let embed_tab = read_u16(&format!("{dir}/embed.u16")).ok();
+        let tok_in = read_i32(&format!("{dir}/tok_in.i32")).ok()
+            .filter(|v| v.len() >= s)
+            .map(|v| v[..s].iter().map(|x| *x as u32).collect());
         Ok(Self {
             bands,
             band_sizes: band_sizes.to_vec(),
@@ -665,6 +682,8 @@ impl Layer {
             head_keys,
             head_tok,
             attn_out_bits,
+            embed_tab,
+            tok_in,
         })
     }
 
@@ -909,7 +928,8 @@ impl Layer {
         Self { bands, band_sizes: band_sizes_all, head_offsets, nsub: s_nsub, mats,
                ao: AttnOut { nh, s, hd, acc, den, jo, jv },
                source: format!("synthetic layer (seed={seed})"), glue: None,
-               head_keys: None, head_tok: None, attn_out_bits: 8 }
+               head_keys: None, head_tok: None, attn_out_bits: 8,
+               embed_tab: None, tok_in: None }
     }
 }
 
