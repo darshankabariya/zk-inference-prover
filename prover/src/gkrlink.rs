@@ -482,7 +482,13 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
         // limbs are not committed -- `hi = (Z - lo) * 2^-z_lo_bits` -- so they
         // fold into weights on the committed `zs` and `los` columns, which is
         // memo section 4's first consequence.
-        if !*corner {
+        //
+        // Gated on `plan.rows_band[b]` and not on `!corner` for the reason
+        // `gkrband::sites_of` gives at the same site: the region belongs to the
+        // head band group, and with `--kv-bind` a group has `c/s` prefix
+        // sub-bands of which only the first carries it. `rows_band` is
+        // `!corner` with the flag off.
+        if plan.rows_band[b] {
             let with_max = plan.attn_variant != AttnVariant::Bf16x;
             let ms = if with_max { l.rw } else { 0 };
             let inv = SecureField::from(M31::from_u32_unchecked(1 << cfg.z_lo_bits).inverse());

@@ -35,6 +35,12 @@
 //! `StarkProof::commitments`, so `chain_check` below reads them out of the proof
 //! bytes. The pair check is one root comparison, after five integer comparisons
 //! that pin the layout — O(1), and no witness anywhere near it.
+//!
+//! Stream AA added a second boundary on a second axis (the K/V cache along the
+//! token-block axis), and with it the question of *which* boundary a given pair
+//! of chunks is supposed to share. See `Axis`: the two edge families are
+//! disjoint, so the pair check derives the axis from the two statements and
+//! asks the one link that axis carries.
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -177,11 +183,108 @@ pub fn report(sides: &[Side]) -> Value {
 
 // ------------------------------------------------------------------ chaining ---
 
+/// Which edge of the chunk grid an ordered pair of chunks sits on.
+///
+/// A sequence proof is a two-dimensional grid of chunks indexed by layer `L`
+/// and token block `b`, and it has **two** families of edges, on orthogonal
+/// axes:
+///
+/// ```text
+///                 block b        block b+1
+///   layer L      (L, b)   --kv-->  (L, b+1)
+///                   |                 |
+///                residual          residual
+///                   |                 |
+///   layer L+1    (L+1, b) --kv-->  (L+1, b+1)
+/// ```
+///
+/// * a **residual** edge runs `(L, b) -> (L+1, b)`: the same tokens, the next
+///   layer.  Stream H binds it, by `roots_equal` on trees 3 and 4.
+/// * a **K/V** edge runs `(L, b) -> (L, b+1)`: the same layer, the next token
+///   block.  Stream AA binds it, by `kv_roots_equal` over the per-group out/in
+///   trees.
+///
+/// The two edge sets are **disjoint**.  A residual edge has `c_a == c_b` (both
+/// chunks declare the same prefix width, because they are the same tokens); a
+/// K/V edge has `c_a + S == c_b`.  Both at once would need `S == 0`.
+///
+/// Stream AA's merged `chains()` *conjoined* the two links, and that predicate
+/// holds on neither axis:
+///
+/// * on a **residual** edge it is false structurally, from the statements
+///   alone.  `kv_shape_ok` carries the adjacency `c_a + S == c_b`, which
+///   `c_a == c_b` cannot satisfy, so with `--kv-bind` on no assignment of roots
+///   makes a layer pair chain.
+/// * on a **K/V** edge it is false on the data.  `roots_equal` compares block
+///   `b`'s residual *output* root against block `b+1`'s residual *input* root
+///   -- two different token sets' residual streams, related by nothing, equal
+///   only by collision.
+///
+/// So the H200 gate's step 5 FAIL (`kv_roots_equal` true, all three groups
+/// equal, `roots_equal` false --
+/// `experiments/b12/e11/out/h200/aa5_chain.json`) is a true report of a defect
+/// in the predicate, not only of a gate asking the wrong question.
+///
+/// The axis is **derived from the two statements**, never chosen by the caller:
+/// a chunk would have to declare a different `c` to move itself onto the other
+/// axis, and its own `sizes` are a function of `c`.  Anything that is not one
+/// of the two edges is `None` and does not chain -- the default is reject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Axis {
+    /// `(L, b) -> (L+1, b)`: same token block, consecutive layer
+    Layer,
+    /// `(L, b) -> (L, b+1)`: same layer, consecutive token block
+    Token,
+    /// the pair is not an edge of the grid
+    None,
+}
+
+impl Axis {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Axis::Layer => "layer",
+            Axis::Token => "token",
+            Axis::None => "none",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Axis> {
+        match s {
+            "layer" => Some(Axis::Layer),
+            "token" => Some(Axis::Token),
+            "none" => Some(Axis::None),
+            _ => None,
+        }
+    }
+}
+
+/// The axis an ordered pair sits on, from the two statements' declared token
+/// count and prefix width and nothing else.
+///
+/// `s_a != s_b` is not an edge at all: the two chunks decode different numbers
+/// of tokens, so neither the residual boundary's row count nor the K/V tiling
+/// can line up.
+fn axis_of(a: &crate::compose::Params, b: &crate::compose::Params) -> Axis {
+    if a.s != b.s || a.s == 0 {
+        return Axis::None;
+    }
+    if a.c == b.c {
+        Axis::Layer
+    } else if a.c + a.s == b.c {
+        Axis::Token
+    } else {
+        Axis::None
+    }
+}
+
 /// What the pair check found. `chains` is the whole answer; the rest is so a
 /// failure says which half of it failed.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChainVerdict {
-    /// both statements carry a boundary, i.e. the feature was on for both
+    /// which edge of the grid the pair sits on, derived from the statements
+    pub axis: Axis,
+    /// both statements carry the residual boundary, i.e. `--bounds` was on for
+    /// both
     pub present: bool,
     /// the two statements agree on everything that fixes the boundary layout
     pub shape_ok: bool,
@@ -200,6 +303,9 @@ pub struct ChainVerdict {
     pub kv_roots_equal: bool,
     /// one entry per head band group, so a failure says which group moved
     pub kv: Vec<KvLink>,
+    /// which conjunct of the pair's own axis failed, when it did.  `None` when
+    /// the pair chains.
+    pub reason: Option<String>,
     pub error: Option<String>,
 }
 
@@ -216,19 +322,52 @@ pub struct KvLink {
 }
 
 impl ChainVerdict {
-    /// Stream AA: the K/V conjunct is added rather than substituted.  A pair
-    /// proved with `--kv-bind` chains only if *both* boundaries hold; a pair
-    /// proved without it chains exactly as stream H's did, which is what keeps
-    /// stream I's recorded 62/62 meaningful.
+    /// The pair's own axis decides which link is asked for, because the two
+    /// links bind different things and no pair carries both (see `Axis`).
+    ///
+    /// * a **residual** edge is stream H's predicate exactly as it was, so a
+    ///   pre-AA pair -- and every layer chain stream I and stream O recorded --
+    ///   is answered by the same three booleans it always was;
+    /// * a **K/V** edge asks for the K/V link and only the K/V link.  It
+    ///   *requires* `kv_present`: a pair proved without `--kv-bind` is not a
+    ///   K/V edge, so turning the flag off makes a token-block pair unchainable
+    ///   rather than vacuously chained;
+    /// * anything that is not an edge does not chain.
+    ///
+    /// This is narrower than the merged predicate on the residual axis (the K/V
+    /// conjunct there was vacuously true anyway, `kv_present` being false
+    /// whenever the flag was off) and it is satisfiable on the K/V axis, where
+    /// the merged predicate was not.
     pub fn chains(&self) -> bool {
-        self.present
-            && self.shape_ok
-            && self.roots_equal
-            && self.kv_shape_ok
-            && (!self.kv_present || self.kv_roots_equal)
+        self.reason.is_none() && self.error.is_none()
+    }
+    /// The failing conjunct of the pair's own axis, or `None` if it chains.
+    fn why(axis: Axis, v: &Self) -> Option<String> {
+        let need = |ok: bool, what: &str| (!ok).then(|| what.to_string());
+        match axis {
+            Axis::Layer => need(v.present, "the residual boundary is absent from one of the \
+                                            statements (`--bounds` was off)")
+                .or_else(|| need(v.shape_ok, "the two statements disagree about the residual \
+                                              boundary's layout"))
+                .or_else(|| need(v.roots_equal, "the first chunk's residual out root is not the \
+                                                 second's in root")),
+            Axis::Token => need(v.kv_present, "the K/V boundary is absent from one of the \
+                                               statements (`--kv-bind` was off)")
+                .or_else(|| need(v.kv_shape_ok, "the two statements disagree about the K/V \
+                                                 boundary's layout"))
+                .or_else(|| need(v.kv_roots_equal, "a head band group's out root is not its \
+                                                    successor's in root")),
+            Axis::None => Some(
+                "the two chunks share no edge of the (layer, token block) grid: they are \
+                 neither the same block at consecutive layers nor the same layer at \
+                 consecutive blocks"
+                    .to_string(),
+            ),
+        }
     }
     fn rejected(msg: &str) -> Self {
         Self {
+            axis: Axis::None,
             present: false,
             shape_ok: false,
             roots_equal: false,
@@ -238,6 +377,7 @@ impl ChainVerdict {
             kv_shape_ok: false,
             kv_roots_equal: false,
             kv: vec![],
+            reason: Some(msg.to_string()),
             error: Some(msg.to_string()),
         }
     }
@@ -317,33 +457,61 @@ pub fn chain_check(
     let Ok(pb) = serde_json::from_slice::<crate::common::Proof>(b_proof) else {
         return ChainVerdict::rejected("unparseable second proof");
     };
-    let (na, nb) = (tree_count(&fa), tree_count(&fb));
-    let (ka, kb) = (kv_layout(&fa.params), kv_layout(&fb.params));
-    // Stream AA: the expected tree count is now a function of the statement --
-    // three, plus stream H's two, plus one per K/V side.  With `--kv-bind`
-    // absent this is `FIRST_TREE + 2` exactly as it was, so a pair of pre-AA
-    // proofs takes the pre-AA path.
-    let want = |n: usize, k: &Option<KvLayout>| {
-        FIRST_TREE + 2 + k.as_ref().map(|k| k.n_sides()).unwrap_or(0) == n
+    let roots = |p: &crate::common::Proof| -> Vec<String> {
+        p.commitments.iter().map(|c| format!("{c:?}")).collect()
     };
-    if !want(na, &ka) || !want(nb, &kb) {
+    chain_of(&fa, &roots(&pa), &fb, &roots(&pb))
+}
+
+/// The pair check over parsed statements and the two proofs' root lists.
+///
+/// Split out of `chain_check` so it can be exercised without building a
+/// `StarkProof`: the roots are the only thing the check reads out of a proof,
+/// and everything else it reads is `Fixed`.  The tests at the bottom of this
+/// file drive this function.
+pub fn chain_of(
+    fa: &Fixed,
+    roots_a: &[String],
+    fb: &Fixed,
+    roots_b: &[String],
+) -> ChainVerdict {
+    let (na, nb) = (tree_count(fa), tree_count(fb));
+    let (ka, kb) = (kv_layout(&fa.params), kv_layout(&fb.params));
+    let (ga, gb) = (glue_sides(&fa.params), glue_sides(&fb.params));
+    // Stream AA: the expected tree count is a function of the statement --
+    // three, plus stream H's two when `--bounds` is on, plus one per K/V side.
+    // With `--kv-bind` absent and `--bounds` on this is `FIRST_TREE + 2`
+    // exactly as it was, so a pair of pre-AA proofs takes the pre-AA path.
+    let want = |n: usize, g: usize, k: &Option<KvLayout>| {
+        FIRST_TREE + g + k.as_ref().map(|k| k.n_sides()).unwrap_or(0) == n
+    };
+    if !want(na, ga, &ka) || !want(nb, gb, &kb) {
         return ChainVerdict::rejected(
             "a statement's tree count is not the one its parameters imply \
-             (the boundary flag was off, or the statement is malformed)",
+             (the boundary flags were off, or the statement is malformed)",
         );
     }
-    if pa.commitments.len() < na || pb.commitments.len() < nb {
+    if roots_a.len() < na || roots_b.len() < nb {
         return ChainVerdict::rejected("a proof carries fewer roots than its statement claims");
     }
+    if ga + gb == 0 && (ka.is_none() || kb.is_none()) {
+        return ChainVerdict::rejected(
+            "neither chunk carries a boundary: there is nothing to compare",
+        );
+    }
+    // The residual boundary exists only when *both* chunks committed stream H's
+    // two trees; without them there is no `FIRST_TREE + 1` to read.
+    let glue_present = ga == 2 && gb == 2;
     // everything the boundary layout depends on: the token count, the two
     // wiring shape numbers, the blowup, and the two trees' own column sizes
-    let shape_ok = fa.params.s == fb.params.s
+    let shape_ok = glue_present
+        && fa.params.s == fb.params.s
         && fa.params.glue == fb.params.glue
         && fa.log_blowup == fb.log_blowup
         && fa.sizes[FIRST_TREE] == fb.sizes[FIRST_TREE]
         && fa.sizes[FIRST_TREE + 1] == fb.sizes[FIRST_TREE + 1];
-    let out_root = format!("{:?}", pa.commitments[FIRST_TREE + 1]);
-    let in_root = format!("{:?}", pb.commitments[FIRST_TREE]);
+    let out_root = glue_present.then(|| roots_a[FIRST_TREE + 1].clone());
+    let in_root = glue_present.then(|| roots_b[FIRST_TREE].clone());
     // ---- stream AA: the K/V link ------------------------------------------
     //
     // The integer comparisons come first and they are not a formality.  Root
@@ -379,8 +547,7 @@ pub fn chain_check(
                 for g in 0..ka.groups {
                     let (to, ti) = (ka.out_tree(g), kb.in_tree(g).expect("with_in"));
                     sizes_ok &= fa.sizes[to] == fb.sizes[ti];
-                    let (ro, ri) = (format!("{:?}", pa.commitments[to]),
-                                    format!("{:?}", pb.commitments[ti]));
+                    let (ro, ri) = (roots_a[to].clone(), roots_b[ti].clone());
                     links.push(KvLink { group: g, out_tree: to, in_tree: ti,
                                         equal: ro == ri, out_root: ro, in_root: ri });
                 }
@@ -391,18 +558,23 @@ pub fn chain_check(
         // compare, and "nothing to compare" must not read as "it chained"
         _ => (false, false, vec![]),
     };
-    ChainVerdict {
-        present: true,
+    let axis = axis_of(&fa.params, &fb.params);
+    let mut v = ChainVerdict {
+        axis,
+        present: glue_present,
         shape_ok,
-        roots_equal: out_root == in_root,
-        out_root: Some(out_root),
-        in_root: Some(in_root),
+        roots_equal: glue_present && out_root == in_root,
+        out_root,
+        in_root,
         kv_present,
         kv_shape_ok,
         kv_roots_equal: !kv.is_empty() && kv.iter().all(|l| l.equal),
         kv,
+        reason: None,
         error: None,
-    }
+    };
+    v.reason = ChainVerdict::why(axis, &v);
+    v
 }
 
 // -------------------------------------------------------------------- driver ---
@@ -634,21 +806,43 @@ pub fn chain_cmd(args: &[String]) {
         std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
     };
 
+    // `--axis layer|token` is the caller saying which edge family it believes
+    // it handed over.  It is not a mode: the axis is still derived from the two
+    // statements, and this only turns "the pair is on the other axis" from a
+    // thing the reader has to notice into a failed link.  A gate that names its
+    // axis cannot silently pass by having been given the wrong tags.
+    let want_axis = crate::arg_str(args, "--axis").map(|a| {
+        Axis::parse(&a).unwrap_or_else(|| panic!("--axis takes `layer` or `token`, got `{a}`"))
+    });
+
     let mut links = vec![];
     let mut passed = 0usize;
+    let mut by_axis = [0usize; 3];
     for w in tags.windows(2) {
         let (a, b) = (&w[0], &w[1]);
         let v = chain_check(&read(a, "fixed"), &read(a, "proof"),
                             &read(b, "fixed"), &read(b, "proof"));
-        let ok = v.chains();
+        by_axis[match v.axis { Axis::Layer => 0, Axis::Token => 1, Axis::None => 2 }] += 1;
+        let axis_ok = want_axis.is_none_or(|w| w == v.axis);
+        let ok = v.chains() && axis_ok;
         if ok {
             passed += 1;
         }
-        eprintln!("chain {a} -> {b}: {}", if ok { "ok" } else { "FAILED" });
+        eprintln!("chain {a} -> {b} [{}]: {}{}", v.axis.name(),
+                  if ok { "ok" } else { "FAILED" },
+                  match (&v.reason, axis_ok) {
+                      (_, false) => format!(" -- not on the requested axis `{}`",
+                                            want_axis.unwrap().name()),
+                      (Some(r), _) => format!(" -- {r}"),
+                      _ => String::new(),
+                  });
         links.push(json!({
             "from": a,
             "to": b,
+            "axis": v.axis.name(),
+            "axis_ok": axis_ok,
             "chains": ok,
+            "reason": v.reason,
             "verdict": serde_json::to_value(&v).unwrap(),
         }));
     }
@@ -658,8 +852,12 @@ pub fn chain_cmd(args: &[String]) {
         json!({
             "dir": dir,
             "chunks": tags,
+            "axis_requested": want_axis.map(|a| a.name()),
             "links_run": n,
             "links_passed": passed,
+            "links_layer": by_axis[0],
+            "links_token": by_axis[1],
+            "links_no_edge": by_axis[2],
             "all_chain": passed == n,
             "links": links,
         }),
@@ -849,4 +1047,223 @@ pub fn kv_report(sides: &[KvSide]) -> Value {
         "columns": sides.iter().map(|s| s.columns).sum::<usize>(),
         "cells": sides.iter().map(|s| s.cells).sum::<usize>(),
     })
+}
+
+// ------------------------------------------------------------------- tests ---
+//
+// The pair check reads exactly two things: the two `Fixed` statements, and the
+// two proofs' root lists.  `chain_of` takes those directly, so the axis rule
+// can be exercised on the coordinating box -- which has no GPU, no witnesses
+// and not enough RAM to prove an 8B chunk -- rather than only on a card.
+// These tests are about *which link is asked for*, not about whether a root is
+// right; the roots here are strings chosen by hand.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compose::{Fixed, GlueParams, Params};
+
+    /// A statement for one chunk: `c` keys of declared prefix, `s` decoded
+    /// tokens, stream H's boundary always on, `--kv-bind` optional.
+    fn fixed(c: usize, s: usize, kv: bool) -> Fixed {
+        let params = Params {
+            s,
+            c,
+            hd: 32,
+            nh: 3,
+            bands: vec![2, 1],
+            variant: "intexp".into(),
+            corner: kv,
+            bounds: true,
+            kv_bind: kv,
+            glue: Some(GlueParams { d: 64, a: 4, ..Default::default() }),
+            ..Default::default()
+        };
+        let n = 3 + 2 + kv_layout(&params).map(|k| k.n_sides()).unwrap_or(0);
+        Fixed {
+            params,
+            log_blowup: 1,
+            n_queries: 50,
+            pow_bits: 0,
+            sizes: vec![vec![4]; n],
+            pre_root: "pre".into(),
+        }
+    }
+
+    /// Root lists for a pair, with the boundaries the caller asks for made
+    /// equal and every other root distinct.
+    ///
+    /// Tree layout for `--kv-bind` with two head band groups and `c > 0`:
+    /// `[0 pre][1 base][2 inter][3 glue in][4 glue out][5 g0 out][6 g0 in]
+    ///  [7 g1 out][8 g1 in]`.
+    fn roots(fa: &Fixed, fb: &Fixed, kv_equal: bool, residual_equal: bool)
+        -> (Vec<String>, Vec<String>) {
+        let (na, nb) = (fa.sizes.len(), fb.sizes.len());
+        let a: Vec<String> = (0..na).map(|i| format!("a{i}")).collect();
+        let mut b: Vec<String> = (0..nb).map(|i| format!("b{i}")).collect();
+        if residual_equal {
+            b[FIRST_TREE] = a[FIRST_TREE + 1].clone();
+        }
+        if let (Some(ka), Some(kb)) = (kv_layout(&fa.params), kv_layout(&fb.params)) {
+            if kv_equal {
+                for g in 0..ka.groups.min(kb.groups) {
+                    if let Some(ti) = kb.in_tree(g) {
+                        b[ti] = a[ka.out_tree(g)].clone();
+                    }
+                }
+            }
+        }
+        (a, b)
+    }
+
+    // ---- the axis is derived, and the two edge families are disjoint --------
+
+    #[test]
+    fn axis_layer_is_the_same_block() {
+        let (a, b) = (fixed(1024, 512, true), fixed(1024, 512, true));
+        assert_eq!(axis_of(&a.params, &b.params), Axis::Layer);
+    }
+
+    #[test]
+    fn axis_token_is_the_next_block() {
+        let (a, b) = (fixed(512, 512, true), fixed(1024, 512, true));
+        assert_eq!(axis_of(&a.params, &b.params), Axis::Token);
+    }
+
+    #[test]
+    fn axis_none_at_distance_two() {
+        let (a, b) = (fixed(512, 512, true), fixed(1536, 512, true));
+        assert_eq!(axis_of(&a.params, &b.params), Axis::None);
+    }
+
+    #[test]
+    fn no_pair_is_on_both_axes() {
+        // the whole reason the merged conjunction could not be satisfied
+        for c in [0usize, 512, 1024, 4096] {
+            for s in [1usize, 32, 512] {
+                let (x, y) = (fixed(c, s, true), fixed(c + s, s, true));
+                assert_ne!(axis_of(&x.params, &y.params), Axis::Layer);
+                let (x, y) = (fixed(c, s, true), fixed(c, s, true));
+                assert_ne!(axis_of(&x.params, &y.params), Axis::Token);
+            }
+        }
+    }
+
+    // ---- the K/V axis ------------------------------------------------------
+
+    #[test]
+    fn token_edge_chains_on_the_kv_link_alone() {
+        let (a, b) = (fixed(512, 512, true), fixed(1024, 512, true));
+        let (ra, rb) = roots(&a, &b, true, false);
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert_eq!(v.axis, Axis::Token);
+        assert!(v.kv_roots_equal, "the K/V link was set up equal");
+        assert!(!v.roots_equal, "two token blocks share no residual edge");
+        assert!(v.chains(), "reason: {:?}", v.reason);
+    }
+
+    #[test]
+    fn token_edge_does_not_chain_when_one_group_moves() {
+        let (a, b) = (fixed(512, 512, true), fixed(1024, 512, true));
+        let (ra, mut rb) = roots(&a, &b, true, false);
+        // group 0's in tree: the shape of the H200 probe on one bit of `vvc.i8`
+        let ti = kv_layout(&b.params).unwrap().in_tree(0).unwrap();
+        rb[ti] = "moved".into();
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert_eq!(v.axis, Axis::Token);
+        assert!(!v.kv_roots_equal);
+        assert!(!v.chains());
+        assert!(!v.kv[0].equal && v.kv[1].equal);
+    }
+
+    #[test]
+    fn token_edge_needs_the_flag_on_both_sides() {
+        // the consumer proved without `--kv-bind`: nothing to compare, and
+        // "nothing to compare" must not read as "it chained"
+        let (a, b) = (fixed(512, 512, true), fixed(1024, 512, false));
+        let (ra, rb) = roots(&a, &b, true, true);
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert_eq!(v.axis, Axis::Token);
+        assert!(!v.kv_present);
+        assert!(!v.chains(), "a token edge without the K/V boundary must not chain");
+    }
+
+    #[test]
+    fn non_neighbour_does_not_chain_however_equal_its_roots() {
+        let (a, b) = (fixed(512, 512, true), fixed(1536, 512, true));
+        let (ra, rb) = roots(&a, &b, true, true);
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert_eq!(v.axis, Axis::None);
+        assert!(!v.chains());
+    }
+
+    // ---- the residual axis, unchanged from stream H ------------------------
+
+    #[test]
+    fn layer_edge_chains_on_the_residual_link_alone() {
+        let (a, b) = (fixed(1024, 512, false), fixed(1024, 512, false));
+        let (ra, rb) = roots(&a, &b, false, true);
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert_eq!(v.axis, Axis::Layer);
+        assert!(v.chains(), "reason: {:?}", v.reason);
+    }
+
+    #[test]
+    fn layer_edge_rejects_a_moved_residual_root() {
+        let (a, b) = (fixed(1024, 512, false), fixed(1024, 512, false));
+        let (ra, rb) = roots(&a, &b, false, false);
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert_eq!(v.axis, Axis::Layer);
+        assert!(!v.roots_equal);
+        assert!(!v.chains());
+    }
+
+    #[test]
+    fn layer_edge_ignores_the_kv_trees() {
+        // with `--kv-bind` on, two layers of one block have unrelated K/V
+        // caches; the residual link is the whole question and the pair chains
+        let (a, b) = (fixed(1024, 512, true), fixed(1024, 512, true));
+        let (ra, rb) = roots(&a, &b, false, true);
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert_eq!(v.axis, Axis::Layer);
+        assert!(!v.kv_roots_equal, "the K/V roots differ, and that is expected here");
+        assert!(v.chains(), "reason: {:?}", v.reason);
+    }
+
+    // ---- what the merged predicate did, kept as a regression ---------------
+
+    /// Stream AA's merged predicate.
+    fn merged(v: &ChainVerdict) -> bool {
+        v.present && v.shape_ok && v.roots_equal && v.kv_shape_ok
+            && (!v.kv_present || v.kv_roots_equal)
+    }
+
+    #[test]
+    fn the_merged_predicate_failed_structurally_on_a_layer_edge() {
+        // `kv_shape_ok` carries the adjacency `c_a + S == c_b`, which a layer
+        // edge cannot satisfy: with `--kv-bind` on, *no* assignment of roots
+        // makes the old predicate true.
+        for kv_equal in [false, true] {
+            for residual_equal in [false, true] {
+                let (a, b) = (fixed(1024, 512, true), fixed(1024, 512, true));
+                let (ra, rb) = roots(&a, &b, kv_equal, residual_equal);
+                let v = chain_of(&a, &ra, &b, &rb);
+                assert!(!v.kv_shape_ok);
+                assert!(!merged(&v), "kv_equal={kv_equal} residual_equal={residual_equal}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_merged_predicate_failed_on_the_data_on_a_token_edge() {
+        // `roots_equal` compares two different token blocks' residual
+        // boundaries.  Nothing relates them, so the honest root table has them
+        // unequal -- which is what the H200 measured.
+        let (a, b) = (fixed(512, 512, true), fixed(1024, 512, true));
+        let (ra, rb) = roots(&a, &b, true, false);
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert!(v.kv_roots_equal && !v.roots_equal);
+        assert!(!merged(&v));
+        assert!(v.chains(), "the new predicate asks only for the K/V link here");
+    }
 }
