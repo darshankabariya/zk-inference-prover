@@ -1139,6 +1139,10 @@ pub struct GlueRegion {
     pub round: Round,
     pub tag: String,
     pub bad_exp: usize,
+    /// how many committed values the tamper actually changed.  Zero under a
+    /// tamper means the probe measured nothing, and the caller must say so
+    /// rather than report the honest proof's verdict as the tamper's.
+    pub fired: usize,
     /// natural row order, for the Horner ties: per group, then per `outs` group
     pub in_nat: Vec<Vec<(i64, i64)>>,
     pub out_nat: Vec<Vec<(i64, i64)>>,
@@ -1205,6 +1209,12 @@ struct RowOut {
     look: Vec<(u8, usize)>,
     off: usize,
     bad_exp: usize,
+    /// how many times the tamper changed a committed value in this row.  A
+    /// tamper that did not fire proves the honest witness, and "accepted" is
+    /// then the wrong word for what happened -- `drop-big` at layer 0 was this:
+    /// its target slot's two operands shared an exponent, so there was no
+    /// larger one to drop, and the probe read as a soundness gap for a day.
+    fired: usize,
 }
 
 /// The tag a row's lookup carries so the parallel fill's multiplicities can be
@@ -1274,7 +1284,7 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
             n_ops: w.rows * prog.slots.len(),
             n_leaves: w.rows * prog.n_leaves(),
             ref_ok, ref_n, outs, prog: prog.clone(), round,
-            tag: tag.to_string(), bad_exp, in_nat, out_nat,
+            tag: tag.to_string(), bad_exp, fired: 0, in_nat, out_nat,
             dev: Some(dev),
         };
     }
@@ -1296,7 +1306,7 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
         .map(|j| {
             let mut cells = vec![M31::zero(); n_cols];
             let mut look: Vec<(u8, usize)> = vec![];
-            let (mut off, mut bad_exp) = (0usize, 0usize);
+            let (mut off, mut bad_exp, mut fired) = (0usize, 0usize, 0usize);
             let live = j < w.rows;
             // ---- leaves ----------------------------------------------------
             let mut lin: Vec<Vec<(i64, u32)>> = vec![];
@@ -1314,12 +1324,14 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                     if let Some(Tamper::Stream(t)) = tamper {
                         if live && g == 0 && t % n_leaf_tot.max(1) == flat {
                             pat ^= 1;
+                            fired += 1;
                         }
                     }
                     let (mut sm, ef) = split(pat);
                     if let Some(Tamper::NotBf16(t)) = tamper {
                         if live && t % n_leaf_tot.max(1) == flat {
                             sm = 5;
+                            fired += 1;
                         }
                     }
                     flat += 1;
@@ -1351,6 +1363,12 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
             }
             // ---- slots ------------------------------------------------------
             let mut outs: Vec<(i64, u32)> = vec![];
+            // `drop-big` needs a slot whose operands differ in exponent, and
+            // whether the aimed slot has one is the data's choice, not the
+            // probe's (17.5% of a real layer's residual adds do not).  So the
+            // aimed slot *arms* the tamper and the first eligible slot at or
+            // after it, in this row, fires it.
+            let mut armed = false;
             for (si, (sa, sb)) in prog.slots.iter().enumerate() {
                 let hit = |t: usize| live && t % (w.rows.max(1) * n_slots) == j * n_slots + si;
                 let get = |s: &Src, outs: &Vec<(i64, u32)>| -> (i64, u32) {
@@ -1370,11 +1388,17 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                         if let Some(Tamper::Anchor(i)) = tamper {
                             if hit(i) {
                                 etop += 1;
+                                fired += 1;
                             }
                         }
                         if let Some(Tamper::DropBig(i)) = tamper {
-                            if hit(i) && a_ef != b_ef {
+                            if hit(i) {
+                                armed = true;
+                            }
+                            if armed && a_ef != b_ef {
                                 etop = a_ef.min(b_ef) as i64;
+                                armed = false;
+                                fired += 1;
                             }
                         }
                         let ua = a_ef as i64 - etop + DMAX as i64;
@@ -1400,6 +1424,11 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                         if let Some(Tamper::Sign(i)) = tamper {
                             if hit(i) {
                                 sg ^= 1;
+                                // a zero sum has no sign to flip: `sm_c` is 0
+                                // either way and nothing constrains `sg`
+                                if mag != 0 {
+                                    fired += 1;
+                                }
                             }
                         }
                         let (m2, ph, st_raw, r) = match bf16::normalise(mag, tables.kmax) {
@@ -1423,6 +1452,7 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                         if let Some(Tamper::NormOut(i)) = tamper {
                             if hit(i) {
                                 m7n = (m7n + 1) % 128;
+                                fired += 1;
                             }
                         }
                         // the bumped row is not in the table, so nothing is
@@ -1450,6 +1480,7 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                         if let Some(Tamper::Result(i)) = tamper {
                             if hit(i) {
                                 c_sm += 1;
+                                fired += 1;
                             }
                         }
                         cells[b + 2] = m31_of(etop);
@@ -1500,6 +1531,7 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                         if let Some(Tamper::Result(i)) = tamper {
                             if hit(i) {
                                 c_sm += 1;
+                                fired += 1;
                             }
                         }
                         cells[b] = m31_of(c_sm);
@@ -1526,12 +1558,17 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                     out_nat.push((sgn_of(cells[c0]), sgn_of(cells[c1])));
                 }
             }
-            RowOut { cells, outs: out_pat, in_nat, out_nat, look, off, bad_exp }
+            RowOut { cells, outs: out_pat, in_nat, out_nat, look, off, bad_exp, fired }
         })
         .collect();
 
     let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); rows]; n_cols];
     let (mut ref_ok, mut ref_n, mut bad_exp) = (0usize, 0usize, 0usize);
+    let fired: usize = filled.iter().map(|f| f.fired).sum();
+    if tamper.is_some() && fired == 0 {
+        eprintln!("{tag}: the {} tamper did not fire -- this region is the honest one",
+                  tamper.unwrap().name());
+    }
     let mut outs: Vec<Vec<u16>> = prog.outs.iter().map(|o| vec![0u16; rows * o.len()]).collect();
     for (j, f) in filled.iter().enumerate() {
         for (c, v) in f.cells.iter().enumerate() {
@@ -1606,7 +1643,7 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
     GlueRegion {
         pre, base, log_rows, rows: w.rows, n_ops, n_leaves: n_leaf_tot,
         ref_ok, ref_n, outs, prog: prog.clone(), round,
-        tag: tag.to_string(), bad_exp, in_nat, out_nat, dev: None,
+        tag: tag.to_string(), bad_exp, fired, in_nat, out_nat, dev: None,
     }
 }
 
@@ -2043,6 +2080,8 @@ pub struct Outcome {
     pub n_leaves: usize,
     pub off_table: usize,
     pub bad_exp: usize,
+    /// how many committed values the tamper changed (0 with no tamper set)
+    pub fired: usize,
     pub ref_ok: usize,
     pub ref_n: usize,
     pub odd: usize,
@@ -2101,6 +2140,7 @@ impl Outcome {
             "dmax": DMAX,
             "off_table": self.off_table,
             "exponent_out_of_range": self.bad_exp,
+            "tamper_fired": self.fired,
             "odd_input_patterns": self.odd,
             "reference_checked": self.ref_n, "reference_ok": self.ref_ok,
             "reference_mismatch": self.ref_n - self.ref_ok,
@@ -2290,7 +2330,7 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
     Outcome {
         proven, sums, prog: prog.clone(), round,
         n_ops: region.n_ops, n_leaves: region.n_leaves,
-        off_table: tables.off_table, bad_exp: region.bad_exp,
+        off_table: tables.off_table, bad_exp: region.bad_exp, fired: region.fired,
         ref_ok: region.ref_ok, ref_n: region.ref_n, odd: w.odd,
         table_cells_pre, table_cells_fresh, region_cells, inter_cells,
         n_columns, tie_ok, trace_secs,

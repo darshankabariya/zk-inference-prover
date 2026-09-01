@@ -928,8 +928,14 @@ impl Plan {
     /// what keeps design A free of any new AIR mechanism -- a prefix sub-band
     /// needs no `iend`/`kappa` conversion, its natural instance stride *is* the
     /// global one, and it keeps `KEY_SEL` and CC's frozen per-slot content.
+    ///
+    /// Block 0 (open item 1) has `c = 0` and no prefix band: its only band is
+    /// the solo corner, whose key Horner walks `S` keys, so the weight is `r^S`
+    /// with the flag off too.  `r^0 = 1` here left the attention output region
+    /// and the verifier's fold on a different weight from the band's own
+    /// `Powers::r_c`, and `den_link_ok` was the one verdict field that failed.
     pub fn head_weight_c(&self) -> usize {
-        if self.p.kv_bind { self.p.s } else { self.p.c }
+        if self.p.kv_bind || self.p.c == 0 { self.p.s } else { self.p.c }
     }
 
     /// How many secure felts the transcript draws after the relations, and where
@@ -1849,6 +1855,11 @@ pub struct Composed {
     /// its head band group, whether it is the out or the in side, the bands
     /// that wrote it, its columns and its cells.  Null without `--kv-bind`.
     pub kv_bounds: Value,
+    /// how many committed values a glue tamper changed; `None` when none was
+    /// set.  A probe whose tamper fired nowhere proved the honest witness, and
+    /// its verdict says nothing about the tamper -- the caller must not read
+    /// `Some(0)` as "accepted".
+    pub glue_tamper_fired: Option<usize>,
 }
 
 /// Tampers that need a hook inside the prover (everything else corrupts the
@@ -1946,6 +1957,9 @@ pub struct Gen {
     /// Stream H: the boundary tamper, carried across the generate/prove split
     /// because the boundary trees are built where they are committed.
     pub bounds_tamper: Option<(usize, usize)>,
+    /// how many committed values a `ProverTamper::glue` changed, `None` when
+    /// none was set.  `Some(0)` is a probe that measured nothing.
+    pub glue_tamper_fired: Option<usize>,
 }
 
 /// B7b (README 26): the first half of `prove_layer` -- every fill, every
@@ -2641,10 +2655,12 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         };
     crate::util::m4_add("gen/tables_up", m4_t.elapsed().as_secs_f64());
     let trace_secs = t0.elapsed().as_secs_f64();
+    let glue_tamper_fired =
+        tamper.glue.map(|_| glue_regions.iter().map(|r| r.fired).sum::<usize>());
     Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
           glue_regions, glue_tcols, glue_mcols, glue_b1, am_region, emb_region,
           n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
-          m4e_tabdev, trace_secs, pre_key, bounds_tamper: tamper.bounds }
+          m4e_tabdev, trace_secs, pre_key, bounds_tamper: tamper.bounds, glue_tamper_fired }
 }
 
 /// B7b (README 26): the second half -- the session, the three commits, the
@@ -2653,7 +2669,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
               glue_regions, glue_tcols, glue_mcols, glue_b1, am_region, emb_region,
               n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
-              m4e_tabdev, trace_secs, pre_key, bounds_tamper } = g;
+              m4e_tabdev, trace_secs, pre_key, bounds_tamper, glue_tamper_fired } = g;
     let p = &plan.p;
     let t0 = std::time::Instant::now();
 
@@ -3781,6 +3797,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         glue_ties_ok,
         bounds: bounds_report,
         kv_bounds: kv_report,
+        glue_tamper_fired,
     }
 }
 

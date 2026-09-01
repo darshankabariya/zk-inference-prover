@@ -127,8 +127,9 @@ pub struct Layer {
     /// Stream AA (E11): how many bands one head band group's declared prefix is
     /// tiled into.  1 everywhere before this stream and without `--kv-bind`;
     /// `C / S` with it, which is what makes a consumer's sub-band the same
-    /// `Shape` as the producer's corner.  `params_of` reads it back to recover
-    /// the chunk's real context and its head band list.
+    /// `Shape` as the producer's corner; 0 on block 0 of a sequence, which has
+    /// no declared prefix and so no prefix band.  `params_of` reads it back to
+    /// recover the chunk's real context and its head band list.
     pub nsub: usize,
     pub mats: Vec<Mat>,
     pub ao: AttnOut,
@@ -401,9 +402,15 @@ impl Layer {
         // site stream P left (`briefs/p-witread.md` (6) item 1).  Nothing
         // about the bytes or the layout changed; the same gathers now run over
         // one image instead of over three copies of it.
+        // Open item 1: block 0 of a sequence has no declared prefix, so `c == 0`,
+        // `kk.i16` is empty and there is no prefix half to read and no prefix
+        // band to build -- the corner is the group's only band and carries its
+        // per-token region (`compose.rs`'s `rows_band`, `Powers::as_solo_corner`).
+        assert!(c > 0 || has_corner,
+                "a c = 0 dump is block 0: it is the solo corner and needs a `--corner` dump");
         let raw = {
             let _s = witread::scope(Site::Bands);
-            AttnRaw::read(dir, &man, true, has_corner)?
+            AttnRaw::read(dir, &man, c > 0, has_corner)?
         };
         let mut bands = vec![];
         let mut head_offsets = vec![];
@@ -418,7 +425,7 @@ impl Layer {
         assert!(!cfg.tile || cfg.corner, "`--kv-bind` needs a `--corner` dump");
         assert!(!cfg.tile || c % s == 0,
                 "`--kv-bind` tiles the prefix in blocks of S: C={c} is not a multiple of S={s}");
-        let nsub = if cfg.tile { c / s } else { 1 };
+        let nsub = if c == 0 { 0 } else if cfg.tile { c / s } else { 1 };
         let sub_c = if cfg.tile { s } else { c };
         {
             let _s = witread::scope(Site::Bands);
@@ -457,16 +464,24 @@ impl Layer {
             // all of them.  The region lives on the group's *first* sub-band,
             // which is `plan.rows_band`'s choice on the other side of the wall.
             let n_pre = band_sizes.len() * nsub;
+            // the band that carries group `g`'s region: its first prefix
+            // sub-band, or -- block 0, no prefix at all -- its solo corner.
+            // `g * nsub` alone is band 0 for every group when `nsub == 0`, and
+            // that read as "the extractor and the AIR disagree about the mask
+            // on 16351 of 16384 rows" (open item 1) when every row agreed.
+            let first = |g: usize| if nsub > 0 { g * nsub } else { n_pre + g };
             {
                 let _s = witread::scope(Site::ZzTotal);
                 for g in 0..band_sizes.len() {
-                    let mut tot = vec![0i64; bands[g * nsub].zz.len()];
+                    let mut tot = vec![0i64; bands[first(g)].zz.len()];
                     for b in (g * nsub..(g + 1) * nsub).chain(std::iter::once(n_pre + g)) {
+                        assert_eq!(bands[b].zz.len(), tot.len(),
+                                   "band {b} of group {g} has a different row count");
                         for (a, x) in tot.iter_mut().zip(&bands[b].zz) {
                             *a += x;
                         }
                     }
-                    bands[g * nsub].zz_total = Some(tot);
+                    bands[first(g)].zz_total = Some(tot);
                 }
             }
             // Rule 21, on the join: the prover recomputes both halves' numerators
@@ -479,9 +494,9 @@ impl Layer {
             let zz32 = read_i32(&format!("{dir}/zz.i32"))?;
             let mut bad = 0usize;
             for (g, insts) in band_sizes.iter().enumerate() {
-                let tot = bands[g * nsub].zz_total.as_ref().unwrap();
+                let tot = bands[first(g)].zz_total.as_ref().unwrap();
                 for i in 0..*insts {
-                    let h = head_offsets[g * nsub] + i;
+                    let h = head_offsets[first(g)] + i;
                     for t in 0..s {
                         if tot[i * s + t] != zz32[h * s + t] {
                             bad += 1;

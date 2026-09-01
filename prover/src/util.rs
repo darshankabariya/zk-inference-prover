@@ -375,6 +375,29 @@ pub fn mem_total_bytes() -> u64 {
         .unwrap_or(0)
 }
 
+/// The card this process can see, as `nvidia-smi` names it (`"NVIDIA H200 NVL,
+/// 143771 MiB"`), or null where there is none.  Open item 9: every timing
+/// constant names its card and until this no artifact recorded it -- the two
+/// boxes were separable only by host RAM and witness path.  Asked once per
+/// process; `emit` runs per chunk in the loop.
+fn gpu_name() -> Option<String> {
+    static GPU: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    GPU.get_or_init(|| {
+        let out = std::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=name,memory.total", "--format=csv,noheader"])
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&out.stdout);
+        let first = s.lines().next()?.trim();
+        (!first.is_empty()).then(|| first.to_string())
+    })
+    .clone()
+}
+
+fn hostname() -> Option<String> {
+    std::fs::read_to_string("/etc/hostname").ok().map(|s| s.trim().to_string())
+}
+
 pub fn env_json() -> Value {
     json!({
         "threads": rayon::current_num_threads(),
@@ -382,6 +405,8 @@ pub fn env_json() -> Value {
         "arch": std::env::consts::ARCH,
         "os": std::env::consts::OS,
         "simd_n_lanes": stwo::prover::backend::simd::m31::N_LANES,
+        "gpu": gpu_name(),
+        "host": hostname(),
     })
 }
 

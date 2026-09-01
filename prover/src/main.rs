@@ -649,6 +649,12 @@ fn embed_probes_cmd(args: &[String]) {
 // ----------------------------------------------------------------- compose ----
 
 /// Build the layer witness: real from `--witness`, else a small synthetic one.
+///
+/// A `--witness` that does not load is fatal (exit 2), never a fallback.  It
+/// used to print one stderr line and prove a synthetic layer instead, and a
+/// synthetic layer has `glue: None`, so a gate pointed at a dump the box did
+/// not hold came back `rc=0` with the whole glue battery skipped -- a pass that
+/// measured nothing (open item 17).
 pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     let vname = arg_strs(args, "--variants", &["intsplit6"])[0].clone();
     let variant = attn_witness::Variant::parse(&vname);
@@ -660,7 +666,11 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
                 tighten_of(&mut l, args);
                 return (l, vname);
             }
-            Err(e) => eprintln!("  (no real layer witness: {e})"),
+            Err(e) => {
+                eprintln!("--witness {dir}: the layer witness did not load: {e}");
+                eprintln!("refusing to fall back to a synthetic layer; drop --witness to prove one");
+                std::process::exit(2);
+            }
         }
     }
     let bands = arg_list(args, "--bands", &[2usize, 1]);
@@ -707,9 +717,16 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
     // `S` keys per head band group, so the chunk's context is the sub-band's
     // times `nsub` and the head band list takes every `nsub`-th entry.  Both are
     // the identity when `nsub == 1`, which is every run without the flag.
+    // Block 0 (open item 1) has no prefix band at all: `nsub == 0`, `c == 0`,
+    // and the head band list is the corner bands', one per group.
+    let (c, bands) = if l.nsub == 0 {
+        (0, l.band_sizes[n_pre..].to_vec())
+    } else {
+        (b0.shape.c * l.nsub, l.band_sizes[..n_pre].iter().step_by(l.nsub).copied().collect())
+    };
     compose::Params {
-        s: l.ao.s, c: b0.shape.c * l.nsub, hd: l.ao.hd, nh: l.ao.nh,
-        bands: l.band_sizes[..n_pre].iter().step_by(l.nsub).copied().collect(),
+        s: l.ao.s, c, hd: l.ao.hd, nh: l.ao.nh,
+        bands,
         corner: l.bands.len() > n_pre,
         // Stream E: the head's order-key claim.  Not under `--no-glue`'s gate,
         // because a head dump has no wiring columns to switch off.
@@ -1078,6 +1095,11 @@ fn compose_probes_cmd(args: &[String]) {
         // verify against the HONEST fixed statement: the trusted half comes from
         // setup, never from the prover under test
         let out2 = compose::prove_layer(l2, &params, t);
+        // a tamper that changed nothing proved the honest witness, and calling
+        // that "accepted" is how `drop-big` at layer 0 read as a soundness gap
+        // (its aimed slot's operands shared an exponent); it is a broken probe
+        assert_ne!(out2.glue_tamper_fired, Some(0),
+                   "probe {name}: the glue tamper did not fire, so nothing was measured");
         let claims_b = serde_json::to_vec(&out2.claims).unwrap();
         let mut fixed = out2.fixed.clone();
         fixed.pre_root = honest_root.clone();
@@ -1095,6 +1117,7 @@ fn compose_probes_cmd(args: &[String]) {
         out.push(json!({
             "probe": name, "expect_reject_by": expect,
             "accepted": accepted,
+            "tamper_fired": out2.glue_tamper_fired,
             "prove_error": out2.prove_error,
             "root_differs_from_honest": root_differs,
             "verdict": verdict.as_ref().map(|v| serde_json::to_value(v).unwrap()),
@@ -1606,9 +1629,11 @@ fn glue_probes_cmd(args: &[String]) {
         for t in tampers {
             eprintln!("glue probe {label}: {}", t.name());
             let o = glue::run(&w, &prog, round, kmax, Some(t));
+            assert!(o.fired > 0, "{label}: {} did not fire, so nothing was measured", t.name());
             assert!(!o.accepts(), "{label}: {} must be rejected", t.name());
             out.push(json!({"region": label, "probe": t.name(),
                             "accepted": o.accepts(),
+                            "tamper_fired": o.fired,
                             "stark_ok": o.proven.stark_ok,
                             "sums_cancel": o.sums.cancels(),
                             "off_table": o.off_table,

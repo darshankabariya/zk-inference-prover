@@ -437,8 +437,15 @@ impl Map {
         Self { per_slot: k, slot0, n_cols: slot0 + sp.per_row * k, shared, f }
     }
     /// Column index of field `off` in slot `s`.
+    ///
+    /// A real assert, not a debug one: `NONE` is `usize::MAX` and the release
+    /// profile has no overflow checks, so the sentinel would not index out of
+    /// range -- it would wrap to `slot0 + s * per_slot - 1`, an in-range column
+    /// one below the slot's base, silently.  No live path reaches it (open item
+    /// 12 traced them), and the repo's tests never call this, so the debug form
+    /// had never had a chance to fire.
     pub fn at(&self, s: usize, off: usize) -> usize {
-        debug_assert_ne!(off, NONE);
+        assert_ne!(off, NONE, "Map::at: a field this variant does not carry");
         self.slot0 + s * self.per_slot + off
     }
 }
@@ -1059,11 +1066,18 @@ impl Witness {
         Ok(w.fit_int8(7))
     }
 
+    /// Real accumulators from `--witness`, else synthetic.  A `--witness` that
+    /// does not load is fatal, not a fallback: the same rule as `layer_of`, for
+    /// the same reason (a run must never pass on data it did not name).
     pub fn get(dir: &Option<String>, name: &str, n: usize, per_row: usize, k: usize) -> Self {
         if let Some(d) = dir {
             match Self::load(d, name, n, per_row) {
                 Ok(w) => return w,
-                Err(e) => eprintln!("  (no real accumulators: {e})"),
+                Err(e) => {
+                    eprintln!("--witness {d}: the {name} accumulators did not load: {e}");
+                    eprintln!("refusing to fall back to synthetic ones; drop --witness for those");
+                    std::process::exit(2);
+                }
             }
         }
         Self::synthetic(n, per_row, k, 7)
@@ -1554,7 +1568,6 @@ pub fn run(w: &Witness, sp: &Spec, tamper: Option<Tamper>) -> Outcome {
     // ---- the lookups, in the order the AIR adds them ------------------------
     let mut looks: Vec<Look> = vec![];
     for s in 0..sp.per_row {
-        let st = if sticky { map.at(s, f.st) } else { zero_col };
         match sp.variant {
             Variant::Limbs => {
                 looks.push(Look::Range(ridx(sp.limb_bits.0), map.at(s, f.lo)));
@@ -1566,6 +1579,10 @@ pub fn run(w: &Witness, sp: &Spec, tamper: Option<Tamper>) -> Outcome {
                 looks.push(Look::Range(ridx(sp.rem_bits), deriv(s)));
             }
             _ => {
+                // only the normalising variants carry `st`; asking `Map::at`
+                // for it under `limbs` was the sentinel reaching the index
+                // arithmetic (open item 12) -- unused there, but computed
+                let st = if sticky { map.at(s, f.st) } else { zero_col };
                 looks.push(Look::Norm([map.at(s, f.m2), map.at(s, f.ph), st,
                                        map.at(s, f.m7), map.at(s, f.ef), map.at(s, f.nz)]));
                 looks.push(Look::Frac([map.at(s, f.ph), map.at(s, f.r), st]));
