@@ -26,8 +26,19 @@ HERE = pathlib.Path(__file__).parent
 OUT = HERE / "out"
 
 NH, HD, L8B = 32, 128, 32
-SS = (512, 1024, 2048)
+SS = (256, 512, 1024, 2048)
 GRID_TARGET = 64          # `--scores-per-row`, the tiling granularity of the grid
+
+# Every two-point reading this probe published names the pair it was taken on.
+# Stream DD showed `bands` is exact at all four S under `64 S^2 + 12,416 S`, so
+# `p = d(bands)/d(S^2)` is a SECANT and moves with the pair it is read between:
+# 80.167 (256->512), 72.083 (512->1024), 68.042 (1024->2048), all reproduced by
+# the identity `64 + 12,416/(S1+S2)`.  Reading it off the two largest rows would
+# silently re-price a published line every time the S list grows, so the pair is
+# pinned here and labelled for what it is: the SUPERSEDED single-parameter fit.
+INCUMBENT_PAIR = (512, 1024)   # the retired `bands = p S^2` reading, and its 2.25
+REMAINDER_PAIR = (512, 1024)   # `design.prefill_chunk_remainder`, frozen on this pair
+HEADLINE_S = 1024              # the S every published sentence in this probe quotes
 
 # B9 1.6, measured: the whole wall on the real 8B chunk (2.415 G cells, C=16K)
 GPU_WALL_CELLS_S = 1.28e9
@@ -55,13 +66,29 @@ L27, NH27 = 62, 32
 ALPHA_CM = 4.0            # the cost model's cells per (head, key, token)
 
 
+def artifact(s):
+    """This probe's own C = S run at S, or stream DD's re-run of the same shape.
+
+    The probe's S=2048 run was killed at 127.60 GiB RSS, 0.40 GiB under the box's
+    128 GiB cap (`out/prefill_s2048.err`), so `out/prefill_s2048.json` is empty
+    and stays empty.  DD re-ran the whole C = S sweep on a 150 GiB container and
+    added S=256; its artifacts are `out/dd_s{S}.json` and they agree with this
+    probe's to the cell at both S the two harnesses share.
+    """
+    for name in (f"prefill_s{s}.json", f"dd_s{s}.json"):
+        q = OUT / name
+        if q.exists() and q.stat().st_size:
+            return q
+    return None
+
+
 def load(s):
-    p = OUT / f"prefill_s{s}.json"
-    if not p.exists() or p.stat().st_size == 0:
+    p = artifact(s)
+    if p is None:
         return None
     d = json.loads(p.read_text())["result"]["point"]
     fc = d["family_cells"]
-    return dict(s=s, accepts=d["accepts"], off_table=d["off_table"],
+    return dict(s=s, src=p.name, accepts=d["accepts"], off_table=d["off_table"],
                 fresh=d["cells"]["fresh"], pre=d["cells"]["preprocessed"],
                 bands=fc["bands"], dequant=fc["dequant"], inter=fc["interaction"],
                 walks=fc["walks"],
@@ -70,6 +97,7 @@ def load(s):
 
 
 rows = [r for r in (load(s) for s in SS) if r]
+by_s = {r["s"]: r for r in rows}
 missing = [s for s in SS if not load(s)]
 if not rows:
     raise SystemExit("no b9/out/prefill_s*.json; run the prefill step on the box")
@@ -89,16 +117,17 @@ print("the naive layout, as built: the whole S x C rectangle committed, half of 
 print("at C = S.  One layer of Llama-3.1-8B's shape (32 heads x 128), SIMD reference.")
 print()
 print(f"  {'S = C':>6} {'chunk (fresh)':>14} {'grid':>10} {'grid share':>11} "
-      f"{'dequant':>10} {'lead rows':>11} {'accepts':>8}")
+      f"{'dequant':>10} {'lead rows':>11} {'accepts':>8} {'artifact':>18}")
 for r in rows:
     print(f"  {r['s']:>6} {g(r['fresh']):>14} {g(r['bands']):>10} "
           f"{r['bands'] / r['fresh'] * 100:>10.1f}% {g(r['dequant']):>10} "
-          f"{str(r['leads']):>11} {str(r['accepts']):>8}")
+          f"{str(r['leads']):>11} {str(r['accepts']):>8} {r['src']:>18}")
 for s in missing:
-    # GNU `time` reports "Maximum resident set size" in **KiB**: the s2048 run's
-    # 133,799,684 is 127.60 GiB, not "133.8 GB".  It died 0.40 GiB under the cap.
-    print(f"  {s:>6} {'-- killed at 127.60 GiB RSS (133,799,684 KiB), 0.40 GiB':>62}")
-    print(f"  {'':>6} {'under the box 128 GiB cap; signal 9 at composition-commit':>62}")
+    print(f"  {s:>6} {'-- no artifact':>62}")
+# GNU `time` reports "Maximum resident set size" in **KiB**: this probe's own
+# s2048 run's 133,799,684 is 127.60 GiB, not "133.8 GB".  It died 0.40 GiB under
+# the box's 128 GiB cap, at composition-commit; DD's re-run on a 150 GiB
+# container is the S=2048 row above.
 
 # --- the corner, in both layouts ---------------------------------------------
 # The split: tokens in blocks of B.  For block i the keys below it are a full
@@ -114,8 +143,8 @@ print()
 print(f"  {'S = C':>6} {'naive /rect':>12} {'naive /useful':>14} {'split /useful':>14} "
       f"{'split/naive':>12} {'grid saved':>11} {'of the chunk':>13}")
 marg = None
-if len(rows) >= 2:
-    a, b = rows[-2], rows[-1]
+if all(s in by_s for s in INCUMBENT_PAIR):
+    a, b = (by_s[s] for s in INCUMBENT_PAIR)
     marg = ((b["bands"] - a["bands"])
             / (NH * (b["s"] ** 2 - a["s"] ** 2)))
 for r in rows:
@@ -129,22 +158,26 @@ for r in rows:
           f"{r['bands'] * ratio / useful:>14.2f} {ratio:>12.3f} {g(saved):>11} "
           f"{saved / r['fresh'] * 100:>12.1f}%")
 if marg:
-    print(f"\n  marginal grid cost, {rows[-2]['s']}->{rows[-1]['s']}: {marg:.2f} committed cells per "
-          f"(head, key, token)")
+    print(f"\n  marginal grid cost, {INCUMBENT_PAIR[0]}->{INCUMBENT_PAIR[1]} (the PUBLISHED pair, "
+          f"pinned): {marg:.2f} committed cells")
+    print("  per (head, key, token) -- a secant, not a coefficient; see the S^2 section below")
     print(f"  (the cost model charges {ALPHA_CM:.2f}, which also counts the exp lookup's "
           f"interaction cells)")
 
 # --- the finding --------------------------------------------------------------
-big = rows[-1]
+big = by_s[HEADLINE_S]
 print()
 print("**The corner is a correctness gap, not a cost gap, at these S.**")
 print(f"  At C = S = {big['s']} the grid is {big['bands'] / big['fresh'] * 100:.1f}% of the chunk, so halving it saves")
 print(f"  {(1 - (0.5 + GRID_TARGET / (2 * big['s']))) * big['bands'] / big['fresh'] * 100:.1f}%.  A prefill chunk is dominated by the per-token matmul work, not by")
 print("  attention: the grid grows as S^2 and everything else as S, so the grid only")
-print("  takes over at large S.  From the two measured points the crossover is")
-if len(rows) >= 2:
-    a, b = rows[-2], rows[-1]
-    # fresh = F + q S + p S^2, with the S^2 term read off the grid family
+print(f"  takes over at large S.  From the pinned {INCUMBENT_PAIR[0]}->{INCUMBENT_PAIR[1]} "
+      "pair the crossover is")
+if all(s in by_s for s in INCUMBENT_PAIR):
+    a, b = (by_s[s] for s in INCUMBENT_PAIR)
+    # fresh = F + q S + p S^2, with the S^2 term read off the grid family.
+    # PINNED to INCUMBENT_PAIR: this is the superseded two-point reading, kept
+    # so the correction below has the published number to be measured against.
     p = (b["bands"] - a["bands"]) / (b["s"] ** 2 - a["s"] ** 2)
     q = ((b["fresh"] - b["bands"]) - (a["fresh"] - a["bands"])) / (b["s"] - a["s"])
     fix = (a["fresh"] - a["bands"]) - q * a["s"]
@@ -215,13 +248,22 @@ def bands_of(s, c, corner):
 gamma, delta = 2 * NH, 2 * NH_HD + NH_HD + 4 * NH
 print()
 print("the S^2 coefficient: `bands = p S^2` against `bands = gamma S C + ... `")
-print(f"  bands / (NH S^2) is {rows[0]['bands'] / (NH * rows[0]['s'] ** 2):.3f} at S={rows[0]['s']} and "
-      f"{rows[-1]['bands'] / (NH * rows[-1]['s'] ** 2):.3f} at S={rows[-1]['s']} -- not constant, so `bands` is")
-print("  not purely quadratic and the marginal read above absorbs a linear term.")
+print("  bands / (NH S^2) is "
+      + " / ".join(f"{r['bands'] / (NH * r['s'] ** 2):.3f}" for r in rows)
+      + " at S = " + " / ".join(str(r["s"]) for r in rows) + " -- not constant,")
+print("  so `bands` is not purely quadratic and the marginal read above absorbs a linear term.")
+print(f"  The secants themselves move the same way: "
+      + " / ".join(
+          f"{(by_s[y]['bands'] - by_s[x]['bands']) / (y * y - x * x):.3f}"
+          for x, y in zip([r['s'] for r in rows], [r['s'] for r in rows][1:]))
+      + f" for the {len(rows) - 1} adjacent pairs,")
+print("  which is the identity 64 + 12,416/(S1+S2) -- so `p` is a property of the PAIR.")
 print()
-print(f"  incumbent   bands = {p:.3f} S^2        (2 points, 2 unknowns, one degree of freedom spare)")
+print(f"  incumbent   bands = {p:.3f} S^2        (SUPERSEDED; the S={INCUMBENT_PAIR[0]}->{INCUMBENT_PAIR[1]} "
+      f"secant, pinned)")
 print(f"  structural  bands = {gamma} S C + {2 * NH_HD:,} C + {NH_HD + 4 * NH:,} S")
-print(f"              at C = S that is {gamma} S^2 + {delta:,} S, hitting both points exactly with")
+print(f"              at C = S that is {gamma} S^2 + {delta:,} S, hitting all {len(rows)} points "
+      "exactly with")
 print(f"              gamma = {gamma} = 2*NH (alpha = {gamma / NH:.3f} base cells per head-key-token:")
 print(f"              exactly two columns, the score and its numerator) and")
 print(f"              delta = {delta:,} = 2*hd*NH ({2 * NH_HD:,}: K and V, `Cells::kv`)")
@@ -230,7 +272,7 @@ print(f"                                  + 4*NH ({4 * NH}: the per-token region
 print(f"  the incumbent p is {p / gamma - 1:+.1%} against gamma, because it charges delta*S to S^2.")
 print()
 print("  the control -- the closed form against every artifact that records a band count:")
-CHECKS = [(f"b9 prefill  S=C={s:<6d}", OUT / f"prefill_s{s}.json", s, s, False) for s in SS]
+CHECKS = [(f"b9 prefill  S=C={s:<6d}", artifact(s), s, s, False) for s in SS]
 SEQ5 = HERE.parent / "b10/out/seq5"
 CHECKS += [(f"seq5 8B L{L:<2d} S=512 C={c:<5d}", SEQ5 / f"seq_c{c}_L{L}.json", 512, c, True)
            for L in (0, 16, 31) for c in (4096, 16384)]
@@ -238,7 +280,7 @@ print(f"  {'artifact':25s} {'base predicted':>15} {'base measured':>15} "
       f"{'inter predicted':>16} {'inter measured':>15}")
 band_checks = []
 for name, path, s_, c_, corner in CHECKS:
-    if not path.exists() or path.stat().st_size == 0:
+    if path is None or not path.exists() or path.stat().st_size == 0:
         print(f"  {name:25s} {'-- artifact absent or empty, check skipped':>47}")
         continue
     fc = json.loads(path.read_text())["result"]["point"]["family_cells"]
@@ -252,7 +294,7 @@ for name, path, s_, c_, corner in CHECKS:
           f"{pi:>16,} {(f'{gi:,}' if gi is not None else '(not recorded)'):>15}"
           f"{'' if gi is None or pi == gi else ' MISMATCH'}")
 print(f"  {sum(c['ok'] for c in band_checks)}/{len(band_checks)} exact to the cell, across two "
-      "harnesses, two cards and three contexts.")
+      "harnesses, two cards, four S at C = S and three contexts.")
 print()
 print("  **The paper should use the structural model, and this is not a choice of fit.**")
 print("  The linear term is the K/V commitment (`Cells::kv`: hd*NH per context key, twice)")
@@ -268,8 +310,9 @@ print("  alone cannot express chunked prefill at all, where every chunk has its 
 # prefix -- so a linear fit of `rest` in S is structurally the right shape.  It
 # is still a two-point fit, and that is where the remaining uncertainty lives.
 rest = {r["s"]: r["fresh"] - band_fresh(r["s"], r["s"]) for r in rows}
-q_star = (rest[rows[-1]["s"]] - rest[rows[0]["s"]]) / (rows[-1]["s"] - rows[0]["s"])
-f_star = rest[rows[0]["s"]] - q_star * rows[0]["s"]
+_rlo, _rhi = REMAINDER_PAIR          # PINNED: `design.prefill_chunk_remainder`
+q_star = (rest[_rhi] - rest[_rlo]) / (_rhi - _rlo)
+f_star = rest[_rlo] - q_star * _rlo
 BAND_SC, BAND_C, BAND_S = 140, 24960, 12688      # band FRESH cells: base + interaction
 
 
@@ -284,16 +327,21 @@ print(f"  fresh(S, C) = {g(f_star)}+ {q_star:,.0f} S  +  band_fresh(S, C)")
 print(f"  band_fresh  = {BAND_SC} S C + {BAND_C:,} C + {BAND_S:,} S   (base + interaction)")
 for r in rows:
     got = fresh_of(r["s"], r["s"])
+    tag = "fitted" if r["s"] in REMAINDER_PAIR else "HELD OUT"
     print(f"    S = C = {r['s']:>4}: model {got:>15,.0f}   measured {r['fresh']:>15,}   "
-          f"{got / r['fresh'] - 1:+.4%}")
+          f"{got / r['fresh'] - 1:+.4%}   {tag}")
+print(f"  The linear fit is pinned to S = {_rlo} and {_rhi} (the pair "
+      "`design.prefill_chunk_remainder` was")
+print("  frozen on); the other two S are hold-outs and are NOT refitted.")
 print(f"  the band family in FRESH cells is {BAND_SC / NH:.3f} per (head, key, token), against "
       f"{ALPHA_CM:.2f} in the")
 print("  cost model and 5.898 for a composed chunk's context slope; the base-only "
       f"{gamma / NH:.3f} is")
 print("  the figure comparable to B10's corner 2.750.  NOTE that the `grid share` column at")
 print(f"  the top of this probe divides a BASE count by a FRESH one: fresh against fresh the")
-print(f"  band family is {band_fresh(1024, 1024) / rows[-1]['fresh'] * 100:.1f}% of the S=1024 chunk, not "
-      f"{rows[-1]['bands'] / rows[-1]['fresh'] * 100:.1f}%.")
+print(f"  band family is {band_fresh(HEADLINE_S, HEADLINE_S) / by_s[HEADLINE_S]['fresh'] * 100:.1f}% "
+      f"of the S={HEADLINE_S} chunk, not "
+      f"{by_s[HEADLINE_S]['bands'] / by_s[HEADLINE_S]['fresh'] * 100:.1f}%.")
 
 
 def cross_of(a2, a1, a0):
@@ -441,9 +489,9 @@ print("  already reports, and it is reached iff the decode target is.")
 print()
 print("the verdict, in one paragraph.")
 print("The corner's price is settled and it is small: at C = S the attention grid is")
-print(f"{rows[-1]['bands'] / rows[-1]['fresh'] * 100:.1f}% of a prefill chunk, so the two-region split -- bulk rectangle plus a")
-print(f"B x B diagonal block, {0.5 + GRID_TARGET / (2 * rows[-1]['s']):.3f} of the naive rectangle at S = {rows[-1]['s']} -- is worth")
-print(f"{(1 - (0.5 + GRID_TARGET / (2 * rows[-1]['s']))) * rows[-1]['bands'] / rows[-1]['fresh'] * 100:.1f}% of the chunk.  The mask is a **soundness and completeness** gap (no AIR")
+print(f"{big['bands'] / big['fresh'] * 100:.1f}% of a prefill chunk, so the two-region split -- bulk rectangle plus a")
+print(f"B x B diagonal block, {0.5 + GRID_TARGET / (2 * big['s']):.3f} of the naive rectangle at S = {big['s']} -- is worth")
+print(f"{(1 - (0.5 + GRID_TARGET / (2 * big['s']))) * big['bands'] / big['fresh'] * 100:.1f}% of the chunk.  The mask is a **soundness and completeness** gap (no AIR")
 print("here has it, and 1.4 shows its absence already leaking into the fold's scale),")
 print("not a throughput one, until S reaches the context where the grid dominates.")
 print("**At the measured rate the overhead ratio does not land in E6c's 50-150x band.**")
@@ -483,9 +531,10 @@ OUT.mkdir(exist_ok=True)
         inter_form="76*S*C + 16768*C + 8464*S",
         s_c_base=gamma, s_c_fresh=BAND_SC, c_base=2 * NH_HD, s_base=NH_HD + 4 * NH,
         alpha_base=gamma / NH, alpha_fresh=BAND_SC / NH,
-        delta_at_c_eq_s=delta, incumbent_p=p, checks=band_checks),
+        delta_at_c_eq_s=delta, incumbent_p=p, incumbent_pair=list(INCUMBENT_PAIR),
+        checks=band_checks),
     chunk_model=dict(fixed=f_star, per_token=q_star, band_sc=BAND_SC,
-                     band_c=BAND_C, band_s=BAND_S),
+                     band_c=BAND_C, band_s=BAND_S, fitted_pair=list(REMAINDER_PAIR)),
     crossover=dict(incumbent=cross, structural_base=x_str, structural_fresh=x_fresh),
     chunking=chunk_rows, e11=e11, e11_chunk_s=E11_S), indent=1))
 print()

@@ -372,12 +372,18 @@ A 512-token sequence with top-2 routing touches every expert a layer would use,
 so the proof walks all E weight matrices in full — the weight term is ×E — while
 the accumulators grow only ×k, because each token still passes through k experts:
 
-| E | per-expert tokens | walk fresh | walk preprocessed | FFN accs | FFN cells/token | vs dense |
-|---|---|---|---|---|---|---|
-| 1 | 512 | 16.78 M | 218.63 M | 254.02 M | 955.90 k | 1.00× |
-| 2 | 512 | 33.55 M | 437.26 M | 508.04 M | 1.91 M | 2.00× |
-| 4 | 256 | 34.60 M | 874.51 M | 508.04 M | 2.77 M | 2.90× |
-| 8 | 128 | 39.85 M | **1.75 G** | 508.04 M | **4.49 M** | **4.69×** |
+| E | per-expert tokens | walk fresh | walk preprocessed | FFN accs | FFN cells/token, **incl. preprocessed** | vs dense | FFN cells/token, **fresh only** | vs dense, fresh |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 512 | 16.78 M | 218.63 M | 254.02 M | 955.90 k | 1.00× | 528.90 k | 1.00× |
+| 2 | 512 | 33.55 M | 437.26 M | 508.04 M | 1.91 M | 2.00× | 1.06 M | 2.00× |
+| 4 | 256 | 34.60 M | 874.51 M | 508.04 M | 2.77 M | 2.90× | 1.06 M | 2.00× |
+| 8 | 128 | 39.85 M | **1.75 G** | 508.04 M | **4.49 M** | **4.69×** | **1.07 M** | **2.02×** |
+
+The two "vs dense" columns are different quantities and must never be read as
+one. `FFN cells/token, incl. preprocessed` counts the walk's preprocessed weight
+trace; `fresh only` is committed + interaction, which is the basis every proving
+rate in this project divides. Everything that grows in E lives in the
+preprocessed column.
 
 **The routing-selection argument**, which nobody has built, priced by analogy:
 a LogUp multiset tying each token's FFN rows to its expert's instance at ~3 cells
@@ -393,10 +399,13 @@ pays for a matmul is dominated by the weight trace it walks, and that term is pe
 *weight*, so it is exactly invariant when an expert's token batch shrinks. A
 sequence touching E experts therefore pays E full weight walks: the per-proof
 weight cost is ×E, which is H6's confirmation criterion verbatim. Per token at
-S=512 the FFN costs ×2.00 (E=2), ×2.90 (E=4), ×4.69 (E=8) against dense — and the
-comparison that matters is against a **dense model with the same active
-parameters**, which pays ×k = ×2: at E=8 the MoE variant pays ×4.69, i.e.
-**×2.35 of pure proving overhead for the same FLOPs per token**. On top of that
+S=512 the FFN costs ×2.00 (E=2), ×2.90 (E=4), ×4.69 (E=8) against dense **on the
+preprocessed-inclusive basis** — and the comparison that matters is against a
+**dense model with the same active parameters**, which pays ×k = ×2: at E=8 the
+MoE variant pays ×4.69, i.e. **×2.35 of pure proving overhead for the same FLOPs
+per token**. On **fresh** cells alone the same four runs give ×2.00 / ×2.00 /
+×2.02 against dense and ×1.01 against the active-matched twin: the tax is the
+walk's preprocessed trace, and no boundary this project reports counts it. On top of that
 the scheme lacks the selection gadget entirely. MoE does not prove as cheaply as
 dense: the batching that makes the dense scheme work — one weight pass amortised
 over S tokens — is exactly what expert partitioning takes away.
