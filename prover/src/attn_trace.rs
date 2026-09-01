@@ -805,6 +805,9 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     }
 
     // ---- grid region -------------------------------------------------------
+    // Stream CC (E11), a DIAGNOSTIC and not a design point -- see the inert-row
+    // branch of `grid_inner` below.  Off unless `B65_PAD_NF=1`.
+    let pad_nf = std::env::var("B65_PAD_NF").as_deref() == Ok("1");
     let n = if m4g_host { lk.g.rows } else { 0 };
     let (mut zs, mut hs) = (vec![SecureField::zero(); n], vec![SecureField::zero(); n]);
     let (mut zn, mut wv) = (vec![SecureField::zero(); n], vec![SecureField::zero(); n]);
@@ -843,6 +846,25 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
                 if val != 0 {
                     vf += pow.rv_pow[p] * SecureField::from(m31_of(val as i64));
                 }
+            }
+        } else if pad_nf {
+            // Stream CC (E11): an INERT lead row.  `commit_base` pads the
+            // numerator column with `a.table[0]` -- index 0 is a real table row,
+            // which is what keeps the exp lookup's multiplicities exact -- but
+            // the AIR's numerator fold has no selector that is zero here, so it
+            // reads that pad into `zn` while this builder contributes nothing.
+            // That single disagreement is why an honest witness at a padded key
+            // grid returns `ConstraintsNotSatisfied`.  Mirroring the pad here is
+            // inert for the claims: `last` is zero on an inert row, so this `zn`
+            // reaches neither `av` nor `sn`, and `nofirst` is zero on the first
+            // real row of every group, so it does not carry forward either.
+            //
+            // OFF by default and gated behind `B65_PAD_NF=1`, because the twin
+            // in `b65_acc.cu` (`nf` is gated by `act || B65A_MUT_NOMASK`) has not
+            // moved with it and `nomask` is aimed at exactly this difference.
+            let pad = SecureField::from(m31_of(a.table[0] as i64));
+            for i in 0..lk.q {
+                nf += pow.sg_pow[i] * pad;
             }
         }
             (sf, nf, vf, nofirst, last, istart, iend)
