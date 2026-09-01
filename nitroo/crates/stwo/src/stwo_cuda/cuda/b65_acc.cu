@@ -355,6 +355,14 @@ __global__ void b65a_grid_kernel(const m31 *const *__restrict__ key_cols,
                                  two_k, scale);
     // The numerator column commits `table[0]` on an inert lead row, where the
     // host's sum has no term at all -- `nomask` is that difference.
+    //
+    // Stream CC (E11): the AIR now agrees with both builders.  `KeyEval`'s
+    // numerator fold carries an `act` factor of its own, read out of tree 0 from
+    // the column `b65_pre_fill.cu` writes from this same flag bit.  Before that
+    // the AIR was the odd one out -- it demanded the pad -- so a padded grid
+    // rejected honestly and `nomask` made it accept.  Both of those are now the
+    // other way round, which is what turns this line from a difference nobody
+    // could exercise into a control with something to catch.
     qm31 nf = B65A_QZERO;
     if (act || cfg.mutate == B65A_MUT_NOMASK) {
         nf = b65a_dot(num_cols, sg_pow, cfg.q, jp, 0u);

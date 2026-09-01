@@ -571,16 +571,23 @@ pub fn band_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> DevP
     // band's device selectors have to skip them too or the two disagree by
     // three columns. The *flags* are cut with them: nothing segments a region
     // that does not exist.
+    // Stream CC (E11): a ninth key selector, `act`, when the grid leaves inert
+    // lead rows -- the AIR's numerator-fold guard.  `commit_pre` appends it to
+    // the end of the grid's block and a device band is never a corner band, so
+    // on this side it is slot 8 of the key group and the two lists still line up
+    // column for column (`check_run` is what says so).
+    let n_key = 8 + usize::from(crate::attn_air::act_id(0, a.corner, l.key.g.lead)
+                                .is_some());
     let shapes: &[(u32, FGridA, u32, u32, usize, u32)] = if with_rows {
         &[
             (SHAPE_CHAN, FGridA::of(&l.chan.g), sh.hd as u32, 0, 5, AT_CHAN),
-            (SHAPE_KEY, FGridA::of(&l.key.g), sh.c as u32, 0, 8, AT_KEY),
+            (SHAPE_KEY, FGridA::of(&l.key.g), sh.c as u32, 0, n_key, AT_KEY),
             (SHAPE_TOK, tokg, sh.s as u32, l.rw as u32, 3, AT_ROW),
         ]
     } else {
         &[
             (SHAPE_CHAN, FGridA::of(&l.chan.g), sh.hd as u32, 0, 5, AT_CHAN),
-            (SHAPE_KEY, FGridA::of(&l.key.g), sh.c as u32, 0, 8, AT_KEY),
+            (SHAPE_KEY, FGridA::of(&l.key.g), sh.c as u32, 0, n_key, AT_KEY),
         ]
     };
 

@@ -101,6 +101,30 @@ pub const KEY_SEL: [&str; 8] =
 pub const CORNER_SEL: [&str; 9] =
     ["b6_x_nofirst", "b6_x_last", "b6_x_notzero", "b6_x_end", "b6_x_m1", "b6_x_m2",
      "b6_x_istart", "b6_x_dinv", "b6_x_iend"];
+/// Stream CC (E11): the grid's **inert lead row** selector -- 1 where
+/// `Grid::row(j)` is `Some`, 0 on the rows `layout.rs:101` pads with.
+///
+/// It exists only when the grid actually has such rows (`g.lead > 0`).  Every
+/// shape proved before E11 tiled exactly, and on those the AIR reads the literal
+/// `1` in its place, so tree 0, the constraint set and the digest are what they
+/// were.  `lead` is a function of the shape, which is public, so this is not a
+/// prover choice.
+///
+/// Why the grid needs it and no other region does: `commit_base` pads the
+/// numerator column with `a.table[0]` rather than zero, because the exp lookup
+/// reads `(idx, num)` on every row and index 0 has to stay a real table row for
+/// the multiplicities to balance.  Every other padded column cancels on its own
+/// -- `idx` pads with 0, `vals` pad with the offset the fold subtracts back --
+/// so the numerator fold is the one place the AIR has to be told the row is not
+/// there.
+pub const KEY_ACT: &str = "b6_k_act";
+pub const CORNER_ACT: &str = "b6_x_act";
+/// The `act` column's id for a band, `None` when the grid tiles exactly and the
+/// column is not committed at all.  One function, so `commit_pre`, `pre_ids`,
+/// `attn_run` and the AIR cannot disagree about whether it is there.
+pub fn act_id(tag: usize, corner: bool, lead: usize) -> Option<PreProcessedColumnId> {
+    (lead > 0).then(|| band_id(tag, if corner { CORNER_ACT } else { KEY_ACT }))
+}
 /// The corner's causal mask, one preprocessed column per token slot of a row:
 /// 1 where the key is in the decoded stream's future of that token.  A slot's
 /// token is a function of the row *and* the column, so the mask cannot be one
@@ -408,6 +432,15 @@ impl FrameworkEval for KeyEval {
             names.iter().map(|n| eval.get_preprocessed_column(band_id(self.tag, n))).collect();
         let (nofirst, last, notzero, end, m1, m2, istart) = (sel[0].clone(), sel[1].clone(),
             sel[2].clone(), sel[3].clone(), sel[4].clone(), sel[5].clone(), sel[6].clone());
+        // Stream CC (E11): 1 on a row the grid actually holds, 0 on the inert
+        // lead rows `Grid` pads with.  Absent -- and read as the literal `1` --
+        // on a grid that tiles exactly, which is every shape proved before E11,
+        // so the lowered constraint there is character for character the one it
+        // was.
+        let act: E::F = match act_id(self.tag, self.corner, self.lay.g.lead) {
+            Some(c) => eval.get_preprocessed_column(c),
+            None => E::F::one(),
+        };
         // the causal mask, one column per token slot; empty on the prefix grid
         let msk: Vec<E::F> = (0..if self.corner { self.lay.q } else { 0 })
             .map(|i| eval.get_preprocessed_column(msk_id(self.tag, i)))
@@ -416,6 +449,17 @@ impl FrameworkEval for KeyEval {
             match msk.get(i) {
                 Some(m) => E::F::one() - m.clone(),
                 None => E::F::one(),
+            }
+        };
+        // The numerator fold's visibility: `vis` **and** the row is real.  Written
+        // as `act - msk` rather than `act * (1 - msk)` on purpose -- the two agree
+        // because `msk` is built from `Grid::row(j)` and so is already zero
+        // wherever `act` is, and the subtraction keeps the factor degree 1, so the
+        // fold's degree is the one `max_constraint_log_degree_bound` promises.
+        let nvis = |i: usize| -> E::F {
+            match msk.get(i) {
+                Some(m) => act.clone() - m.clone(),
+                None => act.clone(),
             }
         };
         // 2^-(F - frac_i): the committed index is the shift scaled to the master
@@ -466,9 +510,19 @@ impl FrameworkEval for KeyEval {
         // the numerator fold drops the masked slots: they are not keys this token
         // attended to, so they are in neither `Z` nor `A.V`.  The score fold above
         // keeps them -- Freivalds is over the whole rectangle.
+        //
+        // Stream CC (E11): it also drops the inert lead rows.  `commit_base` pads
+        // the numerator column with `a.table[0]`, a real table row so the exp
+        // lookup's multiplicities stay exact, and both interaction builders --
+        // `interaction_phase` here and `b65a_grid_kernel`, which gates `nf` on
+        // `act` -- contribute no term on such a row.  Without `act` this fold
+        // demanded `zn = table[0] * sum sg_pow[i]` where the builders wrote 0, and
+        // that single disagreement is why an honest witness at a padded key grid
+        // returned `ConstraintsNotSatisfied`.  The `idx` fold above needs no guard:
+        // its pad is zero.
         let mut nf = E::EF::zero();
         for (i, ni) in num.iter().enumerate() {
-            nf += (ni.clone() * vis(i)) * self.pow.sg_pow[i];
+            nf += (ni.clone() * nvis(i)) * self.pow.sg_pow[i];
         }
         eval.add_constraint(zn.clone() - (zn_prev * self.pow.sg_step) * nofirst.clone() - nf);
 

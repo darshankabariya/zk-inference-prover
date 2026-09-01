@@ -915,6 +915,10 @@ impl Plan {
             } else {
                 ids.extend(KEY_SEL.iter().map(|n| band_id(b, n)));
             }
+            // Stream CC (E11): the inert-lead-row selector closes the grid's
+            // block, and exists only when the grid leaves such rows.
+            ids.extend(crate::attn_air::act_id(b, self.corner[b],
+                                               self.lays[b].key.g.lead));
             // Stream AA: the predicate is "does this band carry the per-token
             // region", not "is it a prefix band".  With `--kv-bind` off the two
             // are the same predicate on the same bands, so this id sequence is

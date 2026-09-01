@@ -194,6 +194,8 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
     } else {
         ids.extend(KEY_SEL.iter().map(|n| band_id(0, n)));
     }
+    // Stream CC (E11): the inert-lead-row selector, in `commit_pre`'s order.
+    ids.extend(crate::attn_air::act_id(0, a.corner, l.key.g.lead));
     ids.extend(OUT_SEL.iter().map(|n| band_id(0, n)));
     ids.extend(ROW_SEL.iter().map(|n| band_id(0, n)));
     ids.push(id(TBL_EXP_X));

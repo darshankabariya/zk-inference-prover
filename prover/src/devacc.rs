@@ -45,6 +45,14 @@
 //!  * the grid's numerator column commits `table[0]` on an inert lead row,
 //!    where the host's sum has no term at all (`nomask`).
 //!
+//! Stream CC (E11): `nomask` had never had anything to catch. Every grid proved
+//! before E11 tiled exactly, so there was no inert lead row on any shape it was
+//! ever run at, and `m4g_run.sh:164` and `dd_prefill.sh:183` both record that as
+//! a vacuous control rather than a pass. It is not vacuous now: `KeyEval`'s
+//! numerator fold carries an `act` factor, so on a padded grid the honest device
+//! sum is the one the AIR wants and `nomask` is a real divergence from it. Run it
+//! at a shape with `band_leads.key > 0` or it says nothing.
+//!
 //! `B7_M4_ACC` says which path runs, on the three-value pattern every fill in
 //! this series uses: 0 the host builds them, 1 the device does and they are
 //! never on the host, 2 both with every cell asserted equal. Mode 2 is a check
