@@ -229,6 +229,21 @@ fn m4b_default(name: &str) -> u32 {
         // run with an empty env a *different configuration* from seq4, and a
         // slower one, which is the precise failure this table exists to stop.
         "B7_M5_IRCACHE" | "B7_M5_PRECACHE" => 1,
+        // B11 stream O, lever 3: the chunk loop generates chunk k+1 while it
+        // proves chunk k. Graduated here in the commit that lands its gate,
+        // which is the seq6 A/B on the H200 at *both* contexts -- 33 chunks
+        // each, the head included, all 66 digests byte-identical to seq5's and
+        // both chains 31/31 from the loop's own serialized bytes, with the
+        // pipelined arm winning at both (`loop_secs` 117.27 -> 71.58 s at
+        // C=4096 and 200.18 -> 117.47 s at C=16384). The memory the second
+        // chunk in flight costs is what gated this for a session: it is
+        // +832 MiB at C=4096 and +2,560 MiB at C=16384 against a 143,771 MiB
+        // card, measured, and the worst pair the sequence contains (L0 and L1
+        // at C=16384, 76,823 MiB apiece on their own) peaked at 76,823 MiB
+        // together. The reference arm is untouched -- `m4b_default` is
+        // all-zero without the `cuda` feature -- so the digest comparison
+        // still has something to be a comparison against.
+        "B7_M5_PIPE" => 1,
         // The generated fraction builders. `3` keeps 19.3's meaning: the
         // generated builder runs and is checked against the hand-written one.
         "B7_M4_LOGUPIR" => 3,
