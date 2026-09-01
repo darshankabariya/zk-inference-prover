@@ -118,6 +118,11 @@ impl Grid {
         if rows < groups {
             return None;
         }
+        // Open item 1: a `c = 0` band (block 0 has no prefix) reaches here with
+        // `groups = c * insts = 0`, slips past the guard above and divides by
+        // zero.  Block 0 is a solo corner and must never build a prefix band at
+        // all; this says so rather than panicking in arithmetic.
+        assert!(groups > 0, "a c = 0 band has no key grid: block 0 is the solo                              corner and builds no prefix band (open item 1)");
         let chunks = (rows / groups).min(cap.max(1));
         Some(Self { log_rows, rows, groups, chunks, lead: rows - groups * chunks, descending })
     }
@@ -192,11 +197,35 @@ impl LayoutKey {
         // one row group per (instance, key): the packed axis whose length is
         // `insts * C`, so the r-Horner folds instances for free
         let g = Grid::new(sh.keys(), log_rows, sh.s.min(sh.hd), true)?;
+        // The token axis must tile exactly -- `attn_trace.rs`'s
+        // "grid layout leaves padded token slots" assert is `q * chunks == S`,
+        // and `q = S.div_ceil(chunks)`, so it is exactly `chunks | S`.  Before
+        // open item 10's fix `pick` never checked this and returned layouts
+        // that could not build: 22 of 32 blocks at C=16384, 4 of 8 at C=4096.
+        if sh.s % g.chunks != 0 {
+            return None;
+        }
         Some(Self { g, q: sh.s.div_ceil(g.chunks), pv: sh.hd.div_ceil(g.chunks) })
     }
     /// the layout whose *scores per row* is closest to `target`
     pub fn choose(sh: &Shape, target: usize) -> Self {
-        pick(MIN_LOG_ROWS..=MAX_LOG_ROWS, |lr| Self::new(sh, lr), |l| l.q, target, |l| l.g.rows)
+        // Score on `chunks`, not on `q`.  With the tiling filter above, scoring
+        // on `q` lands an odd-prefix block on `chunks = cap`, a 64x taller grid
+        // (~2.8x the cells) -- the filter can only remove candidates, so the
+        // nearest surviving `q` is far away.  `chunks ~ S / q`, so asking for
+        // `S.div_ceil(target)` chunks asks for the same layout.
+        //
+        // Digest safety, checked by mirroring both rules over every shape that
+        // builds today (S in {16,32,48,64,128,256,512,1024} x hd x insts x c x
+        // target): the two rules agree everywhere EXCEPT `(S=48, target 8|16)`
+        // and `(S=64, target=48)`, where `q` and `chunks` are reciprocal rather
+        // than linear and the tie-break lands differently.  No invocation in
+        // the tree uses those: the shapes actually run are S=512 (spr 64),
+        // S=240, S=48 (spr 32), S=32 (spr 64) and S=16 (spr 8), and all of them
+        // move nothing.  Re-check this before introducing a new `--s`/`--scores-
+        // per-row` pair where `target` does not divide `S`.
+        pick(MIN_LOG_ROWS..=MAX_LOG_ROWS, |lr| Self::new(sh, lr),
+             |l| l.g.chunks, sh.s.div_ceil(target), |l| l.g.rows)
     }
     pub fn json(&self) -> Value {
         let mut v = self.g.json();
@@ -219,10 +248,15 @@ impl LayoutOut {
         // one row group per (instance, output channel), descending, so the rv-Horner
         // assigns `rv^{j + hd i}` and folds instances by `rv^hd`
         let g = Grid::new(sh.chans(), log_rows, sh.s, true)?;
+        // the out region's twin of the same assert (open item 10)
+        if sh.s % g.chunks != 0 {
+            return None;
+        }
         Some(Self { g, q: sh.s.div_ceil(g.chunks) })
     }
     pub fn choose(sh: &Shape, target: usize) -> Self {
-        pick(MIN_LOG_ROWS..=MAX_LOG_ROWS, |lr| Self::new(sh, lr), |l| l.q, target, |l| l.g.rows)
+        pick(MIN_LOG_ROWS..=MAX_LOG_ROWS, |lr| Self::new(sh, lr),
+             |l| l.g.chunks, sh.s.div_ceil(target), |l| l.g.rows)
     }
     pub fn json(&self) -> Value {
         let mut v = self.g.json();
