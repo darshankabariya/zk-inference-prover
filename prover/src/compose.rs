@@ -717,7 +717,15 @@ impl Plan {
                 p.c, p.s);
         // with the flag off this is 1, so the loop below builds exactly the one
         // prefix band per head band it always built
-        let nsub = if p.kv_bind { p.c / p.s } else { 1 };
+        // Open item 1 / CC deliverable 4: block 0 of a sequence has no declared
+        // prefix, so `c == 0` and there is no prefix band to build.  Without
+        // this the `else` arm built one anyway and `Grid::new` divided by
+        // `groups = c * insts = 0`.  With `nsub == 0` the loop below builds no
+        // prefix band and `rows_band.push(nsub == 0)` hands the group's one
+        // per-token region to the solo corner, which is where it belongs.
+        let nsub = if p.c == 0 { 0 } else if p.kv_bind { p.c / p.s } else { 1 };
+        assert!(p.c > 0 || p.corner,
+                "a c = 0 chunk is block 0: it is the solo corner and needs `--corner`");
         let sub_c = if p.kv_bind { p.s } else { p.c };
         let mut head_offsets = vec![];
         let mut off = 0;
@@ -894,8 +902,14 @@ impl Plan {
         if self.corner[b] {
             let l0 = &self.lays[0];
             let pre0 = Powers::new(r, s, rv, &self.shapes[0], &l0.chan, &l0.key, &l0.out, l0.rw);
-            Powers::new(r_corner, s, rv, sh, &l.chan, &l.key, &l.out, l.rw)
-                .as_corner(pre0.r_c, sh.c)
+            let cp = Powers::new(r_corner, s, rv, sh, &l.chan, &l.key, &l.out, l.rw);
+            // A corner that carries the region is block 0's solo corner and
+            // needs its own `mu`; a paired one rides on the prefix band's.
+            if self.rows_band[b] {
+                cp.as_solo_corner(pre0.r_c, sh.c)
+            } else {
+                cp.as_corner(pre0.r_c, sh.c)
+            }
         } else {
             Powers::new(r, s, rv, sh, &l.chan, &l.key, &l.out, l.rw)
         }

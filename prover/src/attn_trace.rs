@@ -563,7 +563,14 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     // `corner == false` and `with_rows == false` is now a legal and ordinary
     // thing.  The implication that survives is the one that matters here, and
     // it is asserted instead: a corner never carries the region.
-    debug_assert!(!(a.corner && with_rows), "a corner band cannot carry the per-token region");
+    // Open item 1 / CC deliverable 4: a *solo* corner (block 0, whose group has
+    // no prefix band at all) does carry the region, so the old implication
+    // "a corner never carries the region" is no longer true.  What survives is
+    // that a band carrying the region is its group's first band, and `Plan`
+    // establishes that by construction -- `rows_band` is `k == 0` for a prefix
+    // sub-band and `nsub == 0` for a corner.
+    debug_assert!(!(a.corner && with_rows) || a.shape.c == a.shape.s,
+                  "only a solo corner (c == S) may be a corner that carries the region");
     // ... and the device fill still has no notion of any of this
     // (`devwfill.rs` mentions neither `with_rows` nor `corner`), so a band that
     // does not carry the region takes the host path whatever the switch says --

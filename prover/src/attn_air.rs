@@ -242,6 +242,24 @@ impl Powers {
         self.r_c = prefix_r_c;
         self
     }
+
+    /// The **solo** corner's powers: block 0 of a sequence has no declared
+    /// prefix, so its corner is its head band group's only band and it carries
+    /// the per-token region itself (CC deliverable 4, option A).
+    ///
+    /// That is `as_corner` plus one thing.  `as_corner` deliberately drops `mu`
+    /// because a *paired* corner has no per-token region and rides on the
+    /// prefix band's; a solo corner has one and needs its own.  `Powers::new`
+    /// already built `mu = r_c s^{-(S-rw)}` from **this** grid's `r_c`
+    /// (`r_corner^S`), so the `s` factor is recoverable as `mu / r_c` without
+    /// re-deriving `s` or `rw`, and rebasing it onto the borrowed global `r^C`
+    /// gives the region the same instance weight every other region carries.
+    pub fn as_solo_corner(self, prefix_r_c: SecureField, s_keys: usize) -> Self {
+        let s_span_inv = self.mu * self.r_c.inverse();
+        let mut p = self.as_corner(prefix_r_c, s_keys);
+        p.mu = prefix_r_c * s_span_inv;
+        p
+    }
 }
 
 /// Offsets that make a signed committed value a non-negative table index.
