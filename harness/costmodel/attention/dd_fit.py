@@ -405,7 +405,7 @@ def report():
     #    point's own makes the family parameter identical.  It widens the
     #    attnout region and the `o` walk table, so `fresh` must move and `bands`
     #    must NOT -- which is the check.
-    pinned = []
+    pinned, pinned_fit = [], None
     if got["ddpin"]:
         print()
         print("the `ao_rem_bits` confound, removed -- the same points at one pinned value")
@@ -435,7 +435,7 @@ def report():
             px = cross_of(BAND_SC, BAND_S + BAND_C - pq, -pf)
             print(f"  the whole fit redone on the pinned family: rest = {pf:,.0f} + "
                   f"{pq:,.0f} S, crossover S ~ {px:,.0f}")
-            pinned.append(dict(fit=dict(fixed=pf, per_token=pq, crossover=px)))
+            pinned_fit = dict(fixed=pf, per_token=pq, crossover=px, points=pss)
 
     # -- which set to fit on
     src = "dd" if len(got["dd"]) >= 3 else "b9"
@@ -645,7 +645,8 @@ def report():
 
     blob = dict(
         sets={t: {str(s): r for s, r in v.items()} for t, v in got.items()},
-        repro=repro, pinned=pinned, fitted_on=sorted(exact), padded_held_out=sorted(padded),
+        repro=repro, pinned=pinned, pinned_fit=pinned_fit,
+        fitted_on=sorted(exact), padded_held_out=sorted(padded),
         band_models=dict(
             m1_p=p1, m2_gamma=g2, m2_delta=d2, structural_gamma=GAMMA,
             structural_delta=DELTA,

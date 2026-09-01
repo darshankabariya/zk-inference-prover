@@ -22,3 +22,17 @@ compose: synthetic layer (seed=7) bands=[16, 8, 8] variant=intexp kmax=19 rem=17
 thread 'main' panicked at src/layer.rs:921:14:
 no layout, padded or otherwise
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--- S = C = 3072, edge (attn_trace.rs:321, the token axis) ---
+compose: synthetic layer (seed=7) bands=[16, 8, 8] variant=intexp kmax=19 rem=20 p=136
+
+thread 'main' panicked at src/attn_trace.rs:321:5:
+assertion `left == right` failed: grid layout leaves padded token slots: q=74 chunks=42 S=3072
+  left: 3108
+ right: 3072
+
+--- S = C = 4096, edge (the 150.0 GiB container cap) ---
+compose: synthetic layer (seed=7) bands=[16, 8, 8] variant=intexp kmax=19 rem=20 p=136
+	Maximum resident set size (kbytes): 156820092
+	Elapsed (wall clock) time (s): 177.452
+	Exit status: -9
