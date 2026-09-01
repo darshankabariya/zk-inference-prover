@@ -680,8 +680,13 @@ if __name__ == "__main__":
                     z_corner_min=int(numc.sum(-1).min()),
                     # which half the row maximum came from, per token: the reason
                     # `Z >= nmax` is a statement about the total and not about a band
-                    max_from_corner=int((scc.masked_fill(~vis, torch.iinfo(torch.int64).min)
-                                         .amax(-1) > sc.amax(-1)).sum()),
+                    # H200, 2026-09-01: block 0 has no prefix, so `sc` is
+                    # (nh, S, 0) and `amax(-1)` raises "Expected reduction dim
+                    # -1 to have non-zero size".  With no prefix keys every row
+                    # maximum comes from the corner, which is what `nh * S` says.
+                    max_from_corner=(
+                        int((scc.masked_fill(~vis, torch.iinfo(torch.int64).min)
+                             .amax(-1) > sc.amax(-1)).sum()) if P else int(nh * S)),
                     rows=int(nh * S))
             stats = dict(
                 heads=nh, s=S, c=P, hd=hd, layer=L, spec=a.spec, qk_bits=list(spec.qk_bits),
