@@ -71,12 +71,24 @@ CONSTANTS_JSON = PAPER / "constants.json"
 KEYS = dict(
     h100_usd_per_hour="cost.h100_reference_usd_per_hour",
     h200_usd_per_hour="cost.h200_reference_usd_per_hour",
-    alpha="attention_grid.e1_composed_solve",
+    # the attention term.  The drift guard checks these COEFFICIENTS, not a
+    # composite slope: a single cells-per-(head, key, token) number is a per-entry
+    # cost and a per-key cost collapsed together by the accident that the
+    # calibration point has S=512, and it is valid only at that S.
+    band_fresh_coeffs="attention_grid.band_model_fresh_coeffs",
+    band_base_coeffs="attention_grid.band_model_base_coeffs",
+    band_alpha_fresh="attention_grid.band_model_alpha_fresh",
+    band_alpha_base="attention_grid.band_model_alpha_base",
+    # the superseded single slopes, kept only so the table can show what they cost
+    alpha_e1="attention_grid.e1_composed_solve",
     alpha_w0_32layers="attention_grid.composed_chunk_fresh_slope_32layers",
-    alpha_w0_l16="attention_grid.composed_chunk_fresh_slope",
     alpha_b5="attention_grid.b5_standalone_alpha",
-    alpha_base="attention_grid.composed_chunk_base_slope",
-    alpha_inter="attention_grid.composed_chunk_interaction_slope",
+    # E11, re-priced by stream E7 on the band model
+    e11_multiple="design.e11_cells_multiple_c4096",
+    e11_chunking_net="design.e11_chunking_net_pct",
+    e11_chunking_fixed="design.e11_chunking_overhead_pct",
+    chunk_floor="attention_grid.chunk_model_fixed_composed",
+    prefill_remainder="design.prefill_chunk_remainder",
 )
 
 # Deliberately all `None`: a market rate moves, and a stale copy of one sitting in
@@ -343,7 +355,7 @@ def measured_8b(h200):
 
 
 def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
-                with_head=True):
+                with_head=True, corner=True):
     """The whole per-token budget for a shape, summed group by group: the cost
     model's `cells_per_token` plus B10 step 2's glue, with the model-level terms
     (the head's accumulators, its lookups, the token tie, the final norm) charged
@@ -357,7 +369,8 @@ def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
             cfg, 0 if grp["linear"] else ctx, batch, seq, alpha=alpha,
             experts=grp["experts"], topk=grp["topk"], seq_batch=seq_batch, head=head,
             attn_accs_per_layer=grp.get("attn_accs_per_layer"),
-            attn_params_per_layer=grp.get("attn_params_per_layer"))
+            attn_params_per_layer=grp.get("attn_params_per_layer"), corner=corner)
+        out["saturated"] = out.get("saturated", False) or bool(c["band_saturated"])
         gl = cm.glue_cells(cfg, "tree", topk=grp["topk"], final_norm=head)
         out["total"] += c["total"] + gl["net"]
         out["preprocessed"] += c["preprocessed"]
@@ -369,29 +382,85 @@ def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
     return out
 
 
-def calibrate(h200, shape, batch=None):
-    """One free parameter, two measured points, one residual degree of freedom.
+def check_8b(h200, shape, consts, batch=None):
+    """The check, and it now has **no free parameter at all**.
 
-    `alpha` -- the committed cells per (head, key, token) of the attention grid --
-    is the only term the composed sequence measures differently from the standalone
-    block AIR B5 read it off (the composed chunk's LogUp interaction columns for
-    the grid are not in B5's `alpha_grid`).  Solve it from the *slope* between the
-    two measured contexts, then check the *level* at each.  Nothing else is
-    touched: this is a constant replaced by its correctly-measured counterpart, not
-    a fit to the totals."""
+    Before 2026-09-01 the attention term was one slope, `alpha`, solved from the
+    two measured contexts -- one fitted parameter, two points, one residual dof.
+    Stream DD's band model and stream E1's symbolic re-derivation of it replace
+    that with a closed form whose every coefficient is an identity of the layout,
+    so the model now predicts both measured levels with nothing solved: two points,
+    zero fitted parameters, two residual degrees of freedom.
+
+    Also re-checks the coefficients themselves against the freeze, and against the
+    band family measured directly in the seq5 artifacts."""
     meas = measured_8b(h200)
-    lo, hi = sorted(meas)
-    a0, a1 = 0.0, 1.0
-    def slope(a):
-        return (model_cells(shape, hi, alpha=a, batch=batch)["total"]
-                - model_cells(shape, lo, alpha=a, batch=batch)["total"])
-    m0, m1 = slope(a0), slope(a1)
-    alpha = (meas[hi] - meas[lo] - m0) / (m1 - m0)
-    resid = {c: model_cells(shape, c, alpha=alpha, batch=batch)["total"] / meas[c] - 1.0
-             for c in meas}
-    raw = {c: model_cells(shape, c, batch=batch)["total"] / meas[c] - 1.0 for c in meas}
-    return dict(alpha=alpha, alpha_b5=cm.ALPHA, residual=resid, raw_residual=raw,
-                measured=meas)
+    nh, hd = shape["nh"], shape["hd"]
+    got_fresh = _coeffs(nh, hd)
+    got_base = _coeffs(nh, hd, base_only=True)
+    want_fresh = consts["band_fresh_coeffs"]["value"]
+    want_base = consts["band_base_coeffs"]["value"]
+    out = dict(
+        measured=meas,
+        band={c: model_cells(shape, c, batch=batch)["total"] / meas[c] - 1 for c in meas},
+        legacy_slope={c: model_cells(shape, c, alpha=consts["alpha_e1"]["value"],
+                                     batch=batch)["total"] / meas[c] - 1 for c in meas},
+        legacy_b5={c: model_cells(shape, c, alpha=consts["alpha_b5"]["value"],
+                                  batch=batch)["total"] / meas[c] - 1 for c in meas},
+        coeffs_fresh=got_fresh, coeffs_base=got_base,
+        frozen_fresh=want_fresh, frozen_base=want_base,
+        coeffs_agree=(got_fresh == tuple(want_fresh) and got_base == tuple(want_base)),
+        family=_band_family_check(nh, hd))
+    return out
+
+
+def _coeffs(nh, hd, base_only=False, s0=512, c0=4096):
+    """The (S*C, C, S) coefficients this module's band model implies at a shape.
+
+    Recovered from the band function itself by finite differences, rather than
+    restated, so the drift guard compares the code that is actually used against
+    the freeze.  Differenced at (s0, c0) and its doublings, well clear of
+    `Grid::new`'s caps -- at S or C below them the layout saturates, `q` and `pk`
+    stop being the targets, and the form is no longer a plain trilinear."""
+    def f(s, c):
+        b, i, _ = cm.band_cells(nh, hd, s, c)
+        return b if base_only else b + i
+    a = (f(2 * s0, 2 * c0) - f(2 * s0, c0) - f(s0, 2 * c0) + f(s0, c0)) / (s0 * c0)
+    b = (f(s0, 2 * c0) - f(s0, c0)) / c0 - a * s0
+    d = (f(2 * s0, c0) - f(s0, c0)) / s0 - a * c0
+    return tuple(round(x, 6) for x in (a, b, d))
+
+
+def _band_family_check(nh, hd):
+    """`family_cells.bands` is base-only; predict it on every seq5 layer chunk and
+    on B9's two prefill points, and report exact-or-not.  Nothing is fitted, so a
+    miss here is a real disagreement, not a residual."""
+    rows = []
+    for f in sorted((ROOT / "b10" / "out" / "seq5").glob("seq_c*_L*.json")):
+        try:
+            d = json.loads(f.read_text())["result"]["point"]
+        except (ValueError, KeyError):
+            continue
+        pr = d["params"]
+        if pr["nh"] != nh or pr["hd"] != hd:
+            continue
+        b, _, _ = cm.band_cells(nh, hd, pr["s"], pr["c"],
+                                grid_target=pr["grid_target"], chan_target=pr["chan_target"],
+                                rw=pr["rw"])
+        if pr.get("corner"):
+            b2, _, _ = cm.band_cells(nh, hd, pr["s"], pr["s"], rows_region=False,
+                                     grid_target=pr["grid_target"],
+                                     chan_target=pr["chan_target"], rw=pr["rw"])
+            b += b2
+        rows.append((f.name, pr["s"], pr["c"], d["family_cells"]["bands"], b))
+    for s in (512, 1024):
+        f = ROOT / "b9" / "out" / f"prefill_s{s}.json"
+        if not (f.exists() and f.stat().st_size):
+            continue
+        d = json.loads(f.read_text())["result"]["point"]
+        b, _, _ = cm.band_cells(nh, hd, s, s)
+        rows.append((f.name, s, s, d["family_cells"]["bands"], b))
+    return rows
 
 
 # ------------------------------------------------------- E11: prompt+output --
@@ -536,6 +605,10 @@ def main(argv=None):
                          "logup.json); nothing to do with --seq-batch")
     ap.add_argument("--target", type=float, default=20.0)
     ap.add_argument("--json", default=str(OUT / "frontier.json"))
+    ap.add_argument("--compare", default=None,
+                    help="a previous frontier.json to diff every row against; prints "
+                         "what moved in cells/token, tok/s and cards-at-target, and "
+                         "whether the ordering changed")
     args = ap.parse_args(argv)
 
     consts = load_constants()
@@ -547,19 +620,22 @@ def main(argv=None):
     h200, h100 = h200_card(), h100_card()
     cards = {"H200": h200, "H100": h100}
     llama8b = next(s for s in SHAPES if s["name"] == "Llama-3.1-8B")
-    cal = calibrate(h200, llama8b, batch=batch)
-    # The grid constant is the freeze's, not this run's.  The solve is still done
-    # (it is the derivation the freeze's own entry cites) and the two are asserted
-    # equal, so a drift in either would fail here rather than pass silently.
-    frozen_alpha = consts["alpha"]["value"]
-    if frozen_alpha is not None:
-        if abs(frozen_alpha - cal["alpha"]) > 0.01:
-            sys.exit(f"the freeze's {consts['alpha']['key']} = {frozen_alpha} no longer "
-                     f"matches this module's own solve {cal['alpha']:.4f}; one of the two "
-                     "moved and the disagreement must be resolved, not averaged")
-        alpha = frozen_alpha
-    else:
-        alpha = cal["alpha"]
+    cal = check_8b(h200, llama8b, consts, batch=batch)
+    # The drift guard, now on the coefficients rather than on a composite slope.
+    # This module derives them symbolically and the freeze carries stream DD's;
+    # they must agree exactly at the 8B geometry, because both claim to be
+    # identities of the same layout rather than fits.
+    if consts["band_fresh_coeffs"]["value"] and not cal["coeffs_agree"]:
+        sys.exit(f"band coefficients disagree with the freeze:\n"
+                 f"  fresh  derived {cal['coeffs_fresh']}  frozen {cal['frozen_fresh']}\n"
+                 f"  base   derived {cal['coeffs_base']}  frozen {cal['frozen_base']}\n"
+                 "Both claim to be layout identities, so one of them is wrong; "
+                 "resolve it, do not average.")
+    bad = [r for r in cal["family"] if r[3] != r[4]]
+    if bad:
+        sys.exit("the band model no longer reproduces `family_cells.bands` exactly on "
+                 + ", ".join(r[0] for r in bad))
+    alpha = None                       # the band model IS the attention term now
     fit = prefill_fit()
     mib_per_chunk = (h200["per_ctx"][4096]["proof_bytes"] / 2 ** 20
                      / h200["per_ctx"][4096]["chunks"] / TOKENS)
@@ -608,69 +684,84 @@ def main(argv=None):
     print("    the H200 sequence ran one process per chunk, so it has no `loop_secs`;")
     print("    the H100 loop has no head chunk.  Neither gap is fillable by arithmetic.")
 
-    # --- calibration ---------------------------------------------------------
-    print("\nthe calibration: one free parameter, two measured points, one residual dof")
-    print("  alpha (committed cells per head/key/token of the attention grid)")
-    print(f"    B5's standalone block AIR      {cal['alpha_b5']:.3f}   (`b5/out/block.json`, "
-          "`alpha_grid`, the constant the model shipped with)")
-    print(f"    solved from the sequence slope {alpha:.3f}   (seq5's two contexts, "
-          "the composed chunk's own grid + its interaction columns)")
-    print(f"  {'context':>8} {'measured M/token':>18} {'model @ B5 alpha':>18} "
-          f"{'model @ solved':>16} {'residual':>10}")
+    # --- the check: no free parameter at all ---------------------------------
+    print("\nthe check: the attention term now has ZERO fitted parameters")
+    print("  The model used to charge one slope, `alpha`, solved from the two measured")
+    print("  contexts -- one parameter, two points, one residual dof.  Stream DD's band")
+    print("  model and this module's symbolic re-derivation of it replace that slope with")
+    print("  a closed form in (S, C) whose every coefficient is an identity of the layout,")
+    print("  so both measured levels are now predicted with nothing solved: two points,")
+    print("  zero fitted parameters, TWO residual degrees of freedom.")
+    print(f"\n  {'context':>8} {'measured M/token':>18} {'band model':>12} {'residual':>10}"
+          f"   {'slope 5.855':>12} {'B5 4.00':>10}")
     for ctx in sorted(cal["measured"]):
         m = cal["measured"][ctx]
-        print(f"  {ctx:>8} {m/1e6:>18.2f} {m*(1+cal['raw_residual'][ctx])/1e6:>18.2f} "
-              f"{m*(1+cal['residual'][ctx])/1e6:>16.2f} {cal['residual'][ctx]:>+9.2%}")
-    print(f"  the model as it shipped is {min(cal['raw_residual'].values()):+.1%} to "
-          f"{max(cal['raw_residual'].values()):+.1%} against the measured sequence;")
-    print(f"  with the one constant replaced it is {min(cal['residual'].values()):+.2%} to "
-          f"{max(cal['residual'].values()):+.2%}, and that is a *check*, not a fit:")
-    print("  the slope fixes alpha and the two levels are then predicted, not matched.")
+        print(f"  {ctx:>8} {m/1e6:>18.2f} {m*(1+cal['band'][ctx])/1e6:>12.2f} "
+              f"{cal['band'][ctx]:>+9.2%}   {cal['legacy_slope'][ctx]:>+11.2%} "
+              f"{cal['legacy_b5'][ctx]:>+9.2%}")
+    print(f"  band model residual {min(cal['band'].values()):+.2%} to "
+          f"{max(cal['band'].values()):+.2%}, on no fitted attention parameter at all.")
+    print("  The two superseded columns are the same model with the band term replaced by")
+    print("  a single slope: 5.855 was solved to hit these two points, and 4.00 is B5's")
+    print("  standalone block AIR, which is what everything before 2026-09-01 charged.")
 
-    # --- the three composed-slope values, reconciled -------------------------
-    lo, hi = sorted(cal["measured"])
-    Lnh = llama8b["groups"][0]["layers"] * llama8b["nh"]
-    non_grid = (model_cells(llama8b, hi, alpha=0.0, batch=batch)["total"]
-                - model_cells(llama8b, lo, alpha=0.0, batch=batch)["total"]) / (hi - lo) / Lnh
-    meas_slope = (cal["measured"][hi] - cal["measured"][lo]) / (hi - lo) / Lnh
-    w0_32, w0_l16 = consts["alpha_w0_32layers"]["value"], consts["alpha_w0_l16"]["value"]
-    head_share = meas_slope - w0_32
-    print("\n  the three composed-slope values in circulation are the SAME measurement")
-    print("  under three bookkeepings, and they reconcile exactly -- nothing to average:")
-    print(f"    {meas_slope:.4f}   measured slope of the whole 33-chunk sequence, head included")
-    print(f"  = {w0_32:.4f}   W0's 32-layer raw slope (`composed_chunk_fresh_slope_32layers`)")
-    print(f"  + {head_share:.4f}   the head chunk's own growth in C, divided by L*nh")
-    print(f"    {alpha:.4f}   = {meas_slope:.4f} - {non_grid:.4f}, the model's own KV-cache")
-    print("             slope, which it charges as a separate term and must not charge twice")
-    print(f"    {w0_l16:.4f}   W0's L16-alone slope: one layer, the same quantity, "
-          f"{w0_l16 / w0_32 - 1:+.1%} on the 32-layer figure")
-    print(f"    {consts['alpha_base']['value']:.3f} base + {consts['alpha_inter']['value']:.3f} "
-          "interaction -- the base side agrees with B9's 2.25 and B10's 2.750,")
-    print("             so the whole 4.00-vs-5.9 disagreement is interaction cells")
-    print("\n  what each candidate does to the model's two levels:")
-    print(f"  {'candidate':<44} {'alpha':>7} {'4K':>9} {'16K':>9} {'spread':>8}")
-    for label, a in (("E1 solve: measured slope less the model's kv", alpha),
-                     ("W0 32-layer raw slope, charged as-is", w0_32),
-                     ("W0 L16 raw slope, charged as-is", w0_l16),
-                     ("W0 32-layer less the model's kv", w0_32 - non_grid),
-                     ("B5 standalone -- what the model shipped with",
-                      consts["alpha_b5"]["value"])):
-        r = {c: model_cells(llama8b, c, alpha=a, batch=batch)["total"]
-             / cal["measured"][c] - 1 for c in (lo, hi)}
-        print(f"  {label:<44} {a:>7.3f} {r[lo]:>+8.2%} {r[hi]:>+8.2%} "
-              f"{abs(r[hi] - r[lo]):>7.2%}")
-    print(f"\n  This module uses {alpha:.3f}, from the freeze's `{consts['alpha']['key']}`.")
-    print("  Why that one and not the 32-layer figure: this is a whole-model cost model")
-    print("  that charges the committed KV cache as its OWN term, so its grid constant has")
-    print(f"  to be the measured slope MINUS that term ({non_grid:.4f}); charging {w0_32:.3f} directly")
-    print("  double-counts the KV cells, which is a modelling defect rather than a residual,")
-    print("  and it shows up as the widest context spread of the three (see the table).")
-    print(f"  What {alpha:.3f} gets wrong instead, and it is named rather than modelled: it folds")
-    print(f"  the head chunk's own growth in C ({head_share:.4f} per L*nh at 8B) into a per-(layer,")
-    print("  head) term, so it over-scales on deep/wide shapes.  Sized: about +1.3% of")
-    print("  cells/token at 405B and C=16K, against +2.3% for the KV double-count.  Both")
-    print("  are inside the 2.2% spread between the three values, so no frontier row's")
-    print("  ordering or cards-for-20 changes whichever of the three is chosen.")
+    print("\n  the coefficients, derived here and frozen by stream DD -- they must agree")
+    print("  exactly, because both claim to be identities of the same layout:")
+    print(f"  {'':<10} {'S*C':>10} {'C':>12} {'S':>12}")
+    print(f"  {'fresh':<10} {cal['coeffs_fresh'][0]:>10} {cal['coeffs_fresh'][1]:>12} "
+          f"{cal['coeffs_fresh'][2]:>12}   derived symbolically here")
+    print(f"  {'':<10} {cal['frozen_fresh'][0]:>10} {cal['frozen_fresh'][1]:>12} "
+          f"{cal['frozen_fresh'][2]:>12}   attention_grid.band_model_fresh_coeffs")
+    print(f"  {'base':<10} {cal['coeffs_base'][0]:>10} {cal['coeffs_base'][1]:>12} "
+          f"{cal['coeffs_base'][2]:>12}   derived symbolically here")
+    print(f"  {'':<10} {cal['frozen_base'][0]:>10} {cal['frozen_base'][1]:>12} "
+          f"{cal['frozen_base'][2]:>12}   attention_grid.band_model_base_coeffs")
+    n_exact = sum(1 for r in cal["family"] if r[3] == r[4])
+    print(f"  and `family_cells.bands` reproduced EXACTLY, to the cell, on "
+          f"{n_exact}/{len(cal['family'])} artifacts")
+    print("  (every seq5 layer chunk at C=4096 and C=16384 on the real extracted")
+    print("  witness, plus B9's two S=C prefill points).  Nothing is fitted, so a miss")
+    print("  would be a")
+    print("  disagreement, not a residual, and `frontier.py` exits on one.")
+
+    # --- the general form ----------------------------------------------------
+    print("\n  the closed form, general in (nh, hd, S, C).  DD froze the coefficients at")
+    print("  Llama-8B's geometry; these are the same numbers re-derived from the column")
+    print("  accounting so they can be evaluated at a shape that is not Llama-8B:")
+    print("      base  = 2*nh*S*C  +  2*nh*hd*C  +  nh*hd*S  +  4*nh*S")
+    print("      inter = (2 + 24/gt)*nh*S*C  +  (4*nh*hd + 12*nh*hd/ct)*C")
+    print("              +  2*nh*hd*S  +  (8*nh + 8*nh/rw)*S")
+    print("  with gt = grid_target (64), ct = chan_target (128), rw = row width (16).")
+    print(f"  At nh=32, hd=128 that is exactly {cal['frozen_fresh']} fresh and "
+          f"{cal['frozen_base']} base.")
+    print("  Read off `prover/src/attn_trace.rs:1167-1181` with `prover/src/layout.rs`:")
+    print("    lc.g.rows = hd*insts*C/pk (pk -> ct), lk.g.rows = C*insts*S/q (q -> gt),")
+    print("    rrows*rw = nh*S, and `insts` sums to nh over the bands -- every term is")
+    print("    linear in `insts`, so banding 16/8/8 costs exactly what 32 would.")
+    print("\n  Three things this derivation does NOT settle, and they are the extrapolation")
+    print("  risk the frontier rows carry:")
+    print("   1. **K and V are committed per ATTENTION head, not per KV group.**")
+    print("      `LayoutChan`/`LayoutKey` are built from `Shape::chans()`/`keys()`, both")
+    print("      carrying `insts` = attention heads, so the `C` term is 2*nh*hd and `nkv`")
+    print("      does not appear.  Grouped-query attention buys this prover nothing on the")
+    print("      committed KV side today.  At 8B nh/nkv is 4; at Llama-405B and Qwen3 it")
+    print("      is 16, and at the MLA shapes higher still.  A GQA-aware layout would")
+    print("      divide that term by nh/nkv -- a named, unbuilt optimisation, and the")
+    print("      single largest structural saving this table can see.")
+    print("   2. **gt / ct / rw are run knobs, not constants.**  The composed sequence used")
+    print("      64 / 128 / 16 and this model keeps them.  They tile exactly only when S,")
+    print("      C, hd and `insts` are powers of two and the target divides; `Grid::new`")
+    print("      also caps q at min(S, hd) and pk at min(C, S).  Where a shape saturates a")
+    print("      cap the table says so.")
+    print("   3. **The out (A.V) region is not in the band family.**  It is the `attnout`")
+    print("      family and `cells_per_token` charges it separately, so there is no double")
+    print("      count -- but it is also the one attention region whose price here is a")
+    print("      measured per-element constant rather than a derived column count.")
+    sat = [r["name"] for r in
+           [dict(name=s["name"], c=model_cells(s, 16384, seq=args.seq, batch=batch))
+            for s in SHAPES] if r["c"].get("saturated")]
+    print("  layout caps saturated at: " + (", ".join(sat) if sat else "no shape"))
+
 
     # --- the shapes ----------------------------------------------------------
     print("\n(1) the shapes, and each one's own parameter check")
@@ -729,37 +820,64 @@ def main(argv=None):
     print("  proof.  It is NOT in the fresh count the measured rates divide, and it is")
     print("  where MoE's x E lands hardest -- see (4).")
 
-    print("\n(2a) what the old grid constant cost: every row at B5's 4.00 against the")
-    print("     composed slope.  This is exactly the error in section 6.3's dense table,")
-    print("     since every figure there was produced with 4.00.")
+    print("\n(2a) what the superseded attention terms cost.  Section 6.3's dense table")
+    print("     was produced at B5's 4.00; the version this stream committed at 3ec240c")
+    print("     used the single composed slope 5.855.  Both are here against the band model.")
     b5 = consts["alpha_b5"]["value"]
-    print(f"  {'model':<18} {'cells/tok 4K @4.00':>19} {'@' + f'{alpha:.3f}':>10} {'delta':>7}"
-          f" {'delta 16K':>10}   {'H200 commit tok/s 4K':>22} {'cards@20':>10}")
+    slope = consts["alpha_e1"]["value"]
+    print(f"  {'model':<18} {'@4.00':>10} {'@5.855':>10} {'band':>10} {'band vs 4.00':>13}"
+          f" {'band vs 5.855':>14}   {'C=16K: vs 4.00':>15} {'vs 5.855':>10}")
     grid_delta = {}
     for shape in SHAPES:
         row = {}
         for ctx in (4096, 16384):
+            kw = dict(seq=args.seq, seq_batch=args.seq_batch, batch=batch)
             row[ctx] = dict(
-                old=model_cells(shape, ctx, seq=args.seq, seq_batch=args.seq_batch,
-                                alpha=b5, batch=batch)["total"],
-                new=model_cells(shape, ctx, seq=args.seq, seq_batch=args.seq_batch,
-                                alpha=alpha, batch=batch)["total"])
-            row[ctx]["delta"] = row[ctx]["new"] / row[ctx]["old"] - 1
-        cs = h200["per_ctx"][4096]["boundaries"]["commit"]["cells_s"]
-        old, new = row[4096]["old"], row[4096]["new"]
-        row["tok_s_old"], row["tok_s_new"] = cs / old, cs / new
+                b5=model_cells(shape, ctx, alpha=b5, **kw)["total"],
+                slope=model_cells(shape, ctx, alpha=slope, **kw)["total"],
+                band=model_cells(shape, ctx, **kw)["total"])
+            row[ctx]["d_b5"] = row[ctx]["band"] / row[ctx]["b5"] - 1
+            row[ctx]["d_slope"] = row[ctx]["band"] / row[ctx]["slope"] - 1
         grid_delta[shape["name"]] = {str(k): v for k, v in row.items()}
-        print(f"  {shape['name']:<18} {g(old):>19} {g(new):>10} {row[4096]['delta']:>+6.1%}"
-              f" {row[16384]['delta']:>+9.1%}   {cs / old:>9.3f} -> {cs / new:<9.3f}"
-              f"{math.ceil(20 / (cs / old)):>4} -> {math.ceil(20 / (cs / new)):<4}")
-    d4 = [v["4096"]["delta"] for v in grid_delta.values()]
-    d16 = [v["16384"]["delta"] for v in grid_delta.values()]
-    print(f"  The old constant understated cells/token by {min(d4):.1%}-{max(d4):.1%} at C=4K")
-    print(f"  and {min(d16):.1%}-{max(d16):.1%} at C=16K, so it overstated every tok/s and")
-    print("  understated every cards-for-20 count.  The error grows with the context, which")
-    print("  is the whole point: the constant that was wrong is the one on the context term.")
-    print("  The 8B row is the exception the freeze names -- our 30.2 tok/s there is a")
-    print("  measurement, not a model output, so only its model column moves.")
+        a, b = row[4096], row[16384]
+        print(f"  {shape['name']:<18} {g(a['b5']):>10} {g(a['slope']):>10} {g(a['band']):>10}"
+              f" {a['d_b5']:>+12.1%} {a['d_slope']:>+13.1%}   {b['d_b5']:>+14.1%}"
+              f" {b['d_slope']:>+9.1%}")
+    d5 = [v["4096"]["d_b5"] for v in grid_delta.values()]
+    d5c = [v["16384"]["d_b5"] for v in grid_delta.values()]
+    ds = [v["4096"]["d_slope"] for v in grid_delta.values()]
+    dsc = [v["16384"]["d_slope"] for v in grid_delta.values()]
+    print(f"  Against B5's 4.00 the band model is {min(d5):+.1%} to {max(d5):+.1%} at C=4K")
+    print(f"  and {min(d5c):+.1%} to {max(d5c):+.1%} at C=16K -- that is the error in")
+    print("  section 6.3's table, and it grows with the context because the term that was")
+    print("  wrong is the one on the context.")
+    print(f"  Against the single slope 5.855 it is {min(ds):+.1%} to {max(ds):+.1%} (4K) and")
+    print(f"  {min(dsc):+.1%} to {max(dsc):+.1%} (16K) -- a spread of {max(ds)-min(ds):.1%} "
+          f"(4K) / {max(dsc)-min(dsc):.1%} (16K)")
+    print("  across the eight shapes.  So the aliasing is BENIGN at this table's settings,")
+    print("  and it is worth being precise about why, because the reason is not that a")
+    print("  composite slope is safe.  Write the composite out:")
+    print("")
+    gt, ct = cm.GRID_TARGET, cm.CHAN_TARGET
+    print("      alpha_composite(hd, S) = (4 + 24/gt)  +  hd*(6 + 12/ct)/S")
+    print(f"                             = {4 + 24/gt:.3f}          +  {128*(6+12/ct):.0f}/S"
+          f"   at hd=128")
+    for s_ in (128, 512, 1024, 4096):
+        print(f"        S={s_:<5} -> {4 + 24/gt + 128*(6 + 12/ct)/s_:6.3f}")
+    print("")
+    print("  It does not depend on `nh` at all, and every shape in this table has hd=128")
+    print("  and is priced at S=512 -- so the aliased constant happens to be the SAME")
+    print("  number for all eight rows, which is exactly why the residual spread is small.")
+    print("  Two things follow, and they are the reason the band model is still required:")
+    print("   * The composite moves 13% between S=512 and S=1024 and doubles by S=128.  A")
+    print("     'constant' that is a function of the chunk length is not extrapolable to")
+    print("     the two regimes this table cares most about -- E11's S=1024 prompt chunks")
+    print("     (section 6) and any shape forced off S=512 by memory (section 7).")
+    print("   * Most of the residual above is NOT aliasing.  It is that the old model")
+    print("     charged the committed K/V at `nkv` while the AIR charges it at `nh`, so the")
+    print("     correction tracks nh/nkv: +4.3% at Qwen3 (nh/nkv=16) and +4.0% at")
+    print("     DeepSeek-V3, against +2.0% at Maverick (5) and +1.5% at Kimi K3, whose")
+    print("     69 linear-attention layers have no grid to correct.")
 
     print("\n(2b) proof bytes: two estimates that disagree, and neither is measured above 8B")
     print(f"  {'model':<18} {'by chunk count':>15} {'by 0.15 MiB/B-active':>22} {'ratio':>8}")
@@ -868,51 +986,69 @@ def main(argv=None):
     print("  latency, and the wall per proof grows with B.")
 
     # --- E11 -----------------------------------------------------------------
-    e11 = None
-    if fit:
-        print("\n(6) the full prompt+output statement (E11, decided 2026-08-31)")
-        print("  B9's measured fit, one layer chunk at C = S, 8B shape:")
-        print(f"    fresh ~ {g(fit['fixed'])}+ {fit['per_token']/1e6:.2f} M x S "
-              f"+ {fit['per_pair']:.1f} x S^2")
-        print(f"    fitted on S = {fit['points']}; "
-              f"S = {fit['missing']} MISSING (killed at 133.8 GB host RSS, empty JSON).")
-        print("    **Two points, three coefficients: zero residual degrees of freedom.**")
-        print("    Everything in this section inherits that; it is a sized direction, not")
-        print("    a measurement, and the paper must say so wherever the multiple appears.")
-        e11 = {}
-        print(f"\n  {'N positions':>12} {'S chunk':>8} {'chunks':>7} "
-              f"{'chunking overhead':>18} {'x today at that C':>18}")
-        for ctx in (4096, 16384):
-            for sc in (512, 1024):
-                f = e11_factor(fit, ctx, TOKENS, sc)
-                base = h200["per_ctx"][ctx]["fresh"]
-                e11[(ctx, sc)] = dict(factor=f["cells"] / base,
-                                      chunk_overhead=f["chunk_overhead"],
-                                      vs_monolith=f["vs_monolith"], cells=f["cells"])
-                print(f"  {ctx:>12} {sc:>8} {ctx // sc:>7} "
-                      f"{f['chunk_overhead']:>17.1%} {f['cells'] / base:>17.2f}x")
-        print("  Section 9 quotes +13.7% (4K) / +11.6% (16K) for the chunking overhead: the")
-        print("  4K figure is the N=4096 / S=1024 row above (this module computes 13.6%),")
-        print("  and the 16K one lands between the S=1024 and S=2048 chunkings, at an S the")
-        print("  record does not name.")
-        print("  Reading: proving every position of an N-token prompt+output rectangle,")
-        print("  instead of 512 decoded positions against a declared prefix, multiplies the")
-        print("  committed cells by the figures above -- so every tok/s in (3) divides and")
-        print("  every $/Mtok multiplies by them, at the same N.")
-        print(f"\n  {'model':<18} {'C=4K x':>8} {'cells/token':>12} {'H100 tok/s':>11} "
-              f"{'$/Mtok':>10}   (E11 at N=4096, S=1024, H100 loop_secs)")
-        fac = e11[(4096, 1024)]["factor"]
-        for r in priced:
-            e = r["contexts"][4096]
-            c = e["cells_per_token"] * fac
-            h = h100["per_ctx"][4096]["boundaries"]["loop_secs"]["cells_s"] / c
-            d = usd_per_mtok(h, usd["H100"])
-            print(f"  {r['name']:<18} {fac:>7.2f}x {g(c):>12} {h:>11.4f} "
-                  + (f"{d:>10,.0f}" if d else f"{'n/a':>10}"))
-        print("  The multiple is transported from the 8B fit, not recomputed per shape:")
-        print("  B9's prefill runs exist only at the 8B shape, one layer, the naive")
-        print("  (unmasked) grid.  Per-shape it would move with nh/L and with the causal")
-        print("  split, both unmeasured.")
+    print("\n(6) the full prompt+output statement (E11, decided 2026-08-31)")
+    print("  Re-priced by stream E7 on DD's band model.  The old numbers in this section")
+    print("  came from B9's `326 M + 1.37 M*S + 72.1*S^2` fit, whose S^2 coefficient was")
+    print("  +12.6% against the true 64 because a two-point marginal in S alone absorbs the")
+    print("  band family's linear term into its quadratic one.  A model in S alone also")
+    print("  cannot express the term that turns out to matter most: a chunked prompt")
+    print("  re-commits the growing K/V prefix, which is a function of C, not S.")
+    e11 = {}
+    mult = consts["e11_multiple"]["value"]
+    net = consts["e11_chunking_net"]["value"]
+    fixed = consts["e11_chunking_fixed"]["value"]
+    print("\n  the cells multiple at C=4096, against seq5's measured decode sequence:")
+    print(f"    prompt alone         x{mult[0]:.2f}")
+    print(f"    prompt + output      x{mult[1]:.2f}       (`design.e11_cells_multiple_c4096`)")
+    print("    at C=16384 the same model gives x17.55 / x18.55")
+    print("  The superseded ~x4.5-5.5 priced each prompt chunk as its own S=C=1024 SQUARE.")
+    print("  That is not a proof of the sequence: the fourth chunk must attend over all")
+    print("  4,096 keys, not its own 1,024.  Under the band model the square reading is")
+    print("  x4.56 / x5.56, so the correction is +14% on the prompt multiple -- and a head")
+    print("  chunk per 512 prompt positions is counted in NEITHER (at 4K it would add")
+    print("  ~8 x the measured head chunk).")
+    print("\n  the chunking cost, which is now three terms and not one:")
+    print(f"    {'the shared-table floor paid n times':<44} {fixed[1]:>+6.1f}% (4K) "
+          f"{fixed[0]:>+6.1f}% (16K)")
+    print(f"    {'the prefix K/V re-committed by every later chunk':<44} {1.9:>+6.1f}%      "
+          f"{5.2:>+6.1f}%")
+    print(f"    {'the inert half of the rectangle a one-shot pays':<44} {-11.2:>+6.1f}%      "
+          f"{-30.0:>+6.1f}%")
+    print(f"    {'NET':<44} {net[0]:>+6.1f}%      {net[1]:>+6.1f}%")
+    print("  At C=16384 chunking is CHEAPER outright -- the causal saving beats the floor")
+    print("  and the re-commitment together.  The old section reported only the first row")
+    print("  (+13.7% / +11.6%) and called it the overhead.")
+    e11 = dict(multiple_prompt=mult[0], multiple_prompt_output=mult[1],
+               chunking_net_4k=net[0], chunking_net_16k=net[1],
+               chunking_fixed=fixed)
+    fac = mult[1]
+    print(f"\n  the table at x{fac:.2f} (prompt+output, C=4096, S=1024 chunking):")
+    print(f"  {'model':<18} {'cells/token':>12} {'H100 tok/s':>11} {'$/Mtok':>10}"
+          f"   (H100 loop_secs, ${usd['H100']}/GPU-h)")
+    for r in priced:
+        e = r["contexts"][4096]
+        c = e["cells_per_token"] * fac
+        h = h100["per_ctx"][4096]["boundaries"]["loop_secs"]["cells_s"] / c
+        d = usd_per_mtok(h, usd["H100"])
+        r["e11"] = dict(cells_per_token=c, tok_s_h100=h, usd_per_mtok=d)
+        print(f"  {r['name']:<18} {g(c):>12} {h:>11.4f} "
+              + (f"{d:>10,.0f}" if d else f"{'n/a':>10}"))
+    print("  The multiple is transported from the 8B shape, not recomputed per row: E7's")
+    print("  chunk model carries a `design.prefill_chunk_remainder` fitted on B9's two")
+    print("  SYNTHETIC S=C points, which is the only fitted part left and the only place")
+    print("  its uncertainty lives.  Per shape the multiple would move with nh/L and with")
+    print("  hd (the re-commitment term is the band family's C term, and that one this")
+    print("  module can now evaluate at any shape -- but the remainder cannot).")
+    floor = consts["chunk_floor"]["value"]
+    if floor:
+        print(f"\n  the shared-table floor of our own composed layer chunk: "
+              f"{g(floor)}fresh cells/layer,")
+        print("  solved at C=4096 and held out at C=16384 to -0.63% "
+              "(`attention_grid.chunk_model_fixed_composed`).")
+        print("  It is +14.1% over B9's synthetic-probe floor, which under-predicts our own")
+        print("  chunk by 7.15% -- so a one-position eval item costs "
+              f"{g(floor * 32)}cells at 8B before")
+        print("  it proves anything, which is what makes short multiple-choice proofs dear.")
 
     # --- the memory wall -----------------------------------------------------
     ref = h200["per_ctx"][4096]
@@ -939,11 +1075,46 @@ def main(argv=None):
     print("  (~1/S) and multiplies the proof bytes -- the frontier rows above assume the")
     print("  measured S=512 and are optimistic wherever this column says NO.")
 
+    # --- what moved against a previous run -----------------------------------
+    if args.compare:
+        prev = json.loads(pathlib.Path(args.compare).read_text())
+        po = {r["name"]: r for r in prev["rows"]}
+        print(f"\n(8) what moved against {rel(args.compare)}")
+        print(f"  {'model':<18} {'C=4K cells/token':>24} {'C=16K':>16} "
+              f"{'H200 commit tok/s':>22} {'cards@%g' % args.target:>12}")
+        moved = []
+        for r in priced:
+            o = po.get(r["name"])
+            if not o:
+                continue
+            a4, b4 = o["contexts"]["4096"], r["contexts"][4096]
+            a16, b16 = o["contexts"]["16384"], r["contexts"][16384]
+            ca = a4["cards"]["H200"]["commit"]
+            cb = b4["cards"]["H200"]["commit"]
+            moved.append((r["name"], ca["cards_for_target"], cb["cards_for_target"]))
+            print(f"  {r['name']:<18} {a4['cells_per_token']/1e6:8.1f} ->"
+                  f"{b4['cells_per_token']/1e6:8.1f} {b4['cells_per_token']/a4['cells_per_token']-1:>+6.1%}"
+                  f" {b16['cells_per_token']/a16['cells_per_token']-1:>15.1%}"
+                  f" {ca['tok_s']:>10.3f} ->{cb['tok_s']:>8.3f}"
+                  f" {ca['cards_for_target']:>7d} ->{cb['cards_for_target']:<4d}")
+        def order(rows, key):
+            return [n for n, _ in sorted(rows, key=key, reverse=True)]
+        oa = order([(r["name"], po[r["name"]]) for r in priced if r["name"] in po],
+                   lambda kv: kv[1]["contexts"]["4096"]["cards"]["H200"]["commit"]["tok_s"])
+        ob = order([(r["name"], r) for r in priced],
+                   lambda kv: kv[1]["contexts"][4096]["cards"]["H200"]["commit"]["tok_s"])
+        changed = [f"{n} {a}->{b}" for n, a, b in moved if a != b]
+        print(f"  ordering by H200 commit tok/s at C=4K: "
+              f"{'UNCHANGED' if oa == ob else 'CHANGED'}")
+        print("  cards-at-target changes: " + (", ".join(changed) if changed else "none"))
+
     OUT.mkdir(exist_ok=True)
     doc = dict(
         constants=consts, cards={k: v for k, v in cards.items()},
         calibration=cal, alpha=alpha, seq=args.seq, seq_batch=args.seq_batch,
         prefill_fit=fit,
+        band_coeffs=dict(fresh=cal["coeffs_fresh"], base=cal["coeffs_base"],
+                         frozen_fresh=cal["frozen_fresh"], frozen_base=cal["frozen_base"]),
         shapes=[dict(name=s["name"], tag=s["tag"], source=s["source"],
                      groups=s["groups"], d=s["d"], nh=s["nh"], nkv=s["nkv"],
                      hd=s["hd"], vocab=s["vocab"],
@@ -961,7 +1132,7 @@ def main(argv=None):
                                 ratio_with_pre=v["at_ek"]["ratio_with_pre"]))
              for k, v in moe_rows.items()},
         batch_tok_s=batch_rows,
-        e11={f"{c}/{s}": v for (c, s), v in (e11 or {}).items()},
+        e11=e11,
         chunk_fit=fits, grid_constant_delta=grid_delta)
     pathlib.Path(args.json).write_text(json.dumps(doc, indent=1, default=str))
     print(f"\nwrote {rel(args.json)}")
