@@ -47,19 +47,29 @@ fn read<T: Copy + Send>(path: &str, width: usize, site: Site,
 pub struct Half {
     pub kk16: Vec<i16>,
     pub vv8: Vec<u8>,
-    pub num32: Vec<i32>,
+    /// Torch's own numerators, and `None` when the dump declares `slim_num`.
+    ///
+    /// Stream DD's second disk lever (`b12/e11/dd_cost.py`): `num.i32` is 84.2%
+    /// of the per-prefix-key term and feeds exactly one thing, the
+    /// `torch_mismatch` *report* below -- no constraint reads it.  A dump whose
+    /// manifest says `slim_num` did not write the file; the proof it yields is
+    /// the same proof, with that one cross-check unavailable.  A dump that does
+    /// not declare it and is missing the file is still an error.
+    pub num32: Option<Vec<i32>>,
 }
 
 impl Half {
     /// The three files of one half, read and widened once.  `tag` is the
     /// suffix the corner's copies carry (`kkc.i16` against `kk.i16`).
-    fn read(dir: &str, k: &str, v: &str, n: &str) -> Result<Self, String> {
+    fn read(dir: &str, k: &str, v: &str, n: &str, slim_num: bool) -> Result<Self, String> {
         Ok(Self {
             kk16: read(&format!("{dir}/{k}"), 2, Site::DecodeI16,
                        |b| i16::from_le_bytes([b[0], b[1]]))?,
             vv8: witread::read_file(&format!("{dir}/{v}"))?,
-            num32: read(&format!("{dir}/{n}"), 4, Site::DecodeI32,
-                        |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))?,
+            num32: (!slim_num)
+                .then(|| read(&format!("{dir}/{n}"), 4, Site::DecodeI32,
+                              |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])))
+                .transpose()?,
         })
     }
 }
@@ -101,6 +111,7 @@ impl LayerRaw {
     pub fn read(dir: &str, man: &serde_json::Value, prefix: bool, corner: bool)
                 -> Result<Self, String> {
         let has_corner = man["corner"].as_bool().unwrap_or(false);
+        let slim_num = man["slim_num"].as_bool().unwrap_or(false);
         Ok(Self {
             qq16: read(&format!("{dir}/qq.i16"), 2, Site::DecodeI16,
                        |b| i16::from_le_bytes([b[0], b[1]]))?,
@@ -108,8 +119,9 @@ impl LayerRaw {
                 .then(|| read(&format!("{dir}/mm.i32"), 4, Site::DecodeI32,
                               |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])))
                 .transpose()?,
-            pre: prefix.then(|| Half::read(dir, "kk.i16", "vv.i8", "num.i32")).transpose()?,
-            cor: corner.then(|| Half::read(dir, "kkc.i16", "vvc.i8", "numc.i32"))
+            pre: prefix.then(|| Half::read(dir, "kk.i16", "vv.i8", "num.i32", slim_num))
+                .transpose()?,
+            cor: corner.then(|| Half::read(dir, "kkc.i16", "vvc.i8", "numc.i32", slim_num))
                 .transpose()?,
         })
     }
@@ -507,7 +519,10 @@ impl Attn {
         // torch's own numerators, for the bit-for-bit comparison, only where the
         // shape fits inside the dump (no tiling) and the band is real heads
         let tiled = sh.s > s0 || sh.c > c0;
-        let torch_num = (!tiled).then(|| {
+        // ... and only where the dump carries them at all: a `--slim-num` dump
+        // has no `num.i32`, so there is nothing to compare against and
+        // `torch_mismatch` is `None` rather than 0.
+        let torch_num = num32.as_ref().filter(|_| !tiled).map(|num32| {
             let _s = witread::scope(Site::DecodeGather);
             (0..sh.insts * sh.s * sh.c)
                 .into_par_iter()
