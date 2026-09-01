@@ -124,6 +124,12 @@ pub struct Layer {
     pub bands: Vec<Attn>,
     pub band_sizes: Vec<usize>,
     pub head_offsets: Vec<usize>,
+    /// Stream AA (E11): how many bands one head band group's declared prefix is
+    /// tiled into.  1 everywhere before this stream and without `--kv-bind`;
+    /// `C / S` with it, which is what makes a consumer's sub-band the same
+    /// `Shape` as the producer's corner.  `params_of` reads it back to recover
+    /// the chunk's real context and its head band list.
+    pub nsub: usize,
     pub mats: Vec<Mat>,
     pub ao: AttnOut,
     pub source: String,
@@ -394,15 +400,28 @@ impl Layer {
         let mut head_offsets = vec![];
         let mut sizes = vec![];
         let mut off = 0usize;
+        // Stream AA (E11), layout design A: with `--kv-bind` the declared prefix
+        // is loaded as `c / s` sub-bands of exactly `S` keys each rather than as
+        // one rectangle, because that is what makes a consumer's sub-band `b`
+        // the same `Shape` -- and so the same `LayoutKey`, and so a column of
+        // the same height -- as the producer's corner.  `Attn::load_from` reads
+        // the same bytes with a key offset; nothing about the dump changes.
+        assert!(!cfg.tile || cfg.corner, "`--kv-bind` needs a `--corner` dump");
+        assert!(!cfg.tile || c % s == 0,
+                "`--kv-bind` tiles the prefix in blocks of S: C={c} is not a multiple of S={s}");
+        let nsub = if cfg.tile { c / s } else { 1 };
+        let sub_c = if cfg.tile { s } else { c };
         {
             let _s = witread::scope(Site::Bands);
             for insts in band_sizes {
-                let sh = Shape { s, c, hd, insts: *insts };
-                let src = Src { head: off, ..cfg.clone() };
-                bands.push(Attn::load_from(&raw, &man, off, sh, variant, src.nmax,
-                                           src.log_table, master, false)?);
-                head_offsets.push(off);
-                sizes.push(*insts);
+                for k in 0..nsub {
+                    let sh = Shape { s, c: sub_c, hd, insts: *insts };
+                    let src = Src { head: off, ..cfg.clone() };
+                    bands.push(Attn::load_from(&raw, &man, off, sh, variant, src.nmax,
+                                               src.log_table, master, false, k * sub_c)?);
+                    head_offsets.push(off);
+                    sizes.push(*insts);
+                }
                 off += insts;
             }
         }
@@ -414,7 +433,7 @@ impl Layer {
                     let sh = Shape { s, c: s, hd, insts: *insts };
                     let src = Src { head: off, ..cfg.clone() };
                     bands.push(Attn::load_from(&raw, &man, off, sh, variant, src.nmax,
-                                               src.log_table, master, true)?);
+                                               src.log_table, master, true, 0)?);
                     head_offsets.push(off);
                     sizes.push(*insts);
                     off += insts;
@@ -423,13 +442,22 @@ impl Layer {
             // the per-token region belongs to the pair, and the denominator it
             // commits is the total: `Z >= nmax` is true of the sum and of neither
             // half, because the key whose shift is zero may be in either
-            let n_pre = band_sizes.len();
+            //
+            // Stream AA: with the prefix tiled, "the pair" is a head band
+            // group -- `nsub` sub-bands and the corner -- and the total is over
+            // all of them.  The region lives on the group's *first* sub-band,
+            // which is `plan.rows_band`'s choice on the other side of the wall.
+            let n_pre = band_sizes.len() * nsub;
             {
                 let _s = witread::scope(Site::ZzTotal);
-                for b in 0..n_pre {
-                    let tot: Vec<i64> = bands[b].zz.iter().zip(&bands[b + n_pre].zz)
-                        .map(|(x, y)| x + y).collect();
-                    bands[b].zz_total = Some(tot);
+                for g in 0..band_sizes.len() {
+                    let mut tot = vec![0i64; bands[g * nsub].zz.len()];
+                    for b in (g * nsub..(g + 1) * nsub).chain(std::iter::once(n_pre + g)) {
+                        for (a, x) in tot.iter_mut().zip(&bands[b].zz) {
+                            *a += x;
+                        }
+                    }
+                    bands[g * nsub].zz_total = Some(tot);
                 }
             }
             // Rule 21, on the join: the prover recomputes both halves' numerators
@@ -441,10 +469,10 @@ impl Layer {
             let _s = witread::scope(Site::CheckRule21);
             let zz32 = read_i32(&format!("{dir}/zz.i32"))?;
             let mut bad = 0usize;
-            for (b, insts) in band_sizes.iter().enumerate() {
-                let tot = bands[b].zz_total.as_ref().unwrap();
+            for (g, insts) in band_sizes.iter().enumerate() {
+                let tot = bands[g * nsub].zz_total.as_ref().unwrap();
                 for i in 0..*insts {
-                    let h = head_offsets[b] + i;
+                    let h = head_offsets[g * nsub] + i;
                     for t in 0..s {
                         if tot[i * s + t] != zz32[h * s + t] {
                             bad += 1;
@@ -629,6 +657,7 @@ impl Layer {
             bands,
             band_sizes: band_sizes.to_vec(),
             head_offsets,
+            nsub,
             mats,
             ao: AttnOut { nh, s, hd, acc, den, jo, jv },
             source: format!("B6.5 layer witness [{dir}]"),
@@ -679,6 +708,17 @@ impl Layer {
     pub fn synthetic(s: usize, c: usize, hd: usize, band_sizes: &[usize], variant: Variant,
                      cfg: &Src, n_in: usize, n_out: usize, seed: u64) -> Self {
         let mut rng = SmallRng::seed_from_u64(seed);
+        // Stream AA (E11): a tiled synthetic layer is the *same* pair, with its
+        // prefix cut into `C / S` windows by `Attn::key_slice`, so the windows'
+        // denominators really do sum to the pair's total.  What a synthetic
+        // layer still cannot do is two *adjacent chunks* over one shared key
+        // stream, which is what a chain probe needs; that generator is the
+        // follow-on this stream's record names, and until it exists a chain is
+        // proved on a real dump.
+        assert!(!cfg.tile || cfg.corner, "`--kv-bind` needs `--corner`");
+        assert!(!cfg.tile || c % s == 0,
+                "`--kv-bind` tiles the prefix in blocks of S: C={c} is not a multiple of S={s}");
+        let s_nsub = if cfg.tile { c / s } else { 1 };
         let nh: usize = band_sizes.iter().sum();
         // pass 1: learn the data-derived exponents; pass 2: rebuild every band
         // against one shared master exponent and one shared table size
@@ -702,7 +742,11 @@ impl Layer {
                 probe.push(Attn::synthetic(sh, variant, cfg.q_bits, cfg.k_bits, cfg.nmax,
                                            cfg.log_table, seed ^ (off as u64 + 1)));
             }
-            head_offsets.push(off);
+            // stream AA: one entry per *band*, and a tiled prefix is `s_nsub`
+            // bands over the same heads
+            for _ in 0..s_nsub {
+                head_offsets.push(off);
+            }
             off += insts;
         }
         if cfg.corner {
@@ -728,14 +772,32 @@ impl Layer {
                 let (p, cc) = Attn::synthetic_pair(sh, variant, cfg.q_bits, cfg.k_bits,
                                                    cfg.nmax, log_table,
                                                    seed ^ (off as u64 + 1), Some(frac));
-                bands.push(p);
+                // Stream AA (E11): the tiled prefix, as `nsub` windows of the
+                // pair's own prefix rather than as `nsub` unrelated bands -- so
+                // the sub-bands' `zz` really do sum to the pair's total and the
+                // synthetic layer is a layer and not a shape rehearsal.
+                if cfg.tile {
+                    let total = p.zz_total.clone();
+                    for k in 0..s_nsub {
+                        bands.push(p.key_slice(k * s, s));
+                    }
+                    // the group's per-token region lives on its first sub-band,
+                    // and the denominator it commits is the pair's total -- the
+                    // slices' own `zz` are the partial sums that make it up
+                    let first = bands.len() - s_nsub;
+                    bands[first].zz_total = total;
+                } else {
+                    bands.push(p);
+                }
                 corner_bands.push(cc);
             } else {
                 bands.push(Attn::synthetic_shared(sh, variant, cfg.q_bits, cfg.k_bits, cfg.nmax,
                                                   log_table, seed ^ (off as u64 + 1),
                                                   frac, false));
             }
-            sizes.push(*insts);
+            for _ in 0..s_nsub {
+                sizes.push(*insts);
+            }
             off += insts;
         }
         if cfg.corner {
@@ -844,7 +906,7 @@ impl Layer {
             }
             jo[t] = (m / 127.0).log2().ceil().max(-30.0) as i32;
         }
-        Self { bands, band_sizes: band_sizes_all, head_offsets, mats,
+        Self { bands, band_sizes: band_sizes_all, head_offsets, nsub: s_nsub, mats,
                ao: AttnOut { nh, s, hd, acc, den, jo, jv },
                source: format!("synthetic layer (seed={seed})"), glue: None,
                head_keys: None, head_tok: None, attn_out_bits: 8 }

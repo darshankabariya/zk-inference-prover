@@ -39,6 +39,9 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 use stwo::core::fields::m31::M31;
+// stream AA: `Column::at`/`set`, for the one-cell tamper on a K/V side's
+// already-built columns
+use stwo::prover::backend::Column;
 
 use crate::common::{Eval, eval_of};
 use crate::compose::{Fixed, GluePlan};
@@ -186,12 +189,43 @@ pub struct ChainVerdict {
     pub roots_equal: bool,
     pub out_root: Option<String>,
     pub in_root: Option<String>,
+    /// Stream AA: both statements carry the K/V boundary.  `false` on a pair
+    /// proved without `--kv-bind`, where the chain is the layer boundary's
+    /// alone and says nothing about which prefix either chunk attended to.
+    pub kv_present: bool,
+    /// the two statements agree on everything that fixes the K/V layout, the
+    /// adjacency `c_a + S == c_b` included
+    pub kv_shape_ok: bool,
+    /// every head band group's out root equals its successor's in root
+    pub kv_roots_equal: bool,
+    /// one entry per head band group, so a failure says which group moved
+    pub kv: Vec<KvLink>,
     pub error: Option<String>,
 }
 
+/// One head band group's K/V link, for the record and for a failure to be
+/// attributable.
+#[derive(Debug, Clone, Serialize)]
+pub struct KvLink {
+    pub group: usize,
+    pub out_tree: usize,
+    pub in_tree: usize,
+    pub out_root: String,
+    pub in_root: String,
+    pub equal: bool,
+}
+
 impl ChainVerdict {
+    /// Stream AA: the K/V conjunct is added rather than substituted.  A pair
+    /// proved with `--kv-bind` chains only if *both* boundaries hold; a pair
+    /// proved without it chains exactly as stream H's did, which is what keeps
+    /// stream I's recorded 62/62 meaningful.
     pub fn chains(&self) -> bool {
-        self.present && self.shape_ok && self.roots_equal
+        self.present
+            && self.shape_ok
+            && self.roots_equal
+            && self.kv_shape_ok
+            && (!self.kv_present || self.kv_roots_equal)
     }
     fn rejected(msg: &str) -> Self {
         Self {
@@ -200,9 +234,54 @@ impl ChainVerdict {
             roots_equal: false,
             out_root: None,
             in_root: None,
+            kv_present: false,
+            kv_shape_ok: false,
+            kv_roots_equal: false,
+            kv: vec![],
             error: Some(msg.to_string()),
         }
     }
+}
+
+/// Where a statement's K/V sides sit, from its parameters alone.
+///
+/// Arithmetic on `Fixed.params`, deliberately: the pair check never builds a
+/// plan, never opens a commitment and never touches a witness, so it cannot be
+/// made to panic by a malformed statement the way `Plan::new` can.  The layout
+/// it derives is the one `Plan::new` builds -- stream H's two glue sides first,
+/// then, per head band group, the out side and (unless the chunk is block 0,
+/// which has no declared prefix) the in side.
+#[derive(Clone, Copy, Debug)]
+pub struct KvLayout {
+    pub first: usize,
+    pub groups: usize,
+    pub with_in: bool,
+}
+
+impl KvLayout {
+    pub fn out_tree(&self, g: usize) -> usize {
+        self.first + if self.with_in { 2 * g } else { g }
+    }
+    pub fn in_tree(&self, g: usize) -> Option<usize> {
+        self.with_in.then(|| self.first + 2 * g + 1)
+    }
+    pub fn n_sides(&self) -> usize {
+        self.groups * if self.with_in { 2 } else { 1 }
+    }
+}
+
+/// How many glue boundary sides a statement's parameters imply (stream H's two,
+/// or none).
+fn glue_sides(p: &crate::compose::Params) -> usize {
+    if p.bounds && p.glue.is_some() { 2 } else { 0 }
+}
+
+pub fn kv_layout(p: &crate::compose::Params) -> Option<KvLayout> {
+    p.kv_bind.then(|| KvLayout {
+        first: FIRST_TREE + glue_sides(p),
+        groups: p.bands.len(),
+        with_in: p.c > 0,
+    })
 }
 
 /// The number of committed trees a statement claims, and whether it has a
@@ -239,13 +318,21 @@ pub fn chain_check(
         return ChainVerdict::rejected("unparseable second proof");
     };
     let (na, nb) = (tree_count(&fa), tree_count(&fb));
-    let want = FIRST_TREE + 2;
-    if na != want || nb != want {
+    let (ka, kb) = (kv_layout(&fa.params), kv_layout(&fb.params));
+    // Stream AA: the expected tree count is now a function of the statement --
+    // three, plus stream H's two, plus one per K/V side.  With `--kv-bind`
+    // absent this is `FIRST_TREE + 2` exactly as it was, so a pair of pre-AA
+    // proofs takes the pre-AA path.
+    let want = |n: usize, k: &Option<KvLayout>| {
+        FIRST_TREE + 2 + k.as_ref().map(|k| k.n_sides()).unwrap_or(0) == n
+    };
+    if !want(na, &ka) || !want(nb, &kb) {
         return ChainVerdict::rejected(
-            "a statement carries no boundary commitment (the flag was off)",
+            "a statement's tree count is not the one its parameters imply \
+             (the boundary flag was off, or the statement is malformed)",
         );
     }
-    if pa.commitments.len() <= FIRST_TREE + 1 || pb.commitments.len() <= FIRST_TREE + 1 {
+    if pa.commitments.len() < na || pb.commitments.len() < nb {
         return ChainVerdict::rejected("a proof carries fewer roots than its statement claims");
     }
     // everything the boundary layout depends on: the token count, the two
@@ -257,12 +344,63 @@ pub fn chain_check(
         && fa.sizes[FIRST_TREE + 1] == fb.sizes[FIRST_TREE + 1];
     let out_root = format!("{:?}", pa.commitments[FIRST_TREE + 1]);
     let in_root = format!("{:?}", pb.commitments[FIRST_TREE]);
+    // ---- stream AA: the K/V link ------------------------------------------
+    //
+    // The integer comparisons come first and they are not a formality.  Root
+    // equality compares byte strings, so two roots are only *comparable* once
+    // the two chunks agree on everything that fixes what a K/V column holds and
+    // how tall it is: the head geometry, the band decomposition, the two grid
+    // targets that choose the tilings, the quantisation widths that fix the
+    // committed offsets, and -- the one that says the pair is a pair --
+    // `c_a + S == c_b`, the consumer's context being the producer's plus one
+    // block.  Without the adjacency comparison two honest but non-consecutive
+    // chunks would be compared root to root and would simply differ, which is
+    // the right answer for the wrong reason; with it the check says *why*.
+    let (kv_present, kv_shape_ok, kv) = match (&ka, &kb) {
+        (None, None) => (false, true, vec![]),
+        (Some(ka), Some(kb)) => {
+            let p = (&fa.params, &fb.params);
+            let ok = p.0.hd == p.1.hd
+                && p.0.nh == p.1.nh
+                && p.0.bands == p.1.bands
+                && p.0.corner
+                && p.1.corner
+                && p.0.variant == p.1.variant
+                && p.0.q_bits == p.1.q_bits
+                && p.0.k_bits == p.1.k_bits
+                && p.0.chan_target == p.1.chan_target
+                && p.0.grid_target == p.1.grid_target
+                && ka.groups == kb.groups
+                && kb.with_in
+                && p.0.c + p.0.s == p.1.c;
+            let mut links = vec![];
+            let mut sizes_ok = true;
+            if ok {
+                for g in 0..ka.groups {
+                    let (to, ti) = (ka.out_tree(g), kb.in_tree(g).expect("with_in"));
+                    sizes_ok &= fa.sizes[to] == fb.sizes[ti];
+                    let (ro, ri) = (format!("{:?}", pa.commitments[to]),
+                                    format!("{:?}", pb.commitments[ti]));
+                    links.push(KvLink { group: g, out_tree: to, in_tree: ti,
+                                        equal: ro == ri, out_root: ro, in_root: ri });
+                }
+            }
+            (true, ok && sizes_ok, links)
+        }
+        // one chunk bound its K/V and the other did not: there is nothing to
+        // compare, and "nothing to compare" must not read as "it chained"
+        _ => (false, false, vec![]),
+    };
     ChainVerdict {
         present: true,
         shape_ok,
         roots_equal: out_root == in_root,
         out_root: Some(out_root),
         in_root: Some(in_root),
+        kv_present,
+        kv_shape_ok,
+        kv_roots_equal: !kv.is_empty() && kv.iter().all(|l| l.equal),
+        kv,
         error: None,
     }
 }
@@ -526,4 +664,189 @@ pub fn chain_cmd(args: &[String]) {
             "links": links,
         }),
     );
+}
+
+// ------------------------------------------------- stream AA: the K/V sides ---
+//
+// The layer boundary above binds the residual stream along the *layer* axis.
+// Stream AA binds the attention cache along the *token* axis, with the same
+// instrument and for the same reason: today a chunk's K and V are ordinary
+// committed base columns fed from the witness, tied to nothing outside the
+// chunk, so two chunks of one sequence may have attended to two different
+// prefixes and no verifier can tell.
+//
+// The three differences from the glue sides are all simplifications:
+//
+//  * K and V are single integers, not bf16 `(sm, ef)` pairs, so there is no
+//    `PACK` and no degree-1 packing question -- one cell per value.
+//  * a side is not one region's values but a *head band group's*, spread over
+//    the group's band components; the tree's column order is therefore the
+//    component-registration order, `[band's K][band's V]` band by band.
+//  * a chunk commits an **out** side over its whole key set and an **in** side
+//    over its declared prefix, and the chain is `out(L, b) == in(L, b+1)` -- so
+//    every prefix key is committed twice.
+//
+// That duplicate is not an economy that was missed.  K and V feed LogUp range
+// checks (`rel_k` in `ChanEval`, `rel_v` in `KeyEval`) whose challenge is drawn
+// after tree 1 and before tree 2, while a boundary tree is committed after tree
+// 2.  A value first committed *after* its own lookup challenge is not bound by
+// that lookup, so the boundary copy cannot replace the base copy -- moving
+// instead of copying would take the added cells from 264.2 M to 130.0 M at
+// 8B/C=16K and would unbind K and V from their range checks.  It is the price
+// of `FIRST_TREE = 3`, and the rule "add no commitment tree below index 3" is
+// what makes it unavoidable.
+//
+// Why one pair per head band group rather than one global pair: the bands run
+// all prefix bands first and then all corner bands (CC's frozen order), so a
+// producer's global out tree would read
+// `[g0 sub..][g1 sub..][g2 sub..][g0 corner][g1 corner][g2 corner]` while the
+// consumer's global in tree reads `[g0 sub..][g1 sub..][g2 sub..]` with each
+// group's last sub-band inline.  Per-group pairs put each group's corner
+// immediately after its own sub-bands on both sides, and the two column lists
+// coincide without moving CC's band order.
+
+/// One K/V boundary tree as a band component sees it: which tree, and how many
+/// of that component's columns go into it.
+#[derive(Clone, Copy, Debug)]
+pub struct KvBound {
+    pub tree: usize,
+    /// columns this component writes -- `lay.pk` in `ChanEval`, `lay.pv` in
+    /// `KeyEval`
+    pub n: usize,
+}
+
+/// One band's contribution to the K/V sides, as the plan knows it before any
+/// column exists.
+#[derive(Clone, Copy, Debug)]
+pub struct KvBand {
+    /// which head band group the band belongs to
+    pub group: usize,
+    /// the group's own block (`c = S` over the chunk's own decoded tokens)
+    /// rather than one of its declared-prefix sub-bands
+    pub corner: bool,
+    pub pk: usize,
+    pub pv: usize,
+    pub chan_rows: usize,
+    pub key_rows: usize,
+}
+
+/// One side of a chunk's K/V boundary.
+#[derive(Clone, Debug)]
+pub struct KvSide {
+    pub tree: usize,
+    /// which head band group's keys this side carries
+    pub group: usize,
+    /// the **out** side carries the group's whole key set, the chunk's own
+    /// block included; the **in** side carries its declared prefix alone
+    pub out: bool,
+    /// the bands that write it, ascending -- which is component-registration
+    /// order, and therefore the tree's column order
+    pub bands: Vec<usize>,
+    pub columns: usize,
+    pub cells: usize,
+}
+
+/// The K/V sides, read off the per-band summary the plan already has.
+///
+/// `first_tree` is where they start: after the three that were always there and
+/// after stream H's glue sides, so that turning either feature on does not move
+/// the other's tree indices.
+///
+/// The **out** side comes first in each group.  Block 0 of a sequence has no
+/// declared prefix and so no in side at all, and it must not commit an empty
+/// tree -- `verify_ex` requires every committed tree to be read by at least one
+/// component -- so ordering out first means block 0 drops a *trailing* side and
+/// every other side keeps its index.
+pub fn kv_sides(first_tree: usize, bands: &[KvBand]) -> Vec<KvSide> {
+    let ngroups = bands.iter().map(|b| b.group + 1).max().unwrap_or(0);
+    let mut sides: Vec<KvSide> = vec![];
+    for g in 0..ngroups {
+        for out in [true, false] {
+            let idx: Vec<usize> = bands
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.group == g && (out || !b.corner))
+                .map(|(i, _)| i)
+                .collect();
+            if idx.is_empty() {
+                continue;
+            }
+            let columns = idx.iter().map(|i| bands[*i].pk + bands[*i].pv).sum();
+            let cells = idx
+                .iter()
+                .map(|i| bands[*i].pk * bands[*i].chan_rows + bands[*i].pv * bands[*i].key_rows)
+                .sum();
+            sides.push(KvSide {
+                tree: first_tree + sides.len(),
+                group: g,
+                out,
+                bands: idx,
+                columns,
+                cells,
+            });
+        }
+    }
+    sides
+}
+
+/// What band `b` writes into the K/V trees, in the order the AIR must read the
+/// masks: one `KvBound` per side the band participates in, in `plan.kv`'s order.
+///
+/// `n` is the component's own column count -- `lay.pk` for `ChanEval`, `lay.pv`
+/// for `KeyEval` -- and the AIR asserts it against the mask count it reads.
+pub fn kv_bounds_of(sides: &[KvSide], band: usize, n: usize) -> Vec<KvBound> {
+    sides
+        .iter()
+        .filter(|s| s.bands.contains(&band))
+        .map(|s| KvBound { tree: s.tree, n })
+        .collect()
+}
+
+/// One K/V side's committed columns.
+///
+/// `cols` is handed in already assembled by the caller, which **clones the very
+/// `Eval`s tree 1 committed** rather than re-deriving them from the witness.
+/// That is deliberate, and it is the whole of why byte-identity with the region
+/// holds: a second copy of `attn_trace`'s index map (`c = chunk * pk + p` for K,
+/// `ch = chunk * pv + p` for V) would agree with the first on every shape
+/// anyone tests and could disagree on the one that matters.  Here there is one
+/// map, and the boundary tree is a literal copy of columns tree 1 already
+/// holds.
+///
+/// `tamper` bumps one cell by 1, by flat index over `(column, row)` in the
+/// side's own committed order.  It exists for the probe that has to show the
+/// equality constraint bites: a boundary column that disagrees with the region
+/// must take its **own chunk's** proof down, which is the statement that the
+/// root is bound to the proof and not merely appended to it.
+pub fn kv_cols(mut cols: Vec<Eval>, tamper: Option<usize>) -> Vec<Eval> {
+    if let Some(t) = tamper {
+        assert!(!cols.is_empty(), "a K/V side with no columns cannot be tampered");
+        let rows = cols[0].domain.size();
+        let (j, m) = ((t / rows) % cols.len(), t % rows);
+        let v = cols[j].values.at(m);
+        cols[j].values.set(m, v + M31::from_u32_unchecked(1));
+    }
+    cols
+}
+
+/// What the K/V boundary cost this chunk, for the record.
+pub fn kv_report(sides: &[KvSide]) -> Value {
+    let per: Vec<Value> = sides
+        .iter()
+        .map(|s| {
+            json!({
+                "tree": s.tree,
+                "group": s.group,
+                "side": if s.out { "out" } else { "in" },
+                "bands": s.bands,
+                "columns": s.columns,
+                "cells": s.cells,
+            })
+        })
+        .collect();
+    json!({
+        "sides": per,
+        "columns": sides.iter().map(|s| s.columns).sum::<usize>(),
+        "cells": sides.iter().map(|s| s.cells).sum::<usize>(),
+    })
 }
