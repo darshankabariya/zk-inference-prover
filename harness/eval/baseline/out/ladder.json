@@ -1,0 +1,164 @@
+{
+  "schema": "e2h/overhead-ladder/2",
+  "proved_source": "experiments/paper/constants.json (stream W0 freeze)",
+  "unproved_source": "e2/out",
+  "what_neither_side_counts": [
+    "the witness extraction. The proved side's `loop_secs` reads a witness that a prior extraction step produced; that step is in no boundary and has no unproved counterpart.",
+    "model / weight load, and on the proved side the kernel-store emit and the prover binary's own start-up.",
+    "verification. Every number here is prover-side.",
+    "the inference pass itself, on the PROVED side: none of the four boundaries contains one. So an overhead multiple U/P is prover-seconds over inference-seconds -- precisely what fn. 170 computed (zkLLM's 803 s over 668 tok/s). A deployment that must infer AND prove costs (1 + U/P) x the unproved time; at x25-40 that unit is immaterial, and it is stated anyway."
+  ],
+  "e11_assumption": "REGIME 1, the same convention stream E7 used in notes/sufficiency.md: every proved position is charged one measured C=4096 decoded token, so the proved rate in positions/second equals the frozen tok/s row unchanged. This is CONSERVATIVE for E11 -- a prompt position inside a causal rectangle attends to ~N/2 keys, not a full C band -- and it is an assumption, not a measurement: no E11 proved row exists. The unproved side needs no assumption; it is measured directly as (prompt + output) / wall of the concatenated pass.",
+  "cost": {
+    "h200_usd_per_gpu_hour": 4.59,
+    "from_freeze": true,
+    "key": "cost.h200_reference_usd_per_hour",
+    "grade": "web",
+    "source": "RunPod published on-demand list price, Secure Cloud tier, https://www.runpod.io/gpu-models/h200 (page updated 2026-08-27; retrieved 2026-08-31)",
+    "blocking_key": null,
+    "note": "H200 NVL, 141 GB HBM3e -- matches our box (143,771 MiB). Community Cloud is $3.59/h; we price at Secure Cloud deliberately, because the higher tier is the conservative choice for a cost claim (it makes proving look more expensive, not less). Paired with cost.h100_reference_usd_per_hour from the same provider, tier and date, so the H100/H200 ratio is not a cross-provider artifact."
+  },
+  "contexts": {
+    "4096": {
+      "unproved_single_stream": null,
+      "unproved_e11": null,
+      "unproved_batched": null,
+      "rows": [
+        {
+          "boundary": "commit",
+          "proved_key": "tok_s.seq5.c4096.commit",
+          "proved_tok_s": 30.306,
+          "proved_scope": "33 chunks (head included)",
+          "proved_card": "H200",
+          "proved_grade": "measured",
+          "proved_source": "experiments/b10/out/seq5/n_summary_c4096.json (3)",
+          "blocked_by": null,
+          "proved_usd_per_mtok": 42.0708770540487,
+          "latency_overhead_x": null,
+          "e11_overhead_x": null,
+          "usd_overhead_x": null
+        },
+        {
+          "boundary": "stwo total",
+          "proved_key": "tok_s.seq5.c4096.stwo",
+          "proved_tok_s": 16.566,
+          "proved_scope": "33 chunks (head included)",
+          "proved_card": "H200",
+          "proved_grade": "measured",
+          "proved_source": "experiments/b10/out/seq5/n_summary_c4096.json (3)",
+          "blocked_by": null,
+          "proved_usd_per_mtok": 76.96486780152118,
+          "latency_overhead_x": null,
+          "e11_overhead_x": null,
+          "usd_overhead_x": null
+        },
+        {
+          "boundary": "whole wall",
+          "proved_key": "tok_s.seq5.c4096.whole",
+          "proved_tok_s": 4.991,
+          "proved_scope": "33 chunks (head included)",
+          "proved_card": "H200",
+          "proved_grade": "measured",
+          "proved_source": "experiments/b10/out/seq5/n_summary_c4096.json (3)",
+          "blocked_by": null,
+          "proved_usd_per_mtok": 255.45982768984172,
+          "latency_overhead_x": null,
+          "e11_overhead_x": null,
+          "usd_overhead_x": null
+        },
+        {
+          "boundary": "loop_secs",
+          "proved_key": "loop.h200.c4096.pipelined_defaults",
+          "proved_tok_s": 8.276753960556094,
+          "proved_scope": "32 layer chunks (HEADLESS)",
+          "proved_card": "H200",
+          "proved_grade": "measured",
+          "proved_source": "experiments/b12/wire/out/z/z_pipe1_base.json, z_pipe2_base.json, z_pipe3_base.json",
+          "blocked_by": null,
+          "proved_usd_per_mtok": 154.0458984375,
+          "latency_overhead_x": null,
+          "e11_overhead_x": null,
+          "usd_overhead_x": null
+        }
+      ]
+    },
+    "16384": {
+      "unproved_single_stream": null,
+      "unproved_e11": null,
+      "unproved_batched": null,
+      "rows": [
+        {
+          "boundary": "commit",
+          "proved_key": "tok_s.seq5.c16384.commit",
+          "proved_tok_s": 20.856,
+          "proved_scope": "33 chunks (head included)",
+          "proved_card": "H200",
+          "proved_grade": "measured",
+          "proved_source": "experiments/b10/out/seq5/n_summary_c16384.json (3)",
+          "blocked_by": null,
+          "proved_usd_per_mtok": 61.13348676639816,
+          "latency_overhead_x": null,
+          "e11_overhead_x": null,
+          "usd_overhead_x": null
+        },
+        {
+          "boundary": "stwo total",
+          "proved_key": "tok_s.seq5.c16384.stwo",
+          "proved_tok_s": 12.289,
+          "proved_scope": "33 chunks (head included)",
+          "proved_card": "H200",
+          "proved_grade": "measured",
+          "proved_source": "experiments/b10/out/seq5/n_summary_c16384.json (3)",
+          "blocked_by": null,
+          "proved_usd_per_mtok": 103.75132232077468,
+          "latency_overhead_x": null,
+          "e11_overhead_x": null,
+          "usd_overhead_x": null
+        },
+        {
+          "boundary": "whole wall",
+          "proved_key": "tok_s.seq5.c16384.whole",
+          "proved_tok_s": 4.192,
+          "proved_scope": "33 chunks (head included)",
+          "proved_card": "H200",
+          "proved_grade": "measured",
+          "proved_source": "experiments/b10/out/seq5/n_summary_c16384.json (3)",
+          "blocked_by": null,
+          "proved_usd_per_mtok": 304.1507633587786,
+          "latency_overhead_x": null,
+          "e11_overhead_x": null,
+          "usd_overhead_x": null
+        },
+        {
+          "boundary": "loop_secs",
+          "proved_key": "loop.h200.c16384",
+          "proved_tok_s": null,
+          "proved_scope": "32 layer chunks (HEADLESS)",
+          "proved_card": "H200",
+          "proved_grade": null,
+          "proved_source": null,
+          "blocked_by": "loop.h200.c16384",
+          "proved_usd_per_mtok": null,
+          "latency_overhead_x": null,
+          "e11_overhead_x": null,
+          "usd_overhead_x": null
+        }
+      ]
+    }
+  },
+  "caveats": [
+    "C=4096: no single-stream unproved run in e2/out.",
+    "C=4096: no batched unproved run; the $/token column is empty.",
+    "C=16384: no single-stream unproved run in e2/out.",
+    "C=16384: no batched unproved run; the $/token column is empty."
+  ],
+  "boundary_definitions": {
+    "commit": "the commitment path only: interpolate + LDE extend + Merkle over the committed trees. Our best boundary; already at the card's hashing rate.",
+    "stwo total": "commit + `prove_ex` (constraint eval, quotients, OODS, FRI). The stwo prover's own call.",
+    "whole wall": "trace generation + interaction generation + stwo total + serialization, summed per chunk. NOTE: `whole_wall` has NEVER counted the witness read or the layer build (stream O finding) -- under the pipelined loop that term is most of the wall.",
+    "loop_secs": "the one-process chunk loop's own wall (`compose-chunks`), which DOES include the witness read and layer build. Serial or pipelined (`B7_M5_PIPE=1`, one chunk ahead). A FOURTH boundary, not comparable to `whole wall`; named because W/X/Z/O numbers live there.",
+    "unknown": "another group's number whose boundary they did not state. Say so in the paper.",
+    "n/a": "not a proving measurement (hardware, survey, cost, quality).",
+    "unproved decode wall": "the unproved side's own boundary: forward passes with weights resident, warmup and prompt tokenization outside the timed region. See a run artifact's `boundary` block."
+  }
+}
