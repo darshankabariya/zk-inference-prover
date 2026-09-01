@@ -770,7 +770,11 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
         // Stream H: the boundary trees' own cells and columns, and the two roots
         // the chain check compares.  Null on a chunk proved with the flag off.
         "bounds": out.bounds,
+        // Stream AA: the same for the K/V boundary trees, and every boundary
+        // root in the prover's order (stream H's two, then the K/V sides).
+        "kv_bounds": out.kv_bounds,
         "bound_roots": verdict.as_ref().map(|v| json!({"in": v.bound_in, "out": v.bound_out})),
+        "boundary_roots": verdict.as_ref().map(|v| v.bound_roots.clone()),
         "trace_secs": out.trace_secs, "interaction_secs": out.interaction_secs,
         "prove_secs": out.stats.prove_secs,
         "verify_secs": verdict.as_ref().map(|v| v.verify_secs).unwrap_or(0.0),
