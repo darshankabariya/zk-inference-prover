@@ -40,14 +40,14 @@ not yet fast on it.
 
 ## The regression test
 
-The digest is the oracle for "this change broke nothing". Any change that is
+The digest is the reference for "this change broke nothing". Any change that is
 not supposed to alter the proof must reproduce, on both arms, the recorded
 `proof_sha256` starting `6c3fb61524dee2ec` for 8B L16 at S=512, C=16K
 (`experiments/b10/out/prove8b.json` and `ref8b.json`, reproduced on the H200
 on both arms, 2026-08-24). The opt-in statement flags (`--norm-tails`,
 `--swiglu`, `--deq-ties`, `--head-key`/`--head-argmax` from stream E;
 `--bounds` from stream H; `--tight-table` from stream J) must all be absent
-for the oracle to apply — each has held it with the flag off, on both arms:
+for the reference digest to apply — each has held it with the flag off, on both arms:
 
 ```sh
 env RAYON_NUM_THREADS=16 ./target/release/b65 compose \

@@ -176,7 +176,7 @@ pub struct Params {
     /// B11 stream U, lever 3: the same for the *dequant* family, composing with
     /// `gkr_bands` rather than replacing it -- the two families' instances join
     /// one `prove_batch` call and their heights one link. A flag and not an env
-    /// mode for the same reason: it changes the proof, and its oracle is its
+    /// mode for the same reason: it changes the proof, and its reference digest is its
     /// own. Skipped when false, so every statement written without it is byte
     /// identical to one from a crate that never had it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
