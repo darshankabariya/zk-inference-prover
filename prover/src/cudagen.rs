@@ -2361,7 +2361,7 @@ pub fn emit_cmd(args: &[String]) {
             go!(b.tables[i], format!("table{i}"));
         }
         // B11 stream K: the head's argmax region was never emitted -- 10,079
-        // instructions on the CPU per head chunk until now.
+        // instructions on the CPU per `lm_head` chunk until now.
         if let Some(am) = &b.argmax {
             go!(am, "argmax".to_string());
         }

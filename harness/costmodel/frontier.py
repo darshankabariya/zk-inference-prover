@@ -682,7 +682,7 @@ def main(argv=None):
             print(f"    {'':<14} {ref['source']}")
         print(f"    {'':<14} {card['note']}")
     print("    the H200 sequence ran one process per chunk, so it has no `loop_secs`;")
-    print("    the H100 loop has no head chunk.  Neither gap is fillable by arithmetic.")
+    print("    the H100 loop has no lm_head chunk.  Neither gap is fillable by arithmetic.")
 
     # --- the check: no free parameter at all ---------------------------------
     print("\nthe check: the attention term now has ZERO fitted parameters")
@@ -1006,7 +1006,7 @@ def main(argv=None):
     print("  4,096 keys, not its own 1,024.  Under the band model the square reading is")
     print("  x4.56 / x5.56, so the correction is +14% on the prompt multiple -- and a head")
     print("  chunk per 512 prompt positions is counted in NEITHER (at 4K it would add")
-    print("  ~8 x the measured head chunk).")
+    print("  ~8 x the measured lm_head chunk).")
     print("\n  the chunking cost, which is now three terms and not one:")
     print(f"    {'the shared-table floor paid n times':<44} {fixed[1]:>+6.1f}% (4K) "
           f"{fixed[0]:>+6.1f}% (16K)")

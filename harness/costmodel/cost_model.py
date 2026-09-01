@@ -468,7 +468,7 @@ LAYER_DEQUANT_PER_ACC = DEQUANT_AWAY_PER_ACC
 # away, and B6 measured every rung at both modes -- the power-of-two one is
 # **14.0625** away against 15.0625 even, exactly as the chain is 25.125 against
 # 26.125.  Charging the head at the even figure was a cell per accumulator too
-# many, and on the head chunk that is 65.7 M cells at 8B.  Confirmed on the real
+# many, and on the `lm_head` chunk that is 65.7 M cells at 8B.  Confirmed on the real
 # head accumulators, `b10/out/head_deq_*.json`.
 HEAD_DEQUANT_PER_ACC = DEQUANT_POW2_AWAY_PER_ACC
 
