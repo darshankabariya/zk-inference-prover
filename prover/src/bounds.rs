@@ -65,7 +65,7 @@ pub const FIRST_TREE: usize = 3;
 
 /// Whether the feature is on for this run. Off by default, deliberately: with
 /// the flag off not one committed cell moves, which is what lets the recorded
-/// digest stand as the identity line.
+/// digest stand as the bit-for-bit line.
 pub fn enabled() -> bool {
     std::env::var("B10_BOUNDS").map(|v| v != "0").unwrap_or(false)
 }
@@ -806,7 +806,7 @@ pub fn kv_bounds_of(sides: &[KvSide], band: usize, n: usize) -> Vec<KvBound> {
 ///
 /// `cols` is handed in already assembled by the caller, which **clones the very
 /// `Eval`s tree 1 committed** rather than re-deriving them from the witness.
-/// That is deliberate, and it is the whole of why byte-identity with the region
+/// That is deliberate, and it is the whole of why byte-for-byte with the region
 /// holds: a second copy of `attn_trace`'s index map (`c = chunk * pk + p` for K,
 /// `ch = chunk * pv + p` for V) would agree with the first on every shape
 /// anyone tests and could disagree on the one that matters.  Here there is one

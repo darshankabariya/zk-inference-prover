@@ -1809,7 +1809,7 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
             set(f.qc, m31_of(qc), local);
             set(f.fe, m31_of(fe), local);
             set(f.fdp, m31_of(fdp), local);
-            // the identity gate's cross-check: the harness's own arithmetic,
+            // the bit-for-bit gate's cross-check: the harness's own arithmetic,
             // exact in f64 (the product is 42 bits), against the fill's integers
             let sxf = (128.0 + ms as f64) * (es as f64 - 134.0).exp2();
             let (mws, ews) = m.sw[c];

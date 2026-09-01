@@ -26,7 +26,7 @@ Dumping a prompt block is therefore a loop inversion and not a new harness: the
 dump body moved inside the forward loop, the `P = C - S` assertion relaxed to a
 whole number of blocks, and a block axis on the output directory.  `--blocks`
 selects which blocks are written; its default, `last`, is exactly the pre-DD
-behaviour, byte for byte, and is what the identity control checks.
+behaviour, byte for byte, and is what the bit-for-bit control checks.
 
     uv run python b65/extract.py --tokens 4608 --chunk 512 --layers 0,1 \\
         --blocks all --corner --slim --share out/w/shared --out out/w/witness
@@ -292,7 +292,7 @@ if __name__ == "__main__":
         f"--tokens {len(ids)} is not a whole number of --chunk {a.chunk} blocks"
     want = parse_blocks(a.blocks, nblocks)
     # `last` leaves the output paths exactly where they were, which is what the
-    # identity control (re-extraction reproduces the existing dump byte for
+    # bit-for-bit control (re-extraction reproduces the existing dump byte for
     # byte) compares against.  Any other value tags the block into the path.
     tag_blocks = a.blocks not in ("", "last")
     print(f"  {nblocks} blocks of {a.chunk}; dumping {sorted(want)}"

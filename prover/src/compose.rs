@@ -176,7 +176,7 @@ pub struct Params {
     /// B11 stream U, lever 3: the same for the *dequant* family, composing with
     /// `gkr_bands` rather than replacing it -- the two families' instances join
     /// one `prove_batch` call and their heights one link. A flag and not an env
-    /// mode for the same reason: it changes the proof, and its oracle is its
+    /// mode for the same reason: it changes the proof, and its reference digest is its
     /// own. Skipped when false, so every statement written without it is byte
     /// identical to one from a crate that never had it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -240,7 +240,7 @@ pub struct GlueParams {
     pub dff: usize,
     /// Stream E's two additive regions, off by default.  They are opt-in rather
     /// than opt-out so that the pre-change proof is reproduced by the *default*
-    /// invocation -- the identity control is then the ordinary run, not a run
+    /// invocation -- the bit-for-bit control is then the ordinary run, not a run
     /// with a flag in it.  Both are skipped when false so the serialized
     /// statement is byte-identical to the pre-change crate's.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -3444,7 +3444,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // Stream AA: the K/V sides, in the same position and for the same reason,
     // right after stream H's.  A side's columns are the *very columns tree 1
     // committed*, cloned band by band in component-registration order --
-    // `[band's K][band's V]` -- so byte-identity with the region is by
+    // `[band's K][band's V]` -- so byte-for-byte with the region is by
     // construction and not by a second copy of `attn_trace`'s index map.
     let kv_report = if plan.kv.is_empty() {
         json!(null)

@@ -13,7 +13,7 @@ The lines are the same arguments `n_seq.sh`'s `seq` step passes to 33 separate
 theirs chunk by chunk.
 
 **Stream DD (E11): the block axis.**  A full prompt+output proof is `B` token
-blocks of 32 layer chunks, plus one head chunk, and the writer learns that with
+blocks of 32 layer chunks, plus one `lm_head` chunk, and the writer learns that with
 one extra loop and no new argument *kind*:
 
     o_plan.py --dir D --blocks 9 --head D/witness_B8_head --out plan.txt
@@ -95,7 +95,7 @@ def main():
                          "today (layout.rs:117 divides by c * insts); stream CC owns the "
                          "corner-only configuration.")
     ap.add_argument("--head-every-block", action="store_true",
-                    help="a head chunk after every block, not only the last one")
+                    help="an lm_head chunk after every block, not only the last one")
     ap.add_argument("--emit-out", default="",
                     help="also write the distinct emit shapes, one representative plan line "
                          "each, for `emitset` to walk instead of the plan")
