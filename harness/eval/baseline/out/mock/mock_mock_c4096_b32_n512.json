@@ -1,0 +1,257 @@
+{
+  "schema": "e2h/decode-throughput/2",
+  "recorded_utc": "2026-09-01T08:36:37+00:00",
+  "backend": {
+    "name": "mock",
+    "label": "SYNTHETIC -- harness exercise only, never a measurement",
+    "version": "mock/1",
+    "available": true,
+    "reason": null,
+    "synthetic": true
+  },
+  "purpose": "batched",
+  "boundary": {
+    "name": "unproved decode wall, weights resident",
+    "includes": [
+      "the forward passes that produce the measured tokens",
+      "sampling/argmax, KV-cache growth, the engine's own scheduling"
+    ],
+    "excludes": [
+      "process start, weight load and any compile/CUDA-graph capture (a warmup pass precedes every timed rep)",
+      "tokenization of the prompt (built once, outside the timed region)",
+      "the prefill -- for the decode-only rate ONLY; it is measured by a separate max_new_tokens=1 call and subtracted. The e11 rate includes it."
+    ],
+    "comparable_to": "the proved side's per-chunk boundaries. NOTE: none of the four proved boundaries contains an inference pass -- `whole wall` is trace gen + stwo + serialization, and even `loop_secs`, which adds the witness READ and the layer build, reads a witness that a prior extraction produced. So every ratio here is prover-seconds against inference-seconds, which is exactly the quantity fn. 170 computed (zkLLM's 803 s against 668 tok/s). An end-to-end deployment that must both infer and prove costs (1 + ratio), not (ratio) -- immaterial at x25-40, and stated anyway."
+  },
+  "run": {
+    "model": {
+      "id": "MOCK/none",
+      "revision": "main",
+      "n_layers": null,
+      "n_heads": null,
+      "n_kv_heads": null,
+      "hidden": null,
+      "vocab": 32000,
+      "attn_implementation": "none",
+      "SYNTHETIC": true,
+      "cost_model": {
+        "s_per_token": 0.002,
+        "s_per_key": 1e-07,
+        "kv_budget_tokens": 200000
+      },
+      "warning": "SYNTHETIC seconds from an arbitrary arithmetic model. Not a measurement of any model on any hardware."
+    },
+    "tokenizer": {
+      "from_repo": "MOCK/none",
+      "class": "_Tok",
+      "vocab_size": 32000
+    },
+    "dtype": "bfloat16",
+    "device": {
+      "kind": "cpu",
+      "name": "x86_64",
+      "count": 4,
+      "total_mem_mib": null,
+      "capability": null,
+      "torch": "2.13.0+cpu",
+      "cuda": null,
+      "threads": 2
+    },
+    "context_keys": 4096,
+    "prompt_tokens": 4096,
+    "new_tokens": 512,
+    "total_sequence": 4608,
+    "batch_size": 32,
+    "decoding": {
+      "greedy": true,
+      "do_sample": false,
+      "num_beams": 1,
+      "eos_suppressed": true
+    },
+    "reps": 1,
+    "warmup": 0,
+    "prompt_sha256_16": "2d2cd06b0f95aa7c",
+    "generated_sha256_16": "0794af1a35d438c7",
+    "synthetic": true
+  },
+  "measured": {
+    "per_rep": [
+      {
+        "prefill_s": 0.021319200983271003,
+        "total_s": 5.467179088969715,
+        "decode_s": 5.445859887986444,
+        "tok_s_decode_per_stream": 93.83274827309916,
+        "tok_s_wall_per_stream": 93.6497582515604,
+        "tok_s_e11_all_positions_per_stream": 842.8478242640435,
+        "generated_sha256_16": "0794af1a35d438c7"
+      }
+    ],
+    "prefill_s": {
+      "median": 0.021319200983271003,
+      "min": 0.021319200983271003,
+      "max": 0.021319200983271003,
+      "spread_pct": 0.0
+    },
+    "decode_s": {
+      "median": 5.445859887986444,
+      "min": 5.445859887986444,
+      "max": 5.445859887986444,
+      "spread_pct": 0.0
+    },
+    "total_s": {
+      "median": 5.467179088969715,
+      "min": 5.467179088969715,
+      "max": 5.467179088969715,
+      "spread_pct": 0.0
+    },
+    "tok_s_decode_per_stream": {
+      "median": 93.83274827309916,
+      "min": 93.83274827309916,
+      "max": 93.83274827309916,
+      "spread_pct": 0.0
+    },
+    "tok_s_decode_aggregate": {
+      "median": 3002.647944739173,
+      "min": 3002.647944739173,
+      "max": 3002.647944739173,
+      "spread_pct": 0.0
+    },
+    "tok_s_e11_all_positions_per_stream": {
+      "median": 842.8478242640435,
+      "min": 842.8478242640435,
+      "max": 842.8478242640435,
+      "spread_pct": 0.0
+    },
+    "tok_s_e11_all_positions_aggregate": {
+      "median": 26971.130376449393,
+      "min": 26971.130376449393,
+      "max": 26971.130376449393,
+      "spread_pct": 0.0
+    },
+    "e11_positions_per_stream": 4608,
+    "tok_s_wall_per_stream": {
+      "median": 93.6497582515604,
+      "min": 93.6497582515604,
+      "max": 93.6497582515604,
+      "spread_pct": 0.0
+    },
+    "ttft_s": {
+      "median": 0.021319200983271003,
+      "min": 0.021319200983271003,
+      "max": 0.021319200983271003,
+      "spread_pct": 0.0
+    },
+    "counting_conventions": {
+      "decode_only": "(new_tokens - 1) / decode_s. The v1 comparison: our proved seconds cover only the 512 decoded positions (scope.prefill_status -- the prefix is declared, not proven), so the baseline excludes prefill too. Excluding prefill makes the unproved rate LARGER, so this choice makes the reported overhead LARGER.",
+      "e11": "(prompt_tokens + new_tokens) / total_s. Every position of the concatenated prompt+output pass over that pass's whole wall -- the convention DeepProve's TPM uses and the one our own statement needs once E11 proves the prompt. At C=4096 it counts 4608 positions, not 512, so the unproved rate is much larger and the multiple grows with C."
+    },
+    "ladder_uses": "tok_s_decode_per_stream.median for the single-stream latency row; tok_s_decode_aggregate.median for the batched $/token row; tok_s_e11_all_positions_*.median for the E11 arm"
+  },
+  "like_for_like": {
+    "purpose": "batched",
+    "reference": {
+      "key": "tok_s.seq5.c4096.whole",
+      "value": 4.991,
+      "unit": "tok/s",
+      "card": "H200",
+      "context": 4096,
+      "boundary": "whole wall",
+      "grade": "measured",
+      "source": "experiments/b10/out/seq5/n_summary_c4096.json (3)"
+    },
+    "dimensions": [
+      {
+        "name": "model",
+        "ours": "MOCK/none@main",
+        "proved": "Llama-3.1-8B-Instruct",
+        "verdict": "mismatch",
+        "direction": "invalid",
+        "note": "unsloth/Llama-3.1-8B-Instruct @ 4699cc75b550f9c6f3173fb80f4703b62d946aa5; 32 layers, hidden 4096, 32 heads, 8 KV, vocab 128256, bf16."
+      },
+      {
+        "name": "tokenizer",
+        "ours": "MOCK/none (_Tok, vocab 32000)",
+        "proved": "the tokenizer of Llama-3.1-8B-Instruct",
+        "verdict": "mismatch",
+        "direction": "invalid",
+        "note": "Recorded so a reader can check the token stream is the same one; tok/s is meaningless across two tokenizations."
+      },
+      {
+        "name": "card",
+        "ours": "x86_64 x4",
+        "proved": "H200",
+        "verdict": "mismatch",
+        "direction": "invalid",
+        "note": "The proved row is one GPU. A ratio across two different cards is not an overhead multiple."
+      },
+      {
+        "name": "context_keys",
+        "ours": 4096,
+        "proved": 4096,
+        "verdict": "match",
+        "direction": "neutral",
+        "note": "C is the committed KV prefix (prover `--ctx`); the S=512 decoded positions attend over it plus the causal corner, so the unproved run prompts with exactly C tokens and decodes 512 more."
+      },
+      {
+        "name": "new_tokens",
+        "ours": 512,
+        "proved": 512,
+        "verdict": "match",
+        "direction": "neutral",
+        "note": "Both sides divide by the same token count. EOS is suppressed so exactly this many are produced."
+      },
+      {
+        "name": "decoding",
+        "ours": "greedy (do_sample=False, num_beams=1)",
+        "proved": "greedy only",
+        "verdict": "match",
+        "direction": "neutral",
+        "note": "The argmax gadget proves 'the emitted token is the maximum', strict-lowest-index, tied to the head dequant's own output. A sampled token would need committed randomness plus a CDF check. Whether the published system proves anything about sampling is UNKNOWN from the public record."
+      },
+      {
+        "name": "batch_size",
+        "ours": 32,
+        "proved": 1,
+        "verdict": "stated-mismatch",
+        "direction": "different-comparison",
+        "note": "DELIBERATE mismatch: the production-serving row. Batched decode is not comparable to our batch-1 latency; it exists for the $/token comparison, which is the currency the 500,000x claim is really about. Never quote this row as a latency overhead."
+      },
+      {
+        "name": "arithmetic",
+        "ours": "bfloat16",
+        "proved": "b10-final (int8 dynamic linear, bf16 nonlinear)",
+        "verdict": "stated-mismatch",
+        "direction": "flatters_us",
+        "note": "We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+      },
+      {
+        "name": "positions_counted",
+        "ours": "512 decoded positions, prefill excluded",
+        "proved": "512 decoded positions; prompt declared, not proven",
+        "verdict": "match",
+        "direction": "neutral",
+        "note": "The v1 comparison. The proved seconds never include the prompt, so the unproved rate excludes prefill too (a separate max_new_tokens=1 call, subtracted). The SAME run also records an `e11` rate over all prompt+output positions -- the convention DeepProve's TPM uses -- and the ladder reports it as a separate arm under a named assumption. tok_s_wall (512 positions but prefill included) is recorded and used by neither."
+      },
+      {
+        "name": "synthetic",
+        "ours": "SYNTHETIC (mock backend)",
+        "proved": "a real measurement",
+        "verdict": "mismatch",
+        "direction": "invalid",
+        "note": "These seconds came from an arithmetic model, not from running a model on a card. The run exists to exercise the harness. It is blocking here and `ladder.py` drops it before it picks."
+      }
+    ],
+    "verdict": "NOT-LIKE-FOR-LIKE",
+    "quotable": false,
+    "blocking": [
+      "model: 'MOCK/none@main' vs proved 'Llama-3.1-8B-Instruct'",
+      "tokenizer: 'MOCK/none (_Tok, vocab 32000)' vs proved 'the tokenizer of Llama-3.1-8B-Instruct'",
+      "card: 'x86_64 x4' vs proved 'H200'",
+      "synthetic: 'SYNTHETIC (mock backend)' vs proved 'a real measurement'"
+    ],
+    "stated_mismatches": [
+      "batch_size: DELIBERATE mismatch: the production-serving row. Batched decode is not comparable to our batch-1 latency; it exists for the $/token comparison, which is the currency the 500,000x claim is really about. Never quote this row as a latency overhead.",
+      "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+    ]
+  }
+}

@@ -1,0 +1,393 @@
+{
+  "_WARNING": "NOT PUBLISHABLE. 6 selected run(s) failed the like-for-like check (NOT-LIKE-FOR-LIKE). Every key below is prefixed `NOT_QUOTABLE.` and every grade is null so it cannot reach constants.json by accident. Reasons: card: 'x86_64 x4' vs proved 'H200' | model: 'MOCK/none@main' vs proved 'Llama-3.1-8B-Instruct' | synthetic: 'SYNTHETIC (mock backend)' vs proved 'a real measurement' | tokenizer: 'MOCK/none (_Tok, vocab 32000)' vs proved 'the tokenizer of Llama-3.1-8B-Instruct'",
+  "NOT_QUOTABLE.baseline.e2h_protocol": {
+    "value": "greedy, EOS suppressed, exactly 512 new tokens on a C-token prompt; TTFT from a max_new_tokens=1 call and decode seconds by subtraction; prompts distinct per batch element; prefix caching off",
+    "unit": "statement",
+    "card": "x86_64",
+    "context": "n/a",
+    "boundary": "unproved decode wall",
+    "grade": null,
+    "source": "experiments/e2/decode_bench.py; artifacts in experiments/e2/out/",
+    "note": "The measurement protocol every `tok_s.unproved_8b_h200.*` row was produced by. Both counting conventions (decode-only and E11 all-positions) come from the same runs."
+  },
+  "NOT_QUOTABLE.tok_s.unproved_8b_h200.mock.c4096.b1": {
+    "value": 820.575,
+    "unit": "tok/s",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "unproved decode wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b1_n512.json",
+    "note": "SYNTHETIC -- harness exercise only, never a measurement; batch 1, bfloat16, MOCK/none@main, x86_64; decode only, prefill excluded (v1 counting)."
+  },
+  "NOT_QUOTABLE.tok_s.unproved_8b_h200.mock.c4096.b1_e11": {
+    "value": 7369.117,
+    "unit": "tok/s",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "unproved decode wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b1_n512.json",
+    "note": "SYNTHETIC -- harness exercise only, never a measurement; batch 1, bfloat16, MOCK/none@main, x86_64; ALL 4096 + 512 positions of the concatenated pass over that pass's wall (E11 counting)."
+  },
+  "NOT_QUOTABLE.tok_s.unproved_8b_h200.mock.c4096.batched_peak": {
+    "value": 3002.6,
+    "unit": "tok/s aggregate",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "unproved decode wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b32_n512.json",
+    "note": "Peak AGGREGATE decode rate over the batch sweep, at batch 32. NOT a latency figure."
+  },
+  "NOT_QUOTABLE.batch.unproved_8b_h200.mock.c4096.at_peak": {
+    "value": 32,
+    "unit": "sequences",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "unproved decode wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b32_n512.json",
+    "note": "The batch the peak aggregate rate came from. For vLLM this is OFFERED concurrency, scheduled by the engine."
+  },
+  "NOT_QUOTABLE.overhead.8b.c4096.single_stream.commit": {
+    "value": 27.1,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "commit",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b1_n512.json; tok_s.seq5.c4096.commit",
+    "note": "mock unproved 820.575 / proved 30.306 (tok_s.seq5.c4096.commit, 33 chunks (head included))."
+  },
+  "NOT_QUOTABLE.overhead.8b.c4096.e11.commit": {
+    "value": 243.2,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "commit",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b1_n512.json; tok_s.seq5.c4096.commit",
+    "note": "mock unproved 7369.117 / proved 30.306 (tok_s.seq5.c4096.commit, 33 chunks (head included)). ASSUMPTION: REGIME 1, the same convention stream E7 used in notes/sufficiency.md: every proved position is charged one measured C=4096 decoded token, so the proved rate in positions/second equals the frozen tok/s row unchanged. This is CONSERVATIVE for E11 -- a prompt position inside a causal rectangle attends to ~N/2 keys, not a full C band -- and it is an assumption, not a measurement: no E11 proved row exists. The unproved side needs no assumption; it is measured directly as (prompt + output) / wall of the concatenated pass."
+  },
+  "NOT_QUOTABLE.overhead.8b.c4096.usd_per_token.commit": {
+    "value": 99.1,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "commit",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b32_n512.json; tok_s.seq5.c4096.commit",
+    "note": "mock unproved 3002.648 / proved 30.306 (tok_s.seq5.c4096.commit, 33 chunks (head included)). Rate-independent: same card both sides. NOT a latency multiple."
+  },
+  "NOT_QUOTABLE.usd_per_mtok.proved_8b.c4096.commit": {
+    "value": 42.07,
+    "unit": "USD/Mtok",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "commit",
+    "grade": null,
+    "source": "tok_s.seq5.c4096.commit / 3600 * cost.h200_reference_usd_per_hour",
+    "note": "At $4.59/GPU-h (from_freeze=True). 33 chunks (head included)."
+  },
+  "NOT_QUOTABLE.overhead.8b.c4096.single_stream.stwo": {
+    "value": 49.5,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "stwo total",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b1_n512.json; tok_s.seq5.c4096.stwo",
+    "note": "mock unproved 820.575 / proved 16.566 (tok_s.seq5.c4096.stwo, 33 chunks (head included))."
+  },
+  "NOT_QUOTABLE.overhead.8b.c4096.e11.stwo": {
+    "value": 444.8,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "stwo total",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b1_n512.json; tok_s.seq5.c4096.stwo",
+    "note": "mock unproved 7369.117 / proved 16.566 (tok_s.seq5.c4096.stwo, 33 chunks (head included)). ASSUMPTION: REGIME 1, the same convention stream E7 used in notes/sufficiency.md: every proved position is charged one measured C=4096 decoded token, so the proved rate in positions/second equals the frozen tok/s row unchanged. This is CONSERVATIVE for E11 -- a prompt position inside a causal rectangle attends to ~N/2 keys, not a full C band -- and it is an assumption, not a measurement: no E11 proved row exists. The unproved side needs no assumption; it is measured directly as (prompt + output) / wall of the concatenated pass."
+  },
+  "NOT_QUOTABLE.overhead.8b.c4096.usd_per_token.stwo": {
+    "value": 181.3,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "stwo total",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b32_n512.json; tok_s.seq5.c4096.stwo",
+    "note": "mock unproved 3002.648 / proved 16.566 (tok_s.seq5.c4096.stwo, 33 chunks (head included)). Rate-independent: same card both sides. NOT a latency multiple."
+  },
+  "NOT_QUOTABLE.usd_per_mtok.proved_8b.c4096.stwo": {
+    "value": 76.96,
+    "unit": "USD/Mtok",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "stwo total",
+    "grade": null,
+    "source": "tok_s.seq5.c4096.stwo / 3600 * cost.h200_reference_usd_per_hour",
+    "note": "At $4.59/GPU-h (from_freeze=True). 33 chunks (head included)."
+  },
+  "NOT_QUOTABLE.overhead.8b.c4096.single_stream.whole": {
+    "value": 164.4,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "whole wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b1_n512.json; tok_s.seq5.c4096.whole",
+    "note": "mock unproved 820.575 / proved 4.991 (tok_s.seq5.c4096.whole, 33 chunks (head included))."
+  },
+  "NOT_QUOTABLE.overhead.8b.c4096.e11.whole": {
+    "value": 1476.5,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "whole wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b1_n512.json; tok_s.seq5.c4096.whole",
+    "note": "mock unproved 7369.117 / proved 4.991 (tok_s.seq5.c4096.whole, 33 chunks (head included)). ASSUMPTION: REGIME 1, the same convention stream E7 used in notes/sufficiency.md: every proved position is charged one measured C=4096 decoded token, so the proved rate in positions/second equals the frozen tok/s row unchanged. This is CONSERVATIVE for E11 -- a prompt position inside a causal rectangle attends to ~N/2 keys, not a full C band -- and it is an assumption, not a measurement: no E11 proved row exists. The unproved side needs no assumption; it is measured directly as (prompt + output) / wall of the concatenated pass."
+  },
+  "NOT_QUOTABLE.overhead.8b.c4096.usd_per_token.whole": {
+    "value": 601.6,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "whole wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b32_n512.json; tok_s.seq5.c4096.whole",
+    "note": "mock unproved 3002.648 / proved 4.991 (tok_s.seq5.c4096.whole, 33 chunks (head included)). Rate-independent: same card both sides. NOT a latency multiple."
+  },
+  "NOT_QUOTABLE.usd_per_mtok.proved_8b.c4096.whole": {
+    "value": 255.46,
+    "unit": "USD/Mtok",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "whole wall",
+    "grade": null,
+    "source": "tok_s.seq5.c4096.whole / 3600 * cost.h200_reference_usd_per_hour",
+    "note": "At $4.59/GPU-h (from_freeze=True). 33 chunks (head included)."
+  },
+  "NOT_QUOTABLE.overhead.8b.c4096.single_stream.loop": {
+    "value": 99.1,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "loop_secs",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b1_n512.json; loop.h200.c4096.pipelined_defaults",
+    "note": "mock unproved 820.575 / proved 8.277 (loop.h200.c4096.pipelined_defaults, 32 layer chunks (HEADLESS))."
+  },
+  "NOT_QUOTABLE.overhead.8b.c4096.e11.loop": {
+    "value": 890.3,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "loop_secs",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b1_n512.json; loop.h200.c4096.pipelined_defaults",
+    "note": "mock unproved 7369.117 / proved 8.277 (loop.h200.c4096.pipelined_defaults, 32 layer chunks (HEADLESS)). ASSUMPTION: REGIME 1, the same convention stream E7 used in notes/sufficiency.md: every proved position is charged one measured C=4096 decoded token, so the proved rate in positions/second equals the frozen tok/s row unchanged. This is CONSERVATIVE for E11 -- a prompt position inside a causal rectangle attends to ~N/2 keys, not a full C band -- and it is an assumption, not a measurement: no E11 proved row exists. The unproved side needs no assumption; it is measured directly as (prompt + output) / wall of the concatenated pass."
+  },
+  "NOT_QUOTABLE.overhead.8b.c4096.usd_per_token.loop": {
+    "value": 362.8,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "loop_secs",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b32_n512.json; loop.h200.c4096.pipelined_defaults",
+    "note": "mock unproved 3002.648 / proved 8.277 (loop.h200.c4096.pipelined_defaults, 32 layer chunks (HEADLESS)). Rate-independent: same card both sides. NOT a latency multiple."
+  },
+  "NOT_QUOTABLE.usd_per_mtok.proved_8b.c4096.loop": {
+    "value": 154.05,
+    "unit": "USD/Mtok",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "loop_secs",
+    "grade": null,
+    "source": "loop.h200.c4096.pipelined_defaults / 3600 * cost.h200_reference_usd_per_hour",
+    "note": "At $4.59/GPU-h (from_freeze=True). 32 layer chunks (HEADLESS)."
+  },
+  "NOT_QUOTABLE.usd_per_mtok.unproved_8b.c4096.batched": {
+    "value": 0.4246,
+    "unit": "USD/Mtok",
+    "card": "x86_64",
+    "context": 4096,
+    "boundary": "unproved decode wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c4096_b32_n512.json",
+    "note": "Peak aggregate serving at batch 32, $4.59/GPU-h (from_freeze=True)."
+  },
+  "NOT_QUOTABLE.tok_s.unproved_8b_h200.mock.c16384.b1": {
+    "value": 545.903,
+    "unit": "tok/s",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "unproved decode wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c16384_b1_n512.json",
+    "note": "SYNTHETIC -- harness exercise only, never a measurement; batch 1, bfloat16, MOCK/none@main, x86_64; decode only, prefill excluded (v1 counting)."
+  },
+  "NOT_QUOTABLE.tok_s.unproved_8b_h200.mock.c16384.b1_e11": {
+    "value": 17973.48,
+    "unit": "tok/s",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "unproved decode wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c16384_b1_n512.json",
+    "note": "SYNTHETIC -- harness exercise only, never a measurement; batch 1, bfloat16, MOCK/none@main, x86_64; ALL 16384 + 512 positions of the concatenated pass over that pass's wall (E11 counting)."
+  },
+  "NOT_QUOTABLE.tok_s.unproved_8b_h200.mock.c16384.batched_peak": {
+    "value": 1587.8,
+    "unit": "tok/s aggregate",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "unproved decode wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c16384_b8_n512.json",
+    "note": "Peak AGGREGATE decode rate over the batch sweep, at batch 8. NOT a latency figure."
+  },
+  "NOT_QUOTABLE.batch.unproved_8b_h200.mock.c16384.at_peak": {
+    "value": 8,
+    "unit": "sequences",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "unproved decode wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c16384_b8_n512.json",
+    "note": "The batch the peak aggregate rate came from. For vLLM this is OFFERED concurrency, scheduled by the engine."
+  },
+  "NOT_QUOTABLE.overhead.8b.c16384.single_stream.commit": {
+    "value": 26.2,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "commit",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c16384_b1_n512.json; tok_s.seq5.c16384.commit",
+    "note": "mock unproved 545.903 / proved 20.856 (tok_s.seq5.c16384.commit, 33 chunks (head included))."
+  },
+  "NOT_QUOTABLE.overhead.8b.c16384.e11.commit": {
+    "value": 861.8,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "commit",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c16384_b1_n512.json; tok_s.seq5.c16384.commit",
+    "note": "mock unproved 17973.480 / proved 20.856 (tok_s.seq5.c16384.commit, 33 chunks (head included)). ASSUMPTION: REGIME 1, the same convention stream E7 used in notes/sufficiency.md: every proved position is charged one measured C=4096 decoded token, so the proved rate in positions/second equals the frozen tok/s row unchanged. This is CONSERVATIVE for E11 -- a prompt position inside a causal rectangle attends to ~N/2 keys, not a full C band -- and it is an assumption, not a measurement: no E11 proved row exists. The unproved side needs no assumption; it is measured directly as (prompt + output) / wall of the concatenated pass."
+  },
+  "NOT_QUOTABLE.overhead.8b.c16384.usd_per_token.commit": {
+    "value": 76.1,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "commit",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c16384_b8_n512.json; tok_s.seq5.c16384.commit",
+    "note": "mock unproved 1587.757 / proved 20.856 (tok_s.seq5.c16384.commit, 33 chunks (head included)). Rate-independent: same card both sides. NOT a latency multiple."
+  },
+  "NOT_QUOTABLE.usd_per_mtok.proved_8b.c16384.commit": {
+    "value": 61.13,
+    "unit": "USD/Mtok",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "commit",
+    "grade": null,
+    "source": "tok_s.seq5.c16384.commit / 3600 * cost.h200_reference_usd_per_hour",
+    "note": "At $4.59/GPU-h (from_freeze=True). 33 chunks (head included)."
+  },
+  "NOT_QUOTABLE.overhead.8b.c16384.single_stream.stwo": {
+    "value": 44.4,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "stwo total",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c16384_b1_n512.json; tok_s.seq5.c16384.stwo",
+    "note": "mock unproved 545.903 / proved 12.289 (tok_s.seq5.c16384.stwo, 33 chunks (head included))."
+  },
+  "NOT_QUOTABLE.overhead.8b.c16384.e11.stwo": {
+    "value": 1462.6,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "stwo total",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c16384_b1_n512.json; tok_s.seq5.c16384.stwo",
+    "note": "mock unproved 17973.480 / proved 12.289 (tok_s.seq5.c16384.stwo, 33 chunks (head included)). ASSUMPTION: REGIME 1, the same convention stream E7 used in notes/sufficiency.md: every proved position is charged one measured C=4096 decoded token, so the proved rate in positions/second equals the frozen tok/s row unchanged. This is CONSERVATIVE for E11 -- a prompt position inside a causal rectangle attends to ~N/2 keys, not a full C band -- and it is an assumption, not a measurement: no E11 proved row exists. The unproved side needs no assumption; it is measured directly as (prompt + output) / wall of the concatenated pass."
+  },
+  "NOT_QUOTABLE.overhead.8b.c16384.usd_per_token.stwo": {
+    "value": 129.2,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "stwo total",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c16384_b8_n512.json; tok_s.seq5.c16384.stwo",
+    "note": "mock unproved 1587.757 / proved 12.289 (tok_s.seq5.c16384.stwo, 33 chunks (head included)). Rate-independent: same card both sides. NOT a latency multiple."
+  },
+  "NOT_QUOTABLE.usd_per_mtok.proved_8b.c16384.stwo": {
+    "value": 103.75,
+    "unit": "USD/Mtok",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "stwo total",
+    "grade": null,
+    "source": "tok_s.seq5.c16384.stwo / 3600 * cost.h200_reference_usd_per_hour",
+    "note": "At $4.59/GPU-h (from_freeze=True). 33 chunks (head included)."
+  },
+  "NOT_QUOTABLE.overhead.8b.c16384.single_stream.whole": {
+    "value": 130.2,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "whole wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c16384_b1_n512.json; tok_s.seq5.c16384.whole",
+    "note": "mock unproved 545.903 / proved 4.192 (tok_s.seq5.c16384.whole, 33 chunks (head included))."
+  },
+  "NOT_QUOTABLE.overhead.8b.c16384.e11.whole": {
+    "value": 4287.6,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "whole wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c16384_b1_n512.json; tok_s.seq5.c16384.whole",
+    "note": "mock unproved 17973.480 / proved 4.192 (tok_s.seq5.c16384.whole, 33 chunks (head included)). ASSUMPTION: REGIME 1, the same convention stream E7 used in notes/sufficiency.md: every proved position is charged one measured C=4096 decoded token, so the proved rate in positions/second equals the frozen tok/s row unchanged. This is CONSERVATIVE for E11 -- a prompt position inside a causal rectangle attends to ~N/2 keys, not a full C band -- and it is an assumption, not a measurement: no E11 proved row exists. The unproved side needs no assumption; it is measured directly as (prompt + output) / wall of the concatenated pass."
+  },
+  "NOT_QUOTABLE.overhead.8b.c16384.usd_per_token.whole": {
+    "value": 378.8,
+    "unit": "x",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "whole wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c16384_b8_n512.json; tok_s.seq5.c16384.whole",
+    "note": "mock unproved 1587.757 / proved 4.192 (tok_s.seq5.c16384.whole, 33 chunks (head included)). Rate-independent: same card both sides. NOT a latency multiple."
+  },
+  "NOT_QUOTABLE.usd_per_mtok.proved_8b.c16384.whole": {
+    "value": 304.15,
+    "unit": "USD/Mtok",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "whole wall",
+    "grade": null,
+    "source": "tok_s.seq5.c16384.whole / 3600 * cost.h200_reference_usd_per_hour",
+    "note": "At $4.59/GPU-h (from_freeze=True). 33 chunks (head included)."
+  },
+  "NOT_QUOTABLE.usd_per_mtok.unproved_8b.c16384.batched": {
+    "value": 0.803,
+    "unit": "USD/Mtok",
+    "card": "x86_64",
+    "context": 16384,
+    "boundary": "unproved decode wall",
+    "grade": null,
+    "source": "e2/out/mock/mock_mock_c16384_b8_n512.json",
+    "note": "Peak aggregate serving at batch 8, $4.59/GPU-h (from_freeze=True)."
+  }
+}
