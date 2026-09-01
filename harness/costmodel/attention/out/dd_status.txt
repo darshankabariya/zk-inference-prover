@@ -1,0 +1,20 @@
+08:36:02 sweep: 512
+08:36:02 point s512 S=C=512 
+08:36:27 point s512 rc=101 rss=22369816 KiB
+08:36:27 sweep done
+08:38:57 sweep: 512
+08:38:57 point s512 S=C=512 
+08:40:21 point s512 rc=0 rss=100914008 KiB
+08:40:21 sweep done
+08:41:26 sweep: 256 512 1024 1536 2048
+08:41:26 point s256 S=C=256 
+08:42:43 point s256 rc=0 rss=95164936 KiB
+08:42:43 point s512 S=C=512 
+08:44:08 point s512 rc=0 rss=98339984 KiB
+08:44:08 point s1024 S=C=1024 
+08:45:49 point s1024 rc=0 rss=114204536 KiB
+08:45:49 point s1536 S=C=1536 
+08:46:09 point s1536 rc=101 rss=7442672 KiB
+08:46:09 point s2048 S=C=2048 
+08:48:29 point s2048 rc=0 rss=142427088 KiB
+08:48:29 sweep done

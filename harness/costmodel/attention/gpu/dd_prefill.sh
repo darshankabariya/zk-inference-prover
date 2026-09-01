@@ -66,9 +66,10 @@ export B7_SYNTH_DIMS=${DD_DIMS:-$DIMS8B}
 # and the thread count moves both the wall and the peak RSS.
 THREADS=${DD_THREADS:-16}
 # 256/512/1024/2048 tile exactly (S a power of two, and C = S, hd, insts with
-# it); 1536 does not, and it is in the list on purpose -- it is the only
-# affordable shape that leaves an inert lead row, which is the precondition
-# B9 rule 13 has never met.
+# it).  1536 is in the list to be REFUSED, on the record: `attn_trace.rs:320`
+# asserts the grid's token axis tiles (`q * chunks == S`, 74*21 = 1554 != 1536),
+# so eval-plan §5.1's "accept the padding at 1536" is not an option that exists
+# -- the AIR will not build the shape.  See `dd_fit.py --geom`.
 SS=${DD_S:-"256 512 1024 1536 2048"}
 AOPIN=${DD_AOPIN:-20}
 st() { echo "$(date -u +%H:%M:%S) $*" >> $OUT/status; }
@@ -195,12 +196,18 @@ controls|all)
   #     happens: a control that cannot be armed on this arm is a finding, not a
   #     silence.
   # Run at TWO shapes, because a control that fires at neither says nothing:
-  # S=256 tiles exactly (no inert row exists to mutate) and S=1536 does not
-  # (1.5625% of every band grid's rows are inert).  A control that bites only at
-  # 1536 is a control that has finally met its precondition.  And each mutation
-  # is preceded by its own HONEST mirror -- mode 2 with no mutation -- because a
-  # panic from a device path that cannot run on this build is not a control
-  # firing, and only the honest run can tell the two apart.
+  #   S = C = 256  tiles exactly, `band_leads` 0/0/0 -- no inert row to mutate
+  #   S = C = 240  composes AND leaves 1024/512/512 inert lead rows (6.25% of
+  #                every band grid), which is rule 13's precondition, met
+  # 240 rather than §5.1's 1536 because 1536 does not compose at all (the token
+  # axis assertion at `attn_trace.rs:320`).  The two conditions are different
+  # and 1536 fails the wrong one: `Grid::lead` is about the KEY row-group axis,
+  # the assertion is about the TOKEN axis, and a shape needs `chunks | S` for
+  # the second.  `dd_fit.py`'s `composable()` scans for shapes meeting both;
+  # 240 is the cheapest with a large lead fraction.
+  # Each mutation is preceded by its own HONEST mirror -- mode 2 with no
+  # mutation -- because a panic from a device path that cannot run on this build
+  # is not a control firing, and only the honest run tells the two apart.
   st "controls"
   : > $OUT/controls.txt
   for mut in "B7_M4_ACC=2" \
@@ -209,7 +216,7 @@ controls|all)
              "B7_M4_PRE=2 B7_M4_PREMUT=noactive:chan" \
              "B7_M4_PRE=2 B7_M4_PREMUT=noactive:key" \
              "B7_M4_PRE=2 B7_M4_PREMUT=noident:key"; do
-    for s in ${DD_CTRL_S:-256 1536}; do
+    for s in ${DD_CTRL_S:-256 240}; do
       tag=ctl_$(echo "$mut" | tr -dc 'a-z0-9')_s$s
       st "control $mut at S=$s"
       env RAYON_NUM_THREADS=$THREADS $mut $B compose $SHAPE --s $s --ctx $s \

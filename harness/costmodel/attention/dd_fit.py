@@ -141,6 +141,30 @@ def tiles_exactly(s, c=None, hd=HD, bands=BANDS):
     return all(l == (0, 0, 0) for l in leads(s, c if c else s, hd, bands))
 
 
+def composable(s, c=None, hd=HD, bands=BANDS, rw_cfg=16):
+    """Will the AIR build this shape at all?  `attn_trace.rs:320-326` asserts the
+    grid's and the output region's TOKEN axes tile exactly --
+
+        assert_eq!(l.key.q * l.key.g.chunks, sh.s,
+                   "grid layout leaves padded token slots")
+
+    -- because a padded token slot would have to commit a numerator that is both
+    a table output and zero, and the table's zero row is not the one a zero shift
+    maps to.  `attn_trace.rs:159` asserts the per-token region tiles too.  This is
+    a stronger condition than `Grid::lead == 0`, which is about the row-group
+    (key) axis; a shape can fail this and still report `lead 0` everywhere."""
+    c = c if c else s
+    for i in bands:
+        lk, lo = lay_key(s, c, hd, i), lay_out(s, c, hd, i)
+        if lk["q"] * lk["chunks"] != s or lo["q"] * lo["chunks"] != s:
+            return False
+        try:
+            row_region(s, i, rw_cfg)
+        except AssertionError:
+            return False
+    return True
+
+
 # -------------------------------------------------------- the band closed form -
 # `prefill.py`'s structural model, verified exact against 8 artifacts across two
 # harnesses and three contexts.  Zero free parameters; every coefficient is read
@@ -230,13 +254,13 @@ def geom_report():
     print("that exactly when C has no odd factor.  `chunks` is capped at min(S, hd) =")
     print("128, which is why the padding does not shrink away at larger S.")
     print()
-    print(f"  {'S = C':>6} {'tiles':>7} {'band':>5} {'key log_rows':>13} {'chunks':>7} "
-          f"{'scores/row':>11} {'key lead':>10} {'lead frac':>10} {'chan/out lead':>14} "
-          f"{'per-tok lead':>13}")
+    print(f"  {'S = C':>6} {'tiles':>7} {'AIR':>7} {'band':>5} {'key log_rows':>13} "
+          f"{'chunks':>7} {'scores/row':>11} {'key lead':>10} {'lead frac':>10} "
+          f"{'chan/out lead':>14} {'per-tok lead':>13}")
     rows = {}
     for s in SS:
-        ex = tiles_exactly(s)
-        rows[s] = dict(exact=ex, bands=[],
+        ex, cmp_ = tiles_exactly(s), composable(s)
+        rows[s] = dict(exact=ex, composable=cmp_, bands=[],
                        bands_base_layout=band_base_geom(s, s),
                        bands_base_closed=band_base(s, s))
         for b in geometry(s, s):
@@ -249,6 +273,7 @@ def geom_report():
                 out_lead=ou["lead"], row_lead=rr["lead"], row_rows=rr["rrows"]))
             print(f"  {s if b['insts'] == BANDS[0] else '':>6} "
                   f"{('EXACT' if ex else 'padded') if b['insts'] == BANDS[0] else '':>7} "
+                  f"{(('builds' if cmp_ else 'REFUSES') if b['insts'] == BANDS[0] else ''):>7} "
                   f"{b['insts']:>5} {k['log_rows']:>13} {k['chunks']:>7} {k['q']:>11} "
                   f"{k['lead']:>10} {k['lead'] / k['rows'] * 100:>9.4f}% "
                   f"{str((ch['lead'], ou['lead'])):>14} "
@@ -262,6 +287,26 @@ def geom_report():
     print("  S strictly between two of them carries an odd factor into `C * insts`, and")
     print("  eval-plan §5.1's `jump to S=3072, which tiles exactly` is wrong for exactly")
     print("  the reason it gives for 1536: 3072 = 3*2^10, and 3 never divides 2^log_rows.")
+    print()
+    print("  And 1536 is not merely biased -- the AIR REFUSES it.  `attn_trace.rs:320`")
+    print("  asserts the grid's TOKEN axis tiles (`q * chunks == S`; 74*21 = 1554 at")
+    print("  S=1536), because a padded token slot would have to commit a numerator that")
+    print("  is both a table output and zero.  So §5.1's first option -- accept the")
+    print("  padding and arm the controls -- is not an option that exists.  Measured:")
+    print("  the S=1536 point in this sweep dies at that assertion in 20 s.")
+    print()
+    print("  the two conditions are different, and rule 13's precondition needs the")
+    print("  SECOND without the first -- a shape the AIR builds that still leaves an")
+    print("  inert lead row.  Scanning C = S in steps of 16 up to 8192:")
+    build = [s for s in range(16, 8193, 16) if composable(s)]
+    lead13 = [s for s in build if not tiles_exactly(s)]
+    print(f"    {len(build)} of 512 shapes build; {len(lead13)} of those leave a lead row.")
+    frac = lambda s: max(b["key"]["lead"] / b["key"]["rows"] for b in geometry(s, s)) * 100
+    print("    a few, with the largest band lead fraction: "
+          + ", ".join(f"{s} ({frac(s):.2f}%)" for s in (240, 336, 480, 1600, 2016)
+                      if s in lead13))
+    print("    so rule 13 IS reachable -- just not at 1536 or 3072, and never at a")
+    print("    power of two.  This sweep arms the controls at S = C = 240.")
     print()
     print("  the mirror against every artifact that records `band_leads`, including")
     print("  B10's seq5 chunks -- the real 8B witness at C != S, three prefix bands plus")
@@ -396,6 +441,37 @@ def report():
     print(f"  M1 p = {p1:.4f} against M2 gamma = {g2:.4f} and the structural "
           f"{GAMMA} ({p1 / GAMMA - 1:+.1%})")
     print(f"  M2 delta = {d2:,.0f} against the structural {DELTA:,}")
+    print()
+    print("  the same family's INTERACTION cells, where the artifact records them.")
+    print("  The 2026-08 runs predate `interaction_by_family`, so S=2048 is the first")
+    print("  C = S shape at which the interaction closed form can be checked at all:")
+    for s in ss:
+        gi = exact[s]["band_inter"]
+        if gi is None:
+            print(f"    {s:>5}  (not recorded in this artifact)")
+            continue
+        pi = band_inter(s, s)
+        print(f"    {s:>5}  predicted {pi:>15,}   measured {gi:>15,}"
+              f"   {'exact' if pi == gi else 'MISMATCH'}")
+    print()
+    print("  the incumbent `p` is a SECANT, and the sweep watches it move.  Read")
+    print("  between each adjacent pair it is `gamma + delta/(S1+S2)`, so it falls")
+    print("  towards 64 as the pair moves out -- it was never a coefficient:")
+    secants = []
+    for i in range(len(ss) - 1):
+        a_, b_ = ss[i], ss[i + 1]
+        pm = (exact[b_]["bands"] - exact[a_]["bands"]) / (b_ * b_ - a_ * a_)
+        secants.append(dict(lo=a_, hi=b_, p=pm, closed=GAMMA + DELTA / (a_ + b_)))
+        print(f"    {a_:>5} -> {b_:<5}  p = {pm:>8.4f}   gamma + delta/(S1+S2) = "
+              f"{GAMMA + DELTA / (a_ + b_):>8.4f}   {'exact' if abs(pm - GAMMA - DELTA / (a_ + b_)) < 1e-9 else 'DIFFERS'}")
+    pub = 72.0833333
+    if max(ss) >= 2048:
+        pred_inc = pub * 2048 ** 2
+        meas = exact[2048]["bands"]
+        print(f"\n  the published p = 72.083 predicts bands(2048) = {pred_inc:,.0f};")
+        print(f"  the measurement is {meas:,} -- the incumbent is out by "
+              f"{pred_inc - meas:,.0f} cells ({pred_inc / meas - 1:+.2%}), and the")
+        print(f"  structural model is out by {band_base(2048, 2048) - meas}.")
 
     # -- the remainder, which is what the crossover actually turns on
     print()
@@ -437,14 +513,48 @@ def report():
         f_i = (a["fresh"] - a["bands"]) - q_i * a["s"]
         x_i = cross_of(p_i, -q_i, -f_i)
         inc = dict(p=p_i, q=q_i, fix=f_i, crossover=x_i)
-        print(f"\n  incumbent (2 points, base bands vs fresh rest)   S ~ {x_i:>9,.0f}")
-    # like for like: the structural base band count against the same remainder
-    x_str = cross_of(GAMMA, DELTA - q, -f0)
+        print(f"\n  incumbent (2 points, base bands against a fresh rest)  S ~ {x_i:>9,.0f}")
+    # The incumbent's question is ill-posed, and four points is what shows it.
+    # It sets a BASE band count against `fresh - bands_base`, and that remainder
+    # still contains the band family's own INTERACTION, which grows as 76 S^2.
+    # So it fits a quadratic with a line: the answer is whatever pair you secant.
+    rest_b = {s: exact[s]["fresh"] - band_base(s, s) for s in ss}
+    qb, fb = lstsq([[float(s) for s in ss], [1.0] * len(ss)], [rest_b[s] for s in ss])
+    pair_x = []
+    for i in range(len(ss) - 1):
+        a_, b_ = ss[i], ss[i + 1]
+        p_ = (exact[b_]["bands"] - exact[a_]["bands"]) / (b_ * b_ - a_ * a_)
+        q_ = (rest_b[b_] - rest_b[a_]) / (b_ - a_)
+        f_ = rest_b[a_] - q_ * a_
+        pair_x.append(dict(lo=a_, hi=b_, p=p_, crossover=cross_of(p_, -q_, -f_)))
+        print(f"  the same construction on the {a_:>5} / {b_:<5} pair             "
+              f"S ~ {pair_x[-1]['crossover']:>9,.0f}")
+    print("  -- it moves by a third across the sweep, because `fresh - bands_base`")
+    print("  keeps the band family's own interaction (76 S^2) and is not linear:")
+    print(f"     a line through all four misses it by {rms([rest_b[s] - (fb + qb * s) for s in ss]):,.0f} "
+          f"cells RMS, against {rms(rest_res):,.0f} for the fresh remainder.")
+    print("  Setting a base count against a fresh one has no crossover at all when")
+    print("  it is written out: `bands_base = fresh/2` is `12 S^2 + (12,816 + q) S")
+    print("  + F = 0`, which has no positive root -- the family's interaction alone")
+    print("  outgrows its base.  The quantity was never well posed.")
+    x_str = cross_of(GAMMA, DELTA - qb, -fb)
     x_fresh = cross_of(BAND_SC, BAND_S + BAND_C - q, -f0)
-    print(f"  structural base, this sweep's remainder          S ~ {x_str:>9,.0f}"
-          + (f"   {x_str / inc['crossover'] - 1:+.1%}" if inc else ""))
-    print(f"  fresh against fresh (the one to quote)           S ~ {x_fresh:>9,.0f}"
-          + (f"   {x_fresh / inc['crossover'] - 1:+.1%}" if inc else ""))
+    print()
+    print(f"  fresh against fresh, all four points (THE one to quote)  "
+          f"S ~ {x_fresh:>9,.0f}")
+    # How much of that is the data and how much is the fit?  Drop each point in
+    # turn and refit the remainder; the spread is the honest precision.
+    jack = []
+    for drop in ss:
+        keep = [s for s in ss if s != drop]
+        qj, fj = lstsq([[float(s) for s in keep], [1.0] * len(keep)],
+                       [rest[s] for s in keep])
+        jack.append((drop, cross_of(BAND_SC, BAND_S + BAND_C - qj, -fj)))
+    lo, hi = min(x for _, x in jack), max(x for _, x in jack)
+    print(f"  leave-one-out on the remainder: "
+          + ", ".join(f"-{d}: {x:,.0f}" for d, x in jack))
+    print(f"  spread {lo:,.0f} - {hi:,.0f}, i.e. +/-{(hi - lo) / 2 / x_fresh:.2%} -- "
+          f"two significant figures are earned.")
 
     # -- E11
     e11 = {}
@@ -508,6 +618,8 @@ def report():
                   measured={str(s): rest[s] for s in ss}),
         crossover=dict(incumbent=inc["crossover"] if inc else None,
                        structural_base=x_str, structural_fresh=x_fresh),
+        rest_base=dict(fixed=fb, per_token=qb), secants=secants,
+        pair_crossovers=pair_x, crossover_jackknife=jack,
         incumbent=inc, e11=e11,
         geometry={str(s): dict(exact=tiles_exactly(s), leads=leads(s, s)) for s in SS})
     OUT.mkdir(exist_ok=True)
