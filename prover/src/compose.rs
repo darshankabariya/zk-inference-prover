@@ -122,7 +122,10 @@ pub struct MatParams {
     pub tokens: usize,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+/// `Default` is here for `bounds`'s pair-check tests, which need a statement
+/// that is well-formed for the chain check and for nothing else; no prover path
+/// builds a `Params` this way.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Params {
     pub s: usize,
     pub c: usize,
@@ -718,14 +721,16 @@ impl Plan {
                 "`--gkr-walks` extends the bands' GKR arm; it needs `--gkr-bands`");
         assert!(!p.gkr_attnout || p.gkr_bands,
                 "`--gkr-attnout` extends the bands' GKR arm; it needs `--gkr-bands`");
-        // Stream AA: the bands' GKR arm still gates the per-token region on
-        // `plan.corner` in two places of its own (`gkrband.rs`, `gkrlink.rs`),
-        // which is the pairing `--kv-bind` generalises.  Composing the two is a
-        // follow-on and not a hazard to leave silent, so it is a loud
-        // configuration error until that arm learns `rows_band`.
-        assert!(!(p.kv_bind && p.gkr_bands),
-                "`--kv-bind` and `--gkr-bands` do not compose yet: the GKR arm still pairs \
-                 bands by `corner`");
+        // Stream AA left `--kv-bind` and `--gkr-bands` asserted apart, because
+        // the bands' GKR arm gated the per-token region on `plan.corner` in two
+        // places of its own while the composed path had already moved to
+        // `plan.rows_band`.  What pairing by `corner` assumed is "every band
+        // that is not the corner carries the group's per-token region", and
+        // design A breaks exactly that: a group is now `c/s` prefix sub-bands
+        // plus a corner, and the region lives on the *first* sub-band only.
+        // Both derivations now read `plan.rows_band[b]`, which is `!corner[b]`
+        // whenever the flag is off, so the two flags compose and the arm's
+        // flag-off digests do not move.  See `briefs/aa-kvbind.md`, item 4.
         let lays: Vec<Layouts> = shapes.iter().map(|sh| Layouts::choose(sh, &cfg)).collect();
 
         let mut widths = vec![p.k_bits, p.q_bits, 8, p.z_lo_bits, p.z_hi_bits, p.ao_rem_bits];

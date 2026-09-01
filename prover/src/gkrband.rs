@@ -1913,9 +1913,16 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
         out.push(Site { reg: crate::gkrlink::Reg::Band(b), which: 1,
                         log_rows: lk.g.log_rows, unit });
 
-        // ---- the per-token region: four denominator limbs per token. A corner
-        // band has none -- the pair lives on its prefix band.
-        if !*corner {
+        // ---- the per-token region: four denominator limbs per token. There is
+        // one per head band *group* -- one row maximum and one denominator per
+        // token, not per key block -- so it lives on the group's first band and
+        // every other band of the group rides on it. With `--kv-bind` off that
+        // is `!corner`, which is what this read used to say; with it on, a
+        // group is `c/s` prefix sub-bands plus a corner and only the first
+        // sub-band carries the region. `plan.rows_band` is the plan's own
+        // answer and `attn_trace::interaction_phase`'s `with_rows` argument is
+        // fed from it, so this is the derivation the collector actually saw.
+        if plan.rows_band[b] {
             out.push(Site {
                 reg: crate::gkrlink::Reg::Band(b),
                 which: 3,
