@@ -547,8 +547,19 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     // B11 stream M: and the corner override above is now that function's twin,
     // `devwfill::band_fill_mode`, because `devpre::fills_dev` has to reach the
     // same answer before any fill has run.
-    debug_assert_eq!(with_rows, !a.corner, "with_rows is the band's `!corner`");
-    let m4d = crate::devwfill::band_fill_mode(a);
+    // Stream AA: `with_rows` used to *be* `!a.corner`, because the only band
+    // that rode on another's per-token region was the causal corner.  With
+    // `--kv-bind` the declared prefix is tiled into sub-bands of `S` keys and
+    // the group's one region lives on its first sub-band, so a band with
+    // `corner == false` and `with_rows == false` is now a legal and ordinary
+    // thing.  The implication that survives is the one that matters here, and
+    // it is asserted instead: a corner never carries the region.
+    debug_assert!(!(a.corner && with_rows), "a corner band cannot carry the per-token region");
+    // ... and the device fill still has no notion of any of this
+    // (`devwfill.rs` mentions neither `with_rows` nor `corner`), so a band that
+    // does not carry the region takes the host path whatever the switch says --
+    // which for a corner band is the answer `band_fill_mode` already gives.
+    let m4d = if with_rows { crate::devwfill::band_fill_mode(a) } else { 0 };
     if m4d == 1 {
         // B7a milestone 4 (section 3 row 1): with the tables' columns on the
         // device the exp counter has no host reader left, so it stays there --

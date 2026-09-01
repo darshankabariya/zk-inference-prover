@@ -1,0 +1,65 @@
+08:36:02 sweep: 512
+08:36:02 point s512 S=C=512 
+08:36:27 point s512 rc=101 rss=22369816 KiB
+08:36:27 sweep done
+08:38:57 sweep: 512
+08:38:57 point s512 S=C=512 
+08:40:21 point s512 rc=0 rss=100914008 KiB
+08:40:21 sweep done
+08:41:26 sweep: 256 512 1024 1536 2048
+08:41:26 point s256 S=C=256 
+08:42:43 point s256 rc=0 rss=95164936 KiB
+08:42:43 point s512 S=C=512 
+08:44:08 point s512 rc=0 rss=98339984 KiB
+08:44:08 point s1024 S=C=1024 
+08:45:49 point s1024 rc=0 rss=114204536 KiB
+08:45:49 point s1536 S=C=1536 
+08:46:09 point s1536 rc=101 rss=7442672 KiB
+08:46:09 point s2048 S=C=2048 
+08:48:29 point s2048 rc=0 rss=142427088 KiB
+08:48:29 sweep done
+08:53:06 controls
+08:53:06 control B7_M4_ACC=2 at S=256
+08:54:24 control B7_M4_ACC=2 at S=240
+08:55:43 control B7_M4_ACC=2 B7_M4_ACCMUT=nomask:grid at S=256
+08:57:01 control B7_M4_ACC=2 B7_M4_ACCMUT=nomask:grid at S=240
+08:59:27 sweep: 240 336
+08:59:27 point s240 S=C=240 
+09:00:46 point s240 rc=101 rss=91813948 KiB
+09:00:46 point s336 S=C=336 
+09:00:52 point s336 rc=101 rss=3137256 KiB
+09:00:52 sweep done
+09:02:56 controls
+09:02:56 control B7_M4_ACC=2 at S=256
+09:04:14 control B7_M4_ACC=2 B7_M4_ACCMUT=nomask:grid at S=256
+09:05:31 control B7_M4_PRE=2 at S=256
+09:05:38 control B7_M4_PRE=2 B7_M4_PREMUT=noactive:chan at S=256
+09:05:44 control B7_M4_PRE=2 B7_M4_PREMUT=noactive:key at S=256
+09:05:50 control B7_M4_PRE=2 B7_M4_PREMUT=noident:key at S=256
+09:05:56 controls done
+09:05:56 pinned: 256 512 1024 1536 2048 at --ao-rem-bits 20
+09:05:56 point p256 S=C=256 --ao-rem-bits 20
+09:07:14 point p256 rc=0 rss=93033640 KiB
+09:07:14 point p512 S=C=512 --ao-rem-bits 20
+09:08:40 point p512 rc=0 rss=103352628 KiB
+09:08:40 point p1024 S=C=1024 --ao-rem-bits 20
+09:10:22 point p1024 rc=0 rss=116701196 KiB
+09:10:22 point p1536 S=C=1536 --ao-rem-bits 20
+09:10:43 point p1536 rc=101 rss=7442236 KiB
+09:10:43 point p2048 S=C=2048 --ao-rem-bits 20
+09:13:03 point p2048 rc=0 rss=141669088 KiB
+09:13:03 pinned done
+09:13:31 controls
+09:13:31 control B7_M4_ACC=2 at S=256
+09:14:50 control B7_M4_ACC=2 B7_M4_ACCMUT=nomask:grid at S=256
+09:16:08 control B7_M4_TABDEV=1 B7_M4_PRE=2 at S=256
+09:16:39 control B7_M4_TABDEV=1 B7_M4_PRE=2 B7_M4_PREMUT=noactive:chan at S=256
+09:17:09 control B7_M4_TABDEV=1 B7_M4_PRE=2 B7_M4_PREMUT=noactive:key at S=256
+09:17:40 control B7_M4_TABDEV=1 B7_M4_PRE=2 B7_M4_PREMUT=noident:key at S=256
+09:18:11 controls done
+09:18:39 edge: 3072 4096
+09:18:39 point e3072 S=C=3072 
+09:19:22 point e3072 rc=101 rss=19272764 KiB
+09:19:22 point e4096 S=C=4096 
+09:22:19 point e4096 rc=137 rss=156820092 KiB
+09:22:19 edge done

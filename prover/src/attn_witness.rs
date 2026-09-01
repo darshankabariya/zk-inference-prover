@@ -232,6 +232,10 @@ pub struct Src {
     /// B10 step 3: build the band as the causal corner (`C == S`, key `c` is
     /// decoded token `c`) rather than as the prefix rectangle.
     pub corner: bool,
+    /// Stream AA (E11), from `--kv-bind`: load the declared prefix as `C / S`
+    /// bands of `S` keys each instead of one rectangle of `C`.  Implies
+    /// `corner`.  See `Attn::load_from`'s `key_off`.
+    pub tile: bool,
 }
 
 pub struct Attn {
@@ -401,7 +405,7 @@ impl Attn {
                 log_table: u32, master: Option<f64>, corner: bool) -> Result<Self, String> {
         let man: serde_json::Value = witread::read_json(&format!("{dir}/manifest.json"))?;
         let raw = LayerRaw::read(dir, &man, !corner, corner)?;
-        Self::load_from(&raw, &man, head, sh, variant, nmax, log_table, master, corner)
+        Self::load_from(&raw, &man, head, sh, variant, nmax, log_table, master, corner, 0)
     }
 
     /// The same band, out of a layer image its caller already holds.
@@ -412,10 +416,17 @@ impl Attn {
     /// probe path, by reading an image of exactly one band's worth.  Neither
     /// path changed a value: the gathers below are the gathers that were here,
     /// over arrays with the same contents.
+    ///
+    /// Stream AA (E11): `key_off` is where this band's keys start inside the
+    /// dump's context.  Zero everywhere before this stream and on every corner
+    /// band; with `--kv-bind` the declared prefix is loaded as `C / S` bands of
+    /// `S` keys each and `key_off` is `k * S`.  It is a window into the same
+    /// bytes -- no format change, no re-extraction, and the derived values are
+    /// recomputed from the window exactly as they always were from the whole.
     #[allow(clippy::too_many_arguments)]
     pub fn load_from(raw: &LayerRaw, man: &serde_json::Value, head: usize, sh: Shape,
                      variant: Variant, nmax: u32, log_table: u32, master: Option<f64>,
-                     corner: bool) -> Result<Self, String> {
+                     corner: bool, key_off: usize) -> Result<Self, String> {
         let g = |k: &str| man[k].as_u64().ok_or(format!("manifest: missing {k}"));
         let (nh, s0, c0, hd0) = (g("heads")? as usize, g("s")? as usize,
                                  g("c")? as usize, g("hd")? as usize);
@@ -469,18 +480,27 @@ impl Attn {
                 qq16[hh(inst) * s0 * hd0 + (rest / hd0 % s0) * hd0 + rest % hd0] as i32
             })
             .collect();
+        // stream AA: `+ key_off` before the `% c0`, so a tiled band reads its
+        // own window of the dump's context and an untiled one (`key_off == 0`)
+        // reads exactly the bytes it read before
+        if key_off + sh.c > c0 && key_off > 0 {
+            return Err(format!("key window {key_off}..{} runs past the dump's C={c0}",
+                               key_off + sh.c));
+        }
         let kk = (0..sh.insts * sh.c * sh.hd)
             .into_par_iter()
             .map(|i| {
                 let (inst, rest) = (i / (sh.c * sh.hd), i % (sh.c * sh.hd));
-                kk16[hh(inst) * c0 * hd0 + (rest / hd0 % c0) * hd0 + rest % hd0] as i32
+                let c = (rest / hd0 % sh.c + key_off) % c0;
+                kk16[hh(inst) * c0 * hd0 + c * hd0 + rest % hd0] as i32
             })
             .collect();
         let vv = (0..sh.insts * sh.c * sh.hd)
             .into_par_iter()
             .map(|i| {
                 let (inst, rest) = (i / (sh.c * sh.hd), i % (sh.c * sh.hd));
-                vv8[hh(inst) * c0 * hd0 + (rest / hd0 % c0) * hd0 + rest % hd0] as i8 as i32
+                let c = (rest / hd0 % sh.c + key_off) % c0;
+                vv8[hh(inst) * c0 * hd0 + c * hd0 + rest % hd0] as i8 as i32
             })
             .collect();
         drop(gather);
@@ -493,7 +513,7 @@ impl Attn {
                 .into_par_iter()
                 .map(|i| {
                     let (inst, rest) = (i / (sh.s * sh.c), i % (sh.s * sh.c));
-                    num32[hh(inst) * s0 * c0 + (rest / sh.c) * c0 + rest % sh.c] as i64
+                    num32[hh(inst) * s0 * c0 + (rest / sh.c) * c0 + rest % sh.c + key_off] as i64
                 })
                 .collect::<Vec<i64>>()
         });
@@ -579,6 +599,39 @@ impl Attn {
         let a = Self::synthetic(sh, variant, cfg.q_bits, cfg.k_bits, cfg.nmax, cfg.log_table,
                                 cfg.seed);
         if cfg.corner { a.into_corner() } else { a }
+    }
+
+    /// Stream AA (E11): this band restricted to the key window `[c0, c0 + len)`.
+    ///
+    /// The window's derived values -- the scores, the shift, the numerators, the
+    /// denominator, the A.V output -- are *recomputed from the window* by the
+    /// same `build` the whole band came out of, against the parent's row
+    /// maximum.  That is the same construction the causal corner already uses
+    /// (`mm_in`), and it is what makes a partial band's `zz` the partial sum the
+    /// group's total is assembled from.
+    ///
+    /// It exists so a synthetic layer can be tiled without a second generator.
+    /// A real dump does not come through here: `Attn::load_from` reads its own
+    /// window straight out of the layer image, which is one gather rather than a
+    /// gather and a slice.
+    pub fn key_slice(&self, c0: usize, len: usize) -> Self {
+        let sh = self.shape;
+        assert!(!self.corner, "the causal corner is not a prefix window");
+        assert!(c0 + len <= sh.c, "key window {c0}..{} runs past C={}", c0 + len, sh.c);
+        let out = Shape { c: len, ..sh };
+        let gather = |src: &[i32]| -> Vec<i32> {
+            (0..sh.insts * len * sh.hd)
+                .map(|i| {
+                    let (inst, rest) = (i / (len * sh.hd), i % (len * sh.hd));
+                    src[(inst * sh.c + c0 + rest / sh.hd) * sh.hd + rest % sh.hd]
+                })
+                .collect()
+        };
+        Self::build(out, self.variant, self.qq.clone(), gather(&self.kk), gather(&self.vv),
+                    None, self.q_bits, self.k_bits, self.nmax, self.log_table,
+                    Some(self.frac_per_inst.clone()), Some(self.frac),
+                    format!("{} [keys {c0}..{}]", self.source, c0 + len),
+                    None, false, Some(self.mm.clone()))
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -256,6 +256,13 @@ pub struct ChanEval {
     /// GKR instead of committed running-sum columns, so the AIR emits neither
     /// the relation entries nor the interaction masks they would allocate.
     pub gkr: bool,
+    /// Stream AA: the K/V boundary trees this band's committed **keys** are
+    /// copied into -- 0, 1 or 2 of them (a declared-prefix sub-band writes both
+    /// its group's out and in sides; the chunk's own block writes the out side
+    /// alone).  Empty on a chunk proved with `--kv-bind` off, which is why that
+    /// chunk's constraint IR, its kernel fingerprint and its proof are
+    /// byte-for-byte the old ones.
+    pub bound_k: Vec<crate::bounds::KvBound>,
 }
 
 impl FrameworkEval for ChanEval {
@@ -281,6 +288,23 @@ impl FrameworkEval for ChanEval {
         let (nofirst, last, notzero, end, istart) =
             (sel[0].clone(), sel[1].clone(), sel[2].clone(), sel[3].clone(), sel[4].clone());
         let ks: Vec<E::F> = (0..self.lay.pk).map(|_| eval.next_trace_mask()).collect();
+        // ---- the K half of the K/V boundary (stream AA) ----------------------
+        // The exact analogue of the glue boundary at `glue.rs`'s `leaf_in`, and
+        // simpler: a key is a single integer, so there is no `PACK` and the
+        // constraint is a bare equality, one cell per value.  Being an equality
+        // and not a lookup is what lets these trees be committed *after* the
+        // interaction tree -- it is checked at the OODS point, drawn after every
+        // commitment, so a prover who knows the earlier challenges has gained
+        // nothing, and `INTERACTION_TRACE_IDX = 2` stays where the vendored
+        // framework and every generated kernel expect it.  See
+        // `notes/bounds-design.md` and `bounds.rs`'s stream AA section.
+        for b in &self.bound_k {
+            assert_eq!(b.n, self.lay.pk, "a K boundary side's width is not the band's `pk`");
+            for kp in ks.iter() {
+                let [c] = eval.next_interaction_mask(b.tree, [0]);
+                eval.add_constraint(c - kp.clone());
+            }
+        }
         let qs: Vec<E::F> = (0..self.lay.pq).map(|_| eval.next_trace_mask()).collect();
 
         let [u_prev, u] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
@@ -354,6 +378,11 @@ pub struct KeyEval {
     /// fold and the exp lookup, which is what "the token did not attend to it"
     /// means in the AIR.
     pub corner: bool,
+    /// Stream AA: the K/V boundary trees this band's committed **values** are
+    /// copied into -- the V half of `ChanEval::bound_k`, same sides, same
+    /// order, so that one tree holds `[band's K][band's V]` per band in
+    /// component-registration order.
+    pub bound_v: Vec<crate::bounds::KvBound>,
 }
 
 impl FrameworkEval for KeyEval {
@@ -398,6 +427,18 @@ impl FrameworkEval for KeyEval {
         let num: Vec<E::F> = (0..q).map(|_| eval.next_trace_mask()).collect();
         let aux: Vec<E::F> = (0..self.n_aux()).map(|_| eval.next_trace_mask()).collect();
         let vals: Vec<E::F> = (0..self.lay.pv).map(|_| eval.next_trace_mask()).collect();
+        // ---- the V half of the K/V boundary (stream AA) ----------------------
+        // `ChanEval`'s block, on the other geometry: the key region has one row
+        // group per `(instance, key)` and holds head channels on the column
+        // axis, so a V column is `lay.pv` wide where a K column is `lay.pk`.
+        // Nothing else differs -- same trees, same order, same bare equality.
+        for b in &self.bound_v {
+            assert_eq!(b.n, self.lay.pv, "a V boundary side's width is not the band's `pv`");
+            for vp in vals.iter() {
+                let [c] = eval.next_interaction_mask(b.tree, [0]);
+                eval.add_constraint(c - vp.clone());
+            }
+        }
 
         let [zs_prev, zs] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
         let [hs_prev, hs] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
