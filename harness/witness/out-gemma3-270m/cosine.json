@@ -1,0 +1,68 @@
+{
+ "static": {
+  "spec": {
+   "linear": "static",
+   "nonlinear": "bf16",
+   "reduce": "fp32",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    8,
+    8
+   ],
+   "int_softmax": false,
+   "num_bits": 8,
+   "pow2_scales": "",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "token",
+   "dequant": "fp32",
+   "dequant_round": "even",
+   "attn_out_int8": false,
+   "attn_out_pow2": false,
+   "pow2_matmuls": [],
+   "attn_out_bits": 8,
+   "delay_matmuls": []
+  },
+  "cosine_mean": 0.897336664797001,
+  "cosine_se": 0.0006516568022910908,
+  "cosine_min": -0.46629542112350464,
+  "tokens": 20480,
+  "chunks": 40,
+  "seconds": 217.8
+ },
+ "b10-final": {
+  "spec": {
+   "linear": "dynamic",
+   "nonlinear": "bf16",
+   "reduce": "bf16-norm",
+   "qk_int8": false,
+   "fp32_logits": false,
+   "fp32_matmuls": [],
+   "qk_bits": [
+    12,
+    11
+   ],
+   "int_softmax": true,
+   "num_bits": 9,
+   "pow2_scales": "attn",
+   "attn_scale_mode": "static",
+   "q_scale_mode": "head",
+   "dequant": "bf16-chain",
+   "dequant_round": "even",
+   "attn_out_int8": true,
+   "attn_out_pow2": true,
+   "pow2_matmuls": [
+    "lm_head"
+   ],
+   "attn_out_bits": 8,
+   "delay_matmuls": []
+  },
+  "cosine_mean": 0.9835535816790071,
+  "cosine_se": 0.0001661833694108027,
+  "cosine_min": -0.17473822832107544,
+  "tokens": 20480,
+  "chunks": 40,
+  "seconds": 224.6
+ }
+}
