@@ -68,9 +68,13 @@ SLIM = False
 # `AttnWitness::torch_mismatch` and feeds no constraint (`attn_witness.rs:111,
 # 851-853`; `attn_run.rs:104` reports it).  `--slim-num` hashes it into the
 # manifest and does not write it, exactly as `--slim` does for the derived
-# columns.  It is OFF by default and it needs a prover that reads the file as
-# optional: today `Half::read` opens it unconditionally, so a `--slim-num` dump
-# does not load.  See `briefs/dd-extract.md`'s Record for the policy call.
+# columns.  It is OFF by default.  It needed a prover that reads the file as
+# optional, and since `bda8ecc` (2026-09-01) it has one: `Half::read` takes a
+# `slim_num` flag and `num32` is an `Option`, keyed off the manifest's
+# `slim_num`.  A dump that does not declare it and is missing the file is still
+# an error.  See `briefs/dd-extract.md`'s Record for the policy call.  (This
+# comment used to say the loader opened it unconditionally; that outdated line
+# is what put open item 11 in the queue after the fix had already landed.)
 NUMFILES = ("num.i32", "numc.i32")
 SLIM_NUM = False
 # Stream DD: the first disk lever.  These files are a function of the *layer*
