@@ -1,0 +1,899 @@
+{
+  "bench": "compose",
+  "env": {
+    "arch": "x86_64",
+    "mem_total_bytes": 2163978895360,
+    "os": "linux",
+    "simd_n_lanes": 16,
+    "threads": 16
+  },
+  "modes": {
+    "M4_ACC": {
+      "source": "default",
+      "value": 0
+    },
+    "M4_FILL": {
+      "source": "default",
+      "value": 0
+    },
+    "M4_GFILL": {
+      "source": "default",
+      "value": 0
+    },
+    "M4_GTIE": {
+      "source": "default",
+      "value": 0
+    },
+    "M4_LOGUPIR": {
+      "source": "default",
+      "value": 0
+    },
+    "M4_NOCLONE": {
+      "source": "default",
+      "value": 1
+    },
+    "M4_PAREVAL": {
+      "source": "default",
+      "value": 1
+    },
+    "M4_POOL": {
+      "source": "default",
+      "value": 0
+    },
+    "M4_PRE": {
+      "source": "default",
+      "value": 0
+    },
+    "M4_REFBAD": {
+      "source": "default",
+      "value": 1
+    },
+    "M4_SCAN": {
+      "source": "default",
+      "value": 1
+    },
+    "M4_TABDEV": {
+      "source": "default",
+      "value": 0
+    },
+    "M4_WFILL": {
+      "source": "default",
+      "value": 0
+    },
+    "M4_WFILL_BAND": {
+      "source": "default",
+      "value": 0
+    },
+    "M4_WFILL_CORNER": {
+      "source": "default",
+      "value": 0
+    },
+    "M5_IRCACHE": {
+      "source": "default",
+      "value": 0
+    },
+    "M5_PIPE": {
+      "source": "default",
+      "value": 0
+    },
+    "M5_PRECACHE": {
+      "source": "default",
+      "value": 0
+    }
+  },
+  "result": {
+    "point": {
+      "accepts": true,
+      "blob": {
+        "cache_hits": 0,
+        "lower_secs": 0.0,
+        "lowerings": 0
+      },
+      "bound_roots": {
+        "in": null,
+        "out": null
+      },
+      "bounds": null,
+      "cells": {
+        "base": 820877760,
+        "fresh": 1810776256,
+        "interaction": 989898496,
+        "preprocessed": 537145920
+      },
+      "columns": {
+        "base": 2901,
+        "interaction": 3912,
+        "preprocessed": 1269,
+        "total": 8082
+      },
+      "family_cells": {
+        "affinity": [],
+        "attnout": 25427968,
+        "attnout_stats": {
+          "clamp_edge_count": 0,
+          "lead_rows": 0,
+          "log_rows": 18,
+          "n": 4194304,
+          "per_row": 16,
+          "q_bits": 7,
+          "rem_bits": 20
+        },
+        "band_leads": [
+          {
+            "chan": 0,
+            "key": 0,
+            "out": 0
+          },
+          {
+            "chan": 0,
+            "key": 0,
+            "out": 0
+          },
+          {
+            "chan": 0,
+            "key": 0,
+            "out": 0
+          }
+        ],
+        "bands": 79822848,
+        "dequant": 613548032,
+        "gkr": null,
+        "glue": 0,
+        "glue_regions": [],
+        "glue_vs_b1": null,
+        "head_key_vs_b1": null,
+        "interaction": 989898496,
+        "interaction_by_family": {
+          "attnout": {
+            "cells": 28311552,
+            "columns": 108
+          },
+          "bands": {
+            "cells": 105529344,
+            "columns": 2484
+          },
+          "dequant": {
+            "cells": 489684992,
+            "columns": 968
+          },
+          "table": {
+            "cells": 277243648,
+            "columns": 44
+          },
+          "walk": {
+            "cells": 89128960,
+            "columns": 308
+          }
+        },
+        "interaction_split": [
+          {
+            "cells": 52764672,
+            "columns": 828,
+            "region": "band0"
+          },
+          {
+            "cells": 26382336,
+            "columns": 828,
+            "region": "band1"
+          },
+          {
+            "cells": 26382336,
+            "columns": 828,
+            "region": "band2"
+          },
+          {
+            "cells": 28311552,
+            "columns": 108,
+            "region": "attnout"
+          },
+          {
+            "cells": 27262976,
+            "columns": 104,
+            "region": "dequant/q"
+          },
+          {
+            "cells": 6815744,
+            "columns": 104,
+            "region": "dequant/k"
+          },
+          {
+            "cells": 6815744,
+            "columns": 104,
+            "region": "dequant/v"
+          },
+          {
+            "cells": 27262976,
+            "columns": 104,
+            "region": "dequant/o"
+          },
+          {
+            "cells": 184549376,
+            "columns": 176,
+            "region": "dequant/gate"
+          },
+          {
+            "cells": 184549376,
+            "columns": 176,
+            "region": "dequant/up"
+          },
+          {
+            "cells": 52428800,
+            "columns": 200,
+            "region": "dequant/down"
+          },
+          {
+            "cells": 13107200,
+            "columns": 100,
+            "region": "walk/qkv"
+          },
+          {
+            "cells": 11010048,
+            "columns": 84,
+            "region": "walk/o"
+          },
+          {
+            "cells": 20971520,
+            "columns": 40,
+            "region": "walk/gateup"
+          },
+          {
+            "cells": 44040192,
+            "columns": 84,
+            "region": "walk/down"
+          },
+          {
+            "cells": 268435456,
+            "columns": 4,
+            "region": "table/exp"
+          },
+          {
+            "cells": 65536,
+            "columns": 4,
+            "region": "table/norm"
+          },
+          {
+            "cells": 4194304,
+            "columns": 4,
+            "region": "table/frac"
+          },
+          {
+            "cells": 65536,
+            "columns": 4,
+            "region": "table/mul"
+          },
+          {
+            "cells": 512,
+            "columns": 4,
+            "region": "table/qnz"
+          },
+          {
+            "cells": 256,
+            "columns": 4,
+            "region": "table/range6"
+          },
+          {
+            "cells": 1024,
+            "columns": 4,
+            "region": "table/range8"
+          },
+          {
+            "cells": 8192,
+            "columns": 4,
+            "region": "table/range11"
+          },
+          {
+            "cells": 16384,
+            "columns": 4,
+            "region": "table/range12"
+          },
+          {
+            "cells": 262144,
+            "columns": 4,
+            "region": "table/range16"
+          },
+          {
+            "cells": 4194304,
+            "columns": 4,
+            "region": "table/range20"
+          }
+        ],
+        "link_heights": [
+          9,
+          10,
+          13,
+          14,
+          17,
+          18
+        ],
+        "mats": [
+          {
+            "cells": 42205184,
+            "kmax_blind": 17,
+            "kmax_needed": 12,
+            "lead": 0,
+            "log_rows": 18,
+            "n": 4194304,
+            "name": "q",
+            "per_row": 16,
+            "variant": "pow2"
+          },
+          {
+            "cells": 10551296,
+            "kmax_blind": 17,
+            "kmax_needed": 12,
+            "lead": 0,
+            "log_rows": 16,
+            "n": 1048576,
+            "name": "k",
+            "per_row": 16,
+            "variant": "pow2"
+          },
+          {
+            "cells": 10551296,
+            "kmax_blind": 17,
+            "kmax_needed": 12,
+            "lead": 0,
+            "log_rows": 16,
+            "n": 1048576,
+            "name": "v",
+            "per_row": 16,
+            "variant": "pow2"
+          },
+          {
+            "cells": 42205184,
+            "kmax_blind": 17,
+            "kmax_needed": 12,
+            "lead": 0,
+            "log_rows": 18,
+            "n": 4194304,
+            "name": "o",
+            "per_row": 16,
+            "variant": "pow2"
+          },
+          {
+            "cells": 222298112,
+            "kmax_blind": 17,
+            "kmax_needed": 13,
+            "lead": 0,
+            "log_rows": 20,
+            "n": 14680064,
+            "name": "gate",
+            "per_row": 14,
+            "variant": "chain"
+          },
+          {
+            "cells": 222298112,
+            "kmax_blind": 17,
+            "kmax_needed": 12,
+            "lead": 0,
+            "log_rows": 20,
+            "n": 14680064,
+            "name": "up",
+            "per_row": 14,
+            "variant": "chain"
+          },
+          {
+            "cells": 63438848,
+            "kmax_blind": 19,
+            "kmax_needed": 13,
+            "lead": 0,
+            "log_rows": 18,
+            "n": 4194304,
+            "name": "down",
+            "per_row": 16,
+            "variant": "chain"
+          }
+        ],
+        "preprocessed": 537145920,
+        "tables": [
+          {
+            "key_cols": 2,
+            "log_rows": 26,
+            "looks": 1,
+            "region": "table/exp"
+          },
+          {
+            "key_cols": 6,
+            "log_rows": 14,
+            "looks": 1,
+            "region": "table/norm"
+          },
+          {
+            "key_cols": 3,
+            "log_rows": 20,
+            "looks": 1,
+            "region": "table/frac"
+          },
+          {
+            "key_cols": 4,
+            "log_rows": 14,
+            "looks": 1,
+            "region": "table/mul"
+          },
+          {
+            "key_cols": 2,
+            "log_rows": 7,
+            "looks": 1,
+            "region": "table/qnz"
+          },
+          {
+            "key_cols": 1,
+            "log_rows": 6,
+            "looks": 1,
+            "region": "table/range6"
+          },
+          {
+            "key_cols": 1,
+            "log_rows": 8,
+            "looks": 1,
+            "region": "table/range8"
+          },
+          {
+            "key_cols": 1,
+            "log_rows": 11,
+            "looks": 1,
+            "region": "table/range11"
+          },
+          {
+            "key_cols": 1,
+            "log_rows": 12,
+            "looks": 1,
+            "region": "table/range12"
+          },
+          {
+            "key_cols": 1,
+            "log_rows": 16,
+            "looks": 1,
+            "region": "table/range16"
+          },
+          {
+            "key_cols": 1,
+            "log_rows": 20,
+            "looks": 1,
+            "region": "table/range20"
+          }
+        ],
+        "walk_weights": [
+          {
+            "group": "qkv",
+            "lead": 8192,
+            "log_rows": 17,
+            "pk": 137,
+            "pq": 35,
+            "pre_cells": 54394880,
+            "weights": 25165824
+          },
+          {
+            "group": "o",
+            "lead": 8192,
+            "log_rows": 17,
+            "pk": 137,
+            "pq": 35,
+            "pre_cells": 18481152,
+            "weights": 16777216
+          },
+          {
+            "group": "gateup",
+            "lead": 90112,
+            "log_rows": 19,
+            "pk": 136,
+            "pq": 10,
+            "pre_cells": 144703488,
+            "weights": 117440512
+          },
+          {
+            "group": "down",
+            "lead": 94208,
+            "log_rows": 19,
+            "pk": 137,
+            "pq": 35,
+            "pre_cells": 73924608,
+            "weights": 58720256
+          }
+        ],
+        "walks": 32768000
+      },
+      "glue_ties_ok": true,
+      "host_bytes": {},
+      "host_phases": {
+        "evalof/bitrev": {
+          "calls": 1163,
+          "secs": 0.020411639000000023
+        },
+        "evalof/fused": {
+          "calls": 3382,
+          "secs": 1.5423978640000013
+        },
+        "evalof/pack": {
+          "calls": 1163,
+          "secs": 0.012062696000000012
+        },
+        "gen/argmax": {
+          "calls": 1,
+          "secs": 1.66e-7
+        },
+        "gen/attnout": {
+          "calls": 1,
+          "secs": 0.306274328
+        },
+        "gen/bands": {
+          "calls": 1,
+          "secs": 1.9795144009999999
+        },
+        "gen/dequant": {
+          "calls": 1,
+          "secs": 2.669926126
+        },
+        "gen/glue": {
+          "calls": 1,
+          "secs": 2.6e-7
+        },
+        "gen/pre_bands": {
+          "calls": 1,
+          "secs": 1.054e-6
+        },
+        "gen/refs": {
+          "calls": 1,
+          "secs": 0.000076372
+        },
+        "gen/tables": {
+          "calls": 1,
+          "secs": 0.69615328
+        },
+        "gen/tables_up": {
+          "calls": 1,
+          "secs": 6.996e-6
+        },
+        "gen/walks": {
+          "calls": 1,
+          "secs": 3.413569493
+        },
+        "int/air": {
+          "calls": 1,
+          "secs": 0.005424158
+        },
+        "int/argmax": {
+          "calls": 1,
+          "secs": 2.82e-7
+        },
+        "int/attnout": {
+          "calls": 1,
+          "secs": 0.079789076
+        },
+        "int/bands": {
+          "calls": 1,
+          "secs": 0.568073528
+        },
+        "int/bands_build": {
+          "calls": 3,
+          "secs": 0.567754965
+        },
+        "int/deq_carry": {
+          "calls": 7,
+          "secs": 0.028069348999999997
+        },
+        "int/deq_cols": {
+          "calls": 7,
+          "secs": 0.027872841
+        },
+        "int/deq_inner": {
+          "calls": 7,
+          "secs": 0.063090559
+        },
+        "int/deq_logup": {
+          "calls": 7,
+          "secs": 1.0936735
+        },
+        "int/dequant": {
+          "calls": 1,
+          "secs": 1.212936291
+        },
+        "int/glue": {
+          "calls": 1,
+          "secs": 0.000013801
+        },
+        "int/tables": {
+          "calls": 1,
+          "secs": 1.118182015
+        },
+        "int/walks": {
+          "calls": 1,
+          "secs": 0.666908894
+        },
+        "int/walks_build": {
+          "calls": 4,
+          "secs": 0.666786409
+        },
+        "wall/build_components": {
+          "calls": 1,
+          "secs": 0.003470534
+        },
+        "wall/commit_base": {
+          "calls": 1,
+          "secs": 10.667050977
+        },
+        "wall/commit_bounds": {
+          "calls": 1,
+          "secs": 5.34e-7
+        },
+        "wall/commit_inter": {
+          "calls": 1,
+          "secs": 8.928995749
+        },
+        "wall/commit_pre": {
+          "calls": 1,
+          "secs": 8.893770725
+        },
+        "wall/cuda_init": {
+          "calls": 2,
+          "secs": 7.9e-8
+        },
+        "wall/prove_raw": {
+          "calls": 1,
+          "secs": 43.424614626
+        },
+        "wall/ser_proof": {
+          "calls": 1,
+          "secs": 0.027875911
+        },
+        "wall/ser_statement": {
+          "calls": 1,
+          "secs": 0.000110318
+        },
+        "wall/session_new": {
+          "calls": 1,
+          "secs": 5.271e-6
+        },
+        "wall/twiddles": {
+          "calls": 1,
+          "secs": 0.924564813
+        }
+      },
+      "interaction_secs": 3.645909633,
+      "off_table": 0,
+      "params": {
+        "ao_q_bits": 7,
+        "ao_rem_bits": 20,
+        "ao_target": 16,
+        "bands": [
+          16,
+          8,
+          8
+        ],
+        "c": 1024,
+        "chan_target": 128,
+        "corner": false,
+        "deq_target": 16,
+        "gkr_attnout": false,
+        "gkr_glue": false,
+        "gkr_walks": false,
+        "glue": null,
+        "grid_target": 64,
+        "hd": 128,
+        "k_bits": 11,
+        "kmax": 19,
+        "log_table": 26,
+        "mats": [
+          {
+            "n_in": 4096,
+            "n_out": 4096,
+            "name": "q",
+            "tokens": 1024,
+            "variant": "pow2"
+          },
+          {
+            "n_in": 4096,
+            "n_out": 1024,
+            "name": "k",
+            "tokens": 1024,
+            "variant": "pow2"
+          },
+          {
+            "n_in": 4096,
+            "n_out": 1024,
+            "name": "v",
+            "tokens": 1024,
+            "variant": "pow2"
+          },
+          {
+            "n_in": 4096,
+            "n_out": 4096,
+            "name": "o",
+            "tokens": 1024,
+            "variant": "pow2"
+          },
+          {
+            "n_in": 4096,
+            "n_out": 14336,
+            "name": "gate",
+            "tokens": 1024,
+            "variant": "chain"
+          },
+          {
+            "n_in": 4096,
+            "n_out": 14336,
+            "name": "up",
+            "tokens": 1024,
+            "variant": "chain"
+          },
+          {
+            "n_in": 14336,
+            "n_out": 4096,
+            "name": "down",
+            "tokens": 1024,
+            "variant": "chain"
+          }
+        ],
+        "nh": 32,
+        "nmax": 255,
+        "q_bits": 12,
+        "round": "even",
+        "rw": 16,
+        "s": 1024,
+        "variant": "intexp",
+        "walk_p": 136,
+        "z_hi_bits": 6,
+        "z_lo_bits": 16,
+        "z_min": 255
+      },
+      "peak_rss_bytes": 119502024704,
+      "phases": {
+        "commit_plus_fri_frac": 0.7772865479048083,
+        "commit_secs": 32.35035337,
+        "detail": {
+          "constraint_eval_cpu_autofallback": {
+            "calls": 0,
+            "secs": 0.0
+          },
+          "constraint_eval_cpu_fallback": {
+            "calls": 0,
+            "secs": 0.0
+          },
+          "constraint_eval_denom_inv": {
+            "calls": 0,
+            "secs": 0.0
+          },
+          "constraint_eval_gpu": {
+            "calls": 0,
+            "secs": 0.0
+          },
+          "constraint_eval_polys": {
+            "calls": 0,
+            "secs": 0.0
+          }
+        },
+        "fri_secs": 26.430244806,
+        "phases": {
+          "constraint_eval": {
+            "calls": 32,
+            "secs": 4.237132503
+          },
+          "constraint_extension": {
+            "calls": 0,
+            "secs": 0.0
+          },
+          "fri_commit": {
+            "calls": 1,
+            "secs": 15.45372398
+          },
+          "fri_quotients": {
+            "calls": 1,
+            "secs": 10.976475262
+          },
+          "grind": {
+            "calls": 1,
+            "secs": 0.000045564
+          },
+          "interpolate": {
+            "calls": 3,
+            "secs": 1.462843049
+          },
+          "lde_extend": {
+            "calls": 4,
+            "secs": 4.209434603
+          },
+          "merkle": {
+            "calls": 4,
+            "secs": 26.678075718000002
+          },
+          "oods_eval": {
+            "calls": 1,
+            "secs": 1.001855976
+          },
+          "other": {
+            "calls": 0,
+            "secs": 11.603230096999994
+          }
+        },
+        "prove_call_secs": 43.417664192,
+        "wall_secs": 75.622816752
+      },
+      "pre_root": "370d3a670e50567ada74733432d5e3228cb043774fb6e750cf9fa919cd31f052",
+      "preprocessed_is_widest": true,
+      "proof_bytes": 5796864,
+      "proof_ser_bytes": 15956129,
+      "proof_sha256": "45ef606fa3a04c1634d440ad666acdcf5208f8e8853b66e4edb6301900723d53",
+      "prove_error": null,
+      "prove_secs": 75.622816752,
+      "ref_mismatch": 0,
+      "statement_bytes": {
+        "claims": 3026,
+        "fixed": 24863
+      },
+      "trace_secs": 9.217698799,
+      "upload": {
+        "bytes": 0,
+        "columns": 0,
+        "devcopy_bytes": 0,
+        "devcopy_columns": 0,
+        "devcopy_secs": 0.0,
+        "gb_per_s": 0.0,
+        "mirror_batches": 0,
+        "mirror_bytes": 0,
+        "mirror_secs": 0.0,
+        "pool_enabled": false,
+        "pool_peak_bytes": 0,
+        "secs": 0.0,
+        "witness_bytes": 0,
+        "witness_secs": 0.0,
+        "witness_uploads": 0
+      },
+      "verdict": {
+        "av_ok": true,
+        "bound_in": null,
+        "bound_out": null,
+        "den_link_ok": true,
+        "den_ok": [
+          true,
+          true,
+          true
+        ],
+        "deq_out_ok": [],
+        "error": null,
+        "glue_ok": [],
+        "head_tie_ok": true,
+        "qk_ok": [
+          true,
+          true,
+          true
+        ],
+        "root_ok": true,
+        "sizes_ok": true,
+        "stark_ok": true,
+        "stream_in": null,
+        "stream_out": null,
+        "sums_cancel": true,
+        "verify_secs": 0.089687044,
+        "walk_ok": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      "verify_secs": 0.089687044
+    },
+    "source": "synthetic layer (seed=7)"
+  },
+  "security": {
+    "blowup_factor": 2,
+    "fold_step": 1,
+    "hash": "Blake2s (Blake2sM31MerkleChannel)",
+    "log_blowup_factor": 1,
+    "log_last_layer_degree_bound": 0,
+    "m3": {
+      "device_merkle_reduce": true,
+      "fri_gather": true,
+      "launch_sync": false,
+      "merkle_mode": "1",
+      "prewarm": true,
+      "store_coeffs": true
+    },
+    "n_queries": 100,
+    "pow_bits": 0,
+    "security_bits_conjectured": 100
+  }
+}

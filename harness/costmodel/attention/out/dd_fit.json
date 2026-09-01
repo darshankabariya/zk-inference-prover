@@ -244,7 +244,168 @@
     "path": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-aa3fc3be333e23020/experiments/b9/out/dd_s2048.json"
    }
   },
-  "ddpin": {}
+  "ddpin": {
+   "256": {
+    "s": 256,
+    "c": 256,
+    "accepts": true,
+    "off_table": 0,
+    "fresh": 705204416,
+    "base": 245078464,
+    "inter": 460125952,
+    "pre": 456114240,
+    "bands": 7372800,
+    "dequant": 153387008,
+    "walks": 8650752,
+    "attnout": 6356992,
+    "band_inter": 11440128,
+    "band_leads": [
+     [
+      0,
+      0,
+      0
+     ],
+     [
+      0,
+      0,
+      0
+     ],
+     [
+      0,
+      0,
+      0
+     ]
+    ],
+    "ao_rem_bits": 20,
+    "kmax": 19,
+    "log_table": 26,
+    "peak_rss": 95266447360,
+    "wall": 65.824895639,
+    "prove": 40.409013878,
+    "sha": "3ee4928ab33bba9f4e8d67a0d55e4faa0923d04306ac97fc823f9f3ac6f36b00",
+    "path": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-aa3fc3be333e23020/experiments/b9/out/dd_p256.json"
+   },
+   "512": {
+    "s": 512,
+    "c": 512,
+    "accepts": true,
+    "off_table": 0,
+    "fresh": 1054417088,
+    "base": 428710336,
+    "inter": 625706752,
+    "pre": 482600512,
+    "bands": 23134208,
+    "dequant": 306774016,
+    "walks": 16777216,
+    "attnout": 12713984,
+    "band_inter": 32841728,
+    "band_leads": [
+     [
+      0,
+      0,
+      0
+     ],
+     [
+      0,
+      0,
+      0
+     ],
+     [
+      0,
+      0,
+      0
+     ]
+    ],
+    "ao_rem_bits": 20,
+    "kmax": 19,
+    "log_table": 26,
+    "peak_rss": 105833091072,
+    "wall": 69.484316757,
+    "prove": 41.918744042,
+    "sha": "ba5bcce09f9aa7e1199324b946d116534a31b39186ad10b2bc23a4be3ecd907e",
+    "path": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-aa3fc3be333e23020/experiments/b9/out/dd_p512.json"
+   },
+   "1024": {
+    "s": 1024,
+    "c": 1024,
+    "accepts": true,
+    "off_table": 0,
+    "fresh": 1810776256,
+    "base": 820877760,
+    "inter": 989898496,
+    "pre": 537145920,
+    "bands": 79822848,
+    "dequant": 613548032,
+    "walks": 32768000,
+    "attnout": 25427968,
+    "band_inter": 105529344,
+    "band_leads": [
+     [
+      0,
+      0,
+      0
+     ],
+     [
+      0,
+      0,
+      0
+     ],
+     [
+      0,
+      0,
+      0
+     ]
+    ],
+    "ao_rem_bits": 20,
+    "kmax": 19,
+    "log_table": 26,
+    "peak_rss": 119502024704,
+    "wall": 75.622816752,
+    "prove": 43.417664192,
+    "sha": "45ef606fa3a04c1634d440ad666acdcf5208f8e8853b66e4edb6301900723d53",
+    "path": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-aa3fc3be333e23020/experiments/b9/out/dd_p1024.json"
+   },
+   "2048": {
+    "s": 2048,
+    "c": 2048,
+    "accepts": true,
+    "off_table": 0,
+    "fresh": 3542646976,
+    "base": 1705875904,
+    "inter": 1836771072,
+    "pre": 652528192,
+    "bands": 293863424,
+    "dequant": 1227096064,
+    "walks": 64749568,
+    "attnout": 50855936,
+    "band_inter": 370442240,
+    "band_leads": [
+     [
+      0,
+      0,
+      0
+     ],
+     [
+      0,
+      0,
+      0
+     ],
+     [
+      0,
+      0,
+      0
+     ]
+    ],
+    "ao_rem_bits": 20,
+    "kmax": 19,
+    "log_table": 26,
+    "peak_rss": 145069146112,
+    "wall": 91.917627062,
+    "prove": 49.099144133,
+    "sha": "475e1a9182762e06c67f5cefe359d81314c3e855b243e0af51b4bc944cdef52f",
+    "path": "/home/dev/private/dynamic-int8/.claude/worktrees/agent-aa3fc3be333e23020/experiments/b9/out/dd_p2048.json"
+   }
+  }
  },
  "repro": [
   {
@@ -276,6 +437,55 @@
    "b9_sha": "dc30c5c5d1dee180396f9f95e3d484aa09e73445d2055803dddffdd6d53ad916",
    "dd_sha": "dc30c5c5d1dee180396f9f95e3d484aa09e73445d2055803dddffdd6d53ad916",
    "sha_same": true
+  }
+ ],
+ "pinned": [
+  {
+   "s": 256,
+   "bands_same": true,
+   "nat_ao": 16,
+   "pin_ao": 20,
+   "nat_fresh": 699961536,
+   "pin_fresh": 705204416,
+   "nat_bands": 7372800,
+   "pin_bands": 7372800
+  },
+  {
+   "s": 512,
+   "bands_same": true,
+   "nat_ao": 17,
+   "pin_ao": 20,
+   "nat_fresh": 1049829568,
+   "pin_fresh": 1054417088,
+   "nat_bands": 23134208,
+   "pin_bands": 23134208
+  },
+  {
+   "s": 1024,
+   "bands_same": true,
+   "nat_ao": 18,
+   "pin_ao": 20,
+   "nat_fresh": 1806844096,
+   "pin_fresh": 1810776256,
+   "nat_bands": 79822848,
+   "pin_bands": 79822848
+  },
+  {
+   "s": 2048,
+   "bands_same": true,
+   "nat_ao": 20,
+   "pin_ao": 20,
+   "nat_fresh": 3542646976,
+   "pin_fresh": 3542646976,
+   "nat_bands": 293863424,
+   "pin_bands": 293863424
+  },
+  {
+   "fit": {
+    "fixed": 372654984.3478261,
+    "per_token": 1223431.7913043478,
+    "crossover": 8773.284981955254
+   }
   }
  ],
  "fitted_on": [

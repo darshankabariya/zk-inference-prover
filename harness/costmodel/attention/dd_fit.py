@@ -400,6 +400,43 @@ def report():
     if not repro:
         print("  (no overlap yet)")
 
+    # -- the one confound §5.1 named: `ao_rem_bits` is data-derived and moved
+    #    17 -> 18 -> 20 across the family.  Pinning it at one value above every
+    #    point's own makes the family parameter identical.  It widens the
+    #    attnout region and the `o` walk table, so `fresh` must move and `bands`
+    #    must NOT -- which is the check.
+    pinned = []
+    if got["ddpin"]:
+        print()
+        print("the `ao_rem_bits` confound, removed -- the same points at one pinned value")
+        print(f"  {'S':>6} {'ao_rem nat/pin':>15} {'bands nat':>14} {'bands pin':>14} "
+              f"{'fresh nat':>15} {'fresh pin':>15} {'d fresh':>9}")
+        for s in sorted(set(got["dd"]) & set(got["ddpin"])):
+            a, b = got["dd"][s], got["ddpin"][s]
+            pinned.append(dict(s=s, bands_same=a["bands"] == b["bands"],
+                               nat_ao=a["ao_rem_bits"], pin_ao=b["ao_rem_bits"],
+                               nat_fresh=a["fresh"], pin_fresh=b["fresh"],
+                               nat_bands=a["bands"], pin_bands=b["bands"]))
+            ao = f"{a['ao_rem_bits']}/{b['ao_rem_bits']}"
+            print(f"  {s:>6} {ao:>15} "
+                  f"{a['bands']:>14,} {b['bands']:>14,}"
+                  f"{'' if a['bands'] == b['bands'] else ' MOVED'} "
+                  f"{a['fresh']:>15,} {b['fresh']:>15,} "
+                  f"{b['fresh'] / a['fresh'] - 1:>+8.3%}")
+        print("  `bands` unmoved at every point is the confound shown to be outside the")
+        print("  band family; what moves is the attention-output region alone.")
+        pin_ex = {s: got["ddpin"][s] for s in sorted(got["ddpin"])
+                  if tiles_exactly(s) and got["ddpin"][s]["accepts"]}
+        if len(pin_ex) >= 3:
+            pss = sorted(pin_ex)
+            pr = {s: pin_ex[s]["fresh"] - band_fresh(s, s) for s in pss}
+            pq, pf = lstsq([[float(s) for s in pss], [1.0] * len(pss)],
+                           [pr[s] for s in pss])
+            px = cross_of(BAND_SC, BAND_S + BAND_C - pq, -pf)
+            print(f"  the whole fit redone on the pinned family: rest = {pf:,.0f} + "
+                  f"{pq:,.0f} S, crossover S ~ {px:,.0f}")
+            pinned.append(dict(fit=dict(fixed=pf, per_token=pq, crossover=px)))
+
     # -- which set to fit on
     src = "dd" if len(got["dd"]) >= 3 else "b9"
     pts = dict(got["b9"])
@@ -608,7 +645,7 @@ def report():
 
     blob = dict(
         sets={t: {str(s): r for s, r in v.items()} for t, v in got.items()},
-        repro=repro, fitted_on=sorted(exact), padded_held_out=sorted(padded),
+        repro=repro, pinned=pinned, fitted_on=sorted(exact), padded_held_out=sorted(padded),
         band_models=dict(
             m1_p=p1, m2_gamma=g2, m2_delta=d2, structural_gamma=GAMMA,
             structural_delta=DELTA,

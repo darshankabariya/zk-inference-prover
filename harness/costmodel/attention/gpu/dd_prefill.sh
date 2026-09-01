@@ -210,12 +210,15 @@ controls|all)
   # is not a control firing, and only the honest run tells the two apart.
   st "controls"
   : > $OUT/controls.txt
+  # `B7_M4_PRE` refuses to run without `B7_M4_TABDEV` ("the shared tables are one
+  # list"), so the preprocessed controls carry it.  Measured, not assumed.
+  PRE="B7_M4_TABDEV=1 B7_M4_PRE=2"
   for mut in "B7_M4_ACC=2" \
              "B7_M4_ACC=2 B7_M4_ACCMUT=nomask:grid" \
-             "B7_M4_PRE=2" \
-             "B7_M4_PRE=2 B7_M4_PREMUT=noactive:chan" \
-             "B7_M4_PRE=2 B7_M4_PREMUT=noactive:key" \
-             "B7_M4_PRE=2 B7_M4_PREMUT=noident:key"; do
+             "$PRE" \
+             "$PRE B7_M4_PREMUT=noactive:chan" \
+             "$PRE B7_M4_PREMUT=noactive:key" \
+             "$PRE B7_M4_PREMUT=noident:key"; do
     for s in ${DD_CTRL_S:-256 240}; do
       tag=ctl_$(echo "$mut" | tr -dc 'a-z0-9')_s$s
       st "control $mut at S=$s"
