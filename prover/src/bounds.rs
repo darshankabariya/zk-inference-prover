@@ -864,6 +864,319 @@ pub fn chain_cmd(args: &[String]) {
     );
 }
 
+// ------------------------------------ stream EE: the chain over the whole grid ---
+//
+// A sequence proof is a grid of chunks indexed by (token block, layer), chained
+// along both axes: the residual stream inside every block (`(b, k) -> (b, k+1)`,
+// stream H's link) and the K/V cache across blocks at every layer
+// (`(b, k) -> (b+1, k)`, stream AA's link).  `chain_cmd` above walks one list of
+// tags in the order it was given and answers for each consecutive pair; this
+// driver takes the whole grid, works out which links the grid *implies*, runs
+// every one of them, and fails unless every implied link ran and chained.
+//
+// Why "implied" is the load-bearing word.  A driver that reports `links_passed
+// / links_run` over whatever tags it was handed cannot tell a full chain from
+// a short one: `z_box.sh`'s `grep '^L'` dropped every `B<b>L<k>` tag and
+// reported a chain of nothing, without an error (stream DD's record).  So the
+// count is derived from the grid's own block and layer sets, a missing file is
+// a failure and not a shorter chain, a gap in either axis is a failure unless
+// the caller says gaps are expected, and a caller that knows the shape can pin
+// the counts from outside.
+
+/// A tag's place on the grid, from its name: `B<b>L<k>` is `(Some(b), k)` and a
+/// bare `L<k>` is `(None, k)` -- the block is then the one its statement
+/// declares.  Anything else is not on the grid.  Numbers are parsed, not
+/// compared as strings, so `B10` sorts after `B9` and `L10` after `L9`.
+pub fn grid_tag(tag: &str) -> Option<(Option<usize>, usize)> {
+    let num = |s: &str| (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| s.parse::<usize>().ok())
+        .flatten();
+    let rest = tag.strip_prefix('B');
+    match rest {
+        Some(r) => {
+            let (b, l) = r.split_once('L')?;
+            Some((Some(num(b)?), num(l)?))
+        }
+        None => Some((None, num(tag.strip_prefix('L')?)?)),
+    }
+}
+
+/// The tags a `compose-chunks` plan names, in file order: the `--ser-tag` of
+/// every non-comment line, or `chunk<i>` where a line has none (which is what
+/// the loop itself calls such a chunk).
+pub fn plan_tags(path: &str) -> Vec<String> {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    text.lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
+        .filter(|l| !l.is_empty())
+        .enumerate()
+        .map(|(i, l)| {
+            let a: Vec<String> = l.split_whitespace().map(str::to_string).collect();
+            crate::arg_str(&a, "--ser-tag").unwrap_or_else(|| format!("chunk{i}"))
+        })
+        .collect()
+}
+
+/// The commitment roots of a serialized proof and nothing else.  `chain_of`
+/// reads only the roots, so the 50 MB of decommitments behind them need not
+/// be built into a `StarkProof` to answer a pair; the JSON is still read and
+/// walked in full, so what is compared is what is on disk.
+#[derive(serde::Deserialize)]
+struct RootsOnly {
+    commitments: Vec<
+        <<stwo::core::vcs::blake2_merkle::Blake2sM31MerkleChannel
+            as stwo::core::channel::MerkleChannel>::H
+            as stwo::core::vcs::MerkleHasher>::Hash,
+    >,
+}
+
+/// One chunk as the grid driver holds it: its place, its statement and its
+/// roots.  The bytes were read off `--dir` and are not kept.
+struct GridChunk {
+    tag: String,
+    block: usize,
+    layer: usize,
+    fixed: Fixed,
+    roots: Vec<String>,
+}
+
+/// `bounds-grid`: every link of the (block, layer) grid, on both axes, from
+/// serialized bytes alone.
+///
+/// ```text
+///   --dir DIR                   <tag>.fixed.json / <tag>.proof.json per chunk
+///   --plan FILE                 the grid is the plan's --ser-tag set
+///   --tags t0,t1,...            or an explicit list
+///   (neither)                   or every *.fixed.json under --dir
+///   --allow-gaps                a missing block or layer only shrinks the implied count
+///   --expect-layer-links N      pin the implied count from outside
+///   --expect-token-links N
+/// ```
+///
+/// Exit status 0 only when every implied link ran and chained on its own
+/// axis, every tag sits where its statement says it sits, and the pinned
+/// counts (if given) are met; 1 otherwise, after the JSON is written.
+pub fn grid_cmd(args: &[String]) {
+    let dir = crate::arg_str(args, "--dir").expect("bounds-grid needs --dir <serialized dir>");
+    let allow_gaps = crate::flag(args, "--allow-gaps");
+    let expect_layer: Option<usize> = crate::arg_str(args, "--expect-layer-links")
+        .map(|s| s.parse().expect("--expect-layer-links takes a count"));
+    let expect_token: Option<usize> = crate::arg_str(args, "--expect-token-links")
+        .map(|s| s.parse().expect("--expect-token-links takes a count"));
+
+    // ---- which tags make up the grid ------------------------------------
+    let (source, tags): (Value, Vec<String>) = if let Some(p) = crate::arg_str(args, "--plan") {
+        (json!({"plan": p}), plan_tags(&p))
+    } else if let Some(t) = crate::arg_str(args, "--tags") {
+        (json!({"tags": t}), t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+    } else {
+        let mut v: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("{dir}: {e}"))
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter_map(|n| n.strip_suffix(".fixed.json").map(str::to_string))
+            .collect();
+        v.sort();
+        (json!({"scan": dir}), v)
+    };
+    let mut failures: Vec<String> = vec![];
+    let mut off_grid: Vec<String> = vec![];
+    let mut missing: Vec<String> = vec![];
+    let mut chunks: Vec<GridChunk> = vec![];
+    let mut chunk_rows: Vec<Value> = vec![];
+
+    // ---- read every chunk once: statement, and the proof's roots ---------
+    for tag in &tags {
+        let Some((tagged_block, layer)) = grid_tag(tag) else {
+            off_grid.push(tag.clone());
+            continue;
+        };
+        let fpath = format!("{dir}/{tag}.fixed.json");
+        let ppath = format!("{dir}/{tag}.proof.json");
+        let (Ok(fb), Ok(pb)) = (std::fs::read(&fpath), std::fs::read(&ppath)) else {
+            missing.push(tag.clone());
+            continue;
+        };
+        let fixed: Fixed = match serde_json::from_slice(&fb) {
+            Ok(f) => f,
+            Err(e) => { failures.push(format!("{tag}: unparseable statement: {e}")); continue; }
+        };
+        let roots: Vec<String> = match serde_json::from_slice::<RootsOnly>(&pb) {
+            Ok(p) => p.commitments.iter().map(|c| format!("{c:?}")).collect(),
+            Err(e) => { failures.push(format!("{tag}: unparseable proof: {e}")); continue; }
+        };
+        let (c, s) = (fixed.params.c, fixed.params.s);
+        // The block a statement declares is its prefix width in blocks.  A tag
+        // that names another block is a chunk filed on the wrong cell: that is
+        // a failure in its own right, and the chunk is still placed where the
+        // tag put it, so that the links into and out of that cell are run and
+        // answered by the pair check -- the tag is the plan's claim, and the
+        // grid checks the claim against the statement *and* the neighbours.
+        let declared = (s > 0 && c % s == 0).then(|| c / s);
+        let Some(declared) = declared else {
+            failures.push(format!("{tag}: the statement declares c = {c}, s = {s}, which is not \
+                                   a whole number of blocks"));
+            continue;
+        };
+        if let Some(b) = tagged_block.filter(|b| *b != declared) {
+            failures.push(format!("{tag}: the tag names block {b} but the statement declares \
+                                   block {declared} (c = {c} = {declared} x {s})"));
+        }
+        let block = tagged_block.unwrap_or(declared);
+        chunk_rows.push(json!({
+            "tag": tag,
+            "block": block,
+            "block_tagged": tagged_block,
+            "block_declared": declared,
+            "block_tag_ok": block == declared,
+            "layer": layer,
+            "c": c, "s": s,
+            "trees": fixed.sizes.len(),
+            "bounds": fixed.params.bounds,
+            "kv_bind": fixed.params.kv_bind,
+            "statement_bytes": fb.len(),
+            "proof_bytes": pb.len(),
+        }));
+        chunks.push(GridChunk { tag: tag.clone(), block, layer, fixed, roots });
+    }
+    for m in &missing {
+        failures.push(format!("{m}: named by the plan, but {dir}/{m}.{{fixed,proof}}.json is not there"));
+    }
+
+    // ---- the grid, and the links it implies ------------------------------
+    use std::collections::BTreeMap;
+    let mut grid: BTreeMap<usize, BTreeMap<usize, usize>> = BTreeMap::new();
+    for (i, ch) in chunks.iter().enumerate() {
+        if let Some(j) = grid.entry(ch.block).or_default().insert(ch.layer, i) {
+            failures.push(format!("{} and {} both sit on block {}, layer {}",
+                                  chunks[j].tag, ch.tag, ch.block, ch.layer));
+        }
+    }
+    let mut gaps: Vec<Value> = vec![];
+    // layer links: inside every block, consecutive layers
+    let mut layer_links: Vec<(usize, usize)> = vec![];
+    for (b, layers) in &grid {
+        let ks: Vec<usize> = layers.keys().copied().collect();
+        for w in ks.windows(2) {
+            if w[1] == w[0] + 1 {
+                layer_links.push((layers[&w[0]], layers[&w[1]]));
+            } else {
+                gaps.push(json!({"axis": "layer", "block": b, "from": w[0], "to": w[1]}));
+            }
+        }
+    }
+    // token links: at every layer, consecutive blocks
+    let mut by_layer: BTreeMap<usize, BTreeMap<usize, usize>> = BTreeMap::new();
+    for (b, layers) in &grid {
+        for (k, i) in layers {
+            by_layer.entry(*k).or_default().insert(*b, *i);
+        }
+    }
+    let mut token_links: Vec<(usize, usize)> = vec![];
+    for (k, blocks) in &by_layer {
+        let bs: Vec<usize> = blocks.keys().copied().collect();
+        for w in bs.windows(2) {
+            if w[1] == w[0] + 1 {
+                token_links.push((blocks[&w[0]], blocks[&w[1]]));
+            } else {
+                gaps.push(json!({"axis": "token", "layer": k, "from": w[0], "to": w[1]}));
+            }
+        }
+    }
+    if !gaps.is_empty() && !allow_gaps {
+        failures.push(format!("the grid has {} gap(s) and --allow-gaps was not given: a chain \
+                               with a hole is shorter than the one the plan implies", gaps.len()));
+    }
+    let (want_layer, want_token) = (layer_links.len(), token_links.len());
+    if let Some(n) = expect_layer.filter(|n| *n != want_layer) {
+        failures.push(format!("the grid implies {want_layer} layer link(s); --expect-layer-links {n}"));
+    }
+    if let Some(n) = expect_token.filter(|n| *n != want_token) {
+        failures.push(format!("the grid implies {want_token} token link(s); --expect-token-links {n}"));
+    }
+    if want_layer + want_token == 0 {
+        failures.push("the grid implies no link at all: nothing to chain".to_string());
+    }
+
+    // ---- run them ---------------------------------------------------------
+    let mut links: Vec<Value> = vec![];
+    let mut run = [0usize; 2];
+    let mut passed = [0usize; 2];
+    for (ax, want, pairs) in [(0, Axis::Layer, &layer_links), (1, Axis::Token, &token_links)] {
+        for (i, j) in pairs {
+            let (a, b) = (&chunks[*i], &chunks[*j]);
+            let v = chain_of(&a.fixed, &a.roots, &b.fixed, &b.roots);
+            let axis_ok = v.axis == want;
+            let ok = v.chains() && axis_ok;
+            run[ax] += 1;
+            if ok {
+                passed[ax] += 1;
+            }
+            eprintln!("grid {} -> {} [{}]: {}{}", a.tag, b.tag, want.name(),
+                      if ok { "ok" } else { "FAILED" },
+                      match (&v.reason, axis_ok) {
+                          (_, false) => format!(" -- the pair is on axis `{}`, not `{}`",
+                                                v.axis.name(), want.name()),
+                          (Some(r), _) => format!(" -- {r}"),
+                          _ => String::new(),
+                      });
+            links.push(json!({
+                "axis": want.name(),
+                "from": a.tag, "to": b.tag,
+                "block": [a.block, b.block], "layer": [a.layer, b.layer],
+                "axis_ok": axis_ok,
+                "chains": ok,
+                "reason": v.reason,
+                "verdict": serde_json::to_value(&v).unwrap(),
+            }));
+        }
+    }
+    let all_layer = run[0] == want_layer && passed[0] == run[0];
+    let all_token = run[1] == want_token && passed[1] == run[1];
+    let all_chain = failures.is_empty() && all_layer && all_token;
+    let blocks: Vec<usize> = grid.keys().copied().collect();
+    let layers: BTreeMap<String, Vec<usize>> = grid
+        .iter()
+        .map(|(b, l)| (b.to_string(), l.keys().copied().collect()))
+        .collect();
+    eprintln!("grid: {} block(s), {} chunk(s) on the grid, {} off it; layer {}/{} of {} implied, \
+               token {}/{} of {} implied{}",
+              blocks.len(), chunks.len(), off_grid.len(),
+              passed[0], run[0], want_layer, passed[1], run[1], want_token,
+              if all_chain { "" } else { " -- FAILED" });
+    for f in &failures {
+        eprintln!("grid: FAIL {f}");
+    }
+    crate::util::emit(
+        "bounds-grid",
+        json!({
+            "dir": dir,
+            "source": source,
+            "tags": tags,
+            "blocks": blocks,
+            "layers": layers,
+            "chunks": chunk_rows,
+            "off_grid": off_grid,
+            "missing": missing,
+            "gaps": gaps,
+            "allow_gaps": allow_gaps,
+            "layer": {"expected": want_layer, "run": run[0], "passed": passed[0],
+                      "pinned": expect_layer, "all_chain": all_layer},
+            "token": {"expected": want_token, "run": run[1], "passed": passed[1],
+                      "pinned": expect_token, "all_chain": all_token},
+            "links_expected": want_layer + want_token,
+            "links_run": run[0] + run[1],
+            "links_passed": passed[0] + passed[1],
+            "failures": failures,
+            "all_chain": all_chain,
+            "links": links,
+        }),
+    );
+    if !all_chain {
+        std::process::exit(1);
+    }
+}
+
 // ------------------------------------------------- stream AA: the K/V sides ---
 //
 // The layer boundary above binds the residual stream along the *layer* axis.
@@ -1049,6 +1362,51 @@ pub fn kv_report(sides: &[KvSide]) -> Value {
     })
 }
 
+// ------------------------------------- stream EE: the sides, labelled ---------
+
+/// One boundary side's root as the verifier reports it: which tree, which axis
+/// it binds, whether it is the `in` or the `out` side, and -- for a K/V side --
+/// which head band group.  Stream H named the residual pair `bound_in` and
+/// `bound_out` by tree index (3 and 4), which was right while a statement
+/// carried exactly one boundary pair; a statement now carries the sides its
+/// plan lists, and a reader asks for a side by label.
+#[derive(Debug, Clone, Serialize)]
+pub struct SideRoot {
+    pub tree: usize,
+    pub axis: Axis,
+    /// `"in"` or `"out"`
+    pub role: &'static str,
+    /// the head band group, on a K/V side; `None` on the residual pair
+    pub group: Option<usize>,
+    pub root: String,
+}
+
+/// Every side's root, off the plan's two side lists and a root-by-tree lookup.
+/// The order is the prover's commit order, so it is also `bound_roots`' order.
+pub fn side_roots(glue: &[Side], kv: &[KvSide], root: impl Fn(usize) -> String) -> Vec<SideRoot> {
+    let mut v: Vec<SideRoot> = glue
+        .iter()
+        .map(|s| SideRoot {
+            tree: s.bound.tree,
+            axis: Axis::Layer,
+            role: match s.bound.kind {
+                TieKind::In(_) => "in",
+                TieKind::Out(_) => "out",
+            },
+            group: None,
+            root: root(s.bound.tree),
+        })
+        .collect();
+    v.extend(kv.iter().map(|s| SideRoot {
+        tree: s.tree,
+        axis: Axis::Token,
+        role: if s.out { "out" } else { "in" },
+        group: Some(s.group),
+        root: root(s.tree),
+    }));
+    v
+}
+
 // ------------------------------------------------------------------- tests ---
 //
 // The pair check reads exactly two things: the two `Fixed` statements, and the
@@ -1114,6 +1472,53 @@ mod tests {
             }
         }
         (a, b)
+    }
+
+    // ---- stream EE: the tag grammar ----------------------------------------
+
+    #[test]
+    fn grid_tags_parse_numerically() {
+        assert_eq!(grid_tag("B0L8"), Some((Some(0), 8)));
+        assert_eq!(grid_tag("B10L9"), Some((Some(10), 9)));
+        assert_eq!(grid_tag("L31"), Some((None, 31)));
+        assert_eq!(grid_tag("L0"), Some((None, 0)));
+        for bad in ["head", "B8head", "chunk7", "B", "L", "BL1", "B1L", "b1l1", "B1L1x", ""] {
+            assert_eq!(grid_tag(bad), None, "{bad:?} is not on the grid");
+        }
+        // sorted as numbers, so B10 follows B9 and L10 follows L9
+        let mut tags: Vec<(Option<usize>, usize)> =
+            ["B9L2", "B10L1", "B10L10", "B10L9", "B2L10", "B2L9"].iter().map(|t| grid_tag(t).unwrap()).collect();
+        tags.sort();
+        assert_eq!(tags, [(Some(2), 9), (Some(2), 10), (Some(9), 2), (Some(10), 1), (Some(10), 9), (Some(10), 10)]);
+    }
+
+    #[test]
+    fn side_roots_are_labelled_from_the_plan() {
+        // the root of tree `t` is the string `t`
+        let root = |t: usize| t.to_string();
+        let glue = [
+            Side { bound: Bound { tree: 3, kind: TieKind::In(0), n: 1 }, region: 0, log_rows: 1 },
+            Side { bound: Bound { tree: 4, kind: TieKind::Out(1), n: 1 }, region: 0, log_rows: 1 },
+        ];
+        let kv = [
+            KvSide { tree: 5, group: 0, out: true, bands: vec![], columns: 0, cells: 0 },
+            KvSide { tree: 6, group: 0, out: false, bands: vec![], columns: 0, cells: 0 },
+            KvSide { tree: 7, group: 1, out: true, bands: vec![], columns: 0, cells: 0 },
+        ];
+        let v = side_roots(&glue, &kv, root);
+        let lab: Vec<(usize, Axis, &str, Option<usize>, &str)> =
+            v.iter().map(|s| (s.tree, s.axis, s.role, s.group, s.root.as_str())).collect();
+        assert_eq!(lab, [
+            (3, Axis::Layer, "in", None, "3"),
+            (4, Axis::Layer, "out", None, "4"),
+            (5, Axis::Token, "out", Some(0), "5"),
+            (6, Axis::Token, "in", Some(0), "6"),
+            (7, Axis::Token, "out", Some(1), "7"),
+        ]);
+        // no residual pair, only K/V sides: nothing is labelled by position
+        let v = side_roots(&[], &kv, root);
+        assert!(v.iter().all(|s| s.axis == Axis::Token));
+        assert_eq!(v[0].tree, 5);
     }
 
     // ---- the axis is derived, and the two edge families are disjoint --------

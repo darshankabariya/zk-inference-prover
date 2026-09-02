@@ -949,8 +949,14 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
         // Stream AA: the same for the K/V boundary trees, and every boundary
         // root in the prover's order (stream H's two, then the K/V sides).
         "kv_bounds": out.kv_bounds,
-        "bound_roots": verdict.as_ref().map(|v| json!({"in": v.bound_in, "out": v.bound_out})),
+        // Stream EE: the residual pair is found by its label, not by tree index,
+        // so this JSON keeps H's shape while the statement may carry any number
+        // of sides; `boundary_sides` is every side with its label.
+        "bound_roots": verdict.as_ref().map(|v| json!({
+            "in": v.side_root(bounds::Axis::Layer, "in", None),
+            "out": v.side_root(bounds::Axis::Layer, "out", None)})),
         "boundary_roots": verdict.as_ref().map(|v| v.bound_roots.clone()),
+        "boundary_sides": verdict.as_ref().map(|v| serde_json::to_value(&v.bound_sides).unwrap()),
         "trace_secs": out.trace_secs, "interaction_secs": out.interaction_secs,
         "prove_secs": out.stats.prove_secs,
         "verify_secs": verdict.as_ref().map(|v| v.verify_secs).unwrap_or(0.0),
@@ -1743,6 +1749,7 @@ fn main() {
         "glue" => glue_cmd(&args),
         "bounds" => bounds::cmd(&args),
         "bounds-chain" => bounds::chain_cmd(&args),
+        "bounds-grid" => bounds::grid_cmd(&args),
         "glue-probes" => glue_probes_cmd(&args),
         "selftest" => selftest(&args),
         "gkr" => gkrband::cmd(&args),
@@ -1750,7 +1757,7 @@ fn main() {
             eprintln!("unknown subcommand {other:?}; \
                        expected tables|dequant|width|kmax|probes|pack|attn-probes|exprprobe|cudacheck|cudaemit|logupcheck|genemit|\
                        argmax|argmax-probes|embed|embed-probes|\
-                       compose|compose-probes|bounds-chain|psweep|requant|requant-probes|glue|glue-probes|selftest");
+                       compose|compose-probes|bounds-chain|bounds-grid|psweep|requant|requant-probes|glue|glue-probes|selftest");
             std::process::exit(2);
         }
     }

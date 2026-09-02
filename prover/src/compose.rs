@@ -3831,21 +3831,36 @@ pub struct Verdict {
     /// the layer's committed residual-stream input and output claims
     pub stream_in: Option<[u32; 4]>,
     pub stream_out: Option<[u32; 4]>,
-    /// Stream H: the two boundary trees' roots, off the parsed proof.  These are
-    /// what `bounds::chain_check` compares across two proofs; a verifier reading
-    /// one proof alone gets them here so it never has to re-derive anything.
-    pub bound_in: Option<String>,
-    pub bound_out: Option<String>,
     /// Stream AA: every boundary tree's root, stream H's two first and then the
     /// K/V sides in `plan.kv`'s order.  A verifier reading one proof alone gets
     /// them here so it never has to re-derive anything; `bounds::chain_check`
     /// reads the same roots straight out of `proof.commitments`.
     pub bound_roots: Vec<String>,
+    /// Stream EE: the same roots, one entry per boundary side and each labelled
+    /// with what the side is -- its tree, its axis, whether it is the in or the
+    /// out side, and for a K/V side its head band group.  This replaces stream
+    /// H's `bound_in`/`bound_out`, which named trees 3 and 4 by position and so
+    /// only made sense while a statement carried exactly one boundary pair.  A
+    /// statement now carries as many sides as its plan lists, and a reader asks
+    /// for a side by its label (`Verdict::side_root`) rather than by a
+    /// hard-coded index.
+    pub bound_sides: Vec<crate::bounds::SideRoot>,
     pub error: Option<String>,
     pub verify_secs: f64,
 }
 
 impl Verdict {
+    /// The root of the boundary side with the given label, if the statement
+    /// committed one: the residual pair is `(Axis::Layer, "in")` and
+    /// `(Axis::Layer, "out")`; a K/V side is `(Axis::Token, "out")` or
+    /// `(Axis::Token, "in")` with its group.
+    pub fn side_root(&self, axis: crate::bounds::Axis, role: &str, group: Option<usize>)
+        -> Option<&str> {
+        self.bound_sides
+            .iter()
+            .find(|s| s.axis == axis && s.role == role && s.group == group)
+            .map(|s| s.root.as_str())
+    }
     pub fn accepts(&self) -> bool {
         self.stark_ok && self.root_ok && self.sums_cancel && self.av_ok && self.den_link_ok
             && self.sizes_ok && self.qk_ok.iter().all(|x| *x) && self.den_ok.iter().all(|x| *x)
@@ -3859,7 +3874,7 @@ impl Verdict {
                sizes_ok: false, glue_ok: vec![false], deq_out_ok: vec![false],
                head_tie_ok: false, embed_ok: false,
                stream_in: None, stream_out: None,
-               bound_in: None, bound_out: None, bound_roots: vec![],
+               bound_roots: vec![], bound_sides: vec![],
                error: Some(msg.to_string()), verify_secs: 0.0 }
     }
 }
@@ -3971,17 +3986,13 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         vcs.commit(proof.commitments[t], &fixed.sizes[t], &mut ch);
     }
     // Stream AA: every boundary tree's root, in the prover's order -- stream H's
-    // two, then the K/V sides.  `bound_in`/`bound_out` stay as the first pair so
-    // that H's and I's probe JSON does not move; `Verdict` is *output* and not
-    // `Fixed`, so neither field touches the digest.
-    let bound_roots: Vec<String> = (crate::bounds::FIRST_TREE..plan.n_trees())
-        .map(|t| format!("{:?}", proof.commitments[t]))
-        .collect();
-    let (bound_in, bound_out) = match plan.bounds.len() {
-        2 => (Some(format!("{:?}", proof.commitments[3])),
-              Some(format!("{:?}", proof.commitments[4]))),
-        _ => (None, None),
-    };
+    // two, then the K/V sides.  Stream EE: the same roots labelled side by side
+    // off the plan's own side lists, so nothing here assumes how many sides a
+    // statement carries or which tree any of them took.  `Verdict` is *output*
+    // and not `Fixed`, so neither field touches the digest.
+    let root = |t: usize| format!("{:?}", proof.commitments[t]);
+    let bound_roots: Vec<String> = (crate::bounds::FIRST_TREE..plan.n_trees()).map(root).collect();
+    let bound_sides = crate::bounds::side_roots(&plan.bounds, &plan.kv, root);
     ch.mix_felts(&claims.flat());
 
     // ---- components from the parsed statement ----------------------------------
@@ -4121,6 +4132,6 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
 
     Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
               head_tie_ok, embed_ok,
-              sizes_ok, glue_ok, stream_in, stream_out, bound_in, bound_out, bound_roots, error,
+              sizes_ok, glue_ok, stream_in, stream_out, bound_roots, bound_sides, error,
               verify_secs: t0.elapsed().as_secs_f64() }
 }
