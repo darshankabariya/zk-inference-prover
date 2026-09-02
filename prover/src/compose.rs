@@ -2980,18 +2980,29 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // `build_components` gives a corner band no row component, and a corner
         // band's fractions never take the device route -- so it gets no BandAir,
         // and the row index counts prefix bands only.
-        let air = plan.rows_band[b].then(|| {
-            let ri = row_i;
-            row_i += 1;
-            crate::devfrac::BandAir {
+        //
+        // Open item 1 (E11, H200 2026-09-02): block 0's solo corner carries the
+        // region and so has a row component, but it is still a corner -- its
+        // `KeyEval` reads the causal mask (tree 0, `msk_id`) for the exp
+        // lookups' multiplicities, which the device fraction route never
+        // supplies (`devfrac::band_cols` hands the bands `Cols::Unread`, 19.2's
+        // measurement over prefix bands).  It takes the host route like every
+        // other corner; the row index still advances past its row component.
+        let air = plan.rows_band[b]
+            .then(|| {
+                let ri = row_i;
+                row_i += 1;
+                ri
+            })
+            .filter(|_| !a.corner)
+            .map(|ri| crate::devfrac::BandAir {
                 tag: b,
                 chan: &m4e_air.chans[b].eval,
                 key: &m4e_air.keys[b].eval,
                 row: &m4e_air.rows[ri].eval,
                 dev: band_dev[b].as_ref(),
                 pre: band_pre[b].as_ref(),
-            }
-        });
+            });
         // B11 stream L, anatomy: the LogUp build apart from `inter_mark`'s
         // accounting, which is the only other thing in this loop. Whatever
         // `int/bands` minus `int/bands_build` comes to is the accounting.
