@@ -412,6 +412,36 @@ impl AnyCol<'_> {
             _ => panic!("a device column has no host copy"),
         }
     }
+
+    /// The same, downloading a device column rather than refusing it: for a
+    /// reader that needs the cells on this side of the bus and knows it is
+    /// paying for them.  Open item 18: the one such reader is the K/V boundary
+    /// tamper (`bounds::kv_cols`), which bumps one cell of a side whose bands
+    /// filled on the card; the honest commit takes the device references
+    /// instead and never comes here.
+    ///
+    /// `common::eval_of` takes values in coset order and permutes them into the
+    /// committed one; a device column is already in committed order, so this
+    /// reinterprets rather than permutes -- the construction `take_all` makes
+    /// without the cuda feature and `gkrband`'s controls make with it.  Counted
+    /// as a mirror download, which is what it is.
+    pub fn download(self) -> HostEval {
+        let down = |d: &BaseFieldVec, l: u32| {
+            let t = Instant::now();
+            let v = d.to_vec();
+            note_mirror((d.size * 4) as u64, t.elapsed().as_secs_f64());
+            CircleEvaluation::new(
+                stwo::core::poly::circle::CanonicCoset::new(l).circle_domain(),
+                stwo::prover::backend::simd::column::BaseColumn::from_iter(v),
+            )
+        };
+        match self {
+            AnyCol::OwnedHost(e) => e,
+            AnyCol::Host(e) => e.clone(),
+            AnyCol::Dev(d, l) => down(d, l),
+            AnyCol::OwnedDev(d, l) => down(&d, l),
+        }
+    }
 }
 
 /// B7a milestone 4 (section 3 row 1): a tree's columns being assembled in AIR

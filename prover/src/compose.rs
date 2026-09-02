@@ -3714,29 +3714,52 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // committed*, cloned band by band in component-registration order --
     // `[band's K][band's V]` -- so byte-for-byte with the region is by
     // construction and not by a second copy of `attn_trace`'s index map.
+    //
+    // Open item 18: the columns are wherever the band's fill left them.  Under
+    // the CUDA default `B7_M4_WFILL_BAND=1` a band's committed columns are on
+    // the card (`band_dev[b].base`, `commit_base_dev`) and `com.base` is empty;
+    // tree 1 committed them from there as `AnyCol::Dev` references (the
+    // `base_all` loop above), and a boundary side takes the same references
+    // to the same buffers -- `device::take_all` clones a borrowed device column
+    // on the device, so the side sees the bytes tree 1 saw and nothing crosses
+    // the bus.  A host-filled band (the reference arm, `B7_M4_WFILL_BAND=0`,
+    // every corner band) hands its host columns over exactly as before.  The
+    // one reader that needs the cells on the host is the tamper probe, which
+    // bumps one cell of one column: that side comes down (`AnyCol::download`)
+    // and commits through the host path, so `bounds::kv_cols` is unchanged.
     let kv_report = if plan.kv.is_empty() {
         json!(null)
     } else {
         for (i, side) in plan.kv.iter().enumerate() {
-            let mut cols: Vec<Eval> = vec![];
+            let mut cols: Vec<AnyCol> = vec![];
             for b in &side.bands {
-                let com = &band_committed[*b];
-                assert!(!com.base.is_empty(),
-                        "--kv-bind needs the band fill on the host: the K/V boundary tree is a \
-                         copy of the committed columns, and with B7_M4_WFILL_BAND=1 band {b} \
-                         has none on this side of the bus");
-                let (l, at) = (&plan.lays[*b], &com.at);
+                let (com, l) = (&band_committed[*b], &plan.lays[*b]);
+                let at = &com.at;
                 let n_aux = if plan.attn_variant == AttnVariant::IntExp { 0 } else { l.key.q };
                 let v0 = at[1] + 2 * l.key.q + n_aux;
-                cols.extend(com.base[at[0]..at[0] + l.chan.pk].iter().cloned());
-                cols.extend(com.base[v0..v0 + l.key.pv].iter().cloned());
+                let kv = (at[0]..at[0] + l.chan.pk).chain(v0..v0 + l.key.pv);
+                match band_dev[*b].as_ref() {
+                    Some(d) => cols.extend(kv.map(|j| AnyCol::Dev(&d.base[j], d.logs[j]))),
+                    None => {
+                        assert!(!com.base.is_empty(),
+                                "--kv-bind: band {b} has its committed columns on neither side \
+                                 of the bus, so the K/V boundary tree has nothing to copy");
+                        cols.extend(kv.map(|j| AnyCol::Host(&com.base[j])));
+                    }
+                }
             }
             assert_eq!(cols.len(), side.columns, "a K/V side's width disagrees with its plan");
             // the tamper indexes the sides as one list, stream H's first
             let tam = bounds_tamper
                 .filter(|(s, _)| *s == plan.bounds.len() + i)
                 .map(|(_, c)| c);
-            sess.commit(crate::bounds::kv_cols(cols, tam));
+            match tam {
+                None => sess.commit_any(cols),
+                Some(_) => {
+                    let host: Vec<Eval> = cols.into_iter().map(AnyCol::download).collect();
+                    sess.commit(crate::bounds::kv_cols(host, tam));
+                }
+            }
         }
         crate::bounds::kv_report(&plan.kv)
     };
