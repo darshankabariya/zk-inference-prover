@@ -196,6 +196,12 @@ impl<'a> Session<'a> {
         if crate::util::m3_store_coeffs() {
             cs.set_store_polynomials_coefficients();
         }
+        // B12 stream HH: drop each tree's blown-up evaluations after its root
+        // is mixed and rebuild them per phase. `m3_lde_only` refuses when the
+        // coefficients are off, so this is reached only when they are on.
+        if crate::util::m3_lde_only() {
+            cs.set_lde_only();
+        }
         Self {
             config,
             channel,
@@ -222,6 +228,7 @@ impl<'a> Session<'a> {
         tb.extend_evals(evals);
         tb.commit(&mut self.channel);
         self.ops.push(Op::Tree(sizes));
+        self.mark_tree();
     }
 
     /// B7a milestone 4 (18.5): commit a tree whose columns the caller still
@@ -239,6 +246,7 @@ impl<'a> Session<'a> {
         tb.extend_evals(crate::device::take_all(cols));
         tb.commit(&mut self.channel);
         self.ops.push(Op::Tree(sizes));
+        self.mark_tree();
     }
 
     /// B7b (README 26): tree `i` as committed, cloned on the device -- what
@@ -277,6 +285,7 @@ impl<'a> Session<'a> {
         self.tree_max_log.push(sizes.iter().copied().max().unwrap_or(0));
         self.cs.push_cached_tree(tree, &mut self.channel);
         self.ops.push(Op::Tree(sizes));
+        self.mark_tree();
     }
 
     pub fn commit_ref(&mut self, evals: &[&Eval]) {
@@ -294,6 +303,38 @@ impl<'a> Session<'a> {
         tb.extend_evals(evals.iter().map(|e| (*e).clone()).collect());
         tb.commit(&mut self.channel);
         self.ops.push(Op::Tree(sizes));
+        self.mark_tree();
+    }
+
+    /// B12 stream GG: one device-memory mark at the end of every commit, so a
+    /// tree's bytes are read on their own.  Trees 0, 1 and 2 are marked here;
+    /// the boundary trees from 3 up are marked once, together, by
+    /// `mark_bounds` when the caller has committed the last of them.
+    fn mark_tree(&self) {
+        let i = self.tree_cols.len() - 1;
+        let label = match i {
+            0 => "commit_pre",
+            1 => "commit_base",
+            2 => "commit_inter",
+            _ => return,
+        };
+        crate::device::mem_mark_tree(label, i, self.tree_cols[i], self.tree_cells[i],
+                                     self.tree_max_log[i]);
+    }
+
+    /// The boundary trees (3 and up), as one mark: their columns and cells
+    /// summed, their tallest column.  Nothing when there are none.
+    pub fn mark_bounds(&self) {
+        if self.tree_cols.len() <= 3 {
+            return;
+        }
+        crate::device::mem_mark_tree(
+            "commit_bounds",
+            3,
+            self.tree_cols[3..].iter().sum(),
+            self.tree_cells[3..].iter().sum(),
+            self.tree_max_log[3..].iter().copied().max().unwrap_or(0),
+        );
     }
 
     /// B4 section 7's invariant, asserted rather than hoped for: some preprocessed

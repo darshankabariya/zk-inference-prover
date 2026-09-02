@@ -130,6 +130,13 @@ extern "C" {
 
     pub fn cuda_get_memory_info(free_mem: *mut usize, total_mem: *mut usize);
 
+    // Stream GG: the pool's own numbers (`cuda_mem_pool.cu`).  `out` is four
+    // u64s: used-current, used-high, reserved-current, reserved-high.  A
+    // non-zero return means the pool is not initialised and `out` is zeros.
+    pub fn cuda_mem_pool_stats(out: *mut u64) -> i32;
+
+    pub fn cuda_mem_pool_reset_high() -> i32;
+
     pub fn bit_reverse_base_field(array: *const u32, size: usize);
 
     pub fn bit_reverse_secure_field(array: *const u32, size: usize);

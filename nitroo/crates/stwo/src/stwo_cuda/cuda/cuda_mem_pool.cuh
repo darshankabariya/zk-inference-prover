@@ -15,6 +15,17 @@ extern "C" cudaError_t cuda_mem_pool_init();
 // Destroy the CUDA memory pool
 extern "C" cudaError_t cuda_mem_pool_destroy();
 
+// Stream GG: the pool's own live bytes.  Fills `out[4]` with used-current,
+// used-high, reserved-current and reserved-high (cudaMemPoolAttr{Used,Reserved}Mem{Current,High}),
+// in bytes.  Returns non-zero and zeros when the pool was never initialised
+// (the cudaMalloc fallback path above), so a probe on that path reads nothing
+// rather than crashing.
+extern "C" int cuda_mem_pool_stats(uint64_t out[4]);
+
+// Stream GG: reset both high-water marks (writing 0 to a `High` attribute
+// resets it), so the next interval's high is its own.
+extern "C" int cuda_mem_pool_reset_high();
+
 // Allocate memory from the pool (with safe fallback to cudaMalloc when pool is unavailable)
 template<typename T>
 T* cuda_mem_pool_allocate(size_t count) {

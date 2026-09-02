@@ -36,6 +36,26 @@ pub fn m3_store_coeffs() -> bool {
     m3_switch("B7_M3_COEFFS")
 }
 
+/// B12 stream HH: keep every committed column's coefficients and drop its
+/// blown-up evaluations once the tree's root is mixed, rebuilding them per
+/// phase. Opt-in, unlike `m3_switch`'s opt-out switches, because it is a
+/// residency trade and not a default.
+///
+/// It refuses loudly when the coefficients are off: they are the only thing a
+/// dropped extension can be rebuilt from, and a run that proved anyway would be
+/// reading a configuration it did not have.
+pub fn m3_lde_only() -> bool {
+    let on = std::env::var("B7_M3_LDEONLY")
+        .map(|v| v != "0")
+        .unwrap_or(false);
+    assert!(
+        !on || m3_store_coeffs(),
+        "B7_M3_LDEONLY=1 needs B7_M3_COEFFS on: the coefficients are the only \
+         thing the dropped evaluations can be rebuilt from"
+    );
+    on
+}
+
 /// B7a milestone 4: the host-side timeline (18.2).
 ///
 /// One named accumulator, reported as `host_phases` in every JSON, so where
@@ -308,6 +328,9 @@ pub fn modes_json() -> Value {
     for name in ["B7_M4_PAREVAL", "B7_M4_NOCLONE", "B7_M4_SCAN", "B7_M4_REFBAD"] {
         put(name, u32::from(m4_switch(name)));
     }
+    // B12 stream HH: an opt-in switch, off unless the env asks for it, so every
+    // run JSON says which residency regime it ran under.
+    put("B7_M3_LDEONLY", u32::from(m3_lde_only()));
     Value::Object(modes)
 }
 
@@ -328,6 +351,7 @@ pub fn config_json() -> Value {
             "device_merkle_reduce": m3_switch("B7_M3_MERKLE"),
             "fri_gather": m3_switch("B7_M3_FRIGATHER"),
             "prewarm": m3_switch("B7_M3_PREWARM"),
+            "lde_only": m3_lde_only(),
             "merkle_mode": std::env::var("B7_M3_MERKLE").unwrap_or_else(|_| "1".into()),
             "launch_sync": std::env::var("B7_M3_LAUNCHSYNC").is_ok()
         },

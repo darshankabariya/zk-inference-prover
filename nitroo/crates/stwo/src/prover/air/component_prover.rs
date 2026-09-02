@@ -36,10 +36,20 @@ pub struct Trace<'a, B: Backend> {
 /// A struct for representing a polynomial corresponding to a trace column.
 /// A polynomial is defined by it's evaluations on a circle domain of size at least it's degree,
 /// and optionally its coefficients in the FFT basis.
+///
+/// B12 stream HH: the evaluations are optional. Under `lde_only` the commitment
+/// scheme drops them once the tree's root has been mixed into the channel and
+/// keeps the coefficients alone; every later phase rebuilds what it needs
+/// through [`Poly::get_evaluation_on_domain`] and frees it again. The blown-up
+/// domain is a field of its own because it is the one part of the evaluations
+/// that has to outlive them: most readers of `evals` only ever wanted its
+/// log size.
 #[derive(Clone)]
 pub struct Poly<B: Backend> {
     pub coeffs: Option<CircleCoefficients<B>>,
-    pub evals: CircleEvaluation<B, BaseField, BitReversedOrder>,
+    pub evals: Option<CircleEvaluation<B, BaseField, BitReversedOrder>>,
+    /// The domain the evaluations are, or were, on.
+    pub domain: CircleDomain,
 }
 
 impl<B: Backend> Poly<B> {
@@ -47,7 +57,46 @@ impl<B: Backend> Poly<B> {
         coeffs: Option<CircleCoefficients<B>>,
         evals: CircleEvaluation<B, BaseField, BitReversedOrder>,
     ) -> Self {
-        Self { coeffs, evals }
+        Self {
+            coeffs,
+            domain: evals.domain,
+            evals: Some(evals),
+        }
+    }
+
+    /// A polynomial whose evaluations may already be absent.
+    pub const fn from_parts(
+        coeffs: Option<CircleCoefficients<B>>,
+        evals: Option<CircleEvaluation<B, BaseField, BitReversedOrder>>,
+        domain: CircleDomain,
+    ) -> Self {
+        Self {
+            coeffs,
+            evals,
+            domain,
+        }
+    }
+
+    /// The log size of the blown-up domain, held or dropped.
+    pub const fn log_size(&self) -> u32 {
+        self.domain.log_size()
+    }
+
+    /// The blown-up evaluations. Panics once they have been dropped, which is
+    /// only under `lde_only`, where every reader rebuilds them first.
+    pub fn evals(&self) -> &CircleEvaluation<B, BaseField, BitReversedOrder> {
+        self.evals
+            .as_ref()
+            .expect("the polynomial's evaluations were dropped (lde_only)")
+    }
+
+    /// Frees the blown-up evaluations, keeping the coefficients and the domain.
+    pub fn drop_evals(&mut self) {
+        assert!(
+            self.coeffs.is_some(),
+            "lde_only needs the coefficients to rebuild the evaluations"
+        );
+        self.evals = None;
     }
 
     pub fn eval_at_point(
@@ -58,10 +107,10 @@ impl<B: Backend> Poly<B> {
         if let Some(coeffs) = &self.coeffs {
             coeffs.eval_at_point(point)
         } else {
-            self.evals.barycentric_eval_at_point(
+            self.evals().barycentric_eval_at_point(
                 &weights_hash_map
                     .unwrap()
-                    .get(&(self.evals.domain.log_size(), point))
+                    .get(&(self.log_size(), point))
                     .expect("weights should exist for all sampled points"),
             )
         }
@@ -77,6 +126,16 @@ impl<B: Backend> Poly<B> {
         } else {
             panic!("The polynomial's coefficients are not stored");
         }
+    }
+
+    /// Rebuilds the blown-up evaluations on the polynomial's own committed
+    /// domain. The copy is owned by the caller and freed when it drops; this
+    /// is what the phases under `lde_only` call in place of reading `evals`.
+    pub fn rebuild_evals(
+        &self,
+        twiddles: &TwiddleTree<B>,
+    ) -> CircleEvaluation<B, BaseField, BitReversedOrder> {
+        self.get_evaluation_on_domain(self.domain, twiddles)
     }
 }
 

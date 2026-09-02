@@ -286,6 +286,140 @@ pub fn mem_used_bytes() -> u64 {
     0
 }
 
+// ------------------------------------------------ the live-bytes marks --
+
+/// B12 stream GG: one mark inside the allocator at a phase boundary.
+///
+/// Every peak in the record is `nvidia-smi`'s high-water mark of a process
+/// whose pool never gives pages back (o-overlap §9), so the memory model has
+/// been checked against totals and never against one of its terms.  The
+/// fork's pool keeps the two numbers that separate them -- what is allocated
+/// from it now (`pool_used`) and what it holds from the driver
+/// (`pool_reserved`, the number the sampler sees) -- and this reads both at a
+/// named line, after `cudaDeviceSynchronize`: the pool's frees are
+/// stream-ordered, so a mark taken before the stream drains reads too high.
+///
+/// One JSON line to stderr (`[MEM] {...}`; stdout is the run's JSON), the same
+/// object kept for `mem_marks` in the point, then the pool's high-water marks
+/// are reset so the next interval's high is its own.
+#[cfg(feature = "cuda")]
+mod marks {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+
+    use serde_json::{Value, json};
+
+    unsafe extern "C" {
+        fn cudaDeviceSynchronize() -> i32;
+    }
+
+    static MARKS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
+    static T0: OnceLock<Instant> = OnceLock::new();
+
+    // B12 stream GG, the C=16K half: under `compose-chunks --plan` the marks of
+    // two chunks interleave on one stderr, and under `B7_M5_PIPE=1` they
+    // interleave in time as well -- chunk k+1's `after_fill` lands between
+    // chunk k's `commit_inter` and its `prove_values`. The tag is the plan
+    // line's `--ser-tag`, set per thread the way `m4_set_chunk` is, so a mark
+    // says which chunk made it and the reporter can split the run.
+    thread_local! {
+        static TAG: std::cell::RefCell<Option<String>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub fn set_tag(tag: &str) {
+        TAG.with(|t| *t.borrow_mut() = Some(tag.to_string()));
+    }
+
+    pub fn mark(label: &str, tree: Option<Value>) {
+        unsafe { cudaDeviceSynchronize() };
+        let t0 = T0.get_or_init(Instant::now);
+        let pool = stwo::stwo_cuda::mem_pool_stats();
+        let (free, total) = stwo::stwo_cuda::get_cuda_memory_info();
+        let mut g = MARKS.lock().unwrap();
+        let mut o = json!({
+            "mark": label,
+            "seq": g.len(),
+            "t_secs": t0.elapsed().as_secs_f64(),
+            "pool_used": pool.map(|p| p[0]),
+            "pool_used_high": pool.map(|p| p[1]),
+            "pool_reserved": pool.map(|p| p[2]),
+            "pool_reserved_high": pool.map(|p| p[3]),
+            "driver_used": total.saturating_sub(free) as u64,
+            "driver_total": total as u64,
+        });
+        if let Some(t) = tree {
+            o["tree"] = t;
+        }
+        if let Some(tag) = TAG.with(|t| t.borrow().clone()) {
+            o["tag"] = json!(tag);
+        }
+        eprintln!("[MEM] {o}");
+        g.push(o);
+        stwo::stwo_cuda::mem_pool_reset_high();
+    }
+
+    pub fn all() -> Vec<Value> {
+        MARKS.lock().unwrap().clone()
+    }
+}
+
+/// One mark, at `label`.
+#[cfg(feature = "cuda")]
+pub fn mem_mark(label: &str) {
+    marks::mark(label, None);
+}
+
+/// A commit mark, carrying the tree it closes: its index, column and cell
+/// counts and the log rows of its tallest column.
+#[cfg(feature = "cuda")]
+pub fn mem_mark_tree(label: &str, idx: usize, cols: usize, cells: usize, max_log: u32) {
+    marks::mark(
+        label,
+        Some(json!({"idx": idx, "cols": cols, "cells": cells, "max_log": max_log})),
+    );
+}
+
+/// Every mark so far, for the run's JSON; `None` when there are none, so the
+/// field is absent rather than empty.
+#[cfg(feature = "cuda")]
+pub fn mem_marks_json() -> Option<Value> {
+    let v = marks::all();
+    (!v.is_empty()).then_some(Value::Array(v))
+}
+
+/// Hand the fork's `prove_ex` its three marks.  Once per process.
+#[cfg(feature = "cuda")]
+pub fn install_mem_hook() {
+    let _ = stwo::prover::MEM_HOOK.set(mem_mark);
+}
+
+/// Name the chunk whose marks this thread is about to take: the plan line's
+/// `--ser-tag`. Thread-local, like `util::m4_set_chunk`, so the pipelined
+/// loop's generation and prove threads tag their own.
+#[cfg(feature = "cuda")]
+pub fn set_mem_tag(tag: &str) {
+    marks::set_tag(tag);
+}
+
+/// The reference arm marks nothing: no card, no pool, no field in the JSON.
+#[cfg(not(feature = "cuda"))]
+pub fn mem_mark(_label: &str) {}
+
+#[cfg(not(feature = "cuda"))]
+pub fn mem_mark_tree(_label: &str, _idx: usize, _cols: usize, _cells: usize, _max_log: u32) {}
+
+#[cfg(not(feature = "cuda"))]
+pub fn mem_marks_json() -> Option<Value> {
+    None
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn install_mem_hook() {}
+
+#[cfg(not(feature = "cuda"))]
+pub fn set_mem_tag(_tag: &str) {}
+
 /// Move one column to the device.
 ///
 /// `into_cpu_vec` reinterprets the SIMD column's backing store as a

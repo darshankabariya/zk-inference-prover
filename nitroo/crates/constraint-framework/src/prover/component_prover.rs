@@ -59,7 +59,7 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
             let max_evals = component_polys
                 .iter()
                 .flatten()
-                .map(|c| c.evals.domain.log_size())
+                .map(|c| c.log_size())
                 .max();
             let max_coeffs = component_polys
                 .iter()
@@ -79,10 +79,16 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
         // Extend trace if necessary.
         // TODO: Don't extend when eval_size < committed_size. Instead, pick a good
         // subdomain. (For larger blowup factors).
+        // B12 stream HH: a column whose evaluations were dropped under
+        // `lde_only` is rebuilt here exactly like a column committed on a
+        // smaller domain. Forcing the extend branch is safe precisely where it
+        // is new: the branch is only skipped when every column already sits on
+        // `eval_domain`, which is the case `get_evaluation_on_domain` rebuilds
+        // to the same cells. With the evaluations present this reads as before.
         let need_to_extend = component_polys
             .iter()
             .flatten()
-            .any(|c| c.evals.domain.log_size() != eval_domain.log_size());
+            .any(|c| c.evals.is_none() || c.log_size() != eval_domain.log_size());
         let trace: TreeVec<
             Vec<Cow<'_, CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>,
         > = if need_to_extend {
@@ -101,7 +107,7 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
                 })
             }
         } else {
-            component_polys.map_cols(|c| Cow::Borrowed(&c.evals))
+            component_polys.map_cols(|c| Cow::Borrowed(c.evals()))
         };
 
         // Denom inverses.
@@ -220,10 +226,16 @@ impl<E: FrameworkEval + Sync> ComponentProver<CpuBackend> for FrameworkComponent
         // Extend trace if necessary.
         // TODO: Don't extend when eval_size < committed_size. Instead, pick a good
         // subdomain. (For larger blowup factors).
+        // B12 stream HH: a column whose evaluations were dropped under
+        // `lde_only` is rebuilt here exactly like a column committed on a
+        // smaller domain. Forcing the extend branch is safe precisely where it
+        // is new: the branch is only skipped when every column already sits on
+        // `eval_domain`, which is the case `get_evaluation_on_domain` rebuilds
+        // to the same cells. With the evaluations present this reads as before.
         let need_to_extend = component_polys
             .iter()
             .flatten()
-            .any(|c| c.evals.domain.log_size() != eval_domain.log_size());
+            .any(|c| c.evals.is_none() || c.log_size() != eval_domain.log_size());
         let trace: TreeVec<
             Vec<Cow<'_, CircleEvaluation<CpuBackend, BaseField, BitReversedOrder>>>,
         > = if need_to_extend {
@@ -233,7 +245,7 @@ impl<E: FrameworkEval + Sync> ComponentProver<CpuBackend> for FrameworkComponent
                 .as_cols_ref()
                 .map_cols(|col| Cow::Owned(col.get_evaluation_on_domain(eval_domain, &twiddles)))
         } else {
-            component_polys.map_cols(|c| Cow::Borrowed(&c.evals))
+            component_polys.map_cols(|c| Cow::Borrowed(c.evals()))
         };
 
         // Denom inverses.
@@ -302,10 +314,16 @@ impl<E: FrameworkEval + Sync> ComponentProver<CudaBackend> for FrameworkComponen
         span.exit();
 
         let span = span!(Level::INFO, "Check need_to_extend").entered();
+        // B12 stream HH: a column whose evaluations were dropped under
+        // `lde_only` is rebuilt here exactly like a column committed on a
+        // smaller domain. Forcing the extend branch is safe precisely where it
+        // is new: the branch is only skipped when every column already sits on
+        // `eval_domain`, which is the case `get_evaluation_on_domain` rebuilds
+        // to the same cells. With the evaluations present this reads as before.
         let need_to_extend = component_polys
             .iter()
             .flatten()
-            .any(|c| c.evals.domain.log_size() != eval_domain.log_size());
+            .any(|c| c.evals.is_none() || c.log_size() != eval_domain.log_size());
         span.exit();
 
         // B11 stream K, diagnostic: name the component and its column sizes
@@ -315,7 +333,7 @@ impl<E: FrameworkEval + Sync> ComponentProver<CudaBackend> for FrameworkComponen
             let max_evals = component_polys
                 .iter()
                 .flatten()
-                .map(|c| c.evals.domain.log_size())
+                .map(|c| c.log_size())
                 .max();
             let max_coeffs = component_polys
                 .iter()
@@ -342,7 +360,7 @@ impl<E: FrameworkEval + Sync> ComponentProver<CudaBackend> for FrameworkComponen
                 .as_cols_ref()
                 .map_cols(|col| Cow::Owned(col.get_evaluation_on_domain(eval_domain, &twiddles)))
         } else {
-            component_polys.map_cols(|c| Cow::Borrowed(&c.evals))
+            component_polys.map_cols(|c| Cow::Borrowed(c.evals()))
         };
         span.exit();
 

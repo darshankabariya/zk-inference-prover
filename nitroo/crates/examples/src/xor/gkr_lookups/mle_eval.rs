@@ -206,7 +206,7 @@ impl<O: MleCoeffColumnOracle> ComponentProver<SimdBackend> for MleEvalProverComp
         let mut component_trace = trace
             .polys
             .sub_tree(&self.trace_locations)
-            .map_cols(|c| &c.evals);
+            .map_cols(|c| c.evals());
 
         // Build auxiliary trace.
         let span = span!(Level::INFO, "Extension").entered();

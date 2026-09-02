@@ -140,11 +140,16 @@ fn view(t: &Tree) -> Tree {
                 CircleCoefficients::new(BaseFieldVec::from_borrowed_ptr(c.coeffs.device_ptr,
                                                                         c.coeffs.size))
             });
-            let evals = CircleEvaluation::new(
-                p.evals.domain,
-                BaseFieldVec::from_borrowed_ptr(p.evals.values.device_ptr, p.evals.values.size),
-            );
-            stwo::prover::Poly::new(coeffs, evals)
+            // B12 stream HH: under `lde_only` the cached tree holds no
+            // evaluations, so the view carries `None` and the domain comes off
+            // `Poly.domain`, which outlives them.
+            let evals = p.evals.as_ref().map(|e| {
+                CircleEvaluation::new(
+                    e.domain,
+                    BaseFieldVec::from_borrowed_ptr(e.values.device_ptr, e.values.size),
+                )
+            });
+            stwo::prover::Poly::from_parts(coeffs, evals, p.domain)
         })
         .collect();
     let layers = t.commitment.layers.iter().map(|l| l.borrowed_view()).collect();

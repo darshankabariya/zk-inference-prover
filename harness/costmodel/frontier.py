@@ -516,6 +516,439 @@ def e11_factor(fit, n_positions, n_output, s_chunk, layers=32):
                 s_chunk=s_chunk, n_positions=n_positions, n_output=n_output)
 
 
+# ------------------------------------------- what a chunk holds on the card --
+# Stream GG (`briefs/gg-livemem.md`) read the live bytes inside the fork's device
+# memory pool at twelve named marks per chunk, on the H100 at 8B, C=4096, S=512.
+# It retired the single slope this module used to price the memory wall with
+# (~22.6 GiB per G fresh cell, read off ONE chunk) and replaced it with four
+# terms.  Nothing below is typed in, per this module's first rule: GG's two runs
+# differ only in the shared exponent table's height (`params.log_table` 23 and
+# 25), so a two-point solve separates every term that scales with the tallest
+# column from every term that does not, and the coefficients fall out of the two
+# committed artifacts.
+GG_DIR = ROOT / "b12" / "livemem" / "out" / "h100"
+GG_RUNS = ("r1_L16_defaults.json", "r3_L0_defaults.json")
+
+
+def gg_point(path):
+    """One of GG's runs, reduced to the facts the memory model needs.
+
+    `pool_used_high` is the live peak the pool ever held, which GG located at
+    `prove_values` (the FRI transient) in every run; `driver_used - pool_reserved`
+    at that same mark is what the driver holds OUTSIDE the pool."""
+    p = json.loads(pathlib.Path(path).read_text())["result"]["point"]
+    marks = p["mem_marks"]
+    peak = max(marks, key=lambda m: m["pool_used_high"])
+    fill = next(m for m in marks if m["mark"] == "after_fill")
+    fam = p["family_cells"]
+    return dict(
+        h=p["params"]["log_table"], cells=p["cells"],
+        # the walked weights of this chunk's layer, and the preprocessed trace
+        # they actually commit (`pre_cells`), group by group
+        walk_weights=sum(w["weights"] for w in fam["walk_weights"]),
+        walk_pre=sum(w["pre_cells"] for w in fam["walk_weights"]),
+        # trees 0 and 1, as far as they are resident on the device before commit
+        devcopy_cells=p["upload"]["devcopy_bytes"] // 4,
+        fill_resident=fill["pool_used"] - p["upload"]["devcopy_bytes"],
+        peak=peak["pool_used_high"], peak_mark=peak["mark"],
+        driver=peak["driver_used"] - peak["pool_reserved"],
+        slack=peak["pool_reserved_high"] - peak["pool_used_high"],
+        card_total=marks[0]["driver_total"], source=rel(path))
+
+
+def memory_coeffs():
+    """GG's four terms, solved from the two runs rather than restated.
+
+    The two runs are the same layer shape at two table heights, so for any
+    quantity `x` measured at both, `(x25 - x16) / (2**25 - 2**23)` is how many
+    columns of the tallest height it carries and the remainder is its fixed part.
+    That is the whole solve; the only judgement in it is which fixed parts are
+    held constant when the shape changes, and section (7b) prints that."""
+    if not all((GG_DIR / f).exists() for f in GG_RUNS):
+        return None
+    a, b = (gg_point(GG_DIR / f) for f in GG_RUNS)
+    if a["h"] == b["h"]:
+        return None
+    dh = 2 ** b["h"] - 2 ** a["h"]
+
+    def cols(key, sub=None):
+        xa = a[key][sub] if sub else a[key]
+        xb = b[key][sub] if sub else b[key]
+        return (xb - xa) / dh, xa
+
+    fresh_cols, fresh_a = cols("cells", "fresh")
+    pre_cols, pre_a = cols("cells", "preprocessed")
+    base_cols, base_a = cols("cells", "base")
+    inter_cols, inter_a = cols("cells", "interaction")
+    dev_cols, dev_a = cols("devcopy_cells")
+    fill_bytes_cols, fill_a = cols("fill_resident")
+    peak_cols, peak_a = cols("peak")
+    # the three cell terms, each at 12 B / 4 B, leave the height term
+    cell_b, copy_b = 12.0, 4.0
+    # the height term is `height_b * 2**(h+1)`, so its slope in 2**h is twice it
+    height_b = (peak_cols - cell_b * (fresh_cols + pre_cols)
+                - copy_b * dev_cols - fill_bytes_cols) / 2.0
+    resid = peak_a - (cell_b * (fresh_a + pre_a) + copy_b * dev_a + fill_a
+                      + height_b * 2 ** (a["h"] + 1))
+    bounds = a["cells"]["fresh"] - a["cells"]["base"] - a["cells"]["interaction"]
+    return dict(
+        runs=[a, b], cell_bytes=cell_b, copy_bytes=copy_b, height_bytes=height_b,
+        # the boundary trees' own Merkle, plus whatever the decomposition does not
+        # name; GG's brackets put the second part at a few kB
+        residual_bytes=resid, bounds_cells=bounds,
+        fresh_h_cols=fresh_cols, pre_h_cols=pre_cols, base_h_cols=base_cols,
+        inter_h_cols=inter_cols, dev_h_cols=dev_cols, fill_h_bytes=fill_bytes_cols,
+        fill_fixed=fill_a - fill_bytes_cols * 2 ** a["h"],
+        # the walk's OWN preprocessed trace, per walked weight, as the composed
+        # chunk commits it.  B3's `preprocessed_per_weight` is a standalone
+        # width-sweep slope and does not carry the composed chunk's padding.
+        pre_per_weight=a["walk_pre"] / a["walk_weights"],
+        b3_pre_per_weight=cm.PREPROCESSED_PER_WEIGHT,
+        # everything in tree 0 that is not the walk: the shared lookup tables and
+        # the per-region preprocessed columns
+        pre_shared_fixed=pre_a - a["walk_pre"] - pre_cols * 2 ** a["h"],
+        pre_host_built=pre_a - (dev_a - a["cells"]["base"]),
+        # base's share of the height-independent trace, used to split a modelled
+        # fresh count into the base half the device fills clone and the
+        # interaction half they do not
+        base_share=((base_a - base_cols * 2 ** a["h"])
+                    / (base_a + inter_a - (base_cols + inter_cols) * 2 ** a["h"])),
+        driver_bytes=max(a["driver"], b["driver"]),
+        slack_bytes=max(a["slack"], b["slack"]),
+        card_total=a["card_total"],
+        weights_per_walk_row=(cm.WEIGHT_WALK_CELLS_PER_WEIGHT
+                              and 12.0 / cm.WEIGHT_WALK_CELLS_PER_WEIGHT))
+
+
+def chunk_memory(mc, fresh, weights, h, measured=None):
+    """One layer chunk's live peak on the card, in bytes, at table height `h`.
+
+    `fresh` is the chunk's fresh cells as the cost model gives them (which is the
+    h = 23 convention, since that is the height every seq5 artifact was taken at);
+    `weights` is what the chunk's walk covers -- for an MoE layer, EVERY expert,
+    which is why the preprocessed term is the one that moves the MoE rows.
+
+    `measured=<point>` replaces the modelled cell counts with that run's own, so
+    the same function serves the calibration check and the frontier rows."""
+    h_cells = 2 ** h
+    if measured is not None:
+        F, P = measured["cells"]["fresh"], measured["cells"]["preprocessed"]
+        D = measured["devcopy_cells"]
+    else:
+        F = fresh + mc["fresh_h_cols"] * (h_cells - 2 ** 23)
+        P = mc["pre_per_weight"] * weights + mc["pre_shared_fixed"] \
+            + mc["pre_h_cols"] * h_cells
+        base_fixed = mc["base_share"] * (fresh - mc["bounds_cells"]
+                                         - mc["fresh_h_cols"] * 2 ** 23)
+        D = base_fixed + mc["base_h_cols"] * h_cells + (P - mc["pre_host_built"])
+    fill = mc["fill_fixed"] + mc["fill_h_bytes"] * h_cells
+    cells_b = mc["cell_bytes"] * (F + P)
+    copies_b = mc["copy_bytes"] * D
+    height_b = mc["height_bytes"] * 2 * h_cells
+    pool = cells_b + copies_b + fill + height_b + mc["residual_bytes"]
+    return dict(fresh=F, pre=P, dev=D, cells_bytes=cells_b, copies_bytes=copies_b,
+                fill_bytes=fill, height_bytes=height_b, pool=pool,
+                card=pool + mc["driver_bytes"] + mc["slack_bytes"])
+
+
+def head_cross_check(mc, ref):
+    """The one chunk the retired slope was actually read from, priced by the model.
+
+    seq5's `lm_head` chunk is a different chunk on a different card, and none of
+    it entered GG's solve, so it is a real held-out point.  It is informational
+    and not gated: its peak is an `nvidia-smi` sample every 2 s (so a floor on a
+    transient, which GG showed can be 2.5 GiB tall), and its fill residents were
+    never marked, so the layer chunk's are used for them."""
+    p = ROOT / "b10" / "out" / "seq5" / "seq_c4096_head.json"
+    if not p.exists():
+        return None
+    d = json.loads(p.read_text())["result"]["point"]
+    h = d["params"]["log_table"]
+    fam = d["family_cells"]
+    got = chunk_memory(mc, None, None, h, measured=dict(
+        cells=d["cells"], devcopy_cells=d["upload"]["devcopy_bytes"] // 4))
+    card = got["card"]
+    return dict(source=rel(p), h=h, cells=d["cells"],
+                walk_weights=sum(w["weights"] for w in fam["walk_weights"]),
+                walk_pre=sum(w["pre_cells"] for w in fam["walk_weights"]),
+                measured_mib=ref["peak_mib"], model_mib=card / 2 ** 20,
+                delta=card / 2 ** 20 / ref["peak_mib"] - 1.0)
+
+
+def walk_matrices(shape, grp):
+    """The weights of each matrix one layer's walk covers, biggest first.
+
+    Only the biggest matters here: a walk group's row count is the next power of
+    two above `weights / p` for the widest matrix in it (B3's design point `p`),
+    and that row count is the only thing in a layer chunk that could out-grow the
+    shared exponent table and take over `h`."""
+    d, nh, nkv, hd = shape["d"], shape["nh"], shape["nkv"], shape["hd"]
+    if grp.get("attn_params_per_layer"):
+        # MLA: the low-rank pair is not `(nh + 2 nkv) hd`, and this module does not
+        # carry its per-matrix split.  Charging the whole attention block as one
+        # matrix is an over-estimate, which is the safe direction for a bound.
+        mats = [grp["attn_params_per_layer"]]
+    else:
+        mats = [d * nh * hd, d * nkv * hd, nh * hd * d]
+    mats += [d * grp["dff"], grp["dff"] * d]         # per expert, not per layer
+    return sorted(mats, reverse=True)
+
+
+def walk_height(mc, shape, grp):
+    """`ceil(log2(widest matrix / p))` -- the tallest column the walk can build."""
+    p = mc["weights_per_walk_row"]
+    if not p:
+        return None
+    return math.ceil(math.log2(max(walk_matrices(shape, grp)) / p))
+
+
+# ------------------------------------- what LDE-only residency changes (HH) --
+# Stream HH (`briefs/hh-ldeonly.md`) kept every committed column on the trace
+# domain at 4 B per cell and rebuilt its blown-up evaluations in each of the four
+# phases that read them, behind `B7_M3_LDEONLY`.  The proof does not move.  Its
+# gate-1 runs are GG's two shapes again -- the same L16 (h=23) and L0 (h=25)
+# chunks on the same H100 -- with the switch off (A1, A3) and on (A2, A4), and
+# A1/A3 reproduce GG's R1/R3 peaks to the byte, so the same two-point solve that
+# gives (7b) its coefficients gives this one its residency model.  Nothing below
+# is typed in either.
+HH_DIR = ROOT / "b12" / "ldeonly" / "out" / "h100"
+HH_ON = ("a2_L16_on.json", "a4_L0_on.json")
+HH_OFF = ("a1_L16_off.json", "a3_L0_off.json")
+HH_LOOP = ("p1_pipe_off_c4096.json", "p2_pipe_on_c4096.json")
+# Two facts about the box rather than about the proof, needed only by variant
+# (iii): the pinned staging pool measured 30.16 GB/s (`briefs/l-tracegen.md`),
+# and `/sys/fs/cgroup/memory.max` on the H100 container reads 150.0 GiB
+# (`briefs/dd-extract.md`), which is what a host-resident coefficient set has.
+PCIE_PINNED_BPS = 30.16e9
+H100_HOST_CGROUP = 161061273600
+
+
+def hh_point(path):
+    """One of HH's runs, reduced to the facts the LDE-only model needs.
+
+    Beside the peak this keeps every level mark, because the levels are the
+    held-out check: they are what the coefficients must reproduce at the height
+    they were not read at, and none of them enters the two-point solve."""
+    p = json.loads(pathlib.Path(path).read_text())["result"]["point"]
+    marks = {m["mark"]: m for m in p["mem_marks"]}
+    peak = max(p["mem_marks"], key=lambda m: m["pool_used_high"])
+    c = p["cells"]
+    return dict(
+        h=p["params"]["log_table"], cells=c,
+        committed=c["fresh"] + c["preprocessed"],
+        bounds_cells=c["fresh"] - c["base"] - c["interaction"],
+        devcopy_cells=p["upload"]["devcopy_bytes"] // 4,
+        fill=marks["after_fill"]["pool_used"], marks=marks,
+        peak=peak["pool_used_high"], peak_mark=peak["mark"],
+        prove=p["prove_secs"],
+        phase={k: v["secs"] for k, v in p["phases"]["phases"].items()},
+        source=rel(path))
+
+
+def _lde_terms(r):
+    """The residency coefficients, read off ONE run's mark deltas.
+
+    Nothing here is typed in and nothing here comes from the other run.  The two
+    trace trees of different sizes give `delta = c x cells + M x 2^(h+1)` twice,
+    which solves the per-cell cost `c` and the Merkle cost `M` together; the
+    third tree is then a check on that solve (`merkle_check`).  The twiddles, the
+    composition accumulator and the composition tree are pure height terms, the
+    boundary trees' Merkle is a constant because their height is fixed at 2^14,
+    and the transient above `composition_commit` is the quotient column and FRI.
+    `_lde_levels` replays the lot at the OTHER height, where none of it was
+    read."""
+    n = 2.0 ** (r["h"] + 1)
+    m, c = r["marks"], r["cells"]
+    d_pre = m["commit_pre"]["pool_used"] - m["after_twiddles"]["pool_used"]
+    d_base = m["commit_base"]["pool_used"] - m["commit_pre"]["pool_used"]
+    d_inter = m["commit_inter"]["pool_used"] - m["commit_base"]["pool_used"]
+    cell_b = (d_base - d_pre) / (c["base"] - c["preprocessed"])
+    merkle = (d_pre - cell_b * c["preprocessed"]) / n
+    return dict(
+        cell_bytes=cell_b, merkle=merkle,
+        merkle_check=d_inter - (cell_b * c["interaction"] + merkle * n),
+        twiddles=(m["after_twiddles"]["pool_used"] - r["fill"]) / n,
+        composition=(m["composition"]["pool_used"]
+                     - m["commit_bounds"]["pool_used"]) / n,
+        comp_tree=(m["composition_commit"]["pool_used"]
+                   - m["composition"]["pool_used"]) / n,
+        bounds_merkle=(m["commit_bounds"]["pool_used"] - m["commit_inter"]["pool_used"]
+                       - cell_b * r["bounds_cells"]),
+        fri=(r["peak"] - m["composition_commit"]["pool_used"]) / n)
+
+
+def _lde_levels(r, co):
+    """Replay `co`'s coefficients against run `r`'s own cells and fill level."""
+    n = 2.0 ** (r["h"] + 1)
+    c, out = r["cells"], {}
+    lv = r["fill"] + co["twiddles"] * n
+    out["after_twiddles"] = lv
+    for k, cc in (("commit_pre", c["preprocessed"]), ("commit_base", c["base"]),
+                  ("commit_inter", c["interaction"])):
+        lv += co["cell_bytes"] * cc + co["merkle"] * n
+        out[k] = lv
+    lv += co["cell_bytes"] * r["bounds_cells"] + co["bounds_merkle"]
+    out["commit_bounds"] = lv
+    lv += co["composition"] * n
+    out["composition"] = lv
+    lv += co["comp_tree"] * n
+    out["composition_commit"] = lv
+    return out
+
+
+def ldeonly_coeffs(mc):
+    """HH's peak, solved from its two switched-on runs the way (7b) solves GG's.
+
+        peak = 4 B x (fresh + preprocessed) + the copies (7b) already prices
+             + X(h),   X(h) = a + b x 2^(h+1)
+
+    Two measured points, two unknowns, so the solve itself checks nothing.  What
+    checks it is `held_out`: the coefficients of the h=23 run's mark deltas,
+    replayed against the h=25 run's own cells, must reproduce all six of ITS
+    level marks and its peak, and no level mark is in the solve."""
+    if not all((HH_DIR / f).exists() for f in HH_ON + HH_OFF + HH_LOOP):
+        return None
+    a, b = (hh_point(HH_DIR / f) for f in HH_ON)
+    off = [hh_point(HH_DIR / f) for f in HH_OFF]
+    if a["h"] == b["h"]:
+        return None
+
+    def X(r):
+        # the copies term is (7b)'s `4 B x D + other fill residents`, which is
+        # exactly what the run's own `after_fill` level reads
+        return r["peak"] - 4.0 * r["committed"] - r["fill"]
+
+    hb = (X(b) - X(a)) / (2 ** (b["h"] + 1) - 2 ** (a["h"] + 1))
+    ha = X(a) - hb * 2 ** (a["h"] + 1)
+
+    # what a and b are, in the marks.  Read the height terms off each run and
+    # cross-check them against the 472 B of the retained-evaluation model.
+    ta, tb = _lde_terms(a), _lde_terms(b)
+    resident_n = 3 * ta["merkle"] + ta["twiddles"] + ta["composition"] + ta["comp_tree"]
+    # The transient above `composition_commit` is the phase the switch changes.
+    # At h=25 it is the FRI's own 160 x 2^(h+1) to 6 kB, and at h=23 it is 2.69x
+    # that.  What reconciles the two heights is ONE rebuilt log-size group at 8 B
+    # per trace cell (a rebuilt column is the blown-up one), with the transient
+    # the LARGER of it and the FRI's: at h=23 the group wins, at h=25 the FRI
+    # does, and the group is never charged on top of the FRI.  HH's record reads
+    # the h=23 excess instead as a smaller group standing beside the quotient
+    # accumulator; that reading does not reconcile with h=25, where a group of
+    # its share would have pushed the transient 4.96 GiB above the 160 it
+    # measured.  The share below is one measurement at one shape either way.
+    grp_bytes = a["peak"] - a["marks"]["composition_commit"]["pool_used"]
+    grp_share = grp_bytes / 8.0 / a["committed"]
+    held = []
+    for r, src in ((b, a), (a, b)):
+        pred = _lde_levels(r, _lde_terms(src))
+        for k, v in pred.items():
+            held.append(dict(run=r["source"], h=r["h"], mark=k, from_h=src["h"],
+                             measured=r["marks"][k]["pool_used"], model=v,
+                             delta=r["marks"][k]["pool_used"] - v))
+    # the same X, written so that the group scales with the shape instead of
+    # sitting inside a fitted constant.  It reproduces both measured X to a few
+    # kB with one share, which the a + b x 2^(h+1) form cannot do off the 8B
+    # shape, and it is what the wide rows are also priced under.
+    def X_scaled(h, cells):
+        n = 2 ** (h + 1)
+        return (resident_n * n + ta["bounds_merkle"]
+                + max(tb["fri"] * n, 8.0 * grp_share * cells))
+
+    struct = {r["h"]: dict(model=X_scaled(r["h"], r["committed"]),
+                           measured=X(r),
+                           delta=X(r) - X_scaled(r["h"], r["committed"]))
+              for r in (a, b)}
+    return dict(
+        runs=[a, b], off_runs=off, a_bytes=ha, b_bytes=hb,
+        X={r["h"]: X(r) for r in (a, b)},
+        terms=ta, terms_hi=tb, resident_n=resident_n, fri_n=tb["fri"],
+        height_n=resident_n + tb["fri"], retained_n=mc["height_bytes"],
+        group_bytes=grp_bytes, group_cells=grp_bytes / 8.0, group_share=grp_share,
+        struct=struct, held_out=held,
+        held_worst=max(abs(x["delta"]) for x in held),
+        driver_bytes=mc["driver_bytes"], slack_bytes=mc["slack_bytes"])
+
+
+def ldeonly_memory(mc, lo, part, h):
+    """One layer chunk under LDE-only, in bytes, from `chunk_memory`'s own split.
+
+    Three variants, in the order they would have to be built:
+      (i)   as built -- the switch as stream HH measured it;
+      (ii)  the fills' trace-domain copies dropped once the tree is committed,
+            designed and not built: they are redundant with the coefficients;
+      (iii) the coefficients host-resident and streamed per log-size group,
+            designed and not built: the card then holds only the height terms
+            and whatever group is in flight."""
+    n = 2 ** (h + 1)
+    cells = part["fresh"] + part["pre"]
+    cells4 = lo["terms"]["cell_bytes"] * cells
+    copies = part["copies_bytes"] + part["fill_bytes"]
+    fixed = lo["driver_bytes"] + lo["slack_bytes"]
+    X = lo["a_bytes"] + lo["b_bytes"] * n
+    group = lo["group_share"] * cells
+    resident = lo["resident_n"] * n + lo["terms"]["bounds_merkle"]
+    transient = max(lo["fri_n"] * n, 8.0 * group)
+    # (iii) prices the group in flight explicitly: 4 B of coefficients crossing
+    # the bus beside the 8 B of evaluations rebuilt from them.  At the shape and
+    # height the coefficients were read at that is X(h) + 4 B x group, to 192 B.
+    return dict(
+        cells_bytes=cells4, copies_bytes=copies, height_bytes=X, group_cells=group,
+        as_built=cells4 + copies + X + fixed,
+        no_copies=cells4 + X + fixed,
+        host_coeffs=resident + transient + 4.0 * group + fixed,
+        host_ram=cells4, pcie_secs=3.0 * cells4 / PCIE_PINNED_BPS,
+        # the same two, with the rebuilt group scaled to the shape rather than
+        # held at the 8B chunk's own size inside the fitted `a`
+        as_built_scaled=cells4 + copies + resident + transient + fixed,
+        no_copies_scaled=cells4 + resident + transient + fixed)
+
+
+def ldeonly_wall(lo):
+    """The three rebuild passes, and what a batched rebuild would cost instead.
+
+    The commit builds a whole log-size group in one `ntt_n2b_columns`; the
+    rebuild calls `get_evaluation_on_domain` per column.  `lde_extend` is the
+    commit's own batched extension and it does not move between the arms, so it
+    is the batched rate for the same column set, measured in the same run."""
+    a, b = lo["runs"]                       # A2 (h=23), A4 (h=25)
+    o1, o3 = lo["off_runs"]                 # A1 (h=23), A3 (h=25)
+    passes = ("constraint_eval", "fri_quotients", "other")   # composition, quotients, decommit
+    per = []
+    for on, off, tag in ((a, o1, "L16"), (b, o3, "L0")):
+        d = {k: on["phase"][k] - off["phase"][k] for k in on["phase"]}
+        rebuild = sum(d[k] for k in passes)
+        batched = off["phase"]["lde_extend"]
+        per.append(dict(chunk=tag, h=on["h"], off=off["prove"], on=on["prove"],
+                        delta=on["prove"] - off["prove"], rebuild=rebuild,
+                        by_pass={k: d[k] for k in passes}, other={
+                            k: d[k] for k in ("merkle", "fri_commit", "oods_eval")},
+                        batched=batched, ratio=rebuild / 3.0 / batched,
+                        projected=off["prove"] + 3.0 * batched,
+                        cells=on["committed"]))
+    loops = {}
+    for f, tag in zip(HH_LOOP, ("off", "on")):
+        d = json.loads((HH_DIR / f).read_text())["result"]
+        ch, s = d["chunks"], d["summary"]
+        loops[tag] = dict(
+            loop=s["loop_secs"], n=s["n"],
+            gen=sum(c["build_secs"] + c["generate_secs"] for c in ch),
+            prove=sum(c["prove_secs"] for c in ch),
+            lde=sum(c["phases"]["phases"]["lde_extend"]["secs"] for c in ch),
+            cells=sum(c["cells"]["fresh"] + c["cells"]["preprocessed"] for c in ch),
+            source=rel(HH_DIR / f))
+    p1 = loops["off"]
+    proj = p1["prove"] + 3.0 * p1["lde"]
+    over = p1["loop"] - max(p1["gen"], p1["prove"])
+    p1["projected_prove"] = proj
+    p1["slack"] = p1["gen"] - p1["prove"]
+    p1["overhead"] = over
+    p1["projected_loop"] = max(p1["gen"], proj) + over
+    p1["projected_delta"] = p1["projected_loop"] / p1["loop"] - 1.0
+    p1["gen_per_cell"] = p1["gen"] / p1["cells"]
+    return dict(per_chunk=per, loops=loops,
+                prove_per_cell=per[0]["on"] / per[0]["cells"],
+                projected_per_cell=per[0]["projected"] / per[0]["cells"])
+
+
 # ------------------------------------------------------------------ table ----
 def g(x, unit=""):
     if x is None:
@@ -1075,6 +1508,418 @@ def main(argv=None):
     print("  (~1/S) and multiplies the proof bytes -- the frontier rows above assume the")
     print("  measured S=512 and are optimistic wherever this column says NO.")
 
+    # --- the memory wall, re-priced on stream GG's coefficients --------------
+    mc = memory_coeffs()
+    mem = None
+    if mc:
+        GIB = 2 ** 30
+        # card sizes.  The budget is the vendor total, as section (7) used it; the
+        # measured figure beside it is what `cudaMemGetInfo` leaves a context on our
+        # own H100, which is 0.47 GiB tighter.
+        CARDS = (("80 GB", 81559 / 1024.0), ("141 GB", 143771 / 1024.0))
+        a, b = mc["runs"]
+        print("\n(7b) the same question, re-priced with stream GG's coefficients")
+        print(f"  read from {a['source']} and {b['source']} "
+              f"(H100, 8B, C=4096, S=512, inside the fork's device pool).")
+        print("  Four terms, not one slope over fresh cells:")
+        print(f"    {mc['cell_bytes']:.0f} B x (fresh + preprocessed cells)   "
+              "every tree, base and interaction alike")
+        print(f"    {mc['copy_bytes']:.0f} B x device-resident cells of trees 0 and 1"
+              "   base cells plus the tables the fills clone")
+        print(f"    {mc['height_bytes']:.0f} B x 2^(h+1)                      "
+              "h = log rows of the tallest column")
+        print(f"    + {mc['fill_fixed'] / GIB:.3f} GiB + {mc['fill_h_bytes']:.0f} B x 2^h "
+              f"of other fill residents, + {mc['residual_bytes'] / 2 ** 20:.2f} MiB "
+              "of boundary-tree Merkle")
+        print(f"    + {mc['driver_bytes'] / GIB:.3f} GiB the driver holds outside the pool"
+              f", + {mc['slack_bytes'] / 2 ** 20:.0f} MiB of pool slack")
+        print(f"  the walk commits {mc['pre_per_weight']:.4f} preprocessed cells per "
+              f"walked weight in the composed chunk,")
+        print(f"  against B3's standalone-sweep {mc['b3_pre_per_weight']:.4f} that this "
+              "module's `pre` column uses")
+        print(f"  ({mc['pre_per_weight'] / mc['b3_pre_per_weight'] - 1:+.1%}: the composed "
+              "walk pads each group to a power-of-two row count).")
+        print(f"  Held constant when the shape changes, all read at 8B: "
+              f"{g(mc['pre_shared_fixed'])} shared")
+        print(f"  preprocessed cells (the lookup tables and the per-region columns), "
+              f"{g(mc['pre_host_built'])} of")
+        print(f"  them host-built, and base = {mc['base_share']:.4f} of the "
+              "height-independent trace.")
+
+        print("\n  the gate: the model must reproduce BOTH measured peaks within 5%")
+        print(f"  {'chunk':<8} {'h':>3} {'measured pool peak':>19} {'model':>12} "
+              f"{'delta':>8}")
+        gate = []
+        cal8b = next(s for s in SHAPES if s["name"] == "Llama-3.1-8B")
+        cal_grp = cal8b["groups"][0]
+        cal_fresh = model_cells(dict(cal8b, groups=[cal_grp]), 4096, seq=args.seq,
+                                seq_batch=args.seq_batch, alpha=alpha, batch=batch,
+                                with_head=False)["total"] * args.seq / cal_grp["layers"]
+        cal_w = cm.n_params(cfg_of(cal8b, cal_grp), experts=cal_grp["experts"],
+                            topk=cal_grp["topk"], walked=True, head=False,
+                            attn_params_per_layer=cal_grp.get("attn_params_per_layer")
+                            ) / cal_grp["layers"]
+        for run, tag in zip(mc["runs"], ("L16", "L0")):
+            got = chunk_memory(mc, cal_fresh, cal_w, run["h"])["pool"]
+            d = got / run["peak"] - 1.0
+            gate.append(dict(chunk=tag, h=run["h"], measured=run["peak"], model=got,
+                             delta=d, source=run["source"]))
+            print(f"  {tag:<8} {run['h']:>3} {run['peak'] / GIB:>15.3f} GiB "
+                  f"{got / GIB:>8.3f} GiB {d:>+8.2%}")
+        worst = max(abs(r["delta"]) for r in gate)
+        if worst > 0.05:
+            sys.exit(f"the memory model misses a measured peak by {worst:.2%} (> 5%): "
+                     "it is not calibrated and no frontier row may be printed from it.")
+        print(f"  worst {worst:+.2%}, inside the 5% gate.  The residual is the cost "
+              "model's own")
+        print("  fresh-cell residual showing through; the coefficients themselves "
+              "decompose both")
+        print("  measured peaks to a few kB (stream GG, `## Record`).")
+        head = head_cross_check(mc, ref)
+        if head:
+            print(f"  held out, and in no part of the solve: the `lm_head` chunk the "
+                  f"retired slope was")
+            print(f"  read from ({rel(head['source'])}, H200, its own cells) prices at "
+                  f"{head['model_mib']:,.0f} MiB")
+            print(f"  against the {head['measured_mib']:,.0f} MiB seq5 sampled, "
+                  f"{head['delta']:+.2%}.  Its walk commits")
+            print(f"  {head['walk_pre'] / head['walk_weights']:.4f} preprocessed cells "
+                  f"per weight against the layer chunk's "
+                  f"{mc['pre_per_weight']:.4f}: one wide")
+            print("  matrix pads better than a layer's four groups, so the frontier "
+                  "rows below,")
+            print("  which use the layer figure, are high on the preprocessed term "
+                  "rather than low.")
+
+        print(f"\n  one layer chunk at S={args.seq}, C=4096, all [projected]. "
+              "h is NOT known for a")
+        print("  shape whose keys were never extracted, so both bracket ends are "
+              "priced.")
+        print(f"  {'model':<18} {'G fresh':>8} {'G pre':>8} {'GiB h=23':>9} "
+              f"{'GiB h=25':>9} " + " ".join(f"{c + ' @' + str(h):>10}"
+                                             for c, _ in CARDS for h in (23, 25)))
+        mem = {}
+        for s in SHAPES:
+            best = None
+            for grp in s["groups"]:
+                fresh = model_cells(dict(s, groups=[grp]), 4096, seq=args.seq,
+                                    seq_batch=args.seq_batch, alpha=alpha, batch=batch,
+                                    with_head=False)["total"] * args.seq / grp["layers"]
+                w = cm.n_params(cfg_of(s, grp), experts=grp["experts"],
+                                topk=grp["topk"], walked=True, head=False,
+                                attn_params_per_layer=grp.get("attn_params_per_layer")
+                                ) / grp["layers"]
+                at = {h: chunk_memory(mc, fresh, w, h) for h in (23, 25)}
+                row = dict(fresh=fresh, weights=w, at=at,
+                           walk_h=walk_height(mc, s, grp))
+                if best is None or at[23]["card"] > best["at"][23]["card"]:
+                    best = row
+            best["fits"] = {name: {h: best["at"][h]["card"] / GIB < gib
+                                   for h in (23, 25)} for name, gib in CARDS}
+            mem[s["name"]] = best
+            cells = " ".join(
+                f"{('yes' if best['fits'][c][h] else 'NO'):>10}"
+                for c, _ in CARDS for h in (23, 25))
+            print(f"  {s['name']:<18} {best['at'][23]['fresh'] / 1e9:>8.2f} "
+                  f"{best['at'][23]['pre'] / 1e9:>8.2f} "
+                  f"{best['at'][23]['card'] / GIB:>9.1f} "
+                  f"{best['at'][25]['card'] / GIB:>9.1f} {cells}")
+        tall = [n for n, r in mem.items() if r["walk_h"] and r["walk_h"] > 25]
+        print(f"  budgets: {' and '.join(f'{c} = {gib:.1f} GiB' for c, gib in CARDS)}"
+              " (vendor totals); our own H100 leaves a")
+        print(f"  context {mc['card_total'] / GIB:.2f} GiB, so read a row inside "
+              "0.5 GiB of the 80 GB line as at it.")
+        print(f"  tallest walk column over the eight shapes: 2^"
+              f"{max(r['walk_h'] for r in mem.values())}, so the exponent table "
+              "still sets h everywhere")
+        print("  " + (f"except {', '.join(tall)}." if tall
+                      else "and the h = 23..25 bracket holds for every row."))
+        print("  The preprocessed term is per CHUNK, so an MoE layer chunk carries "
+              "every expert's")
+        print("  walk trace; splitting such a layer into per-expert chunks divides it, "
+              "and this")
+        print("  table prices section (7)'s layer-chunk convention, not the smallest "
+              "feasible chunk.")
+
+    # --- the same question under stream HH's LDE-only residency --------------
+    lo = ldeonly_coeffs(mc) if mc else None
+    ldeo, wall = None, None
+    if lo:
+        a, b = lo["runs"]
+        ta = lo["terms"]
+        wall = ldeonly_wall(lo)
+        print("\n(7c) the same question again, with stream HH's LDE-only residency")
+        print(f"  read from {a['source']} and {b['source']}")
+        print("  (H100, 8B, C=4096, S=512, `B7_M3_LDEONLY=1`, the proof byte-identical "
+              "to the off runs).")
+        print("  Every committed column is kept on the trace domain and its blown-up")
+        print("  evaluations are rebuilt in each phase that reads them, so the 12 B "
+              "cell term")
+        print(f"  of (7b) becomes {ta['cell_bytes']:.4f} B and the height term changes "
+              "shape.  Solved the same way:")
+        print("    peak = %.0f B x (fresh + preprocessed) + the copies (7b) prices "
+              "+ X(h)" % ta["cell_bytes"])
+        print(f"    X(h) = {lo['a_bytes'] / GIB:.4f} GiB + "
+              f"{lo['b_bytes']:.2f} B x 2^(h+1)      two points, two unknowns")
+        print(f"  measured X: {lo['X'][a['h']] / GIB:.4f} GiB at h={a['h']}, "
+              f"{lo['X'][b['h']] / GIB:.4f} GiB at h={b['h']}.")
+        print("  What the two are, in the marks.  Read off the runs' own deltas, "
+              "per 2^(h+1):")
+        print(f"    Merkle {3 * ta['merkle']:.0f} (three trace trees at "
+              f"{ta['merkle']:.0f}), twiddles {ta['twiddles']:.0f}, composition "
+              f"accumulator {ta['composition']:.0f},")
+        print(f"    composition tree {ta['comp_tree']:.0f}   ->  "
+              f"{lo['resident_n']:.0f} B resident, plus the transient above "
+              f"`composition_commit`,")
+        print(f"    which at h={b['h']} is the quotient column and FRI at "
+              f"{round(lo['fri_n'])} x 2^(h+1) to "
+              f"{b['peak'] - b['marks']['composition_commit']['pool_used'] - round(lo['fri_n']) * 2 ** (b['h'] + 1):,.0f} B."
+              f"  Together {lo['height_n']:.0f} B")
+        print(f"  against the retained model's {lo['retained_n']:.0f} B (7b): the "
+              f"{lo['retained_n'] - lo['height_n']:.0f} B difference is the composition "
+              "tree's own")
+        print("  blown-up evaluations, the only height-scaled thing the switch drops -- "
+              "the cell")
+        print("  term carries the rest, which is the whole point of the variant.")
+        print(f"  At h={a['h']} the transient is {lo['group_bytes'] / GIB:.4f} GiB, "
+              f"x{lo['group_bytes'] / (lo['fri_n'] * 2 ** (a['h'] + 1)):.2f} the FRI's, "
+              "and what reconciles the two")
+        print("  heights is ONE rebuilt log-size group at 8 B per trace cell, the "
+              "transient being")
+        print(f"  the LARGER of it and the FRI's: {lo['group_cells'] / 1e6:,.1f} M cells, "
+              f"{lo['group_share']:.2%} of the chunk's committed")
+        print(f"  cells, wins at h={a['h']} and loses at h={b['h']}.  So `a` is not a "
+              "constant and `b` is not")
+        print(f"  {lo['height_n']:.0f} B: the fit spreads that one group over the "
+              f"interval and reads {lo['a_bytes'] / GIB:.3f} GiB and")
+        print(f"  {lo['b_bytes']:.0f} B.  Inside h={a['h']}..{b['h']} it is exact at "
+              "both ends, which is where this table prices;")
+        print("  outside it, or off this shape, use the group form.  Both reproduce "
+              "both measured")
+        print("  X: " + ", ".join(
+            f"h={h} {v['delta']:+,.0f} B" for h, v in sorted(lo["struct"].items()))
+              + " for the group form, exactly for the fit.")
+
+        print("\n  held out, and in no part of the peak solve: the LEVEL marks.  The "
+              "coefficients")
+        print("  above come from ONE run's commit deltas -- two trees of different "
+              "sizes solve the")
+        print("  per-cell and the Merkle cost together, the third tree checks them "
+              f"({ta['merkle_check']:+,.0f} B; the")
+        print("  Merkle reads 64 B less a constant 32 B per tree, which GG's record "
+              "also found).")
+        print("  Replayed against the other run's own cells they must reproduce every "
+              "level it")
+        print(f"  reached, at a height they were never read at.  h={b['h']} from the "
+              f"h={a['h']} run's deltas:")
+        print(f"  {'mark':<20} {'measured':>16} {'model':>16} {'delta':>8}")
+        for x in lo["held_out"]:
+            if x["h"] == b["h"]:
+                print(f"  {x['mark']:<20} {x['measured']:>16,} {x['model']:>16,.0f} "
+                      f"{x['delta']:>+8,.0f}")
+        print(f"  worst over both directions and all {len(lo['held_out'])} levels: "
+              f"{lo['held_worst']:,.0f} B, "
+              f"{lo['held_worst'] / lo['runs'][0]['peak']:.1e} of the peak.")
+
+        print("\n  the gate, as (7b) has one: the model must reproduce BOTH of HH's "
+              "measured peaks")
+        print("  within 5%, at the calibration shape's own modelled cells.")
+        print(f"  {'chunk':<8} {'h':>3} {'measured pool peak':>19} {'model':>12} "
+              f"{'delta':>8}")
+        lgate = []
+        for run, tag in zip(lo["runs"], ("L16", "L0")):
+            part = mem["Llama-3.1-8B"]["at"][run["h"]]
+            got = ldeonly_memory(mc, lo, part, run["h"])
+            pool = got["as_built"] - lo["driver_bytes"] - lo["slack_bytes"]
+            d = pool / run["peak"] - 1.0
+            lgate.append(dict(chunk=tag, h=run["h"], measured=run["peak"], model=pool,
+                              delta=d, source=run["source"]))
+            print(f"  {tag:<8} {run['h']:>3} {run['peak'] / GIB:>15.3f} GiB "
+                  f"{pool / GIB:>8.3f} GiB {d:>+8.2%}")
+        lworst = max(abs(r["delta"]) for r in lgate)
+        if lworst > 0.05:
+            sys.exit(f"the LDE-only model misses a measured peak by {lworst:.2%} "
+                     "(> 5%): no frontier row may be printed from it.")
+        print(f"  worst {lworst:+.2%}, inside the 5% gate, and the same residual (7b) "
+              "carries: the")
+        print("  cost model's own fresh-cell figure, not the residency coefficients, "
+              "which decompose")
+        print("  both peaks to a few hundred bytes.")
+
+        print(f"\n  one layer chunk at S={args.seq}, C=4096, all [projected], three "
+              "variants:")
+        print("   (i)   as built      -- HH's switch, measured on this card")
+        print("   (ii)  copies dropped -- DESIGNED, NOT BUILT: the fills' trace-domain "
+              "copies are")
+        print("         redundant with the coefficients once the tree is committed")
+        print("   (iii) host coeffs   -- DESIGNED, NOT BUILT: the coefficients live in "
+              "host RAM and")
+        print("         are streamed to the card per log-size group, once per rebuild "
+              "pass")
+        ldeo = {}
+        for s in SHAPES:
+            r = mem[s["name"]]
+            ldeo[s["name"]] = {h: ldeonly_memory(mc, lo, r["at"][h], h) for h in (23, 25)}
+            for h in (23, 25):
+                ldeo[s["name"]][h]["fits"] = {
+                    name: {k: ldeo[s["name"]][h][k] / GIB < gib
+                           for k in ("as_built", "no_copies", "host_coeffs",
+                                     "as_built_scaled", "no_copies_scaled")}
+                    for name, gib in CARDS}
+        for key, title in (("as_built", "(i) as built"),
+                           ("no_copies", "(ii) copies dropped after commit"),
+                           ("host_coeffs", "(iii) host-resident coefficients")):
+            print(f"\n  {title}")
+            print(f"  {'model':<18} {'GiB h=23':>9} {'GiB h=25':>9} "
+                  + " ".join(f"{c + ' @' + str(h):>10}" for c, _ in CARDS for h in (23, 25)))
+            for s in SHAPES:
+                row = ldeo[s["name"]]
+                cells = " ".join(
+                    f"{('yes' if row[h]['fits'][name][key] else 'NO'):>10}"
+                    for name, _ in CARDS for h in (23, 25))
+                print(f"  {s['name']:<18} {row[23][key] / GIB:>9.1f} "
+                      f"{row[25][key] / GIB:>9.1f} {cells}")
+        print(f"\n  budgets as (7b): {' and '.join(f'{c} = {gib:.1f} GiB' for c, gib in CARDS)}"
+              f", each including the {lo['driver_bytes'] / GIB:.3f} GiB")
+        print(f"  the driver holds outside the pool and the "
+              f"{lo['slack_bytes'] / 2 ** 20:.0f} MiB of pool slack.")
+        print("  (i) and (ii) carry the fitted X(h), so their group in flight is the "
+              "8B chunk's")
+        print("  own; (iii) prices the group explicitly and therefore scales it with "
+              "the shape.")
+        print("  The group is not derivable per shape from (7b)'s family split, which "
+              "carries no")
+        print(f"  heights, so it is the measured {lo['group_share']:.2%} share of the "
+              "chunk's own committed cells.")
+        print("  The exponent table's two key columns at 2^h x 4 B "
+              f"({2 * 2 ** 23 * 4 / GIB:.3f} GiB at h=23,")
+        print(f"  {2 * 2 ** 25 * 4 / GIB:.3f} GiB at h=25) are a floor on it and are far "
+              "below, so they bound nothing useful.")
+
+        print("\n  (iii) also moves the problem to the host and to the bus:")
+        print(f"  {'model':<18} {'host GiB':>9} {'150 GiB cgroup':>15} "
+              f"{'PCIe s/chunk':>13} {'x3 passes GB':>13}")
+        for s in SHAPES:
+            row = ldeo[s["name"]][23]
+            print(f"  {s['name']:<18} {row['host_ram'] / GIB:>9.1f} "
+                  f"{('yes' if row['host_ram'] < H100_HOST_CGROUP else 'NO'):>15} "
+                  f"{row['pcie_secs']:>13.2f} {3 * row['host_ram'] / 1e9:>13.1f}")
+        print(f"  at {PCIE_PINNED_BPS / 1e9:.2f} GB/s pinned (`briefs/l-tracegen.md`) "
+              "and the H100 container's")
+        print(f"  {H100_HOST_CGROUP / GIB:.1f} GiB `memory.max` (`briefs/dd-extract.md`); "
+              "the host must also hold the witness")
+        print("  build, so the cgroup column is a ceiling on the coefficients alone.")
+
+        print("\n  the same (i) and (ii), with the rebuilt group scaled to the shape "
+              "instead of held")
+        print("  at the 8B chunk's own size inside the fitted `a`.  This is the "
+              "conservative reading")
+        cal8 = ldeo["Llama-3.1-8B"]
+        print("  and it is the one the verdict is stated from.  At the calibration "
+              "shape the two")
+        print(f"  agree to {max(abs(cal8[h]['as_built_scaled'] - cal8[h]['as_built']) for h in (23, 25)) / GIB:.2f} GiB, "
+              "which is this module's own cell residual and not a modelling")
+        print("  difference; every wider row is higher under it.")
+        print(f"  {'model':<18} {'(i) h=23':>9} {'(i) h=25':>9} {'(ii) h=23':>9} "
+              f"{'(ii) h=25':>9} {'80 GB':>10} {'141 GB':>10}")
+        moved = []
+        for s in SHAPES:
+            row = ldeo[s["name"]]
+            best = []
+            for name, gib in CARDS:
+                ok = [k for k, v in (("(i)", "as_built_scaled"), ("(ii)", "no_copies_scaled"))
+                      if min(row[23][v], row[25][v]) / GIB < gib]
+                best.append(",".join(ok) if ok else "none")
+            for key, sc in (("as_built", "as_built_scaled"),
+                            ("no_copies", "no_copies_scaled")):
+                for name, gib in CARDS:
+                    for h in (23, 25):
+                        was, now = row[h][key] / GIB < gib, row[h][sc] / GIB < gib
+                        if was != now:
+                            moved.append(f"{s['name']} {key} {name} @{h} "
+                                         f"{'yes->NO' if was else 'NO->yes'}")
+            print(f"  {s['name']:<18} {row[23]['as_built_scaled'] / GIB:>9.1f} "
+                  f"{row[25]['as_built_scaled'] / GIB:>9.1f} "
+                  f"{row[23]['no_copies_scaled'] / GIB:>9.1f} "
+                  f"{row[25]['no_copies_scaled'] / GIB:>9.1f} "
+                  f"{best[0]:>10} {best[1]:>10}")
+        print("  the last two columns name the variants that fit that card at some h; "
+              "`none` means")
+        print("  neither (i) nor (ii) does, and the row needs (iii) or a smaller chunk.")
+        print(f"  {len(moved)} verdict cells move against the fitted table"
+              + (", all of them yes->NO:" if all("yes->NO" in m for m in moved)
+                 else ":"))
+        for i in range(0, len(moved), 2):
+            print("    " + "; ".join(moved[i:i + 2]))
+
+        # --- the wall ------------------------------------------------------
+        p1, p2 = wall["loops"]["off"], wall["loops"]["on"]
+        c16 = wall["per_chunk"][0]
+        print("\n  the wall, which is where this variant is paid for.  Three rebuild "
+              "passes, and")
+        print("  the same three at the commit's own batched rate [projected]:")
+        print(f"  {'pass':<22} {'L16 off':>9} {'L16 on':>9} {'delta':>9} {'L0 delta':>9}")
+        names = (("constraint_eval", "composition"), ("fri_quotients", "FRI quotients"),
+                 ("other", "unattributed rest"))
+        for k, lbl in names:
+            print(f"  {lbl:<22} {lo['off_runs'][0]['phase'][k]:>9.3f} "
+                  f"{lo['runs'][0]['phase'][k]:>9.3f} "
+                  f"{wall['per_chunk'][0]['by_pass'][k]:>+9.3f} "
+                  f"{wall['per_chunk'][1]['by_pass'][k]:>+9.3f}")
+        print("  the composition and the FRI quotients are named phases; the third "
+              "pass is the")
+        print("  decommitment, which has no counter of its own and shows in the "
+              "unattributed rest.")
+        for w in wall["per_chunk"]:
+            print(f"  {w['chunk']} (h={w['h']}): prove_secs {w['off']:.3f} -> "
+                  f"{w['on']:.3f} ({w['delta']:+.3f}), of which the three passes are "
+                  f"{w['rebuild']:+.3f};")
+            print(f"    `lde_extend`, the commit's own batched extension over the same "
+                  f"columns, is {w['batched']:.3f} s")
+            print(f"    and does not move between the arms, so a rebuilt pass costs "
+                  f"x{w['ratio']:.2f} a built one.")
+            print(f"    batched rebuild [projected]: {w['off']:.3f} + 3 x "
+                  f"{w['batched']:.3f} = {w['projected']:.3f} s against "
+                  f"{w['on']:.3f} as built.")
+        print(f"  W's pipelined {p1['n']}-chunk loop at C=4096, from {p1['source']}")
+        print(f"  and {p2['source']}:")
+        print(f"    generation thread {p1['gen']:.3f} s, prove thread {p1['prove']:.3f} s, "
+              f"loop {p1['loop']:.3f} s")
+        print(f"    -- generation-bound, with {p1['slack']:.3f} s "
+              f"({p1['slack'] / p1['n']:.3f} s per chunk) of slack on the prove thread.")
+        print(f"    as built the prove thread is {p2['prove']:.3f} s and the loop "
+              f"{p2['loop']:.3f} s, {p2['loop'] / p1['loop'] - 1:+.1%}.")
+        print(f"    batched [projected]: the prove thread becomes {p1['projected_prove']:.3f} s, "
+              f"{p1['projected_prove'] - p1['prove']:+.3f} s,")
+        print(f"    which is {p1['projected_prove'] / p1['n'] - p1['prove'] / p1['n']:+.3f} s "
+              f"per chunk against {p1['slack'] / p1['n']:.3f} s of slack, so the loop turns "
+              "prove-bound by")
+        print(f"    {p1['projected_prove'] - p1['gen']:.3f} s and reads "
+              f"{p1['projected_loop']:.3f} s, {p1['projected_delta']:+.2%}.  The "
+              "red-team's \"hidden behind")
+        print("    generation\" survives only in that weak form, and only if the "
+              "batched rebuild is built.")
+        big_row = mem["Llama-3.1-405B"]["at"][23]
+        big_cells = big_row["fresh"] + big_row["pre"]
+        ratio = big_cells / c16["cells"]
+        print(f"  scaled to the 405B row by cells ({big_cells / 1e9:.2f} G against "
+              f"{c16['cells'] / 1e9:.2f} G, x{ratio:.2f}):")
+        print(f"    prove {wall['prove_per_cell'] * 1e9:.4f} ns/cell as built -> "
+              f"{wall['prove_per_cell'] * big_cells:.1f} s per chunk, "
+              f"{wall['projected_per_cell'] * 1e9:.4f} ns/cell batched -> "
+              f"{wall['projected_per_cell'] * big_cells:.1f} s;")
+        print(f"    generation {p1['gen_per_cell'] * 1e9:.4f} ns/cell (the loop's own "
+              f"rate) -> {p1['gen_per_cell'] * big_cells:.1f} s per chunk.")
+        print(f"    so the batched ratio is x{wall['projected_per_cell'] * big_cells / (p1['gen_per_cell'] * big_cells):.3f} "
+              f"at 405B against x{p1['projected_prove'] / p1['gen']:.3f} at 8B, and the "
+              "as-built ratio")
+        print(f"    x{wall['prove_per_cell'] / p1['gen_per_cell']:.3f} against "
+              f"x{p2['prove'] / p1['gen']:.3f}: the same ratio holds, because both "
+              "threads scale with cells")
+        print("    at these two shapes.  The 405B generation rate is the 8B loop's, "
+              "extrapolated;")
+        print("    no wide witness exists and nothing here measures one.")
+
     # --- what moved against a previous run -----------------------------------
     if args.compare:
         prev = json.loads(pathlib.Path(args.compare).read_text())
@@ -1133,7 +1978,34 @@ def main(argv=None):
              for k, v in moe_rows.items()},
         batch_tok_s=batch_rows,
         e11=e11,
-        chunk_fit=fits, grid_constant_delta=grid_delta)
+        chunk_fit=fits, grid_constant_delta=grid_delta,
+        memory=(None if not mc else dict(
+            coeffs={k: v for k, v in mc.items() if k != "runs"},
+            runs=[{k: v for k, v in r.items() if k != "cells"} | dict(cells=r["cells"])
+                  for r in mc["runs"]],
+            calibration=gate, head_cross_check=head,
+            cards={c: gib for c, gib in CARDS},
+            rows={n: dict(fresh=r["at"][23]["fresh"], preprocessed=r["at"][23]["pre"],
+                          device_resident=r["at"][23]["dev"], weights=r["weights"],
+                          walk_log_rows=r["walk_h"],
+                          at={str(h): dict(pool=r["at"][h]["pool"],
+                                           card=r["at"][h]["card"],
+                                           cells_bytes=r["at"][h]["cells_bytes"],
+                                           copies_bytes=r["at"][h]["copies_bytes"],
+                                           height_bytes=r["at"][h]["height_bytes"])
+                              for h in (23, 25)},
+                          fits={c: {str(h): r["fits"][c][h] for h in (23, 25)}
+                                for c, _ in CARDS})
+                  for n, r in mem.items()})),
+        memory_ldeonly=(None if not lo else dict(
+            coeffs={k: v for k, v in lo.items()
+                    if k not in ("runs", "off_runs", "held_out")},
+            runs=[{k: v for k, v in r.items() if k != "marks"}
+                  for r in lo["runs"] + lo["off_runs"]],
+            held_out=lo["held_out"], wall=wall,
+            cards={c: gib for c, gib in CARDS},
+            host_cgroup_bytes=H100_HOST_CGROUP, pcie_bytes_per_s=PCIE_PINNED_BPS,
+            rows={n: {str(h): v for h, v in r.items()} for n, r in ldeo.items()})))
     pathlib.Path(args.json).write_text(json.dumps(doc, indent=1, default=str))
     print(f"\nwrote {rel(args.json)}")
     return doc
