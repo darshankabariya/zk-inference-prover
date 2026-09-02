@@ -42,6 +42,27 @@ from quant import (BF16, INT8_MAX, INT_MM_MIN_ROWS, bf16_away, int_gemm,
 #   * the activation is GELU-tanh, not SiLU, and the logits may be softcapped.
 GEMMA3 = "gemma3_text"
 
+# The Gemma-4 text tower.  Same lineage, different family: it keeps Gemma-3's
+# frame (the embedding normalizer, four norms per layer, QK-norm, the 5:1
+# local/global alternation with a RoPE table per type, GELU-tanh, the logit
+# softcap) and changes six things, every one of them again a branch on the
+# checkpoint's own config (briefs/e5c-gemma4.md):
+#   * the head geometry is per *layer type* -- `head_dim` 256 with 16 KV heads on
+#     the local layers, 512 with 4 on the global ones, so `q_proj`'s own output
+#     width differs by layer.  These are heterogeneous config attributes and
+#     reading them off the top-level config raises;
+#   * the global RoPE is `proportional` with `partial_rotary_factor` 0.25: only
+#     the first quarter of the angle pairs get a frequency, the rest are NoPE;
+#   * `attention_k_eq_v` -- a global layer has no `v_proj` at all.  V is
+#     `k_proj(x)` taken *before* K's norm, and it is never rotated;
+#   * V goes through a **scale-free** RMSNorm on every layer type;
+#   * the RMSNorm gain is `w`, not `1 + w` (Gemma3n-style), and the attention
+#     scale is exactly 1.0 -- there is no `query_pre_attn_scalar` at all;
+#   * each layer's whole output is multiplied by a per-layer `layer_scalar`.
+# Per-layer embeddings, KV-shared layers, the double-wide MLP and the MoE block
+# are in the class but off in the 31B checkpoint; each is refused, not guessed.
+GEMMA4 = "gemma4_text"
+
 
 @dataclass
 class Spec:
@@ -309,6 +330,20 @@ def llama3_inv_freq(inv, rp):
     return torch.where(mid, (1 - smooth) * scaled / factor + smooth * scaled, scaled)
 
 
+def proportional_inv_freq(rp, hd, theta):
+    """Gemma-4's global RoPE (`_compute_proportional_rope_parameters`), in fp64.
+
+    Only the first `partial_rotary_factor * head_dim / 2` angle pairs get a
+    frequency; the remaining pairs are NoPE -- `inv_freq` exactly 0, so they still
+    go through the rotation algebra (cos 1, sin 0) but carry no position.  At the
+    31B's global layers that is 64 rotated pairs and 192 NoPE ones out of 256.
+    """
+    pairs = int(float(rp.get("partial_rotary_factor", 1.0)) * hd // 2)
+    rot = 1.0 / (theta ** (torch.arange(0, 2 * pairs, 2, dtype=torch.float64) / hd))
+    nope = torch.zeros(hd // 2 - pairs, dtype=torch.float64)
+    return torch.cat([rot, nope]) / float(rp.get("factor", 1.0))
+
+
 def is_pow2(x):
     """Is the float `x` an exact power of two?"""
     return math.frexp(x)[0] == 0.5
@@ -329,21 +364,45 @@ class Model:
         c = getattr(c, "text_config", None) or c
         base = getattr(hf.model, "language_model", hf.model)
         family = str(getattr(c, "model_type", ""))
-        self.gemma = family == GEMMA3
+        self.gemma4 = family == GEMMA4
+        self.gemma = family in (GEMMA3, GEMMA4)
         if family.startswith("gemma") and not self.gemma:
             raise NotImplementedError(
-                f"model_type {family}: only {GEMMA3} is implemented -- Gemma-4 is a "
-                f"different architecture, see briefs/e5a-gemma.md")
+                f"model_type {family}: only {GEMMA3} and {GEMMA4} are implemented -- "
+                f"see briefs/e5a-gemma.md and briefs/e5c-gemma4.md")
         if self.gemma:
             if getattr(c, "attn_logit_softcapping", None):
                 raise NotImplementedError("attn_logit_softcapping")
-            if getattr(c, "use_bidirectional_attention", False):
-                raise NotImplementedError("use_bidirectional_attention")
+            # Gemma-4 declares `use_bidirectional_attention: "vision"`, i.e.
+            # bidirectional over image spans only, so a text-only eval stays
+            # causal; "all" would need a different mask entirely.
+            bidi = getattr(c, "use_bidirectional_attention", None)
+            if bidi not in (None, False, "vision"):
+                raise NotImplementedError(f"use_bidirectional_attention {bidi}")
+        if self.gemma4:
+            # Present in `Gemma4TextConfig` and off in the 31B checkpoint.  Each is
+            # a real architectural feature this forward pass does not implement, so
+            # each is refused rather than silently ignored on some other size.
+            for flag in ("hidden_size_per_layer_input", "num_kv_shared_layers",
+                         "use_double_wide_mlp", "enable_moe_block", "num_experts"):
+                if getattr(c, flag, None):
+                    raise NotImplementedError(f"{flag}={getattr(c, flag)}")
         self.spec, self.cfg, self.device = spec, c, device
         self.d, self.L = c.hidden_size, c.num_hidden_layers
-        self.nh, self.nkv = c.num_attention_heads, c.num_key_value_heads
-        self.hd = getattr(c, "head_dim", None) or c.hidden_size // c.num_attention_heads
-        self.rep = self.nh // self.nkv
+        self.nh = c.num_attention_heads
+        if self.gemma4:
+            # `head_dim` and `num_key_value_heads` are per-layer-type here, and
+            # reading either off the top-level config raises
+            # (`AmbiguousGlobalPerLayerAttributeError`, a RuntimeError -- a
+            # `getattr` default does not catch it).  One record per type; the
+            # forward pass makes one of them current per layer.
+            self.geoms = {t: self.geometry_of(c.per_layer_config[t])
+                          for t in set(c.layer_types)}
+            self.use_geometry(c.layer_types[0])
+        else:
+            self.nkv = c.num_key_value_heads
+            self.hd = getattr(c, "head_dim", None) or c.hidden_size // c.num_attention_heads
+            self.rep = self.nh // self.nkv
         self.rec, self.calib, self.acc_max = None, None, ({} if track_acc else None)
         # B5: per-(layer, head) max|k| and per-(layer, head, channel) max|v|, the
         # two things the integer softmax needs to be constant along the context
@@ -359,7 +418,13 @@ class Model:
         # of two -- so the scale is folded into W_q before quantization, as a
         # deployment would carry it, and the attention scale becomes 1.
         self.qn_fold = None        # Gemma only: folded into the Q-norm gain instead
-        if self.gemma:
+        if self.gemma4:
+            # There is no `query_pre_attn_scalar` in a Gemma-4 config and no
+            # 1/sqrt(head_dim) either: HF's `Gemma4TextAttention.scaling` is
+            # literally 1.0, the QK-norms absorb it.  Nothing to fold, so B5's
+            # exp-table argument is a bit window of the score for free.
+            self.q_fold, self.attn_scale = None, 1.0
+        elif self.gemma:
             # Gemma divides by sqrt(query_pre_attn_scalar), which is not always the
             # head dim (27B uses 168 against hd = 128).  That scale cannot be folded
             # into W_q the way it is below -- Q-norm is scale-invariant and would
@@ -386,6 +451,10 @@ class Model:
         # Gemma's normalizer on the embedding lookup.  sqrt(d) is held at fp32 --
         # a model constant, exactly the value HF forms -- and the product is stored.
         self.embed_scale = float(self.d) ** 0.5 if self.gemma else None
+        # Gemma-4's V-norm is an RMSNorm with `with_scale=False`: no learned gain at
+        # all.  A gain of exactly 1.0 is that norm, and multiplying by it is exact
+        # in both fp32 and bf16, so the shared `rmsnorm` needs no special case.
+        self.no_gain = self.store(torch.tensor(1.0, device=device))
         self.layers = []
         for i in range(self.L):
             b = base.layers[i]
@@ -403,12 +472,27 @@ class Model:
                 norm1=b.input_layernorm.weight.data.to(device).clone().float(),
                 norm2=b.post_attention_layernorm.weight.data.to(device).clone().float(),
                 q=lin(qw, a.q_proj, "q"), k=lin(a.k_proj.weight.data, a.k_proj, "k"),
-                v=lin(a.v_proj.weight.data, a.v_proj, "v"),
+                # `attention_k_eq_v`: a Gemma-4 global layer has no `v_proj` at all
+                # and V comes off `k_proj`.  Every other checkpoint has one, so this
+                # guard changes nothing that already loads.
+                v=(lin(a.v_proj.weight.data, a.v_proj, "v")
+                   if getattr(a, "v_proj", None) is not None else None),
                 o=lin(a.o_proj.weight.data, a.o_proj, "o"),
                 gate=lin(mlp.gate_proj.weight.data, mlp.gate_proj, "gate"),
                 up=lin(mlp.up_proj.weight.data, mlp.up_proj, "up"),
                 down=lin(mlp.down_proj.weight.data, mlp.down_proj, "down"))
-            if self.gemma:
+            if self.gemma4:
+                # Gemma-4's gain is `w`, not `1 + w`, so `norm1`/`norm2` are already
+                # right as loaded.  `layer_scalar` is held at fp32 for the same
+                # reason the norm gain and sqrt(d) are: it is a property of the
+                # model, and rounding it into the value contract would be evaluating
+                # a different one.  Its product with the residual stream is stored.
+                g = lambda mod: mod.weight.data.to(device).clone().float()
+                ld.update(norm3=g(b.pre_feedforward_layernorm),
+                          norm4=g(b.post_feedforward_layernorm),
+                          qn=g(a.q_norm), kn=g(a.k_norm), vn=self.no_gain,
+                          scalar=b.layer_scalar.data.to(device).clone().float())
+            elif self.gemma:
                 ld["norm1"] = ld["norm1"] + 1.0
                 ld["norm2"] = ld["norm2"] + 1.0
                 ld.update(norm3=g1(b.pre_feedforward_layernorm),
@@ -417,7 +501,7 @@ class Model:
             self.layers.append(ld)
             base.layers[i] = torch.nn.Identity()   # release the checkpoint copy as we go
         self.final_norm = base.norm.weight.data.to(device).clone().float()
-        if self.gemma:
+        if self.gemma and not self.gemma4:
             self.final_norm = self.final_norm + 1.0
         self.tied = bool(getattr(c, "tie_word_embeddings", True))
         head_w = self.emb if self.tied else hf.lm_head.weight.data
@@ -434,9 +518,12 @@ class Model:
         self.softcap = ((float(getattr(c, "final_logit_softcapping", None) or 0.0) or None)
                         if self.gemma else None)
         if self.gemma:
-            # one table per layer type: the local and global layers use two thetas
-            self.inv_freqs = {t: self.inv_freq_of(dict(c.rope_parameters[t])).to(device)
-                              for t in set(self.layer_types)}
+            # one table per layer type: the local and global layers use two thetas,
+            # and on Gemma-4 two head dims and two rope types as well
+            self.inv_freqs = {t: self.inv_freq_of(
+                dict(c.rope_parameters[t]),
+                self.geoms[t]["hd"] if self.gemma4 else None).to(device)
+                for t in set(self.layer_types)}
             self.inv_freq = None
         else:
             self.inv_freq = self.inv_freq_of(dict(c.rope_parameters)).to(device)
@@ -445,16 +532,45 @@ class Model:
             # reserve back so several models can share the GPU (B8's task lanes)
             torch.cuda.empty_cache()
 
-    def inv_freq_of(self, rp):
-        """RoPE inverse frequencies from one `rope_parameters` entry, in fp64."""
+    def inv_freq_of(self, rp, hd=None):
+        """RoPE inverse frequencies from one `rope_parameters` entry, in fp64.
+
+        `hd` overrides the model's head dim for Gemma-4, whose local and global
+        layers rotate different widths; the default keeps every existing call
+        bit-identical.
+        """
+        hd = self.hd if hd is None else hd
         theta = float(rp["rope_theta"])
-        inv = 1.0 / (theta ** (torch.arange(0, self.hd, 2, dtype=torch.float64) / self.hd))
+        inv = 1.0 / (theta ** (torch.arange(0, hd, 2, dtype=torch.float64) / hd))
         rope_type = rp.get("rope_type", "default")
         if rope_type == "llama3":
             inv = llama3_inv_freq(inv, rp)
+        elif rope_type == "proportional":
+            inv = proportional_inv_freq(rp, hd, theta)
         elif rope_type != "default":
             raise NotImplementedError(f"rope_type {rope_type}")
         return inv
+
+    def geometry_of(self, lc):
+        """One layer type's head geometry, from its resolved per-layer config."""
+        hd, nkv = int(lc.head_dim), int(lc.num_key_value_heads)
+        return dict(hd=hd, nkv=nkv, rep=self.nh // nkv,
+                    inv_hd=self.store(torch.tensor(1.0 / hd, device=self.device)))
+
+    def use_geometry(self, layer_type):
+        """Make one layer type's head geometry current.
+
+        Everything downstream of the projections reads `self.hd`, `self.nkv`,
+        `self.rep` and `self.inv_hd`, and on every family before Gemma-4 those are
+        constants set once in `__init__`.  Gemma-4 is the first checkpoint where
+        `q_proj`'s own output width differs between layer types, so the geometry is
+        switched here rather than threaded through `rotate`, `attention` and
+        `attention_int` -- which leaves the arithmetic the frozen specs were
+        measured with untouched.
+        """
+        g = self.geoms[layer_type]
+        self.hd, self.nkv, self.rep = g["hd"], g["nkv"], g["rep"]
+        self.inv_hd = g["inv_hd"]
 
     # -- primitives -------------------------------------------------------
     def spec_for(self, kind):
@@ -712,6 +828,52 @@ class Model:
             self.rec.add(f"L{i}.x", x.to(BF16))     # committed residual stream
         return x
 
+    def gemma4_layer(self, i, l, x, cache, rot, mask):
+        """One Gemma-4 text decoder layer.
+
+        Gemma-3's frame -- four norms, QK-norm before RoPE, GELU-tanh, a RoPE table
+        and a mask per layer type -- with the four things Gemma-3 does not have:
+
+          * the head geometry is this layer type's; the caller has already made it
+            current, which is what lets `q`, `k` and `v` reshape by `self.hd`;
+          * `attention_k_eq_v`: on a global layer `l["v"]` is `None` and V is the
+            *unnormalized* `k_proj` output -- HF takes V off `key_states` before
+            `k_norm` runs -- so K and V share one projection and one matmul;
+          * V passes through a scale-free RMSNorm (gain exactly 1.0) and is never
+            rotated, on either layer type;
+          * the layer's whole output, both residual branches included, is scaled by
+            the per-layer `layer_scalar`.
+        """
+        cos, sin = rot
+        if self.rec is not None:
+            self.rec.add(f"L{i}.xin", x.to(BF16))
+        h = self.rmsnorm(x, l["norm1"], f"L{i}.norm1")
+        q = l["q"](h, self).view(-1, self.nh, self.hd)
+        kv = l["k"](h, self).view(-1, self.nkv, self.hd)
+        v = kv if l["v"] is None else l["v"](h, self).view(-1, self.nkv, self.hd)
+        q = self.rmsnorm(q, l["qn"], f"L{i}.qnorm", self.inv_hd)
+        k = self.rmsnorm(kv, l["kn"], f"L{i}.knorm", self.inv_hd)
+        v = self.rmsnorm(v, l["vn"], f"L{i}.vnorm", self.inv_hd)
+        q = self.rotate(q, cos.unsqueeze(1), sin.unsqueeze(1))
+        k = self.rotate(k, cos.unsqueeze(1), sin.unsqueeze(1))
+        kk, vv = cache.append(i, k, v)
+        a_out, a_pre = self.attention(q, kk, vv, mask, i)
+        o_out = self.rmsnorm(l["o"](a_out, self, pre=a_pre), l["norm2"], f"L{i}.norm2")
+        x = self.store(x + o_out)
+        if self.rec is not None:
+            self.rec.add(f"L{i}.o_out", o_out.to(BF16))
+            self.rec.add(f"L{i}.xmid", x.to(BF16))
+        h = self.rmsnorm(x, l["norm3"], f"L{i}.norm3")
+        g = self.unary(f"L{i}.gelu", l["gate"](h, self), self.act)
+        gu = g * l["up"](h, self)
+        d_out = l["down"](gu if "up" in self.spec.delay_matmuls else self.store(gu), self)
+        d_out = self.rmsnorm(d_out, l["norm4"], f"L{i}.norm4")
+        x = self.store(self.store(x + d_out) * l["scalar"])
+        if self.rec is not None:
+            self.rec.add(f"L{i}.d_out", d_out.to(BF16))
+            self.rec.add(f"L{i}.x", x.to(BF16))     # committed residual stream
+        return x
+
     def forward(self, ids, cache=None, pos=None, seq=None):
         """Logits for `ids`, appended to `cache`.
 
@@ -745,7 +907,11 @@ class Model:
         for i, l in enumerate(self.layers):
             if self.gemma:
                 t = self.layer_types[i]
-                x = self.gemma_layer(i, l, x, cache, rot[t], masks[t])
+                if self.gemma4:
+                    self.use_geometry(t)
+                    x = self.gemma4_layer(i, l, x, cache, rot[t], masks[t])
+                else:
+                    x = self.gemma_layer(i, l, x, cache, rot[t], masks[t])
                 continue
             # B10 step 2: the glue's witness is the residual stream at the three
             # points the two adds join, plus each add's second operand.  Nothing
