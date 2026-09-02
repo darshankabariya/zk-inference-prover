@@ -23,7 +23,7 @@ use crate::core::ColumnVec;
 use crate::prover::air::component_prover::{Poly, Trace, WeightsHashMap};
 use crate::prover::backend::{BackendForChannel, Col};
 use crate::prover::fri::{FriDecommitResult, FriProver};
-use crate::prover::pcs::quotient_ops::compute_fri_quotients;
+use crate::prover::pcs::quotient_ops::{compute_fri_quotients, compute_fri_quotients_by_group};
 use crate::prover::poly::circle::{CircleCoefficients, CircleEvaluation, PolyOps};
 use crate::prover::poly::twiddles::TwiddleTree;
 use crate::prover::poly::BitReversedOrder;
@@ -37,6 +37,10 @@ pub struct CommitmentSchemeProver<'a, B: BackendForChannel<MC>, MC: MerkleChanne
     pub config: PcsConfig,
     twiddles: &'a TwiddleTree<B>,
     pub store_polynomials_coefficients: bool,
+    /// B12 stream HH: keep the coefficients only. A tree's blown-up
+    /// evaluations are dropped once its root has been mixed into the channel,
+    /// and every phase that needs them rebuilds them from the coefficients.
+    pub lde_only: bool,
 }
 impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a, B, MC> {
     /// Creates a new empty commitment scheme prover with the given configuration and twiddles. The
@@ -47,6 +51,7 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
             config,
             twiddles,
             store_polynomials_coefficients: false,
+            lde_only: false,
         }
     }
 
@@ -54,6 +59,17 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
     /// commit.
     pub const fn set_store_polynomials_coefficients(&mut self) {
         self.store_polynomials_coefficients = true;
+    }
+
+    /// Sets the commitment scheme to drop each tree's blown-up evaluations
+    /// after its root is mixed, starting from the next commit. Needs the
+    /// coefficients, which are the only thing left to rebuild them from.
+    pub const fn set_lde_only(&mut self) {
+        assert!(
+            self.store_polynomials_coefficients,
+            "lde_only needs store_polynomials_coefficients"
+        );
+        self.lde_only = true;
     }
 
     fn commit(&mut self, polynomials: ColumnVec<CircleCoefficients<B>>, channel: &mut MC::C) {
@@ -65,6 +81,7 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
             self.twiddles,
             self.store_polynomials_coefficients,
             self.config.lifting_log_size,
+            self.lde_only,
         );
         self.trees.push(tree);
     }
@@ -98,7 +115,7 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
     ) -> TreeVec<ColumnVec<&CircleEvaluation<B, BaseField, BitReversedOrder>>> {
         self.trees
             .as_ref()
-            .map(|tree| tree.polynomials.iter().map(|poly| &poly.evals).collect())
+            .map(|tree| tree.polynomials.iter().map(|poly| poly.evals()).collect())
     }
 
     pub fn trace(&self) -> Trace<'_, B> {
@@ -128,7 +145,7 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
                     });
                 };
 
-                let log_size = poly.evals.domain.log_size();
+                let log_size = poly.log_size();
                 // For each sample point, compute the weights needed to evaluate the polynomial at
                 // the folded sample point.
                 // TODO(Leo): the computation `point.repeated_double(max_log_size - log_size)` is
@@ -212,7 +229,7 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
                 {
                     let coeffs = poly.coeffs.as_ref().unwrap();
                     let log_size = coeffs.log_size();
-                    let n_doubles = lifting_log_size - poly.evals.domain.log_size();
+                    let n_doubles = lifting_log_size - poly.log_size();
 
                     for (point_idx, &point) in col_points.iter().enumerate() {
                         let transformed = point.repeated_double(n_doubles);
@@ -256,7 +273,7 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
                             point,
                             value: poly.eval_at_point(
                                 point.repeated_double(
-                                    lifting_log_size - poly.evals.domain.log_size(),
+                                    lifting_log_size - poly.log_size(),
                                 ),
                                 weights_hash_map.as_ref(),
                             ),
@@ -285,15 +302,52 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
             .map_cols(|x| x.iter().map(|o| o.value).collect());
         channel.mix_felts(&sampled_values.clone().flatten_cols());
 
-        let columns = self.evaluations();
         // Compute oods quotients for boundary constraints on the sampled points.
-        let quotients = compute_fri_quotients(
-            &columns,
-            &samples,
-            channel.draw_secure_felt(),
-            lifting_log_size,
-            self.config.fri_config.log_blowup_factor,
-        );
+        let random_coeff = channel.draw_secure_felt();
+        let quotients = if self.lde_only {
+            // B12 stream HH: the committed evaluations were dropped as each
+            // root went into the channel. Rebuild them one log-size group at a
+            // time, accumulate the group, and let it drop before the next
+            // group is built. The grouping, the order of the groups and the
+            // order inside a group are what they are below, so nothing about
+            // the accumulation moves.
+            let column_log_sizes = TreeVec::new(
+                self.trees
+                    .iter()
+                    .map(|tree| tree.polynomials.iter().map(|p| p.log_size()).collect_vec())
+                    .collect_vec(),
+            );
+            let flat_polys = self
+                .trees
+                .iter()
+                .flat_map(|tree| tree.polynomials.iter())
+                .collect_vec();
+            let twiddles = self.twiddles;
+            compute_fri_quotients_by_group(
+                &column_log_sizes,
+                &samples,
+                random_coeff,
+                lifting_log_size,
+                self.config.fri_config.log_blowup_factor,
+                |group, accumulate| {
+                    let _span = span!(Level::INFO, "Quotient group extension").entered();
+                    let rebuilt = group
+                        .iter()
+                        .map(|&i| flat_polys[i].rebuild_evals(twiddles))
+                        .collect_vec();
+                    accumulate(&rebuilt.iter().collect_vec());
+                },
+            )
+        } else {
+            let columns = self.evaluations();
+            compute_fri_quotients(
+                &columns,
+                &samples,
+                random_coeff,
+                lifting_log_size,
+                self.config.fri_config.log_blowup_factor,
+            )
+        };
         // Run FRI commitment phase on the oods quotients.
         let fri_prover =
             FriProver::<B, MC>::commit(channel, self.config.fri_config, &quotients, self.twiddles);
@@ -341,7 +395,7 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
             .trees
             .as_ref()
             .zip_eq(query_positions_tree)
-            .map(|(tree, query_positions)| tree.decommit(query_positions))
+            .map(|(tree, query_positions)| tree.decommit(query_positions, self.twiddles))
             .0
             .into_iter()
             .map(|(v, x)| (v, x.decommitment, x.aux))
@@ -431,9 +485,10 @@ impl<B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentTreeProver<B, MC> {
         twiddles: &TwiddleTree<B>,
         store_polynomials_coefficients: bool,
         lifting_log_size: Option<u32>,
+        lde_only: bool,
     ) -> Self {
         let span = span!(Level::INFO, "Extension").entered();
-        let polynomials = B::evaluate_polynomials(
+        let mut polynomials = B::evaluate_polynomials(
             polynomials,
             log_blowup_factor,
             twiddles,
@@ -443,7 +498,7 @@ impl<B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentTreeProver<B, MC> {
 
         let max_log_domain_size = polynomials
             .iter()
-            .map(|poly| poly.evals.domain.log_size())
+            .map(|poly| poly.log_size())
             .max()
             .unwrap_or_default();
         let _span = span!(Level::INFO, "Merkle",
@@ -453,10 +508,27 @@ impl<B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentTreeProver<B, MC> {
         let tree = MerkleProver::commit(
             polynomials
                 .iter()
-                .map(|poly: &Poly<B>| &poly.evals.values)
+                .map(|poly: &Poly<B>| &poly.evals().values)
                 .collect(),
         );
         MC::mix_root(channel, tree.root());
+
+        // B12 stream HH: the root is in the channel and the Merkle layers are
+        // built, so nothing reads these cells again until the composition. Drop
+        // them and keep the coefficients; the composition rebuilds per
+        // component, the quotients per log-size group, the decommitment per
+        // tree.
+        if lde_only {
+            let _span = span!(
+                Level::INFO,
+                "Drop extension",
+                n_polys = polynomials.len(),
+            )
+            .entered();
+            for poly in &mut polynomials {
+                poly.drop_evals();
+            }
+        }
 
         CommitmentTreeProver {
             polynomials,
@@ -469,6 +541,7 @@ impl<B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentTreeProver<B, MC> {
     fn decommit(
         &self,
         queries: &[usize],
+        twiddles: &TwiddleTree<B>,
     ) -> (
         Vec<BaseField>,
         ExtendedMerkleDecommitment<MC::H>,
@@ -477,7 +550,7 @@ impl<B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentTreeProver<B, MC> {
         let column_log_sizes: BTreeSet<u32> = self
             .polynomials
             .iter()
-            .map(|p| p.evals.domain.log_size())
+            .map(|p| p.log_size())
             .collect();
         let max_log_size = self.commitment.layers.len() as u32 - 1;
         let mut queries_per_log_size = BTreeMap::new();
@@ -492,11 +565,32 @@ impl<B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentTreeProver<B, MC> {
             queries_per_log_size.insert(log_size, positions);
         }
 
-        let eval_vec = self
-            .polynomials
-            .iter()
-            .map(|poly| &poly.evals.values)
-            .collect_vec();
+        // B12 stream HH: under `lde_only` this tree's evaluations went at
+        // commit time. Rebuild the whole tree here -- the Merkle proof takes
+        // whole columns, and the queried rows cannot be produced from the
+        // coefficients on their own -- decommit, and let the rebuild drop
+        // before the next tree is asked for. This phase runs after FRI, when
+        // nothing else large is live, so one tree here does not raise the peak.
+        let rebuilt: Option<Vec<CircleEvaluation<B, BaseField, BitReversedOrder>>> =
+            if self.polynomials.iter().any(|p| p.evals.is_none()) {
+                let _span = span!(Level::INFO, "Decommit extension").entered();
+                Some(
+                    self.polynomials
+                        .iter()
+                        .map(|poly| poly.rebuild_evals(twiddles))
+                        .collect_vec(),
+                )
+            } else {
+                None
+            };
+        let eval_vec = match &rebuilt {
+            Some(evals) => evals.iter().map(|e| &e.values).collect_vec(),
+            None => self
+                .polynomials
+                .iter()
+                .map(|poly| &poly.evals().values)
+                .collect_vec(),
+        };
         self.commitment.decommit(&queries_per_log_size, eval_vec)
     }
 }

@@ -75,39 +75,88 @@ pub fn compute_fri_quotients<B: QuotientOps + AccumulationOps>(
     samples: &TreeVec<Vec<Vec<PointSample>>>,
     random_coeff: SecureField,
     lifting_log_size: u32,
+    log_blowup_factor: u32,
+) -> SecureEvaluation<B, BitReversedOrder> {
+    let column_log_sizes = TreeVec::new(
+        columns
+            .0
+            .iter()
+            .map(|tree| tree.iter().map(|c| c.domain.log_size()).collect_vec())
+            .collect_vec(),
+    );
+    let flat = columns.iter().flatten().copied().collect_vec();
+    compute_fri_quotients_by_group(
+        &column_log_sizes,
+        samples,
+        random_coeff,
+        lifting_log_size,
+        log_blowup_factor,
+        |group, accumulate| {
+            let group_columns = group.iter().map(|&i| flat[i]).collect_vec();
+            accumulate(&group_columns)
+        },
+    )
+}
+
+/// [`compute_fri_quotients`], with the committed columns supplied one log-size
+/// group at a time.
+///
+/// B12 stream HH. `with_group` is handed a group of flat column indices, in
+/// commitment order, and an `accumulate` callback it must call exactly once
+/// with those columns. The caller that holds the evaluations passes them
+/// straight through; the caller running under `lde_only` rebuilds the group
+/// from the coefficients, calls `accumulate`, and lets the group drop before
+/// the next one is built. The grouping, the group order and the order within a
+/// group are the same either way, so the accumulation is bit for bit the same
+/// and `B::lift_and_accumulate`'s ascending-length precondition still holds.
+pub fn compute_fri_quotients_by_group<B: QuotientOps + AccumulationOps>(
+    column_log_sizes: &TreeVec<Vec<u32>>,
+    samples: &TreeVec<Vec<Vec<PointSample>>>,
+    random_coeff: SecureField,
+    lifting_log_size: u32,
     _log_blowup_factor: u32,
+    mut with_group: impl FnMut(
+        &[usize],
+        &mut dyn FnMut(&[&CircleEvaluation<B, BaseField, BitReversedOrder>]),
+    ),
 ) -> SecureEvaluation<B, BitReversedOrder> {
     let _span = span!(Level::INFO, "Compute FRI quotients", class = "FRIQuotients").entered();
     let mut accumulated_numerators_vec: Vec<AccumulatedNumerators<B>> = vec![];
     let samples_with_randomness = build_samples_with_randomness_and_periodicity(
         samples,
-        columns
+        column_log_sizes
             .0
             .iter()
-            .map(|x| x.iter().map(|c| c.domain.log_size()))
+            .map(|x| x.iter().copied())
             .collect(),
         lifting_log_size,
         random_coeff,
     );
+
+    let flat_log_sizes = column_log_sizes.iter().flatten().copied().collect_vec();
+    let flat_samples = samples_with_randomness.iter().flatten().collect_vec();
+    assert_eq!(flat_log_sizes.len(), flat_samples.len());
 
     // Populate `accumulated_numerators_vec`, per (log_size, sample_point). After this iteration,
     // `accumulated_numerators_vec` will have length equal to
     //
     //   ∑_k (# of distinct sample points per log size k).
     //
-    zip(
-        columns.iter().flatten(),
-        samples_with_randomness.iter().flatten(),
-    )
-    .sorted_by_key(|(c, _)| c.domain.log_size())
-    .group_by(|(c, _)| c.domain.log_size())
-    .into_iter()
-    .for_each(|(_, tuples)| {
-        let (columns, samples_with_randomness): (Vec<_>, Vec<_>) = tuples.unzip();
-        // TODO: slice.
-        let sample_batches = ColumnSampleBatch::new_vec(&samples_with_randomness);
-        B::accumulate_numerators(&columns, &sample_batches, &mut accumulated_numerators_vec)
-    });
+    // The sort is stable, so within a log size the columns keep their
+    // commitment order, exactly as the zip over the columns themselves did.
+    zip(0..flat_log_sizes.len(), flat_log_sizes.iter().copied())
+        .sorted_by_key(|(_, log_size)| *log_size)
+        .group_by(|(_, log_size)| *log_size)
+        .into_iter()
+        .for_each(|(_, tuples)| {
+            let group: Vec<usize> = tuples.map(|(i, _)| i).collect();
+            let samples_with_randomness = group.iter().map(|&i| flat_samples[i]).collect_vec();
+            // TODO: slice.
+            let sample_batches = ColumnSampleBatch::new_vec(&samples_with_randomness);
+            with_group(&group, &mut |columns| {
+                B::accumulate_numerators(columns, &sample_batches, &mut accumulated_numerators_vec)
+            });
+        });
 
     // Group and accumulate the numerators per sample point: the accumulations (of different
     // lengths) get lifted and accumulated to a single vector. After this step, there is a single
