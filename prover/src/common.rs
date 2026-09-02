@@ -196,6 +196,12 @@ impl<'a> Session<'a> {
         if crate::util::m3_store_coeffs() {
             cs.set_store_polynomials_coefficients();
         }
+        // B12 stream HH: drop each tree's blown-up evaluations after its root
+        // is mixed and rebuild them per phase. `m3_lde_only` refuses when the
+        // coefficients are off, so this is reached only when they are on.
+        if crate::util::m3_lde_only() {
+            cs.set_lde_only();
+        }
         Self {
             config,
             channel,
