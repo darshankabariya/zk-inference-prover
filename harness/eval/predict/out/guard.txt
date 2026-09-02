@@ -1,0 +1,65 @@
+== E4 registration guard (step 0) ==
+run timestamp (UTC): 2026-09-02T14:57:59Z
+HEAD: 4c3ccb9bd645ff598f6a507db32df07719a97e45 (2026-09-02 14:47:49 +0000)
+branch: worktree-agent-a33fdc1269f9266b3
+
+-- (a) the history of the brief and experiments/e4/ (git log --follow) --
+37b6431 2026-09-01 09:13:59 +0000 E4: split the content hash from provenance so the registration stays checkable
+74dbdbe 2026-09-01 08:42:18 +0000 E4 record: the prediction registered before measurement, bracket and run-book
+--
+37b6431 2026-09-01 09:13:59 +0000 E4: split the content hash from provenance so the registration stays checkable
+adcf2f6 2026-09-01 08:41:55 +0000 E4 out: the registered prediction block, sha256 55b776d0
+540ecce 2026-09-01 08:41:49 +0000 E4: the unfitted-scale predictor, standalone from the b2 cost model
+
+registration commit: adcf2f6 2026-09-01 08:41:55 +0000
+merged to main at:   5dff017 2026-09-01 08:44:09 +0000
+later commits touching experiments/e4/ after adcf2f6:
+  37b6431 2026-09-01 09:13:59 +0000 E4: split the content hash from provenance so the registration stays checkable
+
+-- (a') do any of those move a predicted number? diff of the shapes/bracket/anchors blocks adcf2f6 -> HEAD --
+  shapes                       identical
+  bracket                      identical
+  anchors                      identical
+  bands_selfcheck_8b           identical
+  frozen_inputs                DIFFERS
+  implied_tok_s_secondary      identical
+  reference_8b_chunk           identical
+  keys only on one side: ['prediction_sha256']
+  differs (non-content): integrator_notes
+  differs (non-content): prediction_block_sha256
+  differs (non-content): provenance
+  predicted (HEAD file) 14B C=4096 cells_per_token_layers: 168370033.5290444
+  predicted (adcf2f6)   14B C=4096 cells_per_token_layers: 168370033.5290444
+
+-- (b) the working-tree file is byte-identical to the committed one --
+sha256 working tree: 7bc58025928c524d93de256e35e493647db9cc18455315a50c22e701a8a95d09
+sha256 HEAD:         7bc58025928c524d93de256e35e493647db9cc18455315a50c22e701a8a95d09
+sha256 37b6431:      7bc58025928c524d93de256e35e493647db9cc18455315a50c22e701a8a95d09
+sha256 adcf2f6:      0c4a277153073f972110fba96b04b3ec0ea0c6304ec55156cbb81f2d92b57c31  (pre-repair file; content identical, hash fields differ)
+(b) PASS: working tree == HEAD
+
+-- (b') the content hash the integrator note says a later reader checks (predict.py's canonical())--
+  file: experiments/e4/out/registration.json
+    prediction_sha256 in file:        bdf9d51a438301b9af407f3cc964879b5d7cc848df0e26ba1a5797a827d7e3a1
+    prediction_sha256 recomputed:     bdf9d51a438301b9af407f3cc964879b5d7cc848df0e26ba1a5797a827d7e3a1 MATCH
+    prediction_block_sha256 in file:  028ef596b431c4343c1f004d6b98f6ff3ab668723773a90ea58c3997664837dc
+    prediction_block_sha256 recomput: 028ef596b431c4343c1f004d6b98f6ff3ab668723773a90ea58c3997664837dc MATCH
+  (the file's own sha256 55b776d0... named in section 9 was the PRE-repair block hash at adcf2f6; the repair commit 37b6431 split it -- the content hash above is the one that is checked)
+
+-- (a'') what exactly changed in frozen_inputs between adcf2f6 and HEAD (values vs grades) --
+  attention_grid.b5_standalone_alpha.grade: 'measured' -> 'derived'
+  model_constants.attention_cells_per_head_key_token.grade: 'measured' -> 'derived'
+  every frozen VALUE identical: True
+
+-- (c) the predicted figures compared against, READ OUT OF THE FILE --
+  hf: Qwen/Qwen2.5-14B-Instruct  cfg: [48, 5120, 40, 8, 128, 13824, 152064]
+  C=4096 cells_per_token_layers        : 168370033.5290444
+  C=4096 cells_per_token_layers_bands  : 53684160.0
+  C=4096 cells_per_token_layers_rest   : 114685873.5290444
+  C=4096 per_layer_chunk_fresh         : 1795947024.3098068
+  C=4096 bands_family_base_per_chunk   : 241254400
+  C=4096 bands_family_interaction/chunk: 331376640
+  C=4096 bands_family_fresh_per_chunk  : 572631040
+  C=4096 band_layout_saturated         : False
+  bracket prize/pass/marginal: [0.97, 1.03] [0.9, 1.1] [0.8, 1.25]
+  widening: {'A_all_layers': {'widen_pct': 0.0}, 'B_even_subset': {'widen_pct': 1.0}, 'C_single_layer': {'widen_pct_lower': 1.5, 'widen_pct_upper': 9.0}}

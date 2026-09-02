@@ -1,0 +1,7 @@
+error: unexpected argument '-L' found
+
+  tip: to pass '-L' as a value, use '-- -L'
+
+Usage: sha256sum [OPTIONS] [FILE]...
+
+For more information, try '--help'.

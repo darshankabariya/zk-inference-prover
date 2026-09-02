@@ -1,0 +1,18 @@
+total 28859132
+-rw-rw-r-- 1 tenant tenant      11343 Sep  2 14:59 LICENSE
+-rw-rw-r-- 1 tenant tenant       6010 Sep  2 14:59 README.md
+-rw-rw-r-- 1 tenant tenant        663 Sep  2 14:59 config.json
+-rw-rw-r-- 1 tenant tenant        242 Sep  2 14:59 generation_config.json
+-rw-rw-r-- 1 tenant tenant    1671839 Sep  2 14:59 merges.txt
+-rw-rw-r-- 1 tenant tenant 3885154816 Sep  2 15:05 model-00001-of-00008.safetensors
+-rw-rw-r-- 1 tenant tenant 3995327992 Sep  2 15:05 model-00002-of-00008.safetensors
+-rw-rw-r-- 1 tenant tenant 3995328080 Sep  2 15:05 model-00003-of-00008.safetensors
+-rw-rw-r-- 1 tenant tenant 3995338432 Sep  2 15:05 model-00004-of-00008.safetensors
+-rw-rw-r-- 1 tenant tenant 3979624824 Sep  2 15:05 model-00005-of-00008.safetensors
+-rw-rw-r-- 1 tenant tenant 3995328080 Sep  2 15:05 model-00006-of-00008.safetensors
+-rw-rw-r-- 1 tenant tenant 3995328080 Sep  2 15:05 model-00007-of-00008.safetensors
+-rw-rw-r-- 1 tenant tenant 1698703696 Sep  2 15:03 model-00008-of-00008.safetensors
+-rw-rw-r-- 1 tenant tenant      47472 Sep  2 15:03 model.safetensors.index.json
+-rw-rw-r-- 1 tenant tenant    7031645 Sep  2 15:03 tokenizer.json
+-rw-rw-r-- 1 tenant tenant       7305 Sep  2 15:03 tokenizer_config.json
+-rw-rw-r-- 1 tenant tenant    2776833 Sep  2 15:03 vocab.json
