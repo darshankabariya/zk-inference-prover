@@ -1,0 +1,22 @@
+{
+  "schema": "e2h/decode-throughput/2",
+  "purpose": "batched",
+  "backend": {
+    "name": "hf",
+    "available": true
+  },
+  "run": {
+    "context_keys": 16384,
+    "batch_size": 32,
+    "new_tokens": 512,
+    "dtype": "bfloat16",
+    "synthetic": false
+  },
+  "measured": null,
+  "failure": {
+    "oom": true,
+    "type": "OutOfMemoryError",
+    "message": "CUDA out of memory. Tried to allocate 14.00 GiB. GPU 0 has a total capacity of 139.80 GiB of which 7.35 GiB is free. Including non-PyTorch memory, this process has 132.45 GiB memory in use. Of the allocated memory 101.25 GiB is allocated by PyTorch, and 30.36 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)"
+  },
+  "note": "This (context, batch) did not run. The sweep's last successful batch is the one to quote."
+}

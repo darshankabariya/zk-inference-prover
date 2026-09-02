@@ -1,0 +1,48 @@
+11:49:48 e2_job: step vllmenv; uv /home/tenant/.local/bin/uv; PYTHON=/home/tenant/b8/.venv/bin/python; gpu NVIDIA H200 NVL, 0 MiB
+11:51:38 vllmenv: 0.28.0
+11:51:38 e2_job: step vllmenv rc=0
+12:11:56 e2_job: step all; uv /home/tenant/.local/bin/uv; PYTHON=/home/tenant/b8/.venv/bin/python; gpu NVIDIA H200 NVL, 0 MiB
+12:11:56 preflight: interpreter = /home/tenant/b8/.venv/bin/python
+card         NVIDIA H200 NVL 143157 MiB
+torch        2.11.0+cu128 cuda 12.8
+transformers 5.15.1
+{
+  "hf": {
+    "available": true,
+    "reason": null
+  },
+  "mock": {
+    "available": true,
+    "reason": null,
+    "warning": "SYNTHETIC. Exercises the harness; produces no measurement."
+  },
+  "vllm": {
+    "available": false,
+    "reason": "No module named 'vllm'"
+  }
+}
+12:12:01 preflight: ok
+12:12:01 hf: start
+12:24:49 e2_job: step all rc=143
+12:25:10 box session: run.sh all KILLED during the hf C=4096 sweep: the --reps 1 sweep rows are the first-call outlier (~137 s decode); re-running the sweeps at --reps 3 (e2_job2.sh)
+12:25:19 e2_job2: sweep3 vllm ladder verify
+12:25:19 sweep3 (box session's deviation from run.sh): the hf batch sweeps at --reps 3 --warmup 1, so the median rep is the steady state
+12:57:46 sweep3: done
+12:57:46 vllm: start
+12:58:27 ladder: e2/out/ladder.json, e2/out/ladder.md, e2/out/constants_rows.json
+ok      hf C=4096 b1    76.554 tok/s decode    677.432 pos/s e11  [like-for-like with stated mismatches]
+ok      hf C=16384 b1    75.137 tok/s decode   2283.507 pos/s e11  [like-for-like with stated mismatches]
+MISSING  vllm C=4096 batch 1
+MISSING  vllm C=16384 batch 1
+12:58:27 verify: exit 1  (0 = every expected artifact landed and is quotable)
+12:58:27 e2_job2: verify rc=1
+12:59:27 e2_job2: vllm ladder verify (VLLM_USE_FLASHINFER_SAMPLER=0: the first vllm start died in FlashInfer's sampler JIT for want of ninja)
+12:59:27 vllm: start
+13:12:23 vllm: done
+13:12:23 ladder: e2/out/ladder.json, e2/out/ladder.md, e2/out/constants_rows.json
+ok      hf C=4096 b1    76.554 tok/s decode    677.432 pos/s e11  [like-for-like with stated mismatches]
+ok      hf C=16384 b1    75.137 tok/s decode   2283.507 pos/s e11  [like-for-like with stated mismatches]
+ok      vllm C=4096 b1   183.133 tok/s decode   1592.345 pos/s e11  [like-for-like with stated mismatches]
+ok      vllm C=16384 b1   169.080 tok/s decode   4764.583 pos/s e11  [like-for-like with stated mismatches]
+13:12:23 verify: exit 0  (0 = every expected artifact landed and is quotable)
+13:12:23 e2_job2: verify rc=0

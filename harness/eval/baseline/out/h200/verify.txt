@@ -1,0 +1,4 @@
+ok      hf C=4096 b1    76.554 tok/s decode    677.432 pos/s e11  [like-for-like with stated mismatches]
+ok      hf C=16384 b1    75.137 tok/s decode   2283.507 pos/s e11  [like-for-like with stated mismatches]
+ok      vllm C=4096 b1   183.133 tok/s decode   1592.345 pos/s e11  [like-for-like with stated mismatches]
+ok      vllm C=16384 b1   169.080 tok/s decode   4764.583 pos/s e11  [like-for-like with stated mismatches]

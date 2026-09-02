@@ -20,9 +20,255 @@
   },
   "contexts": {
     "4096": {
-      "unproved_single_stream": null,
-      "unproved_e11": null,
-      "unproved_batched": null,
+      "unproved_single_stream": {
+        "by_backend": {
+          "hf": {
+            "artifact": "e2/out/llama-31-8b-instruct_hf_c4096_b1_n512.json",
+            "backend": "hf",
+            "backend_label": "transformers.generate() -- the non-specialist path",
+            "backend_version": "transformers 5.15.1, torch 2.11.0+cu128",
+            "metric": "decode_only",
+            "which": "tok_s_decode_per_stream",
+            "tok_s": 76.55390030833205,
+            "spread_pct": 95.1709373433614,
+            "reps": 3,
+            "batch_size": 1,
+            "card": "NVIDIA H200 NVL",
+            "dtype": "bfloat16",
+            "model": "unsloth/Llama-3.1-8B-Instruct",
+            "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+            "new_tokens": 512,
+            "prompt_tokens": 4096,
+            "quotable": true,
+            "lfl_verdict": "like-for-like with stated mismatches",
+            "blocking": [],
+            "stated_mismatches": [
+              "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+            ]
+          },
+          "vllm": {
+            "artifact": "e2/out/llama-31-8b-instruct_vllm_c4096_b1_n512.json",
+            "backend": "vllm",
+            "backend_label": "vLLM -- the production serving path",
+            "backend_version": "vllm 0.28.0",
+            "metric": "decode_only",
+            "which": "tok_s_decode_per_stream",
+            "tok_s": 183.13268267073934,
+            "spread_pct": 0.2124973026917489,
+            "reps": 3,
+            "batch_size": 1,
+            "card": "NVIDIA H200 NVL",
+            "dtype": "bfloat16",
+            "model": "unsloth/Llama-3.1-8B-Instruct",
+            "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+            "new_tokens": 512,
+            "prompt_tokens": 4096,
+            "quotable": true,
+            "lfl_verdict": "like-for-like with stated mismatches",
+            "blocking": [],
+            "stated_mismatches": [
+              "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+            ]
+          }
+        },
+        "chosen": {
+          "artifact": "e2/out/llama-31-8b-instruct_vllm_c4096_b1_n512.json",
+          "backend": "vllm",
+          "backend_label": "vLLM -- the production serving path",
+          "backend_version": "vllm 0.28.0",
+          "metric": "decode_only",
+          "which": "tok_s_decode_per_stream",
+          "tok_s": 183.13268267073934,
+          "spread_pct": 0.2124973026917489,
+          "reps": 3,
+          "batch_size": 1,
+          "card": "NVIDIA H200 NVL",
+          "dtype": "bfloat16",
+          "model": "unsloth/Llama-3.1-8B-Instruct",
+          "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+          "new_tokens": 512,
+          "prompt_tokens": 4096,
+          "quotable": true,
+          "lfl_verdict": "like-for-like with stated mismatches",
+          "blocking": [],
+          "stated_mismatches": [
+            "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+          ]
+        },
+        "choice_rule": "the faster of the backends present; a faster unproved denominator makes the reported overhead LARGER, so this is the conservative choice",
+        "backends_seen": [
+          "hf",
+          "vllm"
+        ],
+        "backends_missing": []
+      },
+      "unproved_e11": {
+        "by_backend": {
+          "hf": {
+            "artifact": "e2/out/llama-31-8b-instruct_hf_c4096_b1_n512.json",
+            "backend": "hf",
+            "backend_label": "transformers.generate() -- the non-specialist path",
+            "backend_version": "transformers 5.15.1, torch 2.11.0+cu128",
+            "metric": "e11",
+            "which": "tok_s_e11_all_positions_per_stream",
+            "tok_s": 677.4316581733528,
+            "spread_pct": 95.09224100965348,
+            "reps": 3,
+            "batch_size": 1,
+            "card": "NVIDIA H200 NVL",
+            "dtype": "bfloat16",
+            "model": "unsloth/Llama-3.1-8B-Instruct",
+            "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+            "new_tokens": 512,
+            "prompt_tokens": 4096,
+            "quotable": true,
+            "lfl_verdict": "like-for-like with stated mismatches",
+            "blocking": [],
+            "stated_mismatches": [
+              "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+            ]
+          },
+          "vllm": {
+            "artifact": "e2/out/llama-31-8b-instruct_vllm_c4096_b1_n512.json",
+            "backend": "vllm",
+            "backend_label": "vLLM -- the production serving path",
+            "backend_version": "vllm 0.28.0",
+            "metric": "e11",
+            "which": "tok_s_e11_all_positions_per_stream",
+            "tok_s": 1592.3449729387341,
+            "spread_pct": 0.1869496737743255,
+            "reps": 3,
+            "batch_size": 1,
+            "card": "NVIDIA H200 NVL",
+            "dtype": "bfloat16",
+            "model": "unsloth/Llama-3.1-8B-Instruct",
+            "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+            "new_tokens": 512,
+            "prompt_tokens": 4096,
+            "quotable": true,
+            "lfl_verdict": "like-for-like with stated mismatches",
+            "blocking": [],
+            "stated_mismatches": [
+              "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+            ]
+          }
+        },
+        "chosen": {
+          "artifact": "e2/out/llama-31-8b-instruct_vllm_c4096_b1_n512.json",
+          "backend": "vllm",
+          "backend_label": "vLLM -- the production serving path",
+          "backend_version": "vllm 0.28.0",
+          "metric": "e11",
+          "which": "tok_s_e11_all_positions_per_stream",
+          "tok_s": 1592.3449729387341,
+          "spread_pct": 0.1869496737743255,
+          "reps": 3,
+          "batch_size": 1,
+          "card": "NVIDIA H200 NVL",
+          "dtype": "bfloat16",
+          "model": "unsloth/Llama-3.1-8B-Instruct",
+          "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+          "new_tokens": 512,
+          "prompt_tokens": 4096,
+          "quotable": true,
+          "lfl_verdict": "like-for-like with stated mismatches",
+          "blocking": [],
+          "stated_mismatches": [
+            "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+          ]
+        },
+        "choice_rule": "the faster of the backends present; a faster unproved denominator makes the reported overhead LARGER, so this is the conservative choice",
+        "backends_seen": [
+          "hf",
+          "vllm"
+        ],
+        "backends_missing": []
+      },
+      "unproved_batched": {
+        "by_backend": {
+          "hf": {
+            "artifact": "e2/out/llama-31-8b-instruct_hf_c4096_b64_n512.json",
+            "backend": "hf",
+            "backend_label": "transformers.generate() -- the non-specialist path",
+            "backend_version": "transformers 5.15.1, torch 2.11.0+cu128",
+            "metric": "decode_only",
+            "which": "tok_s_decode_aggregate",
+            "tok_s": 1664.3817582432569,
+            "spread_pct": 87.28209460758555,
+            "reps": 3,
+            "batch_size": 64,
+            "card": "NVIDIA H200 NVL",
+            "dtype": "bfloat16",
+            "model": "unsloth/Llama-3.1-8B-Instruct",
+            "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+            "new_tokens": 512,
+            "prompt_tokens": 4096,
+            "quotable": true,
+            "lfl_verdict": "like-for-like with stated mismatches",
+            "blocking": [],
+            "stated_mismatches": [
+              "batch_size: DELIBERATE mismatch: the production-serving row. Batched decode is not comparable to our batch-1 latency; it exists for the $/token comparison, which is the currency the 500,000x claim is really about. Never quote this row as a latency overhead.",
+              "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+            ]
+          },
+          "vllm": {
+            "artifact": "e2/out/llama-31-8b-instruct_vllm_c4096_b128_n512.json",
+            "backend": "vllm",
+            "backend_label": "vLLM -- the production serving path",
+            "backend_version": "vllm 0.28.0",
+            "metric": "decode_only",
+            "which": "tok_s_decode_aggregate",
+            "tok_s": 5323.242345298315,
+            "spread_pct": 0.0,
+            "reps": 1,
+            "batch_size": 128,
+            "card": "NVIDIA H200 NVL",
+            "dtype": "bfloat16",
+            "model": "unsloth/Llama-3.1-8B-Instruct",
+            "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+            "new_tokens": 512,
+            "prompt_tokens": 4096,
+            "quotable": true,
+            "lfl_verdict": "like-for-like with stated mismatches",
+            "blocking": [],
+            "stated_mismatches": [
+              "batch_size: DELIBERATE mismatch: the production-serving row. Batched decode is not comparable to our batch-1 latency; it exists for the $/token comparison, which is the currency the 500,000x claim is really about. Never quote this row as a latency overhead.",
+              "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+            ]
+          }
+        },
+        "chosen": {
+          "artifact": "e2/out/llama-31-8b-instruct_vllm_c4096_b128_n512.json",
+          "backend": "vllm",
+          "backend_label": "vLLM -- the production serving path",
+          "backend_version": "vllm 0.28.0",
+          "metric": "decode_only",
+          "which": "tok_s_decode_aggregate",
+          "tok_s": 5323.242345298315,
+          "spread_pct": 0.0,
+          "reps": 1,
+          "batch_size": 128,
+          "card": "NVIDIA H200 NVL",
+          "dtype": "bfloat16",
+          "model": "unsloth/Llama-3.1-8B-Instruct",
+          "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+          "new_tokens": 512,
+          "prompt_tokens": 4096,
+          "quotable": true,
+          "lfl_verdict": "like-for-like with stated mismatches",
+          "blocking": [],
+          "stated_mismatches": [
+            "batch_size: DELIBERATE mismatch: the production-serving row. Batched decode is not comparable to our batch-1 latency; it exists for the $/token comparison, which is the currency the 500,000x claim is really about. Never quote this row as a latency overhead.",
+            "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+          ]
+        },
+        "choice_rule": "the faster of the backends present; a faster unproved denominator makes the reported overhead LARGER, so this is the conservative choice",
+        "backends_seen": [
+          "hf",
+          "vllm"
+        ],
+        "backends_missing": []
+      },
       "rows": [
         {
           "boundary": "commit",
@@ -34,9 +280,12 @@
           "proved_source": "experiments/b10/out/seq5/n_summary_c4096.json (3)",
           "blocked_by": null,
           "proved_usd_per_mtok": 42.0708770540487,
-          "latency_overhead_x": null,
-          "e11_overhead_x": null,
-          "usd_overhead_x": null
+          "latency_overhead_x": 6.042786335073561,
+          "e11_overhead_x": 52.542234967951366,
+          "usd_overhead_x": 175.64978371604022,
+          "e11_overhead_x_note": "1592.3 positions/s unproved over 30.306 proved positions/s under the regime-1 assumption; see `e11_assumption`.",
+          "unproved_batched_usd_per_mtok": 0.23951567809534866,
+          "usd_overhead_x_note": "rate-independent: same card on both sides, so the $/token ratio equals the aggregate-throughput ratio. Numerator is batch 128 serving, denominator is our batch-1 proof: a $/token comparison, NOT a latency one."
         },
         {
           "boundary": "stwo total",
@@ -48,9 +297,12 @@
           "proved_source": "experiments/b10/out/seq5/n_summary_c4096.json (3)",
           "blocked_by": null,
           "proved_usd_per_mtok": 76.96486780152118,
-          "latency_overhead_x": null,
-          "e11_overhead_x": null,
-          "usd_overhead_x": null
+          "latency_overhead_x": 11.054731538738341,
+          "e11_overhead_x": 96.12127085227178,
+          "usd_overhead_x": 321.33540657360345,
+          "e11_overhead_x_note": "1592.3 positions/s unproved over 16.566 proved positions/s under the regime-1 assumption; see `e11_assumption`.",
+          "unproved_batched_usd_per_mtok": 0.23951567809534866,
+          "usd_overhead_x_note": "rate-independent: same card on both sides, so the $/token ratio equals the aggregate-throughput ratio. Numerator is batch 128 serving, denominator is our batch-1 proof: a $/token comparison, NOT a latency one."
         },
         {
           "boundary": "whole wall",
@@ -62,9 +314,12 @@
           "proved_source": "experiments/b10/out/seq5/n_summary_c4096.json (3)",
           "blocked_by": null,
           "proved_usd_per_mtok": 255.45982768984172,
-          "latency_overhead_x": null,
-          "e11_overhead_x": null,
-          "usd_overhead_x": null
+          "latency_overhead_x": 36.69258318387885,
+          "e11_overhead_x": 319.0432724782076,
+          "usd_overhead_x": 1066.5682919852366,
+          "e11_overhead_x_note": "1592.3 positions/s unproved over 4.991 proved positions/s under the regime-1 assumption; see `e11_assumption`.",
+          "unproved_batched_usd_per_mtok": 0.23951567809534866,
+          "usd_overhead_x_note": "rate-independent: same card on both sides, so the $/token ratio equals the aggregate-throughput ratio. Numerator is batch 128 serving, denominator is our batch-1 proof: a $/token comparison, NOT a latency one."
         },
         {
           "boundary": "loop_secs",
@@ -76,16 +331,265 @@
           "proved_source": "experiments/b12/wire/out/z/z_pipe1_base.json, z_pipe2_base.json, z_pipe3_base.json",
           "blocked_by": null,
           "proved_usd_per_mtok": 154.0458984375,
-          "latency_overhead_x": null,
-          "e11_overhead_x": null,
-          "usd_overhead_x": null
+          "latency_overhead_x": 22.12614794924206,
+          "e11_overhead_x": 192.3876172382619,
+          "usd_overhead_x": 643.1558036721754,
+          "e11_overhead_x_note": "1592.3 positions/s unproved over 8.277 proved positions/s under the regime-1 assumption; see `e11_assumption`.",
+          "unproved_batched_usd_per_mtok": 0.23951567809534866,
+          "usd_overhead_x_note": "rate-independent: same card on both sides, so the $/token ratio equals the aggregate-throughput ratio. Numerator is batch 128 serving, denominator is our batch-1 proof: a $/token comparison, NOT a latency one."
         }
       ]
     },
     "16384": {
-      "unproved_single_stream": null,
-      "unproved_e11": null,
-      "unproved_batched": null,
+      "unproved_single_stream": {
+        "by_backend": {
+          "hf": {
+            "artifact": "e2/out/llama-31-8b-instruct_hf_c16384_b1_n512.json",
+            "backend": "hf",
+            "backend_label": "transformers.generate() -- the non-specialist path",
+            "backend_version": "transformers 5.15.1, torch 2.11.0+cu128",
+            "metric": "decode_only",
+            "which": "tok_s_decode_per_stream",
+            "tok_s": 75.13712561860055,
+            "spread_pct": 95.17483313189344,
+            "reps": 3,
+            "batch_size": 1,
+            "card": "NVIDIA H200 NVL",
+            "dtype": "bfloat16",
+            "model": "unsloth/Llama-3.1-8B-Instruct",
+            "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+            "new_tokens": 512,
+            "prompt_tokens": 16384,
+            "quotable": true,
+            "lfl_verdict": "like-for-like with stated mismatches",
+            "blocking": [],
+            "stated_mismatches": [
+              "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+            ]
+          },
+          "vllm": {
+            "artifact": "e2/out/llama-31-8b-instruct_vllm_c16384_b1_n512.json",
+            "backend": "vllm",
+            "backend_label": "vLLM -- the production serving path",
+            "backend_version": "vllm 0.28.0",
+            "metric": "decode_only",
+            "which": "tok_s_decode_per_stream",
+            "tok_s": 169.07967472490702,
+            "spread_pct": 0.16996765755105145,
+            "reps": 3,
+            "batch_size": 1,
+            "card": "NVIDIA H200 NVL",
+            "dtype": "bfloat16",
+            "model": "unsloth/Llama-3.1-8B-Instruct",
+            "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+            "new_tokens": 512,
+            "prompt_tokens": 16384,
+            "quotable": true,
+            "lfl_verdict": "like-for-like with stated mismatches",
+            "blocking": [],
+            "stated_mismatches": [
+              "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+            ]
+          }
+        },
+        "chosen": {
+          "artifact": "e2/out/llama-31-8b-instruct_vllm_c16384_b1_n512.json",
+          "backend": "vllm",
+          "backend_label": "vLLM -- the production serving path",
+          "backend_version": "vllm 0.28.0",
+          "metric": "decode_only",
+          "which": "tok_s_decode_per_stream",
+          "tok_s": 169.07967472490702,
+          "spread_pct": 0.16996765755105145,
+          "reps": 3,
+          "batch_size": 1,
+          "card": "NVIDIA H200 NVL",
+          "dtype": "bfloat16",
+          "model": "unsloth/Llama-3.1-8B-Instruct",
+          "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+          "new_tokens": 512,
+          "prompt_tokens": 16384,
+          "quotable": true,
+          "lfl_verdict": "like-for-like with stated mismatches",
+          "blocking": [],
+          "stated_mismatches": [
+            "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+          ]
+        },
+        "choice_rule": "the faster of the backends present; a faster unproved denominator makes the reported overhead LARGER, so this is the conservative choice",
+        "backends_seen": [
+          "hf",
+          "vllm"
+        ],
+        "backends_missing": []
+      },
+      "unproved_e11": {
+        "by_backend": {
+          "hf": {
+            "artifact": "e2/out/llama-31-8b-instruct_hf_c16384_b1_n512.json",
+            "backend": "hf",
+            "backend_label": "transformers.generate() -- the non-specialist path",
+            "backend_version": "transformers 5.15.1, torch 2.11.0+cu128",
+            "metric": "e11",
+            "which": "tok_s_e11_all_positions_per_stream",
+            "tok_s": 2283.506726286128,
+            "spread_pct": 94.70650409686459,
+            "reps": 3,
+            "batch_size": 1,
+            "card": "NVIDIA H200 NVL",
+            "dtype": "bfloat16",
+            "model": "unsloth/Llama-3.1-8B-Instruct",
+            "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+            "new_tokens": 512,
+            "prompt_tokens": 16384,
+            "quotable": true,
+            "lfl_verdict": "like-for-like with stated mismatches",
+            "blocking": [],
+            "stated_mismatches": [
+              "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+            ]
+          },
+          "vllm": {
+            "artifact": "e2/out/llama-31-8b-instruct_vllm_c16384_b1_n512.json",
+            "backend": "vllm",
+            "backend_label": "vLLM -- the production serving path",
+            "backend_version": "vllm 0.28.0",
+            "metric": "e11",
+            "which": "tok_s_e11_all_positions_per_stream",
+            "tok_s": 4764.5826763233845,
+            "spread_pct": 0.21261812151258988,
+            "reps": 3,
+            "batch_size": 1,
+            "card": "NVIDIA H200 NVL",
+            "dtype": "bfloat16",
+            "model": "unsloth/Llama-3.1-8B-Instruct",
+            "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+            "new_tokens": 512,
+            "prompt_tokens": 16384,
+            "quotable": true,
+            "lfl_verdict": "like-for-like with stated mismatches",
+            "blocking": [],
+            "stated_mismatches": [
+              "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+            ]
+          }
+        },
+        "chosen": {
+          "artifact": "e2/out/llama-31-8b-instruct_vllm_c16384_b1_n512.json",
+          "backend": "vllm",
+          "backend_label": "vLLM -- the production serving path",
+          "backend_version": "vllm 0.28.0",
+          "metric": "e11",
+          "which": "tok_s_e11_all_positions_per_stream",
+          "tok_s": 4764.5826763233845,
+          "spread_pct": 0.21261812151258988,
+          "reps": 3,
+          "batch_size": 1,
+          "card": "NVIDIA H200 NVL",
+          "dtype": "bfloat16",
+          "model": "unsloth/Llama-3.1-8B-Instruct",
+          "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+          "new_tokens": 512,
+          "prompt_tokens": 16384,
+          "quotable": true,
+          "lfl_verdict": "like-for-like with stated mismatches",
+          "blocking": [],
+          "stated_mismatches": [
+            "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+          ]
+        },
+        "choice_rule": "the faster of the backends present; a faster unproved denominator makes the reported overhead LARGER, so this is the conservative choice",
+        "backends_seen": [
+          "hf",
+          "vllm"
+        ],
+        "backends_missing": []
+      },
+      "unproved_batched": {
+        "by_backend": {
+          "hf": {
+            "artifact": "e2/out/llama-31-8b-instruct_hf_c16384_b16_n512.json",
+            "backend": "hf",
+            "backend_label": "transformers.generate() -- the non-specialist path",
+            "backend_version": "transformers 5.15.1, torch 2.11.0+cu128",
+            "metric": "decode_only",
+            "which": "tok_s_decode_aggregate",
+            "tok_s": 438.0441660619402,
+            "spread_pct": 88.04475246789887,
+            "reps": 3,
+            "batch_size": 16,
+            "card": "NVIDIA H200 NVL",
+            "dtype": "bfloat16",
+            "model": "unsloth/Llama-3.1-8B-Instruct",
+            "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+            "new_tokens": 512,
+            "prompt_tokens": 16384,
+            "quotable": true,
+            "lfl_verdict": "like-for-like with stated mismatches",
+            "blocking": [],
+            "stated_mismatches": [
+              "batch_size: DELIBERATE mismatch: the production-serving row. Batched decode is not comparable to our batch-1 latency; it exists for the $/token comparison, which is the currency the 500,000x claim is really about. Never quote this row as a latency overhead.",
+              "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+            ]
+          },
+          "vllm": {
+            "artifact": "e2/out/llama-31-8b-instruct_vllm_c16384_b32_n512.json",
+            "backend": "vllm",
+            "backend_label": "vLLM -- the production serving path",
+            "backend_version": "vllm 0.28.0",
+            "metric": "decode_only",
+            "which": "tok_s_decode_aggregate",
+            "tok_s": 1449.7742788656706,
+            "spread_pct": 0.0,
+            "reps": 1,
+            "batch_size": 32,
+            "card": "NVIDIA H200 NVL",
+            "dtype": "bfloat16",
+            "model": "unsloth/Llama-3.1-8B-Instruct",
+            "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+            "new_tokens": 512,
+            "prompt_tokens": 16384,
+            "quotable": true,
+            "lfl_verdict": "like-for-like with stated mismatches",
+            "blocking": [],
+            "stated_mismatches": [
+              "batch_size: DELIBERATE mismatch: the production-serving row. Batched decode is not comparable to our batch-1 latency; it exists for the $/token comparison, which is the currency the 500,000x claim is really about. Never quote this row as a latency overhead.",
+              "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+            ]
+          }
+        },
+        "chosen": {
+          "artifact": "e2/out/llama-31-8b-instruct_vllm_c16384_b32_n512.json",
+          "backend": "vllm",
+          "backend_label": "vLLM -- the production serving path",
+          "backend_version": "vllm 0.28.0",
+          "metric": "decode_only",
+          "which": "tok_s_decode_aggregate",
+          "tok_s": 1449.7742788656706,
+          "spread_pct": 0.0,
+          "reps": 1,
+          "batch_size": 32,
+          "card": "NVIDIA H200 NVL",
+          "dtype": "bfloat16",
+          "model": "unsloth/Llama-3.1-8B-Instruct",
+          "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5",
+          "new_tokens": 512,
+          "prompt_tokens": 16384,
+          "quotable": true,
+          "lfl_verdict": "like-for-like with stated mismatches",
+          "blocking": [],
+          "stated_mismatches": [
+            "batch_size: DELIBERATE mismatch: the production-serving row. Batched decode is not comparable to our batch-1 latency; it exists for the $/token comparison, which is the currency the 500,000x claim is really about. Never quote this row as a latency overhead.",
+            "arithmetic: We prove a quantized arithmetic; the baseline runs the deployed one. A bf16/fp16 baseline is SLOWER than an int8/fp8 serving stack, so this mismatch makes the overhead multiple we report SMALLER than the truth. Pass --dtype to run a faster baseline arm and the multiple grows."
+          ]
+        },
+        "choice_rule": "the faster of the backends present; a faster unproved denominator makes the reported overhead LARGER, so this is the conservative choice",
+        "backends_seen": [
+          "hf",
+          "vllm"
+        ],
+        "backends_missing": []
+      },
       "rows": [
         {
           "boundary": "commit",
@@ -97,9 +601,12 @@
           "proved_source": "experiments/b10/out/seq5/n_summary_c16384.json (3)",
           "blocked_by": null,
           "proved_usd_per_mtok": 61.13348676639816,
-          "latency_overhead_x": null,
-          "e11_overhead_x": null,
-          "usd_overhead_x": null
+          "latency_overhead_x": 8.107003966480006,
+          "e11_overhead_x": 228.45141332582395,
+          "usd_overhead_x": 69.51353465984228,
+          "e11_overhead_x_note": "4764.6 positions/s unproved over 20.856 proved positions/s under the regime-1 assumption; see `e11_assumption`.",
+          "unproved_batched_usd_per_mtok": 0.8794472481589223,
+          "usd_overhead_x_note": "rate-independent: same card on both sides, so the $/token ratio equals the aggregate-throughput ratio. Numerator is batch 32 serving, denominator is our batch-1 proof: a $/token comparison, NOT a latency one."
         },
         {
           "boundary": "stwo total",
@@ -111,9 +618,12 @@
           "proved_source": "experiments/b10/out/seq5/n_summary_c16384.json (3)",
           "blocked_by": null,
           "proved_usd_per_mtok": 103.75132232077468,
-          "latency_overhead_x": null,
-          "e11_overhead_x": null,
-          "usd_overhead_x": null
+          "latency_overhead_x": 13.758619474725936,
+          "e11_overhead_x": 387.7111788040837,
+          "usd_overhead_x": 117.97333215604773,
+          "e11_overhead_x_note": "4764.6 positions/s unproved over 12.289 proved positions/s under the regime-1 assumption; see `e11_assumption`.",
+          "unproved_batched_usd_per_mtok": 0.8794472481589223,
+          "usd_overhead_x_note": "rate-independent: same card on both sides, so the $/token ratio equals the aggregate-throughput ratio. Numerator is batch 32 serving, denominator is our batch-1 proof: a $/token comparison, NOT a latency one."
         },
         {
           "boundary": "whole wall",
@@ -125,9 +635,12 @@
           "proved_source": "experiments/b10/out/seq5/n_summary_c16384.json (3)",
           "blocked_by": null,
           "proved_usd_per_mtok": 304.1507633587786,
-          "latency_overhead_x": null,
-          "e11_overhead_x": null,
-          "usd_overhead_x": null
+          "latency_overhead_x": 40.33389187139957,
+          "e11_overhead_x": 1136.589378893937,
+          "usd_overhead_x": 345.8431008744443,
+          "e11_overhead_x_note": "4764.6 positions/s unproved over 4.192 proved positions/s under the regime-1 assumption; see `e11_assumption`.",
+          "unproved_batched_usd_per_mtok": 0.8794472481589223,
+          "usd_overhead_x_note": "rate-independent: same card on both sides, so the $/token ratio equals the aggregate-throughput ratio. Numerator is batch 32 serving, denominator is our batch-1 proof: a $/token comparison, NOT a latency one."
         },
         {
           "boundary": "loop_secs",
@@ -146,12 +659,7 @@
       ]
     }
   },
-  "caveats": [
-    "C=4096: no single-stream unproved run in e2/out.",
-    "C=4096: no batched unproved run; the $/token column is empty.",
-    "C=16384: no single-stream unproved run in e2/out.",
-    "C=16384: no batched unproved run; the $/token column is empty."
-  ],
+  "caveats": [],
   "boundary_definitions": {
     "commit": "the commitment path only: interpolate + LDE extend + Merkle over the committed trees. Our best boundary; already at the card's hashing rate.",
     "stwo total": "commit + `prove_ex` (constraint eval, quotients, OODS, FRI). The stwo prover's own call.",
