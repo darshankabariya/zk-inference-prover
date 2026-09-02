@@ -316,6 +316,21 @@ mod marks {
     static MARKS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
     static T0: OnceLock<Instant> = OnceLock::new();
 
+    // B12 stream GG, the C=16K half: under `compose-chunks --plan` the marks of
+    // two chunks interleave on one stderr, and under `B7_M5_PIPE=1` they
+    // interleave in time as well -- chunk k+1's `after_fill` lands between
+    // chunk k's `commit_inter` and its `prove_values`. The tag is the plan
+    // line's `--ser-tag`, set per thread the way `m4_set_chunk` is, so a mark
+    // says which chunk made it and the reporter can split the run.
+    thread_local! {
+        static TAG: std::cell::RefCell<Option<String>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub fn set_tag(tag: &str) {
+        TAG.with(|t| *t.borrow_mut() = Some(tag.to_string()));
+    }
+
     pub fn mark(label: &str, tree: Option<Value>) {
         unsafe { cudaDeviceSynchronize() };
         let t0 = T0.get_or_init(Instant::now);
@@ -335,6 +350,9 @@ mod marks {
         });
         if let Some(t) = tree {
             o["tree"] = t;
+        }
+        if let Some(tag) = TAG.with(|t| t.borrow().clone()) {
+            o["tag"] = json!(tag);
         }
         eprintln!("[MEM] {o}");
         g.push(o);
@@ -376,6 +394,14 @@ pub fn install_mem_hook() {
     let _ = stwo::prover::MEM_HOOK.set(mem_mark);
 }
 
+/// Name the chunk whose marks this thread is about to take: the plan line's
+/// `--ser-tag`. Thread-local, like `util::m4_set_chunk`, so the pipelined
+/// loop's generation and prove threads tag their own.
+#[cfg(feature = "cuda")]
+pub fn set_mem_tag(tag: &str) {
+    marks::set_tag(tag);
+}
+
 /// The reference arm marks nothing: no card, no pool, no field in the JSON.
 #[cfg(not(feature = "cuda"))]
 pub fn mem_mark(_label: &str) {}
@@ -390,6 +416,9 @@ pub fn mem_marks_json() -> Option<Value> {
 
 #[cfg(not(feature = "cuda"))]
 pub fn install_mem_hook() {}
+
+#[cfg(not(feature = "cuda"))]
+pub fn set_mem_tag(_tag: &str) {}
 
 /// Move one column to the device.
 ///
