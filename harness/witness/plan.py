@@ -45,6 +45,18 @@ constraint-kernel shape rather than one per chunk.  `emitset` runs one
 and one set of shared pins the only shape-bearing things that vary down a plan
 are the prefix length and the master table size, so `(c, table_bits)` -- plus
 the head's two extra arguments -- is the whole distinct set.
+
+**Stream EE (E11): the flags a line carries.**  `--layer-flags` goes on every
+layer line, `--l0-flags` on the layer-0 lines after it, `--head-flags` on the
+head line, and `--l0-dir` points the layer-0 lines at another dump set (a
+layer-0 re-extract with `--embed`).  The E11 plan at C=4096 is
+
+    o_plan.py --dir D --blocks 9 --with-block-0 --head H \
+        --layer-flags='--round even --corner --kv-bind' --head-flags='--ao-rem-bits 23'
+
+(the `=` form, because the value starts with a dash), and a line's flags are
+part of its emit key, so the emit set grows by the lines whose flags make a
+new kernel shape and by nothing else.
 """
 
 import argparse
@@ -69,13 +81,19 @@ def want_layers(spec, rows):
     return want
 
 
-def layer_line(tb, wdir, tag):
-    return f"--table-bits {tb} --bounds --witness {wdir} --ser-tag {tag}"
+def layer_line(tb, wdir, tag, extra=""):
+    return f"--table-bits {tb} --bounds{extra} --witness {wdir} --ser-tag {tag}"
 
 
-def head_line(hdir, htb, tag="head"):
-    return (f"--table-bits {htb} --head-argmax --deq-per-row 501 "
+def head_line(hdir, htb, tag="head", extra=""):
+    return (f"--table-bits {htb} --head-argmax --deq-per-row 501{extra} "
             f"--witness {hdir} --ser-tag {tag}")
+
+
+def flags(s):
+    """A flag string as written on a line: one leading space, or nothing."""
+    s = " ".join(s.split())
+    return f" {s}" if s else ""
 
 
 def main():
@@ -99,7 +117,28 @@ def main():
     ap.add_argument("--emit-out", default="",
                     help="also write the distinct emit shapes, one representative plan line "
                          "each, for `emitset` to walk instead of the plan")
+    # ---- stream EE (E11): what every line carries besides its own shape ------
+    # The E11 grid wants AA's flags on every layer line (`--round even --corner
+    # --kv-bind --bounds`), BB's `--embed` on the layer-0 lines, and the head
+    # pinned where seq6 ran it.  They go on the LINE, not the shared command
+    # line, because `bounds-grid` reads a chunk's flags back off its statement
+    # and the head must not inherit `--kv-bind`.  A line's flags are part of its
+    # emit key: an `--embed` layer-0 line is a different kernel shape from a
+    # layer-1 line at the same (c, table bits).
+    ap.add_argument("--layer-flags", default="",
+                    help="appended to every layer line, e.g. "
+                         "'--round even --corner --kv-bind' (E11)")
+    ap.add_argument("--l0-flags", default="",
+                    help="appended to every layer-0 line after --layer-flags, e.g. "
+                         "'--embed' (E11, stream BB)")
+    ap.add_argument("--l0-dir", default="",
+                    help="take the layer-0 witnesses from this directory instead of --dir "
+                         "(a layer-0 re-extract with --embed next to the full dump set)")
+    ap.add_argument("--head-flags", default="",
+                    help="appended to the head line, e.g. '--ao-rem-bits 23' to keep the "
+                         "head at its own pin when the shared pins are the layers'")
     a = ap.parse_args()
+    lf, l0f, hf = flags(a.layer_flags), flags(a.l0_flags), flags(a.head_flags)
 
     if not a.blocks:
         blocks = [None]
@@ -128,19 +167,23 @@ def main():
         want = want_layers(a.layers, rows)
         for k in want:
             tb = rows[k]["table_bits"]
-            line = layer_line(tb, f"{wpre}{k}", f"{pre}L{k}")
+            extra = lf + (l0f if k == 0 else "")
+            wdir = f"{wpre}{k}"
+            if k == 0 and a.l0_dir:
+                wdir = f"{a.l0_dir}/{os.path.basename(wpre)}{k}"
+            line = layer_line(tb, wdir, f"{pre}L{k}", extra)
             lines.append(line)
             n_rows += 1
             n_layer_rows += 1
-            emit.setdefault((rows[k]["c"], tb, False), line)
+            emit.setdefault((rows[k]["c"], tb, False, extra), line)
         if a.head and (a.head_every_block or b == blocks[-1]):
             htb = json.load(open(f"{a.head}/manifest.json"))["master_table_bits"]
             lines.append("# the head, last, and it is the same compose family with two extra "
                          "arguments")
-            hl = head_line(a.head, htb, "head" if not a.head_every_block else f"{pre}head")
+            hl = head_line(a.head, htb, "head" if not a.head_every_block else f"{pre}head", hf)
             lines.append(hl)
             n_rows += 1
-            emit.setdefault((None, htb, True), hl)
+            emit.setdefault((None, htb, True, hf), hl)
     lines.insert(0, f"# stream O: {n_layer_rows} layer chunks from {a.dir}"
                     if blocks == [None] else
                     f"# stream DD: {n_layer_rows} layer chunks over {len(blocks)} token "
@@ -153,9 +196,9 @@ def main():
 
     if a.emit_out:
         el = [f"# stream DD: {len(emit)} distinct emit shapes for the {n_rows} chunks of "
-              f"{a.out}; the key is (prefix c, master table bits, head)"]
-        for (c, tb, is_head) in sorted(emit, key=lambda k: (k[2], k[0] or 0, k[1])):
-            el.append(emit[(c, tb, is_head)])
+              f"{a.out}; the key is (prefix c, master table bits, head, the line's flags)"]
+        for key in sorted(emit, key=lambda k: (k[2], k[0] or 0, k[1], k[3])):
+            el.append(emit[key])
         os.makedirs(os.path.dirname(a.emit_out) or ".", exist_ok=True)
         with open(a.emit_out, "w") as f:
             f.write("\n".join(el) + "\n")
