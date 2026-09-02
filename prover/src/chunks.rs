@@ -529,6 +529,7 @@ pub fn chunks_cmd(args: &[String]) {
     if !pipe {
         for k in 0..n {
             crate::util::m4_set_chunk(k as u64);
+            crate::device::set_mem_tag(&src.tag(k));
             if k > 0 {
                 crate::device::reset();
             }
@@ -588,6 +589,7 @@ pub fn chunks_cmd(args: &[String]) {
             s.spawn(move || {
                 for k in 0..n {
                     crate::util::m4_set_chunk(k as u64);
+                    crate::device::set_mem_tag(&src.tag(k));
                     let t = Instant::now();
                     let snap = crate::witread::snapshot();
                     let built = src.build(k, tamper);
@@ -609,6 +611,7 @@ pub fn chunks_cmd(args: &[String]) {
                     rx.recv().expect("the generation thread died");
                 assert_eq!(k, kk);
                 crate::util::m4_set_chunk(k as u64);
+                crate::device::set_mem_tag(&src.tag(k));
                 let pkey = src.pre_key(k, &built);
                 let t = Instant::now();
                 // Under overlap this is the pair in flight, not this chunk
@@ -819,6 +822,11 @@ pub fn chunks_cmd(args: &[String]) {
         "ircache": crate::scalars::report(),
         "precache": crate::precache::report(),
         "blob": crate::cudagen::blob_report(),
+        // B12 stream GG: every mark the loop took, in the order they were
+        // taken, each tagged with the chunk whose thread took it. Under
+        // `B7_M5_PIPE=1` two chunks' marks interleave and the tag is the only
+        // thing that separates them.
+        "mem_marks": crate::device::mem_marks_json(),
     });
     eprintln!("compose-chunks: {}", serde_json::to_string_pretty(&summary).unwrap());
     emit("compose_chunks", json!({

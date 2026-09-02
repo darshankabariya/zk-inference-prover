@@ -25,6 +25,19 @@ pub mod secure_column;
 pub mod vcs;
 pub mod vcs_lifted;
 
+/// Stream GG: a device-memory mark the crate above can hang on three points
+/// inside `prove_ex` -- after the composition polynomial, after its commit,
+/// after `prove_values`.  `prove_ex` is backend-generic and cannot call the
+/// instrument itself; unset, the three calls are a `OnceLock` read each and
+/// nothing else, so the fork's own tests and the SimdBackend arm are untouched.
+pub static MEM_HOOK: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+fn mem_mark(label: &str) {
+    if let Some(f) = MEM_HOOK.get() {
+        f(label);
+    }
+}
+
 pub fn prove<B: BackendForChannel<MC>, MC: MerkleChannel>(
     components: &[&dyn ComponentProver<B>],
     channel: &mut MC::C,
@@ -63,6 +76,7 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
     let composition_poly = component_provers.compute_composition_polynomial(random_coeff, &trace);
     span1.exit();
     eprintln!("[PROFILE]   prove_ex: composition gen:    {}ms", t_comp.elapsed().as_millis());
+    mem_mark("composition");
 
     // Commit on the Composition Polynomial by splitting its coeffs to two polynomialsof degree
     // half the size of the original polynomial, and commit on each half separately.
@@ -75,6 +89,7 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
     tree_builder.commit(channel);
     span.exit();
     eprintln!("[PROFILE]   prove_ex: composition commit: {}ms", t_comp.elapsed().as_millis());
+    mem_mark("composition_commit");
 
     // Draw OODS point.
     let oods_point = CirclePoint::<SecureField>::get_random_point(channel);
@@ -120,6 +135,7 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
     let commitment_scheme_proof = commitment_scheme.prove_values(sample_points, channel);
     let proof = StarkProof(commitment_scheme_proof.proof);
     eprintln!("[PROFILE]   prove_ex: prove_values:       {}ms", t_pv.elapsed().as_millis());
+    mem_mark("prove_values");
     info!(proof_size_estimate = proof.size_estimate());
 
     // Evaluate composition polynomial at OODS point and check that it matches the trace OODS

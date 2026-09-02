@@ -1019,8 +1019,16 @@ fn compose_cmd(args: &[String]) {
     // proof on disk under that tag, which is what `bounds-chain` reads back.
     let ser_dir = arg_str(args, "--ser-dir");
     let ser_tag = arg_str(args, "--ser-tag").unwrap_or_else(|| "chunk".into());
-    let (j, accepts) = compose_once(&l, &params, &tamper,
-                                    ser_dir.as_deref().map(|d| (d, ser_tag.as_str())));
+    let (mut j, accepts) = compose_once(&l, &params, &tamper,
+                                        ser_dir.as_deref().map(|d| (d, ser_tag.as_str())));
+    // B12 stream GG: the `Composed` is dropped and the proof serialized by
+    // now, so this is what the process still holds; then every mark of the
+    // chunk goes into the point (the cuda arm only -- the reference arm has
+    // none and the field stays absent).
+    device::mem_mark("after_drop");
+    if let Some(m) = device::mem_marks_json() {
+        j["mem_marks"] = m;
+    }
     assert!(accepts, "honest composed proof rejected: {j}");
     if tamper.norm_row.is_none() {
         assert_eq!(j["ref_mismatch"], 0,
@@ -1722,6 +1730,9 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().cloned().unwrap_or_default();
     spans::install();
+    // B12 stream GG: the fork's three marks inside `prove_ex` (a no-op on
+    // the SimdBackend arm).
+    device::install_mem_hook();
     match cmd.as_str() {
         "tables" => tables_cmd(&args),
         "dequant" => dequant_cmd(&args),

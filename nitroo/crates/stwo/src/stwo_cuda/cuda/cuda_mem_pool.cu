@@ -66,3 +66,33 @@ extern "C" uint32_t* cuda_mem_pool_allocate_zeroes_uint32(size_t count) {
 extern "C" void cuda_mem_pool_free_uint32(uint32_t* ptr) {
     cuda_mem_pool_free(ptr);
 }
+
+extern "C" int cuda_mem_pool_stats(uint64_t out[4]) {
+    for (int i = 0; i < 4; i++) out[i] = 0;
+    if (!g_mem_pool_initialized || g_mem_pool == nullptr) {
+        return 1;
+    }
+    const cudaMemPoolAttr attrs[4] = {
+        cudaMemPoolAttrUsedMemCurrent, cudaMemPoolAttrUsedMemHigh,
+        cudaMemPoolAttrReservedMemCurrent, cudaMemPoolAttrReservedMemHigh};
+    for (int i = 0; i < 4; i++) {
+        unsigned long long v = 0;
+        cudaError_t err = cudaMemPoolGetAttribute(g_mem_pool, attrs[i], &v);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "cuda_mem_pool_stats: attribute %d: %s\n", i, cudaGetErrorString(err));
+            return 2;
+        }
+        out[i] = (uint64_t)v;
+    }
+    return 0;
+}
+
+extern "C" int cuda_mem_pool_reset_high() {
+    if (!g_mem_pool_initialized || g_mem_pool == nullptr) {
+        return 1;
+    }
+    unsigned long long zero = 0;
+    cudaError_t e1 = cudaMemPoolSetAttribute(g_mem_pool, cudaMemPoolAttrUsedMemHigh, &zero);
+    cudaError_t e2 = cudaMemPoolSetAttribute(g_mem_pool, cudaMemPoolAttrReservedMemHigh, &zero);
+    return (e1 == cudaSuccess && e2 == cudaSuccess) ? 0 : 2;
+}
