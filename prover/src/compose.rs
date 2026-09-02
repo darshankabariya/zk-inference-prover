@@ -1970,6 +1970,8 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     let m4_t = std::time::Instant::now();
     crate::util::m4_touch_device();
     crate::util::m4_add("wall/cuda_init", m4_t.elapsed().as_secs_f64());
+    // B12 stream GG: the context, before any column.
+    crate::device::mem_mark("init");
     let t0 = std::time::Instant::now();
     let plan = Plan::new(params);
     let p = &plan.p;
@@ -2794,9 +2796,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let m4_t = std::time::Instant::now();
     crate::util::m4_touch_device();
     crate::util::m4_add("wall/cuda_init", m4_t.elapsed().as_secs_f64());
+    // B12 stream GG: after every fill and upload, before the transcript --
+    // what the device-generated columns and their staging hold.
+    crate::device::mem_mark("after_fill");
     let m4_t = std::time::Instant::now();
     let tw = twiddles(widest);
     crate::util::m4_add("wall/twiddles", m4_t.elapsed().as_secs_f64());
+    crate::device::mem_mark("after_twiddles");
     let m4_t = std::time::Instant::now();
     let mut sess = Session::new(&tw);
     crate::util::m4_add("wall/session_new", m4_t.elapsed().as_secs_f64());
@@ -3741,6 +3747,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         crate::bounds::kv_report(&plan.kv)
     };
     crate::util::m4_add("wall/commit_bounds", m4_t.elapsed().as_secs_f64());
+    // B12 stream GG: the boundary trees, one mark for all of them.
+    sess.mark_bounds();
     sess.mix(&claims.flat());
 
     // ---- components, prove ----------------------------------------------------
@@ -3766,6 +3774,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let m4_t = std::time::Instant::now();
     let (res, stats) = sess.prove_raw(&provers);
     crate::util::m4_add("wall/prove_raw", m4_t.elapsed().as_secs_f64());
+    // B12 stream GG: proof in hand, the session consumed -- what `prove`
+    // freed on return, and what the generation still holds.
+    crate::device::mem_mark("after_prove");
     let (proof, prove_error) = match res {
         Ok(pf) => (Some(pf), None),
         Err(e) => (None, Some(e)),

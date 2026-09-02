@@ -22,6 +22,26 @@ pub fn get_cuda_memory_info() -> (usize, usize) {
     (free_mem, total_mem)
 }
 
+/// Stream GG: what the stream-ordered pool holds, as the pool reports it.
+///
+/// `[used_current, used_high, reserved_current, reserved_high]` in bytes.
+/// `used` is what the allocations outstanding add up to; `reserved` is what
+/// the pool holds from the driver, which is the number `cudaMemGetInfo` and
+/// `nvidia-smi` see.  The `high` pair is since the last `mem_pool_reset_high`.
+/// `None` when the pool was never created (the fallback `cudaMalloc` path).
+pub fn mem_pool_stats() -> Option<[u64; 4]> {
+    let mut out = [0u64; 4];
+    let rc = unsafe { bindings::cuda_mem_pool_stats(out.as_mut_ptr()) };
+    (rc == 0).then_some(out)
+}
+
+/// Reset the pool's two high-water marks.
+pub fn mem_pool_reset_high() {
+    unsafe {
+        bindings::cuda_mem_pool_reset_high();
+    }
+}
+
 /// Print CUDA memory usage
 pub fn print_cuda_memory(label: &str) {
     let (free, total) = get_cuda_memory_info();
