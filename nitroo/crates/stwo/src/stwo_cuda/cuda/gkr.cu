@@ -449,8 +449,11 @@ qm31 *gkr_alloc_qm31(uint32_t n) {
 void gkr_read_partials(const qm31 *dev, uint32_t n_pairs, qm31 *out_host) {
     // B11 stream T: one round's partials for every live instance now arrive in
     // one copy, so the staging buffer is sized for the whole round rather than
-    // one instance -- 264 blocks times 64 instances, which no batch reaches.
-    static const uint32_t PINNED_PAIRS = 264u * 64u;
+    // one instance.  Stream X made the launch group 256 instances
+    // (`GKR_SUM_MAX_INSTANCES`, lookups/gkr.rs) and this stayed at T's 64: the
+    // first round with more than 64 live instances -- an E11 block-2 chunk's,
+    // 264 x 66 pairs -- hit the abort below (2026-09-02).  Sized to the group.
+    static const uint32_t PINNED_PAIRS = 264u * 256u;
     // Per thread, like the partials buffer it reads: the test harness runs
     // tests in parallel and two concurrent readbacks must not share staging.
     // (Found by stream T: the batched copy is larger and takes longer, so the
