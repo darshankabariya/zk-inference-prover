@@ -1978,7 +1978,7 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
             reg: crate::gkrlink::Reg::Ao,
             which: 0,
             log_rows: plan.ao_lay.log_rows,
-            unit: vec![true; 3 * plan.ao_lay.per_row],
+            unit: vec![true; 4 * plan.ao_lay.per_row],
         });
     }
     out

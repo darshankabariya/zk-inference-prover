@@ -828,9 +828,10 @@ pub fn walk_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
 
 /// The attention-output region's lookup sites as affine forms.
 ///
-/// B11 stream V, lever 4. Three looks per channel slot in the AIR's order --
+/// B11 stream V, lever 4. Four looks per channel slot in the AIR's order --
 /// the `(qm, nz2)` pair check, then the error `d`, then the excluded bound
-/// `dp = 2 denp - 1 - d`. The third is the one worth naming: `dp` is not a
+/// `dp = 2 denp - 1 - d`, then (stream JJ, `witness-slack.md` section 7 item 1)
+/// `denp` itself. The third is the one worth naming: `dp` is not a
 /// committed column at all, it is an *affine form* over two of them, which is
 /// the same shape the per-token region's high limbs take and the reason memo
 /// section 4's collapse does not care. Every numerator is the literal one.
@@ -863,6 +864,11 @@ pub fn ao_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
                 terms: vec![(RCol::Ao(c0 + 4), two), (RCol::Ao(c0 + 5), -one)],
                 k: -one,
             }),
+        });
+        // stream JJ: `denp`'s own range check
+        looks.push(LinkLook {
+            num: None,
+            den: range_den(rem, Affine::col(RCol::Ao(c0 + 4), one)),
         });
     }
     vec![SiteLooks { reg: Reg::Ao, which: 0, log_rows: lay.log_rows, looks }]
