@@ -2118,13 +2118,37 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 qx: plan.glue.as_ref().map(|_| {
                     let m0 = &p.mats[w.mats[0]];
                     let nn = (m0.tokens * m0.n_in) as i128;
+                    let claimed = claims.walk_qx.get(wi).copied().map(unqm)
+                        .unwrap_or(SecureField::zero());
+                    // Stream II (E11), at the JJ merge: the `o` group folds
+                    // under the *attnout* region's weights, not the wiring
+                    // family's.  Every other group's counterparty is a
+                    // requantize region on the dequant's `MatLayout` map, whose
+                    // canonical weight is `w_glue^(N-1-k tokens-t)`; `o` has no
+                    // requantize region (`AttnOutEval` is its requantize) and
+                    // its only counterparty is `claims.ao_q`, which weights
+                    // element `(channel k, token t)` by `rv^k s^t`.  Both
+                    // conventions factorize as (channel power)(token power), so
+                    // this is a change of the three constants and nothing else:
+                    // slot `p` of chunk `b` carries token `t = b pq + p`, so the
+                    // slot weight is `s^p`, the step inside a channel is
+                    // `s^pq`, and the step at a channel boundary is `rv` with
+                    // the `chunks - 1` in-channel steps of that channel undone.
+                    if w.name == "o" {
+                        let (spow, sstep) = powers(s, w.lay.pq);
+                        return crate::walk_air::WalkQx {
+                            w: spow,
+                            m_in: sstep,
+                            m_bd: rv * sstep.inverse().pow(w.lay.g.chunks as u128 - 1),
+                            claimed,
+                        };
+                    }
                     crate::walk_air::WalkQx {
                         w: (0..w.lay.pq).map(|pp| wpow(w_glue, nn - 1 - pp as i128)).collect(),
                         m_in: wpow(w_glue, -(w.lay.pq as i128)),
                         m_bd: wpow(w_glue, (w.lay.pq as i128) * (w.lay.g.chunks as i128 - 1)
                                    - m0.tokens as i128),
-                        claimed: claims.walk_qx.get(wi).copied().map(unqm)
-                            .unwrap_or(SecureField::zero()),
+                        claimed,
                     }
                 }),
             },
@@ -5320,28 +5344,31 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         .enumerate()
         .map(|(k, rp)| claims.rq_out.get(k).copied() == claims.walk_qx.get(rp.walk).copied())
         .collect();
-    // stream II, the `o` seam: `AttnOutEval` is the attention output's own
+    // Stream II, the `o` seam.  `AttnOutEval` is the attention output's own
     // requantize, so what closes it is one claim on that region -- stream JJ's
-    // `claims.ao_q`, a Horner fold over the signed `qm (1 - 2 sg)` under
-    // `claimed_out`'s weights -- against the `o` walk's activation claim.  The
-    // entry is skipped while `ao_q` is empty, which is what lets this branch
-    // land before JJ's does.
+    // `claims.ao_q`, a Horner fold over the signed `qm (1 - 2 sg)` -- against
+    // the `o` walk's activation claim.  Both now fold the same values in the
+    // same order under the same weights: the walk's `WalkQx` for the `o` group
+    // carries `rv^k s^t` (see `build_components`), and its fold is over
+    // `a - act_off`, which is the signed value the attnout region publishes.
     //
-    // The two folds run over the same values in the same order, but *not yet*
-    // under the same weights, and the merge has to reconcile that: the attnout
-    // region weights element `(head h, token t, channel-in-head c)` by
-    // `rv^(hd (H-1-h) + c) * s^t` (its `lay.at` counts `b` and `t` down, so `z`
-    // at a token's last row is `sum_c acc_c rv^c`, and `mu_out` contributes one
-    // `rv^hd` per later head), while `walk_qx` weights element `(channel k,
-    // token t)` by `w_glue^(N-1-k tokens-t)`, `N = tokens n_in`.  Both
-    // factorize as (channel power)(token power), so one side converting is a
-    // change of the three constants the walk's `WalkQx` already carries --
-    // `w[p]`, `m_in`, `m_bd` -- with `rv^-1` for the channel step and `s` for
-    // the token step, and no new column either side.  Until that is built and
-    // measured against a chunk that carries both claims, this equality is
-    // written, inert, and named in the record.
+    // Live on every chunk that publishes both claims.  A chunk with no wiring
+    // family publishes no `walk_qx` at all and there is nothing to compare; a
+    // chunk with **no attention** -- the `lm_head` chunk, whose only matmul is
+    // the head -- has no `o` walk, so the attnout region is absent, `ao_q` is
+    // empty and the seam is vacuous.  Both report `true`, and neither is a
+    // skipped check: in both cases the statement contains no `o` matmul whose
+    // input could be wrong.
+    //
+    // The third case is a shape, not a statement: a *synthetic* layer whose `o`
+    // walk is not `nh * hd` channels wide folds a different sequence from the
+    // attnout region's, and the equality is not statable there.  The witness
+    // builder wires `o` from `AttnOut::q_ref` exactly when the widths line up
+    // (`Layer::synth_glue`), so on any shape a gate proves this is either live
+    // or structurally absent -- it is never a mismatched comparison read as a
+    // pass.
     let ao_q_ok = match plan.walks.iter().position(|w| w.name == "o") {
-        Some(wi) if !claims.ao_q.is_empty() => {
+        Some(wi) if plan.glue.is_some() && !claims.ao_q.is_empty() => {
             claims.ao_q.first().copied() == claims.walk_qx.get(wi).copied()
         }
         _ => true,

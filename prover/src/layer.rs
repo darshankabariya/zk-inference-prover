@@ -111,6 +111,35 @@ impl AttnOut {
         let hi = self.jo.iter().copied().max().unwrap_or(0);
         (lo, hi)
     }
+    /// Stream II (E11), at the JJ merge: the attention output's requantized
+    /// integers, `sign(acc) * round(|acc| 2^(jv - jo) / den)` per
+    /// `(head, token, channel)` in that order -- exactly what `ao_region`
+    /// commits as `q_out` and what `AttnOutEval`'s `claimed_q` folds.
+    ///
+    /// It lives here, off `AttnOut` alone, so a witness builder can produce the
+    /// `o` matmul's committed input without running the region: on a real dump
+    /// B1 wrote that input and the region recomputes it, but a *synthetic*
+    /// layer draws its `o` activations at random and the `o` seam could not be
+    /// honest on any desk shape.  `ao_region` asserts its own `q_out` against
+    /// this on every untampered run, so the two cannot drift apart.
+    pub fn q_ref(&self) -> Vec<i64> {
+        let mut out = vec![0i64; self.nh * self.s * self.hd];
+        for h in 0..self.nh {
+            for t in 0..self.s {
+                let den = self.den[h * self.s + t];
+                for c in 0..self.hd {
+                    let idx = (h * self.s + t) * self.hd + c;
+                    let e = self.jv[h * self.hd + c] - self.jo[t];
+                    let (num, pj) = (1i64 << e.max(0), 1i64 << (-e).max(0));
+                    let (denp, pm) = (den * pj, self.acc[idx].abs() * num);
+                    let qm = (2 * pm + denp) / (2 * denp);
+                    out[idx] = if self.acc[idx] < 0 { -qm } else { qm };
+                }
+            }
+        }
+        out
+    }
+
     /// The per-(head, channel) V exponent's window.  `jv` is calibrated offline
     /// and is a model constant, so this is a statement of the model.
     pub fn jv_range(&self) -> (i32, i32) {
@@ -1126,7 +1155,29 @@ impl Layer {
     /// requantize and its claim is stream JJ's, so there is nothing here for a
     /// consistent witness to satisfy yet.
     pub fn synth_glue(&mut self, seed: u64, a: usize, round: bf16::Round) {
-        self.synth_family(seed, a, round, 0);
+        self.synth_family(seed, a, round, 0, None);
+    }
+
+    /// Stream II (E11), the `o` seam's control.  The same layer, with **one**
+    /// `o` activation moved to another legal value and the whole layer rebuilt
+    /// around it: the `o` matmul's accumulator follows, and so do `o_out`,
+    /// `xmid`, norm2, the gate/up inputs, the SwiGLU and `down`.  So every
+    /// constraint and every other equality in the chunk still holds -- this is
+    /// an honest proof of a layer whose attention output is not the one the
+    /// attnout region requantized, and only `ao_q_ok` can see it.
+    ///
+    /// Returns `None` when this shape's `o` walk is not `nh * hd` wide, which
+    /// is the shape on which the seam is not statable at all.
+    pub fn synth_glue_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
+                           idx: usize) -> Option<usize> {
+        let oi = self.mats.iter().position(|m| m.name == "o")?;
+        if self.mats[oi].n_in != self.ao.nh * self.ao.hd {
+            return None;
+        }
+        let n = self.mats[oi].qx.len();
+        let at = idx % n;
+        self.synth_family(seed, a, round, 0, Some(at));
+        Some(at)
     }
 
     /// Stream II (E11): the *head* chunk's family on a synthetic layer -- an
@@ -1157,10 +1208,11 @@ impl Layer {
                 .collect(),
             jv2: vec![],
         });
-        self.synth_family(seed, a, round, vocab);
+        self.synth_family(seed, a, round, vocab, None);
     }
 
-    fn synth_family(&mut self, seed: u64, a: usize, round: bf16::Round, head_vocab: usize) {
+    fn synth_family(&mut self, seed: u64, a: usize, round: bf16::Round, head_vocab: usize,
+                    o_bend: Option<usize>) {
         use crate::glue::{Kind, Prog, Tiling, UnKind, canon, reference};
         let head = head_vocab > 0;
         let tokens = self.ao.s;
@@ -1248,6 +1300,58 @@ impl Layer {
                 .map(|(t, c)| deq_ref(&me.mats[mi], &sp, t, c))
                 .collect()
         };
+
+        // Stream II (E11), at the JJ merge: the `o` matmul's committed input is
+        // the attention output requantized, and `AttnOutEval` is that
+        // requantize -- so on a synthetic layer, where the `o` activations are
+        // otherwise drawn at random, the seam can only be honest if the witness
+        // says so.  Wired exactly when the widths line up: the attention output
+        // is `nh * hd` channels wide and the `o` walk reads `n_in` of them.  A
+        // shape where they disagree leaves `o` untied and `ao_q_ok` reports it
+        // as unstatable rather than passing quietly.
+        let o_wired = {
+            let oi = self.mats.iter().position(|m| m.name == "o")
+                .expect("--synth-glue needs the o matmul");
+            let ok = self.mats[oi].n_in == self.ao.nh * self.ao.hd
+                && self.mats[oi].tokens == self.ao.s;
+            if ok {
+                let q = self.ao.q_ref();
+                let (nh, hd, ss) = (self.ao.nh, self.ao.hd, self.ao.s);
+                let ni = self.mats[oi].n_in;
+                let mut qx = vec![0i32; ss * ni];
+                for h in 0..nh {
+                    for t in 0..ss {
+                        for c in 0..hd {
+                            qx[t * ni + h * hd + c] = q[(h * ss + t) * hd + c] as i32;
+                        }
+                    }
+                }
+                if let Some(at) = o_bend {
+                    // any other legal activation: both neighbours of an
+                    // interior value are inside the walk's range window
+                    let w = at % qx.len();
+                    qx[w] += if qx[w] < 126 { 1 } else { -1 };
+                }
+                self.mats[oi].qx = qx;
+                let m = &self.mats[oi];
+                let (no, qxr, qw) = (m.n_out, m.qx.clone(), m.qw.clone());
+                let mut acc = vec![0i64; ss * no];
+                acc.par_chunks_mut(no).enumerate().for_each(|(t, row)| {
+                    for k in 0..ni {
+                        let xv = qxr[t * ni + k] as i64;
+                        if xv == 0 {
+                            continue;
+                        }
+                        for i in 0..no {
+                            row[i] += xv * qw[k * no + i] as i64;
+                        }
+                    }
+                });
+                self.mats[oi].acc = acc;
+            }
+            ok
+        };
+        let _ = o_wired;
 
         let h1 = tail(&gc.xin, &gc.w1, &t1);
         // the head chunk: the final norm's output is the head's committed
@@ -3185,6 +3289,16 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
         eprintln!("wfill-dev: attnout -- {} base and {} pre columns, {} cells, \
 all five multiplicity tables and the f64 reference all match",
                   base.len(), pre.len(), (base.len() + pre.len()) << lay.log_rows);
+    }
+    // Stream II (E11): the witness-side reference and the region's own
+    // committed output are the same function of `AttnOut`, and a synthetic
+    // layer's `o` input is built from the former -- so an untampered run
+    // asserts they agree rather than trusting that they do.  Every tamper index
+    // here is `None` on an honest run, which is exactly when the assert holds.
+    if bend_den.is_none() && bend_jo.is_none() && corrupt.is_none() && corrupt_q.is_none()
+        && corrupt_num.is_none() && corrupt_acc.is_none() && corrupt_jo_tok.is_none()
+    {
+        debug_assert_eq!(q_out, ao.q_ref(), "attnout: q_out and AttnOut::q_ref disagree");
     }
     AoRegion { lay, pre, base, dev: None, ref_bad, q_out, n: ao.nh * ao.s * ao.hd,
                rem_bits, q_bits, acc_lo_bits, acc_hi_bits }

@@ -1630,6 +1630,32 @@ fn compose_probes_cmd(args: &[String]) {
                            "the (pm, scale) lookup"),
                     "a scale that is not the ceil-divide of the attained max accepted");
         }
+        // Stream II (E11), the `o` seam.  `o` has no requantize region --
+        // `AttnOutEval` is its requantize -- so its control is the same shape as
+        // the three above's output side and no tamper either: one `o`
+        // activation the attention output did not produce, with the `o` matmul's
+        // own accumulator moved to match, so the matmul is honestly proved and
+        // only `claims.ao_q` against the walk's `qX` can see it.
+        if let Some(wi) = rplan.walks.iter().position(|w| w.name == "o") {
+            let mut lb = layer_of(args).0;
+            let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
+            let bent = lb.glue.is_some().then(|| {
+                lb.synth_glue_bent(src_of(args).seed, arg_scalar(args, "--glue-a", 32usize),
+                                   round, 41)
+            }).flatten();
+            match bent {
+                Some(at) => {
+                    eprintln!("  o seam: activation {at} bent, the whole layer rebuilt around it");
+                    assert!(!probe("o seam: one activation the attention output did not produce",
+                                   &lb, &Default::default(),
+                                   &format!("the tie ao_q == walk_qx[{wi}]")),
+                            "an o activation the attnout region did not requantize accepted");
+                }
+                None => eprintln!("  o seam: SKIP -- this shape has no wiring family, or its o \
+walk is not nh*hd wide, so the two folds are over different sequences and `ao_q_ok` is not \
+statable here"),
+            }
+        }
     }
 
     // 16. stream E: the head tie.  One committed key of the argmax region is
@@ -1765,19 +1791,32 @@ fn compose_probes_cmd(args: &[String]) {
                                                 ..Default::default() },
                        "the accumulator window's high limb"),
                 "an unbounded accumulator accepted");
-        // and the counterpart, which must ACCEPT.  A whole token's `jo` moved by
-        // one inside the window, with the region rederived, is a different but
-        // equally valid witness: `jo` is the prover's choice and nothing in this
-        // statement reads the attention output's scale.  What would pin it is
-        // the consumer-side tie on `claims.ao_q`, which is stream II's.  Running
-        // it is how the record's sentence about the statement's limit is checked
-        // rather than argued.
-        assert!(probe("attnout: a whole token's jo moved by one (must accept)", &l,
-                      &compose::ProverTamper { ao_jo_tok: Some(1),
-                                               ..Default::default() },
-                      "nothing -- this one is the statement's own limit"),
-                "a token's output exponent is the prover's choice inside the window, \
-                 and moving it must still prove");
+        // And the counterpart, whose verdict is now the *chunk's* to decide.  A
+        // whole token's `jo` moved by one inside the window, with the region
+        // rederived, changes every one of that token's requantized outputs.
+        //
+        // Stream JJ ran this and it accepted, and its record said what would
+        // pin it: the consumer-side tie on `claims.ao_q`, which was stream II's
+        // to add.  With that tie live it *does* pin it -- the `o` walk's
+        // committed activations are the pre-bend integers and the attnout
+        // region's fold is over the post-bend ones, so `ao_q_ok` alone rejects.
+        //
+        // On a chunk with no wiring family the `o` walk publishes no `qX` at
+        // all, so there is no consumer and this still accepts.  That is not a
+        // hole this control can close: `jo` is the prover's choice and a chunk
+        // whose attention output nothing downstream reads has nothing to
+        // compare it against.  Both cases are run, and the assert is the
+        // chunk's own shape rather than a constant.
+        let seam_live = compose::Plan::new(&params).glue.is_some()
+            && l.mats.iter().any(|m| m.name == "o" && m.n_in == l.ao.nh * l.ao.hd);
+        let jo_tok = probe("attnout: a whole token's jo moved by one", &l,
+                           &compose::ProverTamper { ao_jo_tok: Some(1),
+                                                    ..Default::default() },
+                           if seam_live { "the o seam, `ao_q` against the walk's qX" }
+                           else { "nothing -- this chunk has no consumer for it" });
+        assert_eq!(!jo_tok, seam_live,
+                   "a whole token's jo must reject exactly when the o seam is live: \
+                    seam_live={seam_live}, accepted={jo_tok}");
     }
 
     // 8. a tampered claim in the serialized statement: the replayed transcript
