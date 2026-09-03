@@ -42,10 +42,22 @@ not yet fast on it.
 
 The digest is the reference for "this change broke nothing". Any change that is
 not supposed to alter the proof must reproduce, on both arms, the recorded
-`proof_sha256` starting `6c3fb61524dee2ec` for 8B L16 at S=512, C=16K
-(`experiments/b10/out/prove8b.json` and `ref8b.json`, reproduced on the H200
-on both arms, 2026-08-24). The opt-in statement flags (`--norm-tails`,
-`--swiglu`, `--deq-ties`, `--head-key`/`--head-argmax` from stream E;
+`proof_sha256` for 8B L16 at S=512, C=16K
+(`experiments/b10/out/prove8b.json` and `ref8b.json`).
+
+**The reference digest is moving while the statement is being closed
+(2026-09-03, `briefs/README.md` "Closing the statement").** It was
+`6c3fb61524dee2ec` from 2026-08-24 (reproduced on the H200 on both arms) until
+stream JJ's soundness fix and `EPOW` table moved it to **`616d6a80ca9c003f`**
+(H200, both arms, three ways — ref arm, cuda defaults, cuda with every device
+switch off; `briefs/jj-layerwire-out.md`, JJ-3's box record). Stream II's
+requant seams will move it again; stream MM re-records the final value here
+with the negative-control suite. Until then a change is gated against the
+digest of the tree it branched from, on both arms.
+
+`--norm-tails`, `--swiglu` and `--deq-ties` are accepted and ignored since
+2026-09-03: the regions and ties they enabled are unconditional. The remaining
+opt-in statement flags (`--head-key`/`--head-argmax` from stream E;
 `--bounds` from stream H; `--tight-table` from stream J) must all be absent
 for the reference digest to apply — each has held it with the flag off, on both arms:
 
