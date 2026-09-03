@@ -104,6 +104,28 @@ impl AttnOut {
     pub fn e(&self, h: usize, t: usize, j: usize) -> i32 {
         self.jv[h * self.hd + j] - self.jo[t]
     }
+    /// Stream JJ (E11): the per-token output exponent's window, from the data.
+    /// `jo` is prover data; this is the window the statement admits it in.
+    pub fn jo_range(&self) -> (i32, i32) {
+        let lo = self.jo.iter().copied().min().unwrap_or(0);
+        let hi = self.jo.iter().copied().max().unwrap_or(0);
+        (lo, hi)
+    }
+    /// The per-(head, channel) V exponent's window.  `jv` is calibrated offline
+    /// and is a model constant, so this is a statement of the model.
+    pub fn jv_range(&self) -> (i32, i32) {
+        let lo = self.jv.iter().copied().min().unwrap_or(0);
+        let hi = self.jv.iter().copied().max().unwrap_or(0);
+        (lo, hi)
+    }
+    /// The bit length of `1 + max |acc|`: the width the two-limb range check on
+    /// the accumulator has to cover, and with it the `2 mag num < p` half of
+    /// the no-wrap window.
+    pub fn acc_bits(&self) -> u32 {
+        let m = self.acc.iter().map(|a| a.abs()).max().unwrap_or(0);
+        64 - ((m as u64) + 1).leading_zeros()
+    }
+
     /// The rounding-error range check's width: `d < 2 den 2^max(-e,0)` over every
     /// active site, from the data rather than a blind bound.
     pub fn rem_bits(&self) -> u32 {
@@ -276,6 +298,57 @@ impl GlueCols {
         }))
     }
 }
+
+impl GlueCols {
+    /// Stream JJ (E11): the wiring family's consumed columns on a *synthetic*
+    /// layer.  A synthetic layer carries none of B1's columns, so before this
+    /// nothing on the desk could build the glue -- and with it the dequant
+    /// output ties, whose controls need a witness to bite on.  What the family
+    /// consumes is exactly what the ties assert it consumes: `o_out` is the `o`
+    /// region's own dequant reference and `d_out` is `down`'s, so an honest run
+    /// ties and a bent copy does not.  `xin` and the norm tails' `r`/`w` are
+    /// other matmuls' references, which puts them in the same exponent family
+    /// and keeps the add's anchor inside its table.  The columns the family is
+    /// only *checked against* (`xmid`, `xout`, `x_q`, `x_gate`, the SwiGLU's
+    /// three) are left empty: a synthetic layer has no B1 to be right about,
+    /// and the report says `null` rather than a number nobody can read.
+    pub fn synthetic(mats: &[Mat], specs: &[crate::dequant::Spec], a: usize) -> Self {
+        let at = |n: &str| mats.iter().position(|m| m.name == n)
+            .unwrap_or_else(|| panic!("--synth-glue needs the {n} matmul"));
+        let (qi, ki, vi, oi, gi, di) =
+            (at("q"), at("k"), at("v"), at("o"), at("gate"), at("down"));
+        let (d, dff, tokens) = (mats[oi].n_out, mats[gi].n_out, mats[oi].tokens);
+        assert_eq!(mats[di].n_out, d,
+                   "--synth-glue: `down` writes {} channels, `o` writes {d}", mats[di].n_out);
+        assert!(mats[qi].n_out >= d, "--synth-glue: `q` is narrower than the stream");
+        assert_eq!(d % a, 0, "--synth-glue: --glue-a {a} does not divide d = {d}");
+        let col = |mi: usize, w: usize| -> Vec<u16> {
+            (0..tokens).flat_map(|t| (0..w).map(move |c| (mi, t, c)))
+                .map(|(mi, t, c)| deq_ref(&mats[mi], &specs[mi], t, c))
+                .collect()
+        };
+        Self {
+            d, dff, tokens,
+            xin: col(qi, d),
+            o_out: col(oi, d),
+            d_out: col(di, d),
+            xmid: vec![],
+            xout: vec![],
+            r1: (0..tokens).map(|t| deq_ref(&mats[vi], &specs[vi], t, 0)).collect(),
+            r2: (0..tokens).map(|t| deq_ref(&mats[ki], &specs[ki], t, 0)).collect(),
+            w1: (0..d).map(|c| deq_ref(&mats[ki], &specs[ki], 0, c)).collect(),
+            w2: (0..d).map(|c| deq_ref(&mats[vi], &specs[vi], 0, c)).collect(),
+            h1: None, h2: None, silu_in: None, silu_out: None, x_down: None,
+            eps: crate::bf16::from_f64(1.0e-6),
+            inv_d: crate::bf16::from_f64(1.0 / d as f64),
+            reduce: SYNTH_REDUCE.to_string(),
+        }
+    }
+}
+
+/// What `GlueCols::reduce` says on the marker a synthetic layer carries until
+/// `prove_layer` fills it in.
+pub const SYNTH_REDUCE: &str = "synthetic";
 
 fn read_i32(path: &str) -> Result<Vec<i64>, String> {
     let raw = witread::read_file(path)?;
@@ -1166,6 +1239,13 @@ pub struct Tables {
     pub m_frac: Vec<u32>,
     pub m_mul: Vec<u32>,
     pub m_qnz: Vec<u32>,
+    /// Stream JJ (E11): the `EPOW` window table's multiplicities, indexed by
+    /// `e - e_lo` with `e = jv - jo`.  `log_epow` is its height; rows past the
+    /// window repeat the last real one, so padding adds no admissible triple.
+    pub m_epow: Vec<u32>,
+    pub e_lo: i32,
+    pub e_hi: i32,
+    pub log_epow: u32,
     pub m_r: Vec<Vec<u32>>,
     pub off_table: usize,
     /// B9: which table lost a row, how many, and the range of the values that
@@ -1174,8 +1254,9 @@ pub struct Tables {
 }
 
 impl Tables {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(exp: Vec<u32>, log_exp: u32, kmax: u32, round: bf16::Round, q_bits: u32,
-               widths: Vec<u32>) -> Self {
+               widths: Vec<u32>, e_lo: i32, e_hi: i32) -> Self {
         let norm = bf16::norm_table(kmax, round);
         let log_norm = crate::common::log_rows_for(norm.len(), 1);
         let sticky = round.needs_sticky();
@@ -1193,6 +1274,11 @@ impl Tables {
             m_frac: vec![0; 1 << log_frac],
             m_mul: vec![0; 1 << log_mul],
             m_qnz: vec![0; 1 << q_bits],
+            m_epow: vec![0; 1usize << crate::common::log_rows_for(
+                (e_hi - e_lo + 1) as usize, 1)],
+            e_lo,
+            e_hi,
+            log_epow: crate::common::log_rows_for((e_hi - e_lo + 1) as usize, 1),
             m_r: widths.iter().map(|w| vec![0; 1usize << w]).collect(),
             log_exp, exp, kmax, round, norm, log_norm, frac, log_frac, mul, log_mul,
             q_bits, widths,
@@ -1221,6 +1307,31 @@ impl Tables {
         if self.off_table != before {
             self.note_off(kind, v, 1);
         }
+    }
+    /// Stream JJ (E11): the `EPOW` window table, with attribution.  An `e`
+    /// outside the window lands in `off_table`, which is a loud stop.
+    pub fn bump_ek(&mut self, e: i32, kind: &str) {
+        let before = self.off_table;
+        let idx = i64::from(e) - i64::from(self.e_lo);
+        bump(&mut self.m_epow, idx, &mut self.off_table);
+        if self.off_table != before {
+            self.note_off(kind, i64::from(e), 1);
+        }
+    }
+    /// The `EPOW` table's three preprocessed columns, row for row: the key
+    /// `e - e_lo`, then `num = 2^max(e,0)` and `pj = 2^max(-e,0)`.  Rows past
+    /// the window repeat the last real one, so no padded row is a triple a
+    /// lookup could name that the window does not already admit.
+    pub fn epow_rows(&self) -> Vec<(u32, u32, u32)> {
+        let n = 1usize << self.log_epow;
+        let w = (self.e_hi - self.e_lo + 1) as usize;
+        (0..n)
+            .map(|i| {
+                let k = i.min(w - 1);
+                let e = self.e_lo + k as i32;
+                (k as u32, 1u32 << e.max(0), 1u32 << (-e).max(0))
+            })
+            .collect()
     }
     /// the (q, nz) pair table, with attribution
     pub fn bump_qnzk(&mut self, v: i64, kind: &str) {
@@ -1757,17 +1868,25 @@ pub fn deq_ref(m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
 /// accumulator against token 0's scale, and its reference has to be the zero's
 /// image, not the value that would have been there had the row been real.
 pub fn deq_ref_a(a: i64, m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
+    // Stream JJ (E11): every rounding here is `spec.round`'s, not `from_f64`'s.
+    // `from_f64` is round-to-nearest-even and this reference is what the output
+    // ties' claim is built from, so under `--round away` an exact tie made the
+    // claim disagree with the region's own committed cells by one ulp and the
+    // *honest* proof failed to prove.  It cost ~1% of slots on a synthetic
+    // layer; on a witness with no ties it costs nothing, which is why stream E
+    // never saw it.
+    let rd = |x: f64| bf16::from_f64_round(x, spec.round);
     match spec.variant {
         DeqVariant::Pow2 => {
             let jjx = m.jx[t] as i64 + m.jw[c] as i64;
-            bf16::from_f64(a as f64 * (jjx as f64).exp2())
+            rd(a as f64 * (jjx as f64).exp2())
         }
         DeqVariant::Chain => {
-            let y0 = bf16::to_f32(bf16::from_f64(a.unsigned_abs() as f64)) as f64;
+            let y0 = bf16::to_f32(rd(a.unsigned_abs() as f64)) as f64;
             let sxv = bf16::to_f32(bf16::pattern(0, m.sx[t].1, m.sx[t].0)) as f64;
             let swv = bf16::to_f32(bf16::pattern(0, m.sw[c].1, m.sw[c].0)) as f64;
-            let t1 = bf16::to_f32(bf16::from_f64(y0 * sxv)) as f64;
-            bf16::from_f64(t1 * swv) | (u16::from(a < 0) << 15)
+            let t1 = bf16::to_f32(rd(y0 * sxv)) as f64;
+            rd(t1 * swv) | (u16::from(a < 0) << 15)
         }
         _ => unreachable!("matmul regions are pow2 or chain"),
     }
@@ -2438,6 +2557,18 @@ pub struct AoRegion {
     pub n: usize,
     pub rem_bits: u32,
     pub q_bits: u32,
+    /// stream JJ: the two limb widths of the range check on the accumulator,
+    /// and the offset that makes it non-negative
+    pub acc_lo_bits: u32,
+    pub acc_hi_bits: u32,
+}
+
+impl AoRegion {
+    /// `2^(acc_lo_bits + acc_hi_bits - 1)`: what a committed `acc` is shifted by
+    /// so its two limbs are a range check on `|acc|`.
+    pub fn acc_off(&self) -> i64 {
+        1i64 << (self.acc_lo_bits + self.acc_hi_bits - 1)
+    }
 }
 
 impl AoRegion {
@@ -2448,29 +2579,146 @@ impl AoRegion {
     }
 }
 
-/// Column order per slot: acc, sg, qm, nz2, denp, d (after the shared den col).
+/// Column order: the row's `den` and `joff`, then per slot acc, sg, qm, nz2,
+/// denp, d, num, pj, alo.
+///
+/// Stream JJ (E11), `witness-slack.md` section 1f: `joff = jo_max - jo` is the
+/// per-token output exponent, committed because `jo` is prover data and pinned
+/// across the token's rows the way `den` is.  `num = 2^max(e,0)` and
+/// `pj = 2^max(-e,0)` with `e = jv - jo` are committed too and pinned by one
+/// lookup per slot into the preprocessed `EPOW` window table at the key
+/// `jvp + joff`, where `jvp = jv - jv_min` is preprocessed and model-only.
+/// `alo` is the low limb of the offset accumulator, the other half of the
+/// no-wrap window.
+#[allow(clippy::too_many_arguments)]
 pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32,
+                 acc_bits: (u32, u32), jv_min: i32, jo_max: i32,
                  tables: &mut Tables, corrupt: Option<usize>,
-                 corrupt_q: Option<usize>) -> AoRegion {
+                 corrupt_q: Option<usize>, corrupt_den: Option<usize>,
+                 corrupt_jo: Option<usize>, corrupt_num: Option<usize>,
+                 corrupt_acc: Option<usize>, corrupt_jo_tok: Option<usize>) -> AoRegion {
     let lay = AoLayout::choose(ao.nh, ao.s, ao.hd, per_row_target);
     let rows = 1usize << lay.log_rows;
     let pr = lay.per_row;
     // B7a milestone 4 (section 3 row 1): the same three-value mode.
-    let m4d = if corrupt_q.is_some() { 0 } else { crate::util::m4b_mode("B7_M4_WFILL") };
+    let m4d = if corrupt_q.is_some() || corrupt_den.is_some() || corrupt_jo.is_some()
+                 || corrupt_num.is_some() || corrupt_acc.is_some()
+                 || corrupt_jo_tok.is_some() {
+        0
+    } else {
+        crate::util::m4b_mode("B7_M4_WFILL")
+    };
     assert!(m4d == 0 || corrupt.is_none(),
             "attnout: the device fill has no `corrupt` path");
+    // Stream JJ (witness-slack section 7 item 1, and the row-`den` hole beside
+    // it): the row whose denominator is bent.  `den` was read once per row and
+    // folded into `dz` only on the token's *last* row, so on any other row it
+    // -- and with it `denp` -- was free, and the slot's rounding was a rounding
+    // by a denominator of the prover's choosing.  This control rounds one
+    // non-last row honestly against `den - 1`: every constraint and every lookup
+    // of the pre-change AIR holds, so it accepts there, and the `den` pin is
+    // what rejects it now.
+    // stream JJ: the row whose `jo` is moved by one, for the control that the
+    // `nofirst` pin on `pjo`/`njo` exists to catch.  Same resolution as
+    // `bend_den`'s, and it must also land off a token's first row -- the pin
+    // compares a row with its predecessor.
+    let row_of_site = |idx: usize, what: &str| -> usize {
+        let (ht, ch) = (idx / ao.hd, idx % ao.hd);
+        let (h, t) = (ht / ao.s, ht % ao.s);
+        let j = (0..rows)
+            .find(|j| matches!(lay.at(ao.nh, ao.s, *j), Some((hh, tt, b))
+                               if hh == h && tt == t && b * pr <= ch && ch < (b + 1) * pr))
+            .unwrap_or_else(|| panic!("{what}: no row carries channel {ch}"));
+        let b = lay.at(ao.nh, ao.s, j).unwrap().2;
+        assert!(b + 1 < lay.chunks,
+                "{what} needs a row that is not its token's first (b = chunks - 1);                  index {idx} lands on b = {b}");
+        j
+    };
+    let bend_jo: Option<usize> = corrupt_jo.map(|idx| row_of_site(idx, "--corrupt-ao-jo"));
+    // Which way the `jo` control moves.  It has to stay inside the statement's
+    // own windows or it would be caught by the `EPOW` lookup instead of by the
+    // pin it exists to test -- `joff = jo_max - jo` must stay non-negative and
+    // every slot's `e = jv - jo` must stay in `[e_lo, e_hi]`.  Down when the
+    // top of the exponent window has room, up otherwise; a window with no room
+    // either way is a statement too tight to test on, and says so.
+    let bend_jo_step: i32 = match bend_jo {
+        None => 0,
+        Some(j) => {
+            let (h, t, b) = lay.at(ao.nh, ao.s, j).expect("--corrupt-ao-jo: an inert row");
+            let es: Vec<i32> = (0..pr)
+                .map(|s| ao.jv[h * ao.hd + b * pr + s] - ao.jo[t])
+                .collect();
+            // Up first: a larger `jo` is a smaller `num`, and a smaller `num`
+            // cannot push `qm` past the `ao_q_bits` pair table.  Moving `jo`
+            // *down* can, which is itself worth knowing -- see the record.
+            let down = es.iter().all(|e| e + 1 <= tables.e_hi);
+            let up = ao.jo[t] < jo_max && es.iter().all(|e| e - 1 >= tables.e_lo);
+            assert!(down || up,
+                    "--corrupt-ao-jo: the jo window (top {jo_max}) and the exponent \
+                     window [{}, {}] leave no room to move one row's jo; widen one with \
+                     --ao-jo-min / --ao-jo-max",
+                    tables.e_lo, tables.e_hi);
+            if up { 1 } else { -1 }
+        }
+    };
+    // The same choice for the whole-token control, over that token's every row.
+    let bend_tok_step: i32 = match corrupt_jo_tok {
+        None => 0,
+        Some(t) => {
+            let t = t % ao.s;
+            let es: Vec<i32> = (0..ao.nh)
+                .flat_map(|h| (0..ao.hd).map(move |c| (h, c)))
+                .map(|(h, c)| ao.jv[h * ao.hd + c] - ao.jo[t])
+                .collect();
+            let down = es.iter().all(|e| e + 1 <= tables.e_hi);
+            let up = ao.jo[t] < jo_max && es.iter().all(|e| e - 1 >= tables.e_lo);
+            assert!(down || up,
+                    "--corrupt-ao-jo-tok: the windows leave no room to move token {t}'s \
+                     jo; widen one with --ao-jo-min / --ao-jo-max");
+            if up { 1 } else { -1 }
+        }
+    };
+    let (acc_lo_bits, acc_hi_bits) = acc_bits;
+    let acc_off = 1i64 << (acc_lo_bits + acc_hi_bits - 1);
+    let bend_den: Option<usize> = corrupt_den.map(|idx| {
+        let (ht, ch) = (idx / ao.hd, idx % ao.hd);
+        let (h, t) = (ht / ao.s, ht % ao.s);
+        let j = (0..rows)
+            .find(|j| matches!(lay.at(ao.nh, ao.s, *j), Some((hh, tt, b))
+                               if hh == h && tt == t && b * pr <= ch && ch < (b + 1) * pr))
+            .expect("--corrupt-ao-den: no row carries that channel");
+        let b = lay.at(ao.nh, ao.s, j).unwrap().2;
+        assert!(b != 0,
+                "--corrupt-ao-den needs a non-last row of a token (b = 0 is the row \
+                 whose `den` the `dz` fold publishes); index {idx} lands on b = 0");
+        assert!(ao.den[h * ao.s + t] > 1, "--corrupt-ao-den: this token's Z is 1");
+        j
+    });
     if m4d == 1 {
-        let dev = crate::devwfill::ao_region_dev(ao, &lay, q_bits, rem_bits, tables, false);
+        let dev = crate::devwfill::ao_region_dev(ao, &lay, q_bits, rem_bits, acc_bits,
+                                                 jv_min, jo_max, tables, false);
         let (ref_bad, q_out) = (dev.ref_bad, dev.q_out.clone());
         return AoRegion { lay, pre: vec![], base: vec![], dev: Some(dev), ref_bad, q_out,
-                          n: ao.nh * ao.s * ao.hd, rem_bits, q_bits };
+                          n: ao.nh * ao.s * ao.hd, rem_bits, q_bits,
+                          acc_lo_bits, acc_hi_bits };
     }
-    let m4d_snap = |t: &Tables| -> (Vec<u32>, Vec<u32>, usize) {
-        (t.m_qnz.clone(), t.m_r[t.ridx(rem_bits)].clone(), t.off_table)
+    // `B7_M4_WFILL=2` builds this region twice -- host here, device below --
+    // and the device call bumps the same counters a second time, so every
+    // counter this fill touches has to be snapshotted before, compared as a
+    // delta, and restored after.  Stream JJ (E11) added three: the two
+    // accumulator limb tables and `m_epow` (whose bumps are a host loop on
+    // *both* sides, `devwfill::ao_region_dev`).  A counter left out of this
+    // tuple is counted twice and the honest proof is then rejected with
+    // `sums_cancel: false` -- which is what it did on the H200's reference
+    // chunk, and what no desk shape shows, because the desk never runs mode 2.
+    let m4d_snap = |t: &Tables| -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, usize) {
+        (t.m_qnz.clone(), t.m_r[t.ridx(rem_bits)].clone(),
+         t.m_r[t.ridx(acc_lo_bits)].clone(), t.m_r[t.ridx(acc_hi_bits)].clone(),
+         t.m_epow.clone(), t.off_table)
     };
     let m4d_before = (m4d == 2).then(|| m4d_snap(tables));
     let mut want_host = vec![0u32; if m4d == 2 { rows * pr } else { 0 }];
-    let n_cols = 1 + 6 * pr;
+    let n_cols = 2 + 9 * pr;
     let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); rows]; n_cols];
     let mut q_out = vec![0i64; ao.nh * ao.s * ao.hd];
     let mut ref_bad = 0usize;
@@ -2480,19 +2728,45 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                 // inert lead row: den = 1, everything else 0 -> d = denp = 1,
                 // dp = 0, (qm, nz2) = (0, 0); all constraints hold, all lookups
                 // land on real rows
+                // `joff = jo_max - jo` with `jo = jo_max` and `jvp = 0`, so the
+                // `EPOW` key is 0 and the pair is `(2^max(e_lo,0), 2^max(-e_lo,0))`
                 cols[0][j] = M31::one();
+                let (num0, pj0) = (1i64 << tables.e_lo.max(0),
+                                   1i64 << (-tables.e_lo).max(0));
                 for s in 0..pr {
-                    cols[1 + 6 * s + 4][j] = M31::one();     // denp = den * pj = 1
-                    cols[1 + 6 * s + 5][j] = M31::one();     // d = denp
+                    let c0 = 2 + 9 * s;
+                    // `acc` stays the raw accumulator (the `z` fold reads it);
+                    // what the two limbs range-check is `acc + acc_off`
+                    cols[c0 + 4][j] = m31_of(pj0);                 // denp = den pj
+                    cols[c0 + 5][j] = m31_of(pj0);                 // d = denp
+                    cols[c0 + 6][j] = m31_of(num0);
+                    cols[c0 + 7][j] = m31_of(pj0);
+                    cols[c0 + 8][j] = m31_of(acc_off & ((1i64 << acc_lo_bits) - 1));
+                    tables.bump_ek(tables.e_lo, "ao_epow_lead");
                     tables.bump_qnzk(0, "ao_qnz_lead");
-                    tables.bump_rk(rem_bits, 1, "ao_rem_lead");    // d
-                    tables.bump_rk(rem_bits, 0, "ao_rem_lead");    // dp = 2*1 - 1 - 1
+                    tables.bump_rk(rem_bits, pj0, "ao_rem_lead");           // d
+                    tables.bump_rk(rem_bits, pj0 - 1, "ao_rem_lead");       // dp
+                    tables.bump_rk(rem_bits, pj0, "ao_rem_lead");           // denp
+                    tables.bump_rk(acc_lo_bits, acc_off & ((1i64 << acc_lo_bits) - 1),
+                                   "ao_acc_lead");
+                    tables.bump_rk(acc_hi_bits, acc_off >> acc_lo_bits, "ao_acc_lead");
                 }
             }
             Some((h, t, b)) => {
-                let den = ao.den[h * ao.s + t];
+                // stream JJ's control bends this row's denominator only
+                let den = ao.den[h * ao.s + t] - i64::from(bend_den == Some(j));
                 assert!(den > 0, "attnout denominator must be positive");
+                // stream JJ: `jo` is committed now, as `joff = jo_max - jo`.
+                // The control moves this row's `jo` by one and leaves the
+                // token's other rows alone, which only the `nofirst` pin sees.
+                let jo = ao.jo[t]
+                    + if bend_jo == Some(j) { bend_jo_step } else { 0 }
+                    + if corrupt_jo_tok.map(|x| x % ao.s) == Some(t) { bend_tok_step }
+                      else { 0 };
+                let joff = i64::from(jo_max - jo);
+                assert!(joff >= 0, "attnout: jo above the window's top");
                 cols[0][j] = m31_of(den);
+                cols[1][j] = m31_of(joff);
                 for s in 0..pr {
                     let ch = b * pr + s;
                     let idx = (h * ao.s + t) * ao.hd + ch;
@@ -2500,8 +2774,12 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                     if corrupt == Some(idx) {
                         a += 1;
                     }
-                    let e = ao.e(h, t, ch);
-                    let num = 1i64 << e.max(0);
+                    let jv = ao.jv[h * ao.hd + ch];
+                    let e = jv - jo;
+                    // the window pair, and the control that bends it: a `num`
+                    // one doubling out is a triple the `EPOW` table does not
+                    // carry, so only the lookup can reject it
+                    let num = (1i64 << e.max(0)) << u32::from(corrupt_num == Some(idx));
                     let pj = 1i64 << (-e).max(0);
                     let denp = den * pj;
                     let mag = a.abs();
@@ -2519,20 +2797,48 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                     let sg = i64::from(a < 0 && qm != 0);
                     let d = if a < 0 && qm == 0 { denp - 2 * pm }
                             else { 2 * pm - (2 * qm - 1) * denp };
-                    let c0 = 1 + 6 * s;
+                    let c0 = 2 + 9 * s;
+                    // the offset accumulator's two limbs.  The control moves the
+                    // committed low limb by one *inside its own table*, so both
+                    // range lookups still land on real rows and the only thing
+                    // that can see it is that `(acc + acc_off - alo) / 2^lo` is
+                    // no longer the integer the high table was bumped at.
+                    let ao_v = a + acc_off;
+                    assert!(ao_v >= 0 && ao_v < 1i64 << (acc_lo_bits + acc_hi_bits),
+                            "attnout: |acc| outside its declared window: {a}");
+                    let alo = if corrupt_acc == Some(idx) {
+                        ((ao_v & ((1i64 << acc_lo_bits) - 1)) + 1) & ((1i64 << acc_lo_bits) - 1)
+                    } else {
+                        ao_v & ((1i64 << acc_lo_bits) - 1)
+                    };
                     cols[c0][j] = m31_of(a);
                     cols[c0 + 1][j] = m31_of(sg);
                     cols[c0 + 2][j] = m31_of(qm);
                     cols[c0 + 3][j] = m31_of(i64::from(qm != 0));
                     cols[c0 + 4][j] = m31_of(denp);
                     cols[c0 + 5][j] = m31_of(d);
+                    cols[c0 + 6][j] = m31_of(num);
+                    cols[c0 + 7][j] = m31_of(pj);
+                    cols[c0 + 8][j] = m31_of(alo);
+                    tables.bump_ek(e, "ao_epow");
                     tables.bump_qnzk(qm, "ao_qnz");
                     tables.bump_rk(rem_bits, d, "ao_rem_d");
                     tables.bump_rk(rem_bits, 2 * denp - 1 - d, "ao_rem_dp");
+                    // section 7 item 1: `denp`'s own bound, without which the
+                    // pair above leaves the `2 denp = d + dp + 1` halving branch
+                    tables.bump_rk(rem_bits, denp, "ao_rem_denp");
+                    // and the other half of the no-wrap window: `2 mag num < p`
+                    // is `2 mag num` with `num <= 2^e_hi` from the `EPOW` table
+                    // and `mag` bounded here, in two limbs
+                    tables.bump_rk(acc_lo_bits, alo, "ao_acc_lo");
+                    tables.bump_rk(acc_hi_bits, (ao_v - alo) >> acc_lo_bits, "ao_acc_hi");
                     q_out[idx] = if a < 0 { -qm } else { qm };
-                    // the reference: one f64 rounding, half away from zero
-                    let want = ((mag as f64 * (e as f64).exp2()) / den as f64 + 0.5).floor()
-                        as i64;
+                    // the reference: one f64 rounding, half away from zero.  It
+                    // reads `num / pj` rather than `2^(jv - jo)` -- the same
+                    // number on an honest row, and on a bent one the reference
+                    // follows the bend instead of counting it twice.
+                    let want = ((mag as f64 * (num as f64 / pj as f64)) / den as f64 + 0.5)
+                        .floor() as i64;
                     if !want_host.is_empty() {
                         want_host[j * pr + s] = want as u32;
                     }
@@ -2543,21 +2849,18 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
             }
         }
     }
-    // preprocessed: per-slot (num, pj), then the selectors
+    // preprocessed: one per-slot column, then the selectors.  Stream JJ (E11):
+    // `jvp = jv - jv_min`, a per-(head, channel) model constant offset to be
+    // non-negative.  It replaces the old `(num, pj)` pair, which was a function
+    // of `e = jv - jo` and so of this chunk's tokens; tree 0 no longer is.
     let mut pre = vec![];
     for s in 0..pr {
-        for pick in 0..2 {
-            pre.push(eval_of(lay.log_rows, (0..rows).map(|j| {
-                match lay.at(ao.nh, ao.s, j) {
-                    None => M31::one(),
-                    Some((h, t, b)) => {
-                        let e = ao.e(h, t, b * pr + s);
-                        let v = if pick == 0 { 1i64 << e.max(0) } else { 1i64 << (-e).max(0) };
-                        m31_of(v)
-                    }
-                }
-            }).collect()));
-        }
+        pre.push(eval_of(lay.log_rows, (0..rows).map(|j| {
+            match lay.at(ao.nh, ao.s, j) {
+                None => M31::zero(),
+                Some((h, _t, b)) => m31_of(i64::from(ao.jv[h * ao.hd + b * pr + s] - jv_min)),
+            }
+        }).collect()));
     }
     let active = |j: usize| lay.at(ao.nh, ao.s, j).is_some();
     let last = |j: usize| matches!(lay.at(ao.nh, ao.s, j), Some((_, _, 0)));
@@ -2577,15 +2880,25 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
     if m4d == 2 {
         let after = m4d_snap(tables);
         let before = m4d_before.unwrap();
-        let dev = crate::devwfill::ao_region_dev(ao, &lay, q_bits, rem_bits, tables, true);
+        let dev = crate::devwfill::ao_region_dev(ao, &lay, q_bits, rem_bits, acc_bits,
+                                                 jv_min, jo_max, tables, true);
         crate::devwfill::check_cols("attnout base", &base, &dev.base);
         crate::devwfill::check_cols("attnout pre", &pre, &dev.pre);
         let ri = tables.ridx(rem_bits);
+        let (rlo, rhi) = (tables.ridx(acc_lo_bits), tables.ridx(acc_hi_bits));
         crate::devwfill::check_delta("attnout m_qnz", &before.0, &after.0,
                                      &sub_slice(&tables.m_qnz, &after.0));
         crate::devwfill::check_delta("attnout m_rem", &before.1, &after.1,
                                      &sub_slice(&tables.m_r[ri], &after.1));
-        assert_eq!(tables.off_table - after.2, after.2 - before.2,
+        // stream JJ (E11): the accumulator window's two limbs, and the `EPOW`
+        // window, whose column is a host loop on both sides
+        crate::devwfill::check_delta("attnout m_acc_lo", &before.2, &after.2,
+                                     &sub_slice(&tables.m_r[rlo], &after.2));
+        crate::devwfill::check_delta("attnout m_acc_hi", &before.3, &after.3,
+                                     &sub_slice(&tables.m_r[rhi], &after.3));
+        crate::devwfill::check_delta("attnout m_epow", &before.4, &after.4,
+                                     &sub_slice(&tables.m_epow, &after.4));
+        assert_eq!(tables.off_table - after.5, after.5 - before.5,
                    "attnout: off-table bumps differ");
         assert_eq!(dev.ref_bad, ref_bad, "attnout: ref_bad differs");
         assert_eq!(dev.q_out, q_out, "attnout: the committed int8 outputs differ");
@@ -2598,21 +2911,29 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
             panic!("attnout: the f64 reference differs at row {} slot {}: host {}, device {}",
                    k / pr, k % pr, want_host[k], w[k]);
         }
+        // restore in table order, so a width shared between two of these (say
+        // `rem_bits == acc_lo_bits`) ends on the one snapshot that covers it
         tables.m_qnz.copy_from_slice(&after.0);
         tables.m_r[ri].copy_from_slice(&after.1);
-        tables.off_table = after.2;
+        tables.m_r[rlo].copy_from_slice(&after.2);
+        tables.m_r[rhi].copy_from_slice(&after.3);
+        tables.m_epow.copy_from_slice(&after.4);
+        tables.off_table = after.5;
         eprintln!("wfill-dev: attnout -- {} base and {} pre columns, {} cells, \
-both multiplicity tables and the f64 reference all match",
+all five multiplicity tables and the f64 reference all match",
                   base.len(), pre.len(), (base.len() + pre.len()) << lay.log_rows);
     }
     AoRegion { lay, pre, base, dev: None, ref_bad, q_out, n: ao.nh * ao.s * ao.hd,
-               rem_bits, q_bits }
+               rem_bits, q_bits, acc_lo_bits, acc_hi_bits }
 }
 
 pub struct AoInteraction {
     pub cols: Vec<crate::device::AnyCol<'static>>,
     pub claimed_out: SecureField,
     pub claimed_den: SecureField,
+    /// Stream JJ (E11): the region's own requantized output, folded under
+    /// `claimed_out`'s weights -- what the `o` walk's `qX` equals.
+    pub claimed_q: SecureField,
     pub use_sum: SecureField,
 }
 
@@ -2636,6 +2957,10 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
     // three-value mode every fill in this series uses.
     let m4g = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
     let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
+    // stream JJ's fourth accumulator is the host's whatever the device fill
+    // did with the other three (stream M's lesson in `mat_interaction`: keep
+    // the real height before `rows` is shadowed to zero)
+    let n_rows = rows;
     let rows = if m4g_host { rows } else { 0 };
     let inner: Vec<SecureField> = (0..rows)
         .into_par_iter()
@@ -2700,21 +3025,82 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
         }
     };
 
-    // lookups per slot, in AIR order: (qm, nz2), d, dp
+    // ---- stream JJ (E11): the region's own output, published --------------
+    //
+    // `z`/`h`'s shape exactly, over `q = qm (1 - 2 sg)` instead of over `acc`.
+    // `AttnOutEval` *is* the requantization of the attention output, so this
+    // claim is what the `o` walk's committed activations have to equal, row for
+    // row -- `q_out` below is the same value this folds.  The `eqs` entry that
+    // compares them is stream II's, on the consumer's side.
+    let (mut zq, mut hq) = (vec![SecureField::zero(); n_rows],
+                            vec![SecureField::zero(); n_rows]);
+    for j in 0..n_rows {
+        let nofirst = matches!(lay.at(ao.nh, ao.s, j), Some((_, _, b)) if b + 1 < lay.chunks);
+        let last = matches!(lay.at(ao.nh, ao.s, j), Some((_, _, 0)));
+        let hfirst = matches!(lay.at(ao.nh, ao.s, j), Some((_, t, 0)) if t == ao.s - 1);
+        let mut qf = SecureField::zero();
+        if let Some((h, t, b)) = lay.at(ao.nh, ao.s, j) {
+            for s in 0..pr {
+                let q = r.q_out[(h * ao.s + t) * ao.hd + b * pr + s];
+                if q != 0 {
+                    qf += rv_pow[s] * SecureField::from(m31_of(q));
+                }
+            }
+        }
+        zq[j] = if nofirst { zq[j - 1] * rv_step } else { SecureField::zero() } + qf;
+        let mq = if j == 0 {
+            SecureField::zero()
+        } else if last && hfirst {
+            mu_out
+        } else if last {
+            s_ch
+        } else {
+            SecureField::one()
+        };
+        hq[j] = if j > 0 { hq[j - 1] * mq } else { SecureField::zero() };
+        if last {
+            hq[j] += zq[j];
+        }
+    }
+    let claimed_q = hq[n_rows - 1];
+    cols.extend_any(crate::attn_trace::secure_cols_pub(lay.log_rows, &zq)
+                        .into_iter().map(crate::device::AnyCol::OwnedHost).collect::<Vec<_>>());
+    cols.extend_any(crate::attn_trace::secure_cols_pub(lay.log_rows, &hq)
+                        .into_iter().map(crate::device::AnyCol::OwnedHost).collect::<Vec<_>>());
+
+    // lookups in AIR order, per slot: the `EPOW` window, (qm, nz2), d, dp,
+    // denp, the offset accumulator's low limb, then its high limb
     let one = PackedQM31::broadcast(SecureField::one());
-    let n_looks = 3 * pr;
+    let n_looks = 7 * pr;
+    let inv_lo = stwo::prover::backend::simd::m31::PackedM31::broadcast(
+        M31::from_u32_unchecked(1 << r.acc_lo_bits).inverse());
+    let acc_off = stwo::prover::backend::simd::m31::PackedM31::broadcast(
+        M31::from_u32_unchecked(r.acc_off() as u32));
     let fr = |i: usize, vr: usize| -> (PackedQM31, PackedQM31) {
-        let (s, which) = (i / 3, i % 3);
-        let c0 = 1 + 6 * s;
+        let (s, which) = (i / 7, i % 7);
+        let c0 = 2 + 9 * s;
         match which {
-            0 => (one, rels.qnz.combine(&[r.base[c0 + 2].data[vr], r.base[c0 + 3].data[vr]])),
-            1 => (one, rels.range(r.rem_bits).combine(&[r.base[c0 + 5].data[vr]])),
-            _ => {
+            // the window: `(jvp + joff, num, pj)`, `jvp` preprocessed and
+            // model-only, `joff` the row's committed output exponent
+            0 => (one, rels.epow.combine(&[r.pre[s].data[vr] + r.base[1].data[vr],
+                                           r.base[c0 + 6].data[vr],
+                                           r.base[c0 + 7].data[vr]])),
+            1 => (one, rels.qnz.combine(&[r.base[c0 + 2].data[vr], r.base[c0 + 3].data[vr]])),
+            2 => (one, rels.range(r.rem_bits).combine(&[r.base[c0 + 5].data[vr]])),
+            3 => {
                 let two = stwo::prover::backend::simd::m31::PackedM31::broadcast(
                     M31::from_u32_unchecked(2));
                 let onem = stwo::prover::backend::simd::m31::PackedM31::broadcast(M31::one());
                 let dp = r.base[c0 + 4].data[vr] * two - onem - r.base[c0 + 5].data[vr];
                 (one, rels.range(r.rem_bits).combine(&[dp]))
+            }
+            // section 7 item 1: `denp` itself
+            4 => (one, rels.range(r.rem_bits).combine(&[r.base[c0 + 4].data[vr]])),
+            // the no-wrap window's two limbs on `acc + acc_off`
+            5 => (one, rels.range(r.acc_lo_bits).combine(&[r.base[c0 + 8].data[vr]])),
+            _ => {
+                let hi = (r.base[c0].data[vr] + acc_off - r.base[c0 + 8].data[vr]) * inv_lo;
+                (one, rels.range(r.acc_hi_bits).combine(&[hi]))
             }
         }
     };
@@ -2726,6 +3112,7 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
             cols: cols.into_inner(),
             claimed_out,
             claimed_den,
+            claimed_q,
             use_sum: SecureField::zero(),
         };
     }
@@ -2738,7 +3125,7 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
             crate::plogup::build(lay.log_rows, n_pairs, fpair)
         });
     cols.extend_any(lcols);
-    AoInteraction { cols: cols.into_inner(), claimed_out, claimed_den, use_sum }
+    AoInteraction { cols: cols.into_inner(), claimed_out, claimed_den, claimed_q, use_sum }
 }
 
 // ------------------------------------------------------------------ walk regions --

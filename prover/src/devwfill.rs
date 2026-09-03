@@ -107,6 +107,12 @@ pub struct FAoCfg {
     pub lead: u32,
     pub do_ref: u32,
     pub mutate: u32,
+    /// stream JJ (E11): the exponent window's two offsets and the accumulator
+    /// window's two limb widths
+    pub jv_min: i32,
+    pub jo_max: i32,
+    pub acc_lo_bits: u32,
+    pub acc_hi_bits: u32,
 }
 
 #[repr(C)]
@@ -166,6 +172,8 @@ unsafe extern "C" {
         n_pre: u32,
         m_qnz: FMult,
         m_rem: FMult,
+        m_acc_lo: FMult,
+        m_acc_hi: FMult,
         q_out: *mut i32,
         want_out: *mut u32,
         counts: *mut u32,
@@ -791,17 +799,24 @@ pub struct DevAo {
     /// B7a milestone 4 (section 3 row 1): the `q != 0` and remainder counters.
     pub m_qnz: Uint32Vec,
     pub m_rem: Uint32Vec,
+    /// stream JJ (E11): the accumulator window's two limb counters
+    pub m_acc_lo: Uint32Vec,
+    pub m_acc_hi: Uint32Vec,
     pub ref_bad: usize,
     pub q_out: Vec<i64>,
     /// the f64 reference's own answer per (coset row, slot), for `B7_M4_WFILL=2`
     pub want: Option<Vec<u32>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn ao_region_dev(
     ao: &AttnOut,
     lay: &AoLayout,
     q_bits: u32,
     rem_bits: u32,
+    acc_bits: (u32, u32),
+    jv_min: i32,
+    jo_max: i32,
     tables: &mut Tables,
     with_want: bool,
 ) -> DevAo {
@@ -819,13 +834,16 @@ pub fn ao_region_dev(
     crate::util::m4_add("gen/wfill_ao_up", t_up.elapsed().as_secs_f64());
 
     let t_alloc = std::time::Instant::now();
-    let base = uninit(1 + 6 * pr, rows);
-    let pre = uninit(2 * pr + 6, rows);
+    let base = uninit(2 + 9 * pr, rows);
+    let pre = uninit(pr + 6, rows);
     let base_p = ptrs(&base);
     let pre_p = ptrs(&pre);
     let ri = tables.ridx(rem_bits);
+    let (rlo, rhi) = (tables.ridx(acc_bits.0), tables.ridx(acc_bits.1));
     let m_qnz = zeroes(tables.m_qnz.len());
     let m_rem = zeroes(tables.m_r[ri].len());
+    let m_acc_lo = zeroes(tables.m_r[rlo].len());
+    let m_acc_hi = zeroes(tables.m_r[rhi].len());
     let counts = zeroes(3);
     let q_out = zeroes(ao.nh * ao.s * ao.hd);
     let want = with_want.then(|| zeroes(rows * pr));
@@ -844,6 +862,14 @@ pub fn ao_region_dev(
         // every active site, and so does this.
         do_ref: 1,
         mutate: wfill_mut(Fam::Ao),
+        // stream JJ (E11): the exponent window's offsets and the accumulator
+        // window's two limb widths.  `e = jv - jo` is what the kernel derives
+        // `num` and `pj` from; the key it commits is `(jv - jv_min) + (jo_max
+        // - jo)`, which is `e - e_lo`.
+        jv_min,
+        jo_max,
+        acc_lo_bits: acc_bits.0,
+        acc_hi_bits: acc_bits.1,
     };
 
     let t_k = std::time::Instant::now();
@@ -859,6 +885,8 @@ pub fn ao_region_dev(
             pre_p.len() as u32,
             FMult::of(&m_qnz),
             FMult::of(&m_rem),
+            FMult::of(&m_acc_lo),
+            FMult::of(&m_acc_hi),
             q_out.device_ptr as *mut i32,
             want.as_ref().map(|d| d.device_ptr as *mut u32).unwrap_or(std::ptr::null_mut()),
             counts.device_ptr as *mut u32,
@@ -877,13 +905,33 @@ pub fn ao_region_dev(
     if crate::devpre::merge_counters() {
         add_into(&mut tables.m_qnz, &m_qnz.to_vec());
         add_into(&mut tables.m_r[ri], &m_rem.to_vec());
+        add_into(&mut tables.m_r[rlo], &m_acc_lo.to_vec());
+        add_into(&mut tables.m_r[rhi], &m_acc_hi.to_vec());
+    }
+    // The `EPOW` window's multiplicities never leave the host: `e = jv - jo` is
+    // a function of `ao.jv`, `ao.jo` and the layout, so the whole column is one
+    // cheap loop over rows and no counter has to come back off the card.
+    for j in 0..rows {
+        match lay.at(ao.nh, ao.s, j) {
+            None => {
+                for _ in 0..pr {
+                    tables.bump_ek(tables.e_lo, "ao_epow_lead");
+                }
+            }
+            Some((h, t, b)) => {
+                for s in 0..pr {
+                    let e = ao.jv[h * ao.hd + b * pr + s] - ao.jo[t];
+                    tables.bump_ek(e, "ao_epow");
+                }
+            }
+        }
     }
     tables.off_table += got[0] as usize;
     let q_out: Vec<i64> = q_out.to_vec().into_iter().map(|v| v as i32 as i64).collect();
     let want = want.map(|d| d.to_vec());
     crate::util::m4_add("gen/wfill_counters", t_d.elapsed().as_secs_f64());
 
-    DevAo { pre, base, log_rows: lay.log_rows, m_qnz, m_rem,
+    DevAo { pre, base, log_rows: lay.log_rows, m_qnz, m_rem, m_acc_lo, m_acc_hi,
             ref_bad: got[1] as usize, q_out, want }
 }
 

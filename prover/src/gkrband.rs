@@ -556,7 +556,9 @@ pub fn walk_site(
     }, eval);
 }
 
-/// B11 stream V, lever 4: the attention-output region's three looks per slot.
+/// B11 stream V, lever 4: the attention-output region's looks -- seven per
+/// slot since stream JJ (E11) added the exponent window and the accumulator's
+/// two limbs to `denp`'s own range check.
 pub fn ao_site(
     c: &mut Collect,
     eval: &crate::walk_air::AttnOutEval,
@@ -568,7 +570,7 @@ pub fn ao_site(
         mut_env: "B11_AOMUT",
         mut_key: 0,
         log_rows: r.lay.log_rows,
-        unit: vec![true; 3 * r.lay.per_row],
+        unit: vec![true; 7 * r.lay.per_row],
         pre: &r.pre,
         base: &r.base,
         #[cfg(feature = "cuda")]
@@ -1978,7 +1980,9 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
             reg: crate::gkrlink::Reg::Ao,
             which: 0,
             log_rows: plan.ao_lay.log_rows,
-            unit: vec![true; 3 * plan.ao_lay.per_row],
+            // stream JJ (E11): seven per slot -- the exponent window, (qm, nz2),
+            // `d`, `dp`, `denp` and the accumulator's two limbs
+            unit: vec![true; 7 * plan.ao_lay.per_row],
         });
     }
     out
