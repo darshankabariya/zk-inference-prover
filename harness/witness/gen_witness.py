@@ -21,8 +21,8 @@ import time
 import numpy as np
 import torch
 
-from common import MODEL, OUT, SPECS, THREADS, digest, setup, tokens
-from model import Cache, Model, Recorder
+from .common import MODEL, OUT, SPECS, THREADS, digest, setup, tokens
+from .model import Cache, Model, Recorder
 
 WITNESS = os.path.join(OUT, "witness.npz")
 MANIFEST = os.path.join(OUT, "manifest.json")

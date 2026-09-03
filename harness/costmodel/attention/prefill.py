@@ -16,14 +16,18 @@ a mask-aware layout would use, and what the corner costs in each.
 Every "per token" below is per *model* token, i.e. the measured one-layer chunk
 times L; the runs prove one layer.
 
-    uv run experiments/b9/prefill.py
+    uv run python -m harness.costmodel.attention.prefill --artifacts DIR [--constants PATH]
 """
 import json
 import pathlib
 import sys
 
+from harness import inputs
+
 HERE = pathlib.Path(__file__).parent
-OUT = HERE / "out"
+# `--artifacts DIR`: the prefill probe outputs (`prefill_s*.json`) at its root, the
+# decode sequence's per-chunk JSONs under `seq5/`; this probe writes `prefill.json` beside them.
+OUT = inputs.artifacts_dir()
 
 NH, HD, L8B = 32, 128, 32
 SS = (256, 512, 1024, 2048)
@@ -273,7 +277,7 @@ print(f"  the incumbent p is {p / gamma - 1:+.1%} against gamma, because it char
 print()
 print("  the control -- the closed form against every artifact that records a band count:")
 CHECKS = [(f"b9 prefill  S=C={s:<6d}", artifact(s), s, s, False) for s in SS]
-SEQ5 = HERE.parent / "b10/out/seq5"
+SEQ5 = OUT / "seq5"
 CHECKS += [(f"seq5 8B L{L:<2d} S=512 C={c:<5d}", SEQ5 / f"seq_c{c}_L{L}.json", 512, c, True)
            for L in (0, 16, 31) for c in (4096, 16384)]
 print(f"  {'artifact':25s} {'base predicted':>15} {'base measured':>15} "
@@ -390,8 +394,7 @@ print("  Chunking also re-commits the prefix K/V once per later chunk, and it SA
 print("  of the causal rectangle a one-shot proof commits inert.  At 16K the saving wins.")
 
 try:
-    sys.path.insert(0, str(HERE.parent))
-    from paper.constants import value as frozen
+    from harness.constants import value as frozen
     DECODE = {4096: frozen("cells.c4096.fresh_33chunks"),
               16384: frozen("cells.c16384.fresh_33chunks")}
 except Exception as exc:                     # experiments/paper is optional here

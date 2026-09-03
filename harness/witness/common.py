@@ -6,7 +6,7 @@ from dataclasses import replace
 import numpy as np
 import torch
 
-from model import Spec
+from .model import Spec
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # B8 points the same code at an 8B model on a GPU: the model, the output
@@ -14,7 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL = os.environ.get("B1_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
 OUT = os.environ.get("B1_OUT", os.path.join(HERE, "out"))
 DEVICE = os.environ.get("B1_DEVICE", "cpu")
-TEXT = os.path.join(HERE, os.pardir, "text.txt")
+TEXT = os.path.join(HERE, "text.txt")
 THREADS = int(os.environ.get("B1_THREADS", 4))
 CHUNK = 512
 

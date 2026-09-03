@@ -18,10 +18,8 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, os.pardir))
-sys.path.insert(0, os.path.join(HERE, os.pardir, "e5t"))
-import tasks as T  # noqa: E402  (b8/tasks.py: the loaders and the ifeval scorer)
-from report import ifeval_items, mcnemar, rows, se_acc  # noqa: E402  (b8/e5t/report.py)
+from harness.eval import tasks as T
+from harness.eval.e5t.report import ifeval_items, mcnemar, rows, se_acc
 
 E5V = os.environ.get("E5V_OUT", os.path.join(HERE, os.pardir, "out", "e5v"))
 E5T = os.environ.get("E5V_REF", os.path.join(HERE, os.pardir, "out", "e5t"))

@@ -15,10 +15,10 @@ import time
 import numpy as np
 import torch
 
-from common import (B5_SPECS, B6_SPECS, B65_SPECS, B8_SPECS, MODEL, OUT, SPECS, chunks,
+from .common import (B5_SPECS, B6_SPECS, B65_SPECS, B8_SPECS, MODEL, OUT, SPECS, chunks,
                     setup, tokens)
-from model import Model
-from quant import INT8_MAX, bf16_ceil, qscale
+from .model import Model
+from .quant import INT8_MAX, bf16_ceil, qscale
 
 RESULTS = os.path.join(OUT, "ppl.json")
 CALIB = os.path.join(OUT, "static_ranges.json")

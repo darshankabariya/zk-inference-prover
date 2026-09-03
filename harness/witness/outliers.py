@@ -18,8 +18,8 @@ import os
 
 import torch
 
-from common import MODEL, OUT, SPECS, chunks, setup, tokens
-from model import Model
+from .common import MODEL, OUT, SPECS, chunks, setup, tokens
+from .model import Model
 
 CHUNKS = 4
 

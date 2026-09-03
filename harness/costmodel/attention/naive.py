@@ -12,9 +12,12 @@ and cited.
 import json
 import pathlib
 
+from harness import inputs
+
 HERE = pathlib.Path(__file__).parent
-OUT = HERE / "out"
-B2 = HERE.parent / "b2" / "out"
+# `--artifacts DIR` receives `naive.json`; `--inputs DIR` is the cost model's bench outputs.
+OUT = inputs.artifacts_dir()
+B2 = inputs.costmodel_inputs()
 
 # (L, d, nh, nkv, hd, dff, vocab)
 SHAPES = {

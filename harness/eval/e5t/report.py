@@ -22,8 +22,7 @@ import random
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, os.pardir))
-import tasks as T  # noqa: E402  (b8/tasks.py: the loaders and the ifeval scorer)
+from harness.eval import tasks as T
 
 # `E5T_OUT` holds this session's `tasks/` + `tasks.json`, `E5T_REF` the
 # recorded ones (B8's H100 rows).  Defaults are the committed repo layout; the

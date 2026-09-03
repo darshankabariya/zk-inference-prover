@@ -1,9 +1,9 @@
 """Stream E7 -- what it costs to prove a full evaluation suite.
 
-    cd experiments/paper && uv run --project .. python sufficiency.py
+    uv run python -m harness.costmodel.suite_cost --constants PATH --artifacts DIR
 
-Every rate, cost and cells constant comes from `constants.json`; nothing is
-inlined here.  The only input from outside the freeze is B8's per-item JSONL,
+Every rate, cost and cells constant comes from a zk-results `constants.json`
+(`--constants PATH`); nothing is inlined here.  The only input from outside the freeze is B8's per-item JSONL,
 and that is used only to re-derive the token counts that ARE frozen -- so a
 change to either side shows up as a mismatch in `check.py`.
 
@@ -26,12 +26,15 @@ import os
 import statistics
 import sys
 
-from constants import get, value as v
+from harness import inputs
+from harness.constants import get, value as v
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-B8 = os.path.join(HERE, os.pardir, "b8", "out", "tasks")
-E5T = os.path.join(HERE, os.pardir, "b8", "out", "e5t", "tasks")
-E5V = os.path.join(HERE, os.pardir, "b8", "out", "e5v", "tasks")
+# The per-item task rows: `--artifacts DIR` holds `tasks/`, `e5t/tasks/` and
+# `e5v/tasks/` as the eval harness wrote them.
+ART = str(inputs.artifacts_dir())
+B8 = os.path.join(ART, "tasks")
+E5T = os.path.join(ART, "e5t", "tasks")
+E5V = os.path.join(ART, "e5v", "tasks")
 SEC_PER_H = 3600.0
 SPECS = ("fp32", "dynamic-int8", "b6-design", "b6-design-p2o", "b65-design", "static")
 TASKS = ("gpqa", "mmlu_pro", "ifeval")

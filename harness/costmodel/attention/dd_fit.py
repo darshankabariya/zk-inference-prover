@@ -26,8 +26,12 @@ import math
 import pathlib
 import sys
 
+from harness import inputs
+
 HERE = pathlib.Path(__file__).parent
-OUT = HERE / "out"
+# `--artifacts DIR`: the sweep outputs at its root, the decode sequence's per-chunk
+# JSONs under `seq5/`; the fit is written to `dd_fit.json` beside them.
+OUT = inputs.artifacts_dir()
 
 NH, HD, L8B = 32, 128, 32
 BANDS = (16, 8, 8)                # nh = 32 as three power-of-two instance bands
@@ -313,7 +317,7 @@ def geom_report():
     print("  three corner bands at C = S, which is the only check of the C != S arm:")
     ok = bad = 0
     checks = [(tag, s, r) for tag, _ in SETS for s, r in sorted(load_all()[tag].items())]
-    seq5 = HERE.parent / "b10/out/seq5"
+    seq5 = OUT / "seq5"
     for lay in (0, 16, 31):
         for c in (4096, 16384):
             r = load(seq5 / f"seq_c{c}_L{lay}.json")
@@ -596,8 +600,7 @@ def report():
     # -- E11
     e11 = {}
     try:
-        sys.path.insert(0, str(HERE.parent))
-        from paper.constants import value as frozen
+        from harness.constants import value as frozen
         decode = {4096: frozen("cells.c4096.fresh_33chunks"),
                   16384: frozen("cells.c16384.fresh_33chunks")}
     except Exception as exc:

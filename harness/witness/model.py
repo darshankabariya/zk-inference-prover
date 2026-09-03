@@ -24,7 +24,7 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from quant import (BF16, INT8_MAX, INT_MM_MIN_ROWS, bf16_away, int_gemm,
+from .quant import (BF16, INT8_MAX, INT_MM_MIN_ROWS, bf16_away, int_gemm,
                    int_gemm_exact, qscale, qscale_per_channel, qscale_per_token,
                    quantize, reduce_sum, round_hafz, store, weight_dtype)
 

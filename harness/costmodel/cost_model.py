@@ -1,32 +1,36 @@
 """B2 cost model: measured stwo constants -> per-token prover budget, checked
 against a published 53 tok/s target for a Gemma-3-27B-class model.
 
-Every constant is read out of experiments/b2/out/*.json, i.e. out of an actual
-run. The CPU->H100 speedup is never assumed: the model reports the trace
+Every constant is read out of the micro-benchmark run outputs in `--inputs DIR`
+(or `ZK_COSTMODEL_INPUTS`), i.e. out of an actual run. The CPU->H100 speedup is never assumed: the model reports the trace
 commitment throughput a prover would need for 53 tok/s and how far one CPU is
 from it. Closing that gap is B7's job.
 
-    uv run experiments/b2/cost_model.py
+    uv run python -m harness.costmodel.cost_model --inputs DIR
 """
 import json
 import pathlib
 import sys
 
-OUT = pathlib.Path(__file__).parent / "out"
-B1 = pathlib.Path(__file__).parent.parent / "b1" / "out"
-B3 = pathlib.Path(__file__).parent.parent / "b3" / "out"
-B4 = pathlib.Path(__file__).parent.parent / "b4" / "out"
-B5 = pathlib.Path(__file__).parent.parent / "b5" / "out"
-B6 = pathlib.Path(__file__).parent.parent / "b6" / "out"
-B65 = pathlib.Path(__file__).parent.parent / "b65" / "out"
-B10 = pathlib.Path(__file__).parent.parent / "b10" / "out"
+from harness import inputs
+
+# The micro-benchmark outputs this model reads, all under one directory: the
+# stwo benches at its root and the witness-side probes in named subdirectories.
+OUT = inputs.costmodel_inputs()
+B1 = OUT / "b1"
+B3 = OUT / "b3"
+B4 = OUT / "b4"
+B5 = OUT / "b5"
+B6 = OUT / "b6"
+B65 = OUT / "b65"
+B10 = OUT / "b10"
 
 
 def load(name, required=True):
     p = OUT / f"{name}.json"
     if not p.exists():
         if required:
-            sys.exit(f"missing {p}; run experiments/b2/run_all.sh first")
+            sys.exit(f"missing {p} in the cost-model inputs directory")
         return None
     return json.loads(p.read_text())
 

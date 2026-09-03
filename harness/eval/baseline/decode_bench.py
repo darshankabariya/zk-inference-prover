@@ -34,15 +34,15 @@ import statistics
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parent))
+from harness import constants
 
-import backends as B  # noqa: E402
-import lfl  # noqa: E402
+from . import backends as B
+from . import lfl
+
+HERE = Path(__file__).resolve().parent
 
 SCHEMA = "e2h/decode-throughput/2"
-OUT = Path(os.environ.get("E2_OUT", HERE / "out"))
+OUT = Path(os.environ.get("E2_OUT", "out"))
 
 # What the unproved seconds contain, written into every run so the ratio can be
 # audited without re-running anything.  The proved side's four boundaries live in
@@ -253,6 +253,7 @@ def main():
     p.add_argument("--probe", action="store_true")
     p.add_argument("--max-model-len", type=int, default=None)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.90)
+    constants.add_argument(p)
     a = p.parse_args()
 
     if a.selftest:

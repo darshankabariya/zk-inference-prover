@@ -21,11 +21,9 @@ import gc
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 import torch
-from common import MODEL, SPECS, chunks, setup, tokens
-from model import Cache, Model, Recorder, Spec
+from .common import MODEL, SPECS, chunks, setup, tokens
+from .model import Cache, Model, Recorder, Spec
 
 
 def run_recorded(m, ids, seq):

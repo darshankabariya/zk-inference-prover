@@ -19,8 +19,11 @@ nothing.
 import json
 import pathlib
 
+from harness import inputs
+
 HERE = pathlib.Path(__file__).parent
-OUT = HERE / "out"
+# `--artifacts DIR`: the `moe_s*.json` probe outputs; `moe.json` is written beside them.
+OUT = inputs.artifacts_dir()
 
 # the 8B FFN, as `B7_SYNTH_DIMS` gives it to the runs
 D, DFF = 4096, 14336

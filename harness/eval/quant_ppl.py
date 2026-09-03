@@ -8,15 +8,12 @@
 
 Model: distilgpt2 on CPU (directional simulation only).
 """
-import torch, math, urllib.request, os
+import torch, math, os
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.pytorch_utils import Conv1D
 
 torch.manual_seed(0)
-TXT = "text.txt"
-if not os.path.exists(TXT):
-    url = "https://www.gutenberg.org/files/1342/1342-0.txt"  # Pride and Prejudice
-    urllib.request.urlretrieve(url, TXT)
+TXT = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "witness", "text.txt")
 text = open(TXT, encoding="utf-8").read()[10000:130000]
 
 tok = AutoTokenizer.from_pretrained("distilgpt2")

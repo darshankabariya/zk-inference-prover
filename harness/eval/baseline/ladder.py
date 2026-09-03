@@ -1,7 +1,7 @@
 """E2h: the overhead-multiple ladder.
 
 Turns measured unproved tok/s (from `decode_bench.py`) plus the frozen proved
-tok/s (from `experiments/paper/constants.json`) into the table the paper's
+tok/s (from a zk-results `constants.json`, `--constants PATH`) into the table the paper's
 section 4 needs: one row per BOUNDARY, because "the overhead" is not one number
 and the four boundaries the freeze names differ by 6x among themselves.
 
@@ -44,12 +44,12 @@ import json
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parent))
+from harness import constants
+from harness.constants import get, value
 
-import lfl  # noqa: E402
-from paper.constants import get, value  # noqa: E402
+from . import lfl
+
+HERE = Path(__file__).resolve().parent
 
 SCHEMA = "e2h/overhead-ladder/2"
 RUN_SCHEMAS = ("e2h/decode-throughput/1", "e2h/decode-throughput/2")
@@ -208,7 +208,7 @@ def build(outdir, usd_override=None, allow_synthetic=False):
 
     doc = {
         "schema": SCHEMA,
-        "proved_source": "experiments/paper/constants.json (stream W0 freeze)",
+        "proved_source": constants.path(),
         "unproved_source": str(outdir),
         "what_neither_side_counts": WHAT_NEITHER_SIDE_COUNTS,
         "e11_assumption": E11_ASSUMPTION,
@@ -225,9 +225,7 @@ def build(outdir, usd_override=None, allow_synthetic=False):
         doc["caveats"].append(
             f"{len(dropped)} SYNTHETIC run(s) in {outdir} were dropped before "
             f"selection and appear in no cell: {dropped}")
-    doc["boundary_definitions"] = json.loads(
-        (Path(__file__).resolve().parents[1] / "paper" / "constants.json").read_text()
-    )["_boundaries"]
+    doc["boundary_definitions"] = dict(constants.doc().get("_timing_scopes", {}))
     doc["boundary_definitions"]["unproved decode wall"] = (
         "the unproved side's own boundary: forward passes with weights resident, "
         "warmup and prompt tokenization outside the timed region. See a run "
@@ -481,7 +479,8 @@ def markdown(doc):
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--outdir", default=str(HERE / "out"))
+    p.add_argument("--outdir", required=True, help="directory of decode_bench run JSONs")
+    constants.add_argument(p)
     p.add_argument("--out", default=None, help="write the ladder JSON here")
     p.add_argument("--markdown", action="store_true")
     p.add_argument("--emit-constants", action="store_true",
@@ -492,6 +491,7 @@ def main():
     p.add_argument("--usd-per-gpu-hour", type=float, default=None,
                    help="override the frozen H200 rate; stamps from_freeze=false")
     a = p.parse_args()
+    constants.load(a.constants)
     doc = build(a.outdir, a.usd_per_gpu_hour, a.allow_synthetic)
     if a.allow_synthetic:
         doc["WARNING"] = ("--allow-synthetic: this table may contain SYNTHETIC seconds "

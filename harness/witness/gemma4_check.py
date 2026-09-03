@@ -37,8 +37,8 @@ import tempfile
 
 import torch
 
-from common import SPECS
-from model import Model, proportional_inv_freq
+from .common import SPECS
+from .model import Model, proportional_inv_freq
 
 torch.manual_seed(0)
 torch.set_num_threads(int(os.environ.get("B1_THREADS", 4)))
@@ -281,7 +281,7 @@ def test_components(path, ids):
                                attention_mask=additive_mask(mask),
                                shared_kv_states={}, use_cache=False)
         theirs = theirs[0] if isinstance(theirs, tuple) else theirs
-        from model import Cache
+        from .model import Cache
         m.use_geometry(t)
         ours = m.gemma4_layer(li, l, x, Cache(m.L), (cos, sin), mask)
         row(f"[{tag}] decoder layer (4 norms + layer_scalar)", dmax(ours, theirs[0]))
@@ -357,7 +357,7 @@ def test_schedule(path, ids):
     B8's IFEval decodes many prompts in one packed cache.  Both are checked the
     way `selftest.py` test 6 checks the shared path.
     """
-    from model import Cache
+    from .model import Cache
     print("5. schedule invariance (the geometry is switched per layer, so: state):")
     ok = True
     for name in ("fp32", "dynamic-int8"):

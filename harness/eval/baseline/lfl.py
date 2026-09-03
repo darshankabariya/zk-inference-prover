@@ -7,16 +7,11 @@ verdict travels in the run's own JSON.  A dimension that CANNOT be matched is
 not silently dropped -- it is recorded with the direction it pushes the answer,
 so a reader can see whether the mismatch flatters us or costs us.
 
-Proved numbers come from `experiments/paper/constants.json` (stream W0's freeze).
+Proved numbers come from a zk-results `constants.json` (`--constants PATH`).
 Nothing here re-derives one.
 """
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from paper.constants import get, value  # noqa: E402
+from harness.constants import get, value
 
 # The four boundaries the freeze names, in order of how much of the prover they
 # contain.  `loop_secs` is NOT `whole wall`: whole wall has never counted the

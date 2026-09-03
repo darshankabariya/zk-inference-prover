@@ -9,7 +9,7 @@
   6. batched vs token-at-a-time evaluation -- what it takes for the order to be
      genuinely fixed.
 
-    uv run python b1/selftest.py
+    uv run python -m harness.witness.selftest
 """
 import gc
 import json
@@ -18,9 +18,9 @@ import os
 import numpy as np
 import torch
 
-from common import MODEL, OUT, SPECS, chunks, setup, tokens
-from model import Cache, Linear, Model, Recorder
-from quant import BF16, INT8_MAX, qscale_per_token, round_hafz
+from .common import MODEL, OUT, SPECS, chunks, setup, tokens
+from .model import Cache, Linear, Model, Recorder
+from .quant import BF16, INT8_MAX, qscale_per_token, round_hafz
 
 P = (1 << 31) - 1          # M31
 M31_MAX = (P - 1) // 2     # largest |v| a single field element carries signed

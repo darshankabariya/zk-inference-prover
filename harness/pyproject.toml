@@ -1,6 +1,7 @@
 [project]
-name = "experiments"
+name = "harness"
 version = "0.1.0"
+description = "Witness generation, quality evaluation and the cost model for the prover"
 requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.5.2",
@@ -14,3 +15,18 @@ torch = { index = "pytorch-cpu" }
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+# The package root is this directory: `harness/witness` is `harness.witness`.
+[tool.setuptools]
+package-dir = { "harness" = "." }
+packages = [
+    "harness", "harness.witness", "harness.eval", "harness.eval.e5t", "harness.eval.e5v",
+    "harness.eval.baseline", "harness.eval.predict", "harness.costmodel", "harness.costmodel.attention",
+]
+
+[tool.setuptools.package-data]
+"harness.witness" = ["text.txt"]

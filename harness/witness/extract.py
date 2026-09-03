@@ -42,11 +42,10 @@ import numpy as np
 import torch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, os.pardir, "b1"))
 
-from common import MODEL, SPECS, setup, tokens  # noqa: E402
-from model import BF16, Cache, Model, Recorder  # noqa: E402
-from quant import pow2_ceil, round_hafz  # noqa: E402
+from .common import MODEL, SPECS, setup, tokens  # noqa: E402
+from .model import BF16, Cache, Model, Recorder  # noqa: E402
+from .quant import pow2_ceil, round_hafz  # noqa: E402
 
 OUT = os.path.join(HERE, "out", "witness")
 MATS = ["q", "k", "v", "o", "gate", "up", "down"]
@@ -255,7 +254,7 @@ if __name__ == "__main__":
         f"{a.spec} does not use the provable int8 attention-output fold"
     mats = a.mats.split(",")
 
-    from ppl import attention_scales  # noqa: E402
+    from .ppl import attention_scales  # noqa: E402
 
     m = Model(MODEL, spec, attn_scales=attention_scales(spec), track_acc=True)
     m.clamped = {}

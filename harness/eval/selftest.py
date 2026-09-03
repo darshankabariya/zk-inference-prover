@@ -11,7 +11,7 @@
   4. how often the calibrated attention scales clip on the eval slice;
   5. batched vs token-at-a-time evaluation under `b6-design-p2o` (b1 section 5).
 
-    . b8/env.sh && python b8/selftest.py
+    uv run python -m harness.eval.selftest   # needs a GPU and the 8B model
 """
 import json
 import math
@@ -22,10 +22,9 @@ import time
 import torch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, os.pardir, "b1"))
-from common import MODEL, OUT, SPECS, chunks, setup, tokens  # noqa: E402
-from model import Cache, Model  # noqa: E402
-from ppl import attention_scales  # noqa: E402
+from harness.witness.common import MODEL, OUT, SPECS, chunks, setup, tokens
+from harness.witness.model import Cache, Model
+from harness.witness.ppl import attention_scales
 
 P = (1 << 31) - 1
 M31_MAX = (P - 1) // 2
@@ -142,8 +141,7 @@ def test_packed(spec_name="b6-design-p2o", n_prompts=6, n_new=48, batch=4):
     """Packed decode (b8/tasks.py) against one-prompt-at-a-time decode: the same
     prompts, the same tokens, bit for bit -- the packing is a scheduling change
     only (b1 section 5's question, asked of the decode harness)."""
-    sys.path.insert(0, HERE)
-    from tasks import STOP, chat_ids, generate, generate_packed, load_ifeval
+    from .tasks import STOP, chat_ids, generate, generate_packed, load_ifeval
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(MODEL)
     docs = load_ifeval()[:n_prompts]

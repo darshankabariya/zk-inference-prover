@@ -28,10 +28,9 @@ import time
 import torch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, os.pardir, "b1"))
-from common import MODEL, OUT, SPECS, setup  # noqa: E402
-from model import Cache, Model  # noqa: E402
-from ppl import attention_scales, calibration_scales  # noqa: E402
+from harness.witness.common import MODEL, OUT, SPECS, setup
+from harness.witness.model import Cache, Model
+from harness.witness.ppl import attention_scales, calibration_scales
 
 DATA = os.environ.get("B8_DATA", os.path.join(HERE, "data"))
 TASKS = os.path.join(OUT, "tasks")

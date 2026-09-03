@@ -30,9 +30,9 @@ import time
 import numpy as np
 import torch
 
-from common import CHUNK, MODEL, OUT, SPECS, chunks, setup, tokens
-from model import Cache, Model
-from ppl import attention_scales, calibration_scales
+from .common import CHUNK, MODEL, OUT, SPECS, chunks, setup, tokens
+from .model import Cache, Model
+from .ppl import attention_scales, calibration_scales
 
 RESULTS = os.path.join(OUT, "cosine.json")
 SUBBATCH = int(os.environ.get("B1_COSINE_SUBBATCH", 64))

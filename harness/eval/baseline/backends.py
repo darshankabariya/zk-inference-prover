@@ -26,7 +26,7 @@ import hashlib
 import os
 import time
 
-TEXT = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "text.txt")
+TEXT = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir, "witness", "text.txt")
 # Distinct prompts per batch element: no engine-level prefix cache can turn a
 # batch of B sequences into one prefill and inflate the batched rate.
 BATCH_STRIDE = 1013

@@ -33,15 +33,17 @@ import pathlib
 import re
 import sys
 
-HERE = pathlib.Path(__file__).parent
-ROOT = HERE.parent
-OUT = HERE / "out"
-sys.path.insert(0, str(HERE))
+from harness import constants, inputs
+from . import cost_model as cm
 
-import cost_model as cm                                          # noqa: E402
+HERE = pathlib.Path(__file__).parent
+# The measured run outputs this module reads, laid out as the readers below name
+# them (`b10/out/seq5/...`, `b9/out/...`, `b12/.../out/...`).
+ROOT = inputs.artifacts_dir()
+OUT = pathlib.Path(".")
 
 TOKENS = 512            # the measured sequence's decoded tokens (S per chunk)
-REPO = ROOT.parent
+REPO = ROOT
 
 
 def rel(p):
@@ -54,18 +56,12 @@ def rel(p):
 
 
 # ---------------------------------------------------------------- constants --
-# Stream W0's freeze, `experiments/paper/constants.json`, read through its own
-# module.  Nothing measured, cited or agreed is written down here: this module
-# names the keys it needs and fails loudly on a `null`.  When the freeze is
-# absent (an older checkout) the fallbacks below carry the same fields, so the
-# swap is a lookup change and nothing else.
-PAPER = ROOT / "paper"
-CONSTANTS_JSON = PAPER / "constants.json"
+# Read from a zk-results `constants.json` (`--constants PATH`).  Nothing measured,
+# cited or agreed is written down here: this module names the keys it needs and
+# fails loudly on a `null`.
 
 # The keys this module consumes, and nothing else.
-#   dollars -- the `*_reference_*` pair only.  `*_actual_*` exists in the freeze
-#   marked not-for-publication (the H200 we measure on is sponsored, so its
-#   actual rate is 0.00) and this module must never read it.
+#   dollars -- the `*_reference_*` pair only; an `*_actual_*` key must never be read.
 #   the grid -- E1's own composed-chunk solve, plus the other values in
 #   circulation, which section (2) reconciles rather than averages.
 KEYS = dict(
@@ -91,38 +87,14 @@ KEYS = dict(
     prefill_remainder="design.prefill_chunk_remainder",
 )
 
-# Deliberately all `None`: a market rate moves, and a stale copy of one sitting in
-# this file would price the table at a number nobody cited.  Without the freeze the
-# dollar columns print `n/a`, which is the correct answer.
-FALLBACK = {
-    "cost.h100_reference_usd_per_hour": dict(
-        value=None, unit="USD/GPU-h", grade="pending", card="H100",
-        source="frontier.py fallback; there is no reference rate without the freeze"),
-    "cost.h200_reference_usd_per_hour": dict(
-        value=None, unit="USD/GPU-h", grade="pending", card="H200",
-        source="frontier.py fallback; there is no reference rate without the freeze"),
-}
-
 
 def load_constants():
-    """The freeze if it is there, the fallbacks if it is not.
-
-    Returns `{alias: entry}`, each entry carrying the freeze's own value / unit /
-    grade / card / source, plus the key it came from and where it was read."""
-    doc = None
-    if CONSTANTS_JSON.exists():
-        sys.path.insert(0, str(ROOT))
-        import paper.constants as frozen                       # noqa: E402
-        doc = frozen
+    """`{alias: entry}`, each entry carrying the constants file's own value / unit /
+    grade / card, plus the key it came from and where it was read."""
     out = {}
     for alias, key in KEYS.items():
-        if doc is not None:
-            e = dict(doc.get(key))
-            e["origin"] = rel(CONSTANTS_JSON)
-        else:
-            e = dict(FALLBACK.get(key, dict(value=None, unit="", grade="pending",
-                                            card="none", source="not frozen")))
-            e["origin"] = "frontier.py fallback (the freeze is absent)"
+        e = dict(constants.get(key))
+        e["origin"] = constants.path()
         e["key"] = key
         out[alias] = e
     return out
@@ -1037,12 +1009,15 @@ def main(argv=None):
                     help="LogUp lookups sharing one interaction column (b2/out/"
                          "logup.json); nothing to do with --seq-batch")
     ap.add_argument("--target", type=float, default=20.0)
-    ap.add_argument("--json", default=str(OUT / "frontier.json"))
+    ap.add_argument("--json", default="frontier.json")
+    constants.add_argument(ap)
+    inputs.add_arguments(ap, artifacts=True, inputs=True)
     ap.add_argument("--compare", default=None,
                     help="a previous frontier.json to diff every row against; prints "
                          "what moved in cells/token, tok/s and cards-at-target, and "
                          "whether the ordering changed")
     args = ap.parse_args(argv)
+    constants.load(args.constants)
 
     consts = load_constants()
     batch = args.logup_batch if args.logup_batch is not None else cm.BATCH
@@ -1079,7 +1054,7 @@ def main(argv=None):
 
     # --- the ledger ----------------------------------------------------------
     print("\nthe constants this table stands on (nothing below is typed in twice)")
-    src = rel(CONSTANTS_JSON) if CONSTANTS_JSON.exists() else "NOT PRESENT (fallbacks)"
+    src = constants.path()
     print(f"  W0's freeze: {src}")
     for k, v in consts.items():
         print(f"    {v['key']:<52} {str(v['value']):>8}  [{v['grade']}]")

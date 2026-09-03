@@ -15,7 +15,7 @@ committed no witness, no proof and no cell count existed at any of the three
 target scales, on either box -- see the `provenance` block in the emitted JSON.
 
 Nothing here re-derives a frozen constant.  Measured anchors are read through
-`paper.constants.value()`; the cost model's own constants come from the
+`harness.constants.value()`; the cost model's own constants come from the
 checked-in B2-B10 JSON exactly as every other caller sees them.
 """
 import argparse
@@ -24,13 +24,11 @@ import json
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-EXP = os.path.join(HERE, os.pardir)
-sys.path.insert(0, os.path.join(EXP, "b2"))
-sys.path.insert(0, EXP)
+from harness import constants
+from harness.constants import get, value
+from harness.costmodel import cost_model as cm
 
-import cost_model as cm                       # noqa: E402
-from paper.constants import get, value        # noqa: E402
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 S = 512                     # decoded tokens per chunk: the frozen spec's chunking
 B = cm.BATCH                # the LogUp lookup-batch size the model charges (2)
@@ -316,8 +314,8 @@ def _sha(path):
 def provenance():
     return dict(
         inputs_sha256={
-            "experiments/b2/cost_model.py": _sha(os.path.join(EXP, "b2", "cost_model.py")),
-            "experiments/paper/constants.json": _sha(os.path.join(EXP, "paper", "constants.json")),
+            "harness/costmodel/cost_model.py": _sha(cm.__file__),
+            "constants.json": _sha(constants.path()),
         },
         registered_utc_date="2026-09-01",
         registered_by="stream E4 (desk lane)",
@@ -441,8 +439,11 @@ def integrator_notes(reg):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--json", action="store_true", help="rewrite e4/out/registration.json")
+    ap.add_argument("--json", action="store_true", help="rewrite the registration file")
+    constants.add_argument(ap)
+    ap.add_argument("--inputs", metavar="DIR", help="cost-model inputs (read at import; or set ZK_COSTMODEL_INPUTS)")
     a = ap.parse_args()
+    constants.load(a.constants)
 
     chk = selfcheck()
     reg = build()
