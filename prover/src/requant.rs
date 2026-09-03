@@ -909,7 +909,11 @@ pub fn run(w: &RWitness, v: SVariant, with_max: bool, per_row_target: usize,
     let n_looks = pr * n_looks_slot + usize::from(with_max);
     let one = PackedQM31::broadcast(SecureField::one());
     let getb = |c: usize, vr: usize| base[c].data[vr];
-    let sel_last = pre[pre.len() - 2].clone();
+    // the `last` selector, addressed by its place in `RQ_SEL` rather than by an
+    // offset from the end -- stream II added `gt0` and then `mlast` to that
+    // list, and an end-relative index silently walked off `last` both times.
+    // The selectors are the last `RQ_SEL.len()` preprocessed columns, in order.
+    let sel_last = pre[pre.len() - RQ_SEL.len() + 1].clone();
     let c141 = PackedM31::broadcast(m31_u32((134 - TT_POW2) as u32));
     let ctt1 = PackedM31::broadcast(m31_u32(TT_BF16 as u32));
     let c128p = PackedM31::broadcast(m31_u32(128));
