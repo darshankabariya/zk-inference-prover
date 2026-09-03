@@ -740,23 +740,23 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     // here.  The int8-calibrated synthetic data stays complete at any wider
     // width, so this widens only the table domain and the o walk.
     l.attn_out_bits = arg_scalar(args, "--synth-ao-bits", l.attn_out_bits);
-    // Stream JJ (E11): `--synth-glue` gives a synthetic layer a wiring family.
-    // It is a *witness* switch, not a statement one -- it says what this layer
-    // carries, the way `--nout` does -- and it exists because the dequant output
-    // ties cannot be made to bite on a layer with no glue at all, which is every
-    // synthetic layer before it.  The columns are filled from the matmuls' own
-    // dequant references inside `prove_layer`, where the specs live; here the
-    // layer only carries the marker.
+    // Stream II: the wiring family on a synthetic layer.  A witness-construction
+    // switch and not a statement one -- without it a synthetic layer has no glue
+    // columns and composes exactly as it always did, which is what keeps every
+    // other stream's recorded synthetic digest where it is.
     if flag(args, "--synth-glue") {
-        let (d, dff) = (l.mats.iter().find(|m| m.name == "o").expect("o").n_out,
-                        l.mats.iter().find(|m| m.name == "gate").expect("gate").n_out);
-        l.glue = Some(layer::GlueCols {
-            d, dff, tokens: l.mats[0].tokens,
-            xin: vec![], o_out: vec![], xmid: vec![], d_out: vec![], xout: vec![],
-            r1: vec![], r2: vec![], w1: vec![], w2: vec![],
-            h1: None, h2: None, silu_in: None, silu_out: None, x_down: None,
-            eps: 0, inv_d: 0, reduce: layer::SYNTH_REDUCE.to_string(),
-        });
+        let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
+        l.synth_glue(src.seed, arg_scalar(args, "--glue-a", 32usize), round);
+    }
+    // Stream II (E11): the head chunk on a synthetic layer -- an `lm_head`
+    // matmul whose committed input is the final norm's output, and the wiring
+    // family that proves it.  A witness-construction switch like
+    // `--synth-glue`: without it a synthetic layer has no `lm_head` and no
+    // family, and composes exactly as it always did.
+    if flag(args, "--synth-head") {
+        let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
+        l.synth_head(src.seed, arg_scalar(args, "--glue-a", 32usize), round,
+                     arg_scalar(args, "--synth-vocab", 256usize));
     }
     tighten_of(&mut l, args);
     coord_of(&mut l, args);
@@ -958,19 +958,19 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
                 // carried only when the region that needs it is on, so that
                 // with both flags off the serialized statement is not merely
                 // equivalent to the pre-change crate's but identical to it
-                // Stream JJ (E11): the SwiGLU region is the gate/up ties'
-                // counterparty, so it is no longer optional -- `--swiglu` is
-                // accepted and ignored.  A dump whose manifest predates `dff`
-                // still composes: the region needs a width, and without one it
-                // is absent and the two claims are published with nothing to
-                // compare them to, which the record names.
+                // Stream II: the two additive regions are unconditional now, so
+                // `dff` is always carried and `--norm-tails` / `--swiglu` are
+                // accepted and ignored -- the drivers still pass them.
                 dff: g.dff,
-                tails: flag(args, "--norm-tails"),
-                swiglu: g.dff > 0,
-                // Stream JJ (E11): the dequant output ties are unconditional.
-                // `--deq-ties` is accepted and ignored so drivers that pass it
-                // keep working.
+                eps: g.eps,
+                inv_d: g.inv_d,
+                // Stream JJ (E11): the dequant output ties are unconditional
+                // too.  `--deq-ties` is accepted and ignored so drivers that
+                // pass it keep working.
                 deq_ties: true,
+                // stream II: which family this chunk carries is the witness's
+                // to say, not the command line's
+                head_norm: g.head,
             }
         }),
         // Stream H: the boundary commitment, off unless asked for either way --
@@ -1279,6 +1279,69 @@ fn psweep_cmd(args: &[String]) {
     emit("psweep", json!({"source": l.source, "points": points}));
 }
 
+/// Stream II, the requantize seams' output-side control.  One committed
+/// activation of a walk group is moved to another legal value and the layer's
+/// exact accumulators move with it, so the chunk proves an honest matmul of
+/// the changed input: no tamper, no inconsistent region, just a prover that
+/// multiplied activations of its own choosing -- which is what
+/// `witness-slack.md` section 1d says the walk used to allow.
+///
+/// The element is the one whose bend disturbs the fewest *dequantized* outputs
+/// of its token, because those are what the rest of the chunk consumes: one
+/// activation's worth of accumulator is below a bf16 ulp on most channels, so
+/// the search usually finds an element the consumers cannot see at all and the
+/// seam's own output tie is then the only thing that can reject.  Returns the
+/// element and how many dequantized outputs it did move.
+fn bend_walk_qx(l: &mut layer::Layer, specs: &[dequant::Spec], mats: &[usize],
+                start: usize) -> Option<(usize, usize)> {
+    let m0 = &l.mats[mats[0]];
+    let (n_in, tokens) = (m0.n_in, m0.tokens);
+    if n_in * tokens == 0 {
+        return None;
+    }
+    let noise = |l: &layer::Layer, idx: usize, d: i64| -> usize {
+        let (t, k) = (idx / n_in, idx % n_in);
+        mats.iter().map(|mi| {
+            let m = &l.mats[*mi];
+            (0..m.n_out).filter(|c| {
+                let a0 = m.acc[t * m.n_out + c];
+                let a1 = a0 + d * m.qw[k * m.n_out + c] as i64;
+                layer::deq_ref_a(a1, m, &specs[*mi], t, *c)
+                    != layer::deq_ref_a(a0, m, &specs[*mi], t, *c)
+            }).count()
+        }).sum()
+    };
+    // any other legal activation: the walks range check `qx + 2^(bits-1)`, and
+    // both neighbours of an interior value are inside that window
+    let dir = |l: &layer::Layer, idx: usize| -> i64 {
+        if l.mats[mats[0]].qx[idx] < 126 { 1 } else { -1 }
+    };
+    let mut best = (usize::MAX, 0usize, 0i64);
+    for step in 0..n_in * tokens {
+        let idx = (start + step) % (n_in * tokens);
+        let d = dir(l, idx);
+        let s = noise(l, idx, d);
+        if s < best.0 {
+            best = (s, idx, d);
+        }
+        if s == 0 {
+            break;
+        }
+    }
+    let (moved, idx, d) = best;
+    let (t, k) = (idx / n_in, idx % n_in);
+    for mi in mats {
+        let m = &mut l.mats[*mi];
+        assert_eq!(m.n_in, n_in, "walk group mixes input widths");
+        m.qx[idx] = (m.qx[idx] as i64 + d) as i32;
+        let n_out = m.n_out;
+        for c in 0..n_out {
+            m.acc[t * n_out + c] += d * m.qw[k * n_out + c] as i64;
+        }
+    }
+    Some((idx, moved))
+}
+
 fn compose_probes_cmd(args: &[String]) {
     let (l, vname) = layer_of(args);
     let params = params_of(&l, args, &vname);
@@ -1401,11 +1464,17 @@ fn compose_probes_cmd(args: &[String]) {
     //    claims can catch it.  The other two are the add's own argument, run
     //    here rather than only in `glue-probes`, on the real layer's columns.
     if l.glue.is_some() {
-        assert!(!probe("glue: gn2's copy of the residual stream", &l,
-                       &compose::ProverTamper { glue_stream: Some((2, 4321)),
-                                                ..Default::default() },
-                       "the tie gn1.xmid == gn2.in"),
-                "a broken residual thread accepted");
+        // stream II: the head chunk's family has one reduction and no add, so
+        // there is no second region's copy of the stream to break -- that probe
+        // is the layer's, and the head chunk's equivalent is the tail's own
+        // copy, which probe 12 below runs on whichever family this chunk has.
+        if !l.glue.as_ref().is_some_and(|g| g.head) {
+            assert!(!probe("glue: gn2's copy of the residual stream", &l,
+                           &compose::ProverTamper { glue_stream: Some((2, 4321)),
+                                                    ..Default::default() },
+                           "the tie gn1.xmid == gn2.in"),
+                    "a broken residual thread accepted");
+        }
         assert!(!probe("glue: one add's result, one step up", &l,
                        &compose::ProverTamper {
                            glue: Some((0, glue::Tamper::Result(97))), ..Default::default() },
@@ -1431,29 +1500,61 @@ fn compose_probes_cmd(args: &[String]) {
         if let Some(g) = gplan.glue.as_ref() {
             // `Tamper::Stream` counts leaves across every group of the row and
             // fires only inside group 0, so the index has to be derived from the
-            // layout rather than picked: a tail row is `[nreal x, 1 r, nreal w]`
-            // and anything at or past `nreal` corrupts nothing at all.
+            // layout rather than picked: a tail row is `[nreal x, 1 ms]` since
+            // stream II moved the weight into tree 0, and anything at or past
+            // `nreal` corrupts nothing at all.
             let in0 = g.t.nreal / 2;
             // stream JJ: how far into the SwiGLU region's value list `up` starts
             let swiglu_n = g.tff.map(|t| t.tokens * t.d).unwrap_or(0);
             for (k, i) in g.tails.iter().copied().enumerate() {
-                let n = k + 1;
+                // stream II: the region's own tag, so a head chunk's single
+                // tail is named `ntf` and the layer's two keep the names the
+                // record already carries
+                let n = g.regions[i].tag.clone();
+                let _ = k;
                 // the tie is the whole point of the tail: its copy of the
                 // stream is changed and the region stays internally consistent,
                 // so only `nt.In(0) == gn.In(0)` can catch it
-                assert!(!probe(&format!("tail nt{n}: its own copy of the stream"), &l,
+                assert!(!probe(&format!("tail {n}: its own copy of the stream"), &l,
                                &compose::ProverTamper {
                                    glue: Some((i, glue::Tamper::Stream(in0))),
                                    ..Default::default() },
-                               &format!("the tie nt{n}.in == gn{n}.in")),
+                               &format!("the tie {n}.In(0) == its reduction's In(0)")),
                         "a tail reading a different stream accepted");
-                assert!(!probe(&format!("tail nt{n}: one multiply's result"), &l,
+                assert!(!probe(&format!("tail {n}: one multiply's result"), &l,
                                &compose::ProverTamper {
                                    glue: Some((i, glue::Tamper::Result(97))),
                                    ..Default::default() },
                                "the multiply's output constraint"),
                         "a corrupted tail result accepted");
+                // stream II's three controls on the norm tail.  The first two
+                // change what `r` is without breaking anything inside the
+                // region: the `NormR` lookup still finds a row and the two
+                // multiplies still hold, so the only thing that can reject is
+                // the tie to the reduction's published sum of squares.
+                assert!(!probe(&format!("tail {n}: a wrong r on one row"), &l,
+                               &compose::ProverTamper {
+                                   glue: Some((i, glue::Tamper::Ms(37))),
+                                   ..Default::default() },
+                               &format!("the tie {n}.In(1) == G the reduction's Out(0)")),
+                        "a tail with a wrong r accepted");
+                assert!(!probe(&format!("tail {n}: two rows of one token, two rs"), &l,
+                               &compose::ProverTamper {
+                                   glue: Some((i, glue::Tamper::MsRow(37))),
+                                   ..Default::default() },
+                               &format!("the tie {n}.In(1) == G the reduction's Out(0)")),
+                        "a token whose rows disagree about r accepted");
             }
+            // and the third: one norm-weight cell bent.  It is preprocessed
+            // now, so every constraint still holds and the *root* is what
+            // moves -- a different kind of rejection from every probe above,
+            // and the one that says `w` is the model's and not the prover's.
+            let wtag = g.regions[g.tails[0]].tag.clone();
+            assert!(!probe(&format!("tail {wtag}: one norm-weight cell"), &l,
+                           &compose::ProverTamper { glue_w: Some(4321),
+                                                    ..Default::default() },
+                           "the pinned preprocessed root"),
+                    "a bent norm weight accepted");
             // the dequant output ties: the wiring family's copy of `o_out` (and
             // of `d_out`) is changed, the region's own add is recomputed from it,
             // and only the tie against the dequant region's published output can
@@ -1488,6 +1589,46 @@ fn compose_probes_cmd(args: &[String]) {
                                "the UN / VAL lookup"),
                         "an illegal swiglu leaf accepted");
             }
+        }
+    }
+
+    // stream II: the three requantize seams.  Each gets the three controls the
+    //     brief names, and each has to reject by exactly one verdict field:
+    //     the input probe by `rq_in_ok`, the output probe by `rq_out_ok`, and
+    //     the scale probe by `sums_cancel` (the committed scale no longer
+    //     divides the attained maximum, so its `(pm, scale)` lookup is off the
+    //     table).  The indices are derived from the plan, never counted.
+    {
+        let rplan = compose::Plan::new(&params);
+        for (k, rp) in rplan.rqs.iter().enumerate() {
+            let n = rp.name.clone();
+            assert!(!probe(&format!("requant {n}: one input value, replaced"), &l,
+                           &compose::ProverTamper {
+                               rq: Some((k, requant::RqTamper::In(37))),
+                               ..Default::default() },
+                           &format!("the tie rq_in[{k}] == the producer's Out(0)")),
+                    "a requantize of values the producer did not write accepted");
+            // the output side: no tamper at all.  The layer itself carries one
+            // activation the requantize did not derive, and its own
+            // accumulators move with it, so every constraint and every other
+            // equality in the chunk still holds -- an honest matmul of the
+            // prover's own choice of input, which is exactly what
+            // `witness-slack.md` section 1d says the walk used to allow.
+            let mut lb = layer_of(args).0;
+            let bent = bend_walk_qx(&mut lb, &rplan.specs, &rplan.walks[rp.walk].mats, 41)
+                .unwrap_or_else(|| panic!("requant {n}: the output-side control bent nothing"));
+            eprintln!("  {n}: activation {} bent, {} dequantized outputs moved with it",
+                      bent.0, bent.1);
+            assert!(!probe(&format!("requant {n}: one activation the requantize did not derive"),
+                           &lb, &Default::default(),
+                           &format!("the tie rq_out[{k}] == walk_qx[{}]", rp.walk)),
+                    "an activation the requantize did not derive accepted");
+            assert!(!probe(&format!("requant {n}: the per-token scale, one step up"), &l,
+                           &compose::ProverTamper {
+                               rq: Some((k, requant::RqTamper::Scale(3))),
+                               ..Default::default() },
+                           "the (pm, scale) lookup"),
+                    "a scale that is not the ceil-divide of the attained max accepted");
         }
     }
 
@@ -1683,7 +1824,7 @@ fn layer_clone(l: &layer::Layer) -> layer::Layer {
             h1: g.h1.clone(), h2: g.h2.clone(),
             silu_in: g.silu_in.clone(), silu_out: g.silu_out.clone(),
             x_down: g.x_down.clone(),
-            eps: g.eps, inv_d: g.inv_d, reduce: g.reduce.clone(),
+            eps: g.eps, inv_d: g.inv_d, reduce: g.reduce.clone(), head: g.head,
         }),
         head_keys: l.head_keys.clone(),
         head_tok: l.head_tok.clone(),
@@ -1806,6 +1947,12 @@ fn glue_cmd(args: &[String]) {
         ("unary+add", Prog::tree(leaves, leaves, UnKind::Square), 11),
         ("mul", Prog::pairs(per_row, Kind::Mul, UnKind::None, UnKind::None), 13),
         ("swiglu", Prog::pairs(per_row, Kind::Mul, UnKind::Silu, UnKind::None), 17),
+        // Stream II: the norm tail as it is composed -- the reduction's answer
+        // through `UnKind::NormR` and a preprocessed weight.  Here it runs on
+        // synthetic values, which is the isolation the composed rung has not
+        // got: a failure in this case is the region, never the wiring.
+        ("normtail", Prog::norm_tail(per_row, UnKind::NormR {
+            inv_d: bf16::from_f64(1.0 / per_row as f64), eps: bf16::from_f64(1e-5) }), 19),
     ];
     for (name, prog, seed) in &cases {
         let w = GlueWitness::synthetic(rows, prog, round, *seed);

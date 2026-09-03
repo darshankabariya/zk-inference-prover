@@ -284,6 +284,14 @@ if __name__ == "__main__":
         # prefix -- `m.head = Linear(..., "lm_head", ...)` -- so its recorder keys
         # are bare.
         keep |= {"lm_head/acc", "lm_head/qx", "lm_head/s_x"}
+        # Stream II (E11): the head chunk's own norm tail.  `lm_head` consumes
+        # the int8 activation of `rmsnorm(x, final_norm)`, and no dump carried
+        # either operand, so the final RMSNorm was proved by nobody (stream KK).
+        # The tail needs the last layer's committed residual (its input), the
+        # model's final-norm weight (preprocessed, tree 0) and B1's own rsqrt
+        # lookup and head input as the two references the region reproduces.
+        keep |= {f"L{m.L - 1}.x", "final_norm.rsqrt/in", "final_norm.rsqrt/out",
+                 "lm_head/x"}
     m.rec = LastChunk(keep)
     if a.ids:
         ids = torch.from_numpy(np.load(a.ids).astype(np.int64))
@@ -631,6 +639,25 @@ if __name__ == "__main__":
                 tokh = lg.float().argmax(-1).numpy().astype(np.int64)
                 write("tok_head.i32", tokh.astype(np.int32), digests)
 
+                # ---- stream II (E11): the head chunk's norm tail ------------
+                # Five bf16 pattern columns and two bf16 scalars, which is what
+                # a chunk needs to prove `h = (x rsqrt(ms inv_d + eps)) w` for
+                # the *final* norm exactly as a layer proves it for norm1 and
+                # norm2: the residual in, the weight (tree 0, under `pre_root`),
+                # and B1's `r`, its `ms + eps` and its `h` as references.  The
+                # residual-in claim is also where the head chunk's tree-3
+                # boundary lands -- stream KK's, hooked here by writing the
+                # column the boundary would be taken over.
+                def hpat(t):
+                    return (t.detach().to("cpu").contiguous().to(BF16)
+                            .view(torch.int16).numpy().view(np.uint16))
+
+                write("xin_head.u16", hpat(m.rec.cols[f"L{m.L - 1}.x"]), digests)
+                write("w_head.u16", hpat(m.final_norm), digests)
+                write("rin_head.u16", hpat(m.rec.cols["final_norm.rsqrt/in"]), digests)
+                write("r_head.u16", hpat(m.rec.cols["final_norm.rsqrt/out"]), digests)
+                write("h_head.u16", hpat(m.rec.cols["lm_head/x"]), digests)
+
                 # Which tokens do these rows emit?  This block covers positions
                 # `base .. base + S - 1`, and row `t` predicts the token at position
                 # `base + t + 1` -- so the rows emit the window *shifted by one* from
@@ -656,6 +683,15 @@ if __name__ == "__main__":
                 )
                 head = dict(
                     vocab=int(lin.n_out), d_in=int(lin.n_in), tokens=int(hacc.shape[0]),
+                    # stream II: what the head chunk's norm tail is built from.
+                    # `eps` and `inv_d` are bf16 patterns of the model, because
+                    # a table is only as pinned as the parameters the verifier
+                    # builds it from, and `reduce` says whether the AIR's
+                    # balanced bf16 tree is B1's own accumulation.
+                    final_norm=True,
+                    eps=int(hpat(m.eps.reshape(1))[0]),
+                    inv_d=int(hpat(m.inv_d.reshape(1))[0]),
+                    reduce=spec.reduce, rms_norm_eps=float(m.eps.item()),
                     tied_embedding=bool(getattr(m, "tied", False)),
                     abs_max=int(hacc.abs().amax()), bits=bits_for(int(hacc.abs().amax())),
                     kmax_needed=max(0, bits_for(int(hacc.abs().amax())) - 9),

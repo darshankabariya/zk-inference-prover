@@ -1120,7 +1120,13 @@ mod tests {
             ao_acc_lo_bits: 16, ao_acc_hi_bits: 4,
             fold_rem_bits: 0, fold_alpha: 0, walk_p: 136,
             glue: Some(crate::compose::GlueParams {
-                d: 64, a: 4, dff: 0, tails: false, swiglu: false, deq_ties: false,
+                // stream II: the two additive regions are unconditional, so this
+                // fixture carries a real `dff` and the model's two norm
+                // constants.  A mechanical update, not a change of what the
+                // test asserts -- both plans it compares gain the same columns.
+                d: 64, a: 4, dff: 64, deq_ties: false, head_norm: false,
+                eps: crate::bf16::from_f64(1e-5),
+                inv_d: crate::bf16::from_f64(1.0 / 64.0),
             }),
             corner: false, gkr_bands: false, gkr_dequant: false, gkr_glue: false,
             gkr_walks: false, gkr_attnout: false, bounds: false, kv_bind: false,
@@ -1163,7 +1169,7 @@ mod tests {
             Channel::mix_u64(&mut ch, 0xBB_0001);
             let rels = crate::compose::Rels::draw(
                 &mut ch, &plan.widths, plan.glue.as_ref().map(|g| g.uns.as_slice()),
-                plan.emb.map(|l| l.arity()));
+                plan.emb.map(|l| l.arity()), !plan.rqs.is_empty());
             let f = Channel::draw_secure_felts(&mut ch, 6);
             let claims = crate::exprprobe::claims_for(&plan, 0x0b65_bb01);
             let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3],

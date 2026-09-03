@@ -1329,7 +1329,7 @@ pub fn cmd(args: &[String]) {
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_2B02);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
                                           plan.glue.as_ref().map(|g| g.uns.as_slice()),
-                                          plan.emb.map(|l| l.arity()));
+                                          plan.emb.map(|l| l.arity()), !plan.rqs.is_empty());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b02);
     fill_tie_claims(&plan, &mut claims, 0x7135_2b02);
@@ -2333,7 +2333,7 @@ pub fn emit_cmd(args: &[String]) {
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_2B03);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
                                           plan.glue.as_ref().map(|g| g.uns.as_slice()),
-                                          plan.emb.map(|l| l.arity()));
+                                          plan.emb.map(|l| l.arity()), !plan.rqs.is_empty());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b03);
     fill_tie_claims(&plan, &mut claims, 0x7135_2b03);
@@ -2769,7 +2769,7 @@ pub fn logup_cmd(args: &[String]) {
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_4B04);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
                                           plan.glue.as_ref().map(|g| g.uns.as_slice()),
-                                          plan.emb.map(|l| l.arity()));
+                                          plan.emb.map(|l| l.arity()), !plan.rqs.is_empty());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b04);
     fill_tie_claims(&plan, &mut claims, 0x7135_4b04);
@@ -3188,7 +3188,7 @@ pub fn gen_emit_cmd(args: &[String]) {
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_4B05);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
                                           plan.glue.as_ref().map(|g| g.uns.as_slice()),
-                                          plan.emb.map(|l| l.arity()));
+                                          plan.emb.map(|l| l.arity()), !plan.rqs.is_empty());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b05);
     fill_tie_claims(&plan, &mut claims, 0x7135_4b05);

@@ -222,6 +222,12 @@ pub struct GlueCols {
     pub eps: u16,
     pub inv_d: u16,
     pub reduce: String,
+    /// Stream II (E11): these columns are the *head* chunk's -- `xin` is the
+    /// last layer's residual, `w1` the model's final-norm weight, `r1` B1's own
+    /// `rsqrt` answer and `h1` the head's bf16 input.  `o_out`, `xmid`,
+    /// `d_out`, `xout` and the second norm's are empty, because a head chunk
+    /// has no residual add and no second norm.
+    pub head: bool,
 }
 
 // Stream P: this widening and the two below it are parallel.  Each output
@@ -295,60 +301,122 @@ impl GlueCols {
             eps: g["eps"].as_u64().ok_or("manifest: glue.eps")? as u16,
             inv_d: g["inv_d"].as_u64().ok_or("manifest: glue.inv_d")? as u16,
             reduce: g["reduce"].as_str().unwrap_or("").to_string(),
+            head: false,
+        }))
+    }
+
+    /// Stream II (E11): the head chunk's own five columns, which
+    /// `extract.py --head` writes -- the last layer's residual, the model's
+    /// final-norm weight, B1's `rsqrt` in and out and the head's bf16 input.
+    /// `None` on a dump written before this, in which case the head chunk
+    /// composes as it did and the final norm stays proved by nobody.
+    pub fn load_head(dir: &str, man: &serde_json::Value, tokens: usize)
+                     -> Result<Option<Self>, String> {
+        let h = &man["head"];
+        if !h["final_norm"].as_bool().unwrap_or(false) {
+            return Ok(None);
+        }
+        let d = h["d_in"].as_u64().ok_or("manifest: head.d_in")? as usize;
+        let cut = |v: Vec<u16>, n: usize, name: &str| -> Result<Vec<u16>, String> {
+            if v.len() < n {
+                return Err(format!("{name}: {} values is under {n}", v.len()));
+            }
+            let _s = witread::scope(Site::DecodeTrunc);
+            Ok(v[..n].to_vec())
+        };
+        Ok(Some(Self {
+            d,
+            dff: 0,
+            tokens,
+            xin: cut(read_u16(&format!("{dir}/xin_head.u16"))?, tokens * d, "xin_head")?,
+            o_out: vec![],
+            xmid: vec![],
+            d_out: vec![],
+            xout: vec![],
+            r1: cut(read_u16(&format!("{dir}/r_head.u16"))?, tokens, "r_head")?,
+            r2: vec![],
+            w1: cut(read_u16(&format!("{dir}/w_head.u16"))?, d, "w_head")?,
+            w2: vec![],
+            h1: read_u16(&format!("{dir}/h_head.u16"))
+                .ok()
+                .filter(|v| v.len() >= tokens * d)
+                .map(|v| v[..tokens * d].to_vec()),
+            h2: None,
+            silu_in: None,
+            silu_out: None,
+            x_down: None,
+            eps: h["eps"].as_u64().ok_or("manifest: head.eps")? as u16,
+            inv_d: h["inv_d"].as_u64().ok_or("manifest: head.inv_d")? as u16,
+            reduce: h["reduce"].as_str().unwrap_or("").to_string(),
+            head: true,
         }))
     }
 }
 
 impl GlueCols {
-    /// Stream JJ (E11): the wiring family's consumed columns on a *synthetic*
-    /// layer.  A synthetic layer carries none of B1's columns, so before this
-    /// nothing on the desk could build the glue -- and with it the dequant
-    /// output ties, whose controls need a witness to bite on.  What the family
-    /// consumes is exactly what the ties assert it consumes: `o_out` is the `o`
-    /// region's own dequant reference and `d_out` is `down`'s, so an honest run
-    /// ties and a bent copy does not.  `xin` and the norm tails' `r`/`w` are
-    /// other matmuls' references, which puts them in the same exponent family
-    /// and keeps the add's anchor inside its table.  The columns the family is
-    /// only *checked against* (`xmid`, `xout`, `x_q`, `x_gate`, the SwiGLU's
-    /// three) are left empty: a synthetic layer has no B1 to be right about,
-    /// and the report says `null` rather than a number nobody can read.
-    pub fn synthetic(mats: &[Mat], specs: &[crate::dequant::Spec], a: usize) -> Self {
-        let at = |n: &str| mats.iter().position(|m| m.name == n)
-            .unwrap_or_else(|| panic!("--synth-glue needs the {n} matmul"));
-        let (qi, ki, vi, oi, gi, di) =
-            (at("q"), at("k"), at("v"), at("o"), at("gate"), at("down"));
-        let (d, dff, tokens) = (mats[oi].n_out, mats[gi].n_out, mats[oi].tokens);
-        assert_eq!(mats[di].n_out, d,
-                   "--synth-glue: `down` writes {} channels, `o` writes {d}", mats[di].n_out);
-        assert!(mats[qi].n_out >= d, "--synth-glue: `q` is narrower than the stream");
-        assert_eq!(d % a, 0, "--synth-glue: --glue-a {a} does not divide d = {d}");
-        let col = |mi: usize, w: usize| -> Vec<u16> {
-            (0..tokens).flat_map(|t| (0..w).map(move |c| (mi, t, c)))
-                .map(|(mi, t, c)| deq_ref(&mats[mi], &specs[mi], t, c))
+    /// Stream II: the wiring family on a synthetic layer, so the desk can run
+    /// the whole composed statement -- ties, norm tails, SwiGLU and all -- at a
+    /// shape that proves in seconds and without a dump.  Only the columns the
+    /// regions *consume* are built: `xmid`, `xout` and the five reference
+    /// columns are what the regions compute, and a synthetic layer has no B1 to
+    /// compare against, so they are absent and the run reports them as absent.
+    ///
+    /// The exponent spread is deliberately narrow.  A residual stream of wildly
+    /// scaled values gives a sum of squares whose `rsqrt` leaves bf16's normal
+    /// range, and `h = (x r) w` then lands off the `VAL` table -- the gadget's
+    /// incompleteness edge, not a soundness one, and not what this shape is for.
+    pub fn synthetic(tokens: usize, d: usize, dff: usize, seed: u64) -> Self {
+        use rand::rngs::SmallRng;
+        use rand::{Rng, SeedableRng};
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut col = |n: usize, spread: i32| -> Vec<u16> {
+            (0..n)
+                .map(|_| {
+                    let e: i32 = rng.random_range(-spread..spread);
+                    let m: f64 = rng.random_range(-2.0f64..2.0);
+                    crate::glue::canon(bf16::from_f64(m * (e as f64).exp2()))
+                })
                 .collect()
         };
         Self {
-            d, dff, tokens,
-            xin: col(qi, d),
-            o_out: col(oi, d),
-            d_out: col(di, d),
+            d,
+            dff,
+            tokens,
+            xin: col(tokens * d, 2),
+            o_out: col(tokens * d, 2),
             xmid: vec![],
+            d_out: col(tokens * d, 2),
             xout: vec![],
-            r1: (0..tokens).map(|t| deq_ref(&mats[vi], &specs[vi], t, 0)).collect(),
-            r2: (0..tokens).map(|t| deq_ref(&mats[ki], &specs[ki], t, 0)).collect(),
-            w1: (0..d).map(|c| deq_ref(&mats[ki], &specs[ki], 0, c)).collect(),
-            w2: (0..d).map(|c| deq_ref(&mats[vi], &specs[vi], 0, c)).collect(),
-            h1: None, h2: None, silu_in: None, silu_out: None, x_down: None,
-            eps: crate::bf16::from_f64(1.0e-6),
-            inv_d: crate::bf16::from_f64(1.0 / d as f64),
-            reduce: SYNTH_REDUCE.to_string(),
+            // the derived `r` has no B1 counterpart here; the run says so
+            r1: vec![],
+            r2: vec![],
+            w1: col(d, 2),
+            w2: col(d, 2),
+            h1: None,
+            h2: None,
+            silu_in: None,
+            silu_out: None,
+            x_down: None,
+            eps: bf16::from_f64(1e-5),
+            inv_d: bf16::from_f64(1.0 / d as f64),
+            reduce: "bf16-norm".into(),
+            head: false,
         }
+    }
+
+    /// Stream II: the head chunk's family on a synthetic layer.  One residual
+    /// column and one norm weight; everything else a head chunk has not got.
+    pub fn synthetic_head(tokens: usize, d: usize, seed: u64) -> Self {
+        let mut c = Self::synthetic(tokens, d, d, seed);
+        c.dff = 0;
+        c.o_out = vec![];
+        c.d_out = vec![];
+        c.w2 = vec![];
+        c.head = true;
+        c
     }
 }
 
-/// What `GlueCols::reduce` says on the marker a synthetic layer carries until
-/// `prove_layer` fills it in.
-pub const SYNTH_REDUCE: &str = "synthetic";
 
 fn read_i32(path: &str) -> Result<Vec<i64>, String> {
     let raw = witread::read_file(path)?;
@@ -746,7 +814,15 @@ impl Layer {
                 })
                 .collect();
         }
-        let glue = GlueCols::load(dir, &man, s)?;
+        // Stream II (E11): the wiring family is the layer's when the dump
+        // carries `glue`, and the *head* chunk's final norm when it does not
+        // but carries `head.final_norm`.  No flag: which family a chunk can
+        // prove is a property of the columns the extractor wrote, and a dump
+        // written before either simply has none, as before.
+        let glue = match GlueCols::load(dir, &man, s)? {
+            Some(g) => Some(g),
+            None => GlueCols::load_head(dir, &man, s)?,
+        };
         // stream E: B1's key column, when the dump carries a head.  Read as
         // patterns; the comparison happens on the claim, not value by value.
         let head_keys = man["head"]["vocab"].as_u64().and_then(|v| {
@@ -1028,6 +1104,193 @@ impl Layer {
                source: format!("synthetic layer (seed={seed})"), glue: None,
                head_keys: None, head_tok: None, attn_out_bits: 8,
                embed_tab: None, tok_in: None, layer: None, block: None }
+    }
+}
+
+impl Layer {
+    /// Stream II: give a synthetic layer the wiring family's own columns, sized
+    /// off the matmuls it already has -- `d` is the q/k/v group's input width
+    /// and `dff` the gate matmul's output width, exactly as a real dump's are.
+    ///
+    /// And then make the *matmuls* consistent with them.  A synthetic layer's
+    /// activations were seven unrelated random columns, which is fine while
+    /// nothing ties a matmul's input to anything; with the requantize seams in,
+    /// an honest proof needs `qX` to actually be the requantize of the
+    /// producer's output under the token's own scale, or the seam's own scale
+    /// lookup goes off-table before any tie is reached.  So this runs the
+    /// wiring family's own reference forward -- `glue::reference` on the very
+    /// programs the regions prove, so the two cannot disagree -- and rebuilds
+    /// each group's input, scale and accumulator from it.
+    ///
+    /// `o`'s input is deliberately left alone: `AttnOutEval` is that matmul's
+    /// requantize and its claim is stream JJ's, so there is nothing here for a
+    /// consistent witness to satisfy yet.
+    pub fn synth_glue(&mut self, seed: u64, a: usize, round: bf16::Round) {
+        self.synth_family(seed, a, round, 0);
+    }
+
+    /// Stream II (E11): the *head* chunk's family on a synthetic layer -- an
+    /// `lm_head` matmul of `vocab` columns whose committed input is the final
+    /// norm's output, so the desk can run the head's norm tail and its
+    /// requantize seam without a dump.  The layer's own seven matmuls keep
+    /// their untied inputs, exactly as a head chunk's do.
+    pub fn synth_head(&mut self, seed: u64, a: usize, round: bf16::Round, vocab: usize) {
+        use rand::rngs::SmallRng;
+        use rand::{Rng, SeedableRng};
+        assert!(vocab > 0, "--synth-head needs a vocabulary");
+        let tokens = self.ao.s;
+        let d = self.mats.iter().find(|m| m.name == "q")
+            .expect("--synth-head needs a q matmul").n_in;
+        let variant = self.mats[0].variant;
+        let mut rng = SmallRng::seed_from_u64(seed ^ 0x1ead_1ead);
+        let qw: Vec<i32> = (0..d * vocab).map(|_| rng.random_range(-127..=127)).collect();
+        self.mats.push(Mat {
+            name: "lm_head".into(), variant, n_in: d, n_out: vocab, tokens,
+            acc: vec![0i64; tokens * vocab],
+            qx: vec![0i32; tokens * d],
+            qw,
+            jx: (0..tokens).map(|_| -(rng.random_range(14..20) as i32)).collect(),
+            jw: (0..vocab).map(|_| -(rng.random_range(14..20) as i32)).collect(),
+            sx: (0..tokens).map(|_| (rng.random_range(0..128), rng.random_range(100..120)))
+                .collect(),
+            sw: (0..vocab).map(|_| (rng.random_range(0..128), rng.random_range(100..120)))
+                .collect(),
+            jv2: vec![],
+        });
+        self.synth_family(seed, a, round, vocab);
+    }
+
+    fn synth_family(&mut self, seed: u64, a: usize, round: bf16::Round, head_vocab: usize) {
+        use crate::glue::{Kind, Prog, Tiling, UnKind, canon, reference};
+        let head = head_vocab > 0;
+        let tokens = self.ao.s;
+        let d = self.mats.iter().find(|m| m.name == "q")
+            .expect("--synth-glue needs a q matmul").n_in;
+        let dff = self.mats.iter().find(|m| m.name == "gate")
+            .expect("--synth-glue needs a gate matmul").n_out;
+        let gc = if head {
+            GlueCols::synthetic_head(tokens, d, seed ^ 0x9e37_79b9)
+        } else {
+            GlueCols::synthetic(tokens, d, dff, seed ^ 0x9e37_79b9)
+        };
+        let (eps, inv_d) = (gc.eps, gc.inv_d);
+        let un_r = UnKind::NormR { inv_d, eps };
+        let t1 = Tiling::new(tokens, d, a);
+        let tff = Tiling::new(tokens, dff, a);
+
+        // `h = (x r) w` for one norm, through the same three programs the
+        // regions carry: the squares' two levels, then the tail.
+        let tail = |stream: &[u16], wcol: &[u16], t: &Tiling| -> Vec<u16> {
+            let laid = t.lay(stream);
+            let roots = reference(&[laid.clone()], &[], t.rows1(),
+                                  &Prog::tree(t.nreal, t.b, UnKind::Square), round);
+            let ms = reference(&[t.roots_to_l2(&roots[0])], &[], t.tokens,
+                               &Prog::tree(t.a, t.a, UnKind::None), round);
+            let msblk: Vec<u16> =
+                (0..t.rows1()).map(|m| canon(ms[0][m % t.tokens])).collect();
+            let mut wblk = vec![0u16; t.rows1() * t.nreal];
+            for m in 0..t.rows1() {
+                let res = m / t.tokens;
+                for j in 0..t.nreal {
+                    wblk[m * t.nreal + j] = canon(wcol[res + j * t.a]);
+                }
+            }
+            let out = reference(&[laid, msblk], &wblk, t.rows1(),
+                                &Prog::norm_tail(t.nreal, un_r), round);
+            t.unlay(&out[0])
+        };
+
+        // one walk group's input, scale and accumulators, from a bf16 column
+        let mut wire = |me: &mut Self, names: &[&str], x: &[u16], n: usize| {
+            let v = match me.mats.iter().find(|m| names.contains(&m.name.as_str())) {
+                Some(m) if m.variant == DeqVariant::Pow2 => crate::requant::SVariant::Pow2,
+                _ => crate::requant::SVariant::Bf16,
+            };
+            let (qx, jx, sx) = crate::requant::requant_ref(x, tokens, n, v);
+            for name in names {
+                let Some(mi) = me.mats.iter().position(|m| m.name == *name) else { continue };
+                let m = &mut me.mats[mi];
+                assert_eq!(m.n_in, n, "{name}: the walk's input width is not its producer's");
+                m.qx = qx.clone();
+                m.jx = jx.iter().map(|j| *j as i32).collect();
+                m.sx = sx.clone();
+                let (ni, no) = (m.n_in, m.n_out);
+                let (qxr, qw) = (m.qx.clone(), m.qw.clone());
+                let mut acc = vec![0i64; tokens * no];
+                acc.par_chunks_mut(no).enumerate().for_each(|(t, row)| {
+                    for k in 0..ni {
+                        let xv = qxr[t * ni + k] as i64;
+                        if xv == 0 {
+                            continue;
+                        }
+                        for i in 0..no {
+                            row[i] += xv * qw[k * no + i] as i64;
+                        }
+                    }
+                });
+                me.mats[mi].acc = acc;
+            }
+        };
+
+        let mut gc = gc;
+        // the dequant reference of one matmul's output, under the spec the
+        // plan builds for it -- `deq_ref` reads only `variant` and `round`
+        let sp = |m: &Mat| crate::dequant::Spec {
+            variant: m.variant, round, kmax: 0, per_row: 1, limb_bits: (16, 14),
+            q_bits: 0, rem_bits: 0, fold_alpha: 0,
+        };
+        let out_col = |me: &Self, name: &str, w: usize| -> Vec<u16> {
+            let mi = me.mats.iter().position(|m| m.name == name)
+                .unwrap_or_else(|| panic!("--synth-glue needs the {name} matmul"));
+            let sp = sp(&me.mats[mi]);
+            (0..tokens)
+                .flat_map(|t| (0..w).map(move |c| (t, c)))
+                .map(|(t, c)| deq_ref(&me.mats[mi], &sp, t, c))
+                .collect()
+        };
+
+        let h1 = tail(&gc.xin, &gc.w1, &t1);
+        // the head chunk: the final norm's output is the head's committed
+        // input, and there is no add, no second norm and no SwiGLU after it
+        if head {
+            wire(self, &["lm_head"], &h1, d);
+            self.glue = Some(gc);
+            return;
+        }
+        wire(self, &["q", "k", "v"], &h1, d);
+        // Stream JJ's dequant output ties: `o_out` is the `o` region's own
+        // dequant reference, so an honest run ties and a bent copy does not.
+        // `o`'s input is not rewired (its requantize is `AttnOutEval`'s), so
+        // its accumulator is final by here.
+        gc.o_out = out_col(self, "o", d);
+        let resid = reference(&[t1.lay(&gc.xin), t1.lay(&gc.o_out)], &[], t1.rows1(),
+                              &Prog::norm_resid(t1.nreal, t1.b), round);
+        let xmid = t1.unlay(&resid[1]);
+        let h2 = tail(&xmid, &gc.w2, &t1);
+        wire(self, &["gate", "up"], &h2, d);
+
+        // the SwiGLU reads the gate and up regions' *dequantized* outputs, so
+        // its input is a function of the accumulators `wire` just rebuilt
+        let gi = self.mats.iter().position(|m| m.name == "gate").unwrap();
+        let ui = self.mats.iter().position(|m| m.name == "up").unwrap();
+        let (gs, us) = (sp(&self.mats[gi]), sp(&self.mats[ui]));
+        let mut gate_out = vec![0u16; tokens * dff];
+        let mut up_out = vec![0u16; tokens * dff];
+        for t in 0..tokens {
+            for c in 0..dff {
+                gate_out[t * dff + c] = deq_ref(&self.mats[gi], &gs, t, c);
+                up_out[t * dff + c] = deq_ref(&self.mats[ui], &us, t, c);
+            }
+        }
+        let sw = reference(&[tff.lay(&gate_out), tff.lay(&up_out)], &[], tff.rows1(),
+                           &Prog::pairs(tff.nreal, Kind::Mul, UnKind::Silu, UnKind::None),
+                           round);
+        let x_down = tff.unlay(&sw[0]);
+        wire(self, &["down"], &x_down, dff);
+        // and the second output tie, after `down`'s accumulator is final
+        gc.d_out = out_col(self, "down", d);
+
+        self.glue = Some(gc);
     }
 }
 
@@ -3292,6 +3555,9 @@ pub struct WalkInteraction {
     pub cols: Vec<crate::device::AnyCol<'static>>,
     pub claimed: Vec<SecureField>,
     pub use_sum: SecureField,
+    /// Stream II: the group's claim over its own committed activations, in the
+    /// canonical channel-major order, or zero when the AIR carries none.
+    pub qx_claim: SecureField,
 }
 
 pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: SecureField,
@@ -3384,6 +3650,52 @@ pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: Se
             accs.iter().map(|a| a[rows - 1]).collect()
         }
     };
+    // stream II: the activation claim, in the AIR's own mask order -- after the
+    // per-matmul accumulators and before the LogUp columns.  It is built from
+    // `m0.qx` and not from `r.base`, so it is the same column whether the fill
+    // left the region on the host or on the card, and it does not depend on
+    // `rows` having been zeroed for the device accumulator path above.
+    let mut qx_claim = SecureField::zero();
+    if let Some(q) = air.qx.as_ref() {
+        let nrows = 1usize << lay.g.log_rows;
+        let inner_x: Vec<SecureField> = (0..nrows)
+            .into_par_iter()
+            .map(|j| {
+                let mut f = SecureField::zero();
+                if let Some((k, chunk)) = lay.g.row(j) {
+                    for p in 0..lay.pq {
+                        let t = chunk * lay.pq + p;
+                        if t < m0.tokens {
+                            let x = m0.qx[t * m0.n_in + k];
+                            if x != 0 {
+                                f += q.w[p] * SecureField::from(m31_of(x as i64));
+                            }
+                        }
+                    }
+                }
+                f
+            })
+            .collect();
+        let mut xs = vec![SecureField::zero(); nrows];
+        for j in 0..nrows {
+            let (nofirst, notzero) = match lay.g.row(j) {
+                Some((_, c)) => (c + 1 < lay.g.chunks, j > 0),
+                None => (false, j > 0),
+            };
+            let carry = if j == 0 {
+                SecureField::zero()
+            } else if nofirst {
+                xs[j - 1] * q.m_in
+            } else if notzero {
+                xs[j - 1] * q.m_bd
+            } else {
+                SecureField::zero()
+            };
+            xs[j] = carry + inner_x[j];
+        }
+        qx_claim = xs[nrows - 1];
+        cols.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &xs));
+    }
     let mut use_sum = SecureField::zero();
     // B11 stream V, lever 4: under `--gkr-walks` this group's range checks were
     // handed to the collector before the GKR proof ran, in `compose`'s own pass,
@@ -3405,5 +3717,5 @@ pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: Se
         cols.extend_any(lcols);
         use_sum = s;
     }
-    WalkInteraction { cols: cols.into_inner(), claimed, use_sum }
+    WalkInteraction { cols: cols.into_inner(), claimed, use_sum, qx_claim }
 }
