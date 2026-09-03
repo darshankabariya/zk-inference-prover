@@ -1,0 +1,48 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build-test:
+    # The vendored fork links its CUDA library on every Linux build, so even the
+    # SIMD backend needs the toolkit at build time.  No GPU is needed to build
+    # either backend or to run the SIMD tests.
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:12.9.1-devel-ubuntu24.04
+    env:
+      CUDAARCHS: "90"
+      CARGO_TERM_COLOR: always
+      RUSTUP_HOME: /opt/rustup
+      CARGO_HOME: /opt/cargo
+    steps:
+      - uses: actions/checkout@v4
+      - name: system packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential cmake curl ca-certificates git python3 pkg-config
+      - name: rust toolchain (pinned by rust-toolchain.toml)
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "/opt/cargo/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /opt/cargo/registry
+            /opt/cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'nitroo/Cargo.lock', 'rust-toolchain.toml') }}
+      - name: build, SIMD backend
+        run: cargo build --release --locked
+      - name: tests, SIMD backend (pinned synthetic digests)
+        run: cargo test --release --locked
+      - name: build, CUDA backend
+        run: cargo build --release --locked -p b65-pipeline --features cuda
+
+  words:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: banned words in durable prose
+        run: python3 tools/words.py README.md GLOSSARY.md docs/
