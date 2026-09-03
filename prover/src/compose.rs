@@ -2844,6 +2844,15 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         let d = aor.dev.as_ref().expect("B7_M4_WFILL=1 but the attnout is host-built");
         pre_counters[3].push(&d.m_qnz);
         pre_counters[ri(p.ao_rem_bits)].push(&d.m_rem);
+        // stream JJ (E11): the accumulator window's two limb tables.  Every
+        // shared table a device fill bumps must hand its counter over here, or
+        // `tables_dev` has nothing to sum for it and stops -- which is what the
+        // `ao_acc_hi_bits` table did on the H200's reference chunk ("shared
+        // table 4 has no device counter to sum"), the defaults cuda regime
+        // being the only place that asks.  `EPOW` is deliberately not here: its
+        // column is a host loop on both arms, so it has no device counter.
+        pre_counters[ri(p.ao_acc_lo_bits)].push(&d.m_acc_lo);
+        pre_counters[ri(p.ao_acc_hi_bits)].push(&d.m_acc_hi);
         for (b, a) in layer.bands.iter().enumerate() {
             // A corner band is host-built (the static fill kernels do not know
             // its layout), so its bumps sit in the host multiplicity arrays and

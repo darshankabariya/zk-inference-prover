@@ -2692,8 +2692,19 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                           n: ao.nh * ao.s * ao.hd, rem_bits, q_bits,
                           acc_lo_bits, acc_hi_bits };
     }
-    let m4d_snap = |t: &Tables| -> (Vec<u32>, Vec<u32>, usize) {
-        (t.m_qnz.clone(), t.m_r[t.ridx(rem_bits)].clone(), t.off_table)
+    // `B7_M4_WFILL=2` builds this region twice -- host here, device below --
+    // and the device call bumps the same counters a second time, so every
+    // counter this fill touches has to be snapshotted before, compared as a
+    // delta, and restored after.  Stream JJ (E11) added three: the two
+    // accumulator limb tables and `m_epow` (whose bumps are a host loop on
+    // *both* sides, `devwfill::ao_region_dev`).  A counter left out of this
+    // tuple is counted twice and the honest proof is then rejected with
+    // `sums_cancel: false` -- which is what it did on the H200's reference
+    // chunk, and what no desk shape shows, because the desk never runs mode 2.
+    let m4d_snap = |t: &Tables| -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, usize) {
+        (t.m_qnz.clone(), t.m_r[t.ridx(rem_bits)].clone(),
+         t.m_r[t.ridx(acc_lo_bits)].clone(), t.m_r[t.ridx(acc_hi_bits)].clone(),
+         t.m_epow.clone(), t.off_table)
     };
     let m4d_before = (m4d == 2).then(|| m4d_snap(tables));
     let mut want_host = vec![0u32; if m4d == 2 { rows * pr } else { 0 }];
@@ -2864,11 +2875,20 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
         crate::devwfill::check_cols("attnout base", &base, &dev.base);
         crate::devwfill::check_cols("attnout pre", &pre, &dev.pre);
         let ri = tables.ridx(rem_bits);
+        let (rlo, rhi) = (tables.ridx(acc_lo_bits), tables.ridx(acc_hi_bits));
         crate::devwfill::check_delta("attnout m_qnz", &before.0, &after.0,
                                      &sub_slice(&tables.m_qnz, &after.0));
         crate::devwfill::check_delta("attnout m_rem", &before.1, &after.1,
                                      &sub_slice(&tables.m_r[ri], &after.1));
-        assert_eq!(tables.off_table - after.2, after.2 - before.2,
+        // stream JJ (E11): the accumulator window's two limbs, and the `EPOW`
+        // window, whose column is a host loop on both sides
+        crate::devwfill::check_delta("attnout m_acc_lo", &before.2, &after.2,
+                                     &sub_slice(&tables.m_r[rlo], &after.2));
+        crate::devwfill::check_delta("attnout m_acc_hi", &before.3, &after.3,
+                                     &sub_slice(&tables.m_r[rhi], &after.3));
+        crate::devwfill::check_delta("attnout m_epow", &before.4, &after.4,
+                                     &sub_slice(&tables.m_epow, &after.4));
+        assert_eq!(tables.off_table - after.5, after.5 - before.5,
                    "attnout: off-table bumps differ");
         assert_eq!(dev.ref_bad, ref_bad, "attnout: ref_bad differs");
         assert_eq!(dev.q_out, q_out, "attnout: the committed int8 outputs differ");
@@ -2881,11 +2901,16 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
             panic!("attnout: the f64 reference differs at row {} slot {}: host {}, device {}",
                    k / pr, k % pr, want_host[k], w[k]);
         }
+        // restore in table order, so a width shared between two of these (say
+        // `rem_bits == acc_lo_bits`) ends on the one snapshot that covers it
         tables.m_qnz.copy_from_slice(&after.0);
         tables.m_r[ri].copy_from_slice(&after.1);
-        tables.off_table = after.2;
+        tables.m_r[rlo].copy_from_slice(&after.2);
+        tables.m_r[rhi].copy_from_slice(&after.3);
+        tables.m_epow.copy_from_slice(&after.4);
+        tables.off_table = after.5;
         eprintln!("wfill-dev: attnout -- {} base and {} pre columns, {} cells, \
-both multiplicity tables and the f64 reference all match",
+all five multiplicity tables and the f64 reference all match",
                   base.len(), pre.len(), (base.len() + pre.len()) << lay.log_rows);
     }
     AoRegion { lay, pre, base, dev: None, ref_bad, q_out, n: ao.nh * ao.s * ao.hd,
