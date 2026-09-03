@@ -1120,6 +1120,7 @@ fn compose_cmd(args: &[String]) {
                         ("--corrupt-ao-jo", &mut tamper.ao_jo),
                         ("--corrupt-ao-num", &mut tamper.ao_num),
                         ("--corrupt-ao-acc", &mut tamper.ao_acc),
+                        ("--corrupt-ao-jo-tok", &mut tamper.ao_jo_tok),
                         ("--corrupt-walk-act", &mut tamper.walk_over)] {
         if let Some(i) = arg_str(args, key) {
             *slot = Some(i.parse().unwrap_or_else(|_| panic!("{key} wants an index")));
