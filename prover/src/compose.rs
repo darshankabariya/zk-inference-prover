@@ -383,7 +383,7 @@ pub struct Claims {
     /// region of its own -- only this claim, which is JJ's to publish.  Empty
     /// until it does, and the equality below is skipped while it is empty.
     #[serde(default)]
-    pub ao_qx: Vec<[u32; 4]>,
+    pub ao_q: Vec<[u32; 4]>,
     /// B11 stream Q: the bands' batch GKR proof, as bytes, on the GKR arm only.
     /// It rides here because the statement already travels everywhere the proof
     /// does and `Claims::flat` -- what the transcript mixes -- reads only the
@@ -439,7 +439,7 @@ impl Claims {
         v.extend(self.rq_in.iter().map(|x| unqm(*x)));
         v.extend(self.rq_out.iter().map(|x| unqm(*x)));
         v.extend(self.walk_qx.iter().map(|x| unqm(*x)));
-        v.extend(self.ao_qx.iter().map(|x| unqm(*x)));
+        v.extend(self.ao_q.iter().map(|x| unqm(*x)));
         v
     }
 }
@@ -4542,10 +4542,10 @@ pub struct Verdict {
     /// output", and "the walk multiplied the integers this seam derived"
     pub rq_in_ok: Vec<bool>,
     pub rq_out_ok: Vec<bool>,
-    /// stream II: the `o` seam, once stream JJ publishes `ao_qx`.  True while
+    /// stream II: the `o` seam, once stream JJ publishes `ao_q`.  True while
     /// that claim is absent -- an equality nobody can state yet is not a
     /// failure, and the record says so rather than the verdict pretending.
-    pub ao_qx_ok: bool,
+    pub ao_q_ok: bool,
     /// the layer's committed residual-stream input and output claims
     pub stream_in: Option<[u32; 4]>,
     pub stream_out: Option<[u32; 4]>,
@@ -4586,14 +4586,14 @@ impl Verdict {
             && self.walk_ok.iter().all(|x| *x) && self.glue_ok.iter().all(|x| *x)
             && self.deq_out_ok.iter().all(|x| *x) && self.head_tie_ok && self.embed_ok
             && self.rq_in_ok.iter().all(|x| *x) && self.rq_out_ok.iter().all(|x| *x)
-            && self.ao_qx_ok
+            && self.ao_q_ok
     }
     fn rejected(msg: &str) -> Self {
         Self { stark_ok: false, root_ok: false, sums_cancel: false, qk_ok: vec![],
                den_ok: vec![], av_ok: false, den_link_ok: false, walk_ok: vec![],
                sizes_ok: false, glue_ok: vec![false], deq_out_ok: vec![false],
                head_tie_ok: false, embed_ok: false,
-               rq_in_ok: vec![false], rq_out_ok: vec![false], ao_qx_ok: false,
+               rq_in_ok: vec![false], rq_out_ok: vec![false], ao_q_ok: false,
                stream_in: None, stream_out: None,
                bound_roots: vec![], bound_sides: vec![],
                error: Some(msg.to_string()), verify_secs: 0.0 }
@@ -4881,13 +4881,27 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         .collect();
     // stream II, the `o` seam: `AttnOutEval` is the attention output's own
     // requantize, so what closes it is one claim on that region -- stream JJ's
-    // to publish -- against the `o` walk's activation claim.  Skipped while
-    // `ao_qx` is empty, which is what lets this branch land before JJ's does;
-    // the moment the claim appears the equality is live and needs no change
-    // here.
-    let ao_qx_ok = match plan.walks.iter().position(|w| w.name == "o") {
-        Some(wi) if !claims.ao_qx.is_empty() => {
-            claims.ao_qx.first().copied() == claims.walk_qx.get(wi).copied()
+    // `claims.ao_q`, a Horner fold over the signed `qm (1 - 2 sg)` under
+    // `claimed_out`'s weights -- against the `o` walk's activation claim.  The
+    // entry is skipped while `ao_q` is empty, which is what lets this branch
+    // land before JJ's does.
+    //
+    // The two folds run over the same values in the same order, but *not yet*
+    // under the same weights, and the merge has to reconcile that: the attnout
+    // region weights element `(head h, token t, channel-in-head c)` by
+    // `rv^(hd (H-1-h) + c) * s^t` (its `lay.at` counts `b` and `t` down, so `z`
+    // at a token's last row is `sum_c acc_c rv^c`, and `mu_out` contributes one
+    // `rv^hd` per later head), while `walk_qx` weights element `(channel k,
+    // token t)` by `w_glue^(N-1-k tokens-t)`, `N = tokens n_in`.  Both
+    // factorize as (channel power)(token power), so one side converting is a
+    // change of the three constants the walk's `WalkQx` already carries --
+    // `w[p]`, `m_in`, `m_bd` -- with `rv^-1` for the channel step and `s` for
+    // the token step, and no new column either side.  Until that is built and
+    // measured against a chunk that carries both claims, this equality is
+    // written, inert, and named in the record.
+    let ao_q_ok = match plan.walks.iter().position(|w| w.name == "o") {
+        Some(wi) if !claims.ao_q.is_empty() => {
+            claims.ao_q.first().copied() == claims.walk_qx.get(wi).copied()
         }
         _ => true,
     };
@@ -4904,7 +4918,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     };
 
     Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
-              head_tie_ok, embed_ok, rq_in_ok, rq_out_ok, ao_qx_ok,
+              head_tie_ok, embed_ok, rq_in_ok, rq_out_ok, ao_q_ok,
               sizes_ok, glue_ok, stream_in, stream_out, bound_roots, bound_sides, error,
               verify_secs: t0.elapsed().as_secs_f64() }
 }
