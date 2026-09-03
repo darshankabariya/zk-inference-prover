@@ -306,6 +306,14 @@ pub struct Claims {
     pub bands: Vec<[[u32; 4]; 6]>,
     pub ao_out: [u32; 4],
     pub ao_den: [u32; 4],
+    /// Stream JJ (E11): the attention-output region's claim over its *own
+    /// output* -- the signed requantized value `qm (1 - 2 sg)`, folded under
+    /// exactly `ao_out`'s weights.  `AttnOutEval` is the requantization of the
+    /// attention output, so this is the value the `o` walk's committed
+    /// activations equal row for row; the equality is stream II's to add.  A
+    /// `Vec` so a statement written before this stream still parses.
+    #[serde(default)]
+    pub ao_q: Vec<[u32; 4]>,
     /// per matmul: the dequant region's Freivalds side
     pub mat_h: Vec<[u32; 4]>,
     /// per walk group, per matmul: the walk's side
@@ -391,6 +399,8 @@ impl Claims {
         // the transcript is unchanged without it
         v.extend(self.embed_out.iter().map(|x| unqm(*x)));
         v.extend(self.embed_tok.iter().map(|x| unqm(*x)));
+        // stream JJ, appended last for the same reason
+        v.extend(self.ao_q.iter().map(|x| unqm(*x)));
         v
     }
 }
@@ -1558,6 +1568,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             mu_den: r_c * s_span.inverse(),
             claimed_out: unqm(claims.ao_out),
             claimed_den: unqm(claims.ao_den),
+            claimed_q: claims.ao_q.first().copied().map(unqm).unwrap_or(SecureField::zero()),
             qnz: rels.qnz.clone(),
             rel_rem: rels.range(p.ao_rem_bits).clone(),
             gkr: p.gkr_attnout,
@@ -3420,6 +3431,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     inter_mark("attnout", &inter_all, &mut inter_seen, &mut inter_split);
     claims.ao_out = qm(aoi.claimed_out);
     claims.ao_den = qm(aoi.claimed_den);
+    claims.ao_q = vec![qm(aoi.claimed_q)];
     if !p.gkr_attnout {
         claims.use_sums.push(qm(aoi.use_sum));
     }

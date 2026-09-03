@@ -170,6 +170,13 @@ pub struct AttnOutEval {
     pub mu_den: SecureField,
     pub claimed_out: SecureField,
     pub claimed_den: SecureField,
+    /// Stream JJ (E11), for stream II: the region's *own output* -- the signed
+    /// requantized attention output `q = qm (1 - 2 sg)`, folded under exactly
+    /// the weights `claimed_out` uses.  `AttnOutEval` is the requantization of
+    /// the attention output, so this is what the `o` walk's `qX` has to equal
+    /// and there is no requant region between them; the `eqs` entry that says
+    /// so is II's.
+    pub claimed_q: SecureField,
     pub qnz: PairRel,
     pub rel_rem: RangeRel,
     /// B11 stream V, lever 4: as `WalkEval::gkr`.
@@ -199,6 +206,9 @@ impl FrameworkEval for AttnOutEval {
             AO_SEL.iter().map(|n| eval.get_preprocessed_column(ao_sel(*n))).collect();
         let (nofirst, last, m1, m2, m3, end) = (sel[0].clone(), sel[1].clone(), sel[2].clone(),
                                                 sel[3].clone(), sel[4].clone(), sel[5].clone());
+        // stream JJ's fourth claim reads the same six selectors
+        let (nofirst2, last2) = (nofirst.clone(), last.clone());
+        let (m1q, m2q, m3q) = (m1.clone(), m2.clone(), m3.clone());
         // `den` is the token's denominator Z, one committed cell per row, and
         // before this it entered exactly two places: `denp = den pj` per slot,
         // and the `dz` fold -- which takes it only on the token's *last* row
@@ -212,6 +222,7 @@ impl FrameworkEval for AttnOutEval {
         let [den_prev, den] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
         eval.add_constraint((den.clone() - den_prev) * nofirst.clone());
         let mut accs: Vec<E::F> = Vec::with_capacity(self.per_row);
+        let mut qouts: Vec<E::F> = Vec::with_capacity(self.per_row);
         for slot in 0..self.per_row {
             let num = eval.get_preprocessed_column(ao_chan("n", slot));
             let pj = eval.get_preprocessed_column(ao_chan("p", slot));
@@ -228,10 +239,12 @@ impl FrameworkEval for AttnOutEval {
             // denp = den * 2^max(-e, 0), committed so the error identity and the
             // tie-excluding bound stay degree <= 3 / degree 1
             eval.add_constraint(denp.clone() - den.clone() * pj);
-            let mag = acc.clone() - (acc * sg) * two;
+            let mag = acc.clone() - (acc * sg.clone()) * two;
             eval.add_constraint(
                 d.clone() - (mag * num) * two + (qm.clone() * two - E::F::one()) * denp.clone(),
             );
+            // stream JJ: the region's output value, degree 2, never a column
+            qouts.push(qm.clone() - (qm.clone() * sg.clone()) * two);
             let dp = denp.clone() * two - E::F::one() - d.clone();
             if !self.gkr {
                 eval.add_to_relation(RelationEntry::new(&self.qnz, E::EF::one(),
@@ -274,8 +287,24 @@ impl FrameworkEval for AttnOutEval {
         dmult += m2 * self.s;
         dmult += m3 * self.mu_den;
         eval.add_constraint(dz.clone() - dz_prev * dmult - E::EF::from(den * last));
+        let mut multq: E::EF = E::EF::from(m1q);
+        multq += m2q * self.s;
+        multq += m3q * self.mu_out;
         eval.add_constraint((h - self.claimed_out) * end.clone());
-        eval.add_constraint((dz - self.claimed_den) * end);
+        eval.add_constraint((dz - self.claimed_den) * end.clone());
+        // stream JJ: the fourth claim, `z`/`h`'s shape over the region's own
+        // output instead of over `acc`.  Same slot weights, same row step, same
+        // token and head boundaries, so a consumer that folds the attention
+        // output under `claimed_out`'s convention compares against this one.
+        let [zq_prev, zq] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+        let [hq_prev, hq] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+        let mut qf = E::EF::zero();
+        for (i, q) in qouts.iter().enumerate() {
+            qf += q.clone() * self.rv_pow[i];
+        }
+        eval.add_constraint(zq.clone() - (zq_prev * self.rv_step) * nofirst2 - qf);
+        eval.add_constraint(hq.clone() - hq_prev * multq - zq * last2);
+        eval.add_constraint((hq - self.claimed_q) * end);
         if !self.gkr {
             eval.finalize_logup_in_pairs();
         }

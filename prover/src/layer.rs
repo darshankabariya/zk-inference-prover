@@ -2693,6 +2693,9 @@ pub struct AoInteraction {
     pub cols: Vec<crate::device::AnyCol<'static>>,
     pub claimed_out: SecureField,
     pub claimed_den: SecureField,
+    /// Stream JJ (E11): the region's own requantized output, folded under
+    /// `claimed_out`'s weights -- what the `o` walk's `qX` equals.
+    pub claimed_q: SecureField,
     pub use_sum: SecureField,
 }
 
@@ -2716,6 +2719,10 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
     // three-value mode every fill in this series uses.
     let m4g = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
     let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
+    // stream JJ's fourth accumulator is the host's whatever the device fill
+    // did with the other three (stream M's lesson in `mat_interaction`: keep
+    // the real height before `rows` is shadowed to zero)
+    let n_rows = rows;
     let rows = if m4g_host { rows } else { 0 };
     let inner: Vec<SecureField> = (0..rows)
         .into_par_iter()
@@ -2780,6 +2787,49 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
         }
     };
 
+    // ---- stream JJ (E11): the region's own output, published --------------
+    //
+    // `z`/`h`'s shape exactly, over `q = qm (1 - 2 sg)` instead of over `acc`.
+    // `AttnOutEval` *is* the requantization of the attention output, so this
+    // claim is what the `o` walk's committed activations have to equal, row for
+    // row -- `q_out` below is the same value this folds.  The `eqs` entry that
+    // compares them is stream II's, on the consumer's side.
+    let (mut zq, mut hq) = (vec![SecureField::zero(); n_rows],
+                            vec![SecureField::zero(); n_rows]);
+    for j in 0..n_rows {
+        let nofirst = matches!(lay.at(ao.nh, ao.s, j), Some((_, _, b)) if b + 1 < lay.chunks);
+        let last = matches!(lay.at(ao.nh, ao.s, j), Some((_, _, 0)));
+        let hfirst = matches!(lay.at(ao.nh, ao.s, j), Some((_, t, 0)) if t == ao.s - 1);
+        let mut qf = SecureField::zero();
+        if let Some((h, t, b)) = lay.at(ao.nh, ao.s, j) {
+            for s in 0..pr {
+                let q = r.q_out[(h * ao.s + t) * ao.hd + b * pr + s];
+                if q != 0 {
+                    qf += rv_pow[s] * SecureField::from(m31_of(q));
+                }
+            }
+        }
+        zq[j] = if nofirst { zq[j - 1] * rv_step } else { SecureField::zero() } + qf;
+        let mq = if j == 0 {
+            SecureField::zero()
+        } else if last && hfirst {
+            mu_out
+        } else if last {
+            s_ch
+        } else {
+            SecureField::one()
+        };
+        hq[j] = if j > 0 { hq[j - 1] * mq } else { SecureField::zero() };
+        if last {
+            hq[j] += zq[j];
+        }
+    }
+    let claimed_q = hq[n_rows - 1];
+    cols.extend_any(crate::attn_trace::secure_cols_pub(lay.log_rows, &zq)
+                        .into_iter().map(crate::device::AnyCol::OwnedHost).collect::<Vec<_>>());
+    cols.extend_any(crate::attn_trace::secure_cols_pub(lay.log_rows, &hq)
+                        .into_iter().map(crate::device::AnyCol::OwnedHost).collect::<Vec<_>>());
+
     // lookups per slot, in AIR order: (qm, nz2), d, dp, denp
     let one = PackedQM31::broadcast(SecureField::one());
     let n_looks = 4 * pr;
@@ -2808,6 +2858,7 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
             cols: cols.into_inner(),
             claimed_out,
             claimed_den,
+            claimed_q,
             use_sum: SecureField::zero(),
         };
     }
@@ -2820,7 +2871,7 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
             crate::plogup::build(lay.log_rows, n_pairs, fpair)
         });
     cols.extend_any(lcols);
-    AoInteraction { cols: cols.into_inner(), claimed_out, claimed_den, use_sum }
+    AoInteraction { cols: cols.into_inner(), claimed_out, claimed_den, claimed_q, use_sum }
 }
 
 // ------------------------------------------------------------------ walk regions --

@@ -669,6 +669,8 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         bands: (0..nb).map(|_| std::array::from_fn(|_| felt())).collect(),
         ao_out: felt(),
         ao_den: felt(),
+        // stream JJ: a tie claim like the others -- a zero here would fold away
+        ao_q: vec![felt()],
         mat_h: (0..nm).map(|_| felt()).collect(),
         walk_acc: plan
             .walks

@@ -2310,6 +2310,8 @@ fn fill_tie_claims(plan: &crate::compose::Plan, claims: &mut crate::compose::Cla
     // the emitted kernel would not match the proved one.
     claims.embed_out = vec![felt()];
     claims.embed_tok = vec![felt()];
+    // stream JJ: the attnout region's output claim, the same shape of tie
+    claims.ao_q = vec![felt()];
 }
 
 /// `cudaemit`: lower every component, group by fingerprint into kernels, and
