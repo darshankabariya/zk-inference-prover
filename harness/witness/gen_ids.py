@@ -5,7 +5,7 @@ given a committed KV prefix of C - S keys, and that decoding is **greedy**.  So
 the rectangle the 32 layers are extracted from has to be a real decode, not the
 corpus's next 512 tokens: this generates the continuation once, greedily, under
 the spec that is proved, and writes `prompt || continuation` for
-`b65/extract.py --ids`.
+`harness.witness.extract --ids`.
 
 B8 step 1 established that decode is bit-identical to prefill in this model, so
 the extractor still prefills the concatenation and the last chunk of `--new`
@@ -13,8 +13,8 @@ tokens is the decoded rectangle.  The prompt is the eval corpus's first
 `--prefix` tokens -- a real 16,384-token document, which is what a C=16K
 benchmark condition means -- and `--prefix` is the manifest's `c`.
 
-    uv run python b10/gpu/gen_ids.py --prefix 16384 --new 512 --spec b10-design \
-        --out out/ids_c16384.npy
+    uv run python -m harness.witness.gen_ids --prefix 16384 --new 512 --spec y-delay-vw12 \
+        --out ids_c16384.npy
 """
 import argparse
 import json
@@ -25,12 +25,8 @@ import time
 import numpy as np
 import torch
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, os.pardir, os.pardir, "b1"))
-sys.path.insert(0, os.path.join(HERE, os.pardir, os.pardir, "b65"))
-
-from common import MODEL, SPECS, setup, tokens  # noqa: E402
-from model import Cache, Model  # noqa: E402
+from .common import MODEL, SPECS, setup, tokens
+from .model import Cache, Model
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()

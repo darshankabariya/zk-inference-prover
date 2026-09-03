@@ -10,9 +10,9 @@ that produced every run.
 
 | path | what |
 |---|---|
-| `prover/` | the prover crate, binary `b65`; `prover/README.md` lists the recorded proof digests |
+| `prover/` | the prover crate, binary `b65`; `prover/README.md` lists the recorded proof digests; `prover/kernels/` installs generated device kernels into the CUDA backend |
 | `nitroo/` | the vendored Circle STARK library the prover builds on; its `README.md` names the upstream commit and each local change |
-| `harness/` | one uv package: `witness/` (deterministic quantized forward pass and witness extraction), `eval/` (perplexity, task suite, the unproved baseline), `costmodel/` |
+| `harness/` | one uv package: `witness/` (deterministic quantized forward pass, greedy continuation, witness extraction, shape table, plan file), `eval/` (perplexity, task suite, the unproved baseline), `costmodel/` |
 | `docs/statement.md` | what the proof binds, generated from the prover's binding report (written once that report exists) |
 | `docs/decisions/` | prover design decisions, one dated file each, never edited after merge |
 | `GLOSSARY.md` | the identifiers kept despite not being standard |
@@ -23,7 +23,8 @@ that produced every run.
 The prover has two backends selected by one cargo feature. Without the feature
 the same code runs on the SIMD backend, which is the reference every digest is
 compared against; with `--features cuda` commitment and proving run on the
-device. The vendored library links its CUDA library on every Linux build, so
+device, at device speed once `prover/kernels/` has installed the generated
+kernels for the shapes being proved. The vendored library links its CUDA library on every Linux build, so
 the CUDA 12.9 toolkit is needed at build time even for the SIMD backend. No GPU
 is needed to build either one.
 

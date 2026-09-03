@@ -6,6 +6,11 @@ directory, after `uv sync`:
 
     uv run python -m harness.witness.selftest
 
+The witness package also holds the statement's token generator
+(`gen_ids`, a greedy continuation under the proved variant, and `shift_ids`),
+the shape table (`shapes`) and the plan writer (`plan`) the results drivers
+call at a pinned commit.
+
 Scripts that read measured numbers take `--constants PATH` (a zk-results
 `constants.json`) and `--artifacts DIR` or `--inputs DIR` for run outputs.
 Nothing measured lives in this repository. `witness/text.txt` is the fixed

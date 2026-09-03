@@ -11,7 +11,7 @@ Two asserted, idempotent edits:
 
 `--undo` removes both.
 
-    python3 m4b_kernels.py [--fork DIR] [--gen DIR] [--src DIR] [--undo]
+    python3 m4b_kernels.py --fork DIR --gen DIR [--src DIR] [--undo]
 """
 import json
 import shutil
@@ -21,13 +21,17 @@ from pathlib import Path
 args = sys.argv[1:]
 
 
-def opt(name, default):
-    return args[args.index(name) + 1] if name in args else default
+def opt(name, default=None):
+    if name in args and args.index(name) + 1 < len(args):
+        return args[args.index(name) + 1]
+    if default is None:
+        sys.exit(f"{name} DIR is required; this script knows no host paths")
+    return default
 
 
-FORK = Path(opt("--fork", "/root/b7/nitroo"))
-GEN = Path(opt("--gen", "/root/b7/gen"))
-HAND = Path(opt("--src", "/root/b7/scout/m4b"))
+FORK = Path(opt("--fork"))
+GEN = Path(opt("--gen"))
+HAND = Path(opt("--src", str(Path(__file__).resolve().parent)))
 UNDO = "--undo" in args
 CUDA = FORK / "crates" / "stwo" / "src" / "stwo_cuda" / "cuda"
 BEGIN = "        # B7a m4: generated b65 generation kernels\n"

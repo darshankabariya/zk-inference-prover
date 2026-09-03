@@ -30,7 +30,7 @@ So the continuation is decoded to `--new 513` and this writes the first
 `[P, P + 512)` on a prefix of exactly `P`, and the tokens they emit are
 `[P + 1, P + 513)` -- all 512 of them recorded.
 
-    uv run python b10/gpu/shift_ids.py --ids w8b/ids_c4096_final513.npy \
+    uv run python -m harness.witness.shift_ids --ids ids_c4096_513.npy \
         --prefix 4096 --out w8b/ids_c4096_final_rect.npy
 """
 import argparse

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stream O: write the chunk loop's plan.
+"""Write the segment loop's plan file for `b65 compose-chunks --plan`.
 
 One line per chunk, in the order the sequence proves them: the 32 layers and
 then the head. A line carries only what that chunk decides for itself -- its
@@ -16,7 +16,7 @@ theirs chunk by chunk.
 blocks of 32 layer chunks, plus one `lm_head` chunk, and the writer learns that with
 one extra loop and no new argument *kind*:
 
-    o_plan.py --dir D --blocks 9 --head D/witness_B8_head --out plan.txt
+    python -m harness.witness.plan --dir D --blocks 9 --head D/witness_B8_head --out plan.txt
 
 reads `D/shapes_B<b>.json` and writes `--witness D/witness_B<b>_L<k>
 --ser-tag B<b>L<k>`.  What a prompt block's line carries that a decode line
@@ -51,7 +51,7 @@ layer line, `--l0-flags` on the layer-0 lines after it, `--head-flags` on the
 head line, and `--l0-dir` points the layer-0 lines at another dump set (a
 layer-0 re-extract with `--embed`).  The E11 plan at C=4096 is
 
-    o_plan.py --dir D --blocks 9 --with-block-0 --head H \
+    python -m harness.witness.plan --dir D --blocks 9 --with-block-0 --head H \
         --layer-flags='--round even --corner --kv-bind' --head-flags='--ao-rem-bits 23'
 
 (the `=` form, because the value starts with a dash), and a line's flags are

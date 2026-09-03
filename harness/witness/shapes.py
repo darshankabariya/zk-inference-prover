@@ -1,19 +1,19 @@
-"""B10 step 1: the model-wide shape table, read off the 32 manifests.
+"""The model-wide shape table, read off the layer witnesses' manifests.
 
 A chunk loop over a real model may mix table sizes but not two statements
-(`b10/gpu/m5/chunks.rs`), so `kmax` and `ao_rem_bits` are pinned at the
+(`prover/src/chunks.rs`), so `kmax` and `ao_rem_bits` are pinned at the
 model-wide worst case while `master_table_bits` varies per layer.  This reads
 what each layer needs -- before a loop is launched, not from the assert it
 trips -- and prints the table B10's record carries.
 
-`ao_rem_bits` is `Layer::rem_bits()` in `b65/bench/src/layer.rs`:
+`ao_rem_bits` is `Layer::rem_bits()` in `prover/src/layer.rs`:
 
     bits( 2 * max_{h,t,j} ( Z[h,t] << max(-(jv[h,j] - jo[t]), 0) ) )
 
 which for a fixed (h, t) is maximised at the smallest `jv[h, .]`, so the whole
 maximum is over (h, t) alone.
 
-    uv run python b10/gpu/shapes32.py /root/b8/w8b/c16384/witness_L 32
+    uv run python -m harness.witness.shapes <witness base> 32 [<out.json>]
 
 **Stream DD (E11): the block axis.**  A sequence has one of these per token
 block, so the output path is no longer derivable from the base alone -- every
@@ -21,8 +21,8 @@ block's base lives in the same directory -- and the *model-wide* pins are no
 longer a maximum over 32 layers but over `B x 32`.  Two additions, both
 backwards compatible:
 
-    ... shapes32.py <base> <n> [<out.json>]        one block, named output
-    ... shapes32.py --merge a.json b.json ... --out shapes_all.json
+    ... shapes <base> <n> [<out.json>]        one block, named output
+    ... shapes --merge a.json b.json ... --out shapes_all.json
 
 The merge recomputes `worst` over every row of every input -- `ao_rem_bits`
 grows with the prefix, so the last block's is the model-wide one and a plan

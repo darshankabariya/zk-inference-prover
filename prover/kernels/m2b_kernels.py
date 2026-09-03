@@ -16,7 +16,7 @@ asserted, idempotent edits to the fork's CUDA tree:
 Re-running after a fresh `cudaemit` refreshes the files and leaves the edits
 alone. `--undo` removes all three, restoring the pristine `41c2a05` dispatch.
 
-    python3 m2b_kernels.py [--fork DIR] [--gen DIR] [--undo]
+    python3 m2b_kernels.py --fork DIR --gen DIR [--undo]
 """
 import json
 import shutil
@@ -26,12 +26,16 @@ from pathlib import Path
 args = sys.argv[1:]
 
 
-def opt(name, default):
-    return args[args.index(name) + 1] if name in args else default
+def opt(name, default=None):
+    if name in args and args.index(name) + 1 < len(args):
+        return args[args.index(name) + 1]
+    if default is None:
+        sys.exit(f"{name} DIR is required; this script knows no host paths")
+    return default
 
 
-FORK = Path(opt("--fork", "/root/b7/nitroo"))
-GEN = Path(opt("--gen", "/root/b7/gen"))
+FORK = Path(opt("--fork"))
+GEN = Path(opt("--gen"))
 UNDO = "--undo" in args
 CUDA = FORK / "crates" / "stwo" / "src" / "stwo_cuda" / "cuda"
 BEGIN = "        # B7a 2b: generated b65 constraint kernels\n"

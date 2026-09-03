@@ -14,6 +14,9 @@ cargo build --release -p b65-pipeline --features cuda   # CUDA backend
 The vendored library in `../nitroo` links its CUDA library on every Linux
 build, so the CUDA toolkit is needed to build either backend; a GPU is needed
 only to run the CUDA one. On macOS the crate type-checks but does not link.
+A fresh CUDA build evaluates constraints on the CPU until `kernels/` has
+installed the generated kernels for the shapes being proved; digests do not
+depend on it.
 
 ## The digest gate
 
