@@ -683,6 +683,24 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     // here.  The int8-calibrated synthetic data stays complete at any wider
     // width, so this widens only the table domain and the o walk.
     l.attn_out_bits = arg_scalar(args, "--synth-ao-bits", l.attn_out_bits);
+    // Stream JJ (E11): `--synth-glue` gives a synthetic layer a wiring family.
+    // It is a *witness* switch, not a statement one -- it says what this layer
+    // carries, the way `--nout` does -- and it exists because the dequant output
+    // ties cannot be made to bite on a layer with no glue at all, which is every
+    // synthetic layer before it.  The columns are filled from the matmuls' own
+    // dequant references inside `prove_layer`, where the specs live; here the
+    // layer only carries the marker.
+    if flag(args, "--synth-glue") {
+        let (d, dff) = (l.mats.iter().find(|m| m.name == "o").expect("o").n_out,
+                        l.mats.iter().find(|m| m.name == "gate").expect("gate").n_out);
+        l.glue = Some(layer::GlueCols {
+            d, dff, tokens: l.mats[0].tokens,
+            xin: vec![], o_out: vec![], xmid: vec![], d_out: vec![], xout: vec![],
+            r1: vec![], r2: vec![], w1: vec![], w2: vec![],
+            h1: None, h2: None, silu_in: None, silu_out: None, x_down: None,
+            eps: 0, inv_d: 0, reduce: layer::SYNTH_REDUCE.to_string(),
+        });
+    }
     tighten_of(&mut l, args);
     (l, vname)
 }
@@ -829,10 +847,19 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
                 // carried only when the region that needs it is on, so that
                 // with both flags off the serialized statement is not merely
                 // equivalent to the pre-change crate's but identical to it
-                dff: if flag(args, "--swiglu") { g.dff } else { 0 },
+                // Stream JJ (E11): the SwiGLU region is the gate/up ties'
+                // counterparty, so it is no longer optional -- `--swiglu` is
+                // accepted and ignored.  A dump whose manifest predates `dff`
+                // still composes: the region needs a width, and without one it
+                // is absent and the two claims are published with nothing to
+                // compare them to, which the record names.
+                dff: g.dff,
                 tails: flag(args, "--norm-tails"),
-                swiglu: flag(args, "--swiglu"),
-                deq_ties: flag(args, "--deq-ties"),
+                swiglu: g.dff > 0,
+                // Stream JJ (E11): the dequant output ties are unconditional.
+                // `--deq-ties` is accepted and ignored so drivers that pass it
+                // keep working.
+                deq_ties: true,
             }
         }),
         // Stream H: the boundary commitment, off unless asked for either way --
@@ -1281,6 +1308,8 @@ fn compose_probes_cmd(args: &[String]) {
             // layout rather than picked: a tail row is `[nreal x, 1 r, nreal w]`
             // and anything at or past `nreal` corrupts nothing at all.
             let in0 = g.t.nreal / 2;
+            // stream JJ: how far into the SwiGLU region's value list `up` starts
+            let swiglu_n = g.tff.map(|t| t.tokens * t.d).unwrap_or(0);
             for (k, i) in g.tails.iter().copied().enumerate() {
                 let n = k + 1;
                 // the tie is the whole point of the tail: its copy of the
@@ -1303,11 +1332,19 @@ fn compose_probes_cmd(args: &[String]) {
             // of `d_out`) is changed, the region's own add is recomputed from it,
             // and only the tie against the dequant region's published output can
             // tell.  This is the probe those ties exist for.
-            for (k, ((ri, _), name)) in g.out_ties.iter().enumerate() {
-                let _ = k;
+            // Stream JJ (E11): one per tie that has a counterparty.  For the
+            // SwiGLU seam the bent value is `gate`'s copy or `up`'s -- the
+            // region recomputes `silu(g) * u` from it either way, so nothing
+            // inside the region can tell and only the tie against the gate (or
+            // up) dequant region's published output rejects.
+            for t in g.out_ties.iter() {
+                let Some((ri, ti)) = t.at else { continue };
+                let name = t.name;
+                let vi = if name == "up" { 4321 + swiglu_n } else { 4321 };
+                let _ = ti;
                 assert!(!probe(&format!("deq tie: the wiring copy of {name}'s output"), &l,
                                &compose::ProverTamper {
-                                   glue_add: Some((*ri, 4321)), ..Default::default() },
+                                   glue_add: Some((ri, vi)), ..Default::default() },
                                &format!("the tie {name}_out == the {name} region's output")),
                         "a corrupted dequant output copy accepted");
             }

@@ -476,7 +476,20 @@ pub struct GluePlan {
     /// stream E: `((region, tie), name)` per dequant output tie -- the wiring
     /// side's claim over `o_out` and over `d_out`, and the matmul whose region
     /// has to publish the same value
-    pub out_ties: Vec<((usize, usize), &'static str)>,
+    pub out_ties: Vec<OutTie>,
+}
+
+/// Stream E, generalised by stream JJ: one matmul's dequant output side.
+///
+/// `at` is the wiring-family tie the output is compared against -- region index
+/// and tie index -- and it is `None` for the three whose consumer is not in the
+/// statement at all.  `q` and `k` feed the attention through RoPE, which no
+/// region proves, and `v` through a per-channel power-of-two requantize which no
+/// region proves either; those three publish their claim and the verifier has
+/// nothing to read it against yet (`briefs/jj-layerwire-out.md`'s record).
+pub struct OutTie {
+    pub name: &'static str,
+    pub at: Option<(usize, usize)>,
 }
 
 impl GluePlan {
@@ -523,12 +536,18 @@ impl GluePlan {
         // columns and only a `VAL` lookup pinned them.  One claim each, on the
         // same channel-major weights the stream uses, and the `o` and `down`
         // dequant regions publish the same value from their own outputs.
-        let mut out_ties = vec![];
-        if gp.deq_ties {
-            for (ri, name) in [(0usize, "o"), (2usize, "down")] {
-                regions[ri].ties.push((TieKind::In(1), stream.clone(), 1));
-                out_ties.push(((ri, regions[ri].ties.len() - 1), name));
-            }
+        //
+        // Stream JJ (E11): unconditional, and all seven.  `o` and `down` keep
+        // E's `In(1)` tie on the two reduction regions; `gate` and `up` are
+        // read against the SwiGLU region's own `In(0)`/`In(1)`, which need no
+        // new tie because the region already publishes them; `q`, `k` and `v`
+        // publish a claim with no counterparty (see `OutTie`).  The list ends
+        // up in `MAT_NAMES` order because `claims.deq_out` is pushed in matmul
+        // order and the verifier reads the two side by side.
+        let mut oside_at: Vec<(&'static str, Option<(usize, usize)>)> = vec![];
+        for (ri, name) in [(0usize, "o"), (2usize, "down")] {
+            regions[ri].ties.push((TieKind::In(1), stream.clone(), 1));
+            oside_at.push((name, Some((ri, regions[ri].ties.len() - 1))));
         }
         // ---- stream E: the two norm tails ------------------------------------
         //
@@ -577,6 +596,7 @@ impl GluePlan {
                 }
             }
             swiglu = Some(regions.len());
+            let i = regions.len();
             regions.push(GlueRegionPlan {
                 tag: "gsw".into(),
                 prog,
@@ -585,8 +605,23 @@ impl GluePlan {
                            (TieKind::In(1), ff.clone(), 1),
                            (TieKind::Out(0), ff, 1)],
             });
+            // stream JJ: the gate/up seam.  `Prog::pairs` puts the unary on
+            // group 0, so `In(0)` is the silu's operand -- `gate` -- and `In(1)`
+            // is `up`.
+            oside_at.push(("gate", Some((i, 0))));
+            oside_at.push(("up", Some((i, 1))));
             tff = Some(t2);
         }
+        // stream JJ: q, k and v publish without a counterparty, then the list is
+        // put in matmul order -- which is the order `claims.deq_out` arrives in
+        for n in ["q", "k", "v"] {
+            oside_at.push((n, None));
+        }
+        let out_ties: Vec<OutTie> = crate::layer::MAT_NAMES
+            .iter()
+            .filter_map(|n| oside_at.iter().find(|(m, _)| m == n))
+            .map(|(name, at)| OutTie { name, at: *at })
+            .collect();
         Self {
             t,
             tff,
@@ -965,7 +1000,7 @@ impl Plan {
     /// Both sides ask the plan, so the preprocessed list, the region, the AIR and
     /// the verifier cannot disagree about it.
     pub fn has_oside(&self, name: &str) -> bool {
-        self.glue.as_ref().is_some_and(|g| g.out_ties.iter().any(|(_, n)| *n == name))
+        self.glue.as_ref().is_some_and(|g| g.out_ties.iter().any(|t| t.name == name))
             || (self.p.head_key && name == "lm_head")
     }
 
@@ -1561,7 +1596,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         // the claims arrive in mat order and the plan lists the
                         // ties in the same order, `o` before `down`
                         plan.glue.as_ref().unwrap().out_ties.iter()
-                            .position(|(_, n)| *n == m.name)
+                            .position(|t| t.name == m.name)
                             .and_then(|k| claims.deq_out.get(k).copied())
                     };
                     crate::dequant::OSide {
@@ -2254,6 +2289,12 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     let mut glue_b1: Value = json!(null);
     if let Some(gp) = &plan.glue {
         let gc = layer.glue.as_ref().expect("params ask for the glue, the witness has none");
+        // Stream JJ (E11): a synthetic layer carries only the marker; the
+        // columns the family consumes are the matmuls' own dequant references,
+        // which is what makes the output ties testable off a box.
+        let synth = (gc.reduce == crate::layer::SYNTH_REDUCE)
+            .then(|| crate::layer::GlueCols::synthetic(&layer.mats, &plan.specs, gp.t.a));
+        let gc = synth.as_ref().unwrap_or(gc);
         assert_eq!(gc.d, gp.t.d, "the witness's d disagrees with the glue params");
         let mut gt = GlueTables::new(p.kmax, plan.round, &gp.uns);
         gt.norm = tables.norm.clone();
@@ -2300,10 +2341,19 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // what the region computed is what the next one reads: that is what
             // the tie says, and it is checked against B1's own column here
             let got = t.unlay(&r1.outs[1]);
-            let bad = (0..t.tokens * t.d)
-                .filter(|i| crate::glue::canon(got[*i]) != crate::glue::canon(want[*i]))
-                .count();
-            mismatch.push(json!({"column": wname, "values": t.tokens * t.d, "mismatch": bad}));
+            // stream JJ: a synthetic layer has no B1 column to be right about,
+            // and `null` says so rather than a number nobody can read
+            if want.is_empty() {
+                mismatch.push(json!({"column": wname, "values": 0,
+                                     "mismatch": serde_json::Value::Null,
+                                     "note": "the dump does not carry this column"}));
+            } else {
+                let bad = (0..t.tokens * t.d)
+                    .filter(|i| crate::glue::canon(got[*i]) != crate::glue::canon(want[*i]))
+                    .count();
+                mismatch.push(json!({"column": wname, "values": t.tokens * t.d,
+                                     "mismatch": bad}));
+            }
             let l2 = t.roots_to_l2(&r1.outs[0]);
             let w2 = crate::glue::GlueWitness::new(
                 t.tokens, vec![l2], &prog2, plan.round,
@@ -2402,6 +2452,17 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                     }
                 });
             crate::util::m4_add("gen/glue_deqref", t_dq.elapsed().as_secs_f64());
+            // Stream JJ (E11): the SwiGLU seam's control.  One of the region's
+            // two committed input copies is bent and the product is recomputed
+            // from it, so every constraint inside the region still holds and
+            // only the tie against the gate (or up) dequant region's published
+            // output can reject.  `vi` past `n` aims at `up`.
+            if let Some((ri, vi)) = tamper.glue_add {
+                if ri == i {
+                    let n2 = gate_out.len();
+                    if vi < n2 { gate_out[vi] ^= 1 } else { up_out[(vi - n2) % n2] ^= 1 }
+                }
+            }
             let prog = gp.regions[i].prog.clone();
             let tag = gp.regions[i].tag.clone();
             let w = crate::glue::GlueWitness::new(
@@ -3935,6 +3996,12 @@ pub struct Verdict {
     /// stream E, one per dequant output tie: the region's own output claim equals
     /// the wiring family's claim over the same values
     pub deq_out_ok: Vec<bool>,
+    /// Stream JJ: the dequant outputs that publish a claim with no counterparty
+    /// in this statement -- `q`, `k` and `v`, whose consumers reach the
+    /// attention through RoPE and a per-channel requantize that no region
+    /// proves.  Reported so a reader cannot mistake seven published claims for
+    /// seven checked ties; it is not part of `accepts`.
+    pub deq_out_open: Vec<String>,
     /// stream E: the argmax's key claim equals the head dequant's -- "the token
     /// this row emits is the maximum of the logits *this layer computed*"
     pub head_tie_ok: bool,
@@ -3986,7 +4053,7 @@ impl Verdict {
         Self { stark_ok: false, root_ok: false, sums_cancel: false, qk_ok: vec![],
                den_ok: vec![], av_ok: false, den_link_ok: false, walk_ok: vec![],
                sizes_ok: false, glue_ok: vec![false], deq_out_ok: vec![false],
-               head_tie_ok: false, embed_ok: false,
+               deq_out_open: vec![], head_tie_ok: false, embed_ok: false,
                stream_in: None, stream_out: None,
                bound_roots: vec![], bound_sides: vec![],
                error: Some(msg.to_string()), verify_secs: 0.0 }
@@ -4212,16 +4279,24 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // own published outputs against the copies the wiring family committed.
     // This is what makes `o_out` and `d_out` the dequant's results rather than
     // two columns that merely happen to agree.
-    let deq_out_ok: Vec<bool> = match &plan.glue {
-        Some(g) => g
-            .out_ties
-            .iter()
-            .enumerate()
-            .map(|(k, ((ra, ta), _))| {
-                claims.deq_out.get(k).copied() == Some(claims.glue_ties[*ra][*ta])
-            })
-            .collect(),
-        None => vec![],
+    //
+    // Stream JJ (E11): one entry per tie that HAS a counterparty, in the plan's
+    // order.  `deq_out_open` names the outputs that publish a claim the
+    // statement cannot yet read -- they are not counted as passing.
+    let (deq_out_ok, deq_out_open): (Vec<bool>, Vec<String>) = match &plan.glue {
+        Some(g) => {
+            let mut ok = vec![];
+            let mut open = vec![];
+            for (k, t) in g.out_ties.iter().enumerate() {
+                match t.at {
+                    Some((ra, ta)) => ok.push(
+                        claims.deq_out.get(k).copied() == Some(claims.glue_ties[ra][ta])),
+                    None => open.push(t.name.to_string()),
+                }
+            }
+            (ok, open)
+        }
+        None => (vec![], vec![]),
     };
 
     // stream E: the argmax compared the head's own output.  Both claims are
@@ -4245,7 +4320,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     };
 
     Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
-              head_tie_ok, embed_ok,
+              deq_out_open, head_tie_ok, embed_ok,
               sizes_ok, glue_ok, stream_in, stream_out, bound_roots, bound_sides, error,
               verify_secs: t0.elapsed().as_secs_f64() }
 }

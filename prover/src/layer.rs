@@ -269,6 +269,57 @@ impl GlueCols {
     }
 }
 
+impl GlueCols {
+    /// Stream JJ (E11): the wiring family's consumed columns on a *synthetic*
+    /// layer.  A synthetic layer carries none of B1's columns, so before this
+    /// nothing on the desk could build the glue -- and with it the dequant
+    /// output ties, whose controls need a witness to bite on.  What the family
+    /// consumes is exactly what the ties assert it consumes: `o_out` is the `o`
+    /// region's own dequant reference and `d_out` is `down`'s, so an honest run
+    /// ties and a bent copy does not.  `xin` and the norm tails' `r`/`w` are
+    /// other matmuls' references, which puts them in the same exponent family
+    /// and keeps the add's anchor inside its table.  The columns the family is
+    /// only *checked against* (`xmid`, `xout`, `x_q`, `x_gate`, the SwiGLU's
+    /// three) are left empty: a synthetic layer has no B1 to be right about,
+    /// and the report says `null` rather than a number nobody can read.
+    pub fn synthetic(mats: &[Mat], specs: &[crate::dequant::Spec], a: usize) -> Self {
+        let at = |n: &str| mats.iter().position(|m| m.name == n)
+            .unwrap_or_else(|| panic!("--synth-glue needs the {n} matmul"));
+        let (qi, ki, vi, oi, gi, di) =
+            (at("q"), at("k"), at("v"), at("o"), at("gate"), at("down"));
+        let (d, dff, tokens) = (mats[oi].n_out, mats[gi].n_out, mats[oi].tokens);
+        assert_eq!(mats[di].n_out, d,
+                   "--synth-glue: `down` writes {} channels, `o` writes {d}", mats[di].n_out);
+        assert!(mats[qi].n_out >= d, "--synth-glue: `q` is narrower than the stream");
+        assert_eq!(d % a, 0, "--synth-glue: --glue-a {a} does not divide d = {d}");
+        let col = |mi: usize, w: usize| -> Vec<u16> {
+            (0..tokens).flat_map(|t| (0..w).map(move |c| (mi, t, c)))
+                .map(|(mi, t, c)| deq_ref(&mats[mi], &specs[mi], t, c))
+                .collect()
+        };
+        Self {
+            d, dff, tokens,
+            xin: col(qi, d),
+            o_out: col(oi, d),
+            d_out: col(di, d),
+            xmid: vec![],
+            xout: vec![],
+            r1: (0..tokens).map(|t| deq_ref(&mats[vi], &specs[vi], t, 0)).collect(),
+            r2: (0..tokens).map(|t| deq_ref(&mats[ki], &specs[ki], t, 0)).collect(),
+            w1: (0..d).map(|c| deq_ref(&mats[ki], &specs[ki], 0, c)).collect(),
+            w2: (0..d).map(|c| deq_ref(&mats[vi], &specs[vi], 0, c)).collect(),
+            h1: None, h2: None, silu_in: None, silu_out: None, x_down: None,
+            eps: crate::bf16::from_f64(1.0e-6),
+            inv_d: crate::bf16::from_f64(1.0 / d as f64),
+            reduce: SYNTH_REDUCE.to_string(),
+        }
+    }
+}
+
+/// What `GlueCols::reduce` says on the marker a synthetic layer carries until
+/// `prove_layer` fills it in.
+pub const SYNTH_REDUCE: &str = "synthetic";
+
 fn read_i32(path: &str) -> Result<Vec<i64>, String> {
     let raw = witread::read_file(path)?;
     let _s = witread::scope(Site::DecodeI32);
@@ -1747,17 +1798,25 @@ pub fn deq_ref(m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
 /// accumulator against token 0's scale, and its reference has to be the zero's
 /// image, not the value that would have been there had the row been real.
 pub fn deq_ref_a(a: i64, m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
+    // Stream JJ (E11): every rounding here is `spec.round`'s, not `from_f64`'s.
+    // `from_f64` is round-to-nearest-even and this reference is what the output
+    // ties' claim is built from, so under `--round away` an exact tie made the
+    // claim disagree with the region's own committed cells by one ulp and the
+    // *honest* proof failed to prove.  It cost ~1% of slots on a synthetic
+    // layer; on a witness with no ties it costs nothing, which is why stream E
+    // never saw it.
+    let rd = |x: f64| bf16::from_f64_round(x, spec.round);
     match spec.variant {
         DeqVariant::Pow2 => {
             let jjx = m.jx[t] as i64 + m.jw[c] as i64;
-            bf16::from_f64(a as f64 * (jjx as f64).exp2())
+            rd(a as f64 * (jjx as f64).exp2())
         }
         DeqVariant::Chain => {
-            let y0 = bf16::to_f32(bf16::from_f64(a.unsigned_abs() as f64)) as f64;
+            let y0 = bf16::to_f32(rd(a.unsigned_abs() as f64)) as f64;
             let sxv = bf16::to_f32(bf16::pattern(0, m.sx[t].1, m.sx[t].0)) as f64;
             let swv = bf16::to_f32(bf16::pattern(0, m.sw[c].1, m.sw[c].0)) as f64;
-            let t1 = bf16::to_f32(bf16::from_f64(y0 * sxv)) as f64;
-            bf16::from_f64(t1 * swv) | (u16::from(a < 0) << 15)
+            let t1 = bf16::to_f32(rd(y0 * sxv)) as f64;
+            rd(t1 * swv) | (u16::from(a < 0) << 15)
         }
         _ => unreachable!("matmul regions are pow2 or chain"),
     }
