@@ -974,7 +974,13 @@ mod tests {
             round: "away".into(), ao_target: 16, ao_q_bits: 7, ao_rem_bits: 8,
             fold_rem_bits: 0, fold_alpha: 0, walk_p: 136,
             glue: Some(crate::compose::GlueParams {
-                d: 64, a: 4, dff: 0, tails: false, swiglu: false, deq_ties: false,
+                // stream II: the two additive regions are unconditional, so this
+                // fixture carries a real `dff` and the model's two norm
+                // constants.  A mechanical update, not a change of what the
+                // test asserts -- both plans it compares gain the same columns.
+                d: 64, a: 4, dff: 64, deq_ties: false,
+                eps: crate::bf16::from_f64(1e-5),
+                inv_d: crate::bf16::from_f64(1.0 / 64.0),
             }),
             corner: false, gkr_bands: false, gkr_dequant: false, gkr_glue: false,
             gkr_walks: false, gkr_attnout: false, bounds: false, kv_bind: false,
