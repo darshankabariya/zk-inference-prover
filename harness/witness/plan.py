@@ -85,8 +85,22 @@ def layer_line(tb, wdir, tag, extra=""):
     return f"--table-bits {tb} --bounds{extra} --witness {wdir} --ser-tag {tag}"
 
 
-def head_line(hdir, htb, tag="head", extra=""):
-    return (f"--table-bits {htb} --head-argmax --deq-per-row 501{extra} "
+def head_line(hdir, htb, tag="head", extra="", layer=None, block=None):
+    """The `lm_head` line.
+
+    **Stream KK (E11): the coordinate.**  A head dump's manifest says which
+    layer it was *extracted* at (16, for the C=4K set) and carries no block at
+    all, but the grid puts the head chunk after the last layer of the block it
+    reads.  `--layer` / `--block` declare that, `Fixed` carries it, and
+    `bounds-grid` places the chunk by the statement rather than by the tag --
+    which is what lets the head take a cell at all.
+    """
+    coord = ""
+    if layer is not None:
+        coord += f" --layer {layer}"
+    if block is not None:
+        coord += f" --block {block}"
+    return (f"--table-bits {htb} --head-argmax --deq-per-row 501{extra}{coord} "
             f"--witness {hdir} --ser-tag {tag}")
 
 
@@ -114,6 +128,16 @@ def main():
                          "corner-only configuration.")
     ap.add_argument("--head-every-block", action="store_true",
                     help="an lm_head chunk after every block, not only the last one")
+    # ---- stream KK (E11): which blocks need a head chunk, and why ------------
+    ap.add_argument("--head-blocks", default="",
+                    help="the blocks that get an lm_head chunk, e.g. '7,8' or '0-8' "
+                         "(default: the last block; --head-every-block is '0-B'). "
+                         "A GENERATED position's id has to equal the argmax the head "
+                         "proved for the position before it, so the block that owns the "
+                         "position before the first generated one needs a head chunk too "
+                         "-- for the 9-block C=4K sequence (8 prompt blocks + 1 decode "
+                         "block) that is block 7, and '--head-blocks 7,8' is what makes "
+                         "`bounds-grid --verify` report no declared generated position")
     ap.add_argument("--emit-out", default="",
                     help="also write the distinct emit shapes, one representative plan line "
                          "each, for `emitset` to walk instead of the plan")
@@ -150,6 +174,20 @@ def main():
     else:
         blocks = list(range(int(a.blocks)))
 
+    # stream KK: which blocks carry a head chunk.  `None` keeps the pre-KK rule
+    # (the last block, tagged `head`); a list tags them `B<b>head` unless there
+    # is only one.
+    if a.head_blocks:
+        head_blocks = set(want_layers(a.head_blocks, {b: None for b in blocks if b is not None}))
+    elif a.head_every_block:
+        head_blocks = {b for b in blocks if b is not None}
+    else:
+        head_blocks = None
+    # the layer coordinate the head chunk sits at: one past the last layer the
+    # plan writes, read off the dump's own shapes rather than assumed to be 32
+    n_layers = 1 + max(read_rows(f"{a.dir}/shapes.json" if blocks == [None]
+                                 else f"{a.dir}/shapes_B{blocks[-1]}.json"))
+
     lines, emit = [], {}
     n_rows, n_layer_rows = 0, 0
     for b in blocks:
@@ -176,11 +214,13 @@ def main():
             n_rows += 1
             n_layer_rows += 1
             emit.setdefault((rows[k]["c"], tb, False, extra), line)
-        if a.head and (a.head_every_block or b == blocks[-1]):
+        if a.head and (b in head_blocks if head_blocks is not None else b == blocks[-1]):
             htb = json.load(open(f"{a.head}/manifest.json"))["master_table_bits"]
             lines.append("# the head, last, and it is the same compose family with two extra "
                          "arguments")
-            hl = head_line(a.head, htb, "head" if not a.head_every_block else f"{pre}head", hf)
+            solo = head_blocks is None or len(head_blocks) == 1
+            hl = head_line(a.head, htb, "head" if solo else f"{pre}head", hf,
+                           layer=n_layers, block=b)
             lines.append(hl)
             n_rows += 1
             emit.setdefault((None, htb, True, hf), hl)
