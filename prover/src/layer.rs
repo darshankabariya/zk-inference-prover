@@ -269,6 +269,57 @@ impl GlueCols {
     }
 }
 
+impl GlueCols {
+    /// Stream II: the wiring family on a synthetic layer, so the desk can run
+    /// the whole composed statement -- ties, norm tails, SwiGLU and all -- at a
+    /// shape that proves in seconds and without a dump.  Only the columns the
+    /// regions *consume* are built: `xmid`, `xout` and the five reference
+    /// columns are what the regions compute, and a synthetic layer has no B1 to
+    /// compare against, so they are absent and the run reports them as absent.
+    ///
+    /// The exponent spread is deliberately narrow.  A residual stream of wildly
+    /// scaled values gives a sum of squares whose `rsqrt` leaves bf16's normal
+    /// range, and `h = (x r) w` then lands off the `VAL` table -- the gadget's
+    /// incompleteness edge, not a soundness one, and not what this shape is for.
+    pub fn synthetic(tokens: usize, d: usize, dff: usize, seed: u64) -> Self {
+        use rand::rngs::SmallRng;
+        use rand::{Rng, SeedableRng};
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut col = |n: usize, spread: i32| -> Vec<u16> {
+            (0..n)
+                .map(|_| {
+                    let e: i32 = rng.random_range(-spread..spread);
+                    let m: f64 = rng.random_range(-2.0f64..2.0);
+                    crate::glue::canon(bf16::from_f64(m * (e as f64).exp2()))
+                })
+                .collect()
+        };
+        Self {
+            d,
+            dff,
+            tokens,
+            xin: col(tokens * d, 2),
+            o_out: col(tokens * d, 2),
+            xmid: vec![],
+            d_out: col(tokens * d, 2),
+            xout: vec![],
+            // the derived `r` has no B1 counterpart here; the run says so
+            r1: vec![],
+            r2: vec![],
+            w1: col(d, 2),
+            w2: col(d, 2),
+            h1: None,
+            h2: None,
+            silu_in: None,
+            silu_out: None,
+            x_down: None,
+            eps: bf16::from_f64(1e-5),
+            inv_d: bf16::from_f64(1.0 / d as f64),
+            reduce: "bf16-norm".into(),
+        }
+    }
+}
+
 fn read_i32(path: &str) -> Result<Vec<i64>, String> {
     let raw = witread::read_file(path)?;
     let _s = witread::scope(Site::DecodeI32);
@@ -945,6 +996,19 @@ impl Layer {
                source: format!("synthetic layer (seed={seed})"), glue: None,
                head_keys: None, head_tok: None, attn_out_bits: 8,
                embed_tab: None, tok_in: None }
+    }
+}
+
+impl Layer {
+    /// Stream II: give a synthetic layer the wiring family's own columns, sized
+    /// off the matmuls it already has -- `d` is the q/k/v group's input width
+    /// and `dff` the gate matmul's output width, exactly as a real dump's are.
+    pub fn synth_glue(&mut self, seed: u64) {
+        let d = self.mats.iter().find(|m| m.name == "q")
+            .expect("--synth-glue needs a q matmul").n_in;
+        let dff = self.mats.iter().find(|m| m.name == "gate")
+            .expect("--synth-glue needs a gate matmul").n_out;
+        self.glue = Some(GlueCols::synthetic(self.ao.s, d, dff, seed ^ 0x9e37_79b9));
     }
 }
 

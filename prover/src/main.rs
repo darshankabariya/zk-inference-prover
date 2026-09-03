@@ -683,6 +683,13 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     // here.  The int8-calibrated synthetic data stays complete at any wider
     // width, so this widens only the table domain and the o walk.
     l.attn_out_bits = arg_scalar(args, "--synth-ao-bits", l.attn_out_bits);
+    // Stream II: the wiring family on a synthetic layer.  A witness-construction
+    // switch and not a statement one -- without it a synthetic layer has no glue
+    // columns and composes exactly as it always did, which is what keeps every
+    // other stream's recorded synthetic digest where it is.
+    if flag(args, "--synth-glue") {
+        l.synth_glue(src.seed);
+    }
     tighten_of(&mut l, args);
     (l, vname)
 }
@@ -829,9 +836,12 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
                 // carried only when the region that needs it is on, so that
                 // with both flags off the serialized statement is not merely
                 // equivalent to the pre-change crate's but identical to it
-                dff: if flag(args, "--swiglu") { g.dff } else { 0 },
-                tails: flag(args, "--norm-tails"),
-                swiglu: flag(args, "--swiglu"),
+                // Stream II: the two additive regions are unconditional now, so
+                // `dff` is always carried and `--norm-tails` / `--swiglu` are
+                // accepted and ignored -- the drivers still pass them.
+                dff: g.dff,
+                eps: g.eps,
+                inv_d: g.inv_d,
                 deq_ties: flag(args, "--deq-ties"),
             }
         }),
@@ -1559,6 +1569,12 @@ fn glue_cmd(args: &[String]) {
         ("unary+add", Prog::tree(leaves, leaves, UnKind::Square), 11),
         ("mul", Prog::pairs(per_row, Kind::Mul, UnKind::None, UnKind::None), 13),
         ("swiglu", Prog::pairs(per_row, Kind::Mul, UnKind::Silu, UnKind::None), 17),
+        // Stream II: the norm tail as it is composed -- the reduction's answer
+        // through `UnKind::NormR` and a preprocessed weight.  Here it runs on
+        // synthetic values, which is the isolation the composed rung has not
+        // got: a failure in this case is the region, never the wiring.
+        ("normtail", Prog::norm_tail(per_row, UnKind::NormR {
+            inv_d: bf16::from_f64(1.0 / per_row as f64), eps: bf16::from_f64(1e-5) }), 19),
     ];
     for (name, prog, seed) in &cases {
         let w = GlueWitness::synthetic(rows, prog, round, *seed);

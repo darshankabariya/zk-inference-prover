@@ -259,19 +259,16 @@ pub struct Params {
 pub struct GlueParams {
     pub d: usize,
     pub a: usize,
-    /// The FFN width, for the SwiGLU's own tiling.  Zero on a dump whose
-    /// manifest predates it, which is what `swiglu` then refuses to run on.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    /// The FFN width, for the SwiGLU's own tiling.  Stream II made the region
+    /// unconditional, so a dump whose manifest predates `dff` no longer composes
+    /// with the wiring family at all -- and says so rather than proving less.
     pub dff: usize,
-    /// Stream E's two additive regions, off by default.  They are opt-in rather
-    /// than opt-out so that the pre-change proof is reproduced by the *default*
-    /// invocation -- the bit-for-bit control is then the ordinary run, not a run
-    /// with a flag in it.  Both are skipped when false so the serialized
-    /// statement is byte-identical to the pre-change crate's.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub tails: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub swiglu: bool,
+    /// Stream II: the model's two RMSNorm constants, as bf16 patterns.  They are
+    /// in the *statement* because the norm tail's `r` is now a table lookup
+    /// whose table bakes them in (`UnKind::NormR`), and a table is only as
+    /// pinned as the parameters the verifier builds it from.
+    pub eps: u16,
+    pub inv_d: u16,
     /// Stream E: make `o_out` and `d_out` the `o` and `down` dequant regions'
     /// own published outputs, tied to the copies the wiring family commits.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -458,13 +455,42 @@ pub struct GlueRegionPlan {
 /// `gn2.roots == gn2b.in`.  What is left open is named in the record: the two
 /// norms' tails (`* r`, `* w`), the SwiGLU, and the ties from `o`'s and `down`'s
 /// dequant regions into `o_out` and `d_out`.
+/// One equality the verifier checks between two regions' Horner claims.
+///
+/// Stream II added `scale`, because one of the new ties compares sequences of
+/// different *lengths*: the norm tail carries one committed sum of squares per
+/// `(residue, token)` row and the reduction publishes one per token, so the
+/// tail's claim is the reduction's multiplied by `sum_res w^(...)`.  The factor
+/// is a function of the plan and the drawn challenge alone, so it is still one
+/// equality between two claims and not a second mechanism; empty means one.
+#[derive(Clone, Debug)]
+pub struct GlueEq {
+    pub a: (usize, usize),
+    pub b: (usize, usize),
+    /// exponents of the tie challenge whose powers sum to the factor `b` carries
+    pub scale: Vec<i128>,
+}
+
+impl GlueEq {
+    fn plain(a: (usize, usize), b: (usize, usize)) -> Self {
+        Self { a, b, scale: vec![] }
+    }
+    /// The factor, from the challenge the transcript drew.
+    pub fn factor(&self, w: SecureField) -> SecureField {
+        if self.scale.is_empty() {
+            return SecureField::one();
+        }
+        self.scale.iter().fold(SecureField::zero(), |acc, e| acc + wpow(w, *e))
+    }
+}
+
 pub struct GluePlan {
     pub t: Tiling,
     /// the SwiGLU's own tiling, over `dff` instead of `d`
     pub tff: Option<Tiling>,
     pub regions: Vec<GlueRegionPlan>,
-    /// `((region, tie), (region, tie))` the verifier compares
-    pub eqs: Vec<((usize, usize), (usize, usize))>,
+    /// what the verifier compares, `a == factor * b`
+    pub eqs: Vec<GlueEq>,
     pub uns: Vec<UnKind>,
     /// the layer's committed residual-stream input and output claims
     pub stream_in: (usize, usize),
@@ -514,7 +540,8 @@ impl GluePlan {
                            (TieKind::Out(0), one.clone(), 1)],
             });
         }
-        let mut eqs = vec![((0, 1), (1, 0)), ((0, 2), (2, 0)), ((2, 1), (3, 0))];
+        let mut eqs = vec![GlueEq::plain((0, 1), (1, 0)), GlueEq::plain((0, 2), (2, 0)),
+                           GlueEq::plain((2, 1), (3, 0))];
         let mut uns = l1.un_kinds();
         // ---- stream E: the dequant output ties -------------------------------
         //
@@ -538,19 +565,46 @@ impl GluePlan {
         // very values the reduction squared -- which is the half of "the norm
         // computed its own output" a committed column cannot fake.  `Out(0)` is
         // published for the requantize region that will read it.
+        //
+        // Stream II made the region unconditional and closed both of the gaps
+        // the first build left.  `r` is no longer a committed leaf: group 1
+        // commits the reduction's *answer* and `UnKind::NormR`'s lookup is
+        // `r = rsqrt(ms inv_d + eps)`, so the tie `nt.In(1) == G gnb.Out(0)`
+        // makes it the reduction's own answer -- and because every one of a
+        // token's `a` rows is compared against that one reduction row, they
+        // cannot carry different `r`s either.  `G` is the geometric sum over
+        // the `a` rows and is the verifier's own arithmetic (`GlueEq::scale`).
+        // The norm weight moved to `Src::Pre`, i.e. into tree 0 under
+        // `pre_root`, because it is the model's and not the prover's.
         let mut tails = vec![];
-        if gp.tails {
-            let tail = Prog::norm_tail(nreal);
-            for (gn, tag) in [(0usize, "nt1"), (2usize, "nt2")] {
+        {
+            let rows1 = 1usize << lr1;
+            let rows2 = 1usize << lr2;
+            assert_eq!(rows1, a * tok,
+                       "the norm tail's tie needs the level-1 region to tile exactly");
+            assert_eq!(rows2, tok,
+                       "the norm tail's tie needs the level-2 region to tile exactly");
+            let un_r = UnKind::NormR { inv_d: gp.inv_d, eps: gp.eps };
+            if !uns.contains(&un_r) {
+                uns.push(un_r);
+            }
+            let tail = Prog::norm_tail(nreal, un_r);
+            let one_pos = vec![0u128];
+            // sum_{res} w^(rows1 - rows2 - res * tokens)
+            let g_scale: Vec<i128> =
+                (0..a).map(|res| (rows1 as i128) - (rows2 as i128) - (res * tok) as i128).collect();
+            for (gn, gnb, tag) in [(0usize, 1usize, "nt1"), (2usize, 3usize, "nt2")] {
                 let i = regions.len();
                 regions.push(GlueRegionPlan {
                     tag: tag.into(),
                     prog: tail.clone(),
                     log_rows: lr1,
                     ties: vec![(TieKind::In(0), stream.clone(), 1),
+                               (TieKind::In(1), one_pos.clone(), 1),
                                (TieKind::Out(0), stream.clone(), 1)],
                 });
-                eqs.push(((i, 0), (gn, 0)));
+                eqs.push(GlueEq::plain((i, 0), (gn, 0)));
+                eqs.push(GlueEq { a: (i, 1), b: (gnb, 1), scale: g_scale.clone() });
                 tails.push(i);
             }
         }
@@ -564,7 +618,7 @@ impl GluePlan {
         // B1's own columns, and the record says so.
         let mut tff = None;
         let mut swiglu = None;
-        if gp.swiglu {
+        {
             assert!(gp.dff > 0, "the SwiGLU needs the manifest's dff");
             let t2 = Tiling::new(p.s, gp.dff, gp.a);
             let prog = Prog::pairs(t2.nreal, Kind::Mul, UnKind::Silu, UnKind::None);
@@ -1042,6 +1096,12 @@ impl Plan {
             for r in &g.regions {
                 ids.push(crate::glue::glue_sel(&r.tag, "nofirst"));
                 ids.push(crate::glue::glue_sel(&r.tag, "end"));
+                // stream II: then the region's own preprocessed values, in the
+                // order `glue_region` appends their columns
+                for i in 0..r.prog.n_pre {
+                    ids.push(crate::glue::glue_pre_col(&r.tag, i, 0));
+                    ids.push(crate::glue::glue_pre_col(&r.tag, i, 1));
+                }
             }
         }
         ids.push(id(TBL_EXP_X));
@@ -1940,6 +2000,12 @@ pub struct ProverTamper {
     /// everything inside the glue stays consistent and the only thing that can
     /// catch it is the dequant output tie.
     pub glue_add: Option<(usize, usize)>,
+    /// Stream II, control 3: bend one cell of a norm tail's *preprocessed*
+    /// weight block.  The region recomputes `h` from the bent weight, so every
+    /// constraint holds and the tree-0 root is what moves -- `root_ok` against
+    /// the statement's `pre_root` is the rejection, and it is a different kind
+    /// of rejection from every other control here.
+    pub glue_w: Option<usize>,
     /// Stream E: a tamper inside the composed argmax region
     pub argmax: Option<crate::argmax::Tamper>,
     /// Stream BB: a tamper inside the composed embedding region.  `TokRow` is
@@ -2259,6 +2325,9 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         // region reads the identical block -- the tie compares those, and B1's
         // own column is the separate check
         let mut tail_in: Vec<Vec<u16>> = vec![];
+        // stream II: and each norm's own sum of squares, one per token, which is
+        // what the tail's group 1 commits and `UnKind::NormR` turns into `r`
+        let mut ms_out: Vec<Vec<u16>> = vec![];
         // stream 0: xin + o_out into xmid, and the squares' first levels;
         // stream 1: xmid + d_out into xout, and norm2's
         let mut stream = t.lay(&gc.xin);
@@ -2293,36 +2362,52 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // what the region computed is what the next one reads: that is what
             // the tie says, and it is checked against B1's own column here
             let got = t.unlay(&r1.outs[1]);
-            let bad = (0..t.tokens * t.d)
-                .filter(|i| crate::glue::canon(got[*i]) != crate::glue::canon(want[*i]))
-                .count();
-            mismatch.push(json!({"column": wname, "values": t.tokens * t.d, "mismatch": bad}));
+            // stream II: a synthetic layer carries no B1 column to compare
+            // against, and an absent reference is reported as absent rather
+            // than as zero mismatches -- the trap E's own record names.
+            if want.len() >= t.tokens * t.d {
+                let bad = (0..t.tokens * t.d)
+                    .filter(|i| crate::glue::canon(got[*i]) != crate::glue::canon(want[*i]))
+                    .count();
+                mismatch.push(json!({"column": wname, "values": t.tokens * t.d,
+                                     "mismatch": bad}));
+            } else {
+                mismatch.push(json!({"column": wname, "values": 0,
+                                     "mismatch": serde_json::Value::Null,
+                                     "note": "the dump does not carry this column"}));
+            }
             let l2 = t.roots_to_l2(&r1.outs[0]);
             let w2 = crate::glue::GlueWitness::new(
                 t.tokens, vec![l2], &prog2, plan.round,
                 format!("the level-1 roots [{} x {}]", t.tokens, t.a));
+            // stream II: the tail reads this norm's own sum of squares, one per
+            // token -- `r` is its `UnKind::NormR` image and nothing else
             let tam2 = tamper.glue.filter(|(ri, _)| *ri == i1 + 1).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
             let r2 = crate::glue::glue_region(&w2, &prog2, plan.round, &tag2, &mut gt, tam2);
             crate::util::m4_add("gen/glue_region", t_gr.elapsed().as_secs_f64());
+            ms_out.push(r2.outs[0][..t.tokens].to_vec());
             stream = t.lay(&got);
             glue_regions.push(r1);
             glue_regions.push(r2);
         }
         // ---- stream E: h = (x * r) * w, once per norm -------------------------
         for (k, i) in gp.tails.iter().copied().enumerate() {
-            let (rcol, wcol, want, wname) = if k == 0 {
-                (&gc.r1, &gc.w1, &gc.h1, "x_q")
+            let (rcol, wcol, want, wname, rname) = if k == 0 {
+                (&gc.r1, &gc.w1, &gc.h1, "x_q", "n1_out")
             } else {
-                (&gc.r2, &gc.w2, &gc.h2, "x_gate")
+                (&gc.r2, &gc.w2, &gc.h2, "x_gate", "n2_out")
             };
+            let un_r = crate::glue::UnKind::NormR { inv_d: gc.inv_d, eps: gc.eps };
             let prog = gp.regions[i].prog.clone();
             let tag = gp.regions[i].tag.clone();
-            // `r` is per token and a row is one `(residue, token)` pair, so the
-            // row's single leaf is its own token's `r`; `w` is per channel and
-            // constant down the tokens, so the row reads channels `res + j a`.
-            let rblk: Vec<u16> =
-                (0..rows1).map(|m| crate::glue::canon(rcol[m % t.tokens])).collect();
+            // stream II: a row is one `(residue, token)` pair, so its single
+            // group-1 leaf is its own token's sum of squares -- the reduction's
+            // published answer, not a committed `r`.  `w` is per channel and
+            // constant down the tokens, so the row reads channels `res + j a`;
+            // it is preprocessed now, so it is `pre` and not a group.
+            let msblk: Vec<u16> =
+                (0..rows1).map(|m| crate::glue::canon(ms_out[k][m % t.tokens])).collect();
             // B11 stream L, anatomy: the same shape of serial gather as the
             // SwiGLU's below -- `rows1 * nreal` canonicalisations, one row
             // independent of the next.
@@ -2334,9 +2419,18 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                     row[j] = crate::glue::canon(wcol[res + j * t.a]);
                 }
             });
+            // stream II's control 3: one norm-weight cell bent on the prover
+            // side.  It is preprocessed, so the constraint set stays satisfied
+            // and the *root* moves -- `root_ok` against the statement's
+            // `pre_root` is what rejects it, and the record says so.
+            if let Some(x) = tamper.glue_w.filter(|_| k == 0) {
+                let at = x % wblk.len();
+                wblk[at] ^= 1;
+                eprintln!("compose: norm weight cell {at} of {tag} bent (a rejection is the pass)");
+            }
             crate::util::m4_add("gen/glue_wblk", t_wb.elapsed().as_secs_f64());
-            let w = crate::glue::GlueWitness::new(
-                rows1, vec![tail_in[k].clone(), rblk, wblk], &prog, plan.round,
+            let w = crate::glue::GlueWitness::with_pre(
+                rows1, vec![tail_in[k].clone(), msblk], wblk, &prog, plan.round,
                 format!("B1 norm{} tail [{} x {}]", k + 1, t.tokens, t.d));
             let tam = tamper.glue.filter(|(ri, _)| *ri == i).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
@@ -2355,6 +2449,26 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                                      "mismatch": bad}));
             } else {
                 mismatch.push(json!({"column": wname, "values": 0,
+                                     "mismatch": serde_json::Value::Null,
+                                     "note": "the dump does not carry this column"}));
+            }
+            // stream II: and the derived `r` itself, against B1's own
+            // `n1_out`/`n2_out`.  The tail no longer commits `r`, so this is the
+            // one number that says the `NormR` table reproduces the model: a
+            // dump whose norm reduction is B1's fp32 accumulation rather than
+            // its balanced tree (`reduce = "fp32"`) will differ here, and the
+            // `x_q`/`x_gate` count above will differ with it.
+            if rcol.len() >= t.tokens {
+                let rbad = (0..t.tokens)
+                    .filter(|tt| {
+                        let got = crate::glue::un_image(un_r,
+                                                        crate::glue::canon(ms_out[k][*tt]));
+                        crate::glue::canon(got) != crate::glue::canon(rcol[*tt])
+                    })
+                    .count();
+                mismatch.push(json!({"column": rname, "values": t.tokens, "mismatch": rbad}));
+            } else {
+                mismatch.push(json!({"column": rname, "values": 0,
                                      "mismatch": serde_json::Value::Null,
                                      "note": "the dump does not carry this column"}));
             }
@@ -4194,7 +4308,13 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         Some(g) => (
             g.eqs
                 .iter()
-                .map(|((ra, ta), (rb, tb))| claims.glue_ties[*ra][*ta] == claims.glue_ties[*rb][*tb])
+                .map(|e| {
+                    // stream II: `a == factor * b`, the factor being the plan's
+                    // own geometric sum over the tail's `a` rows per token.
+                    // With no factor this is the equality it always was.
+                    unqm(claims.glue_ties[e.a.0][e.a.1])
+                        == e.factor(w_glue) * unqm(claims.glue_ties[e.b.0][e.b.1])
+                })
                 .collect(),
             Some(claims.glue_ties[g.stream_in.0][g.stream_in.1]),
             Some(claims.glue_ties[g.stream_out.0][g.stream_out.1]),
