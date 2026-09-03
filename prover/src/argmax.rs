@@ -95,6 +95,15 @@ pub struct ATie {
     pub k_in: SecureField,
     pub k_bd: SecureField,
     pub claimed: SecureField,
+    /// Stream KK: the second accumulator's step -- one factor of `w` per token,
+    /// which is what makes the emitted tokens a *named value* of the head
+    /// chunk's statement rather than a committed column nobody outside the
+    /// proof can address.  `verify_composed` recomputes this claim from the
+    /// statement's published `tok_out` and compares; `bounds-grid` then reads
+    /// the vector, position by position, against the ids the next block's
+    /// embedding chunk consumed (`notes/witness-slack.md` §5 item 2).
+    pub k_tok: SecureField,
+    pub claimed_tok: SecureField,
     pub tag: String,
 }
 
@@ -206,7 +215,7 @@ impl FrameworkEval for ArgmaxEval {
             f = f + s.clone();
         }
         eval.add_constraint(ss.clone() - ss_prev * nofirst - f);
-        let want = if self.lax { E::F::one() } else { tk };
+        let want = if self.lax { E::F::one() } else { tk.clone() };
         if !self.lax {
             // The all-ones indicator is the one assignment the chain and the
             // closing sum both accept with `tok = vocab` -- no selector fires,
@@ -235,9 +244,26 @@ impl FrameworkEval for ArgmaxEval {
             for (i, k) in ks.iter().enumerate() {
                 f += k.clone() * t.w[i];
             }
-            let mult: E::EF = E::EF::from(oin) * t.k_in + E::EF::from(obd) * t.k_bd;
-            eval.add_constraint(u.clone() - u_prev * mult - f * oact);
-            eval.add_constraint((u - t.claimed) * end);
+            let mult: E::EF =
+                E::EF::from(oin.clone()) * t.k_in + E::EF::from(obd.clone()) * t.k_bd;
+            eval.add_constraint(u.clone() - u_prev * mult.clone() - f * oact.clone());
+            eval.add_constraint((u - t.claimed) * end.clone());
+
+            // stream KK: the same shape over the emitted token, one step per
+            // token instead of one per row -- `oin` carries the accumulator
+            // unchanged inside a token, `obd` multiplies by `w` at the row that
+            // begins one, and the id is added exactly there.  The committed
+            // `tk` is the one the region's own closing sum pins to the
+            // lowest-indexed maximum, so this claim is a Horner image of the
+            // proved argmax and of nothing else.
+            let kmult: E::EF = E::EF::from(oin.clone()) + E::EF::from(obd) * t.k_tok;
+            let [g_prev, g] =
+                eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+            eval.add_constraint(
+                g.clone() - g_prev * kmult
+                    - E::EF::from(tk.clone() * (E::F::one() - oin) * oact),
+            );
+            eval.add_constraint((g - t.claimed_tok) * end);
         } else {
             let _ = end;
         }
@@ -480,9 +506,27 @@ pub struct ARegion {
     pub off_table: usize,
     /// the committed keys, row-major over `(row, slot)` -- the tie's Horner input
     pub keys: Vec<u32>,
+    /// stream KK: the committed token per *row*, zero on an inert lead row --
+    /// the second tie's Horner input, and the vector the head chunk publishes
+    pub toks: Vec<u32>,
     pub col_pm: usize,
     pub k0: usize,
     pub b0: usize,
+}
+
+impl ARegion {
+    /// Stream KK: the emitted token of every position, in position order.  The
+    /// rows walk the tokens descending, so this reads them back off the
+    /// committed column rather than assuming an order.
+    pub fn token_ids(&self, tokens: usize) -> Vec<u32> {
+        let mut out = vec![0u32; tokens];
+        for j in 0..1usize << self.lay.log_rows {
+            if let Some((t, _)) = self.lay.at_opt(tokens, j) {
+                out[t] = self.toks[j];
+            }
+        }
+        out
+    }
 }
 
 pub fn region(w: &AWitness, lax: bool, lay: MatLayout, m_rk: &mut [u32],
@@ -490,6 +534,7 @@ pub fn region(w: &AWitness, lax: bool, lay: MatLayout, m_rk: &mut [u32],
     let pr = lay.per_row;
     let rows = 1usize << lay.log_rows;
     let mut keys = vec![0u32; rows * pr];
+    let mut toks = vec![0u32; rows];
     let (mut tok, mut pm) = w.tampered(bad);
     // stream E: a key changed, and the row's own maximum and token move with it,
     // so nothing inside the region notices
@@ -534,6 +579,7 @@ pub fn region(w: &AWitness, lax: bool, lay: MatLayout, m_rk: &mut [u32],
         }
         cols[col_pm][j] = m31_u32(pm[t]);
         cols[col_tk][j] = m31_u32(tok[t]);
+        toks[j] = tok[t];
         for sl in 0..pr {
             // the walk ascends the vocabulary: rows carry blocks in increasing
             // index order even though `MatLayout` numbers its chunks the other way
@@ -574,7 +620,7 @@ pub fn region(w: &AWitness, lax: bool, lay: MatLayout, m_rk: &mut [u32],
     ];
 
     let base: Vec<Eval> = cols.into_iter().map(|c| eval_of(lay.log_rows, c)).collect();
-    ARegion { lay, pre, base, off_table, keys, col_pm, k0, b0 }
+    ARegion { lay, pre, base, off_table, keys, toks, col_pm, k0, b0 }
 }
 
 /// The region's LogUp columns and its use sum, in the order the AIR adds the
@@ -594,9 +640,14 @@ pub fn logup(r: &ARegion, lax: bool, rk: &RangeRel) -> (Vec<Eval>, SecureField) 
 /// Stream E: the tie's accumulator column, and the value it closes on.  The
 /// weights are the mirror of the head dequant's output side, and an inert row
 /// contributes nothing on either side.
-pub fn tie_col(r: &ARegion, tokens: usize, t: &ATie) -> (Vec<Eval>, SecureField) {
+pub fn tie_col(r: &ARegion, tokens: usize, t: &ATie) -> (Vec<Eval>, SecureField, SecureField) {
     let rows = 1usize << r.lay.log_rows;
     let mut u = vec![SecureField::zero(); rows];
+    // stream KK: the second accumulator, one step per token over the committed
+    // `tk`.  Its multipliers are the same three preprocessed selectors the key
+    // tie reads (`oin`, `obd`, `oact`), so the two cannot disagree about which
+    // row begins a token.
+    let mut g = vec![SecureField::zero(); rows];
     for j in 0..rows {
         let mut f = SecureField::zero();
         if r.lay.at_opt(tokens, j).is_some() {
@@ -604,18 +655,29 @@ pub fn tie_col(r: &ARegion, tokens: usize, t: &ATie) -> (Vec<Eval>, SecureField)
                 f += SecureField::from(m31_u32(r.keys[j * r.lay.per_row + sl])) * t.w[sl];
             }
         }
-        let mult = if j == 0 {
-            SecureField::zero()
+        let first = matches!(r.lay.at_opt(tokens, j), Some((_, b)) if b + 1 == r.lay.chunks);
+        let active = r.lay.at_opt(tokens, j).is_some();
+        let oin = j > 0 && active && !first;
+        let obd = j > 0 && first;
+        let mult = if oin { t.k_in } else if obd { t.k_bd } else { SecureField::zero() };
+        let kmult = if oin {
+            SecureField::one()
+        } else if obd {
+            t.k_tok
         } else {
-            match r.lay.at_opt(tokens, j) {
-                Some((_, b)) if b + 1 == r.lay.chunks => t.k_bd,
-                Some(_) => t.k_in,
-                None => SecureField::zero(),
-            }
+            SecureField::zero()
+        };
+        let add = if active && !oin {
+            SecureField::from(m31_u32(r.toks[j]))
+        } else {
+            SecureField::zero()
         };
         u[j] = if j == 0 { f } else { u[j - 1] * mult + f };
+        g[j] = if j == 0 { add } else { g[j - 1] * kmult + add };
     }
-    (crate::attn_trace::secure_cols_pub(r.lay.log_rows, &u), u[rows - 1])
+    let mut cols = crate::attn_trace::secure_cols_pub(r.lay.log_rows, &u);
+    cols.extend(crate::attn_trace::secure_cols_pub(r.lay.log_rows, &g));
+    (cols, u[rows - 1], g[rows - 1])
 }
 
 pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
@@ -681,4 +743,43 @@ pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
     (Outcome { proven, sums: Sums { uses: use_sum, tables: tsum }, cells,
                n_cols: n_cols_out, off_table, lax },
      lay)
+}
+
+// ------------------------------------------------------------------- tests ----
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stream KK (`notes/witness-slack.md` section 5 item 2): the sum
+    /// `verify_composed` recomputes from the statement's published `tok_out` is
+    /// the claim the region publishes.  The argmax's rows walk the positions
+    /// *descending*, so the exponents are the mirror of the embedding's and
+    /// this is where that is checked rather than argued.
+    #[test]
+    fn the_published_tokens_recompute_the_claim() {
+        for (tokens, vocab, target) in [(8usize, 40usize, 8usize),
+                                        (16, 97, 16),
+                                        (4, 300, 32)] {
+            let w = AWitness::synthetic(tokens, vocab, 0.25, 5);
+            let lay = MatLayout::choose_padded(vocab, tokens, target);
+            let mut m_rk = vec![0u32; 1 << KEY_BITS];
+            let r = region(&w, false, lay, &mut m_rk, None);
+            let ch = SecureField::from_m31_array(
+                [m31_u32(61), m31_u32(67), m31_u32(71), m31_u32(73)]);
+            let tie = ATie { w: vec![SecureField::zero(); lay.per_row],
+                             k_in: SecureField::zero(), k_bd: SecureField::zero(),
+                             claimed: SecureField::zero(), k_tok: ch,
+                             claimed_tok: SecureField::zero(), tag: String::new() };
+            let (_, _, claimed) = tie_col(&r, tokens, &tie);
+            let toks = r.token_ids(tokens);
+            assert_eq!(toks, w.tok, "the published tokens are the region's");
+            // exactly `verify_composed`'s `horner(.., false)`
+            let mut acc = SecureField::zero();
+            for v in toks.iter().rev() {
+                acc = acc * ch + SecureField::from(m31_u32(*v));
+            }
+            assert_eq!(acc, claimed, "tokens={tokens} vocab={vocab} target={target}");
+        }
+    }
 }

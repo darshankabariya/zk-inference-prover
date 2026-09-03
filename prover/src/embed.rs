@@ -44,6 +44,25 @@
 //! **The table side** (`EmbTableEval`), one row per `(vocabulary entry, channel
 //! block)`: `pe` preprocessed value columns and one committed multiplicity.
 //!
+//! # The padded rows, and why they carry an out-of-range block index
+//!
+//! The vocabulary is not a power of two (Llama-3.1-8B has 128,256 entries, so
+//! `vpad = 131,072`) and the table's row count must be, so `2^log_tab` always
+//! holds rows for ids no model can emit.  Stream KK closes what that left open
+//! (`notes/witness-slack.md` §1a): before it, a padded row was a legal, distinct
+//! table row `(v_pad, cb, 0, .., 0)`, so a prover could commit `tk = v_pad` with
+//! an all-zero stream row, put the multiplicity on the padded row, and prove a
+//! block whose id names no vocabulary entry.
+//!
+//! The fix is one preprocessed value: a padded row's block index is `k`, which
+//! is **out of the use side's range**.  `cb` on the use side is preprocessed
+//! (`j % k`, one of the region's five preprocessed columns), so no use row can
+//! ever present `k` in that slot, so a padded row is not the tuple of any use
+//! row, so its multiplicity must be zero for the LogUp sums to cancel.  That
+//! confines `tk` to `[0, vocab)` at zero marginal cost: no column, no
+//! constraint, no arity change and no new kernel fingerprint.  Tree 0's values
+//! move, so `pre_root` and the digest of an `--embed` chunk move with them.
+//!
 //! # What the lookup carries, and why one cell per channel is enough
 //!
 //! The tuple is `(v, cb, y_0 .. y_{pe-1})` with `y_k = PACK sm_k + ef_k` --
@@ -409,6 +428,13 @@ pub enum Tamper {
     /// match it -- every internal check passes and the pinned preprocessed root
     /// is what rejects
     Table(usize),
+    /// stream KK, `notes/witness-slack.md` §1a's **before** arm: build the table
+    /// the way it was built before the sentinel, with every padded row carrying
+    /// its own block index and therefore matchable.  Not a corruption of an
+    /// honest witness -- it is the open table, and on a witness whose id is a
+    /// padded one (`EWitness::padded`) it is what *accepts*.  Pairing it with
+    /// the same witness under `None` is the control that shows the fix bites.
+    LegacyPad,
 }
 
 pub struct EWitness {
@@ -452,6 +478,28 @@ impl EWitness {
             xin[t * d..(t + 1) * d].copy_from_slice(&tab[v * d..(v + 1) * d]);
         }
         Self { tokens, d, vocab, tab, tok, xin, source: format!("synthetic(seed={seed})") }
+    }
+
+    /// Stream KK, `notes/witness-slack.md` §1a: the witness the open statement
+    /// admitted.  Position `at` commits an id in `[vocab, vpad)` -- outside the
+    /// vocabulary, inside the table -- and an all-zero stream row, which is the
+    /// row `glue::split(0)` gives and the row the padded table entry held.
+    /// Every other position is honest.
+    ///
+    /// This is not a corruption: every constraint the region carries holds on
+    /// it, and before the sentinel the lookup cancelled.  It is a legal witness
+    /// for a false statement, which is why it is built here rather than in
+    /// `Tamper`.
+    pub fn padded(tokens: usize, d: usize, vocab: usize, target: usize, seed: u64, at: usize)
+                  -> Self {
+        let lay = EmbLayout::choose(d, tokens, vocab, target);
+        assert!(lay.vpad > vocab, "this vocabulary needs no padding: {vocab} = 2^k");
+        let mut w = Self::synthetic(tokens, d, vocab, seed);
+        let at = at % tokens;
+        w.tok[at] = vocab as u32;
+        w.xin[at * d..(at + 1) * d].fill(0);
+        w.source = format!("synthetic(seed={seed}) with the padded id {vocab} at position {at}");
+        w
     }
 
     /// The real columns a `Layer` holds.  The check is the statement's own
@@ -561,7 +609,7 @@ pub fn region(w: &EWitness, lay: EmbLayout, m_ef: &mut [u32], bad: Option<Tamper
             let q = i % xin.len();
             xin[q] ^= 1;
         }
-        Some(Tamper::Table(_)) | None => {}
+        Some(Tamper::Table(_)) | Some(Tamper::LegacyPad) | None => {}
     }
 
     // ---- the use side --------------------------------------------------------
@@ -601,11 +649,16 @@ pub fn region(w: &EWitness, lay: EmbLayout, m_ef: &mut [u32], bad: Option<Tamper
 
     // ---- the table side ------------------------------------------------------
     let trows = 1usize << lay.log_tab;
+    let legacy_pad = matches!(bad, Some(Tamper::LegacyPad));
     let mut tcols: Vec<Vec<M31>> = vec![vec![M31::zero(); trows]; pe + 2];
     for n in 0..trows {
         let (v, cb) = (n / k, n % k);
         tcols[0][n] = m31_u32(v as u32);
-        tcols[1][n] = m31_u32(cb as u32);
+        // §1a: a padded row's block index is `k`, which the use side's
+        // preprocessed `cb` (`j % k`) can never present -- so a padded row is
+        // the tuple of no use row and its multiplicity must be zero.  The probe
+        // arm restores the pre-KK value, under which the row is matchable.
+        tcols[1][n] = m31_u32(if v >= w.vocab && !legacy_pad { k as u32 } else { cb as u32 });
         if v >= w.vocab {
             continue;
         }
@@ -627,6 +680,13 @@ pub fn region(w: &EWitness, lay: EmbLayout, m_ef: &mut [u32], bad: Option<Tamper
 }
 
 impl ERegion {
+    /// Stream KK: the committed id of every position, in position order -- the
+    /// vector the statement publishes and `bounds-grid` compares against the
+    /// previous block's proved argmax.  Read off the committed column, so it is
+    /// the region's own ids and not the witness's.
+    pub fn token_ids(&self) -> Vec<u32> {
+        (0..self.tokens).map(|t| self.ids[t * self.lay.k]).collect()
+    }
     /// Committed cells, both sides.
     pub fn base_cells(&self) -> usize {
         self.base.len() * (1usize << self.lay.log_use) + (1usize << self.lay.log_tab)
@@ -956,6 +1016,87 @@ mod tests {
         assert_eq!(got, want);
     }
 
+
+    /// Stream KK, `notes/witness-slack.md` §1a, both arms, on tuples and not on
+    /// field sums: with the pre-KK table the padded id's use row **is** a table
+    /// row, so the lookup has something to cancel against; with the sentinel it
+    /// is not the tuple of any row of the table at all, so the multiplicity has
+    /// nowhere to go.  The proving half of the same pair is
+    /// `embed-probes`' `pad` / `pad_legacy` rows.
+    #[test]
+    fn a_padded_id_is_a_table_row_only_before_the_sentinel() {
+        let (d, tokens, vocab, target) = (96usize, 8usize, 40usize, 24usize);
+        let lay = EmbLayout::choose(d, tokens, vocab, target);
+        assert!(lay.vpad > vocab);
+        let w = EWitness::padded(tokens, d, vocab, target, 11, 3);
+        // the committed columns are in the domain's own order, so the rows are
+        // read as sets: every use tuple whose id is the padded one, against
+        // every row of the table.
+        let cells = |e: &Eval| -> Vec<M31> {
+            e.data.iter().flat_map(|p| p.to_array()).collect()
+        };
+        for legacy in [true, false] {
+            let mut m_ef = vec![0u32; 1 << EF_BITS];
+            let r = region(&w, lay, &mut m_ef, legacy.then_some(Tamper::LegacyPad));
+            let (ur, tr) = (1usize << lay.log_use, 1usize << lay.log_tab);
+            let (tk, cb) = (cells(&r.base[0]), cells(&r.pre[4]));
+            let act = cells(&r.pre[0]);
+            let vals: Vec<Vec<M31>> = (0..lay.pe)
+                .map(|sl| {
+                    let (sm, ef) = (cells(&r.base[1 + 2 * sl]), cells(&r.base[2 + 2 * sl]));
+                    (0..ur).map(|j| sm[j] * m31_u32(PACK as u32) + ef[j]).collect()
+                })
+                .collect();
+            let tcols: Vec<Vec<M31>> = r.tab_pre.iter().map(&cells).collect();
+            let tab: Vec<Vec<M31>> = (0..tr)
+                .map(|n| tcols.iter().map(|c| c[n]).collect())
+                .collect();
+            let mut seen = 0usize;
+            for j in 0..ur {
+                if act[j] == M31::zero() || tk[j] != m31_u32(vocab as u32) {
+                    continue;
+                }
+                seen += 1;
+                let mut want = vec![tk[j], cb[j]];
+                want.extend((0..lay.pe).map(|sl| vals[sl][j]));
+                let found = tab.iter().filter(|row| **row == want).count();
+                assert_eq!(found, usize::from(legacy),
+                           "legacy={legacy}: the padded id's tuple matched {found} table row(s)");
+            }
+            assert_eq!(seen, lay.k, "the padded position takes one row per channel block");
+        }
+    }
+
+    /// Stream KK, `notes/witness-slack.md` section 1b: the sum
+    /// `verify_composed` recomputes from the statement's published ids is the
+    /// claim the region publishes, at four shapes.  One line in the verifier
+    /// rests on this; if the two conventions ever drift, it fails here rather
+    /// than on a box, and a chunk that is honest reads as one that is not.
+    #[test]
+    fn the_published_ids_recompute_the_claim() {
+        for (d, tokens, vocab, target) in [(96usize, 8usize, 40usize, 24usize),
+                                           (128, 16, 97, 32),
+                                           (64, 16, 33, 64),
+                                           (128, 4, 300, 16)] {
+            let w = EWitness::synthetic(tokens, d, vocab, 17);
+            let lay = EmbLayout::choose(d, tokens, vocab, target);
+            let mut m_ef = vec![0u32; 1 << EF_BITS];
+            let r = region(&w, lay, &mut m_ef, None);
+            let ch = SecureField::from_m31_array(
+                [m31_u32(43), m31_u32(47), m31_u32(53), m31_u32(59)]);
+            let t = tie_w(ch, SecureField::one(), d, tokens, &lay);
+            let (_, _, claimed) = tie_cols(&r, &t);
+            // exactly `verify_composed`'s `horner(.., true)`
+            let ids = r.token_ids();
+            assert_eq!(ids.len(), tokens);
+            assert_eq!(ids, w.tok, "the published ids are the witness's");
+            let mut acc = SecureField::zero();
+            for v in &ids {
+                acc = acc * ch + SecureField::from(m31_u32(*v));
+            }
+            assert_eq!(acc, claimed, "d={d} tokens={tokens} vocab={vocab}");
+        }
+    }
 
     /// A `Params` with the wiring family and nothing else optional: the smallest
     /// statement the gadget can ride on.

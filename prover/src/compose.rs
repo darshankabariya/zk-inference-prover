@@ -297,6 +297,31 @@ pub struct Fixed {
     pub sizes: Vec<Vec<u32>>,
     /// the pinned root of tree 0: tables, selectors, weights and scales
     pub pre_root: String,
+    /// Stream KK: which layer of the model this chunk proves, and which token
+    /// block.  Declared -- like `pre_root`, and pinned to the model only when
+    /// stream LL derives the expected tree-0 root per (layer, shape) -- but
+    /// *compared*: `bounds::chain_of` demands `layer_b == layer_a + 1` on a
+    /// layer edge and `block_b == block_a + 1` on a token edge, and
+    /// `bounds-grid` takes the grid coordinate from here rather than from the
+    /// tag.  `None` on a statement written before the field existed, which is
+    /// why the comparisons are conditional on both sides declaring one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<usize>,
+    /// Stream KK (`notes/witness-slack.md` §1b): the token ids the embedding
+    /// region committed, one per position of this block, in position order.
+    /// `verify_composed` recomputes the Horner claim over them under the
+    /// chunk's own replayed `w` and compares it against `claims.embed_tok`, so
+    /// this vector is the proof's ids and not a second, free-standing
+    /// declaration.  Empty on a chunk with no embedding region.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tok_in: Vec<u32>,
+    /// Stream KK (§5 item 2): the tokens the `lm_head` chunk's argmax region
+    /// emitted, one per position, pinned the same way against
+    /// `claims.head_tok`.  Empty on a chunk without `--head-argmax`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tok_out: Vec<u32>,
 }
 
 /// The prover-supplied half: every claimed value the identities compare.
@@ -331,6 +356,12 @@ pub struct Claims {
     /// `head_key` is what says it compared the head's own output
     #[serde(default)]
     pub am_key: Vec<[u32; 4]>,
+    /// stream KK: the argmax region's claim over the tokens it emitted, under
+    /// the same `w` its key claim uses.  The counterparty is not another claim
+    /// inside this proof but the statement's own `tok_out`, which the verifier
+    /// recomputes it from.
+    #[serde(default)]
+    pub head_tok: Vec<[u32; 4]>,
     /// stream BB: the embedding region's Horner claim over the residual stream
     /// it proved.  Equal to `glue_ties[stream_in]` is what says the row it
     /// proved is the row the layer consumed.
@@ -391,6 +422,9 @@ impl Claims {
         // the transcript is unchanged without it
         v.extend(self.embed_out.iter().map(|x| unqm(*x)));
         v.extend(self.embed_tok.iter().map(|x| unqm(*x)));
+        // stream KK, appended after both, for the same reason: a chunk without
+        // `--head-argmax` mixes exactly what it mixed before
+        v.extend(self.head_tok.iter().map(|x| unqm(*x)));
         v
     }
 }
@@ -1804,6 +1838,8 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         let m = &plan.p.mats[mi];
         let tie = crate::argmax::ATie {
             claimed: claims.am_key.first().copied().map(unqm).unwrap_or(SecureField::zero()),
+            claimed_tok: claims.head_tok.first().copied().map(unqm)
+                .unwrap_or(SecureField::zero()),
             tag: m.name.clone(),
             ..argmax_tie_w(w_glue, m.tokens, m.n_out, lay.per_row)
         };
@@ -1875,6 +1911,9 @@ fn argmax_tie_w(w: SecureField, tokens: usize, vocab: usize, per_row: usize)
         k_in: wpow(w, pr * tok),
         k_bd: wpow(w, -((v - pr) * tok + 1)),
         claimed: SecureField::zero(),
+        // stream KK: the token accumulator's step is `w` itself, one per token
+        k_tok: w,
+        claimed_tok: SecureField::zero(),
         tag: String::new(),
     }
 }
@@ -3597,12 +3636,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         let m = &plan.p.mats[mi];
         let tie = crate::argmax::ATie {
             claimed: SecureField::zero(),
+            claimed_tok: SecureField::zero(),
             tag: m.name.clone(),
             ..argmax_tie_w(w_glue, m.tokens, m.n_out, plan.mat_lays[mi].per_row)
         };
-        let (tcols, claimed) = crate::argmax::tie_col(r, m.tokens, &tie);
+        let (tcols, claimed, claimed_tok) = crate::argmax::tie_col(r, m.tokens, &tie);
         inter_all.extend(crate::device::host_cols(tcols));
         claims.am_key.push(qm(claimed));
+        claims.head_tok.push(qm(claimed_tok));
         let (lcols, use_sum) =
             crate::argmax::logup(r, plan.p.head_argmax_lax,
                                  rels.range(crate::argmax::KEY_BITS));
@@ -3876,6 +3917,20 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             .as_ref()
             .map(|pf| format!("{:?}", pf.commitments[0]))
             .unwrap_or_default(),
+        // stream KK: the chunk's own coordinate, off the dump's manifest (or
+        // the `--layer` / `--block` overrides a plan line carries for a chunk
+        // whose manifest cannot know where the grid puts it, the `lm_head`
+        // chunk being the one that cannot).
+        layer: layer.layer,
+        block: layer.block,
+        // stream KK: the ids the embedding region committed, one per position,
+        // and the tokens the argmax region emitted -- published so that a
+        // reader of two chunks can compare them position by position.  Each is
+        // pinned inside its own proof by the Horner claim beside it.
+        tok_in: emb_region.as_ref().map(|r| r.token_ids()).unwrap_or_default(),
+        tok_out: am_region.as_ref()
+            .map(|r| r.token_ids(p.mats[plan.argmax_mat().expect("the head matmul")].tokens))
+            .unwrap_or_default(),
     };
     Composed {
         proof,
@@ -3935,6 +3990,17 @@ pub struct Verdict {
     /// `stream_in` claim -- "the residual stream this layer consumed is row
     /// `tok[t]` of the pinned embedding matrix".  True when the gadget is off.
     pub embed_ok: bool,
+    /// stream KK (`notes/witness-slack.md` §1b): the ids the statement publishes
+    /// are the ids the proof committed -- the Horner sum of `fixed.tok_in`
+    /// under this chunk's own replayed `w` equals `claims.embed_tok`.  A
+    /// probabilistic binding over a post-commitment challenge (§0), not a
+    /// constraint.  True when the gadget is off *and* the statement publishes
+    /// no ids; an embedding chunk that publishes none is rejected.
+    pub embed_tok_ok: bool,
+    /// stream KK (§5 item 2): the same for the head chunk's emitted tokens --
+    /// `fixed.tok_out` against `claims.head_tok`.  True when `--head-argmax` is
+    /// off and nothing is published.
+    pub head_tok_ok: bool,
     /// the layer's committed residual-stream input and output claims
     pub stream_in: Option<[u32; 4]>,
     pub stream_out: Option<[u32; 4]>,
@@ -3974,12 +4040,14 @@ impl Verdict {
 
             && self.walk_ok.iter().all(|x| *x) && self.glue_ok.iter().all(|x| *x)
             && self.deq_out_ok.iter().all(|x| *x) && self.head_tie_ok && self.embed_ok
+            && self.embed_tok_ok && self.head_tok_ok
     }
     fn rejected(msg: &str) -> Self {
         Self { stark_ok: false, root_ok: false, sums_cancel: false, qk_ok: vec![],
                den_ok: vec![], av_ok: false, den_link_ok: false, walk_ok: vec![],
                sizes_ok: false, glue_ok: vec![false], deq_out_ok: vec![false],
                head_tie_ok: false, embed_ok: false,
+               embed_tok_ok: false, head_tok_ok: false,
                stream_in: None, stream_out: None,
                bound_roots: vec![], bound_sides: vec![],
                error: Some(msg.to_string()), verify_secs: 0.0 }
@@ -4018,6 +4086,8 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         // stream BB: one claim each, or none at all
         || claims.embed_out.len() != usize::from(plan.emb.is_some())
         || claims.embed_tok.len() != usize::from(plan.emb.is_some())
+        // stream KK: the head's token claim, exactly when the argmax is composed
+        || claims.head_tok.len() != usize::from(plan.argmax_mat().is_some())
     {
         return Verdict::rejected("claims shape mismatch");
     }
@@ -4237,8 +4307,46 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         (None, _) => true,
     };
 
+    // stream KK: the published token vectors against the claims that pin them.
+    // Both are Horner images under `w_glue`, which is drawn after tree 1 -- so
+    // the ids were fixed before the challenge existed and a second vector with
+    // the same image is a collision, not a choice (`notes/witness-slack.md`
+    // §0's probabilistic binding).  The conventions are each region's own: the
+    // embedding walks its positions ascending, the argmax's rows walk them
+    // descending, so the two exponents are mirrored and this is where that is
+    // written down.
+    let horner = |ids: &[u32], asc: bool| -> SecureField {
+        let mut acc = SecureField::zero();
+        if asc {
+            for v in ids {
+                acc = acc * w_glue + SecureField::from(m31_u32(*v));
+            }
+        } else {
+            for v in ids.iter().rev() {
+                acc = acc * w_glue + SecureField::from(m31_u32(*v));
+            }
+        }
+        acc
+    };
+    let embed_tok_ok = match &plan.emb {
+        Some(_) => {
+            fixed.tok_in.len() == p.s
+                && claims.embed_tok.first().map(|c| unqm(*c))
+                    == Some(horner(&fixed.tok_in, true))
+        }
+        None => fixed.tok_in.is_empty(),
+    };
+    let head_tok_ok = match plan.argmax_mat() {
+        Some(mi) => {
+            fixed.tok_out.len() == p.mats[mi].tokens
+                && claims.head_tok.first().map(|c| unqm(*c))
+                    == Some(horner(&fixed.tok_out, false))
+        }
+        None => fixed.tok_out.is_empty(),
+    };
+
     Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
-              head_tie_ok, embed_ok,
+              head_tie_ok, embed_ok, embed_tok_ok, head_tok_ok,
               sizes_ok, glue_ok, stream_in, stream_out, bound_roots, bound_sides, error,
               verify_secs: t0.elapsed().as_secs_f64() }
 }

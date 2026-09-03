@@ -635,15 +635,54 @@ fn embed_probes_cmd(args: &[String]) {
     // The table probe is the pinned-root probe and the standalone harness has no
     // pinned root to check against, so it is *expected to accept here* and the
     // composed run is where it bites. Running it anyway is what says so.
-    let (o, lay) = embed::run(&w, target, Some(embed::Tamper::Table(4321)));
+    // Stream KK: the cell is chosen in a row *no token uses*, so the rebuilt
+    // witness is the honest one value for value and the pinned root is the only
+    // thing that can see the change.  A cell in a used row makes the stream
+    // differ from the layer's, which the tie catches first -- a rejection for
+    // the wrong reason, and one that came and went with the witness's draw.
+    let unused = (0..w.vocab as u32).find(|v| !w.tok.contains(v)).unwrap_or(0) as usize;
+    let (o, lay) = embed::run(&w, target, Some(embed::Tamper::Table(unused * w.d + 1)));
     out.push(json!({"probe": "one cell of the committed table changed, witness rebuilt",
                     "expect_reject_by": "the pinned preprocessed root (composed only)",
                     "rejected": !o.accepts(), "accepts_standalone": o.accepts(),
                     "result": o.json(&w, &lay)}));
     assert!(o.accepts(),
             "the table probe must be internally consistent -- only the pinned root sees it");
+    // Stream KK, `notes/witness-slack.md` section 1a, both arms of the same
+    // witness: a position whose committed id is a *padded* one, outside the
+    // vocabulary and inside the table, with the all-zero stream row that padded
+    // table row held.  Nothing here is corrupted -- every constraint the region
+    // carries holds -- so before the sentinel this accepted, and that is the
+    // whole item.  Both runs are made, because "it rejects now" is only half
+    // the claim.
+    let lay0 = embed::EmbLayout::choose(w.d, w.tokens, w.vocab, target);
+    if lay0.vpad == w.vocab {
+        out.push(json!({"probe": "a token id outside the vocabulary",
+                        "expect_reject_by": "the embedding lookup",
+                        "skipped": "this vocabulary is a power of two, so the table \
+                                    has no padded row and section 1a is vacuous here"}));
+        emit("embed_probes", json!({"probes": out, "tokens": w.tokens, "d": w.d,
+                                    "vocab": w.vocab, "vocab_padded": lay0.vpad}));
+        return;
+    }
+    let wp = embed::EWitness::padded(w.tokens, w.d, w.vocab, target, 23, 3);
+    let (o_open, lay) = embed::run(&wp, target, Some(embed::Tamper::LegacyPad));
+    out.push(json!({"probe": "a token id outside the vocabulary, with a zero stream \
+                              row, against the pre-KK table",
+                    "expect_reject_by": "nothing -- this is the open statement, and it accepts",
+                    "rejected": !o_open.accepts(), "accepts_before_the_fix": o_open.accepts(),
+                    "result": o_open.json(&wp, &lay)}));
+    let (o_shut, lay) = embed::run(&wp, target, None);
+    out.push(json!({"probe": "the same witness against the table this crate builds",
+                    "expect_reject_by": "the embedding lookup: a padded row carries the \
+                                         out-of-range block index k, is the tuple of no use \
+                                         row, and its multiplicity cannot cancel",
+                    "rejected": !o_shut.accepts(), "result": o_shut.json(&wp, &lay)}));
+    assert!(o_open.accepts(),
+            "the pre-KK table must accept the padded id -- that is what section 1a records");
+    assert!(!o_shut.accepts(), "the padded id must be rejected now");
     emit("embed_probes", json!({"probes": out, "tokens": w.tokens, "d": w.d,
-                                "vocab": w.vocab}));
+                                "vocab": w.vocab, "vocab_padded": lay0.vpad}));
 }
 
 // ----------------------------------------------------------------- compose ----
@@ -655,6 +694,23 @@ fn embed_probes_cmd(args: &[String]) {
 /// synthetic layer has `glue: None`, so a gate pointed at a dump the box did
 /// not hold came back `rc=0` with the whole glue battery skipped -- a pass that
 /// measured nothing (open item 17).
+/// Stream KK: the chunk's declared coordinate, `--layer N` / `--block N` over
+/// the manifest's own.
+///
+/// Not a switch on a check: the coordinate goes into the statement either way
+/// and `bounds-grid` compares it either way.  It is an override because one
+/// chunk's manifest cannot know where the grid puts it -- the `lm_head` chunk
+/// is extracted at some layer and proved *after* the last one, so its plan
+/// line says `--layer 32` and its block is the block it reads.
+fn coord_of(l: &mut layer::Layer, args: &[String]) {
+    if let Some(v) = arg_str(args, "--layer") {
+        l.layer = Some(v.parse().expect("--layer takes a layer index"));
+    }
+    if let Some(v) = arg_str(args, "--block") {
+        l.block = Some(v.parse().expect("--block takes a block index"));
+    }
+}
+
 pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     let vname = arg_strs(args, "--variants", &["intsplit6"])[0].clone();
     let variant = attn_witness::Variant::parse(&vname);
@@ -664,6 +720,7 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
         match layer::Layer::load(dir, &src, &bands, variant) {
             Ok(mut l) => {
                 tighten_of(&mut l, args);
+                coord_of(&mut l, args);
                 return (l, vname);
             }
             Err(e) => {
@@ -684,6 +741,7 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     // width, so this widens only the table domain and the o walk.
     l.attn_out_bits = arg_scalar(args, "--synth-ao-bits", l.attn_out_bits);
     tighten_of(&mut l, args);
+    coord_of(&mut l, args);
     (l, vname)
 }
 
@@ -905,10 +963,18 @@ pub fn ser_write(dir: &str, tag: &str, ser: &Ser) {
     std::fs::create_dir_all(dir).expect("the serialization directory");
     std::fs::write(format!("{dir}/{tag}.fixed.json"), &ser.fixed_bytes)
         .expect("writing the statement");
+    // Stream KK: the claims, which `verify_composed` needs and which nothing
+    // wrote before -- so `bounds-grid --verify` could not have verified a
+    // serialized chunk however hard it tried.  They are small (tens of KB
+    // beside a 50 MB proof) and they are a third of the document the verifier
+    // reads, so they are written beside the other two.
+    std::fs::write(format!("{dir}/{tag}.claims.json"), &ser.claims_bytes)
+        .expect("writing the claims");
     if let Some(b) = &ser.proof_bytes {
         std::fs::write(format!("{dir}/{tag}.proof.json"), b).expect("writing the proof");
     }
-    eprintln!("compose: statement and proof written to {dir}/{tag}.{{fixed,proof}}.json");
+    eprintln!("compose: statement, claims and proof written to \
+               {dir}/{tag}.{{fixed,claims,proof}}.json");
 }
 
 /// The statement and the proof as bytes.
@@ -1445,6 +1511,8 @@ fn layer_clone(l: &layer::Layer) -> layer::Layer {
         attn_out_bits: l.attn_out_bits,
         embed_tab: l.embed_tab.clone(),
         tok_in: l.tok_in.clone(),
+        layer: l.layer,
+        block: l.block,
         source: l.source.clone(),
     }
 }

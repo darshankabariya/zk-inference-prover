@@ -160,6 +160,14 @@ pub struct Layer {
     /// Stream BB: `tok_in.i32`, the vocabulary index of each of the block's
     /// positions.  These are the ids the gadget commits.
     pub tok_in: Option<Vec<u32>>,
+    /// Stream KK: where this dump sits in the model and in the sequence, off the
+    /// manifest's own `layer` and `block` (`extract.py` has written both since
+    /// stream DD).  They go into the statement, so the grid's coordinates are
+    /// the statement's and not the plan tag's.  `--layer` / `--block` override
+    /// them for a chunk whose manifest cannot know where the grid puts it --
+    /// the `lm_head` chunk, which sits after the last layer of its block.
+    pub layer: Option<usize>,
+    pub block: Option<usize>,
 }
 
 pub struct GlueCols {
@@ -699,6 +707,8 @@ impl Layer {
             attn_out_bits,
             embed_tab,
             tok_in,
+            layer: man["layer"].as_u64().map(|v| v as usize),
+            block: man["block"].as_u64().map(|v| v as usize),
         })
     }
 
@@ -944,7 +954,7 @@ impl Layer {
                ao: AttnOut { nh, s, hd, acc, den, jo, jv },
                source: format!("synthetic layer (seed={seed})"), glue: None,
                head_keys: None, head_tok: None, attn_out_bits: 8,
-               embed_tab: None, tok_in: None }
+               embed_tab: None, tok_in: None, layer: None, block: None }
     }
 }
 

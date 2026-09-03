@@ -288,6 +288,14 @@ pub struct ChainVerdict {
     pub present: bool,
     /// the two statements agree on everything that fixes the boundary layout
     pub shape_ok: bool,
+    /// Stream KK: the two statements' declared coordinates are the ones the
+    /// pair's own axis implies -- `layer_b == layer_a + 1` and one block on a
+    /// layer edge, one layer and `block_b == block_a + 1` on a token edge.
+    /// True when neither statement declares a coordinate (every proof written
+    /// before the field existed), false when only one does: a pair where one
+    /// side says where it is and the other does not is not a pair whose
+    /// coordinates were checked.
+    pub coord_ok: bool,
     /// the first chunk's output root equals the second's input root
     pub roots_equal: bool,
     pub out_root: Option<String>,
@@ -349,12 +357,16 @@ impl ChainVerdict {
                                             statements (`--bounds` was off)")
                 .or_else(|| need(v.shape_ok, "the two statements disagree about the residual \
                                               boundary's layout"))
+                .or_else(|| need(v.coord_ok, "the two statements' declared (layer, block) \
+                                              coordinates are not a layer edge"))
                 .or_else(|| need(v.roots_equal, "the first chunk's residual out root is not the \
                                                  second's in root")),
             Axis::Token => need(v.kv_present, "the K/V boundary is absent from one of the \
                                                statements (`--kv-bind` was off)")
                 .or_else(|| need(v.kv_shape_ok, "the two statements disagree about the K/V \
                                                  boundary's layout"))
+                .or_else(|| need(v.coord_ok, "the two statements' declared (layer, block) \
+                                              coordinates are not a token edge"))
                 .or_else(|| need(v.kv_roots_equal, "a head band group's out root is not its \
                                                     successor's in root")),
             Axis::None => Some(
@@ -370,6 +382,7 @@ impl ChainVerdict {
             axis: Axis::None,
             present: false,
             shape_ok: false,
+            coord_ok: false,
             roots_equal: false,
             out_root: None,
             in_root: None,
@@ -559,10 +572,25 @@ pub fn chain_of(
         _ => (false, false, vec![]),
     };
     let axis = axis_of(&fa.params, &fb.params);
+    // Stream KK: the coordinate the statement declares, compared on the pair's
+    // own axis.  `pre_root` is what would tie a declared layer to the model
+    // (stream LL); until then this says the two chunks agree about which edge
+    // they are, which is what the tag used to say on its own.
+    let step = |a: Option<usize>, b: Option<usize>, d: usize| match (a, b) {
+        (Some(a), Some(b)) => b == a + d,
+        (None, None) => true,
+        _ => false,
+    };
+    let coord_ok = match axis {
+        Axis::Layer => step(fa.layer, fb.layer, 1) && step(fa.block, fb.block, 0),
+        Axis::Token => step(fa.layer, fb.layer, 0) && step(fa.block, fb.block, 1),
+        Axis::None => false,
+    };
     let mut v = ChainVerdict {
         axis,
         present: glue_present,
         shape_ok,
+        coord_ok,
         roots_equal: glue_present && out_root == in_root,
         out_root,
         in_root,
@@ -938,6 +966,12 @@ struct GridChunk {
     layer: usize,
     fixed: Fixed,
     roots: Vec<String>,
+    /// stream KK: the `lm_head` chunk of its block.  It is on the grid -- it
+    /// has a coordinate and it is verified like every other chunk -- but it
+    /// carries no residual boundary today, so the link into it is a declared
+    /// end and not a link that failed (`notes/witness-slack.md` section 5 item
+    /// 3).
+    is_head: bool,
 }
 
 /// `bounds-grid`: every link of the (block, layer) grid, on both axes, from
@@ -951,11 +985,35 @@ struct GridChunk {
 ///   --allow-gaps                a missing block or layer only shrinks the implied count
 ///   --expect-layer-links N      pin the implied count from outside
 ///   --expect-token-links N
+///   --verify                    also run `verify_composed` on every chunk proof
+///   --prompt FILE               the declared prompt's ids (a JSON list, or an `ids` field)
+///   --expect-pre-roots FILE     the tree-0 root each (layer, prefix) must declare
 /// ```
 ///
 /// Exit status 0 only when every implied link ran and chained on its own
-/// axis, every tag sits where its statement says it sits, and the pinned
-/// counts (if given) are met; 1 otherwise, after the JSON is written.
+/// axis, every tag sits where its statement says it sits, every position's id
+/// is the declared prompt's or the previous position's proved argmax, the
+/// pinned counts (if given) are met, and -- under `--verify` -- every chunk
+/// proof verifies; 1 otherwise, after the JSON is written.
+///
+/// **Stream KK.**  Before `--verify` this command answered "the roots line up",
+/// which is not "the sequence is proved" (`notes/witness-slack.md` section 6):
+/// it never called `verify_composed`, so a chunk whose proof had been corrupted
+/// below its roots chained exactly as an honest one did.  `--verify` runs the
+/// verifier on every chunk of the plan and needs the third document
+/// `--ser-dir` writes, `<tag>.claims.json`; a directory serialized before
+/// stream KK does not have it, and the run says so per chunk rather than
+/// passing.
+///
+/// The token axis of the *sequence* -- as distinct from the K/V axis of the
+/// grid -- is checked here too, and unconditionally: every position of every
+/// block whose layer-0 chunk carries the embedding gadget is either a prompt
+/// position, whose id must equal the declared prompt's, or a generated one,
+/// whose id must equal the token the `lm_head` chunk proved for the position
+/// before it (within a block, and across the block seam at `t = 0`).  Both
+/// vectors are published in the statements and pinned there by
+/// `verify_composed` (`Fixed::tok_in`, `Fixed::tok_out`), so this comparison is
+/// between two proved values and not between two declarations.
 pub fn grid_cmd(args: &[String]) {
     let dir = crate::arg_str(args, "--dir").expect("bounds-grid needs --dir <serialized dir>");
     let allow_gaps = crate::flag(args, "--allow-gaps");
@@ -963,6 +1021,38 @@ pub fn grid_cmd(args: &[String]) {
         .map(|s| s.parse().expect("--expect-layer-links takes a count"));
     let expect_token: Option<usize> = crate::arg_str(args, "--expect-token-links")
         .map(|s| s.parse().expect("--expect-token-links takes a count"));
+    // stream KK: the verifier, and the one declaration the sequence still needs
+    let verify = crate::flag(args, "--verify");
+    let prompt: Option<Vec<u32>> = crate::arg_str(args, "--prompt").map(|f| {
+        let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--prompt {f}: {e}"));
+        let v: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("--prompt {f}: not JSON: {e}"));
+        let a = v.get("ids").unwrap_or(&v).as_array()
+            .unwrap_or_else(|| panic!("--prompt {f}: want a list of ids, or an `ids` field"))
+            .clone();
+        a.iter().map(|x| x.as_u64().expect("--prompt: an id is not a number") as u32).collect()
+    });
+    // Stream KK, the hook stream LL fills: a table of the tree-0 root each
+    // (layer, prefix width) is expected to declare.  `root_ok` compares a
+    // proof's commitment 0 against its *own* statement, so the statement's
+    // `pre_root` is a declaration; deriving it from the model for that chunk's
+    // shape is LL's, and this is where the derived table is compared.  The file
+    // is a list of `{"layer": k, "c": n, "pre_root": "..."}`.
+    let expect_pre: Option<Vec<Value>> = crate::arg_str(args, "--expect-pre-roots").map(|f| {
+        let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--expect-pre-roots {f}: {e}"));
+        let v: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("--expect-pre-roots {f}: not JSON: {e}"));
+        v.get("roots").unwrap_or(&v).as_array()
+            .unwrap_or_else(|| panic!("--expect-pre-roots {f}: want a list of \
+                                       {{layer, c, pre_root}}"))
+            .clone()
+    });
+    if verify && prompt.is_none() {
+        eprintln!("grid: --verify needs --prompt <file>: without the declared prompt no \
+                   position's id can be checked against anything, and a run that skipped \
+                   the check would read as one that made it");
+        std::process::exit(1);
+    }
 
     // ---- which tags make up the grid ------------------------------------
     let (source, tags): (Value, Vec<String>) = if let Some(p) = crate::arg_str(args, "--plan") {
@@ -987,10 +1077,11 @@ pub fn grid_cmd(args: &[String]) {
 
     // ---- read every chunk once: statement, and the proof's roots ---------
     for tag in &tags {
-        let Some((tagged_block, layer)) = grid_tag(tag) else {
-            off_grid.push(tag.clone());
-            continue;
-        };
+        // stream KK: the tag is the plan's claim about where a chunk sits; the
+        // statement is the chunk's own.  A tag that is not on the grid is no
+        // longer off it if the statement declares a coordinate -- which is how
+        // the `lm_head` chunk, whose tag is `head`, takes its cell.
+        let tagged = grid_tag(tag);
         let fpath = format!("{dir}/{tag}.fixed.json");
         let ppath = format!("{dir}/{tag}.proof.json");
         let (Ok(fb), Ok(pb)) = (std::fs::read(&fpath), std::fs::read(&ppath)) else {
@@ -1005,6 +1096,26 @@ pub fn grid_cmd(args: &[String]) {
             Ok(p) => p.commitments.iter().map(|c| format!("{c:?}")).collect(),
             Err(e) => { failures.push(format!("{tag}: unparseable proof: {e}")); continue; }
         };
+        let (tagged_block, tagged_layer) = match tagged {
+            Some((b, l)) => (b, Some(l)),
+            None => (None, None),
+        };
+        let Some(layer) = fixed.layer.or(tagged_layer) else {
+            off_grid.push(tag.clone());
+            continue;
+        };
+        if let (Some(d), Some(t)) = (fixed.layer, tagged_layer) {
+            if d != t {
+                failures.push(format!("{tag}: the tag names layer {t} but the statement \
+                                       declares layer {d}"));
+            }
+        }
+        if let (Some(d), Some(t)) = (fixed.block, tagged_block) {
+            if d != t {
+                failures.push(format!("{tag}: the tag names block {t} but the statement \
+                                       declares block {d}"));
+            }
+        }
         let (c, s) = (fixed.params.c, fixed.params.s);
         // The block a statement declares is its prefix width in blocks.  A tag
         // that names another block is a chunk filed on the wrong cell: that is
@@ -1022,7 +1133,12 @@ pub fn grid_cmd(args: &[String]) {
             failures.push(format!("{tag}: the tag names block {b} but the statement declares \
                                    block {declared} (c = {c} = {declared} x {s})"));
         }
-        let block = tagged_block.unwrap_or(declared);
+        if let Some(b) = fixed.block.filter(|b| *b != declared) {
+            failures.push(format!("{tag}: the statement's declared block {b} is not the block \
+                                   its own prefix implies (c = {c} = {declared} x {s})"));
+        }
+        let block = tagged_block.or(fixed.block).unwrap_or(declared);
+        let is_head = fixed.params.head_argmax;
         chunk_rows.push(json!({
             "tag": tag,
             "block": block,
@@ -1030,14 +1146,19 @@ pub fn grid_cmd(args: &[String]) {
             "block_declared": declared,
             "block_tag_ok": block == declared,
             "layer": layer,
+            "layer_declared": fixed.layer,
+            "block_declared": fixed.block,
             "c": c, "s": s,
             "trees": fixed.sizes.len(),
             "bounds": fixed.params.bounds,
             "kv_bind": fixed.params.kv_bind,
+            "head": is_head,
+            "ids": fixed.tok_in.len(),
+            "emits": fixed.tok_out.len(),
             "statement_bytes": fb.len(),
             "proof_bytes": pb.len(),
         }));
-        chunks.push(GridChunk { tag: tag.clone(), block, layer, fixed, roots });
+        chunks.push(GridChunk { tag: tag.clone(), block, layer, fixed, roots, is_head });
     }
     for m in &missing {
         failures.push(format!("{m}: named by the plan, but {dir}/{m}.{{fixed,proof}}.json is not there"));
@@ -1052,6 +1173,14 @@ pub fn grid_cmd(args: &[String]) {
                                   chunks[j].tag, ch.tag, ch.block, ch.layer));
         }
     }
+    // stream KK: a `lm_head` chunk takes a cell of the grid -- it is verified,
+    // its emitted tokens are read, and its coordinate is compared -- but it
+    // carries neither the residual boundary nor the K/V one, so the edges that
+    // would touch it are declared ends, listed below, and not links that ran
+    // and failed.  Deleting it from the link sets is what keeps "every implied
+    // link chained" an honest sentence rather than one the head always breaks.
+    let head_of = |i: &usize| chunks[*i].is_head && !chunks[*i].fixed.params.bounds;
+    let mut declared: Vec<Value> = vec![];
     let mut gaps: Vec<Value> = vec![];
     // layer links: inside every block, consecutive layers
     let mut layer_links: Vec<(usize, usize)> = vec![];
@@ -1059,7 +1188,17 @@ pub fn grid_cmd(args: &[String]) {
         let ks: Vec<usize> = layers.keys().copied().collect();
         for w in ks.windows(2) {
             if w[1] == w[0] + 1 {
-                layer_links.push((layers[&w[0]], layers[&w[1]]));
+                let (i, j) = (layers[&w[0]], layers[&w[1]]);
+                if head_of(&j) {
+                    declared.push(json!({
+                        "what": "the lm_head chunk's input",
+                        "block": b, "from": chunks[i].tag, "to": chunks[j].tag,
+                        "why": "the head chunk carries no wiring family, so the last \
+                                layer's stream_out joins it by declaration, not by a root \
+                                equality (notes/witness-slack.md section 5 item 3)"}));
+                } else {
+                    layer_links.push((i, j));
+                }
             } else {
                 gaps.push(json!({"axis": "layer", "block": b, "from": w[0], "to": w[1]}));
             }
@@ -1077,7 +1216,17 @@ pub fn grid_cmd(args: &[String]) {
         let bs: Vec<usize> = blocks.keys().copied().collect();
         for w in bs.windows(2) {
             if w[1] == w[0] + 1 {
-                token_links.push((blocks[&w[0]], blocks[&w[1]]));
+                let (i, j) = (blocks[&w[0]], blocks[&w[1]]);
+                if head_of(&i) || head_of(&j) {
+                    declared.push(json!({
+                        "what": "two lm_head chunks are not a K/V edge",
+                        "layer": k, "from": chunks[i].tag, "to": chunks[j].tag,
+                        "why": "the head chunk commits no K/V boundary; its own \
+                                inputs are the block's, and nothing here compares two \
+                                blocks' heads"}));
+                } else {
+                    token_links.push((i, j));
+                }
             } else {
                 gaps.push(json!({"axis": "token", "layer": k, "from": w[0], "to": w[1]}));
             }
@@ -1094,7 +1243,10 @@ pub fn grid_cmd(args: &[String]) {
     if let Some(n) = expect_token.filter(|n| *n != want_token) {
         failures.push(format!("the grid implies {want_token} token link(s); --expect-token-links {n}"));
     }
-    if want_layer + want_token == 0 {
+    // Stream KK: with `--verify` a grid of one chunk is still a question worth
+    // asking -- does it verify, and are its ids what the prompt declares -- so
+    // "no link" is only a failure for the pair check on its own.
+    if want_layer + want_token == 0 && !verify {
         failures.push("the grid implies no link at all: nothing to chain".to_string());
     }
 
@@ -1131,18 +1283,190 @@ pub fn grid_cmd(args: &[String]) {
             }));
         }
     }
+    // ---- stream KK: the chunk proofs themselves ---------------------------
+    //
+    // The pair check above reads four byte strings and compares roots.  This
+    // reads the three documents a chunk *is* and asks the only question that
+    // makes a chain a proof: does this chunk verify?
+    let mut verified: Vec<Value> = vec![];
+    let mut n_accept = 0usize;
+    if verify {
+        for ch in &chunks {
+            let t0 = std::time::Instant::now();
+            let f = format!("{dir}/{}.fixed.json", ch.tag);
+            let c = format!("{dir}/{}.claims.json", ch.tag);
+            let pp = format!("{dir}/{}.proof.json", ch.tag);
+            let (fb, cb, pb) = (std::fs::read(&f), std::fs::read(&c), std::fs::read(&pp));
+            let (accepts, secs, err) = match (fb, cb, pb) {
+                (Ok(fb), Ok(cb), Ok(pb)) => {
+                    let v = crate::compose::verify_composed(&fb, &cb, &pb);
+                    let why = (!v.accepts()).then(|| {
+                        serde_json::to_string(&json!({
+                            "stark": v.stark_ok, "root": v.root_ok, "sums": v.sums_cancel,
+                            "embed": v.embed_ok, "embed_tok": v.embed_tok_ok,
+                            "head_tie": v.head_tie_ok, "head_tok": v.head_tok_ok,
+                            "error": v.error})).unwrap()
+                    });
+                    (v.accepts(), v.verify_secs, why)
+                }
+                (_, Err(e), _) => (false, 0.0,
+                    Some(format!("{c}: {e} -- a directory serialized before stream KK carries the \
+                        statement and the proof but not the claims, and the verifier needs all \
+                        three"))),
+                (Err(e), _, _) | (_, _, Err(e)) => (false, 0.0, format!("{e}").into()),
+            };
+            if accepts {
+                n_accept += 1;
+            } else {
+                failures.push(format!("{}: the chunk proof does not verify: {}", ch.tag,
+                                      err.clone().unwrap_or_default()));
+            }
+            eprintln!("grid verify {}: {} ({:.2} s)", ch.tag,
+                      if accepts { "accepts" } else { "REJECTED" }, secs);
+            verified.push(json!({"tag": ch.tag, "accepts": accepts, "verify_secs": secs,
+                                 "wall_secs": t0.elapsed().as_secs_f64(), "why": err}));
+        }
+    }
+
+    // ---- stream KK: emitted -> consumed, along the sequence ---------------
+    //
+    // `notes/witness-slack.md` section 5 item 2.  The ids a block consumed are
+    // its layer-0 chunk's `tok_in`; the tokens a block emitted are its
+    // `lm_head` chunk's `tok_out`; both are pinned to their own proof by
+    // `verify_composed`.  What is unchecked before this is the join: that the
+    // sequence's own output at position `t` is what it read at position
+    // `t + 1`.
+    let mut ids: BTreeMap<usize, (&str, &Vec<u32>)> = BTreeMap::new();
+    let mut emits: BTreeMap<usize, (&str, &Vec<u32>)> = BTreeMap::new();
+    for ch in &chunks {
+        if !ch.fixed.tok_in.is_empty() {
+            if let Some((other, _)) = ids.insert(ch.block, (&ch.tag, &ch.fixed.tok_in)) {
+                failures.push(format!("{} and {other} both publish block {}'s ids", ch.tag,
+                                      ch.block));
+            }
+        }
+        if !ch.fixed.tok_out.is_empty() {
+            if let Some((other, _)) = emits.insert(ch.block, (&ch.tag, &ch.fixed.tok_out)) {
+                failures.push(format!("{} and {other} both publish block {}'s emitted tokens",
+                                      ch.tag, ch.block));
+            }
+        }
+    }
+    let mut n_prompt = 0usize;
+    let mut n_generated = 0usize;
+    let mut bad_ids: Vec<Value> = vec![];
+    let mut unbacked: Vec<Value> = vec![];
+    for (b, (tag, tin)) in &ids {
+        let s_blk = chunks.iter().find(|c| c.tag == **tag).map(|c| c.fixed.params.s).unwrap_or(0);
+        for (t, got) in tin.iter().enumerate() {
+            let pos = b * s_blk + t;
+            let declared_id = prompt.as_ref().and_then(|p| p.get(pos).copied());
+            if let Some(want) = declared_id {
+                n_prompt += 1;
+                if want != *got {
+                    bad_ids.push(json!({"kind": "prompt", "block": b, "t": t, "pos": pos,
+                                        "want": want, "got": got, "tag": tag}));
+                }
+                continue;
+            }
+            // a generated position: the previous position's proved argmax, in
+            // this block for `t > 0` and in the previous one at the seam
+            let src = if t > 0 {
+                emits.get(b).and_then(|(ht, e)| e.get(t - 1).map(|v| (*ht, *v, *b, t - 1)))
+            } else {
+                b.checked_sub(1).and_then(|pb| {
+                    emits.get(&pb).and_then(|(ht, e)| {
+                        e.last().map(|v| (*ht, *v, pb, e.len() - 1))
+                    })
+                })
+            };
+            match src {
+                Some((ht, want, sb, st)) => {
+                    n_generated += 1;
+                    if want != *got {
+                        bad_ids.push(json!({"kind": "generated", "block": b, "t": t, "pos": pos,
+                                            "want": want, "got": got, "tag": tag,
+                                            "from": {"tag": ht, "block": sb, "t": st}}));
+                    }
+                }
+                None => unbacked.push(json!({"block": b, "t": t, "pos": pos, "tag": tag,
+                                             "why": "no lm_head chunk on this grid \
+                                                     proves the argmax at the position \
+                                                     before it, and the declared prompt \
+                                                     does not reach it"})),
+            }
+        }
+    }
+    for e in &bad_ids {
+        failures.push(format!("the id at position {} is not the one that reaches it: {e}",
+                              e["pos"]));
+    }
+    // Without a declared prompt nothing says where the prompt ends, so a
+    // position with no argmax behind it is reported as declared rather than
+    // failed; `--verify` demands the prompt and then it is a hole.
+    if prompt.is_some() {
+        for u in &unbacked {
+            failures.push(format!("position {} is generated and unbacked: {u}", u["pos"]));
+        }
+    } else if !unbacked.is_empty() {
+        declared.push(json!({"what": "the ids of positions with no argmax behind them",
+                             "positions": unbacked.len(),
+                             "why": "no --prompt was given, so these are declared"}));
+    }
+    if prompt.is_none() && !ids.is_empty() {
+        declared.push(json!({"what": "the prompt",
+                             "why": "no --prompt was given: every published id was \
+                                     compared only against an argmax, where one exists"}));
+    }
+    declared.push(json!({"what": "one tree-0 root per chunk", "chunks": chunks.len(),
+                         "why": "root_ok compares the proof's commitment 0 against its \
+                                 own statement's pre_root; that the root is the model's, \
+                                 for this layer and this shape, is the verifier's \
+                                 declaration"}));
+    let ids_ok = bad_ids.is_empty() && (prompt.is_none() || unbacked.is_empty());
+
+    // ---- stream KK: the declared tree-0 roots, against a derived table ------
+    let mut pre_rows: Vec<Value> = vec![];
+    if let Some(table) = &expect_pre {
+        for ch in &chunks {
+            let want = table.iter().find(|r| {
+                r["layer"].as_u64() == Some(ch.layer as u64)
+                    && r["c"].as_u64() == Some(ch.fixed.params.c as u64)
+            });
+            let got = &ch.fixed.pre_root;
+            let ok = want.and_then(|r| r["pre_root"].as_str()) == Some(got.as_str());
+            if !ok {
+                failures.push(format!(
+                    "{}: the statement declares pre_root {got} for (layer {}, c {}), and \
+                     the table says {}", ch.tag, ch.layer, ch.fixed.params.c,
+                    want.map(|r| r["pre_root"].to_string())
+                        .unwrap_or_else(|| "nothing at all".into())));
+            }
+            pre_rows.push(json!({"tag": ch.tag, "layer": ch.layer, "c": ch.fixed.params.c,
+                                 "pre_root": got, "ok": ok}));
+        }
+    } else {
+        declared.push(json!({"what": "which model each chunk's tree-0 root is",
+                             "why": "no --expect-pre-roots table was given, so every \
+                                     chunk's pre_root is compared only against its own \
+                                     proof"}));
+    }
+
     let all_layer = run[0] == want_layer && passed[0] == run[0];
     let all_token = run[1] == want_token && passed[1] == run[1];
-    let all_chain = failures.is_empty() && all_layer && all_token;
+    let all_verified = !verify || n_accept == chunks.len();
+    let all_chain = failures.is_empty() && all_layer && all_token && ids_ok && all_verified;
     let blocks: Vec<usize> = grid.keys().copied().collect();
     let layers: BTreeMap<String, Vec<usize>> = grid
         .iter()
         .map(|(b, l)| (b.to_string(), l.keys().copied().collect()))
         .collect();
     eprintln!("grid: {} block(s), {} chunk(s) on the grid, {} off it; layer {}/{} of {} implied, \
-               token {}/{} of {} implied{}",
+               token {}/{} of {} implied; verified {}/{}; ids prompt {} + generated {} \
+               ({} bad, {} unbacked){}",
               blocks.len(), chunks.len(), off_grid.len(),
               passed[0], run[0], want_layer, passed[1], run[1], want_token,
+              n_accept, verified.len(), n_prompt, n_generated, bad_ids.len(), unbacked.len(),
               if all_chain { "" } else { " -- FAILED" });
     for f in &failures {
         eprintln!("grid: FAIL {f}");
@@ -1167,6 +1491,18 @@ pub fn grid_cmd(args: &[String]) {
             "links_expected": want_layer + want_token,
             "links_run": run[0] + run[1],
             "links_passed": passed[0] + passed[1],
+            // stream KK
+            "verify": verify,
+            "verified": {"run": verified.len(), "accepted": n_accept,
+                         "all": all_verified, "chunks": verified},
+            "tokens": {"prompt_file": crate::arg_str(args, "--prompt"),
+                       "prompt_len": prompt.as_ref().map(|p| p.len()),
+                       "blocks_with_ids": ids.len(), "blocks_with_emits": emits.len(),
+                       "prompt_positions": n_prompt, "generated_positions": n_generated,
+                       "mismatches": bad_ids, "unbacked": unbacked, "all": ids_ok},
+            "pre_roots": {"table": crate::arg_str(args, "--expect-pre-roots"),
+                          "chunks": pre_rows},
+            "declared_ends": declared,
             "failures": failures,
             "all_chain": all_chain,
             "links": links,
@@ -1445,7 +1781,21 @@ mod tests {
             pow_bits: 0,
             sizes: vec![vec![4]; n],
             pre_root: "pre".into(),
+            // stream KK: the tests below drive the coordinate comparison
+            // through `at`, which sets these; undeclared is the pre-KK case and
+            // the default here so every existing test keeps asking what it asked
+            layer: None,
+            block: None,
+            tok_in: vec![],
+            tok_out: vec![],
         }
+    }
+
+    /// Stream KK: the same statement with a declared coordinate.
+    fn at(mut f: Fixed, layer: usize, block: usize) -> Fixed {
+        f.layer = Some(layer);
+        f.block = Some(block);
+        f
     }
 
     /// Root lists for a pair, with the boundaries the caller asks for made
@@ -1611,6 +1961,48 @@ mod tests {
         let v = chain_of(&a, &ra, &b, &rb);
         assert_eq!(v.axis, Axis::Layer);
         assert!(v.chains(), "reason: {:?}", v.reason);
+    }
+
+    /// Stream KK: two honest, accepted, root-equal chunks whose *declared*
+    /// coordinates are not a layer edge.  Before the coordinate went into the
+    /// statement, the layer index lived in the plan tag alone and this pair
+    /// chained.
+    #[test]
+    fn layer_edge_rejects_declared_coordinates_that_do_not_step() {
+        let (a, b) = (fixed(1024, 512, false), fixed(1024, 512, false));
+        let (ra, rb) = roots(&a, &b, false, true);
+        // the honest pair: layer 8 -> layer 9 of block 2
+        let (a8, b9) = (at(a.clone(), 8, 2), at(b.clone(), 9, 2));
+        let v = chain_of(&a8, &ra, &b9, &rb);
+        assert!(v.coord_ok && v.chains(), "reason: {:?}", v.reason);
+        // the same two proofs filed as layer 8 -> layer 12
+        let b12 = at(b.clone(), 12, 2);
+        let v = chain_of(&a8, &ra, &b12, &rb);
+        assert!(v.roots_equal && !v.coord_ok && !v.chains());
+        // and as two chunks of different blocks at consecutive layers
+        let b9b3 = at(b.clone(), 9, 3);
+        let v = chain_of(&a8, &ra, &b9b3, &rb);
+        assert!(!v.coord_ok && !v.chains());
+        // one side declaring and the other not is not a checked pair
+        let v = chain_of(&a8, &ra, &b, &rb);
+        assert!(!v.coord_ok && !v.chains());
+        // neither declaring is every proof written before the field existed
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert!(v.coord_ok && v.chains());
+    }
+
+    /// The same on the token axis: the block steps, the layer does not.
+    #[test]
+    fn token_edge_rejects_declared_coordinates_that_do_not_step() {
+        let (a, b) = (fixed(1024, 512, true), fixed(1536, 512, true));
+        let (ra, rb) = roots(&a, &b, true, false);
+        let v = chain_of(&at(a.clone(), 8, 2), &ra, &at(b.clone(), 8, 3), &rb);
+        assert_eq!(v.axis, Axis::Token);
+        assert!(v.coord_ok && v.chains(), "reason: {:?}", v.reason);
+        let v = chain_of(&at(a.clone(), 8, 2), &ra, &at(b.clone(), 9, 3), &rb);
+        assert!(!v.coord_ok && !v.chains());
+        let v = chain_of(&at(a, 8, 2), &ra, &at(b, 8, 7), &rb);
+        assert!(!v.coord_ok && !v.chains());
     }
 
     #[test]
