@@ -20,13 +20,16 @@
 //!
 //! Per-slot the scale exponent `e = jv[h,j] - jo[t]` splits into `num = 2^max(e,0)`
 //! (preprocessed) and a committed `denp = den * 2^max(-e,0)` pinned by a
-//! preprocessed `pj` column, so the error identity stays degree 3.
+//! preprocessed `pj` column, so the error identity stays degree 3.  `denp` is
+//! range-checked in its own right (`ao_rem_bits`), which is what makes the
+//! error identity an *integer* identity -- see the note beside the lookup.
 
 use num_traits::{One, Zero};
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval, INTERACTION_TRACE_IDX, RelationEntry};
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval, INTERACTION_TRACE_IDX,
+                                ORIGINAL_TRACE_IDX, RelationEntry};
 
 use crate::attn_air::RangeRel;
 use crate::dequant::PairRel;
@@ -196,7 +199,18 @@ impl FrameworkEval for AttnOutEval {
             AO_SEL.iter().map(|n| eval.get_preprocessed_column(ao_sel(*n))).collect();
         let (nofirst, last, m1, m2, m3, end) = (sel[0].clone(), sel[1].clone(), sel[2].clone(),
                                                 sel[3].clone(), sel[4].clone(), sel[5].clone());
-        let den = eval.next_trace_mask();
+        // `den` is the token's denominator Z, one committed cell per row, and
+        // before this it entered exactly two places: `denp = den pj` per slot,
+        // and the `dz` fold -- which takes it only on the token's *last* row
+        // (`den * last`).  On every other row of a token nothing constrained it,
+        // so `denp` was free (pick `den = denp / pj`) and the slot's rounding
+        // was a rounding by a denominator of the prover's choosing.  Reading
+        // `den` at [-1, 0] and pinning it across the token's rows -- `nofirst`
+        // is exactly "not the first row of this token's group", the selector the
+        // `z` fold already chains on -- makes every row's `den` the row the `dz`
+        // fold publishes, and so the band's `az` claim.
+        let [den_prev, den] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
+        eval.add_constraint((den.clone() - den_prev) * nofirst.clone());
         let mut accs: Vec<E::F> = Vec::with_capacity(self.per_row);
         for slot in 0..self.per_row {
             let num = eval.get_preprocessed_column(ao_chan("n", slot));
@@ -218,7 +232,7 @@ impl FrameworkEval for AttnOutEval {
             eval.add_constraint(
                 d.clone() - (mag * num) * two + (qm.clone() * two - E::F::one()) * denp.clone(),
             );
-            let dp = denp * two - E::F::one() - d.clone();
+            let dp = denp.clone() * two - E::F::one() - d.clone();
             if !self.gkr {
                 eval.add_to_relation(RelationEntry::new(&self.qnz, E::EF::one(),
                                                         &[qm, nz2]));
@@ -226,6 +240,21 @@ impl FrameworkEval for AttnOutEval {
                     &self.rel_rem, E::EF::one(), core::slice::from_ref(&d)));
                 eval.add_to_relation(RelationEntry::new(
                     &self.rel_rem, E::EF::one(), core::slice::from_ref(&dp)));
+                // witness-slack section 7 item 1.  `d` and `dp` alone do NOT
+                // bound `denp`: they give `2 denp = d + dp + 1` over the field,
+                // and halving is a bijection mod an odd prime, so the branch
+                // where `d + dp + 1` is odd puts `denp` at `(d + dp + 1 + p)/2`
+                // -- about 2^30, where `0 <= d <= 2 denp - 1` is not an integer
+                // reading and `d = 2 denp0` (the exact tie's second witness the
+                // `-1` exists to exclude) is back.  Range-checking `denp` in the
+                // same `ao_rem_bits` table costs one lookup per slot, is
+                // satisfied by every honest row -- `rem_bits` is derived as the
+                // bit length of `max 2 denp` (`AttnOut::rem_bits`), so honest
+                // `denp < 2^(rem_bits-1)` -- and makes the error identity an
+                // integer identity.  Before it, the only guard was the host-side
+                // assert at `layer.rs`'s `ao_region`.
+                eval.add_to_relation(RelationEntry::new(
+                    &self.rel_rem, E::EF::one(), core::slice::from_ref(&denp)));
             }
         }
 

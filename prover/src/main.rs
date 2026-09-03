@@ -1036,6 +1036,7 @@ fn compose_cmd(args: &[String]) {
     for (key, slot) in [("--corrupt-fold-qm", &mut tamper.fold_qm),
                         ("--corrupt-fold-dent", &mut tamper.fold_dent),
                         ("--corrupt-ao-clamp", &mut tamper.ao_clamp),
+                        ("--corrupt-ao-den", &mut tamper.ao_den),
                         ("--corrupt-walk-act", &mut tamper.walk_over)] {
         if let Some(i) = arg_str(args, key) {
             *slot = Some(i.parse().unwrap_or_else(|_| panic!("{key} wants an index")));
@@ -1392,6 +1393,28 @@ fn compose_probes_cmd(args: &[String]) {
                                                 ..Default::default() },
                        "the pinned preprocessed root"),
                 "a corrupted embedding table accepted");
+    }
+
+    // 17. Stream JJ (E11): the attention output's denominator on a row the `dz`
+    //     fold never publishes.  `den` is one committed cell per row and it
+    //     entered exactly two places -- `denp = den pj` per slot, and `den *
+    //     last` in the `dz` fold -- so on every row of a token but the last it
+    //     was free, and with it `denp`.  This probe rounds one such row honestly
+    //     against `den - 1`: `denp`, `qm`, `sg` and `d` are all rederived from
+    //     it, every lookup lands on a real table row and every constraint of the
+    //     pre-change AIR holds.  It is the control for `witness-slack.md`
+    //     section 7 item 1 and for the row-`den` hole found beside it.
+    {
+        let lay = layer::AoLayout::choose(params.nh, params.s, params.hd, params.ao_target);
+        if lay.chunks > 1 {
+            // `b = 1` is a channel block the `dz` fold does not close on
+            let idx = params.hd + lay.per_row;
+            assert!(!probe("attnout: one non-last row rounded against den - 1", &l,
+                           &compose::ProverTamper { ao_den: Some(idx),
+                                                    ..Default::default() },
+                           "the `den` pin across a token's rows"),
+                    "a rounding by an unpinned denominator accepted");
+        }
     }
 
     // 8. a tampered claim in the serialized statement: the replayed transcript

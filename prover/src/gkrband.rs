@@ -568,7 +568,7 @@ pub fn ao_site(
         mut_env: "B11_AOMUT",
         mut_key: 0,
         log_rows: r.lay.log_rows,
-        unit: vec![true; 3 * r.lay.per_row],
+        unit: vec![true; 4 * r.lay.per_row],
         pre: &r.pre,
         base: &r.base,
         #[cfg(feature = "cuda")]

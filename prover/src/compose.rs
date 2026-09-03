@@ -1959,6 +1959,13 @@ pub struct ProverTamper {
     pub fold_dent: Option<usize>,
     pub ao_clamp: Option<usize>,
     pub walk_over: Option<usize>,
+    /// Stream JJ (witness-slack section 7 item 1): round one *non-last* row of
+    /// the attention output against `den - 1`, self-consistently -- the whole
+    /// row's `denp`, `qm`, `sg` and `d` are rederived from it, so every
+    /// constraint and every lookup of the pre-change AIR holds and the pre-change
+    /// statement accepts a rounding by a denominator nothing pinned.  The index
+    /// is a flat `(h, t, ch)` site, as `ao_clamp`'s is.
+    pub ao_den: Option<usize>,
 }
 
 pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Composed {
@@ -2160,7 +2167,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
 
     let m4_t = std::time::Instant::now();
     let aor = ao_region(&layer.ao, p.ao_target, p.ao_q_bits, p.ao_rem_bits, &mut tables,
-                        None, tamper.ao_clamp);
+                        None, tamper.ao_clamp, tamper.ao_den);
 
     crate::util::m4_add("gen/attnout", m4_t.elapsed().as_secs_f64());
 

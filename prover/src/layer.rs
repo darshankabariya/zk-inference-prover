@@ -2441,14 +2441,40 @@ impl AoRegion {
 /// Column order per slot: acc, sg, qm, nz2, denp, d (after the shared den col).
 pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32,
                  tables: &mut Tables, corrupt: Option<usize>,
-                 corrupt_q: Option<usize>) -> AoRegion {
+                 corrupt_q: Option<usize>, corrupt_den: Option<usize>) -> AoRegion {
     let lay = AoLayout::choose(ao.nh, ao.s, ao.hd, per_row_target);
     let rows = 1usize << lay.log_rows;
     let pr = lay.per_row;
     // B7a milestone 4 (section 3 row 1): the same three-value mode.
-    let m4d = if corrupt_q.is_some() { 0 } else { crate::util::m4b_mode("B7_M4_WFILL") };
+    let m4d = if corrupt_q.is_some() || corrupt_den.is_some() {
+        0
+    } else {
+        crate::util::m4b_mode("B7_M4_WFILL")
+    };
     assert!(m4d == 0 || corrupt.is_none(),
             "attnout: the device fill has no `corrupt` path");
+    // Stream JJ (witness-slack section 7 item 1, and the row-`den` hole beside
+    // it): the row whose denominator is bent.  `den` was read once per row and
+    // folded into `dz` only on the token's *last* row, so on any other row it
+    // -- and with it `denp` -- was free, and the slot's rounding was a rounding
+    // by a denominator of the prover's choosing.  This control rounds one
+    // non-last row honestly against `den - 1`: every constraint and every lookup
+    // of the pre-change AIR holds, so it accepts there, and the `den` pin is
+    // what rejects it now.
+    let bend_den: Option<usize> = corrupt_den.map(|idx| {
+        let (ht, ch) = (idx / ao.hd, idx % ao.hd);
+        let (h, t) = (ht / ao.s, ht % ao.s);
+        let j = (0..rows)
+            .find(|j| matches!(lay.at(ao.nh, ao.s, *j), Some((hh, tt, b))
+                               if hh == h && tt == t && b * pr <= ch && ch < (b + 1) * pr))
+            .expect("--corrupt-ao-den: no row carries that channel");
+        let b = lay.at(ao.nh, ao.s, j).unwrap().2;
+        assert!(b != 0,
+                "--corrupt-ao-den needs a non-last row of a token (b = 0 is the row \
+                 whose `den` the `dz` fold publishes); index {idx} lands on b = 0");
+        assert!(ao.den[h * ao.s + t] > 1, "--corrupt-ao-den: this token's Z is 1");
+        j
+    });
     if m4d == 1 {
         let dev = crate::devwfill::ao_region_dev(ao, &lay, q_bits, rem_bits, tables, false);
         let (ref_bad, q_out) = (dev.ref_bad, dev.q_out.clone());
@@ -2477,10 +2503,12 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                     tables.bump_qnzk(0, "ao_qnz_lead");
                     tables.bump_rk(rem_bits, 1, "ao_rem_lead");    // d
                     tables.bump_rk(rem_bits, 0, "ao_rem_lead");    // dp = 2*1 - 1 - 1
+                    tables.bump_rk(rem_bits, 1, "ao_rem_lead");    // denp
                 }
             }
             Some((h, t, b)) => {
-                let den = ao.den[h * ao.s + t];
+                // stream JJ's control bends this row's denominator only
+                let den = ao.den[h * ao.s + t] - i64::from(bend_den == Some(j));
                 assert!(den > 0, "attnout denominator must be positive");
                 cols[0][j] = m31_of(den);
                 for s in 0..pr {
@@ -2519,6 +2547,9 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                     tables.bump_qnzk(qm, "ao_qnz");
                     tables.bump_rk(rem_bits, d, "ao_rem_d");
                     tables.bump_rk(rem_bits, 2 * denp - 1 - d, "ao_rem_dp");
+                    // section 7 item 1: `denp`'s own bound, without which the
+                    // pair above leaves the `2 denp = d + dp + 1` halving branch
+                    tables.bump_rk(rem_bits, denp, "ao_rem_denp");
                     q_out[idx] = if a < 0 { -qm } else { qm };
                     // the reference: one f64 rounding, half away from zero
                     let want = ((mag as f64 * (e as f64).exp2()) / den as f64 + 0.5).floor()
@@ -2690,22 +2721,24 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
         }
     };
 
-    // lookups per slot, in AIR order: (qm, nz2), d, dp
+    // lookups per slot, in AIR order: (qm, nz2), d, dp, denp
     let one = PackedQM31::broadcast(SecureField::one());
-    let n_looks = 3 * pr;
+    let n_looks = 4 * pr;
     let fr = |i: usize, vr: usize| -> (PackedQM31, PackedQM31) {
-        let (s, which) = (i / 3, i % 3);
+        let (s, which) = (i / 4, i % 4);
         let c0 = 1 + 6 * s;
         match which {
             0 => (one, rels.qnz.combine(&[r.base[c0 + 2].data[vr], r.base[c0 + 3].data[vr]])),
             1 => (one, rels.range(r.rem_bits).combine(&[r.base[c0 + 5].data[vr]])),
-            _ => {
+            2 => {
                 let two = stwo::prover::backend::simd::m31::PackedM31::broadcast(
                     M31::from_u32_unchecked(2));
                 let onem = stwo::prover::backend::simd::m31::PackedM31::broadcast(M31::one());
                 let dp = r.base[c0 + 4].data[vr] * two - onem - r.base[c0 + 5].data[vr];
                 (one, rels.range(r.rem_bits).combine(&[dp]))
             }
+            // section 7 item 1: `denp` itself
+            _ => (one, rels.range(r.rem_bits).combine(&[r.base[c0 + 4].data[vr]])),
         }
     };
     // B11 stream V, lever 4: as the walks, and for the same reason. The `z`,

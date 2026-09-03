@@ -315,6 +315,7 @@ __global__ void b65w_ao(const unsigned *__restrict__ acc,
             }
             b65w_bump(m_rem, 1LL, &counts[0]);
             b65w_bump(m_rem, 0LL, &counts[0]);
+            b65w_bump(m_rem, 1LL, &counts[0]);   // denp
             continue;
         }
 
@@ -351,6 +352,8 @@ __global__ void b65w_ao(const unsigned *__restrict__ acc,
         }
         b65w_bump(m_rem, d, &counts[0]);
         b65w_bump(m_rem, 2LL * denp - 1LL - d, &counts[0]);
+        // witness-slack section 7 item 1: `denp`'s own range check
+        b65w_bump(m_rem, denp, &counts[0]);
         q_out[idx] = (int)(a < 0 ? -qm : qm);
 
         if (cfg.do_ref != 0u) {
