@@ -192,6 +192,12 @@ pub struct GlueCols {
     pub eps: u16,
     pub inv_d: u16,
     pub reduce: String,
+    /// Stream II (E11): these columns are the *head* chunk's -- `xin` is the
+    /// last layer's residual, `w1` the model's final-norm weight, `r1` B1's own
+    /// `rsqrt` answer and `h1` the head's bf16 input.  `o_out`, `xmid`,
+    /// `d_out`, `xout` and the second norm's are empty, because a head chunk
+    /// has no residual add and no second norm.
+    pub head: bool,
 }
 
 // Stream P: this widening and the two below it are parallel.  Each output
@@ -265,6 +271,54 @@ impl GlueCols {
             eps: g["eps"].as_u64().ok_or("manifest: glue.eps")? as u16,
             inv_d: g["inv_d"].as_u64().ok_or("manifest: glue.inv_d")? as u16,
             reduce: g["reduce"].as_str().unwrap_or("").to_string(),
+            head: false,
+        }))
+    }
+
+    /// Stream II (E11): the head chunk's own five columns, which
+    /// `extract.py --head` writes -- the last layer's residual, the model's
+    /// final-norm weight, B1's `rsqrt` in and out and the head's bf16 input.
+    /// `None` on a dump written before this, in which case the head chunk
+    /// composes as it did and the final norm stays proved by nobody.
+    pub fn load_head(dir: &str, man: &serde_json::Value, tokens: usize)
+                     -> Result<Option<Self>, String> {
+        let h = &man["head"];
+        if !h["final_norm"].as_bool().unwrap_or(false) {
+            return Ok(None);
+        }
+        let d = h["d_in"].as_u64().ok_or("manifest: head.d_in")? as usize;
+        let cut = |v: Vec<u16>, n: usize, name: &str| -> Result<Vec<u16>, String> {
+            if v.len() < n {
+                return Err(format!("{name}: {} values is under {n}", v.len()));
+            }
+            let _s = witread::scope(Site::DecodeTrunc);
+            Ok(v[..n].to_vec())
+        };
+        Ok(Some(Self {
+            d,
+            dff: 0,
+            tokens,
+            xin: cut(read_u16(&format!("{dir}/xin_head.u16"))?, tokens * d, "xin_head")?,
+            o_out: vec![],
+            xmid: vec![],
+            d_out: vec![],
+            xout: vec![],
+            r1: cut(read_u16(&format!("{dir}/r_head.u16"))?, tokens, "r_head")?,
+            r2: vec![],
+            w1: cut(read_u16(&format!("{dir}/w_head.u16"))?, d, "w_head")?,
+            w2: vec![],
+            h1: read_u16(&format!("{dir}/h_head.u16"))
+                .ok()
+                .filter(|v| v.len() >= tokens * d)
+                .map(|v| v[..tokens * d].to_vec()),
+            h2: None,
+            silu_in: None,
+            silu_out: None,
+            x_down: None,
+            eps: h["eps"].as_u64().ok_or("manifest: head.eps")? as u16,
+            inv_d: h["inv_d"].as_u64().ok_or("manifest: head.inv_d")? as u16,
+            reduce: h["reduce"].as_str().unwrap_or("").to_string(),
+            head: true,
         }))
     }
 }
@@ -316,7 +370,20 @@ impl GlueCols {
             eps: bf16::from_f64(1e-5),
             inv_d: bf16::from_f64(1.0 / d as f64),
             reduce: "bf16-norm".into(),
+            head: false,
         }
+    }
+
+    /// Stream II: the head chunk's family on a synthetic layer.  One residual
+    /// column and one norm weight; everything else a head chunk has not got.
+    pub fn synthetic_head(tokens: usize, d: usize, seed: u64) -> Self {
+        let mut c = Self::synthetic(tokens, d, d, seed);
+        c.dff = 0;
+        c.o_out = vec![];
+        c.d_out = vec![];
+        c.w2 = vec![];
+        c.head = true;
+        c
     }
 }
 
@@ -716,7 +783,15 @@ impl Layer {
                 })
                 .collect();
         }
-        let glue = GlueCols::load(dir, &man, s)?;
+        // Stream II (E11): the wiring family is the layer's when the dump
+        // carries `glue`, and the *head* chunk's final norm when it does not
+        // but carries `head.final_norm`.  No flag: which family a chunk can
+        // prove is a property of the columns the extractor wrote, and a dump
+        // written before either simply has none, as before.
+        let glue = match GlueCols::load(dir, &man, s)? {
+            Some(g) => Some(g),
+            None => GlueCols::load_head(dir, &man, s)?,
+        };
         // stream E: B1's key column, when the dump carries a head.  Read as
         // patterns; the comparison happens on the claim, not value by value.
         let head_keys = man["head"]["vocab"].as_u64().and_then(|v| {
@@ -1018,13 +1093,53 @@ impl Layer {
     /// requantize and its claim is stream JJ's, so there is nothing here for a
     /// consistent witness to satisfy yet.
     pub fn synth_glue(&mut self, seed: u64, a: usize, round: bf16::Round) {
+        self.synth_family(seed, a, round, 0);
+    }
+
+    /// Stream II (E11): the *head* chunk's family on a synthetic layer -- an
+    /// `lm_head` matmul of `vocab` columns whose committed input is the final
+    /// norm's output, so the desk can run the head's norm tail and its
+    /// requantize seam without a dump.  The layer's own seven matmuls keep
+    /// their untied inputs, exactly as a head chunk's do.
+    pub fn synth_head(&mut self, seed: u64, a: usize, round: bf16::Round, vocab: usize) {
+        use rand::rngs::SmallRng;
+        use rand::{Rng, SeedableRng};
+        assert!(vocab > 0, "--synth-head needs a vocabulary");
+        let tokens = self.ao.s;
+        let d = self.mats.iter().find(|m| m.name == "q")
+            .expect("--synth-head needs a q matmul").n_in;
+        let variant = self.mats[0].variant;
+        let mut rng = SmallRng::seed_from_u64(seed ^ 0x1ead_1ead);
+        let qw: Vec<i32> = (0..d * vocab).map(|_| rng.random_range(-127..=127)).collect();
+        self.mats.push(Mat {
+            name: "lm_head".into(), variant, n_in: d, n_out: vocab, tokens,
+            acc: vec![0i64; tokens * vocab],
+            qx: vec![0i32; tokens * d],
+            qw,
+            jx: (0..tokens).map(|_| -(rng.random_range(14..20) as i32)).collect(),
+            jw: (0..vocab).map(|_| -(rng.random_range(14..20) as i32)).collect(),
+            sx: (0..tokens).map(|_| (rng.random_range(0..128), rng.random_range(100..120)))
+                .collect(),
+            sw: (0..vocab).map(|_| (rng.random_range(0..128), rng.random_range(100..120)))
+                .collect(),
+            jv2: vec![],
+        });
+        self.synth_family(seed, a, round, vocab);
+    }
+
+    fn synth_family(&mut self, seed: u64, a: usize, round: bf16::Round, head_vocab: usize) {
         use crate::glue::{Kind, Prog, Tiling, UnKind, canon, reference};
+        let head = head_vocab > 0;
         let tokens = self.ao.s;
         let d = self.mats.iter().find(|m| m.name == "q")
             .expect("--synth-glue needs a q matmul").n_in;
         let dff = self.mats.iter().find(|m| m.name == "gate")
             .expect("--synth-glue needs a gate matmul").n_out;
-        let gc = GlueCols::synthetic(tokens, d, dff, seed ^ 0x9e37_79b9);
+        let gc = if head {
+            GlueCols::synthetic_head(tokens, d, seed ^ 0x9e37_79b9)
+        } else {
+            GlueCols::synthetic(tokens, d, dff, seed ^ 0x9e37_79b9)
+        };
         let (eps, inv_d) = (gc.eps, gc.inv_d);
         let un_r = UnKind::NormR { inv_d, eps };
         let t1 = Tiling::new(tokens, d, a);
@@ -1085,6 +1200,13 @@ impl Layer {
         };
 
         let h1 = tail(&gc.xin, &gc.w1, &t1);
+        // the head chunk: the final norm's output is the head's committed
+        // input, and there is no add, no second norm and no SwiGLU after it
+        if head {
+            wire(self, &["lm_head"], &h1, d);
+            self.glue = Some(gc);
+            return;
+        }
         wire(self, &["q", "k", "v"], &h1, d);
         let resid = reference(&[t1.lay(&gc.xin), t1.lay(&gc.o_out)], &[], t1.rows1(),
                               &Prog::norm_resid(t1.nreal, t1.b), round);

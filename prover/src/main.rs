@@ -691,6 +691,16 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
         let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
         l.synth_glue(src.seed, arg_scalar(args, "--glue-a", 32usize), round);
     }
+    // Stream II (E11): the head chunk on a synthetic layer -- an `lm_head`
+    // matmul whose committed input is the final norm's output, and the wiring
+    // family that proves it.  A witness-construction switch like
+    // `--synth-glue`: without it a synthetic layer has no `lm_head` and no
+    // family, and composes exactly as it always did.
+    if flag(args, "--synth-head") {
+        let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
+        l.synth_head(src.seed, arg_scalar(args, "--glue-a", 32usize), round,
+                     arg_scalar(args, "--synth-vocab", 256usize));
+    }
     tighten_of(&mut l, args);
     (l, vname)
 }
@@ -844,6 +854,9 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
                 eps: g.eps,
                 inv_d: g.inv_d,
                 deq_ties: flag(args, "--deq-ties"),
+                // stream II: which family this chunk carries is the witness's
+                // to say, not the command line's
+                head_norm: g.head,
             }
         }),
         // Stream H: the boundary commitment, off unless asked for either way --
@@ -1321,11 +1334,17 @@ fn compose_probes_cmd(args: &[String]) {
     //    claims can catch it.  The other two are the add's own argument, run
     //    here rather than only in `glue-probes`, on the real layer's columns.
     if l.glue.is_some() {
-        assert!(!probe("glue: gn2's copy of the residual stream", &l,
-                       &compose::ProverTamper { glue_stream: Some((2, 4321)),
-                                                ..Default::default() },
-                       "the tie gn1.xmid == gn2.in"),
-                "a broken residual thread accepted");
+        // stream II: the head chunk's family has one reduction and no add, so
+        // there is no second region's copy of the stream to break -- that probe
+        // is the layer's, and the head chunk's equivalent is the tail's own
+        // copy, which probe 12 below runs on whichever family this chunk has.
+        if !l.glue.as_ref().is_some_and(|g| g.head) {
+            assert!(!probe("glue: gn2's copy of the residual stream", &l,
+                           &compose::ProverTamper { glue_stream: Some((2, 4321)),
+                                                    ..Default::default() },
+                           "the tie gn1.xmid == gn2.in"),
+                    "a broken residual thread accepted");
+        }
         assert!(!probe("glue: one add's result, one step up", &l,
                        &compose::ProverTamper {
                            glue: Some((0, glue::Tamper::Result(97))), ..Default::default() },
@@ -1356,17 +1375,21 @@ fn compose_probes_cmd(args: &[String]) {
             // `nreal` corrupts nothing at all.
             let in0 = g.t.nreal / 2;
             for (k, i) in g.tails.iter().copied().enumerate() {
-                let n = k + 1;
+                // stream II: the region's own tag, so a head chunk's single
+                // tail is named `ntf` and the layer's two keep the names the
+                // record already carries
+                let n = g.regions[i].tag.clone();
+                let _ = k;
                 // the tie is the whole point of the tail: its copy of the
                 // stream is changed and the region stays internally consistent,
                 // so only `nt.In(0) == gn.In(0)` can catch it
-                assert!(!probe(&format!("tail nt{n}: its own copy of the stream"), &l,
+                assert!(!probe(&format!("tail {n}: its own copy of the stream"), &l,
                                &compose::ProverTamper {
                                    glue: Some((i, glue::Tamper::Stream(in0))),
                                    ..Default::default() },
-                               &format!("the tie nt{n}.in == gn{n}.in")),
+                               &format!("the tie {n}.In(0) == its reduction's In(0)")),
                         "a tail reading a different stream accepted");
-                assert!(!probe(&format!("tail nt{n}: one multiply's result"), &l,
+                assert!(!probe(&format!("tail {n}: one multiply's result"), &l,
                                &compose::ProverTamper {
                                    glue: Some((i, glue::Tamper::Result(97))),
                                    ..Default::default() },
@@ -1377,24 +1400,25 @@ fn compose_probes_cmd(args: &[String]) {
                 // region: the `NormR` lookup still finds a row and the two
                 // multiplies still hold, so the only thing that can reject is
                 // the tie to the reduction's published sum of squares.
-                assert!(!probe(&format!("tail nt{n}: a wrong r on one row"), &l,
+                assert!(!probe(&format!("tail {n}: a wrong r on one row"), &l,
                                &compose::ProverTamper {
                                    glue: Some((i, glue::Tamper::Ms(37))),
                                    ..Default::default() },
-                               &format!("the tie nt{n}.In(1) == G gn{n}b.Out(0)")),
+                               &format!("the tie {n}.In(1) == G the reduction's Out(0)")),
                         "a tail with a wrong r accepted");
-                assert!(!probe(&format!("tail nt{n}: two rows of one token, two rs"), &l,
+                assert!(!probe(&format!("tail {n}: two rows of one token, two rs"), &l,
                                &compose::ProverTamper {
                                    glue: Some((i, glue::Tamper::MsRow(37))),
                                    ..Default::default() },
-                               &format!("the tie nt{n}.In(1) == G gn{n}b.Out(0)")),
+                               &format!("the tie {n}.In(1) == G the reduction's Out(0)")),
                         "a token whose rows disagree about r accepted");
             }
             // and the third: one norm-weight cell bent.  It is preprocessed
             // now, so every constraint still holds and the *root* is what
             // moves -- a different kind of rejection from every probe above,
             // and the one that says `w` is the model's and not the prover's.
-            assert!(!probe("tail nt1: one norm-weight cell", &l,
+            let wtag = g.regions[g.tails[0]].tag.clone();
+            assert!(!probe(&format!("tail {wtag}: one norm-weight cell"), &l,
                            &compose::ProverTamper { glue_w: Some(4321),
                                                     ..Default::default() },
                            "the pinned preprocessed root"),
@@ -1579,7 +1603,7 @@ fn layer_clone(l: &layer::Layer) -> layer::Layer {
             h1: g.h1.clone(), h2: g.h2.clone(),
             silu_in: g.silu_in.clone(), silu_out: g.silu_out.clone(),
             x_down: g.x_down.clone(),
-            eps: g.eps, inv_d: g.inv_d, reduce: g.reduce.clone(),
+            eps: g.eps, inv_d: g.inv_d, reduce: g.reduce.clone(), head: g.head,
         }),
         head_keys: l.head_keys.clone(),
         head_tok: l.head_tok.clone(),

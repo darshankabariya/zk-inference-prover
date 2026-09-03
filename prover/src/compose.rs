@@ -298,6 +298,14 @@ pub struct GlueParams {
     /// own published outputs, tied to the copies the wiring family commits.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deq_ties: bool,
+    /// Stream II (E11), stream KK's finding: this chunk is the `lm_head` chunk,
+    /// so its wiring family is the *final* RMSNorm and nothing else -- one
+    /// reduction pair and one tail, whose input is the last layer's committed
+    /// residual and whose output the head requantizes.  Skipped in the
+    /// serialization, so a layer chunk's statement is byte identical to one
+    /// from a crate that never had the mode.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub head_norm: bool,
 }
 
 fn is_zero(v: &usize) -> bool {
@@ -599,10 +607,79 @@ pub struct GluePlan {
     /// side's claim over `o_out` and over `d_out`, and the matmul whose region
     /// has to publish the same value
     pub out_ties: Vec<((usize, usize), &'static str)>,
+    /// stream II: the head chunk's family (`gnf`, `gnfb`, `ntf`) instead of the
+    /// layer's seven regions.  The witness build and the seam list both branch
+    /// on it, and nothing else does.
+    pub head_norm: bool,
 }
 
 impl GluePlan {
+    /// Stream II (E11): the `lm_head` chunk's wiring family -- the final
+    /// RMSNorm, and nothing else.
+    ///
+    /// The head consumes the int8 activation of `rmsnorm(x, final_norm)`, and
+    /// before this the chunk committed that activation as a free column: no
+    /// dump carried the final norm's weight, so the norm was proved by nobody
+    /// (stream KK).  The family here is the layer's minus the parts a head
+    /// chunk has not got.  There is no residual add, so level 1 is
+    /// `Prog::tree(nreal, b, Square)` and not `norm_resid`; there is no second
+    /// norm and no SwiGLU.  What is left is exactly the three statements the
+    /// layer's own norms make, with the same table and the same weights:
+    /// `gnf.Out(0) == gnfb.In(0)` (one reduction over two levels),
+    /// `ntf.In(0) == gnf.In(0)` (the tail scaled the values the reduction
+    /// squared) and `ntf.In(1) == G gnfb.Out(0)` (`r` is that reduction's own
+    /// `rsqrt` answer, one per token across all `a` of its rows).
+    ///
+    /// `stream_in` is the residual claim, which is **the hook for the head
+    /// chunk's tree-3 residual-in boundary** -- stream KK's, not built here:
+    /// a boundary taken over `claims.glue_ties[0][0]` says the residual this
+    /// chunk normalized is the one the last layer's chunk published.
+    fn head(p: &Params, gp: &GlueParams) -> Self {
+        let t = Tiling::new(p.s, gp.d, gp.a);
+        let (a, tok, nreal) = (t.a, t.tokens, t.nreal);
+        let stream: Vec<u128> =
+            (0..nreal).map(|j| (a * tok * (nreal - 1 - j)) as u128).collect();
+        let l2_in: Vec<u128> = (0..a).map(|r| (tok * (a - 1 - r)) as u128).collect();
+        let one = vec![0u128];
+        let lr1 = crate::common::log_rows_for(t.rows1(), 1);
+        let lr2 = crate::common::log_rows_for(tok, 1);
+        let (rows1, rows2) = (1usize << lr1, 1usize << lr2);
+        assert_eq!(rows1, a * tok, "the head norm's tie needs level 1 to tile exactly");
+        assert_eq!(rows2, tok, "the head norm's tie needs level 2 to tile exactly");
+        let un_r = UnKind::NormR { inv_d: gp.inv_d, eps: gp.eps };
+        let l1 = Prog::tree(nreal, t.b, UnKind::Square);
+        let l2 = Prog::tree(a, a, UnKind::None);
+        let tail = Prog::norm_tail(nreal, un_r);
+        let mut uns = l1.un_kinds();
+        if !uns.contains(&un_r) {
+            uns.push(un_r);
+        }
+        let g_scale: Vec<i128> = (0..a)
+            .map(|res| (rows1 as i128) - (rows2 as i128) - (res * tok) as i128)
+            .collect();
+        let regions = vec![
+            GlueRegionPlan { tag: "gnf".into(), prog: l1, log_rows: lr1,
+                             ties: vec![(TieKind::In(0), stream.clone(), 1),
+                                        (TieKind::Out(0), one.clone(), 1)] },
+            GlueRegionPlan { tag: "gnfb".into(), prog: l2, log_rows: lr2,
+                             ties: vec![(TieKind::In(0), l2_in, 1),
+                                        (TieKind::Out(0), one.clone(), 1)] },
+            GlueRegionPlan { tag: "ntf".into(), prog: tail, log_rows: lr1,
+                             ties: vec![(TieKind::In(0), stream.clone(), 1),
+                                        (TieKind::In(1), one, 1),
+                                        (TieKind::Out(0), stream, 1)] },
+        ];
+        let eqs = vec![GlueEq::plain((0, 1), (1, 0)),
+                       GlueEq::plain((2, 0), (0, 0)),
+                       GlueEq { a: (2, 1), b: (1, 1), scale: g_scale }];
+        Self { t, tff: None, regions, eqs, uns, stream_in: (0, 0), stream_out: (2, 2),
+               tails: vec![2], swiglu: None, out_ties: vec![], head_norm: true }
+    }
+
     pub fn new(p: &Params, gp: &GlueParams) -> Self {
+        if gp.head_norm {
+            return Self::head(p, gp);
+        }
         let t = Tiling::new(p.s, gp.d, gp.a);
         let (a, tok, nreal) = (t.a, t.tokens, t.nreal);
         // the canonical stream position of channel `c` of token `t` is
@@ -748,6 +825,7 @@ impl GluePlan {
             tails,
             swiglu,
             out_ties,
+            head_norm: false,
         }
     }
 
@@ -1013,12 +1091,20 @@ impl Plan {
         let mut rqs = vec![];
         let mut rq_vars: Vec<crate::requant::SVariant> = vec![];
         if let Some(g) = glue.as_ref() {
-            let seams: Vec<(&str, (usize, usize), usize)> = vec![
-                ("qkv", (g.tails[0], 2), g.t.d),
-                ("gateup", (g.tails[1], 2), g.t.d),
-                ("down", (g.swiglu.expect("the SwiGLU region is unconditional"), 2),
-                 g.tff.expect("the SwiGLU's tiling").d),
-            ];
+            // stream II: on the head chunk the only producer is the final
+            // norm's tail and the only consumer is the head's own walk, so the
+            // seam list is one entry and the layer's three are absent -- there
+            // is no layer here to have produced them.
+            let seams: Vec<(&str, (usize, usize), usize)> = if g.head_norm {
+                vec![("head", (g.tails[0], 2), g.t.d)]
+            } else {
+                vec![
+                    ("qkv", (g.tails[0], 2), g.t.d),
+                    ("gateup", (g.tails[1], 2), g.t.d),
+                    ("down", (g.swiglu.expect("the SwiGLU region is unconditional"), 2),
+                     g.tff.expect("the SwiGLU's tiling").d),
+                ]
+            };
             for (name, producer, n) in seams {
                 let Some(wi) = walks.iter().position(|w| w.name == name) else { continue };
                 let m0 = &p.mats[walks[wi].mats[0]];
@@ -2641,10 +2727,20 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         let mut ms_out: Vec<Vec<u16>> = vec![];
         // stream 0: xin + o_out into xmid, and the squares' first levels;
         // stream 1: xmid + d_out into xout, and norm2's
+        //
+        // Stream II, the head chunk: one reduction and no add.  `xin` is the
+        // last layer's committed residual, level 1 is the squares' tree alone,
+        // and there is no second stream to thread -- so the loop runs once,
+        // over an empty second operand, and the region's output group 1 (the
+        // add) does not exist to be compared.
+        let empty: Vec<u16> = vec![];
+        let sources: Vec<(&Vec<u16>, &Vec<u16>, &str)> = if gp.head_norm {
+            vec![(&empty, &empty, "xin_head")]
+        } else {
+            vec![(&gc.o_out, &gc.xmid, "xmid"), (&gc.d_out, &gc.xout, "xout")]
+        };
         let mut stream = t.lay(&gc.xin);
-        for (k, (add, want, wname)) in
-            [(&gc.o_out, &gc.xmid, "xmid"), (&gc.d_out, &gc.xout, "xout")].iter().enumerate()
-        {
+        for (k, (add, want, wname)) in sources.iter().enumerate() {
             let i1 = 2 * k;
             let (prog1, tag1) = (gp.regions[i1].prog.clone(), gp.regions[i1].tag.clone());
             let (prog2, tag2) =
@@ -2655,7 +2751,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                     stream[vi % n] ^= 1;
                 }
             }
-            let mut addv = t.lay(add);
+            let mut addv = if gp.head_norm { vec![] } else { t.lay(add) };
             if let Some((ri, vi)) = tamper.glue_add {
                 if ri == i1 {
                     let n = addv.len();
@@ -2663,20 +2759,27 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 }
             }
             tail_in.push(stream.clone());
+            let leaves = if gp.head_norm {
+                vec![stream.clone()]
+            } else {
+                vec![stream.clone(), addv]
+            };
             let w1 = crate::glue::GlueWitness::new(
-                rows1, vec![stream.clone(), addv], &prog1, plan.round,
+                rows1, leaves, &prog1, plan.round,
                 format!("B1 residual stream [{} x {}]", t.tokens, t.d));
             let tam1 = tamper.glue.filter(|(ri, _)| *ri == i1).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
             let r1 = crate::glue::glue_region(&w1, &prog1, plan.round, &tag1, &mut gt, tam1);
             crate::util::m4_add("gen/glue_region", t_gr.elapsed().as_secs_f64());
             // what the region computed is what the next one reads: that is what
-            // the tie says, and it is checked against B1's own column here
-            let got = t.unlay(&r1.outs[1]);
+            // the tie says, and it is checked against B1's own column here.
+            // The head chunk's level 1 has no add, so there is no second output
+            // group and nothing to compare -- its own reference is the tail's.
+            let got = if gp.head_norm { vec![] } else { t.unlay(&r1.outs[1]) };
             // stream II: a synthetic layer carries no B1 column to compare
             // against, and an absent reference is reported as absent rather
             // than as zero mismatches -- the trap E's own record names.
-            if want.len() >= t.tokens * t.d {
+            if !gp.head_norm && want.len() >= t.tokens * t.d {
                 let bad = (0..t.tokens * t.d)
                     .filter(|i| crate::glue::canon(got[*i]) != crate::glue::canon(want[*i]))
                     .count();
@@ -2698,13 +2801,17 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             let r2 = crate::glue::glue_region(&w2, &prog2, plan.round, &tag2, &mut gt, tam2);
             crate::util::m4_add("gen/glue_region", t_gr.elapsed().as_secs_f64());
             ms_out.push(r2.outs[0][..t.tokens].to_vec());
-            stream = t.lay(&got);
+            if !gp.head_norm {
+                stream = t.lay(&got);
+            }
             glue_regions.push(r1);
             glue_regions.push(r2);
         }
         // ---- stream E: h = (x * r) * w, once per norm -------------------------
         for (k, i) in gp.tails.iter().copied().enumerate() {
-            let (rcol, wcol, want, wname, rname) = if k == 0 {
+            let (rcol, wcol, want, wname, rname) = if gp.head_norm {
+                (&gc.r1, &gc.w1, &gc.h1, "h_head", "r_head")
+            } else if k == 0 {
                 (&gc.r1, &gc.w1, &gc.h1, "x_q", "n1_out")
             } else {
                 (&gc.r2, &gc.w2, &gc.h2, "x_gate", "n2_out")
