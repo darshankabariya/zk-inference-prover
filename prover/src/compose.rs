@@ -1244,6 +1244,55 @@ impl BuiltComponents {
         tasks.par_iter().for_each(|t| t());
     }
 
+    /// Stream EE (open item 21): the fingerprint every dispatched component
+    /// will look its kernel up by, in `cudaemit`'s own component order and
+    /// under `cudaemit`'s own names, so the two reports compare line for line.
+    ///
+    /// It is the same lowering the dispatch does (`cudagen::lowered_ir`) over
+    /// the same evals -- this chunk's real claims and challenges included --
+    /// so it answers "what will this chunk ask the store for", not "what
+    /// should it ask for".
+    pub fn fp_rows(&self) -> Vec<Value> {
+        let mut v = vec![];
+        for i in 0..self.chans.len() {
+            v.push(crate::cudagen::fp_row(&self.chans[i].eval, &format!("chan_band{i}")));
+            v.push(crate::cudagen::fp_row(&self.keys[i].eval, &format!("key_band{i}")));
+        }
+        for i in 0..self.rows.len() {
+            v.push(crate::cudagen::fp_row(&self.rows[i].eval, &format!("row_band{i}")));
+        }
+        for i in 0..self.links.len() {
+            v.push(crate::cudagen::fp_row(&self.links[i].eval, &format!("link{i}")));
+        }
+        v.push(crate::cudagen::fp_row(&self.ao.eval, "attnout"));
+        for i in 0..self.mats.len() {
+            v.push(crate::cudagen::fp_row(&self.mats[i].eval, &format!("dequant{i}")));
+        }
+        for i in 0..self.glue.len() {
+            v.push(crate::cudagen::fp_row(&self.glue[i].eval, &format!("glue{i}")));
+        }
+        for i in 0..self.gtables.len() {
+            v.push(crate::cudagen::fp_row(&self.gtables[i].eval, &format!("gtable{i}")));
+        }
+        for i in 0..self.walks.len() {
+            v.push(crate::cudagen::fp_row(&self.walks[i].eval, &format!("walk{i}")));
+        }
+        v.push(crate::cudagen::fp_row(&self.exp_t.eval, "exp_table"));
+        for i in 0..self.tables.len() {
+            v.push(crate::cudagen::fp_row(&self.tables[i].eval, &format!("table{i}")));
+        }
+        if let Some(c) = &self.argmax {
+            v.push(crate::cudagen::fp_row(&c.eval, "argmax"));
+        }
+        if let Some(c) = &self.embed {
+            v.push(crate::cudagen::fp_row(&c.eval, "embed"));
+        }
+        if let Some(c) = &self.emb_tab {
+            v.push(crate::cudagen::fp_row(&c.eval, "emb_table"));
+        }
+        v
+    }
+
     pub fn provers(&self) -> Vec<&dyn ComponentProver<crate::common::PcsB>> {
         let mut v: Vec<&dyn ComponentProver<_>> = vec![];
         let mut ri = 0usize;
@@ -3779,6 +3828,19 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let built = build_components_linked(&plan, &rels, r, s, rv, r_corner, w_glue, lam_glue,
                                         &claims, link_hl.as_deref());
     crate::util::m4_add("wall/build_components", m4_t.elapsed().as_secs_f64());
+    // Stream EE (open item 21): `--fp-out FILE` writes the fingerprint set this
+    // chunk will look up, for the pre-run comparison against `cudaemit
+    // --fp-out` on the same plan line. `--fp-only` stops here: the components
+    // exist and their fingerprints are the whole answer, so the report is
+    // written and the process ends without proving.
+    if let Some((path, only)) = crate::cudagen::fp_out() {
+        let rows = built.fp_rows();
+        crate::cudagen::fp_write(path, "compose", &layer.source, &rows);
+        if *only {
+            eprintln!("--fp-only: fingerprints written, proving skipped");
+            std::process::exit(0);
+        }
+    }
     let sizes: Vec<Vec<u32>> = sess
         .ops
         .iter()

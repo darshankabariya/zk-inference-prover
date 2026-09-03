@@ -2169,6 +2169,75 @@ pub fn blob_for<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
     blob_timed(eval)
 }
 
+/// The IR a *running chunk* lowers a component to -- the one whose fingerprint
+/// `cuda_eval_blob` looks the kernel up by.
+///
+/// Stream EE (open item 21): named so the dispatch and the pre-run fingerprint
+/// report cannot lower two different things. It is the emitter's `lower` over
+/// the same eval, through the B7b IR cache.
+pub fn lowered_ir<E: FrameworkEval>(eval: &E) -> Ir {
+    crate::scalars::cached_ir(
+        eval,
+        eval.log_size(),
+        eval.max_constraint_log_degree_bound(),
+        false,
+        || lower(eval, SecureField::zero(), eval.log_size(), eval.max_constraint_log_degree_bound()),
+    )
+}
+
+/// One component's row of the fingerprint report, in the shape `cudaemit`
+/// writes its own rows in, so the two sides compare field for field.
+pub fn fp_row<E: FrameworkEval>(eval: &E, name: &str) -> serde_json::Value {
+    let ir = lowered_ir(eval);
+    json!({
+        "component": name,
+        "family": eval.cuda_eval_name(),
+        "fingerprint": format!("{:#010x}", ir.fingerprint()),
+        "instructions": ir.ops.len(),
+        "constraints": ir.constraints.len(),
+        "scalars": ir.scalars.len(),
+        "log_size": ir.log_size,
+        "eval_log_size": ir.eval_log_size,
+    })
+}
+
+/// Stream EE (open item 21): a fingerprint set, in one shape for both sides --
+/// `cudaemit --fp-out` writes what a plan line *installs*, `compose --fp-out`
+/// writes what a chunk on that line *asks for*, and `b65 fpcompare` reads the
+/// two files.
+pub fn fp_json(side: &str, source: &str, rows: &[serde_json::Value]) -> serde_json::Value {
+    let mut fams: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+    for r in rows {
+        let f = r["family"].as_str().unwrap_or("?").to_string();
+        let fp = r["fingerprint"].as_str().unwrap_or("?").to_string();
+        let n = r["instructions"].as_u64().unwrap_or(0);
+        fams.entry(f).or_default().insert(fp, n);
+    }
+    json!({"side": side, "source": source, "families": fams, "components": rows})
+}
+
+pub fn fp_write(path: &str, side: &str, source: &str, rows: &[serde_json::Value]) {
+    let j = fp_json(side, source, rows);
+    std::fs::write(path, serde_json::to_string_pretty(&j).unwrap())
+        .unwrap_or_else(|e| panic!("--fp-out {path}: {e}"));
+    let n: usize = j["families"].as_object().unwrap().values()
+        .map(|v| v.as_object().unwrap().len()).sum();
+    eprintln!("fp-out ({side}): {n} shape(s) over {} famil(ies) -> {path}",
+              j["families"].as_object().unwrap().len());
+}
+
+/// `--fp-out FILE` / `--fp-only` on `compose`, set once from the command line.
+static FP_OUT: std::sync::OnceLock<Option<(String, bool)>> = std::sync::OnceLock::new();
+
+pub fn fp_out_set(args: &[String]) {
+    let _ = FP_OUT.set(crate::arg_str(args, "--fp-out")
+                       .map(|p| (p, crate::flag(args, "--fp-only"))));
+}
+
+pub fn fp_out() -> Option<&'static (String, bool)> {
+    FP_OUT.get().and_then(|o| o.as_ref())
+}
+
 fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
     let name = eval.cuda_eval_name();
     if crate::cudakernels::SHAPES.is_empty() {
@@ -2177,13 +2246,7 @@ fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
         return None;
     }
     // B7b (README 26): by shape, with this proof's scalars replayed.
-    let ir = crate::scalars::cached_ir(
-        eval,
-        eval.log_size(),
-        eval.max_constraint_log_degree_bound(),
-        false,
-        || lower(eval, SecureField::zero(), eval.log_size(), eval.max_constraint_log_degree_bound()),
-    );
+    let ir = lowered_ir(eval);
     let fp = ir.fingerprint();
     let shape = match crate::cudakernels::shape_of(name, fp) {
         Some(s) => s,
@@ -2252,8 +2315,7 @@ fn fill_tie_claims(plan: &crate::compose::Plan, claims: &mut crate::compose::Cla
 /// `cudaemit`: lower every component, group by fingerprint into kernels, and
 /// write the generated CUDA, the Rust shape table and a manifest.
 pub fn emit_cmd(args: &[String]) {
-    let (l, vname) = crate::layer_of(args);
-    let params = crate::params_of(&l, args, &vname);
+    let (source, params) = crate::plan_params(args);
     let plan = crate::compose::Plan::new(&params);
     let out = crate::arg_str(args, "--out").unwrap_or_else(|| "/root/b7/gen".to_string());
     let launch = Launch {
@@ -2382,6 +2444,43 @@ pub fn emit_cmd(args: &[String]) {
         if let Some(et) = &b.emb_tab {
             go!(et, "emb_table".to_string());
         }
+
+        // Stream EE (open item 21): the **collapsed** grid bands.
+        //
+        // `Lower::ext` folds `x - 0` and `schedule` then drops the dead scalar
+        // slot with it, so a claim a witness drives to exactly zero takes two
+        // instructions out of the IR and the component lowers to a fingerprint
+        // these placeholder claims never produce -- `exprprobe::claims_for`
+        // hands out four nonzero limbs per claim, and `fill_tie_claims` is the
+        // same hazard already found on the tie claims.
+        //
+        // The grid region has one such pair.  `KeyEval`'s `claimed_av` and
+        // `claimed_sn` are both folds of the numerator accumulator `zn`
+        // (`attn_air.rs`'s `av`/`sn` constraints), so both are exactly zero on
+        // a band whose numerator column is identically zero -- and that is an
+        // ordinary witness, not a coincidence: `commit_base` writes a zero
+        // numerator wherever a key's shift is off the exp table, and at a long
+        // prefix a whole `S`-key sub-band can be off it for every token of the
+        // chunk.  The C=16384 E11 run met exactly that on layer 2 of blocks
+        // 17-32: the prover asked for `b65_key_eval 0x67c40d82` at **744**
+        // instructions where every emitted shape of that band is **748**, and
+        // 16 chunks took the announced scalar fallback.
+        //
+        // So the emitter lowers every band a second time with that pair zeroed
+        // and installs whatever shape is new.  It is additive -- no fingerprint
+        // an earlier emit produced moves -- and value-preserving: the kernel is
+        // chosen by shape and the blob still replays the proof's own scalars,
+        // so a collapsed band computes `av - 0` exactly as the fallback did.
+        let mut zclaims = claims.clone();
+        for bc in zclaims.bands.iter_mut() {
+            bc[2] = [0; 4];
+            bc[3] = [0; 4];
+        }
+        let bz = crate::compose::build_components_linked(&plan, &rels, f[0], f[1], f[2], f[3],
+                                                         f[4], f[5], &zclaims, link.as_deref());
+        for i in 0..bz.keys.len() {
+            go!(bz.keys[i], format!("key_band{i}_zav"));
+        }
     }
 
     let fresh: usize = fams.iter().map(|(_, s)| s.len()).sum::<usize>() - carried;
@@ -2451,7 +2550,7 @@ pub fn emit_cmd(args: &[String]) {
     std::fs::write(dir.join("cudakernels.rs"), &table).unwrap();
 
     let man = json!({
-        "source": l.source,
+        "source": source,
         "launch": {"block": launch.block, "min_blocks": launch.min_blocks},
         "seg_cap": seg_cap,
         "families": manifest,
@@ -2479,6 +2578,11 @@ pub fn emit_cmd(args: &[String]) {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    }
+    // Stream EE (open item 21): the set this line installs, for the pre-run
+    // comparison against what a chunk on the same line asks for.
+    if let Some(p) = crate::arg_str(args, "--fp-out") {
+        fp_write(&p, "cudaemit", &source, &rows);
     }
     crate::util::emit("cudaemit", man);
 }

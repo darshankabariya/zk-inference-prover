@@ -705,6 +705,34 @@ off_table {off})",
               l.bands.iter().map(|b| b.key_max()).max().unwrap_or(0), need);
 }
 
+/// The design point a lowering command works on: a witness dump, or -- with
+/// `--params FILE` -- the `params` object of a serialized statement.
+///
+/// Stream EE (open item 21).  `Fixed` carries every field `params_of` derives
+/// from a dump, so a `<tag>.fixed.json` a run left on disk is a complete
+/// description of that chunk's plan.  Reading it back is how a machine with no
+/// witness -- the coordinating box -- lowers a real 8B plan line and compares
+/// the fingerprints against what the run asked for.  It is a lowering path
+/// only: nothing here can prove, because a statement carries no trace.
+pub fn plan_params(args: &[String]) -> (String, compose::Params) {
+    if let Some(f) = arg_str(args, "--params") {
+        let bytes = std::fs::read(&f)
+            .unwrap_or_else(|e| panic!("--params {f}: {e}"));
+        let v: serde_json::Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("--params {f}: not JSON: {e}"));
+        // a `Fixed` (what `--ser-dir` writes) or a bare `Params`
+        let p = v.get("params").cloned().unwrap_or(v);
+        let params: compose::Params = serde_json::from_value(p)
+            .unwrap_or_else(|e| panic!("--params {f}: not a statement's params: {e}"));
+        eprintln!("params: {f} (s={} c={} bands={:?} kv_bind={})",
+                  params.s, params.c, params.bands, params.kv_bind);
+        return (format!("--params {f}"), params);
+    }
+    let (l, vname) = layer_of(args);
+    let params = params_of(&l, args, &vname);
+    (l.source.clone(), params)
+}
+
 pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Params {
     let b0 = &l.bands[0];
     let kmax = l.mats.iter().map(|m| m.kmax_blind()).max().unwrap()
@@ -979,6 +1007,8 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
 }
 
 fn compose_cmd(args: &[String]) {
+    // Stream EE (open item 21): before anything, because `prove_gen` reads it.
+    cudagen::fp_out_set(args);
     let (mut l, vname) = layer_of(args);
     // B7a milestone 4 (section 3 row 1): rung 3's sixth probe on its own, so the
     // `nopatch` control has a witness whose exp table is *not* the closed form
@@ -1726,6 +1756,54 @@ fn selftest(args: &[String]) {
                             "requant": rq, "compose": cj}));
 }
 
+/// Stream EE (open item 21): `fpcompare EMIT.json ASK.json` -- does the plan
+/// line's emitted kernel set cover everything a chunk on that line looks up?
+///
+/// The rule is containment, not equality: one emit line installs the shapes of
+/// every component of its design point, and a chunk asks for the subset its own
+/// components use, so `ask ⊆ emit` is the property that keeps a run off the
+/// scalar route. Any fingerprint on the ask side and not on the emit side is
+/// the defect item 21 recorded, and it is named here with its family and its
+/// instruction count.
+fn fpcompare_cmd(args: &[String]) {
+    let files: Vec<&String> = args[1..].iter().filter(|a| !a.starts_with("--")).collect();
+    assert_eq!(files.len(), 2, "fpcompare wants EMIT.json and ASK.json");
+    let read = |p: &str| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(p).unwrap_or_else(|e| panic!("{p}: {e}"))).unwrap()
+    };
+    let (emitted, asked) = (read(files[0]), read(files[1]));
+    let mut missing = vec![];
+    let mut n_ask = 0usize;
+    for (family, fps) in asked["families"].as_object().expect("ask: no families") {
+        for (fp, instr) in fps.as_object().unwrap() {
+            n_ask += 1;
+            if emitted["families"][family].get(fp).is_none() {
+                missing.push(json!({"family": family, "fingerprint": fp,
+                                    "instructions": instr}));
+            }
+        }
+    }
+    let n_emit: usize = emitted["families"].as_object().map(|o| {
+        o.values().map(|v| v.as_object().unwrap().len()).sum()
+    }).unwrap_or(0);
+    for m in &missing {
+        eprintln!("fpcompare: {} {} ({} instructions) is asked for and never emitted",
+                  m["family"].as_str().unwrap(), m["fingerprint"].as_str().unwrap(),
+                  m["instructions"]);
+    }
+    let covered = missing.is_empty();
+    eprintln!("fpcompare: {n_ask} shape(s) asked, {n_emit} emitted, {} missing -- {}",
+              missing.len(), if covered { "COVERED" } else { "NOT COVERED" });
+    emit("fpcompare", json!({
+        "emit": files[0], "ask": files[1],
+        "emit_shapes": n_emit, "ask_shapes": n_ask,
+        "missing": missing, "covered": covered,
+    }));
+    if !covered {
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().cloned().unwrap_or_default();
@@ -1763,6 +1841,7 @@ fn main() {
         "bounds-grid" => bounds::grid_cmd(&args),
         "glue-probes" => glue_probes_cmd(&args),
         "selftest" => selftest(&args),
+        "fpcompare" => fpcompare_cmd(&args),
         "gkr" => gkrband::cmd(&args),
         other => {
             eprintln!("unknown subcommand {other:?}; \
