@@ -691,7 +691,7 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         embed_out: vec![], embed_tok: vec![],
         // stream II: the same again -- the seams read their claims through
         // `.get(..).unwrap_or(zero)`, so empty placeholders keep the IR's shape
-        rq_in: vec![], rq_out: vec![], walk_qx: vec![],
+        rq_in: vec![], rq_out: vec![], walk_qx: vec![], rq_sc: vec![], deq_sc: vec![],
         // B11 stream Q: the GKR bundle is bytes, not a claim; nothing the
         // components lower reads it, so the placeholder statement carries none.
         gkr: None,

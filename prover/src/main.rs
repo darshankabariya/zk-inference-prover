@@ -1630,6 +1630,33 @@ fn compose_probes_cmd(args: &[String]) {
                            "the (pm, scale) lookup"),
                     "a scale that is not the ceil-divide of the attained max accepted");
         }
+        // Stream II (E11), the scale tie.  A *consumer's* per-token scale moved
+        // by one, with its dequant region rederived under it, so every
+        // constraint that region carries still holds -- an honest dequant by a
+        // scale the requantize did not pin.  The bend has to be on a matmul
+        // that is not its group's first, because the seam reads its scale off
+        // that one and moving it would move both sides together; `down`'s group
+        // is `[down]` alone, so its own pair is not separable by a witness bend
+        // and would need a committed-column tamper instead.
+        for (k, rp) in rplan.rqs.iter().enumerate() {
+            let mats = &rplan.walks[rp.walk].mats;
+            let Some(mi) = mats.get(1).copied() else { continue };
+            let mut lb = layer_of(args).0;
+            let name = lb.mats[mi].name.clone();
+            match rp.v {
+                requant::SVariant::Pow2 => lb.mats[mi].jx[0] += 1,
+                requant::SVariant::Bf16 => lb.mats[mi].sx[0].1 += 1,
+            }
+            let at = mats.iter().position(|x| *x == mi).unwrap();
+            let base: usize = rplan.rqs[..k].iter().map(|q| rplan.walks[q.walk].mats.len()).sum();
+            assert!(!probe(&format!("requant {}: {name} dequantized by another scale",
+                                    rp.name),
+                           &lb, &Default::default(),
+                           &format!("the tie rq_sc[{k}] == deq_sc[{name}]")),
+                    "a dequant under a scale the requantize did not pin accepted");
+            let _ = base + at;
+        }
+
         // Stream II (E11), the `o` seam.  `o` has no requantize region --
         // `AttnOutEval` is its requantize -- so its control is the same shape as
         // the three above's output side and no tamper either: one `o`

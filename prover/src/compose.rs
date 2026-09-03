@@ -453,6 +453,15 @@ pub struct Claims {
     /// in the canonical channel-major order.
     #[serde(default)]
     pub walk_qx: Vec<[u32; 4]>,
+    /// Stream II (E11): the requantize↔dequant scale tie.  `rq_sc` is one claim
+    /// per seam over the scale that seam pinned to the attained maximum;
+    /// `deq_sc` is one per *matmul* over the x-side scale its dequant used, and
+    /// is empty on a chunk with no seams.  Indexed by matmul so the verifier
+    /// reads a consumer's entry straight off the walk group's mat list.
+    #[serde(default)]
+    pub rq_sc: Vec<[u32; 4]>,
+    #[serde(default)]
+    pub deq_sc: Vec<[u32; 4]>,
     /// B11 stream Q: the bands' batch GKR proof, as bytes, on the GKR arm only.
     /// It rides here because the statement already travels everywhere the proof
     /// does and `Claims::flat` -- what the transcript mixes -- reads only the
@@ -513,6 +522,8 @@ impl Claims {
         v.extend(self.rq_in.iter().map(|x| unqm(*x)));
         v.extend(self.rq_out.iter().map(|x| unqm(*x)));
         v.extend(self.walk_qx.iter().map(|x| unqm(*x)));
+        v.extend(self.rq_sc.iter().map(|x| unqm(*x)));
+        v.extend(self.deq_sc.iter().map(|x| unqm(*x)));
         v
     }
 }
@@ -526,7 +537,8 @@ impl Claims {
 /// last row gives `w^(N - 1 - c*tokens - t)` per value, which is the canonical
 /// stream weight the producing region's `Out(0)` tie already carries.
 fn rq_tie_w(w: SecureField, lam: SecureField, rp: &RqPlan,
-            claimed_in: SecureField, claimed_out: SecureField) -> crate::requant::RqTie {
+            claimed_in: SecureField, claimed_out: SecureField,
+            claimed_sc: SecureField) -> crate::requant::RqTie {
     let n = (rp.tokens * rp.n) as i128;
     let (tok, pr, nn) = (rp.tokens as i128, rp.lay.per_row as i128, rp.n as i128);
     crate::requant::RqTie {
@@ -536,6 +548,11 @@ fn rq_tie_w(w: SecureField, lam: SecureField, rp: &RqPlan,
         lam,
         claimed_in,
         claimed_out,
+        // stream II (E11): the scale tie's row step.  Both sides fold one value
+        // per token on their own `last` rows with the tokens descending, so
+        // token `t` carries `w^t` either side and no other constant is needed.
+        mu: w,
+        claimed_sc,
     }
 }
 
@@ -2077,6 +2094,18 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         kind,
                     }
                 }),
+                // Stream II (E11): the x-side scale's claim, on every matmul a
+                // requantize seam feeds.  `mu` is the wiring family's own `w`
+                // and `lam` its `lam`, the same two the seam's own fold uses,
+                // so the two claims are comparable with no scale factor.
+                sside: plan.rqs.iter()
+                    .any(|rp| plan.walks[rp.walk].mats.contains(&mi))
+                    .then(|| crate::dequant::SSide {
+                        mu: w_glue,
+                        lam: lam_glue,
+                        claimed: claims.deq_sc.get(mi).copied().map(unqm)
+                            .unwrap_or(SecureField::zero()),
+                    }),
                 // B11 stream U, lever 3: under the flag this region's lookups
                 // are the batched GKR's, so the AIR emits none of them and the
                 // interaction masks they would allocate are not there to claim.
@@ -2374,6 +2403,8 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                                claims.rq_in.get(k).copied().map(unqm)
                                    .unwrap_or(SecureField::zero()),
                                claims.rq_out.get(k).copied().map(unqm)
+                                   .unwrap_or(SecureField::zero()),
+                               claims.rq_sc.get(k).copied().map(unqm)
                                    .unwrap_or(SecureField::zero()));
             rq_comps.push(FrameworkComponent::<crate::requant::RequantEval>::new(
                 alloc,
@@ -4266,7 +4297,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     crate::util::m4_add("int/attnout", m4_t.elapsed().as_secs_f64());
     let m4_t = std::time::Instant::now();
-    for (m, reg) in layer.mats.iter().zip(&mat_regions) {
+    claims.deq_sc = vec![[0u32; 4]; if plan.rqs.is_empty() { 0 } else { layer.mats.len() }];
+    for (mi, (m, reg)) in layer.mats.iter().zip(&mat_regions).enumerate() {
         // stream E: the output side rides on the wiring family's tie challenge,
         // so it exists exactly when that family does and the plan says this
         // matmul publishes one
@@ -4274,7 +4306,11 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             oside_w(w_glue, lam_glue, m.tokens, m.n_out, reg.lay.per_row,
                     plan.oside_kind(&m.name))
         });
-        let it = mat_interaction(m, reg, rv, s, &rels, ow.as_ref(), p.gkr_dequant);
+        // stream II (E11): the x-side scale's fold, on the matmuls a seam feeds
+        let sc = plan.rqs.iter()
+            .any(|rp| plan.walks[rp.walk].mats.contains(&mi))
+            .then_some((w_glue, lam_glue));
+        let it = mat_interaction(m, reg, rv, s, &rels, ow.as_ref(), p.gkr_dequant, sc);
         inter_all.extend(it.cols);
         inter_mark(&format!("dequant/{}", m.name), &inter_all, &mut inter_seen,
                    &mut inter_split);
@@ -4291,6 +4327,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             } else {
                 claims.deq_out.push(qm(c));
             }
+        }
+        if let Some(c) = it.claimed_sc {
+            claims.deq_sc[mi] = qm(c);
         }
     }
     // Stream E: the head's key claim against B1's own `key_head` column.  The
@@ -4526,13 +4565,15 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     if let Some(rr) = rels.rq.as_ref() {
         for (k, reg) in rq_regions.iter().enumerate() {
             let tie = rq_tie_w(w_glue, lam_glue, &plan.rqs[k],
-                               SecureField::zero(), SecureField::zero());
-            let (cols, use_sum, cin, cout) = crate::requant::rq_interaction(
+                               SecureField::zero(), SecureField::zero(),
+                               SecureField::zero());
+            let (cols, use_sum, cin, cout, csc) = crate::requant::rq_interaction(
                 reg, &tie, &rels.qnz, &rr.rq3, &rr.rq4, &rr.scl2, &rr.scl3,
                 rels.range(15), &rr.rqv);
             inter_all.extend(crate::device::host_cols(cols));
             claims.rq_in.push(qm(cin));
             claims.rq_out.push(qm(cout));
+            claims.rq_sc.push(qm(csc));
             claims.use_sums.push(qm(use_sum));
             inter_mark(&format!("requant/{}", reg.tag), &inter_all, &mut inter_seen,
                        &mut inter_split);
@@ -4995,6 +5036,10 @@ pub struct Verdict {
     /// output", and "the walk multiplied the integers this seam derived"
     pub rq_in_ok: Vec<bool>,
     pub rq_out_ok: Vec<bool>,
+    /// Stream II (E11): per (seam, consuming matmul) pair, in plan order -- "the
+    /// scale this matmul dequantized by is the scale the requantize pinned to
+    /// its input's attained maximum".  Empty on a chunk with no seams.
+    pub rq_scale_ok: Vec<bool>,
     /// stream II: the `o` seam, once stream JJ publishes `ao_q`.  True while
     /// that claim is absent -- an equality nobody can state yet is not a
     /// failure, and the record says so rather than the verdict pretending.
@@ -5040,7 +5085,7 @@ impl Verdict {
             && self.deq_out_ok.iter().all(|x| *x) && self.head_tie_ok && self.embed_ok
             && self.embed_tok_ok && self.head_tok_ok
             && self.rq_in_ok.iter().all(|x| *x) && self.rq_out_ok.iter().all(|x| *x)
-            && self.ao_q_ok
+            && self.rq_scale_ok.iter().all(|x| *x) && self.ao_q_ok
     }
     fn rejected(msg: &str) -> Self {
         Self { stark_ok: false, root_ok: false, sums_cancel: false, qk_ok: vec![],
@@ -5048,7 +5093,8 @@ impl Verdict {
                sizes_ok: false, glue_ok: vec![false], deq_out_ok: vec![false],
                deq_out_open: vec![], head_tie_ok: false, embed_ok: false,
                embed_tok_ok: false, head_tok_ok: false,
-               rq_in_ok: vec![false], rq_out_ok: vec![false], ao_q_ok: false,
+               rq_in_ok: vec![false], rq_out_ok: vec![false], rq_scale_ok: vec![false],
+               ao_q_ok: false,
                stream_in: None, stream_out: None,
                bound_roots: vec![], bound_sides: vec![],
                error: Some(msg.to_string()), verify_secs: 0.0 }
@@ -5095,6 +5141,10 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         || claims.rq_out.len() != plan.rqs.len()
         || claims.walk_qx.len()
             != if plan.glue.is_some() { plan.walks.len() } else { 0 }
+        // stream II: the scale tie -- one per seam, and one per matmul when the
+        // chunk carries any seam at all
+        || claims.rq_sc.len() != plan.rqs.len()
+        || claims.deq_sc.len() != if plan.rqs.is_empty() { 0 } else { p.mats.len() }
     {
         return Verdict::rejected("claims shape mismatch");
     }
@@ -5344,6 +5394,24 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         .enumerate()
         .map(|(k, rp)| claims.rq_out.get(k).copied() == claims.walk_qx.get(rp.walk).copied())
         .collect();
+    // Stream II (E11): the scale tie.  The per-token activation scale is
+    // committed twice and, before this, never compared: once by the requantize
+    // region, where `with_max` pins it to the ceil-divide of the attained
+    // maximum of the seam's own input, and once as the x-side scale of every
+    // consuming matmul's dequant.  A prover could requantize under one scale
+    // and dequantize under another; these equalities say it did not.
+    //
+    // One entry per (seam, consumer) pair -- three for `qkv` (q, k and v share
+    // the seam's input, each has its own dequant region), two for `gateup`, one
+    // for `down`, one for the head.  `o` is not here and cannot be: its
+    // producer's scale is the attnout region's preprocessed `num`/`pj`, so that
+    // comparison is preprocessed against committed and not a claim pair.
+    let mut rq_scale_ok: Vec<bool> = vec![];
+    for (k, rp) in plan.rqs.iter().enumerate() {
+        for mi in &plan.walks[rp.walk].mats {
+            rq_scale_ok.push(claims.rq_sc.get(k).copied() == claims.deq_sc.get(*mi).copied());
+        }
+    }
     // Stream II, the `o` seam.  `AttnOutEval` is the attention output's own
     // requantize, so what closes it is one claim on that region -- stream JJ's
     // `claims.ao_q`, a Horner fold over the signed `qm (1 - 2 sg)` -- against
@@ -5425,7 +5493,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
 
     Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
               deq_out_open, head_tie_ok, embed_ok, embed_tok_ok, head_tok_ok,
-              rq_in_ok, rq_out_ok, ao_q_ok,
+              rq_in_ok, rq_out_ok, rq_scale_ok, ao_q_ok,
               sizes_ok, glue_ok, stream_in, stream_out, bound_roots, bound_sides, error,
               verify_secs: t0.elapsed().as_secs_f64() }
 }

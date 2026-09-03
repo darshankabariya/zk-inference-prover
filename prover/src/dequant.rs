@@ -503,6 +503,23 @@ pub struct OSide {
     pub kind: OKind,
 }
 
+/// Stream II (E11): the x-side scale's claim.  One Horner over the region's
+/// shared per-token scale columns on its `last` rows, under the same weights
+/// the producing requantize region folds its own committed scale under -- so
+/// the equality says "the matmul dequantized by the scale its input was
+/// quantized with", which was the last thing left open between a producer and
+/// its consumer.
+///
+/// `lam` folds the bf16 variant's `(ms, es)` into one field element, exactly as
+/// the output side folds `(sm, ef)`.  `None` on a region whose walk group has
+/// no requantize seam, and on every region of a chunk with no wiring family.
+#[derive(Clone)]
+pub struct SSide {
+    pub mu: SecureField,
+    pub lam: SecureField,
+    pub claimed: SecureField,
+}
+
 /// The preprocessed selectors an output side adds, in this order: the ordinary
 /// row step, the token-boundary step, and whether the row is active at all.
 ///
@@ -531,6 +548,9 @@ pub struct DequantEval {
     pub yside: Option<YSide>,
     /// stream E: the output-side claim, when this region publishes one
     pub oside: Option<OSide>,
+    /// stream II (E11): the x-side scale's claim, when a requantize seam feeds
+    /// this matmul
+    pub sside: Option<SSide>,
     /// B11 stream U, lever 3: this region's lookups are proved by the batched
     /// GKR instead of committed running-sum columns, so the AIR emits neither
     /// the relation entries nor the interaction masks they would allocate. The
@@ -867,6 +887,27 @@ impl FrameworkEval for DequantEval {
             let mult: E::EF = E::EF::from(oin) * o.k_in + E::EF::from(obd) * o.k_bd;
             eval.add_constraint(u.clone() - u_prev * mult - f * oact);
             eval.add_constraint((u - o.claimed) * oend);
+        }
+        // Stream II (E11): the x-side scale, folded on the `last` rows.  `m1`
+        // and `m2` are `[j > 0 and not last]` and `[j > 0 and last]`, so the
+        // step is `m1 + m2 mu` -- degree 1, as the claimed side's already is --
+        // and an inert lead row is neither `last` nor `m2`, so it carries the
+        // (still zero) accumulator and folds nothing.
+        if let Some(sc) = &self.sside {
+            let sel: Vec<E::F> = DEQ_SEL
+                .iter()
+                .map(|n| eval.get_preprocessed_column(deq_sel(&self.tag, n)))
+                .collect();
+            let (last, m1, m2, end) =
+                (sel[1].clone(), sel[2].clone(), sel[3].clone(), sel[4].clone());
+            let [v_prev, v] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+            let mut f = E::EF::from(shared[0].clone());
+            if shared.len() > 1 {
+                f += E::EF::from(shared[1].clone()) * sc.lam;
+            }
+            let mult: E::EF = E::EF::from(m1) + E::EF::from(m2) * sc.mu;
+            eval.add_constraint(v.clone() - v_prev * mult - f * E::EF::from(last));
+            eval.add_constraint((v - sc.claimed) * end);
         }
         if !self.gkr {
             eval.finalize_logup_in_pairs();
@@ -1700,7 +1741,7 @@ pub fn run(w: &Witness, sp: &Spec, tamper: Option<Tamper>) -> Outcome {
             mul: mul_rel.clone(),
             qnz: qnz_rel.clone(),
             rels: rels.clone(),
-            yside: None, oside: None,
+            yside: None, oside: None, sside: None,
             // the standalone dequant probe has no GKR arm to hand its lookups to
             gkr: false,
         },

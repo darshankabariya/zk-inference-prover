@@ -2459,6 +2459,9 @@ pub struct MatInteraction {
     pub use_sum: SecureField,
     /// stream E: the output side's closing value, when this region carries one
     pub claimed_out: Option<SecureField>,
+    /// stream II (E11): the x-side scale's, when a requantize seam feeds this
+    /// matmul
+    pub claimed_sc: Option<SecureField>,
 }
 
 /// The weights an output-side Horner claim runs on, as the composition derives
@@ -2483,8 +2486,10 @@ pub struct OSideW {
 /// `sums_cancel`. This is the same shape stream S gave the bands in
 /// `attn_trace::interaction_phase`.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
-                       rels: &crate::compose::Rels, out: Option<&OSideW>, gkr: bool)
+                       rels: &crate::compose::Rels, out: Option<&OSideW>, gkr: bool,
+                       sc: Option<(SecureField, SecureField)>)
                        -> MatInteraction {
     let lay = r.lay;
     let rows = 1usize << lay.log_rows;
@@ -2631,6 +2636,34 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
         claimed
     });
 
+    // Stream II (E11): the x-side scale, between the output side's column and
+    // the LogUp columns -- the order the AIR reads them in.  One value per
+    // token on the `last` rows, the same field elements this region's shared
+    // columns commit, so the producing seam's own fold is comparable to it.
+    let claimed_sc = sc.map(|(mu, lam)| {
+        let mut v = vec![SecureField::zero(); n_rows];
+        for j in 0..n_rows {
+            let (f, last) = match lay.at_opt(m.tokens, j) {
+                Some((t, 0)) => {
+                    let x = match r.spec.variant {
+                        DeqVariant::Pow2 => SecureField::from(m31_of(m.jx[t] as i64)),
+                        _ => SecureField::from(m31_u32(m.sx[t].0))
+                             + SecureField::from(m31_u32(m.sx[t].1)) * lam,
+                    };
+                    (x, true)
+                }
+                _ => (SecureField::zero(), false),
+            };
+            let mult = if j == 0 { SecureField::zero() }
+                       else if last { mu } else { SecureField::one() };
+            v[j] = if j == 0 { f } else { v[j - 1] * mult + f };
+        }
+        let claimed = v[n_rows - 1];
+        cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &v)
+            .into_iter().map(crate::device::AnyCol::OwnedHost));
+        claimed
+    });
+
     // the LogUp columns, in the exact order the AIR adds lookups -- or, under
     // the flag, the same fractions handed to the GKR collector instead
     let m4_t = std::time::Instant::now();
@@ -2645,7 +2678,7 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
         cols.extend(lcols);
         use_sum
     };
-    MatInteraction { cols, claimed_h, use_sum, claimed_out }
+    MatInteraction { cols, claimed_h, use_sum, claimed_out, claimed_sc }
 }
 
 /// The interaction-mask columns come first (z, h), then the LogUp columns; this
@@ -2697,6 +2730,7 @@ pub fn deq_logup_eval(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField
         // LogUp IR -- leaving it off here keeps the lowering identical whether
         // the tie is on or not, which is what `B7_M4_LOGUPIR=2` compares
         oside: None,
+        sside: None,
         gkr: false,
     }
 }
