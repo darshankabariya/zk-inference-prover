@@ -1287,8 +1287,9 @@ fn compose_probes_cmd(args: &[String]) {
         if let Some(g) = gplan.glue.as_ref() {
             // `Tamper::Stream` counts leaves across every group of the row and
             // fires only inside group 0, so the index has to be derived from the
-            // layout rather than picked: a tail row is `[nreal x, 1 r, nreal w]`
-            // and anything at or past `nreal` corrupts nothing at all.
+            // layout rather than picked: a tail row is `[nreal x, 1 ms]` since
+            // stream II moved the weight into tree 0, and anything at or past
+            // `nreal` corrupts nothing at all.
             let in0 = g.t.nreal / 2;
             for (k, i) in g.tails.iter().copied().enumerate() {
                 let n = k + 1;
@@ -1307,7 +1308,33 @@ fn compose_probes_cmd(args: &[String]) {
                                    ..Default::default() },
                                "the multiply's output constraint"),
                         "a corrupted tail result accepted");
+                // stream II's three controls on the norm tail.  The first two
+                // change what `r` is without breaking anything inside the
+                // region: the `NormR` lookup still finds a row and the two
+                // multiplies still hold, so the only thing that can reject is
+                // the tie to the reduction's published sum of squares.
+                assert!(!probe(&format!("tail nt{n}: a wrong r on one row"), &l,
+                               &compose::ProverTamper {
+                                   glue: Some((i, glue::Tamper::Ms(37))),
+                                   ..Default::default() },
+                               &format!("the tie nt{n}.In(1) == G gn{n}b.Out(0)")),
+                        "a tail with a wrong r accepted");
+                assert!(!probe(&format!("tail nt{n}: two rows of one token, two rs"), &l,
+                               &compose::ProverTamper {
+                                   glue: Some((i, glue::Tamper::MsRow(37))),
+                                   ..Default::default() },
+                               &format!("the tie nt{n}.In(1) == G gn{n}b.Out(0)")),
+                        "a token whose rows disagree about r accepted");
             }
+            // and the third: one norm-weight cell bent.  It is preprocessed
+            // now, so every constraint still holds and the *root* is what
+            // moves -- a different kind of rejection from every probe above,
+            // and the one that says `w` is the model's and not the prover's.
+            assert!(!probe("tail nt1: one norm-weight cell", &l,
+                           &compose::ProverTamper { glue_w: Some(4321),
+                                                    ..Default::default() },
+                           "the pinned preprocessed root"),
+                    "a bent norm weight accepted");
             // the dequant output ties: the wiring family's copy of `o_out` (and
             // of `d_out`) is changed, the region's own add is recomputed from it,
             // and only the tie against the dequant region's published output can

@@ -1194,6 +1194,19 @@ pub enum Tamper {
     /// one committed leaf of group 0 replaced -- the residual stream a consumer
     /// reads is not the one its producer wrote (the Horner tie)
     Stream(usize),
+    /// Stream II: one row's committed sum of squares, bent by one pattern step.
+    /// It is still a legal `(sm, ef)`, so the `UnKind::NormR` lookup finds a row
+    /// and the region's arithmetic stays consistent -- `r` is simply the
+    /// `rsqrt` of a number this token's reduction did not produce.  Only the
+    /// tie `nt.In(1) == G gnb.Out(0)` can catch it.
+    Ms(usize),
+    /// Stream II: one row's committed sum of squares replaced by the *next
+    /// row's*.  Rows of one norm-tail region step through tokens at a fixed
+    /// residue, so this gives two rows of one token two different `r`s, out of
+    /// values that are each some token's honest reduction.  Again only the tie
+    /// can catch it -- and this is the one the record's "one `r` per token"
+    /// sentence rests on.
+    MsRow(usize),
 }
 
 impl Tamper {
@@ -1206,6 +1219,8 @@ impl Tamper {
             Tamper::NotBf16(_) => "a leaf that is not a bf16 value",
             Tamper::Sign(_) => "result sign flipped",
             Tamper::Stream(_) => "one value of the residual stream, swapped",
+            Tamper::Ms(_) => "one row's sum of squares, one step up",
+            Tamper::MsRow(_) => "one row's sum of squares taken from the next row",
         }
     }
 }
@@ -1421,6 +1436,25 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                         if live && g == 0 && t % n_leaf_tot.max(1) == flat {
                             pat ^= 1;
                             fired += 1;
+                        }
+                    }
+                    // stream II: the two probes the `In(1)` tie exists for.
+                    // Both leave a legal bf16 pattern, so the `NormR` lookup
+                    // still finds its row and the region stays self-consistent.
+                    if let Some(Tamper::Ms(t)) = tamper {
+                        if live && g == 1 && t % w.rows.max(1) == j {
+                            pat ^= 1;
+                            fired += 1;
+                        }
+                    }
+                    if let Some(Tamper::MsRow(t)) = tamper {
+                        if live && g == 1 && t % w.rows.max(1) == j {
+                            let nxt = (j + 1) % w.rows;
+                            let other = w.groups[g][nxt * gr.n + i];
+                            if other != pat {
+                                pat = other;
+                                fired += 1;
+                            }
                         }
                     }
                     let (mut sm, ef) = split(pat);
