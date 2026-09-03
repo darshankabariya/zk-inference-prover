@@ -2253,7 +2253,16 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // stream Z: the fold region and the widened attention output's walk
             // both fill on the host, whatever the switches say
             || plan.specs.iter().any(|s| s.variant == DeqVariant::Fold)
-            || plan.walks.iter().any(|w| w.act_bits != 8),
+            || plan.walks.iter().any(|w| w.act_bits != 8)
+            // stream JJ (E11): an armed attnout tamper does too -- `ao_region`
+            // sets its own mode to 0 because the device fill has no `corrupt`
+            // path -- so its counters are the host's and the shared
+            // multiplicity columns have to be as well.  Without this the
+            // defaults cuda regime stops at "B7_M4_WFILL=1 but the attnout is
+            // host-built" and no attnout control can be run on the card.
+            || tamper.ao_clamp.is_some() || tamper.ao_den.is_some()
+            || tamper.ao_jo.is_some() || tamper.ao_num.is_some()
+            || tamper.ao_acc.is_some() || tamper.ao_jo_tok.is_some(),
     );
     let mut mult_exp = std::mem::take(&mut tables.m_exp);
     let mut mult_r = std::mem::take(&mut tables.m_r);
