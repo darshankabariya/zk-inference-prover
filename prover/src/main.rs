@@ -688,7 +688,8 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     // columns and composes exactly as it always did, which is what keeps every
     // other stream's recorded synthetic digest where it is.
     if flag(args, "--synth-glue") {
-        l.synth_glue(src.seed);
+        let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
+        l.synth_glue(src.seed, arg_scalar(args, "--glue-a", 32usize), round);
     }
     tighten_of(&mut l, args);
     (l, vname)
@@ -1135,6 +1136,69 @@ fn psweep_cmd(args: &[String]) {
     emit("psweep", json!({"source": l.source, "points": points}));
 }
 
+/// Stream II, the requantize seams' output-side control.  One committed
+/// activation of a walk group is moved to another legal value and the layer's
+/// exact accumulators move with it, so the chunk proves an honest matmul of
+/// the changed input: no tamper, no inconsistent region, just a prover that
+/// multiplied activations of its own choosing -- which is what
+/// `witness-slack.md` section 1d says the walk used to allow.
+///
+/// The element is the one whose bend disturbs the fewest *dequantized* outputs
+/// of its token, because those are what the rest of the chunk consumes: one
+/// activation's worth of accumulator is below a bf16 ulp on most channels, so
+/// the search usually finds an element the consumers cannot see at all and the
+/// seam's own output tie is then the only thing that can reject.  Returns the
+/// element and how many dequantized outputs it did move.
+fn bend_walk_qx(l: &mut layer::Layer, specs: &[dequant::Spec], mats: &[usize],
+                start: usize) -> Option<(usize, usize)> {
+    let m0 = &l.mats[mats[0]];
+    let (n_in, tokens) = (m0.n_in, m0.tokens);
+    if n_in * tokens == 0 {
+        return None;
+    }
+    let noise = |l: &layer::Layer, idx: usize, d: i64| -> usize {
+        let (t, k) = (idx / n_in, idx % n_in);
+        mats.iter().map(|mi| {
+            let m = &l.mats[*mi];
+            (0..m.n_out).filter(|c| {
+                let a0 = m.acc[t * m.n_out + c];
+                let a1 = a0 + d * m.qw[k * m.n_out + c] as i64;
+                layer::deq_ref_a(a1, m, &specs[*mi], t, *c)
+                    != layer::deq_ref_a(a0, m, &specs[*mi], t, *c)
+            }).count()
+        }).sum()
+    };
+    // any other legal activation: the walks range check `qx + 2^(bits-1)`, and
+    // both neighbours of an interior value are inside that window
+    let dir = |l: &layer::Layer, idx: usize| -> i64 {
+        if l.mats[mats[0]].qx[idx] < 126 { 1 } else { -1 }
+    };
+    let mut best = (usize::MAX, 0usize, 0i64);
+    for step in 0..n_in * tokens {
+        let idx = (start + step) % (n_in * tokens);
+        let d = dir(l, idx);
+        let s = noise(l, idx, d);
+        if s < best.0 {
+            best = (s, idx, d);
+        }
+        if s == 0 {
+            break;
+        }
+    }
+    let (moved, idx, d) = best;
+    let (t, k) = (idx / n_in, idx % n_in);
+    for mi in mats {
+        let m = &mut l.mats[*mi];
+        assert_eq!(m.n_in, n_in, "walk group mixes input widths");
+        m.qx[idx] = (m.qx[idx] as i64 + d) as i32;
+        let n_out = m.n_out;
+        for c in 0..n_out {
+            m.acc[t * n_out + c] += d * m.qw[k * n_out + c] as i64;
+        }
+    }
+    Some((idx, moved))
+}
+
 fn compose_probes_cmd(args: &[String]) {
     let (l, vname) = layer_of(args);
     let params = params_of(&l, args, &vname);
@@ -1361,6 +1425,46 @@ fn compose_probes_cmd(args: &[String]) {
                                "the UN / VAL lookup"),
                         "an illegal swiglu leaf accepted");
             }
+        }
+    }
+
+    // stream II: the three requantize seams.  Each gets the three controls the
+    //     brief names, and each has to reject by exactly one verdict field:
+    //     the input probe by `rq_in_ok`, the output probe by `rq_out_ok`, and
+    //     the scale probe by `sums_cancel` (the committed scale no longer
+    //     divides the attained maximum, so its `(pm, scale)` lookup is off the
+    //     table).  The indices are derived from the plan, never counted.
+    {
+        let rplan = compose::Plan::new(&params);
+        for (k, rp) in rplan.rqs.iter().enumerate() {
+            let n = rp.name.clone();
+            assert!(!probe(&format!("requant {n}: one input value, replaced"), &l,
+                           &compose::ProverTamper {
+                               rq: Some((k, requant::RqTamper::In(37))),
+                               ..Default::default() },
+                           &format!("the tie rq_in[{k}] == the producer's Out(0)")),
+                    "a requantize of values the producer did not write accepted");
+            // the output side: no tamper at all.  The layer itself carries one
+            // activation the requantize did not derive, and its own
+            // accumulators move with it, so every constraint and every other
+            // equality in the chunk still holds -- an honest matmul of the
+            // prover's own choice of input, which is exactly what
+            // `witness-slack.md` section 1d says the walk used to allow.
+            let mut lb = layer_of(args).0;
+            let bent = bend_walk_qx(&mut lb, &rplan.specs, &rplan.walks[rp.walk].mats, 41)
+                .unwrap_or_else(|| panic!("requant {n}: the output-side control bent nothing"));
+            eprintln!("  {n}: activation {} bent, {} dequantized outputs moved with it",
+                      bent.0, bent.1);
+            assert!(!probe(&format!("requant {n}: one activation the requantize did not derive"),
+                           &lb, &Default::default(),
+                           &format!("the tie rq_out[{k}] == walk_qx[{}]", rp.walk)),
+                    "an activation the requantize did not derive accepted");
+            assert!(!probe(&format!("requant {n}: the per-token scale, one step up"), &l,
+                           &compose::ProverTamper {
+                               rq: Some((k, requant::RqTamper::Scale(3))),
+                               ..Default::default() },
+                           "the (pm, scale) lookup"),
+                    "a scale that is not the ceil-divide of the attained max accepted");
         }
     }
 

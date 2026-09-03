@@ -50,6 +50,28 @@ pub fn ao_chan(kind: &str, slot: usize) -> PreProcessedColumnId {
     id(format!("b65_ao_{kind}{slot:04}"))
 }
 
+/// Stream II: the walk's own Horner claim over its committed activations, in
+/// the canonical channel-major stream order `q = c * tokens + t`, so that a
+/// producing region's claim over the same sequence is comparable to it value
+/// for value.
+///
+/// The walk's grid runs `(input channel, token chunk)` down the rows with the
+/// tokens in the slots, so the row step takes two values -- `m_in` inside one
+/// channel's chunks and `m_bd` at a channel boundary -- which is the shape
+/// `dequant::OSide` already runs at.  Both selectors it needs are ones this
+/// region already commits: `nofirst` is `[chunk + 1 < chunks]`, which is true
+/// only away from a channel's first row, and `notzero` is `[j > 0]`, so
+/// `notzero - nofirst` is exactly "this row begins a channel and is not row 0".
+/// No new preprocessed column.
+#[derive(Clone)]
+pub struct WalkQx {
+    /// one weight per token slot
+    pub w: Vec<SecureField>,
+    pub m_in: SecureField,
+    pub m_bd: SecureField,
+    pub claimed: SecureField,
+}
+
 // ------------------------------------------------------------- the weight walk --
 
 #[derive(Clone)]
@@ -81,6 +103,9 @@ pub struct WalkEval {
     /// allocate. `range_check` still says whether the checks exist at all; this
     /// says who owns them.
     pub gkr: bool,
+    /// Stream II: the activation claim, or `None` on a chunk with no wiring
+    /// family -- which is what keeps such a chunk's proof exactly what it was.
+    pub qx: Option<WalkQx>,
 }
 
 impl FrameworkEval for WalkEval {
@@ -138,6 +163,23 @@ impl FrameworkEval for WalkEval {
             eval.add_constraint(u.clone() - (u_prev * self.rv_step) * nofirst.clone() - uf);
             eval.add_constraint(acc.clone() - acc_prev * notzero.clone() - (u * v.clone()) * last.clone());
             eval.add_constraint((acc - self.claimed[m]) * end.clone());
+        }
+        // stream II: the activation claim, allocated before the LogUp columns
+        // so that the interaction order is ties-then-fractions, as the wiring
+        // family's regions already are.  The value folded is `a - act_off`, the
+        // signed activation, which is what a producer's requantize publishes.
+        if let Some(q) = &self.qx {
+            let [x_prev, x] =
+                eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+            let off = E::F::from(M31::from_u32_unchecked(self.act_off));
+            let mut xf = E::EF::zero();
+            for (p, a) in acts.iter().enumerate() {
+                xf += (E::EF::from(a.clone()) - E::EF::from(off.clone())) * q.w[p];
+            }
+            let mult = E::EF::from(nofirst.clone()) * q.m_in
+                + (E::EF::from(notzero.clone()) - E::EF::from(nofirst.clone())) * q.m_bd;
+            eval.add_constraint(x.clone() - x_prev * mult - xf);
+            eval.add_constraint((x - q.claimed) * end.clone());
         }
         if self.range_check && !self.gkr {
             for a in &acts {

@@ -1003,12 +1003,119 @@ impl Layer {
     /// Stream II: give a synthetic layer the wiring family's own columns, sized
     /// off the matmuls it already has -- `d` is the q/k/v group's input width
     /// and `dff` the gate matmul's output width, exactly as a real dump's are.
-    pub fn synth_glue(&mut self, seed: u64) {
+    ///
+    /// And then make the *matmuls* consistent with them.  A synthetic layer's
+    /// activations were seven unrelated random columns, which is fine while
+    /// nothing ties a matmul's input to anything; with the requantize seams in,
+    /// an honest proof needs `qX` to actually be the requantize of the
+    /// producer's output under the token's own scale, or the seam's own scale
+    /// lookup goes off-table before any tie is reached.  So this runs the
+    /// wiring family's own reference forward -- `glue::reference` on the very
+    /// programs the regions prove, so the two cannot disagree -- and rebuilds
+    /// each group's input, scale and accumulator from it.
+    ///
+    /// `o`'s input is deliberately left alone: `AttnOutEval` is that matmul's
+    /// requantize and its claim is stream JJ's, so there is nothing here for a
+    /// consistent witness to satisfy yet.
+    pub fn synth_glue(&mut self, seed: u64, a: usize, round: bf16::Round) {
+        use crate::glue::{Kind, Prog, Tiling, UnKind, canon, reference};
+        let tokens = self.ao.s;
         let d = self.mats.iter().find(|m| m.name == "q")
             .expect("--synth-glue needs a q matmul").n_in;
         let dff = self.mats.iter().find(|m| m.name == "gate")
             .expect("--synth-glue needs a gate matmul").n_out;
-        self.glue = Some(GlueCols::synthetic(self.ao.s, d, dff, seed ^ 0x9e37_79b9));
+        let gc = GlueCols::synthetic(tokens, d, dff, seed ^ 0x9e37_79b9);
+        let (eps, inv_d) = (gc.eps, gc.inv_d);
+        let un_r = UnKind::NormR { inv_d, eps };
+        let t1 = Tiling::new(tokens, d, a);
+        let tff = Tiling::new(tokens, dff, a);
+
+        // `h = (x r) w` for one norm, through the same three programs the
+        // regions carry: the squares' two levels, then the tail.
+        let tail = |stream: &[u16], wcol: &[u16], t: &Tiling| -> Vec<u16> {
+            let laid = t.lay(stream);
+            let roots = reference(&[laid.clone()], &[], t.rows1(),
+                                  &Prog::tree(t.nreal, t.b, UnKind::Square), round);
+            let ms = reference(&[t.roots_to_l2(&roots[0])], &[], t.tokens,
+                               &Prog::tree(t.a, t.a, UnKind::None), round);
+            let msblk: Vec<u16> =
+                (0..t.rows1()).map(|m| canon(ms[0][m % t.tokens])).collect();
+            let mut wblk = vec![0u16; t.rows1() * t.nreal];
+            for m in 0..t.rows1() {
+                let res = m / t.tokens;
+                for j in 0..t.nreal {
+                    wblk[m * t.nreal + j] = canon(wcol[res + j * t.a]);
+                }
+            }
+            let out = reference(&[laid, msblk], &wblk, t.rows1(),
+                                &Prog::norm_tail(t.nreal, un_r), round);
+            t.unlay(&out[0])
+        };
+
+        // one walk group's input, scale and accumulators, from a bf16 column
+        let mut wire = |me: &mut Self, names: &[&str], x: &[u16], n: usize| {
+            let v = match me.mats.iter().find(|m| names.contains(&m.name.as_str())) {
+                Some(m) if m.variant == DeqVariant::Pow2 => crate::requant::SVariant::Pow2,
+                _ => crate::requant::SVariant::Bf16,
+            };
+            let (qx, jx, sx) = crate::requant::requant_ref(x, tokens, n, v);
+            for name in names {
+                let Some(mi) = me.mats.iter().position(|m| m.name == *name) else { continue };
+                let m = &mut me.mats[mi];
+                assert_eq!(m.n_in, n, "{name}: the walk's input width is not its producer's");
+                m.qx = qx.clone();
+                m.jx = jx.iter().map(|j| *j as i32).collect();
+                m.sx = sx.clone();
+                let (ni, no) = (m.n_in, m.n_out);
+                let (qxr, qw) = (m.qx.clone(), m.qw.clone());
+                let mut acc = vec![0i64; tokens * no];
+                acc.par_chunks_mut(no).enumerate().for_each(|(t, row)| {
+                    for k in 0..ni {
+                        let xv = qxr[t * ni + k] as i64;
+                        if xv == 0 {
+                            continue;
+                        }
+                        for i in 0..no {
+                            row[i] += xv * qw[k * no + i] as i64;
+                        }
+                    }
+                });
+                me.mats[mi].acc = acc;
+            }
+        };
+
+        let h1 = tail(&gc.xin, &gc.w1, &t1);
+        wire(self, &["q", "k", "v"], &h1, d);
+        let resid = reference(&[t1.lay(&gc.xin), t1.lay(&gc.o_out)], &[], t1.rows1(),
+                              &Prog::norm_resid(t1.nreal, t1.b), round);
+        let xmid = t1.unlay(&resid[1]);
+        let h2 = tail(&xmid, &gc.w2, &t1);
+        wire(self, &["gate", "up"], &h2, d);
+
+        // the SwiGLU reads the gate and up regions' *dequantized* outputs, so
+        // its input is a function of the accumulators `wire` just rebuilt
+        let sp = |m: &Mat| crate::dequant::Spec {
+            variant: m.variant, round, kmax: 0, per_row: 1, limb_bits: (16, 14),
+            q_bits: 0, rem_bits: 0, fold_alpha: 0,
+        };
+        let gi = self.mats.iter().position(|m| m.name == "gate").unwrap();
+        let ui = self.mats.iter().position(|m| m.name == "up").unwrap();
+        let (gs, us) = (sp(&self.mats[gi]), sp(&self.mats[ui]));
+        let mut gate_out = vec![0u16; tokens * dff];
+        let mut up_out = vec![0u16; tokens * dff];
+        for t in 0..tokens {
+            for c in 0..dff {
+                gate_out[t * dff + c] = deq_ref(&self.mats[gi], &gs, t, c);
+                up_out[t * dff + c] = deq_ref(&self.mats[ui], &us, t, c);
+            }
+        }
+        let sw = reference(&[tff.lay(&gate_out), tff.lay(&up_out)], &[], tff.rows1(),
+                           &Prog::pairs(tff.nreal, Kind::Mul, UnKind::Silu, UnKind::None),
+                           round);
+        let x_down = tff.unlay(&sw[0]);
+        wire(self, &["down"], &x_down, dff);
+
+        self.glue = Some(gc);
     }
 }
 
@@ -2959,6 +3066,9 @@ pub struct WalkInteraction {
     pub cols: Vec<crate::device::AnyCol<'static>>,
     pub claimed: Vec<SecureField>,
     pub use_sum: SecureField,
+    /// Stream II: the group's claim over its own committed activations, in the
+    /// canonical channel-major order, or zero when the AIR carries none.
+    pub qx_claim: SecureField,
 }
 
 pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: SecureField,
@@ -3051,6 +3161,52 @@ pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: Se
             accs.iter().map(|a| a[rows - 1]).collect()
         }
     };
+    // stream II: the activation claim, in the AIR's own mask order -- after the
+    // per-matmul accumulators and before the LogUp columns.  It is built from
+    // `m0.qx` and not from `r.base`, so it is the same column whether the fill
+    // left the region on the host or on the card, and it does not depend on
+    // `rows` having been zeroed for the device accumulator path above.
+    let mut qx_claim = SecureField::zero();
+    if let Some(q) = air.qx.as_ref() {
+        let nrows = 1usize << lay.g.log_rows;
+        let inner_x: Vec<SecureField> = (0..nrows)
+            .into_par_iter()
+            .map(|j| {
+                let mut f = SecureField::zero();
+                if let Some((k, chunk)) = lay.g.row(j) {
+                    for p in 0..lay.pq {
+                        let t = chunk * lay.pq + p;
+                        if t < m0.tokens {
+                            let x = m0.qx[t * m0.n_in + k];
+                            if x != 0 {
+                                f += q.w[p] * SecureField::from(m31_of(x as i64));
+                            }
+                        }
+                    }
+                }
+                f
+            })
+            .collect();
+        let mut xs = vec![SecureField::zero(); nrows];
+        for j in 0..nrows {
+            let (nofirst, notzero) = match lay.g.row(j) {
+                Some((_, c)) => (c + 1 < lay.g.chunks, j > 0),
+                None => (false, j > 0),
+            };
+            let carry = if j == 0 {
+                SecureField::zero()
+            } else if nofirst {
+                xs[j - 1] * q.m_in
+            } else if notzero {
+                xs[j - 1] * q.m_bd
+            } else {
+                SecureField::zero()
+            };
+            xs[j] = carry + inner_x[j];
+        }
+        qx_claim = xs[nrows - 1];
+        cols.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &xs));
+    }
     let mut use_sum = SecureField::zero();
     // B11 stream V, lever 4: under `--gkr-walks` this group's range checks were
     // handed to the collector before the GKR proof ran, in `compose`'s own pass,
@@ -3072,5 +3228,5 @@ pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: Se
         cols.extend_any(lcols);
         use_sum = s;
     }
-    WalkInteraction { cols: cols.into_inner(), claimed, use_sum }
+    WalkInteraction { cols: cols.into_inner(), claimed, use_sum, qx_claim }
 }

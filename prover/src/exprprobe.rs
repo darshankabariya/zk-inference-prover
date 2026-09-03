@@ -686,6 +686,9 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         // stream BB: the same, and `fill_tie_claims` gives them nonzero
         // placeholders on the emit path so the emitted shape is the proved one
         embed_out: vec![], embed_tok: vec![],
+        // stream II: the same again -- the seams read their claims through
+        // `.get(..).unwrap_or(zero)`, so empty placeholders keep the IR's shape
+        rq_in: vec![], rq_out: vec![], walk_qx: vec![], ao_qx: vec![],
         // B11 stream Q: the GKR bundle is bytes, not a claim; nothing the
         // components lower reads it, so the placeholder statement carries none.
         gkr: None,
@@ -711,7 +714,7 @@ pub fn cmd(args: &[String]) {
         ch.mix_u64(0xB65_2B00 + u64::from(tag));
         let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
                                               plan.glue.as_ref().map(|g| g.uns.as_slice()),
-                                              plan.emb.map(|l| l.arity()));
+                                              plan.emb.map(|l| l.arity()), !plan.rqs.is_empty());
         let f = ch.draw_secure_felts(6);
         (rels, f)
     };
