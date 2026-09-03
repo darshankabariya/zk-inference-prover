@@ -363,8 +363,8 @@ fn probes_cmd(args: &[String]) {
 ///
 /// This is the question B6 exists to answer.  B5 proved one head at ~1,200 columns
 /// and 600 KiB-1 MiB of proof; B1's model has 24 x 14 = 336 head-instances, so
-/// per-head instantiation extrapolates to a 200-340 MB proof, two orders over
-/// a single-digit MiB proof.  Packing shares one column set across the band, and
+/// per-head instantiation extrapolates to a 200-340 MB proof, two orders of
+/// magnitude over a single-digit MiB proof.  Packing shares one column set across the band, and
 /// the sweep below is what that is worth.
 fn pack_cmd(args: &[String]) {
     let src = src_of(args);

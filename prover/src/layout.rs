@@ -3,8 +3,8 @@
 //! B5 proved one head and left the structural problem to B6: one head is
 //! ~1,100-1,600 committed columns and 600 KiB-1 MiB of proof, and B1's model has
 //! 24 x 14 = 336 head-instances, so per-head instantiation is a 200-340 MB proof --
-//! two orders over a single-digit MiB proof.  Their proofs *require* head- and
-//! layer-packed columns.
+//! two orders of magnitude over a single-digit MiB proof.  Proofs of that size
+//! *require* head- and layer-packed columns.
 //!
 //! The packing is cheaper than it looks, and that is B6's first result: it needs
 //! **no extra committed or interaction column at all.**  Extend each region's

@@ -3,8 +3,8 @@
 One spec per invocation (peak RAM stays at a single model); results are merged
 into out/ppl.json.  `--report` prints the table.
 
-    uv run python b1/ppl.py --spec dynamic-int8
-    uv run python b1/ppl.py --report
+    uv run python -m harness.witness.ppl --spec dynamic-int8
+    uv run python -m harness.witness.ppl --report
 """
 import argparse
 import json

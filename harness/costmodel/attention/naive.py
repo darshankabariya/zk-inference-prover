@@ -22,7 +22,7 @@ B2 = inputs.costmodel_inputs()
 # (L, d, nh, nkv, hd, dff, vocab)
 SHAPES = {
     "Llama-3.1-8B": (32, 4096, 32, 8, 128, 14336, 128256),
-    "Gemma-3-27B (the 27B proxy shape)": (62, 5376, 32, 16, 128, 21504, 262144),
+    "Gemma-3-27B (proxy shape)": (62, 5376, 32, 16, 128, 21504, 262144),
 }
 CTXS = (4096, 16384)
 TARGET_TOKS = 53.0
