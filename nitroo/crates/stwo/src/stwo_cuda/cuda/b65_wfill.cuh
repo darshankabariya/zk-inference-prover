@@ -99,6 +99,12 @@ struct B65AoCfg {
     unsigned lead;
     unsigned do_ref;
     unsigned mutate;
+    // stream JJ (E11): the exponent window's two offsets and the accumulator
+    // window's two limb widths
+    int jv_min;
+    int jo_max;
+    unsigned acc_lo_bits;
+    unsigned acc_hi_bits;
 };
 
 extern "C" void b65_fill_attnout(const unsigned *acc, const unsigned *den,
@@ -106,6 +112,7 @@ extern "C" void b65_fill_attnout(const unsigned *acc, const unsigned *den,
                                  m31 *const *base_cols, unsigned n_base,
                                  m31 *const *pre_cols, unsigned n_pre,
                                  B65Mult m_qnz, B65Mult m_rem,
+                                 B65Mult m_acc_lo, B65Mult m_acc_hi,
                                  int *q_out, unsigned *want_out,
                                  unsigned *counts, B65AoCfg cfg);
 

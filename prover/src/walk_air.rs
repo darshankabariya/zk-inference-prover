@@ -26,13 +26,14 @@
 
 use num_traits::{One, Zero};
 use stwo::core::fields::m31::M31;
+use stwo::core::fields::FieldExpOps;
 use stwo::core::fields::qm31::SecureField;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, INTERACTION_TRACE_IDX,
                                 ORIGINAL_TRACE_IDX, RelationEntry};
 
 use crate::attn_air::RangeRel;
-use crate::dequant::PairRel;
+use crate::dequant::{FracRel, PairRel};
 use crate::layout::Grid;
 
 pub fn id(s: impl Into<String>) -> PreProcessedColumnId {
@@ -52,6 +53,13 @@ pub fn ao_sel(name: &str) -> PreProcessedColumnId {
 pub fn ao_chan(kind: &str, slot: usize) -> PreProcessedColumnId {
     id(format!("b65_ao_{kind}{slot:04}"))
 }
+/// Stream JJ (E11): the exponent-window table's three preprocessed columns,
+/// `(e - e_min, 2^max(e,0), 2^max(-e,0))` row for row over the admissible
+/// `e = jv - jo`.  One `FracRel` lookup per attnout slot lands on one of its
+/// rows at the key `jvp + joff`, which is what pins the committed `(num, pj)`
+/// to a real exponent -- and so bounds `pj`, and with it `denp`, inside the
+/// AIR rather than in tree 0.
+pub const EPOW_COLS: [&str; 3] = ["b65_epow_e", "b65_epow_n", "b65_epow_p"];
 
 // ------------------------------------------------------------- the weight walk --
 
@@ -179,6 +187,17 @@ pub struct AttnOutEval {
     pub claimed_q: SecureField,
     pub qnz: PairRel,
     pub rel_rem: RangeRel,
+    /// Stream JJ (E11): the exponent window, as a table
+    /// `(e - e_min, 2^max(e,0), 2^max(-e,0))`.  One lookup per slot at the key
+    /// `jvp + joff` pins the committed `(num, pj)` and bounds both, which is
+    /// what takes `jo` out of tree 0 and gives `pj` an in-AIR bound.
+    pub epow: FracRel,
+    /// the two limbs of the range check on `acc + acc_off`, the other half of
+    /// the no-wrap window
+    pub rel_acc_lo: RangeRel,
+    pub rel_acc_hi: RangeRel,
+    pub acc_lo_bits: u32,
+    pub acc_hi_bits: u32,
     /// B11 stream V, lever 4: as `WalkEval::gkr`.
     pub gkr: bool,
 }
@@ -202,6 +221,15 @@ impl FrameworkEval for AttnOutEval {
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let two = M31::from_u32_unchecked(2);
+        // Stream JJ (E11): the per-slot `jvp` comes first, because a lowered
+        // evaluator numbers its preprocessed loads in `get_preprocessed_column`
+        // call order (`cudagen::Ir::pre_ids`) and the GKR arm's `fam_site`
+        // indexes the region's own `pre` vector with that number.  `ao_region`
+        // builds `pre` as the slots' `jvp` then `AO_SEL`, so the reads have to
+        // run in that order or the arm's fractions read a selector for a `jv`.
+        let jvps: Vec<E::F> = (0..self.per_row)
+            .map(|slot| eval.get_preprocessed_column(ao_chan("jv", slot)))
+            .collect();
         let sel: Vec<E::F> =
             AO_SEL.iter().map(|n| eval.get_preprocessed_column(ao_sel(*n))).collect();
         let (nofirst, last, m1, m2, m3, end) = (sel[0].clone(), sel[1].clone(), sel[2].clone(),
@@ -221,32 +249,68 @@ impl FrameworkEval for AttnOutEval {
         // fold publishes, and so the band's `az` claim.
         let [den_prev, den] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
         eval.add_constraint((den.clone() - den_prev) * nofirst.clone());
+        // Stream JJ (E11), `witness-slack.md` section 1f: the per-token output
+        // exponent leaves tree 0.  `jo` is prover data, so what tree 0 may hold
+        // is `jvp = jv - jv_min`, the per-(head, channel) model constant, and
+        // `joff = jo_max - jo` is committed -- one cell per row, pinned across
+        // the token's rows by the same `nofirst` the `den` pin uses.  The pair
+        // `(num, pj) = (2^max(e,0), 2^max(-e,0))` for `e = jv - jo` is committed
+        // too and pinned by one lookup per slot into the preprocessed `EPOW`
+        // window at the key `jvp + joff`, which is `e - e_min`.  Tree 0 is then
+        // a function of the model, the shape and the params alone.
+        // The offsets are `[0, -1]` and not `den`'s `[-1, 0]`, and that order is
+        // load-bearing: `joff` is the first column of this region a *lookup*
+        // reads at a mask, and `gkrlink::LinkTie` resolves a referenced column
+        // as `mask[tree][col][0]` -- the value at the column's *first* sampled
+        // offset.  With `[-1, 0]` the GKR arm's tie would read the previous
+        // row's `joff`, which agrees with this row's on every witness whose
+        // `jo` is constant and on no other; `--gkr-attnout` then accepts or
+        // rejects by luck of the data.  Any future lookup over a masked column
+        // in this family has to put offset 0 first for the same reason.
+        let [joff, joff_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
+        eval.add_constraint((joff.clone() - joff_prev) * nofirst.clone());
+        let acc_off = E::F::from(M31::from_u32_unchecked(
+            1 << (self.acc_lo_bits + self.acc_hi_bits - 1)));
+        let inv_lo = M31::from_u32_unchecked(1 << self.acc_lo_bits).inverse();
         let mut accs: Vec<E::F> = Vec::with_capacity(self.per_row);
         let mut qouts: Vec<E::F> = Vec::with_capacity(self.per_row);
         for slot in 0..self.per_row {
-            let num = eval.get_preprocessed_column(ao_chan("n", slot));
-            let pj = eval.get_preprocessed_column(ao_chan("p", slot));
+            let jvp = jvps[slot].clone();
             let acc = eval.next_trace_mask();
             let sg = eval.next_trace_mask();
             let qm = eval.next_trace_mask();
             let nz2 = eval.next_trace_mask();
             let denp = eval.next_trace_mask();
             let d = eval.next_trace_mask();
+            let num = eval.next_trace_mask();
+            let pj = eval.next_trace_mask();
+            let alo = eval.next_trace_mask();
             accs.push(acc.clone());
             eval.add_constraint(sg.clone() * sg.clone() - sg.clone());
             // the sign pin (B6 review, gap 7), as in the standalone gadget
             eval.add_constraint(sg.clone() * (E::F::one() - nz2.clone()));
-            // denp = den * 2^max(-e, 0), committed so the error identity and the
-            // tie-excluding bound stay degree <= 3 / degree 1
-            eval.add_constraint(denp.clone() - den.clone() * pj);
-            let mag = acc.clone() - (acc * sg.clone()) * two;
+            // denp = den pj = den 2^max(-e, 0), committed so the error identity
+            // and the tie-excluding bound stay degree <= 3 / degree 1
+            eval.add_constraint(denp.clone() - den.clone() * pj.clone());
+            let mag = acc.clone() - (acc.clone() * sg.clone()) * two;
             eval.add_constraint(
-                d.clone() - (mag * num) * two + (qm.clone() * two - E::F::one()) * denp.clone(),
+                d.clone() - (mag.clone() * num.clone()) * two
+                    + (qm.clone() * two - E::F::one()) * denp.clone(),
             );
             // stream JJ: the region's output value, degree 2, never a column
             qouts.push(qm.clone() - (qm.clone() * sg.clone()) * two);
             let dp = denp.clone() * two - E::F::one() - d.clone();
             if !self.gkr {
+                // Stream JJ (E11), `witness-slack.md` section 1f: the exponent
+                // window.  `num` and `pj` are committed -- `jo` is prover data,
+                // so `e = jv - jo` cannot be preprocessed -- and this lookup is
+                // what says the pair is `(2^max(e,0), 2^max(-e,0))` for the `e`
+                // the row's own `joff` and the slot's model-only `jvp` name.  It
+                // bounds `pj`, which is what section 1(c) had no answer for, and
+                // it is why tree 0 no longer depends on this chunk's tokens.
+                eval.add_to_relation(RelationEntry::new(
+                    &self.epow, E::EF::one(),
+                    &[jvp + joff.clone(), num.clone(), pj]));
                 eval.add_to_relation(RelationEntry::new(&self.qnz, E::EF::one(),
                                                         &[qm, nz2]));
                 eval.add_to_relation(RelationEntry::new(
@@ -268,6 +332,22 @@ impl FrameworkEval for AttnOutEval {
                 // assert at `layer.rs`'s `ao_region`.
                 eval.add_to_relation(RelationEntry::new(
                     &self.rel_rem, E::EF::one(), core::slice::from_ref(&denp)));
+                // Stream JJ (E11): the other half of the no-wrap window,
+                // which until now was a host-side assert alone.  `2 mag num`
+                // needs both factors bounded; the lookup above bounds `num` by
+                // `2^max(ao_e_max,0)`, and this bounds `mag`.  `|acc|` is up to
+                // 29 bits at 8B, far past any range table, so it goes in two
+                // limbs on the *offset* accumulator, which keeps every argument
+                // degree 1: `acc + acc_off = alo + 2^acc_lo_bits ahi` with `alo`
+                // in the `ao_acc_lo_bits` table and `ahi` in the
+                // `ao_acc_hi_bits` one, so `|acc| < 2^(lo + hi - 1)`.
+                // `Plan::new` asserts
+                // `1 + ao_acc_lo_bits + ao_acc_hi_bits + max(ao_e_max, 0) <= 31`.
+                let ahi = (acc + acc_off.clone() - alo.clone()) * inv_lo;
+                eval.add_to_relation(RelationEntry::new(
+                    &self.rel_acc_lo, E::EF::one(), core::slice::from_ref(&alo)));
+                eval.add_to_relation(RelationEntry::new(
+                    &self.rel_acc_hi, E::EF::one(), core::slice::from_ref(&ahi)));
             }
         }
 

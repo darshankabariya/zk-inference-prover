@@ -318,6 +318,11 @@ pub enum RCol {
     Walk(usize),
     /// B11 stream V: the attention-output region's `i`-th trace mask.
     Ao(usize),
+    /// Stream JJ (E11): the attention-output region's slot-`i` preprocessed
+    /// column, `jvp = jv - jv_min`.  The only preprocessed column an attnout
+    /// lookup reads: `jv` is a model constant, so the exponent window's key is
+    /// half preprocessed and half committed.
+    AoPre(usize),
 }
 
 /// Which region a site's looks and a folded weight's column belong to: the
@@ -842,11 +847,28 @@ pub fn ao_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
     let lay = plan.ao_lay;
     let (qz, qal) = rels.qnz.parts();
     let rem = rels.range(plan.p.ao_rem_bits);
+    // stream JJ (E11): the exponent window and the accumulator window
+    let (ez, eal) = rels.epow.parts();
+    let (rlo, rhi) = (rels.range(plan.p.ao_acc_lo_bits), rels.range(plan.p.ao_acc_hi_bits));
+    let inv_lo = SecureField::from(M31::from_u32_unchecked(1 << plan.p.ao_acc_lo_bits))
+        .inverse();
+    let acc_off = SecureField::from(M31::from_u32_unchecked(
+        1 << (plan.p.ao_acc_lo_bits + plan.p.ao_acc_hi_bits - 1)));
     let mut looks = vec![];
     for sl in 0..lay.per_row {
-        // `ao_interaction`'s own indexing: slot `sl` starts at `1 + 6 * sl`,
-        // and the builder reads `+2`, `+3`, `+4` and `+5` off it
-        let c0 = 1 + 6 * sl;
+        // `ao_interaction`'s own indexing: slot `sl` starts at `2 + 9 * sl`,
+        // and the builder reads `+2`..`+8` off it.  `joff` is column 1 and the
+        // slot's `jvp` is preprocessed column `sl`.
+        let c0 = 2 + 9 * sl;
+        // the `EPOW` window: `(jvp + joff, num, pj)`
+        looks.push(LinkLook {
+            num: None,
+            den: Affine {
+                terms: vec![(RCol::AoPre(sl), eal[0]), (RCol::Ao(1), eal[0]),
+                            (RCol::Ao(c0 + 6), eal[1]), (RCol::Ao(c0 + 7), eal[2])],
+                k: -ez,
+            },
+        });
         looks.push(LinkLook {
             num: None,
             den: Affine {
@@ -869,6 +891,18 @@ pub fn ao_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
         looks.push(LinkLook {
             num: None,
             den: range_den(rem, Affine::col(RCol::Ao(c0 + 4), one)),
+        });
+        // stream JJ: the accumulator window's two limbs
+        looks.push(LinkLook {
+            num: None,
+            den: range_den(rlo, Affine::col(RCol::Ao(c0 + 8), one)),
+        });
+        looks.push(LinkLook {
+            num: None,
+            den: range_den(rhi, Affine {
+                terms: vec![(RCol::Ao(c0), inv_lo), (RCol::Ao(c0 + 8), -inv_lo)],
+                k: acc_off * inv_lo,
+            }),
         });
     }
     vec![SiteLooks { reg: Reg::Ao, which: 0, log_rows: lay.log_rows, looks }]

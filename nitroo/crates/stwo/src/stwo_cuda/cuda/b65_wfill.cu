@@ -264,6 +264,7 @@ __global__ void b65w_ao(const unsigned *__restrict__ acc,
                         m31 *const *__restrict__ base_cols,
                         m31 *const *__restrict__ pre_cols,
                         B65Mult m_qnz, B65Mult m_rem,
+                        B65Mult m_acc_lo, B65Mult m_acc_hi,
                         int *__restrict__ q_out, unsigned *__restrict__ want_out,
                         unsigned *__restrict__ counts, const B65AoCfg cfg) {
     const unsigned rows = 1u << cfg.log_rows;
@@ -279,43 +280,58 @@ __global__ void b65w_ao(const unsigned *__restrict__ acc,
     const unsigned s0 = blockIdx.y * B65W_TILE;
     const unsigned s1 = min(pr, s0 + B65W_TILE);
 
+    // stream JJ (E11): the accumulator window's offset, and the exponent
+    // window's lower end.  `e_lo = jv_min - jo_max` is the `e` the inert lead
+    // rows commit, since they commit `jvp = 0` and `joff = 0`.
+    const long long acc_off = 1LL << (cfg.acc_lo_bits + cfg.acc_hi_bits - 1u);
+    const long long lo_mask = (1LL << cfg.acc_lo_bits) - 1LL;
+    const int e_lo = cfg.jv_min - cfg.jo_max;
+
     if (blockIdx.y == 0u) {
         // the shared denominator column; an inert lead row commits 1, which is
         // what makes every constraint hold and every lookup land on a real row
         base_cols[0][i] = live ? b65w_m31(b65w_i64(den, (size_t)h * cfg.s + t)) : 1u;
+        // stream JJ (E11): `joff = jo_max - jo`, the per-token output exponent,
+        // committed because `jo` is prover data.  An inert lead row commits 0.
+        base_cols[1][i] = live ? b65w_m31((long long)(cfg.jo_max - jo[t])) : 0u;
     }
 
     for (unsigned s = s0; s < s1; ++s) {
-        const unsigned c0 = 1u + 6u * s;
-        // the preprocessed (num, pj) pair. `chan` misaddresses it by one slot,
-        // which is this family's version of 20.2's `chan`.
+        const unsigned c0 = 2u + 9u * s;
+        // the preprocessed `jvp = jv - jv_min`, a per-(head, channel) model
+        // constant.  `chan` misaddresses it by one slot, which is this family's
+        // version of 20.2's `chan`.
         unsigned sp = s;
         if (cfg.mutate == B65W_MUT_CHAN) {
             sp = (s + 1u) % pr;
         }
-        if (live) {
-            const int e = jv[(size_t)h * cfg.hd + b * pr + sp] - jo[t];
-            pre_cols[2u * s + 0u][i] = b65w_m31(1LL << (e > 0 ? e : 0));
-            pre_cols[2u * s + 1u][i] = b65w_m31(1LL << (e < 0 ? -e : 0));
-        } else {
-            pre_cols[2u * s + 0u][i] = 1u;
-            pre_cols[2u * s + 1u][i] = 1u;
-        }
+        pre_cols[s][i] = live
+            ? b65w_m31((long long)(jv[(size_t)h * cfg.hd + b * pr + sp] - cfg.jv_min))
+            : 0u;
 
         if (!live) {
-            // denp = den * pj = 1, d = denp, dp = 2*1 - 1 - 1 = 0
+            // the inert lead row: acc = 0, den = 1, joff = 0, so the `EPOW` key
+            // is 0 and the pair is `(2^max(e_lo,0), 2^max(-e_lo,0))`; then
+            // denp = den pj = pj, d = denp, dp = 2 pj - 1 - pj = pj - 1
+            const long long num0 = 1LL << (e_lo > 0 ? e_lo : 0);
+            const long long pj0 = 1LL << (e_lo < 0 ? -e_lo : 0);
             base_cols[c0 + 0u][i] = 0u;
             base_cols[c0 + 1u][i] = 0u;
             base_cols[c0 + 2u][i] = 0u;
             base_cols[c0 + 3u][i] = 0u;
-            base_cols[c0 + 4u][i] = 1u;
-            base_cols[c0 + 5u][i] = 1u;
+            base_cols[c0 + 4u][i] = b65w_m31(pj0);
+            base_cols[c0 + 5u][i] = b65w_m31(pj0);
+            base_cols[c0 + 6u][i] = b65w_m31(num0);
+            base_cols[c0 + 7u][i] = b65w_m31(pj0);
+            base_cols[c0 + 8u][i] = b65w_m31(acc_off & lo_mask);
             if (!b65w_drop(cfg.mutate, i)) {
                 b65w_bump(m_qnz, 0LL, &counts[0]);
             }
-            b65w_bump(m_rem, 1LL, &counts[0]);
-            b65w_bump(m_rem, 0LL, &counts[0]);
-            b65w_bump(m_rem, 1LL, &counts[0]);   // denp
+            b65w_bump(m_rem, pj0, &counts[0]);
+            b65w_bump(m_rem, pj0 - 1LL, &counts[0]);
+            b65w_bump(m_rem, pj0, &counts[0]);   // denp
+            b65w_bump(m_acc_lo, acc_off & lo_mask, &counts[0]);
+            b65w_bump(m_acc_hi, acc_off >> cfg.acc_lo_bits, &counts[0]);
             continue;
         }
 
@@ -331,6 +347,13 @@ __global__ void b65w_ao(const unsigned *__restrict__ acc,
         const long long num = 1LL << (e > 0 ? e : 0);
         const long long pj = 1LL << (e < 0 ? -e : 0);
         const long long denp = dv * pj;
+        // stream JJ (E11): the offset accumulator and its low limb
+        const long long av = a + acc_off;
+        if (av < 0LL || av >= (1LL << (cfg.acc_lo_bits + cfg.acc_hi_bits))) {
+            atomicAdd(&counts[2], 1u);
+            continue;
+        }
+        const long long alo = av & lo_mask;
         const long long mag = a < 0 ? -a : a;
         const long long pm = mag * num;
         if (2LL * pm >= (1LL << 31) - 1LL || 2LL * denp >= (1LL << 31) - 1LL) {
@@ -347,6 +370,9 @@ __global__ void b65w_ao(const unsigned *__restrict__ acc,
         base_cols[c0 + 3u][i] = b65w_m31(qm != 0 ? 1LL : 0LL);
         base_cols[c0 + 4u][i] = b65w_m31(denp);
         base_cols[c0 + 5u][i] = b65w_m31(d);
+        base_cols[c0 + 6u][i] = b65w_m31(num);
+        base_cols[c0 + 7u][i] = b65w_m31(pj);
+        base_cols[c0 + 8u][i] = b65w_m31(alo);
         if (!b65w_drop(cfg.mutate, i)) {
             b65w_bump(m_qnz, qm, &counts[0]);
         }
@@ -354,6 +380,12 @@ __global__ void b65w_ao(const unsigned *__restrict__ acc,
         b65w_bump(m_rem, 2LL * denp - 1LL - d, &counts[0]);
         // witness-slack section 7 item 1: `denp`'s own range check
         b65w_bump(m_rem, denp, &counts[0]);
+        // stream JJ (E11): the other half of the no-wrap window.  The `EPOW`
+        // window's own multiplicities are not bumped here -- `e = jv - jo` is a
+        // function of the witness and the layout, so the host builds that whole
+        // column beside the kernel and nothing has to come back off the card.
+        b65w_bump(m_acc_lo, alo, &counts[0]);
+        b65w_bump(m_acc_hi, (av - alo) >> cfg.acc_lo_bits, &counts[0]);
         q_out[idx] = (int)(a < 0 ? -qm : qm);
 
         if (cfg.do_ref != 0u) {
@@ -384,7 +416,7 @@ __global__ void b65w_ao(const unsigned *__restrict__ acc,
         // the six selectors, in `ao_region`'s order
         const bool last = live && b == 0u;
         const bool hfirst = last && t == cfg.s - 1u;
-        m31 *const *sel = pre_cols + 2u * pr;
+        m31 *const *sel = pre_cols + pr;
         sel[0][i] = (live && b + 1u < cfg.chunks) ? 1u : 0u;
         sel[1][i] = last ? 1u : 0u;
         sel[2][i] = (j > 0u && !last) ? 1u : 0u;
@@ -399,6 +431,7 @@ extern "C" void b65_fill_attnout(const unsigned *acc, const unsigned *den,
                                  m31 *const *base_cols, unsigned n_base,
                                  m31 *const *pre_cols, unsigned n_pre,
                                  B65Mult m_qnz, B65Mult m_rem,
+                                 B65Mult m_acc_lo, B65Mult m_acc_hi,
                                  int *q_out, unsigned *want_out,
                                  unsigned *counts, B65AoCfg cfg) {
     m31 **d_base = clone_to_device<m31 *>(const_cast<m31 **>(base_cols), n_base);
@@ -406,8 +439,8 @@ extern "C" void b65_fill_attnout(const unsigned *acc, const unsigned *den,
     const unsigned rows = 1u << cfg.log_rows;
     dim3 g((rows + B65W_BLOCK - 1u) / B65W_BLOCK,
            (cfg.per_row + B65W_TILE - 1u) / B65W_TILE);
-    b65w_ao<<<g, B65W_BLOCK>>>(acc, den, jo, jv, d_base, d_pre, m_qnz, m_rem, q_out,
-                               want_out, counts, cfg);
+    b65w_ao<<<g, B65W_BLOCK>>>(acc, den, jo, jv, d_base, d_pre, m_qnz, m_rem,
+                               m_acc_lo, m_acc_hi, q_out, want_out, counts, cfg);
     ASSERT_CUDA_SUCCESS(cudaDeviceSynchronize());
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
     cuda_free_memory(d_base);

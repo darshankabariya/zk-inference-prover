@@ -972,6 +972,11 @@ mod tests {
             q_bits: 8, k_bits: 8, nmax: 1, chan_target: 128, grid_target: 64, rw: 16,
             z_lo_bits: 16, z_hi_bits: 6, z_min: 1, mats, deq_target: 16, kmax: 12,
             round: "away".into(), ao_target: 16, ao_q_bits: 7, ao_rem_bits: 8,
+            // stream JJ (E11): the attention output's two windows.  This fixture
+            // carries no attnout data, so the values only have to satisfy
+            // `Plan::new`'s asserts.
+            ao_jv_min: -8, ao_jv_max: -6, ao_jo_min: -10, ao_jo_max: -10,
+            ao_acc_lo_bits: 16, ao_acc_hi_bits: 4,
             fold_rem_bits: 0, fold_alpha: 0, walk_p: 136,
             glue: Some(crate::compose::GlueParams {
                 d: 64, a: 4, dff: 0, tails: false, swiglu: false, deq_ties: false,

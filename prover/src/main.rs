@@ -814,6 +814,59 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
                     "--ao-rem-bits {want} is below this witness's {}", l.ao.rem_bits());
             want
         },
+        // Stream JJ (E11): data-derived and overridable exactly as
+        // `ao_rem_bits` is, and for the same reason -- a driver pins the
+        // model-wide worst case and proves every layer as one shape.  Below the
+        // witness's own value an `EPOW` lookup or an accumulator limb would land
+        // off its table, so that is an error and not a smaller proof.
+        ao_jv_min: {
+            let want = arg_scalar(args, "--ao-jv-min", l.ao.jv_range().0);
+            assert!(want <= l.ao.jv_range().0,
+                    "--ao-jv-min {want} is above this witness's {}", l.ao.jv_range().0);
+            want
+        },
+        ao_jv_max: {
+            let want = arg_scalar(args, "--ao-jv-max", l.ao.jv_range().1);
+            assert!(want >= l.ao.jv_range().1,
+                    "--ao-jv-max {want} is below this witness's {}", l.ao.jv_range().1);
+            want
+        },
+        ao_jo_min: {
+            let want = arg_scalar(args, "--ao-jo-min", l.ao.jo_range().0);
+            assert!(want <= l.ao.jo_range().0,
+                    "--ao-jo-min {want} is above this witness's {}", l.ao.jo_range().0);
+            want
+        },
+        ao_jo_max: {
+            let want = arg_scalar(args, "--ao-jo-max", l.ao.jo_range().1);
+            assert!(want >= l.ao.jo_range().1,
+                    "--ao-jo-max {want} is below this witness's {}", l.ao.jo_range().1);
+            want
+        },
+        // `|acc| < 2^(lo + hi - 1)`, so the two limbs together carry one bit
+        // more than the accumulator needs.  16 is the widest range table the
+        // layer already builds, which is why the low limb stops there; the high
+        // one never goes below `MIN_LOG_ROWS`, since a range table *is* its own
+        // `1 << bits` rows and the LogUp builder has no shorter column.
+        ao_acc_lo_bits: {
+            let want = arg_scalar(args, "--ao-acc-lo-bits",
+                                  (l.ao.acc_bits() + 1).clamp(crate::common::MIN_LOG_ROWS, 16));
+            assert!(want >= crate::common::MIN_LOG_ROWS,
+                    "--ao-acc-lo-bits {want} is below MIN_LOG_ROWS");
+            want
+        },
+        ao_acc_hi_bits: {
+            let need = l.ao.acc_bits() + 1;
+            let lo: u32 = arg_scalar(args, "--ao-acc-lo-bits",
+                                     need.clamp(crate::common::MIN_LOG_ROWS, 16));
+            let want = arg_scalar(args, "--ao-acc-hi-bits",
+                                  need.saturating_sub(lo).max(crate::common::MIN_LOG_ROWS));
+            assert!(lo + want >= need,
+                    "--ao-acc-*-bits {lo}+{want} is below this witness's {need}");
+            assert!(want >= crate::common::MIN_LOG_ROWS,
+                    "--ao-acc-hi-bits {want} is below MIN_LOG_ROWS");
+            want
+        },
         // Stream Z: the fold's two pins, data-derived exactly as `ao_rem_bits`
         // and overridable the same way so a driver can pin the model-wide worst
         // case.  Zero -- absent from the serialized statement -- on a witness
@@ -1064,6 +1117,9 @@ fn compose_cmd(args: &[String]) {
                         ("--corrupt-fold-dent", &mut tamper.fold_dent),
                         ("--corrupt-ao-clamp", &mut tamper.ao_clamp),
                         ("--corrupt-ao-den", &mut tamper.ao_den),
+                        ("--corrupt-ao-jo", &mut tamper.ao_jo),
+                        ("--corrupt-ao-num", &mut tamper.ao_num),
+                        ("--corrupt-ao-acc", &mut tamper.ao_acc),
                         ("--corrupt-walk-act", &mut tamper.walk_over)] {
         if let Some(i) = arg_str(args, key) {
             *slot = Some(i.parse().unwrap_or_else(|_| panic!("{key} wants an index")));
@@ -1071,8 +1127,11 @@ fn compose_cmd(args: &[String]) {
         }
     }
     let params = params_of(&l, args, &vname);
-    eprintln!("compose: {} bands={:?} variant={} kmax={} rem={} p={}",
-              l.source, l.band_sizes, vname, params.kmax, params.ao_rem_bits, params.walk_p);
+    eprintln!("compose: {} bands={:?} variant={} kmax={} rem={} p={} jv=[{},{}] jo=[{},{}] \
+acc={}+{}",
+              l.source, l.band_sizes, vname, params.kmax, params.ao_rem_bits, params.walk_p,
+              params.ao_jv_min, params.ao_jv_max, params.ao_jo_min, params.ao_jo_max,
+              params.ao_acc_lo_bits, params.ao_acc_hi_bits);
     // Stream I: `--ser-dir DIR [--ser-tag TAG]` leaves this chunk's statement and
     // proof on disk under that tag, which is what `bounds-chain` reads back.
     let ser_dir = arg_str(args, "--ser-dir");
@@ -1452,6 +1511,65 @@ fn compose_probes_cmd(args: &[String]) {
                            "the `den` pin across a token's rows"),
                     "a rounding by an unpinned denominator accepted");
         }
+    }
+
+    // 18. Stream JJ (E11), `witness-slack.md` section 1f: the three controls the
+    //     exponent window and the accumulator window exist for.  Each bends one
+    //     committed cell and rederives everything the honest builder would from
+    //     it, so every other check of the chunk still passes and exactly one
+    //     thing can reject:
+    //
+    //       * `--corrupt-ao-jo` moves one *row*'s `jo` by one and leaves the
+    //         token's other rows alone.  Every `EPOW` lookup still lands on a
+    //         real table row and the row's own arithmetic is self-consistent, so
+    //         only the `nofirst` pin on `joff` can see it.  (A whole token's
+    //         `jo` moved by one is a different matter and is *accepted*: `jo` is
+    //         the prover's choice inside the window, and what pins it to the
+    //         consumer's scale is the tie on `claims.ao_q`, which is stream
+    //         II's.  See the record.)
+    //       * `--corrupt-ao-num` doubles one slot's committed `num` and derives
+    //         `qm`, `sg`, `d` and the reference from it.  The triple
+    //         `(jvp + joff, num, pj)` is then not a row of the `EPOW` table, so
+    //         only that lookup can reject it.
+    //       * `--corrupt-ao-acc` moves one slot's committed low accumulator limb
+    //         by one inside its own table, so both range lookups land on real
+    //         rows and only the high limb's *value* -- no longer an integer --
+    //         parts company with the multiplicity the table was bumped at.
+    {
+        let lay = layer::AoLayout::choose(params.nh, params.s, params.hd, params.ao_target);
+        if lay.chunks > 1 {
+            // a channel in the first block: `b = 0`, a row the `nofirst` pin
+            // compares against its predecessor
+            let idx = params.hd;
+            assert!(!probe("attnout: one row's jo moved by one", &l,
+                           &compose::ProverTamper { ao_jo: Some(idx),
+                                                    ..Default::default() },
+                           "the `joff` pin across a token's rows"),
+                    "a per-row output exponent accepted");
+        }
+        assert!(!probe("attnout: one slot's num a doubling out of the window", &l,
+                       &compose::ProverTamper { ao_num: Some(params.hd + 1),
+                                                ..Default::default() },
+                       "the `EPOW` window lookup"),
+                "an exponent pair outside the window accepted");
+        assert!(!probe("attnout: one accumulator limb off its own decomposition", &l,
+                       &compose::ProverTamper { ao_acc: Some(params.hd + 2),
+                                                ..Default::default() },
+                       "the accumulator window's high limb"),
+                "an unbounded accumulator accepted");
+        // and the counterpart, which must ACCEPT.  A whole token's `jo` moved by
+        // one inside the window, with the region rederived, is a different but
+        // equally valid witness: `jo` is the prover's choice and nothing in this
+        // statement reads the attention output's scale.  What would pin it is
+        // the consumer-side tie on `claims.ao_q`, which is stream II's.  Running
+        // it is how the record's sentence about the statement's limit is checked
+        // rather than argued.
+        assert!(probe("attnout: a whole token's jo moved by one (must accept)", &l,
+                      &compose::ProverTamper { ao_jo_tok: Some(1),
+                                               ..Default::default() },
+                      "nothing -- this one is the statement's own limit"),
+                "a token's output exponent is the prover's choice inside the window, \
+                 and moving it must still prove");
     }
 
     // 8. a tampered claim in the serialized statement: the replayed transcript

@@ -63,7 +63,8 @@ use crate::layer::{
 use crate::glue::{self, GKind, GTableEval, GlueEval, GlueRels, GlueTables, Kind, Prog, Tie,
                   TieKind, TieSpec, Tiling, UnKind};
 use crate::layout::Shape;
-use crate::walk_air::{AO_SEL, AttnOutEval, WALK_SEL, WalkEval, ao_chan, ao_sel, walk_sel, walk_w};
+use crate::walk_air::{AO_SEL, AttnOutEval, EPOW_COLS, WALK_SEL, WalkEval, ao_chan, ao_sel,
+                      walk_sel, walk_w};
 
 // ---------------------------------------------------------------- relations ----
 
@@ -74,6 +75,8 @@ pub struct Rels {
     pub frac: FracRel,
     pub mul: MulRel,
     pub qnz: PairRel,
+    /// Stream JJ (E11): the `(e - e_min, 2^max(e,0), 2^max(-e,0))` window table
+    pub epow: FracRel,
     pub widths: Vec<u32>,
     pub ranges: Vec<RangeRel>,
     /// B10 step 2: `POW`, `SMUL`, `VAL` and one unary table per kind.  `NORM` and
@@ -100,6 +103,9 @@ impl Rels {
         let mul = MulRel::draw(ch);
         let qnz = PairRel::draw(ch);
         let ranges: Vec<RangeRel> = widths.iter().map(|_| RangeRel::draw(ch)).collect();
+        // stream JJ: drawn after the ranges so the earlier relations keep their
+        // place in the transcript and only this proof's own tail moves
+        let epow = FracRel::draw(ch);
         let glue = uns.map(|ks| GlueRels {
             norm: norm.clone(),
             frac: frac.clone(),
@@ -110,7 +116,7 @@ impl Rels {
             uns: ks.to_vec(),
         });
         let emb = emb.map(|n| crate::embed::EmbRel::draw(ch, n));
-        Self { exp, norm, frac, mul, qnz, widths: widths.to_vec(), ranges, glue, emb }
+        Self { exp, norm, frac, mul, qnz, epow, widths: widths.to_vec(), ranges, glue, emb }
     }
     pub fn range(&self, bits: u32) -> &RangeRel {
         &self.ranges[self.widths.iter().position(|w| *w == bits).unwrap()]
@@ -156,6 +162,29 @@ pub struct Params {
     pub ao_target: usize,
     pub ao_q_bits: u32,
     pub ao_rem_bits: u32,
+    /// Stream JJ (E11), `witness-slack.md` section 1f.  The attention output's
+    /// rescaling exponent is `e = jv[h,ch] - jo[t]`.  `jv` is calibrated
+    /// offline and is a model constant, so `ao_jv_min`/`ao_jv_max` are a
+    /// statement of the model; `jo` is per-token prover data, so
+    /// `ao_jo_min`/`ao_jo_max` are the window the statement admits the prover's
+    /// choice in.  Together they fix the `EPOW` table's domain
+    /// `[ao_jv_min - ao_jo_max, ao_jv_max - ao_jo_min]`, which is what bounds
+    /// the committed `num` and `pj` inside the AIR.
+    /// `ao_acc_lo_bits`/`ao_acc_hi_bits` are the two limbs of the range check
+    /// on `acc + 2^(lo + hi - 1)`, the other half of the no-wrap window.
+    /// `Plan::new` asserts the whole window fits under the field.
+    #[serde(default)]
+    pub ao_jv_min: i32,
+    #[serde(default)]
+    pub ao_jv_max: i32,
+    #[serde(default)]
+    pub ao_jo_min: i32,
+    #[serde(default)]
+    pub ao_jo_max: i32,
+    #[serde(default)]
+    pub ao_acc_lo_bits: u32,
+    #[serde(default)]
+    pub ao_acc_hi_bits: u32,
     /// Stream Z: the fold's two data-derived pins, present only on a statement
     /// with a `fold` matmul (a witness whose manifest declares one).  Zero --
     /// and skipped in the serialization, so every pre-change statement is
@@ -827,7 +856,28 @@ impl Plan {
         // flag-off digests do not move.  See `briefs/aa-kvbind.md`, item 4.
         let lays: Vec<Layouts> = shapes.iter().map(|sh| Layouts::choose(sh, &cfg)).collect();
 
-        let mut widths = vec![p.k_bits, p.q_bits, 8, p.z_lo_bits, p.z_hi_bits, p.ao_rem_bits];
+        // Stream JJ (E11): the no-wrap window, stated rather than asserted on
+        // the host.  `2 mag num < p` needs both factors bounded: `num` by the
+        // `EPOW` table's own domain, `mag = |acc|` by the two limbs.  The
+        // second line is the other term of the same identity, which the design
+        // has always needed and never said out loud.
+        assert!(p.ao_jv_min <= p.ao_jv_max, "the jv window is empty");
+        assert!(p.ao_jo_min <= p.ao_jo_max, "the jo window is empty");
+        let e_hi = p.ao_jv_max - p.ao_jo_min;
+        let e_lo = p.ao_jv_min - p.ao_jo_max;
+        assert!(e_hi <= 30 && -e_lo <= 30,
+                "the attention output's exponent window does not fit in the field:                  e in [{e_lo}, {e_hi}]");
+        assert!(p.ao_acc_lo_bits >= crate::common::MIN_LOG_ROWS
+                    && p.ao_acc_hi_bits >= crate::common::MIN_LOG_ROWS,
+                "an accumulator limb is narrower than a range table's shortest column");
+        assert!(1 + p.ao_acc_lo_bits + p.ao_acc_hi_bits + e_hi.max(0) as u32 <= 31,
+                "the attention output's no-wrap window does not fit:                  1 + {} + {} + {} > 31",
+                p.ao_acc_lo_bits, p.ao_acc_hi_bits, e_hi.max(0));
+        assert!(1 + p.ao_q_bits + p.ao_rem_bits <= 30,
+                "the attention output's quotient term does not fit: 1 + {} + {} > 30",
+                p.ao_q_bits, p.ao_rem_bits);
+        let mut widths = vec![p.k_bits, p.q_bits, 8, p.z_lo_bits, p.z_hi_bits, p.ao_rem_bits,
+                              p.ao_acc_lo_bits, p.ao_acc_hi_bits];
         if let AttnVariant::IntSplit(k) = attn_variant {
             widths.push(k);
         }
@@ -1049,8 +1099,7 @@ impl Plan {
             }
         }
         for s in 0..self.ao_lay.per_row {
-            ids.push(ao_chan("n", s));
-            ids.push(ao_chan("p", s));
+            ids.push(ao_chan("jv", s));
         }
         ids.extend(AO_SEL.iter().map(|n| ao_sel(n)));
         for (m, sp) in self.p.mats.iter().zip(&self.specs) {
@@ -1096,6 +1145,9 @@ impl Plan {
         ids.extend(MUL_COLS.iter().map(|c| id(*c)));
         ids.extend(QNZ_COLS.iter().map(|c| id(*c)));
         ids.extend(self.widths.iter().map(|w| tbl_range(*w)));
+        // Stream JJ (E11): the exponent window, last of the shared tables so
+        // that no table before it moves an index.
+        ids.extend(EPOW_COLS.iter().map(|c| id(*c)));
         if let Some(g) = &self.glue {
             ids.extend(crate::glue::glue_table_ids(&g.uns));
         }
@@ -1153,8 +1205,17 @@ impl Plan {
             // stream BB: the embedding gadget's use region, last of all
             + usize::from(self.emb.is_some())
     }
+    /// Stream JJ (E11): the `EPOW` window's domain and height.  Derived from
+    /// `Params` alone -- both sides compute them, nothing commits them.
+    pub fn e_window(&self) -> (i32, i32) {
+        (self.p.ao_jv_min - self.p.ao_jo_max, self.p.ao_jv_max - self.p.ao_jo_min)
+    }
+    pub fn log_epow(&self) -> u32 {
+        let (lo, hi) = self.e_window();
+        crate::common::log_rows_for((hi - lo + 1) as usize, 1)
+    }
     pub fn n_table_sums(&self) -> usize {
-        5 + self.widths.len() + self.glue.as_ref().map(|g| g.n_tables()).unwrap_or(0)
+        6 + self.widths.len() + self.glue.as_ref().map(|g| g.n_tables()).unwrap_or(0)
             // stream BB: the embedding table's own side, appended last
             + usize::from(self.emb.is_some())
     }
@@ -1571,6 +1632,11 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             claimed_q: claims.ao_q.first().copied().map(unqm).unwrap_or(SecureField::zero()),
             qnz: rels.qnz.clone(),
             rel_rem: rels.range(p.ao_rem_bits).clone(),
+            epow: rels.epow.clone(),
+            rel_acc_lo: rels.range(p.ao_acc_lo_bits).clone(),
+            rel_acc_hi: rels.range(p.ao_acc_hi_bits).clone(),
+            acc_lo_bits: p.ao_acc_lo_bits,
+            acc_hi_bits: p.ao_acc_hi_bits,
             gkr: p.gkr_attnout,
         },
         if p.gkr_attnout { SecureField::zero() } else { next_use(claims) },
@@ -1744,10 +1810,21 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         continue;
                     }
                     Reg::Ao => {
-                        let RCol::Ao(i) = c else {
-                            panic!("a non-attnout column named on the attnout region")
+                        let (tree, g) = match c {
+                            RCol::Ao(i) => (1, span_of(ao.trace_locations(), 1) + i),
+                            // stream JJ: the slot's `jvp`, preprocessed
+                            RCol::AoPre(sl) => {
+                                let want = ao_chan("jv", *sl).id;
+                                let g = ids.iter().position(|x| x.id == want)
+                                    .expect("an attnout jv column missing from the \
+                                             preprocessed tree");
+                                pre_idx.push(g);
+                                (0, g)
+                            }
+                            _ => panic!("a non-attnout column named on the \
+                                         attnout region"),
                         };
-                        terms.push((1, span_of(ao.trace_locations(), 1) + i, *w));
+                        terms.push((tree, g, *w));
                         continue;
                     }
                     // B11 stream U, lever 3: a dequant region is one component,
@@ -1827,10 +1904,21 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             unqm(claims.table_sums[5 + t]),
         ));
     }
+    // Stream JJ (E11), `witness-slack.md` section 1f: the exponent window.  It
+    // is last of the core tables so that every table before it keeps its index,
+    // and it is the only one with no device build -- `1 << log_epow` is at most
+    // a few dozen rows, so there is nothing for a kernel to win.
+    tables.push(FrameworkComponent::<TableEval>::new(
+        alloc,
+        TableEval { log_rows: plan.log_epow(),
+                    cols: EPOW_COLS.iter().map(|c| id(*c)).collect(),
+                    kind: TableKind::Frac(rels.epow.clone()) },
+        unqm(claims.table_sums[5 + plan.widths.len()]),
+    ));
 
     let mut gtables = vec![];
     if let (Some(gp), Some(gr)) = (&plan.glue, &rels.glue) {
-        let base = 5 + plan.widths.len();
+        let base = 6 + plan.widths.len();
         for (t, (lr, cols, kind)) in
             crate::glue::glue_table_kinds(&gp.uns, gr).into_iter().enumerate()
         {
@@ -2012,6 +2100,25 @@ pub struct ProverTamper {
     /// statement accepts a rounding by a denominator nothing pinned.  The index
     /// is a flat `(h, t, ch)` site, as `ao_clamp`'s is.
     pub ao_den: Option<usize>,
+    /// Stream JJ (E11): move one *row*'s `jo` by one and leave the token's
+    /// other rows alone.  Every `EPOW` lookup still lands on a real table row
+    /// and the row's own arithmetic is self-consistent, so only the `nofirst`
+    /// pin on `joff` -- "one output exponent per token" -- can reject it.
+    pub ao_jo: Option<usize>,
+    /// One slot's `num` doubled: a `(key, num, pj)` triple the `EPOW` table
+    /// does not carry, so only the window lookup can reject it.  The index is
+    /// a flat `(h, t, ch)` site.
+    pub ao_num: Option<usize>,
+    /// One slot's low accumulator limb moved by one, so `alo + 2^lo ahi` is no
+    /// longer `acc + acc_off`: the other half of the no-wrap window, and only
+    /// its own two range lookups can reject it.
+    pub ao_acc: Option<usize>,
+    /// One *token*'s `jo` moved by one, on every row of it, with the whole
+    /// region rederived.  This one must be **accepted**: `jo` is the prover's
+    /// choice inside the window and nothing in this statement reads the
+    /// attention output's scale.  It is the honest limit of what section 1f
+    /// buys, and the probe that says so.  The index is a token.
+    pub ao_jo_tok: Option<usize>,
 }
 
 pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Composed {
@@ -2087,7 +2194,8 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     assert_eq!(layer.bands[0].log_table, p.log_table, "exp table rows disagree");
 
     let mut tables = Tables::new(layer.bands[0].table.clone(), p.log_table, p.kmax,
-                                 plan.round, p.ao_q_bits, plan.widths.clone());
+                                 plan.round, p.ao_q_bits, plan.widths.clone(),
+                                 plan.e_window().0, plan.e_window().1);
     if let Some(i) = tamper.norm_row {
         let i = i % tables.norm.len();
         tables.norm[i].m7 = (tables.norm[i].m7 + 1) % 128;
@@ -2212,8 +2320,10 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     crate::util::m4_add("gen/pre_bands", m4_t.elapsed().as_secs_f64());
 
     let m4_t = std::time::Instant::now();
-    let aor = ao_region(&layer.ao, p.ao_target, p.ao_q_bits, p.ao_rem_bits, &mut tables,
-                        None, tamper.ao_clamp, tamper.ao_den);
+    let aor = ao_region(&layer.ao, p.ao_target, p.ao_q_bits, p.ao_rem_bits,
+                        (p.ao_acc_lo_bits, p.ao_acc_hi_bits), p.ao_jv_min, p.ao_jo_max,
+                        &mut tables, None, tamper.ao_clamp, tamper.ao_den, tamper.ao_jo,
+                        tamper.ao_num, tamper.ao_acc, tamper.ao_jo_tok);
 
     crate::util::m4_add("gen/attnout", m4_t.elapsed().as_secs_f64());
 
@@ -2627,6 +2737,18 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             pre_tables.push(None);
         }
     }
+    // Stream JJ (E11): the exponent window table.  Host-built on both arms --
+    // it is `1 << log_epow` rows, a few dozen at most -- so it sits after the
+    // 21 columns `tables_dev` builds and the device parity check skips it.
+    let log_epow = plan.log_epow();
+    {
+        let rows = tables.epow_rows();
+        for k in 0..3 {
+            pre_logs.push(log_epow);
+            pre_tables.push(Some(eval_of(log_epow, rows.iter()
+                .map(|r| m31_u32(match k { 0 => r.0, 1 => r.1, _ => r.2 })).collect())));
+        }
+    }
     // `m_exp` needs a counter to sum, and there is one only where a band's fill
     // ran on the device (21.1). With the bands on the host it stays a host
     // column and a 4a upload -- the honest accounting, not a special case.
@@ -2666,6 +2788,13 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             base_mults.push(None);
         }
     }
+    // and its multiplicity, bumped by `ao_region` (and, on the device arm, by
+    // the host loop `ao_region_dev` runs beside the kernel -- `e = jv - jo` is
+    // a function of `ao.jv`, `ao.jo` and the layout alone, so no counter has to
+    // come back off the card for it)
+    mult_logs.push(log_epow);
+    base_mults.push(Some(eval_of(log_epow,
+                                 tables.m_epow.iter().map(|m| m31_u32(*m)).collect())));
     crate::util::m4_add("gen/tables", m4_t.elapsed().as_secs_f64());
 
     // B7a milestone 4 (section 3 row 1): the shared tables' columns, uploaded
@@ -2743,11 +2872,11 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     });
     if pre_mode == 2 {
         let d = dev_rest.as_ref().unwrap();
-        let hp: Vec<&Eval> =
-            (2..pre_tables.len()).map(|i| crate::devtab::htab(&pre_tables, i)).collect();
+        let hp: Vec<&Eval> = (2..pre_tables.len() - 3)
+            .map(|i| crate::devtab::htab(&pre_tables, i)).collect();
         crate::devpre::check_run("shared tables", &hp, &d.pre);
         if !d.mult.is_empty() {
-            let hm: Vec<&Eval> = (1..base_mults.len())
+            let hm: Vec<&Eval> = (1..base_mults.len() - 1)
                 .map(|i| crate::devtab::htab(&base_mults, i)).collect();
             crate::devpre::check_run("shared multiplicities", &hm, &d.mult);
         }
@@ -2765,11 +2894,19 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             match dev_rest {
                 Some(r) => {
                     pre.extend(r.pre);
+                    // stream JJ: the exponent window has no device build, so
+                    // its three columns and its multiplicity are uploaded
+                    let n = pre_tables.len();
+                    pre.extend(pre_tables[n - 3..].iter()
+                        .map(|e| crate::device::upload_col(crate::devtab::hone(e))));
                     if r.mult.is_empty() {
                         mult.extend(base_mults[1..].iter()
                             .map(|e| crate::device::upload_col(crate::devtab::hone(e))));
                     } else {
                         mult.extend(r.mult);
+                        let m = base_mults.len();
+                        mult.extend(base_mults[m - 1..].iter()
+                            .map(|e| crate::device::upload_col(crate::devtab::hone(e))));
                     }
                 }
                 None => {
@@ -2975,6 +3112,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         let qnz = sess.draw_relation(PairRel::draw);
         let ranges: Vec<RangeRel> =
             widths.iter().map(|_| sess.draw_relation(RangeRel::draw)).collect();
+        // stream JJ, in `Rels::draw`'s order
+        let epow = sess.draw_relation(FracRel::draw);
         let glue = plan.glue.as_ref().map(|g| GlueRels {
             norm: norm.clone(),
             frac: frac.clone(),
@@ -2989,7 +3128,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         let emb = plan.emb.map(|l| {
             sess.draw_relation(|ch| crate::embed::EmbRel::draw(ch, l.arity()))
         });
-        Rels { exp, norm, frac, mul, qnz, widths: widths.clone(), ranges, glue, emb }
+        Rels { exp, norm, frac, mul, qnz, epow, widths: widths.clone(), ranges, glue, emb }
     };
     let n_ch = plan.n_challenges();
     let ch = sess.draw_felts(n_ch);
@@ -3041,6 +3180,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     ]
     .into_iter()
     .chain(plan.widths.iter().map(|w| (format!("table/range{w}"), *w)))
+    .chain(std::iter::once(("table/epow".to_string(), plan.log_epow())))
     .collect();
     let affinity: Vec<crate::gkrlink::Affinity> = if crate::util::m4_switch_off("B11_GKR_AFFINE") {
         vec![]
@@ -3310,6 +3450,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 return match (c, &aor.dev) {
                     (RCol::Ao(i), Some(d)) => Src::Dev(d.base[*i].device_ptr),
                     (RCol::Ao(i), None) => Src::Host(&aor.base[*i]),
+                    (RCol::AoPre(sl), Some(d)) => Src::Dev(d.pre[*sl].device_ptr),
+                    (RCol::AoPre(sl), None) => Src::Host(&aor.pre[*sl]),
                     _ => panic!("a non-attnout column named on the attnout region"),
                 };
             }
@@ -3633,6 +3775,25 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                        &mut inter_split);
             table_regions.push(json!({"region": format!("table/range{w}"),
                                       "log_rows": *w, "key_cols": 1, "looks": 1}));
+            claims.table_sums.push(qm(sum));
+        }
+        // stream JJ: the exponent window, last of the core tables
+        {
+            let nw = plan.widths.len();
+            let lj = plan.log_epow();
+            let (c, sum) = crate::devfrac::frac_cols(
+                &m4e_air.tables[4 + nw].eval, "table epow", lj,
+                tc(&pre_tables, &tab_pre, 17 + nw, 3),
+                tc(&base_mults, &tab_mult, 5 + nw, 1),
+                || {
+                    let refs: Vec<&Eval> =
+                        (0..3).map(|i| htab(&pre_tables, 17 + nw + i)).collect();
+                    table_col(lj, &rels.epow, &refs, htab(&base_mults, 5 + nw))
+                });
+            inter_all.extend(c);
+            inter_mark("table/epow", &inter_all, &mut inter_seen, &mut inter_split);
+            table_regions.push(json!({"region": "table/epow", "log_rows": lj,
+                                      "key_cols": 3, "looks": 1}));
             claims.table_sums.push(qm(sum));
         }
         // The glue's tables have no device path (and no generated kernels), so
