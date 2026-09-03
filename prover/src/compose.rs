@@ -1346,6 +1346,23 @@ impl Plan {
         if let Some(g) = &self.glue {
             ids.extend(crate::glue::glue_table_ids(&g.uns));
         }
+        // stream II: the requantize seams register before the two ends -- four selectors per
+        // seam, then one division and one scale table per variant, then the
+        // 257-row sign table.  Strictly last, so no family that exists today
+        // moves an index.
+        for r in &self.rqs {
+            ids.extend(crate::requant::RQ_SEL.iter()
+                       .map(|n| crate::requant::rq_sel(&r.name, n)));
+        }
+        for v in &self.rq_vars {
+            ids.extend((0..crate::requant::rq_tab_width(*v))
+                       .map(|k| crate::requant::rq_tab_col(*v, k)));
+            ids.extend((0..crate::requant::scl_tab_width(*v))
+                       .map(|k| crate::requant::scl_tab_col(*v, k)));
+        }
+        if !self.rqs.is_empty() {
+            ids.extend(crate::requant::RQV_COLS.iter().map(|c| id(*c)));
+        }
         // stream E: the argmax region's own three selectors, last, so that no
         // family before it moves an index
         if self.argmax_mat().is_some() {
@@ -1370,23 +1387,6 @@ impl Plan {
                 ids.push(crate::gkrlink::first_id(h));
                 ids.push(crate::gkrlink::second_id(h));
             }
-        }
-        // stream II: the requantize seams close the list -- four selectors per
-        // seam, then one division and one scale table per variant, then the
-        // 257-row sign table.  Strictly last, so no family that exists today
-        // moves an index.
-        for r in &self.rqs {
-            ids.extend(crate::requant::RQ_SEL.iter()
-                       .map(|n| crate::requant::rq_sel(&r.name, n)));
-        }
-        for v in &self.rq_vars {
-            ids.extend((0..crate::requant::rq_tab_width(*v))
-                       .map(|k| crate::requant::rq_tab_col(*v, k)));
-            ids.extend((0..crate::requant::scl_tab_width(*v))
-                       .map(|k| crate::requant::scl_tab_col(*v, k)));
-        }
-        if !self.rqs.is_empty() {
-            ids.extend(crate::requant::RQV_COLS.iter().map(|c| id(*c)));
         }
         ids
     }
@@ -1413,28 +1413,34 @@ impl Plan {
             + if self.p.gkr_glue { 0 }
               else { self.glue.as_ref().map(|g| g.regions.len()).unwrap_or(0) }
             - usize::from(self.p.gkr_attnout)
+            // stream II: one per requantize seam, before the two ends
+            + self.rqs.len()
             + usize::from(self.argmax_mat().is_some())
             // stream BB: the embedding gadget's use region, last of all
             + usize::from(self.emb.is_some())
-            // stream II: one per requantize seam, after everything
-            + self.rqs.len()
     }
-    /// Stream II: where the embedding's table sum sits, and where the
-    /// requantize seams' tables start.  Written out rather than read off the
-    /// end of the list, because stream II appends past the embedding.
-    pub fn emb_table_at(&self) -> usize {
+    /// Stream II: where the requantize seams' tables start, and where the
+    /// embedding's table sum sits.  Written out rather than read off the end of
+    /// the list, because the seams register *before* the two ends -- stream
+    /// BB's `registration_is_append_only` says the embedding's ids and its two
+    /// components are the last thing any plan adds, and a family appended past
+    /// it would make that false.
+    pub fn rq_table_at(&self) -> usize {
         5 + self.widths.len() + self.glue.as_ref().map(|g| g.n_tables()).unwrap_or(0)
     }
-    pub fn rq_table_at(&self) -> usize {
-        self.emb_table_at() + usize::from(self.emb.is_some())
+    pub fn n_rq_tables(&self) -> usize {
+        2 * self.rq_vars.len() + usize::from(!self.rqs.is_empty())
+    }
+    pub fn emb_table_at(&self) -> usize {
+        self.rq_table_at() + self.n_rq_tables()
     }
     pub fn n_table_sums(&self) -> usize {
         5 + self.widths.len() + self.glue.as_ref().map(|g| g.n_tables()).unwrap_or(0)
+            // stream II: one division and one scale table per variant, then the
+            // sign table, before the two ends
+            + self.n_rq_tables()
             // stream BB: the embedding table's own side, appended last
             + usize::from(self.emb.is_some())
-            // stream II: one division and one scale table per variant, then the
-            // sign table
-            + 2 * self.rq_vars.len() + usize::from(!self.rqs.is_empty())
     }
 }
 
@@ -1619,6 +1625,12 @@ impl BuiltComponents {
         for i in 0..self.tables.len() {
             v.push(crate::cudagen::fp_row(&self.tables[i].eval, &format!("table{i}")));
         }
+        for i in 0..self.rqs.len() {
+            v.push(crate::cudagen::fp_row(&self.rqs[i].eval, &format!("requant{i}")));
+        }
+        for i in 0..self.rq_tabs.len() {
+            v.push(crate::cudagen::fp_row(&self.rq_tabs[i].eval, &format!("rqtable{i}")));
+        }
         if let Some(c) = &self.argmax {
             v.push(crate::cudagen::fp_row(&c.eval, "argmax"));
         }
@@ -1627,12 +1639,6 @@ impl BuiltComponents {
         }
         if let Some(c) = &self.emb_tab {
             v.push(crate::cudagen::fp_row(&c.eval, "emb_table"));
-        }
-        for i in 0..self.rqs.len() {
-            v.push(crate::cudagen::fp_row(&self.rqs[i].eval, &format!("requant{i}")));
-        }
-        for i in 0..self.rq_tabs.len() {
-            v.push(crate::cudagen::fp_row(&self.rq_tabs[i].eval, &format!("rqtable{i}")));
         }
         v
     }
@@ -1671,6 +1677,14 @@ impl BuiltComponents {
         for t in &self.gtables {
             v.push(t);
         }
+        // stream II: the requantize seams and their tables, before the two ends,
+        // as `Plan::pre_ids` has them
+        for r in &self.rqs {
+            v.push(r);
+        }
+        for t in &self.rq_tabs {
+            v.push(t);
+        }
         if let Some(a) = &self.argmax {
             v.push(a);
         }
@@ -1679,13 +1693,6 @@ impl BuiltComponents {
         }
         if let Some(e) = &self.emb_tab {
             v.push(e);
-        }
-        // stream II: the requantize seams and their tables, last of all
-        for r in &self.rqs {
-            v.push(r);
-        }
-        for t in &self.rq_tabs {
-            v.push(t);
         }
         v
     }
@@ -1723,6 +1730,14 @@ impl BuiltComponents {
         for t in &self.gtables {
             v.push(t);
         }
+        // stream II: the requantize seams and their tables, before the two ends,
+        // as `Plan::pre_ids` has them
+        for r in &self.rqs {
+            v.push(r);
+        }
+        for t in &self.rq_tabs {
+            v.push(t);
+        }
         if let Some(a) = &self.argmax {
             v.push(a);
         }
@@ -1731,13 +1746,6 @@ impl BuiltComponents {
         }
         if let Some(e) = &self.emb_tab {
             v.push(e);
-        }
-        // stream II: the requantize seams and their tables, last of all
-        for r in &self.rqs {
-            v.push(r);
-        }
-        for t in &self.rq_tabs {
-            v.push(t);
         }
         v
     }
@@ -2170,66 +2178,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         }
     }
 
-    // stream E: the argmax, tied to the head's key claim.  It shares the layer's
-    // 16-bit range table and the head dequant's step selectors, so it adds one
-    // component and no table.
-    let argmax = plan.argmax_mat().map(|mi| {
-        let lay = plan.mat_lays[mi];
-        let m = &plan.p.mats[mi];
-        let tie = crate::argmax::ATie {
-            claimed: claims.am_key.first().copied().map(unqm).unwrap_or(SecureField::zero()),
-            tag: m.name.clone(),
-            ..argmax_tie_w(w_glue, m.tokens, m.n_out, lay.per_row)
-        };
-        FrameworkComponent::<crate::argmax::ArgmaxEval>::new(
-            alloc,
-            crate::argmax::ArgmaxEval {
-                log_rows: lay.log_rows,
-                per_row: lay.per_row,
-                lax: plan.p.head_argmax_lax,
-                rk: rels.range(crate::argmax::KEY_BITS).clone(),
-                tie: Some(tie),
-            },
-            next_use(claims),
-        )
-    });
-
-    // stream BB: the embedding gadget, after the argmax and after everything
-    // else.  The use region takes the last `use_sums` cursor position and the
-    // table region the last `table_sums` slot, which is what keeps both lists
-    // append-only.  Its tie reads the wiring family's own `w` and `lam`, so it
-    // draws no challenge of its own.
-    let (embed, emb_tab) = match (&plan.emb, &rels.emb) {
-        (Some(l), Some(er)) => {
-            let g = plan.glue.as_ref().expect("the embedding gadget needs the wiring family");
-            let mut tie = crate::embed::tie_w(w_glue, lam_glue, g.t.d, p.s, l);
-            tie.claimed =
-                claims.embed_out.first().copied().map(unqm).unwrap_or(SecureField::zero());
-            tie.claimed_tok =
-                claims.embed_tok.first().copied().map(unqm).unwrap_or(SecureField::zero());
-            let em = FrameworkComponent::<crate::embed::EmbedEval>::new(
-                alloc,
-                crate::embed::EmbedEval {
-                    log_rows: l.log_use,
-                    per_row: l.pe,
-                    rel: er.clone(),
-                    rel_ef: rels.range(crate::embed::EF_BITS).clone(),
-                    tie,
-                },
-                next_use(claims),
-            );
-            let et = FrameworkComponent::<crate::embed::EmbTableEval>::new(
-                alloc,
-                crate::embed::EmbTableEval { log_rows: l.log_tab, per_row: l.pe,
-                                             rel: er.clone() },
-                unqm(claims.table_sums[plan.emb_table_at()]),
-            );
-            (Some(em), Some(et))
-        }
-        _ => (None, None),
-    };
-
-    // stream II: the requantize seams, after everything else.  Their weights are
+    // stream II: the requantize seams, before the two ends.  Their weights are
     // the wiring family's own `w` and `lam` on the dequant's `MatLayout` map, so
     // a seam's input claim and its producer's `Out(0)` are two Horner sums over
     // the same sequence under the same weights -- which is what equality means.
@@ -2305,6 +2254,66 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             unqm(claims.table_sums[base + t]),
         ));
     }
+
+    // stream E: the argmax, tied to the head's key claim.  It shares the layer's
+    // 16-bit range table and the head dequant's step selectors, so it adds one
+    // component and no table.
+    let argmax = plan.argmax_mat().map(|mi| {
+        let lay = plan.mat_lays[mi];
+        let m = &plan.p.mats[mi];
+        let tie = crate::argmax::ATie {
+            claimed: claims.am_key.first().copied().map(unqm).unwrap_or(SecureField::zero()),
+            tag: m.name.clone(),
+            ..argmax_tie_w(w_glue, m.tokens, m.n_out, lay.per_row)
+        };
+        FrameworkComponent::<crate::argmax::ArgmaxEval>::new(
+            alloc,
+            crate::argmax::ArgmaxEval {
+                log_rows: lay.log_rows,
+                per_row: lay.per_row,
+                lax: plan.p.head_argmax_lax,
+                rk: rels.range(crate::argmax::KEY_BITS).clone(),
+                tie: Some(tie),
+            },
+            next_use(claims),
+        )
+    });
+
+    // stream BB: the embedding gadget, after the argmax and after everything
+    // else.  The use region takes the last `use_sums` cursor position and the
+    // table region the last `table_sums` slot, which is what keeps both lists
+    // append-only.  Its tie reads the wiring family's own `w` and `lam`, so it
+    // draws no challenge of its own.
+    let (embed, emb_tab) = match (&plan.emb, &rels.emb) {
+        (Some(l), Some(er)) => {
+            let g = plan.glue.as_ref().expect("the embedding gadget needs the wiring family");
+            let mut tie = crate::embed::tie_w(w_glue, lam_glue, g.t.d, p.s, l);
+            tie.claimed =
+                claims.embed_out.first().copied().map(unqm).unwrap_or(SecureField::zero());
+            tie.claimed_tok =
+                claims.embed_tok.first().copied().map(unqm).unwrap_or(SecureField::zero());
+            let em = FrameworkComponent::<crate::embed::EmbedEval>::new(
+                alloc,
+                crate::embed::EmbedEval {
+                    log_rows: l.log_use,
+                    per_row: l.pe,
+                    rel: er.clone(),
+                    rel_ef: rels.range(crate::embed::EF_BITS).clone(),
+                    tie,
+                },
+                next_use(claims),
+            );
+            let et = FrameworkComponent::<crate::embed::EmbTableEval>::new(
+                alloc,
+                crate::embed::EmbTableEval { log_rows: l.log_tab, per_row: l.pe,
+                                             rel: er.clone() },
+                unqm(claims.table_sums[plan.emb_table_at()]),
+            );
+            (Some(em), Some(et))
+        }
+        _ => (None, None),
+    };
+
 
     BuiltComponents { chans, keys, rows, links, link_tie, ao, mats, walks, glue, exp_t, tables,
                       gtables, argmax, embed, emb_tab, rqs: rq_comps, rq_tabs, pows,
@@ -3372,30 +3381,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // And the glue's shared tables close both trees, as before.
     pre_all.extend(glue_tcols.iter().map(AnyCol::Host));
     base_all.extend(glue_mcols.iter().map(AnyCol::Host));
-    // stream E: the argmax region closes both trees, matching `pre_ids` and the
-    // component order -- appending it moves no family before it
-    if let Some(r) = am_region.as_ref() {
-        pre_all.extend(r.pre.iter().map(AnyCol::Host));
-        base_all.extend(r.base.iter().map(AnyCol::Host));
-    }
-    // stream BB: the embedding gadget closes both trees after the argmax, in
-    // the order `pre_ids` writes its ids and the order `components()` places
-    // its two components -- the use side, then the table side
-    if let Some(r) = emb_region.as_ref() {
-        pre_all.extend(r.pre.iter().map(AnyCol::Host));
-        pre_all.extend(r.tab_pre.iter().map(AnyCol::Host));
-        base_all.extend(r.base.iter().map(AnyCol::Host));
-        base_all.push(AnyCol::Host(&r.tab_mult));
-    }
-    // B11 stream S, lever 3: the link heights' boundary selectors close the
-    // preprocessed tree, matching `pre_ids` -- GKR arm only
-    if p.gkr_bands {
-        for h in crate::gkrlink::link_heights(&plan) {
-            pre_all.extend(crate::gkrlink::boundary_cols(h)
-                .into_iter().map(crate::device::AnyCol::OwnedHost));
-        }
-    }
-    // stream II: the requantize seams close both trees, in `Plan::pre_ids`'
+    // stream II: the requantize seams join both trees before the two ends, in `Plan::pre_ids`'
     // order -- every seam's four selectors, then the division and scale tables
     // per variant, then the sign table.  The tables' own multiplicity columns
     // follow in tree 1, in the same order, matching the component list.
@@ -3442,6 +3428,29 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     pre_all.extend(rq_tab_pre.iter().map(AnyCol::Host));
     base_all.extend(rq_tab_mult.iter().map(AnyCol::Host));
+    // stream E: the argmax region closes both trees, matching `pre_ids` and the
+    // component order -- appending it moves no family before it
+    if let Some(r) = am_region.as_ref() {
+        pre_all.extend(r.pre.iter().map(AnyCol::Host));
+        base_all.extend(r.base.iter().map(AnyCol::Host));
+    }
+    // stream BB: the embedding gadget closes both trees after the argmax, in
+    // the order `pre_ids` writes its ids and the order `components()` places
+    // its two components -- the use side, then the table side
+    if let Some(r) = emb_region.as_ref() {
+        pre_all.extend(r.pre.iter().map(AnyCol::Host));
+        pre_all.extend(r.tab_pre.iter().map(AnyCol::Host));
+        base_all.extend(r.base.iter().map(AnyCol::Host));
+        base_all.push(AnyCol::Host(&r.tab_mult));
+    }
+    // B11 stream S, lever 3: the link heights' boundary selectors close the
+    // preprocessed tree, matching `pre_ids` -- GKR arm only
+    if p.gkr_bands {
+        for h in crate::gkrlink::link_heights(&plan) {
+            pre_all.extend(crate::gkrlink::boundary_cols(h)
+                .into_iter().map(crate::device::AnyCol::OwnedHost));
+        }
+    }
     crate::util::m4_add("gen/refs", m4_t.elapsed().as_secs_f64());
     let trace_secs = trace_secs + t0.elapsed().as_secs_f64();
 
@@ -4205,61 +4214,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     crate::util::m4_add("int/tables", m4_t.elapsed().as_secs_f64());
 
-    // Stream E: the argmax's interaction columns come *after* the tables' own
-    // sides, because the framework hands out interaction spans in component
-    // order and the argmax component is last of all.  Appended earlier, this
-    // component is handed the exp table's columns instead and the prover dies
-    // evaluating a 2^23 polynomial on a 2^16 domain -- which is exactly how it
-    // failed the first time.
-
-    // stream E: the argmax's tie column then its lookups, the order the AIR
-    // reads them, and its use sum last of all -- the component is last too
-    let m4_t = std::time::Instant::now();
-    if let (Some(r), Some(mi)) = (am_region.as_ref(), plan.argmax_mat()) {
-        let m = &plan.p.mats[mi];
-        let tie = crate::argmax::ATie {
-            claimed: SecureField::zero(),
-            tag: m.name.clone(),
-            ..argmax_tie_w(w_glue, m.tokens, m.n_out, plan.mat_lays[mi].per_row)
-        };
-        let (tcols, claimed) = crate::argmax::tie_col(r, m.tokens, &tie);
-        inter_all.extend(crate::device::host_cols(tcols));
-        claims.am_key.push(qm(claimed));
-        let (lcols, use_sum) =
-            crate::argmax::logup(r, plan.p.head_argmax_lax,
-                                 rels.range(crate::argmax::KEY_BITS));
-        inter_all.extend(crate::device::host_cols(lcols));
-        claims.use_sums.push(qm(use_sum));
-        inter_mark("argmax", &inter_all, &mut inter_seen, &mut inter_split);
-    }
-    crate::util::m4_add("int/argmax", m4_t.elapsed().as_secs_f64());
-
-    // stream BB: the embedding gadget's interaction columns, last of all,
-    // because its two components are last of all.  Within the use region the
-    // AIR reads the two Horner accumulators before it finalizes its LogUp, so
-    // the tie columns come before the fraction columns here too; the table
-    // region's single column follows, matching the component order.
-    let m4_t = std::time::Instant::now();
-    if let (Some(r), Some(er)) = (emb_region.as_ref(), rels.emb.as_ref()) {
-        let mut tie = crate::embed::tie_w(w_glue, lam_glue, r.d, r.tokens, &r.lay);
-        let (tcols, hc, gc) = crate::embed::tie_cols(r, &tie);
-        tie.claimed = hc;
-        tie.claimed_tok = gc;
-        inter_all.extend(crate::device::host_cols(tcols));
-        claims.embed_out.push(qm(hc));
-        claims.embed_tok.push(qm(gc));
-        let (lcols, use_sum) =
-            crate::embed::logup(r, er, rels.range(crate::embed::EF_BITS));
-        inter_all.extend(crate::device::host_cols(lcols));
-        claims.use_sums.push(qm(use_sum));
-        let (tbcols, tab_sum) = crate::embed::table_side(r, er);
-        inter_all.extend(crate::device::host_cols(tbcols));
-        claims.table_sums.push(qm(tab_sum));
-        inter_mark("embed", &inter_all, &mut inter_seen, &mut inter_split);
-    }
-    crate::util::m4_add("int/embed", m4_t.elapsed().as_secs_f64());
-
-    // stream II: the requantize seams' interaction columns, last of all.  Within
+    // stream II: the requantize seams' interaction columns, before the two ends'.  Within
     // a seam the AIR reads its two Horner accumulators before it finalizes its
     // LogUp, so the tie columns come before the fraction columns here too; the
     // seams' shared tables follow, in `Plan::pre_ids`' order.
@@ -4322,6 +4277,60 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         inter_mark("requant/tables", &inter_all, &mut inter_seen, &mut inter_split);
     }
     crate::util::m4_add("int/requant", m4_t.elapsed().as_secs_f64());
+    // Stream E: the argmax's interaction columns come *after* the tables' own
+    // sides, because the framework hands out interaction spans in component
+    // order and the argmax component is last of all.  Appended earlier, this
+    // component is handed the exp table's columns instead and the prover dies
+    // evaluating a 2^23 polynomial on a 2^16 domain -- which is exactly how it
+    // failed the first time.
+
+    // stream E: the argmax's tie column then its lookups, the order the AIR
+    // reads them, and its use sum last of all -- the component is last too
+    let m4_t = std::time::Instant::now();
+    if let (Some(r), Some(mi)) = (am_region.as_ref(), plan.argmax_mat()) {
+        let m = &plan.p.mats[mi];
+        let tie = crate::argmax::ATie {
+            claimed: SecureField::zero(),
+            tag: m.name.clone(),
+            ..argmax_tie_w(w_glue, m.tokens, m.n_out, plan.mat_lays[mi].per_row)
+        };
+        let (tcols, claimed) = crate::argmax::tie_col(r, m.tokens, &tie);
+        inter_all.extend(crate::device::host_cols(tcols));
+        claims.am_key.push(qm(claimed));
+        let (lcols, use_sum) =
+            crate::argmax::logup(r, plan.p.head_argmax_lax,
+                                 rels.range(crate::argmax::KEY_BITS));
+        inter_all.extend(crate::device::host_cols(lcols));
+        claims.use_sums.push(qm(use_sum));
+        inter_mark("argmax", &inter_all, &mut inter_seen, &mut inter_split);
+    }
+    crate::util::m4_add("int/argmax", m4_t.elapsed().as_secs_f64());
+
+    // stream BB: the embedding gadget's interaction columns, last of all,
+    // because its two components are last of all.  Within the use region the
+    // AIR reads the two Horner accumulators before it finalizes its LogUp, so
+    // the tie columns come before the fraction columns here too; the table
+    // region's single column follows, matching the component order.
+    let m4_t = std::time::Instant::now();
+    if let (Some(r), Some(er)) = (emb_region.as_ref(), rels.emb.as_ref()) {
+        let mut tie = crate::embed::tie_w(w_glue, lam_glue, r.d, r.tokens, &r.lay);
+        let (tcols, hc, gc) = crate::embed::tie_cols(r, &tie);
+        tie.claimed = hc;
+        tie.claimed_tok = gc;
+        inter_all.extend(crate::device::host_cols(tcols));
+        claims.embed_out.push(qm(hc));
+        claims.embed_tok.push(qm(gc));
+        let (lcols, use_sum) =
+            crate::embed::logup(r, er, rels.range(crate::embed::EF_BITS));
+        inter_all.extend(crate::device::host_cols(lcols));
+        claims.use_sums.push(qm(use_sum));
+        let (tbcols, tab_sum) = crate::embed::table_side(r, er);
+        inter_all.extend(crate::device::host_cols(tbcols));
+        claims.table_sums.push(qm(tab_sum));
+        inter_mark("embed", &inter_all, &mut inter_seen, &mut inter_split);
+    }
+    crate::util::m4_add("int/embed", m4_t.elapsed().as_secs_f64());
+
     // an independent recomputation of every tie claim, from the region's witness
     // rather than from its trace: a tie is only worth something if it is checkable
     let glue_ties_ok = match (&plan.glue, &rels.glue) {
