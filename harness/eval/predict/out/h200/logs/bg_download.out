@@ -1,4 +1,0 @@
-download: Qwen/Qwen2.5-14B-Instruct -> /home/tenant/hf (disk before: 418G avail)
-download: snapshot /home/tenant/hf/hub/models--Qwen--Qwen2.5-14B-Instruct/snapshots/cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8/
-download: 28G in the snapshot; disk after: 390G avail
-e4: download PASS 

@@ -1,0 +1,11 @@
+[workspace]
+resolver = "3"
+members = ["prover"]
+# The vendored fork is its own cargo workspace with its own lockfile; prover
+# depends on its crates by path.
+exclude = ["nitroo"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

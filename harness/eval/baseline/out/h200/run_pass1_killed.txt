@@ -1,61 +1,0 @@
-12:11:56 preflight: interpreter = /home/tenant/b8/.venv/bin/python
-card         NVIDIA H200 NVL 143157 MiB
-torch        2.11.0+cu128 cuda 12.8
-transformers 5.15.1
-{
-  "hf": {
-    "available": true,
-    "reason": null
-  },
-  "mock": {
-    "available": true,
-    "reason": null,
-    "warning": "SYNTHETIC. Exercises the harness; produces no measurement."
-  },
-  "vllm": {
-    "available": false,
-    "reason": "No module named 'vllm'"
-  }
-}
-12:12:01 preflight: ok
-12:12:01 hf: start
-Loading weights:   0%|          | 0/291 [00:00<?, ?it/s]Loading weights:  57%|█████▋    | 165/291 [00:00<00:00, 1648.84it/s]Loading weights: 100%|██████████| 291/291 [00:00<00:00, 2155.45it/s]
-[transformers] Token indices sequence length is longer than the specified maximum sequence length for this model (171511 > 131072). Running this sequence through the model will result in indexing errors
-[transformers] The following generation flags are not valid and may be ignored: ['temperature', 'top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
-[transformers] Both `max_new_tokens` (=8) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=1) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=512) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=1) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=512) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=1) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=512) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-C=4096   batch=1    hf    per-stream    76.554 tok/s   aggregate     76.554 tok/s   ttft   0.127s   [like-for-like with stated mismatches]
-  -> e2/out/llama-31-8b-instruct_hf_c4096_b1_n512.json
-Loading weights:   0%|          | 0/291 [00:00<?, ?it/s]Loading weights: 100%|██████████| 291/291 [00:00<00:00, 14974.33it/s]
-[transformers] Token indices sequence length is longer than the specified maximum sequence length for this model (171511 > 131072). Running this sequence through the model will result in indexing errors
-[transformers] The following generation flags are not valid and may be ignored: ['temperature', 'top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
-[transformers] Both `max_new_tokens` (=8) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=1) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=512) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=1) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=512) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=1) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=512) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-C=16384  batch=1    hf    per-stream    75.137 tok/s   aggregate     75.137 tok/s   ttft   0.601s   [like-for-like with stated mismatches]
-  -> e2/out/llama-31-8b-instruct_hf_c16384_b1_n512.json
-Loading weights:   0%|          | 0/291 [00:00<?, ?it/s]Loading weights: 100%|██████████| 291/291 [00:00<00:00, 14380.81it/s]
-[transformers] Token indices sequence length is longer than the specified maximum sequence length for this model (171511 > 131072). Running this sequence through the model will result in indexing errors
-[transformers] The following generation flags are not valid and may be ignored: ['temperature', 'top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
-[transformers] Both `max_new_tokens` (=8) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=1) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=512) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=8) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=1) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=512) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=8) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=1) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=512) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=8) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-Terminated
-[transformers] Both `max_new_tokens` (=1) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
-[transformers] Both `max_new_tokens` (=512) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)

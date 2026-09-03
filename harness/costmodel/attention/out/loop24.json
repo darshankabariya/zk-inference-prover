@@ -1,2 +1,0 @@
-Failed to allocate 67108864 bytes from pool: out of memory
-Also failed to fallback cudaMalloc(67108864): out of memory

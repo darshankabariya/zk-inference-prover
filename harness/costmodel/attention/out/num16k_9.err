@@ -1,4 +1,0 @@
-compose: synthetic layer (seed=7) bands=[8, 4, 2] variant=intexp kmax=18 rem=23 p=136
-[PROFILE]   prove_ex: composition gen:    3224ms
-[PROFILE]   prove_ex: composition commit: 1028ms
-[PROFILE]   prove_ex: prove_values:       6640ms

@@ -1,5 +1,0 @@
-tight-table: 2^27 -> 2^25 (key max 26356742, 25 bits, slack 0, off_table 0)
-compose: B6.5 layer witness [/home/tenant/b8/w14b/c4096_final/witness_L1] bands=[32, 8, 32, 8] variant=intexp kmax=19 rem=18 p=136
-[PROFILE]   prove_ex: composition gen:    3375ms
-[PROFILE]   prove_ex: composition commit: 2064ms
-[PROFILE]   prove_ex: prove_values:       10703ms

@@ -1,0 +1,14 @@
+/target/
+nitroo/target/
+nitroo/crates/*/target/
+harness/.venv/
+harness/.venv-vllm/
+__pycache__/
+*.pyc
+*.egg-info/
+# runtime outputs of the harness: results belong in zk-results
+harness/**/out/
+harness/**/out-*/
+*.npz
+*.npy
+.DS_Store
