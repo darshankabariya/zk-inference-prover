@@ -252,10 +252,7 @@ pub fn commit_pre(a: &Attn, l: &Layouts, with_out: bool, with_rows: bool)
         // the causal mask, one column per token slot: key `k` is in token `t`'s
         // future exactly when `k > t`
         for i in 0..lk.q {
-            pre.push(sel(lk.g.log_rows, &|j| {
-                matches!(lk.g.row(j), Some((g, chunk))
-                         if split(g, sh.c).1 > chunk * lk.q + i)
-            }));
+            pre.push(sel(lk.g.log_rows, &|j| masked(lk, sh.c, j, i)));
         }
     }
     // Stream CC (E11): the inert-lead-row selector, last of the grid's block and
@@ -265,6 +262,23 @@ pub fn commit_pre(a: &Attn, l: &Layouts, with_out: bool, with_rows: bool)
     // lands at slot 8 of the key group, which is where `devpre`'s `b65p_sel`
     // writes it.
     if crate::attn_air::act_id(0, a.corner, lk.g.lead).is_some() {
+        // Stream JJ (E11), `witness-slack.md` section 7 item 7: `KeyEval` reads
+        // the numerator fold's visibility as `act - msk[i]` rather than
+        // `act * (1 - msk[i])` to keep the factor degree 1, and that is the same
+        // expression only while `msk` is zero on every row where `act` is.  It
+        // was true by construction -- both predicates test `Grid::row(j)` -- and
+        // relied on in a comment; here it is checked, over exactly the rows where
+        // `act` is zero, which are the grid's lead rows and nothing else.
+        for j in 0..lk.g.rows {
+            if lk.g.row(j).is_some() {
+                continue;
+            }
+            for i in 0..lk.q {
+                assert!(!masked(lk, sh.c, j, i),
+                        "the causal mask is set on an inert row (band row {j}, slot {i}): \
+                         `act - msk` is not `act * (1 - msk)` there");
+            }
+        }
         pre.push(sel(lk.g.log_rows, &|j| lk.g.row(j).is_some()));
     }
 
@@ -289,6 +303,13 @@ pub fn commit_pre(a: &Attn, l: &Layouts, with_out: bool, with_rows: bool)
         pre.push(sel(l.log_row, &|j| j > 0 && tok_istart(rrows, l.rw, sh.s, j)));
     }
     pre
+}
+
+/// The causal mask's predicate: key `k` is in token `t`'s future exactly when
+/// `k > t`, and an inert row is masked nowhere.  One function so that
+/// `commit_pre` and the assertion beside it cannot drift apart.
+fn masked(lk: &crate::layout::LayoutKey, c: usize, j: usize, i: usize) -> bool {
+    matches!(lk.g.row(j), Some((g, chunk)) if split(g, c).1 > chunk * lk.q + i)
 }
 
 /// The shared tables (tree 0): the exp table and one range table per width.
