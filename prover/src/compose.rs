@@ -5040,6 +5040,12 @@ pub struct Verdict {
     /// scale this matmul dequantized by is the scale the requantize pinned to
     /// its input's attained maximum".  Empty on a chunk with no seams.
     pub rq_scale_ok: Vec<bool>,
+    /// Stream II (E11): true when this chunk publishes both the attnout
+    /// region's `ao_q` and the `o` walk's `qX` but its `o` matmul does not read
+    /// `nh * hd` channels -- so the two folds are over different sequences and
+    /// `ao_q_ok` says nothing.  A desk shape, never a real layer; reported so a
+    /// reader cannot mistake a vacuous `ao_q_ok` for a checked seam.
+    pub ao_q_open: bool,
     /// stream II: the `o` seam, once stream JJ publishes `ao_q`.  True while
     /// that claim is absent -- an equality nobody can state yet is not a
     /// failure, and the record says so rather than the verdict pretending.
@@ -5094,7 +5100,7 @@ impl Verdict {
                deq_out_open: vec![], head_tie_ok: false, embed_ok: false,
                embed_tok_ok: false, head_tok_ok: false,
                rq_in_ok: vec![false], rq_out_ok: vec![false], rq_scale_ok: vec![false],
-               ao_q_ok: false,
+               ao_q_open: false, ao_q_ok: false,
                stream_in: None, stream_out: None,
                bound_roots: vec![], bound_sides: vec![],
                error: Some(msg.to_string()), verify_secs: 0.0 }
@@ -5435,8 +5441,22 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // (`Layer::synth_glue`), so on any shape a gate proves this is either live
     // or structurally absent -- it is never a mismatched comparison read as a
     // pass.
-    let ao_q_ok = match plan.walks.iter().position(|w| w.name == "o") {
-        Some(wi) if plan.glue.is_some() && !claims.ao_q.is_empty() => {
+    //
+    // The width test is the statement's own: the attention output is `nh * hd`
+    // channels and the `o` walk reads `n_in` of them, and both are `Params`.  A
+    // shape where they disagree is not a layer of any transformer -- its `o`
+    // matmul does not consume the attention output at all -- so the two folds
+    // run over different sequences and the equality is not statable.  That case
+    // is *reported*, in `ao_q_open`, and never counted as a pass by silence;
+    // it is stream JJ's `deq_out_open` convention, for the same reason.
+    let ao_q_at = plan.walks.iter().position(|w| w.name == "o").filter(|_| {
+        plan.glue.is_some() && !claims.ao_q.is_empty()
+    });
+    let ao_q_wide = p.mats.iter().find(|m| m.name == "o")
+        .is_some_and(|m| m.n_in == p.nh * p.hd);
+    let ao_q_open = ao_q_at.is_some() && !ao_q_wide;
+    let ao_q_ok = match ao_q_at {
+        Some(wi) if ao_q_wide => {
             claims.ao_q.first().copied() == claims.walk_qx.get(wi).copied()
         }
         _ => true,
@@ -5493,7 +5513,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
 
     Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
               deq_out_open, head_tie_ok, embed_ok, embed_tok_ok, head_tok_ok,
-              rq_in_ok, rq_out_ok, rq_scale_ok, ao_q_ok,
+              rq_in_ok, rq_out_ok, rq_scale_ok, ao_q_open, ao_q_ok,
               sizes_ok, glue_ok, stream_in, stream_out, bound_roots, bound_sides, error,
               verify_secs: t0.elapsed().as_secs_f64() }
 }
