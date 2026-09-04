@@ -1798,6 +1798,15 @@ statable here"),
             // claim against the quantize region's output can see it.  The
             // generator is the witness's, so this needs a synthetic layer.
             for (which, name) in [(0usize, "Q"), (1, "K"), (2, "V")] {
+                // the generator rebuilds the whole layer, so it only makes
+                // sense on a synthetic one -- on a dump it would replace the
+                // witness under test with a different layer and the probe would
+                // measure nothing about this chunk
+                if arg_str(args, "--witness").is_some() {
+                    eprintln!("  band {name}: SKIP -- the consumer-side control needs the \
+synthetic generator (Layer::synth_glue_band_bent); on a dump the bands are B1's");
+                    continue;
+                }
                 let mut lb = layer_of(args).0;
                 if lb.glue.is_none() {
                     eprintln!("  band {name}: SKIP -- no synthetic wiring family here");
