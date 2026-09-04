@@ -95,6 +95,19 @@ pub struct Rels {
     /// a relation nobody combines against costs one channel draw and keeps the
     /// order a function of "are there seams" alone.
     pub rq: Option<RqRels>,
+    /// Stream NN-3: the quantize family's own tables, drawn after the seams'
+    /// and only when the chunk carries a quantize region -- so a proof without
+    /// the rotation draws exactly what it always drew.
+    pub qq: Option<QuantRels>,
+}
+
+/// Stream NN-3: one division relation per side width, in `Plan::q_tabs` order,
+/// and the family's own `(q, nz)` pair relation.  The regions keep reading the
+/// layer's 15-bit range and `requant.rs`'s sign table, which are width-free.
+#[derive(Clone)]
+pub struct QuantRels {
+    pub div: Vec<FracRel>,
+    pub qnz: PairRel,
 }
 
 /// Stream II: the five relations a requantize seam reads, beyond the `qnz` and
@@ -114,7 +127,8 @@ impl Rels {
     /// embedding relation's arity, or `None` when the gadget is off; `rq` says
     /// whether the chunk carries requantize seams.
     pub fn draw(ch: &mut Blake2sM31Channel, widths: &[u32],
-                uns: Option<&[crate::glue::UnKind]>, emb: Option<usize>, rq: bool) -> Self {
+                uns: Option<&[crate::glue::UnKind]>, emb: Option<usize>, rq: bool,
+                qtabs: usize) -> Self {
         let exp = ExpRel::draw(ch);
         let norm = NormRel::draw(ch);
         let frac = FracRel::draw(ch);
@@ -141,7 +155,14 @@ impl Rels {
             scl2: PairRel::draw(ch),
             scl3: FracRel::draw(ch),
         });
-        Self { exp, norm, frac, mul, qnz, epow, widths: widths.to_vec(), ranges, glue, emb, rq }
+        // stream NN-3: last of all, so every relation before it keeps its place
+        // in the transcript
+        let qq = (qtabs > 0).then(|| QuantRels {
+            div: (0..qtabs).map(|_| FracRel::draw(ch)).collect(),
+            qnz: PairRel::draw(ch),
+        });
+        Self { exp, norm, frac, mul, qnz, epow, widths: widths.to_vec(), ranges, glue, emb, rq,
+               qq }
     }
     pub fn range(&self, bits: u32) -> &RangeRel {
         &self.ranges[self.widths.iter().position(|w| *w == bits).unwrap()]
@@ -874,6 +895,10 @@ pub struct QuantPlan {
     pub n: usize,
     pub tokens: usize,
     pub lay: MatLayout,
+    /// Stream NN-3: this side's integer width, `Params::q_bits` for `q`,
+    /// `Params::k_bits` for `k` and `V_BITS` for `v`.  It sizes the region's own
+    /// division table, and `rope::qmax_of` reads B1's clamp off it.
+    pub bits: u32,
     /// `(glue region, tie)` publishing the bf16 side -- a rotation's `Out(0)`.
     /// `None` for `v`, whose bf16 side is the `v` dequant region's own published
     /// output and is compared against `claims.deq_out` instead.
@@ -1432,6 +1457,14 @@ pub struct Plan {
     /// Stream NN: the three quantize regions -- `q`, `k`, `v` -- in that order.
     /// Empty on a chunk without `Params::rope`.
     pub quants: Vec<QuantPlan>,
+    /// Stream NN-3: the widths the quantize regions' own division tables are
+    /// built at -- the distinct `QuantPlan::bits`, ascending, one table each.
+    /// Empty when the chunk carries no quantize region.
+    pub q_tabs: Vec<u32>,
+    /// and the width of their shared `(q, nz)` pair table: the widest side's,
+    /// because the division table is what fixes the admissible quotient and this
+    /// one only pins `nz = [q != 0]`.  Zero when there are no regions.
+    pub q_nz_bits: u32,
     /// Stream NN: the bands that publish a K/Q/V claim over their own committed
     /// columns.  Exactly the **corner** bands: their keys are this block's own
     /// tokens, which are the ones this chunk's `k` and `v` matmuls produced,
@@ -1745,8 +1778,10 @@ impl Plan {
                     "the q/k/v ties read the corner band's own columns; --rope needs --corner");
             assert!(p.nh % rp.nkv == 0, "nh={} is not a multiple of nkv={}", p.nh, rp.nkv);
             assert_eq!(rp.inv(p.hd).len(), p.hd / 2, "inv_freq must be hd/2 long");
-            for (i, (name, heads)) in
-                [("q", p.nh), ("k", rp.nkv), ("v", rp.nkv)].into_iter().enumerate()
+            for (i, (name, heads, bits)) in
+                [("q", p.nh, p.q_bits), ("k", rp.nkv, p.k_bits),
+                 ("v", rp.nkv, crate::rope::V_BITS)]
+                    .into_iter().enumerate()
             {
                 let mi = p.mats.iter().position(|m| m.name == name)
                     .unwrap_or_else(|| panic!("--rope needs the {name} matmul"));
@@ -1762,12 +1797,10 @@ impl Plan {
                     n: m.n_out,
                     tokens: m.tokens,
                     lay: crate::rope::q_layout(m.n_out, p.hd, m.tokens, p.deq_target),
+                    bits,
                     // q and k read a rotation's output; v reads its own dequant
                     producer: (i < 2).then(|| (g.ropes[i].add, 1)),
                 });
-            }
-            if !rq_vars.contains(&crate::requant::SVariant::Pow2) {
-                rq_vars.insert(0, crate::requant::SVariant::Pow2);
             }
         }
         // Stream H: the boundary is the wiring family's two stream ties, so it
@@ -1834,8 +1867,20 @@ impl Plan {
                 }
             }
         }
+        // stream NN-3: the tables the quantize regions own, deduplicated by
+        // width.  One per distinct side width, so `q` at 12 bits and `k` at 11
+        // get their own and `v`'s int8 side keeps the eight-bit window; the
+        // shared `(q, nz)` table is the widest of them.
+        let q_tabs = {
+            let mut w: Vec<u32> = quants.iter().map(|q| q.bits).collect();
+            w.sort_unstable();
+            w.dedup();
+            w
+        };
+        let q_nz_bits = q_tabs.last().copied().unwrap_or(0);
         Self { p: p.clone(), attn_variant, round, shapes, lays, cfg, head_offsets, corner, specs,
-               mat_lays, ao_lay, walks, rqs, rq_vars, quants, nn_bands, nn_qbands,
+               mat_lays, ao_lay, walks, rqs, rq_vars, quants, q_tabs, q_nz_bits,
+               nn_bands, nn_qbands,
                widths, log_norm,
                log_frac, log_mul,
                glue, bounds,
@@ -2151,9 +2196,25 @@ impl Plan {
                     PreNeeds::Params, PreVaries::Layer);
             }
         }
-        if !self.rqs.is_empty() || !self.quants.is_empty() {
+        if self.needs_rq_rels() {
             for c in crate::requant::RQV_COLS {
                 put(id(c), "table/requant", 9, PreNeeds::Params, PreVaries::Layer);
+            }
+        }
+        // stream NN-3: the quantize family's own tables.  Both are a closed
+        // form of the side's width -- `Params::q_bits` and `Params::k_bits` --
+        // so they need the statement's parameters and no model data at all.
+        for w in &self.q_tabs {
+            for k in 0..crate::rope::QDIV_COLS {
+                put(crate::rope::qdiv_col(*w, k), "table/quant",
+                    crate::rope::qdiv_log_rows(*w), PreNeeds::Params, PreVaries::Layer);
+            }
+        }
+        if !self.quants.is_empty() {
+            for k in 0..2 {
+                put(crate::rope::qnz_col(self.q_nz_bits, k), "table/quant",
+                    crate::rope::qnz_log_rows(self.q_nz_bits), PreNeeds::Params,
+                    PreVaries::Layer);
             }
         }
         if let Some(mi) = self.argmax_mat() {
@@ -2337,8 +2398,17 @@ impl Plan {
             ids.extend((0..crate::requant::scl_tab_width(*v))
                        .map(|k| crate::requant::scl_tab_col(*v, k)));
         }
-        if !self.rqs.is_empty() || !self.quants.is_empty() {
+        if self.needs_rq_rels() {
             ids.extend(crate::requant::RQV_COLS.iter().map(|c| id(*c)));
+        }
+        // stream NN-3: the quantize family's own tables, after the seams' and
+        // the sign table -- one division table per side width, then the shared
+        // `(q, nz)` pair table
+        for w in &self.q_tabs {
+            ids.extend((0..crate::rope::QDIV_COLS).map(|k| crate::rope::qdiv_col(*w, k)));
+        }
+        if !self.quants.is_empty() {
+            ids.extend((0..2).map(|k| crate::rope::qnz_col(self.q_nz_bits, k)));
         }
         // stream E: the argmax region's own three selectors, last, so that no
         // family before it moves an index
@@ -2413,12 +2483,29 @@ impl Plan {
     /// BB's `registration_is_append_only` says the embedding's ids and its two
     /// components are the last thing any plan adds, and a family appended past
     /// it would make that false.  The 6 is stream JJ's `EPOW` counted in.
+    /// Stream II's five relations are drawn for the requantize seams *and* for
+    /// stream NN's quantize regions, which read the sign table and (before
+    /// NN-3) the division table.  One predicate, so the prover, the emitter and
+    /// the probes cannot disagree about whether they exist.
+    pub fn needs_rq_rels(&self) -> bool {
+        !self.rqs.is_empty() || !self.quants.is_empty()
+    }
+    /// Stream NN-3: which of `q_tabs` a side of this width reads.
+    pub fn q_tab_at(&self, bits: u32) -> usize {
+        self.q_tabs.iter().position(|w| *w == bits)
+            .unwrap_or_else(|| panic!("no quantize division table at {bits} bits"))
+    }
     pub fn rq_table_at(&self) -> usize {
         6 + self.widths.len() + self.glue.as_ref().map(|g| g.n_tables()).unwrap_or(0)
     }
     pub fn n_rq_tables(&self) -> usize {
         2 * self.rq_vars.len()
-            + usize::from(!self.rqs.is_empty() || !self.quants.is_empty())
+            + usize::from(self.needs_rq_rels())
+            // stream NN-3: one division table per side width, then the quantize
+            // family's own `(q, nz)` table -- after the seams' tables and the
+            // sign table, so nothing before them moves an index
+            + self.q_tabs.len()
+            + usize::from(!self.quants.is_empty())
     }
     pub fn emb_table_at(&self) -> usize {
         self.rq_table_at() + self.n_rq_tables()
@@ -3311,6 +3398,9 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             let tie = q_tie_w(w_glue, lam_glue, qp, p.nh,
                               claim_at(claims.nn_in.get(k).copied(), "nn_in"),
                               claim_at(claims.nn_out.get(k).copied(), "nn_out"));
+            // stream NN-3: this side's own division table, and the family's own
+            // `(q, nz)` table rather than the attention output's
+            let qr = rels.qq.as_ref().expect("the quantize regions draw their own tables");
             quant_comps.push(FrameworkComponent::<crate::rope::QuantEval>::new(
                 alloc,
                 crate::rope::QuantEval {
@@ -3318,8 +3408,9 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     log_rows: qp.lay.log_rows,
                     per_row: qp.lay.per_row,
                     chunks: qp.lay.chunks,
-                    qnz: rels.qnz.clone(),
-                    rq3: rr.rq3.clone(),
+                    bits: qp.bits,
+                    qnz: qr.qnz.clone(),
+                    rq3: qr.div[plan.q_tab_at(qp.bits)].clone(),
                     rqv: rr.rqv.clone(),
                     r15: rels.range(15).clone(),
                     tie: Some(tie),
@@ -3368,6 +3459,30 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         kind: TableKind::Frac(rr.rqv.clone()) },
             unqm(claims.table_sums[base + t]),
         ));
+        t += 1;
+        // stream NN-3: the quantize family's own tables, in `Plan::pre_ids`'
+        // order -- one division table per side width, then the `(q, nz)` pair
+        if let Some(qr) = &rels.qq {
+            for (i, w) in plan.q_tabs.iter().enumerate() {
+                rq_tabs.push(FrameworkComponent::<TableEval>::new(
+                    alloc,
+                    TableEval { log_rows: crate::rope::qdiv_log_rows(*w),
+                                cols: (0..crate::rope::QDIV_COLS)
+                                    .map(|k| crate::rope::qdiv_col(*w, k)).collect(),
+                                kind: TableKind::Frac(qr.div[i].clone()) },
+                    unqm(claims.table_sums[base + t]),
+                ));
+                t += 1;
+            }
+            rq_tabs.push(FrameworkComponent::<TableEval>::new(
+                alloc,
+                TableEval { log_rows: crate::rope::qnz_log_rows(plan.q_nz_bits),
+                            cols: (0..2).map(|k| crate::rope::qnz_col(plan.q_nz_bits, k))
+                                .collect(),
+                            kind: TableKind::Pair(qr.qnz.clone()) },
+                unqm(claims.table_sums[base + t]),
+            ));
+        }
     }
 
     // stream E: the argmax, tied to the head's key claim.  It shares the layer's
@@ -4363,7 +4478,8 @@ different rotation", inv.len(), 2 * hd * p.s);
                 .collect()
         }).unwrap_or_default();
         let r = crate::rope::q_region(
-            qp.name, &x, &jj, Some(&want), qp.tokens, qp.n, qp.hd, qp.lay, &mut tables,
+            qp.name, &x, &jj, Some(&want), qp.tokens, qp.n, qp.hd, qp.bits, plan.q_nz_bits,
+            qp.lay, &mut tables,
             tamper.quant.filter(|(i, _)| *i == k).map(|(_, t)| t));
         q_regions.push(r);
     }
@@ -4781,6 +4897,10 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         })
         .chain(if rq_regions.is_empty() && q_regions.is_empty() { vec![] }
                else { crate::requant::rqv_tab_cols() })
+        // stream NN-3: and the quantize family's own two, last
+        .chain(plan.q_tabs.iter().flat_map(|w| crate::rope::qdiv_tab_cols(*w)))
+        .chain(if plan.quants.is_empty() { vec![] }
+               else { crate::rope::qnz_tab_cols(plan.q_nz_bits) })
         .collect();
     // one multiplicity vector per table, merged across the seams that share it
     let rq_tab_mult: Vec<Eval> = {
@@ -4795,15 +4915,6 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 }
                 for (a, b) in ms.iter_mut().zip(&r.m_scl) {
                     *a += *b;
-                }
-            }
-            // stream NN: the quantize regions read the power-of-two division
-            // table and nothing else of this pair
-            if *v == crate::requant::SVariant::Pow2 {
-                for r in &q_regions {
-                    for (a, b) in m.iter_mut().zip(&r.m_rq) {
-                        *a += *b;
-                    }
                 }
             }
             out.push(crate::common::eval_of(lr, m.iter().map(|x| m31_u32(*x)).collect()));
@@ -4822,6 +4933,29 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 }
             }
             out.push(crate::common::eval_of(9, m.iter().map(|x| m31_u32(*x)).collect()));
+        }
+        // stream NN-3: the quantize family's own two, in `Plan::pre_ids`' order.
+        // A division table is shared by every side of its width; the `(q, nz)`
+        // table by all three regions.
+        for w in &plan.q_tabs {
+            let lr = crate::rope::qdiv_log_rows(*w);
+            let mut m = vec![0u32; 1usize << lr];
+            for r in q_regions.iter().filter(|r| r.bits == *w) {
+                for (a, b) in m.iter_mut().zip(&r.m_rq) {
+                    *a += *b;
+                }
+            }
+            out.push(crate::common::eval_of(lr, m.iter().map(|x| m31_u32(*x)).collect()));
+        }
+        if !plan.quants.is_empty() {
+            let lr = crate::rope::qnz_log_rows(plan.q_nz_bits);
+            let mut m = vec![0u32; 1usize << lr];
+            for r in &q_regions {
+                for (a, b) in m.iter_mut().zip(&r.m_qnz) {
+                    *a += *b;
+                }
+            }
+            out.push(crate::common::eval_of(lr, m.iter().map(|x| m31_u32(*x)).collect()));
         }
         out
     };
@@ -4965,14 +5099,20 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         });
         // stream II: last, after the embedding's, so the flag-off draw order is
         // the one every recorded digest was taken under
-        let rq = (!plan.rqs.is_empty() || !plan.quants.is_empty()).then(|| RqRels {
+        let rq = plan.needs_rq_rels().then(|| RqRels {
             rqv: sess.draw_relation(FracRel::draw),
             rq3: sess.draw_relation(FracRel::draw),
             rq4: sess.draw_relation(MulRel::draw),
             scl2: sess.draw_relation(PairRel::draw),
             scl3: sess.draw_relation(FracRel::draw),
         });
-        Rels { exp, norm, frac, mul, qnz, epow, widths: widths.clone(), ranges, glue, emb, rq }
+        // stream NN-3: and the quantize family's own tables, last of all
+        let qq = (!plan.q_tabs.is_empty()).then(|| QuantRels {
+            div: plan.q_tabs.iter().map(|_| sess.draw_relation(FracRel::draw)).collect(),
+            qnz: sess.draw_relation(PairRel::draw),
+        });
+        Rels { exp, norm, frac, mul, qnz, epow, widths: widths.clone(), ranges, glue, emb, rq,
+               qq }
     };
     let n_ch = plan.n_challenges();
     let ch = sess.draw_felts(n_ch);
@@ -5736,8 +5876,10 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             let qp = &plan.quants[k];
             let tie = q_tie_w(w_glue, lam_glue, qp, p.nh,
                               SecureField::zero(), SecureField::zero());
+            let qr = rels.qq.as_ref().expect("the quantize regions draw their own tables");
             let (cols, use_sum, cin, cout) = crate::rope::q_interaction(
-                reg, &tie, qp.hd, &rels.qnz, &rr.rq3, rels.range(15), &rr.rqv);
+                reg, &tie, qp.hd, &qr.qnz, &qr.div[plan.q_tab_at(qp.bits)],
+                rels.range(15), &rr.rqv);
             inter_all.extend(crate::device::host_cols(cols));
             claims.nn_in.push(qm(cin));
             claims.nn_out.push(qm(cout));
@@ -5753,39 +5895,61 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         use stwo::prover::backend::simd::m31::PackedM31;
         use stwo::prover::backend::simd::qm31::PackedQM31;
         use stwo_constraint_framework::Relation;
+        // stream NN-3: the combiner is passed in rather than selected by an
+        // index, because the quantize family's tables are relations of their
+        // own and the seams' five no longer cover the list
         let side = |lr: u32, ncol: usize, pi: usize, mi: usize,
-                    kind: usize, rr: &RqRels| {
+                    comb: &(dyn Fn(&[PackedM31]) -> PackedQM31 + Sync)| {
             crate::plogup::build(lr, 1, |_, vr| {
                 let vals: Vec<PackedM31> = (0..ncol).map(|k| rq_tab_pre[pi + k].data[vr]).collect();
-                let d = match kind {
-                    0 => rr.rq3.combine(&vals),
-                    1 => rr.rq4.combine(&vals),
-                    2 => rr.scl2.combine(&vals),
-                    3 => rr.scl3.combine(&vals),
-                    _ => rr.rqv.combine(&vals),
-                };
-                (-PackedQM31::from(rq_tab_mult[mi].data[vr]), d)
+                (-PackedQM31::from(rq_tab_mult[mi].data[vr]), comb(&vals))
             })
         };
         for v in &plan.rq_vars {
             let is_p2 = *v == crate::requant::SVariant::Pow2;
             let lr = crate::requant::rq_log_rows(*v);
             let w = crate::requant::rq_tab_width(*v);
-            let (c, sum) = side(lr, w, pi, mi, usize::from(!is_p2), rr);
+            let (c, sum) = if is_p2 {
+                side(lr, w, pi, mi, &|x| rr.rq3.combine(x))
+            } else {
+                side(lr, w, pi, mi, &|x| rr.rq4.combine(x))
+            };
             inter_all.extend(crate::device::host_cols(c));
             claims.table_sums.push(qm(sum));
             pi += w;
             mi += 1;
             let ws = crate::requant::scl_tab_width(*v);
-            let (c, sum) = side(15, ws, pi, mi, if is_p2 { 2 } else { 3 }, rr);
+            let (c, sum) = if is_p2 {
+                side(15, ws, pi, mi, &|x| rr.scl2.combine(x))
+            } else {
+                side(15, ws, pi, mi, &|x| rr.scl3.combine(x))
+            };
             inter_all.extend(crate::device::host_cols(c));
             claims.table_sums.push(qm(sum));
             pi += ws;
             mi += 1;
         }
-        let (c, sum) = side(9, 3, pi, mi, 4, rr);
+        let (c, sum) = side(9, 3, pi, mi, &|x| rr.rqv.combine(x));
         inter_all.extend(crate::device::host_cols(c));
         claims.table_sums.push(qm(sum));
+        pi += 3;
+        mi += 1;
+        // stream NN-3: and the quantize family's own, in `Plan::pre_ids`' order
+        if let Some(qr) = rels.qq.as_ref() {
+            for (i, w) in plan.q_tabs.iter().enumerate() {
+                let lr = crate::rope::qdiv_log_rows(*w);
+                let (c, sum) =
+                    side(lr, crate::rope::QDIV_COLS, pi, mi, &|x| qr.div[i].combine(x));
+                inter_all.extend(crate::device::host_cols(c));
+                claims.table_sums.push(qm(sum));
+                pi += crate::rope::QDIV_COLS;
+                mi += 1;
+            }
+            let (c, sum) = side(crate::rope::qnz_log_rows(plan.q_nz_bits), 2, pi, mi,
+                                &|x| qr.qnz.combine(x));
+            inter_all.extend(crate::device::host_cols(c));
+            claims.table_sums.push(qm(sum));
+        }
         inter_mark("requant/tables", &inter_all, &mut inter_seen, &mut inter_split);
     }
     crate::util::m4_add("int/requant", m4_t.elapsed().as_secs_f64());
@@ -5918,6 +6082,39 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             }
             _ => json!(null),
         },
+        // Stream NN-3: `s_v` is used at two sites and the statement now says so.
+        // The `v` quantize divides by the per-(head, channel) exponent it
+        // commits to tree 0 and the attention output rescales by `jv - jo` off
+        // its own tree-0 column; in B1 both are one `s_v`.  The two columns tile
+        // the grid differently -- the attention output's rows are
+        // (head, token, chunk) and the region's are (token, channel block) --
+        // so the equality is per (head, channel) and not per row, and a GQA
+        // group's `rep` query heads all read the kv head's one exponent.  It
+        // costs **no proof cells**: both sides are preprocessed, so a prover who
+        // rescales by one scale and quantizes by another commits a tree 0 that
+        // is not the statement's and `root_ok` rejects it.  `mismatch` is the
+        // count of (head, channel) sites where the two disagree.
+        "sv_tie": match q_regions.iter().zip(&plan.quants).find(|(_, qp)| qp.name == "v") {
+            Some((r, qp)) => {
+                let (nh, hd) = (layer.ao.nh, layer.ao.hd);
+                let mut bad = 0usize;
+                for h in 0..nh {
+                    for ch in 0..hd {
+                        let kv = h / qp.rep;
+                        if i64::from(layer.ao.jv[h * hd + ch]) != r.je[kv * qp.hd + ch] {
+                            bad += 1;
+                        }
+                    }
+                }
+                // and the dump's own two loads of `jv.i32`, which is what a
+                // real chunk's tie rests on
+                let refbad = layer.rope.as_ref()
+                    .map(|rc| (0..nh * hd).filter(|i| rc.jv[*i] != layer.ao.jv[*i]).count());
+                json!({"sites": nh * hd, "mismatch": bad, "ok": bad == 0,
+                       "rope_jv_mismatch": refbad})
+            }
+            None => json!(null),
+        },
         "head_key_vs_b1": head_key_b1,
         // stream BB: what the embedding gadget costs this chunk, or null with
         // the flag off.  Reported per position and per block so E1 folds it into
@@ -5938,11 +6135,16 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // stream NN: what each quantize region costs, and the number that
         // matters -- how many of the integers it derived from the rotation's
         // output equal the value the *band* committed.  A nonzero `clamped` is
-        // an incompleteness and not a disagreement: B1 clamps at 127 and this
-        // region's division table has no row past it, so a clamped site has no
-        // honest witness here at all.
+        // an incompleteness and not a disagreement: B1 clamps at this side's own
+        // `qmax` and the region's division table has no row past it, so a
+        // clamped site has no honest witness here at all.  Stream NN-3: the
+        // table is the side's own, so `clamped` counts B1's clamp and nothing
+        // else -- before it, at `qk_bits (12, 11)`, it counted "the region is
+        // narrower than the model" as well.
         "quant": q_regions.iter().zip(&plan.quants).map(|(r, qp)| json!({
             "region": r.tag,
+            "bits": r.bits, "qmax": crate::rope::qmax_of(r.bits),
+            "div_rows": crate::rope::qdiv_table(r.bits).len(),
             "heads": qp.heads, "rep": qp.rep, "n": qp.n, "tokens": qp.tokens,
             "layout": {"per_row": r.lay.per_row, "chunks": r.lay.chunks,
                        "log_rows": r.lay.log_rows, "lead": r.lay.lead},
@@ -6415,7 +6617,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     vcs.commit(proof.commitments[1], &fixed.sizes[1], &mut ch);
     let rels = Rels::draw(&mut ch, &plan.widths, plan.glue.as_ref().map(|g| g.uns.as_slice()),
                           plan.emb.map(|l| l.arity()),
-                          !plan.rqs.is_empty() || !plan.quants.is_empty());
+                          plan.needs_rq_rels(), plan.q_tabs.len());
     let n_ch = plan.n_challenges();
     let f = ch.draw_secure_felts(n_ch);
     let (r, s, rv) = (f[0], f[1], f[2]);

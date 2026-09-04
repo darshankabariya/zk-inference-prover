@@ -1044,13 +1044,27 @@ impl Layer {
                           -> Option<RopeCols> {
         use crate::glue::{Prog, UnKind, reference};
         let (nh, hd, tokens) = (self.ao.nh, self.ao.hd, self.ao.s);
-        if hd % 2 != 0 || self.nsub > 1 || !self.bands.iter().any(|b| b.corner) {
-            return None;
+        // stream NN-3: a tiled prefix (`--kv-bind`) is rebuilt like any other
+        // now, so `nsub` is no longer a reason to leave the family off
+        // stream NN-3: a shape that leaves the family off says which test it
+        // failed.  Silence here cost a session an afternoon of guessing.
+        let off = |why: &str| -> Option<RopeCols> {
+            eprintln!("layer: no rotation -- {why}");
+            None
+        };
+        if hd % 2 != 0 {
+            return off("hd is odd");
+        }
+        if !self.bands.iter().any(|b| b.corner) {
+            return off("no corner band");
         }
         let width = |n: &str| self.mats.iter().find(|m| m.name == n).map(|m| m.n_out);
-        let (nq, nk, nv) = (width("q")?, width("k")?, width("v")?);
+        let (nq, nk, nv) = match (width("q"), width("k"), width("v")) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => return off("this layer has no q/k/v matmul"),
+        };
         if nq != nh * hd || nk != nv || nk % hd != 0 || nh % (nk / hd) != 0 {
-            return None;
+            return off(&format!("widths do not line up: nq={nq} nk={nk} nv={nv} nh={nh} hd={hd}"));
         }
         let nkv = nk / hd;
         let rep = nh / nkv;
@@ -1064,10 +1078,10 @@ impl Layer {
         // panicked.  A shape the regions cannot tile leaves the family off and
         // reports `nn_open`, which is what the width test already does.
         if !(tokens * nh).is_power_of_two() || !(tokens * nkv).is_power_of_two() {
-            return None;
+            return off(&format!("the rotation's rows do not tile: tokens={tokens} nh={nh} nkv={nkv}"));
         }
         if !crate::rope::q_tiles(nq, hd, tokens) || !crate::rope::q_tiles(nk, hd, tokens) {
-            return None;
+            return off("a quantize region cannot tile this shape");
         }
         let b0 = &self.bands[0];
         let (q_bits, k_bits) = (b0.q_bits, b0.k_bits);
@@ -1122,15 +1136,34 @@ impl Layer {
                 })
                 .collect()
         };
-        let jq = scale(&qrot, nq, qmax_q);
-        let jk_kv = scale(&krot, nk, qmax_k);
-        let jv_kv = scale(&vdeq, nv, 127);
+        // Stream NN-3: `B7_NN_CLAMP=n` calibrates every scale `n` exponents
+        // *below* the smallest one that fits, so a synthetic layer clamps where
+        // B1 does and the desk can prove a chunk that carries the clamp.  A
+        // witness-construction switch like `--synth-glue`: at 0 -- the default,
+        // and every recorded digest -- nothing here moves.
+        let shift = std::env::var("B7_NN_CLAMP").ok()
+            .and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        if shift != 0 {
+            eprintln!("layer: B7_NN_CLAMP={shift} -- the q/k/v scales are {shift} \
+exponent(s) small, so B1's clamp fires");
+        }
+        let down = |v: Vec<i32>| -> Vec<i32> { v.into_iter().map(|x| x - shift as i32).collect() };
+        let jq = down(scale(&qrot, nq, qmax_q));
+        let jk_kv = down(scale(&krot, nk, qmax_k));
+        let jv_kv = down(scale(&vdeq, nv, crate::rope::qmax_of(crate::rope::V_BITS)));
         // and on the query-head grid, which is where B1 applies them and where
         // the statement carries them
         let spread = |src: &[i32]| -> Vec<i32> {
             (0..nh * hd).map(|i| src[(i / hd / rep) * hd + i % hd]).collect()
         };
         let (jk, jv) = (spread(&jk_kv), spread(&jv_kv));
+        // Stream NN-3: `s_v` is one scale in B1 and is used at two sites -- the
+        // `v` quantize divides by it and the attention output rescales by it
+        // (`AttnOut::e` is `jv - jo`).  A real dump reads both off one
+        // `jv.i32`; a synthetic layer drew the attention output's at random, so
+        // the two sites disagreed and no desk shape could state the tie.  The
+        // attention output is rebuilt below, so this is the value it takes.
+        self.ao.jv = jv.clone();
         // the bands' own columns, on the query-head grid: the kv head's values
         // replicated across its `rep` query heads, exactly as
         // `attention`'s `repeat_interleave` does
@@ -1184,10 +1217,14 @@ impl Layer {
     /// halves share one row maximum and one master exponent, exactly as
     /// `Attn::synthetic_pair` builds them.
     ///
-    /// `nsub > 1` is not supported here: a tiled prefix is `nsub` windows of one
-    /// pair and rebuilding it means re-slicing that pair.  A real dump needs
-    /// none of this -- its bands come from B1 -- so the restriction is the
-    /// synthetic generator's alone.
+    /// Stream NN-3: a tiled prefix (`--kv-bind`, `nsub > 1`) is rebuilt too.
+    /// Its sub-bands are `nsub` windows of one pair's prefix, so each keeps its
+    /// own slice of the cache and takes the new queries, the group's master
+    /// exponent is the joint maximum over every sub-band **and** the corner, and
+    /// the pair's total denominator -- which the group's per-token region
+    /// commits on its first sub-band -- is the sum of all of their `zz`.  Before
+    /// this the function asserted `nsub <= 1` and the rotation simply turned
+    /// itself off under `--kv-bind`.
     ///
     /// `pre_q_bend` is stream NN-2's control: one cell of the **first group's
     /// prefix band's own** copy of Q, moved before that band's attention is
@@ -1197,11 +1234,19 @@ impl Layer {
     pub fn rebuild_bands(&mut self, qq: &[i32], kk: &[i32], vv: &[i32],
                          pre_q_bend: Option<usize>) {
         let (nh, hd, s) = (self.ao.nh, self.ao.hd, self.ao.s);
-        assert!(self.nsub <= 1, "the q/k/v rewiring does not support a tiled prefix");
+        let nsub = self.nsub.max(1);
         let n_pre = self.bands.iter().filter(|b| !b.corner).count();
         let groups = self.bands.len() - n_pre;
         assert!(groups > 0, "the q/k/v rewiring needs the causal corner");
-        assert!(n_pre == 0 || n_pre == groups, "one prefix band per group, or none");
+        assert!(n_pre == 0 || n_pre == groups * nsub,
+                "{nsub} prefix sub-bands per group, or none: {n_pre} prefix bands, \
+{groups} groups");
+        // the bands of one group, prefix sub-bands first and the corner last --
+        // the order `Layer::synthetic` lays them out in
+        let gidx = |g: usize| -> Vec<usize> {
+            let pre = if n_pre == 0 { 0 } else { nsub };
+            (0..pre).map(|k| g * nsub + k).chain(std::iter::once(n_pre + g)).collect()
+        };
         let take = |src: &[i32], off: usize, insts: usize, rows: usize| -> Vec<i32> {
             (0..insts * rows * hd)
                 .map(|i| {
@@ -1240,43 +1285,41 @@ unmoved (a rejection is the pass)");
         // pass 1: learn the master exponent and the table height the new data
         // needs, over both halves of every group -- the two-pass shape
         // `Layer::synthetic` uses, for the same reason
-        let mut probe = vec![];
+        let mut probe: Vec<Vec<Attn>> = vec![];
         for g in 0..groups {
-            for b in [(n_pre > 0).then_some(g), Some(n_pre + g)].into_iter().flatten() {
+            let mut row = vec![];
+            for (n, b) in gidx(g).into_iter().enumerate() {
                 let a = &self.bands[b];
                 let sh = a.shape;
                 let off = self.head_offsets[b];
-                let q = take_q(qq, off, sh.insts, sh.s, !a.corner && g == 0);
+                let q = take_q(qq, off, sh.insts, sh.s, !a.corner && g == 0 && n == 0);
                 let (k, v) = if a.corner {
                     (take(kk, off, sh.insts, sh.c), take(vv, off, sh.insts, sh.c))
                 } else {
                     (a.kk.clone(), a.vv.clone())
                 };
-                probe.push(Attn::from_qkv(sh, a.variant, q, k, v, a.q_bits, a.k_bits, a.nmax,
-                                          a.log_table, None, None, a.source.clone(), a.corner,
-                                          None));
+                row.push(Attn::from_qkv(sh, a.variant, q, k, v, a.q_bits, a.k_bits, a.nmax,
+                                        a.log_table, None, None, a.source.clone(), a.corner,
+                                        None));
             }
+            probe.push(row);
         }
-        let frac = probe.iter().map(|b| b.frac).fold(f64::MIN, f64::max).ceil();
-        let d_bits = probe.iter().map(|b| b.d_bits()).max().unwrap() + 1;
+        let frac = probe.iter().flatten().map(|b| b.frac).fold(f64::MIN, f64::max).ceil();
+        let d_bits = probe.iter().flatten().map(|b| b.d_bits()).max().unwrap() + 1;
         let log_table = d_bits.clamp(4, 22);
-        // pass 2: the joint row maximum per group, then both halves under it
+        // pass 2: the joint row maximum per group -- over every sub-band and the
+        // corner -- then all of them under it
         for g in 0..groups {
-            let ci = n_pre + g;
-            let pi = (n_pre > 0).then_some(g);
-            let mm: Vec<i64> = match pi {
-                Some(p) => {
-                    let (a, b) = (&probe[2 * g], &probe[2 * g + 1]);
-                    let _ = p;
-                    a.mm.iter().zip(&b.mm).map(|(x, y)| *x.max(y)).collect()
-                }
-                None => probe[g].mm.clone(),
-            };
-            for b in [pi, Some(ci)].into_iter().flatten() {
+            let idx = gidx(g);
+            let mm: Vec<i64> = probe[g].iter().skip(1)
+                .fold(probe[g][0].mm.clone(), |acc, b| {
+                    acc.iter().zip(&b.mm).map(|(x, y)| *x.max(y)).collect()
+                });
+            for (n, b) in idx.iter().copied().enumerate() {
                 let a = &self.bands[b];
                 let sh = a.shape;
                 let off = self.head_offsets[b];
-                let q = take_q(qq, off, sh.insts, sh.s, !a.corner && g == 0);
+                let q = take_q(qq, off, sh.insts, sh.s, !a.corner && g == 0 && n == 0);
                 let (k, v) = if a.corner {
                     (take(kk, off, sh.insts, sh.c), take(vv, off, sh.insts, sh.c))
                 } else {
@@ -1289,14 +1332,15 @@ unmoved (a rejection is the pass)");
                                                Some(vec![frac; sh.insts]), Some(frac), src,
                                                corner, Some(mm.clone()));
             }
-            if let Some(p) = pi {
-                let total: Vec<i64> = self.bands[p].zz.iter().zip(&self.bands[ci].zz)
-                    .map(|(x, y)| x + y).collect();
-                self.bands[p].zz_total = Some(total);
-            } else {
-                let total = self.bands[ci].zz.clone();
-                self.bands[ci].zz_total = Some(total);
-            }
+            // the group's denominator: the pair's total, which every sub-band's
+            // `zz` is a partial sum of.  It lives on the band that carries the
+            // per-token region -- the first sub-band when there is a prefix, and
+            // the corner itself when there is none.
+            let total: Vec<i64> = idx.iter().skip(1)
+                .fold(self.bands[idx[0]].zz.clone(), |acc, b| {
+                    acc.iter().zip(&self.bands[*b].zz).map(|(x, y)| x + y).collect()
+                });
+            self.bands[idx[0]].zz_total = Some(total);
         }
         // the attention output follows the bands: its accumulator and
         // denominator *are* their sums, and the per-token output scale is the
@@ -1349,7 +1393,14 @@ unmoved (a rejection is the pass)");
         let src = match name {
             "q" => &r.jq,
             "k" => &r.jk,
-            "v" => &r.jv,
+            // Stream NN-3: `s_v` is one scale used at two sites, and this is
+            // where the two read **one array**.  The attention output rescales
+            // by `jv - jo` off `AttnOut::jv`; the `v` quantize divides by the
+            // same exponent, so it takes it from there rather than from the
+            // rotation's own copy of `jv.i32`.  A dump loads both from that one
+            // file (`Layer::load` and `RopeCols::load`), and `family_cells.sv_tie`
+            // reports the two against each other on every run.
+            "v" => &self.ao.jv,
             other => panic!("no quantize exponents for {other}"),
         };
         let mut out = vec![0i64; heads * hd];

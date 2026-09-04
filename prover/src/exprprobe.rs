@@ -743,7 +743,8 @@ pub fn cmd(args: &[String]) {
         ch.mix_u64(0xB65_2B00 + u64::from(tag));
         let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
                                               plan.glue.as_ref().map(|g| g.uns.as_slice()),
-                                              plan.emb.map(|l| l.arity()), !plan.rqs.is_empty());
+                                              plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
+                                          plan.q_tabs.len());
         let f = ch.draw_secure_felts(6);
         (rels, f)
     };

@@ -1173,7 +1173,8 @@ mod tests {
             Channel::mix_u64(&mut ch, 0xBB_0001);
             let rels = crate::compose::Rels::draw(
                 &mut ch, &plan.widths, plan.glue.as_ref().map(|g| g.uns.as_slice()),
-                plan.emb.map(|l| l.arity()), !plan.rqs.is_empty());
+                plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
+                                          plan.q_tabs.len());
             let f = Channel::draw_secure_felts(&mut ch, 6);
             let claims = crate::exprprobe::claims_for(&plan, 0x0b65_bb01);
             let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3],
