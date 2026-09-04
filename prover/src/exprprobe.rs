@@ -694,7 +694,7 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         rq_in: vec![], rq_out: vec![], walk_qx: vec![], rq_sc: vec![], deq_sc: vec![],
         // stream NN: and once more for the rotation's quantize regions and the
         // bands' own K/Q/V claims
-        nn_in: vec![], nn_out: vec![], band_qkv: vec![],
+        nn_in: vec![], nn_out: vec![], band_qkv: vec![], band_q: vec![],
         // B11 stream Q: the GKR bundle is bytes, not a claim; nothing the
         // components lower reads it, so the placeholder statement carries none.
         gkr: None,

@@ -1384,6 +1384,13 @@ pub fn cmd(args: &[String]) {
         for i in 0..b.rq_tabs.len() {
             go!(format!("rq_table{i}"), &b.rq_tabs[i]);
         }
+        // Stream NN, added at its merge: `b65_quant_eval` is dispatched like any
+        // other family and was in neither this list nor the two emit walks, so
+        // nothing in the tree compared its lowering against the AIR it claims to
+        // be.  Same reason stream OO gave for the eight it added here.
+        for i in 0..b.quants.len() {
+            go!(format!("quant{i}"), &b.quants[i]);
+        }
         if let Some(c) = &b.argmax {
             go!("argmax".to_string(), c);
         }
@@ -2475,6 +2482,13 @@ pub fn emit_cmd(args: &[String]) {
         for i in 0..b.tables.len() {
             go!(b.tables[i], format!("table{i}"));
         }
+        // Stream NN, added at its merge: the q/k/v quantize regions.  Without
+        // this the family has no shape in the store at all, so the cuda arm
+        // falls back to `accumulate_pointwise_cpu` for all three on every
+        // chunk that carries the rotation and no emit can ever change that.
+        for i in 0..b.quants.len() {
+            go!(b.quants[i], format!("quant{i}"));
+        }
         // B11 stream K: the head's argmax region was never emitted -- 10,079
         // instructions on the CPU per `lm_head` chunk until now.
         if let Some(am) = &b.argmax {
@@ -3349,6 +3363,12 @@ pub fn gen_emit_cmd(args: &[String]) {
         go!(b.exp_t, "exp_table".to_string());
         for i in 0..b.tables.len() {
             go!(b.tables[i], format!("table{i}"));
+        }
+        // Stream NN, added at its merge: the quantize regions' fraction half,
+        // in the same commit as the constraint half above -- adding a family to
+        // one walk alone is exactly the gap stream BB's comment below names.
+        for i in 0..b.quants.len() {
+            go!(b.quants[i], format!("quant{i}"));
         }
         // B11 stream BB: the same two families here. This walk is the one the
         // argmax is missing from (`$FAMS` names ten families and not

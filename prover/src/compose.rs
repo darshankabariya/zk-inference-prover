@@ -486,6 +486,12 @@ pub struct Claims {
     /// Stream NN: per band of `Plan::nn_bands`, that band's K, Q and V claims.
     #[serde(default)]
     pub band_qkv: Vec<[[u32; 4]; 3]>,
+    /// Stream NN (NN-2): per band of `Plan::nn_qbands`, that **prefix** band's
+    /// own Q claim.  Its counterparty is its group's corner, not a quantize
+    /// region: `nn_q_ok` says the two folds agree, and the corner's is already
+    /// tied to the rotated query, so the prefix's is too.
+    #[serde(default)]
+    pub band_q: Vec<[u32; 4]>,
     /// stream E: the head's order-key claim, when it is published
     #[serde(default)]
     pub head_key: Vec<[u32; 4]>,
@@ -598,6 +604,8 @@ impl Claims {
         v.extend(self.nn_in.iter().map(|x| unqm(*x)));
         v.extend(self.nn_out.iter().map(|x| unqm(*x)));
         v.extend(self.band_qkv.iter().flatten().map(|x| unqm(*x)));
+        // stream NN (NN-2), after the corner's three so no claim before it moves
+        v.extend(self.band_q.iter().map(|x| unqm(*x)));
         v
     }
 }
@@ -726,6 +734,37 @@ fn nn_band_ties(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
         claimed: unqm(cl[2]),
     };
     Some((kt, qt, vt))
+}
+
+/// Stream NN (NN-2): a **prefix** band's Q claim, under the same canonical
+/// weights the corner's takes.
+///
+/// The two bands of a group hold the same `S` queries over the same heads, so
+/// the weight of the cell at (query head `hq`, channel `ch`, token `t`) is the
+/// same `w^(N - 1 - (t nh hd + hq hd + ch))` on both -- only the *layout* that
+/// scatters those cells over rows differs, and that is exactly what `pq` and
+/// `chunks` carry.  Equality of the two folds is therefore "the same queries",
+/// with no positional assumption beyond the one the corner's own tie already
+/// makes.
+fn nn_band_qtie(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
+                -> Option<crate::attn_air::BandTie> {
+    let k = plan.nn_qbands.iter().position(|x| *x == b)?;
+    let p = &plan.p;
+    let l = &plan.lays[b];
+    let off = Offsets::new(p.q_bits, p.k_bits);
+    let (hd, nh) = (p.hd as i128, p.nh as i128);
+    let n = (p.s as i128) * nh * hd;
+    let base = n - 1 - plan.head_offsets[b] as i128 * hd;
+    let pq = l.chan.pq as i128;
+    let cc = l.chan.g.chunks as i128;
+    Some(crate::attn_air::BandTie {
+        w: (0..l.chan.pq).map(|q| wpow(w, base - q as i128 * nh * hd)).collect(),
+        s_in: wpow(w, -(pq * nh * hd)),
+        s_bd: wpow(w, (cc - 1) * pq * nh * hd - 1),
+        s_ib: None,
+        off: off.q,
+        claimed: claims.band_q.get(k).copied().map(unqm).unwrap_or(SecureField::zero()),
+    })
 }
 
 /// `w^e` for a signed exponent: an output side's row step points backwards
@@ -1360,6 +1399,13 @@ pub struct Plan {
     /// root equality instead.  The corner also carries the queries, which every
     /// band of a group shares.
     pub nn_bands: Vec<usize>,
+    /// Stream NN (NN-2): the bands that publish a Q claim **alone** -- every
+    /// prefix band of the same chunk, in band order.  Their counterparty is
+    /// their group's corner (`nn_q_ok`), which closes the asymmetry NN-1 left:
+    /// before this, a prover could attend to the cache with queries the `q`
+    /// matmul did not produce while attending to this block's own keys with
+    /// queries it did.  Empty on a chunk without `Params::rope`.
+    pub nn_qbands: Vec<usize>,
     pub widths: Vec<u32>,
     pub log_norm: u32,
     pub log_frac: u32,
@@ -1725,6 +1771,18 @@ impl Plan {
         } else {
             (0..shapes.len()).filter(|b| corner[*b]).collect()
         };
+        // stream NN (NN-2): every prefix band publishes its own Q, against its
+        // group's corner.  A group with no corner publishes nothing -- there is
+        // nothing to compare against -- and `--corner` is already required by
+        // the quantize regions, so that case does not arise on a rope chunk.
+        let nn_qbands: Vec<usize> = if quants.is_empty() {
+            vec![]
+        } else {
+            (0..shapes.len())
+                .filter(|b| !corner[*b] && corner.iter().enumerate()
+                        .any(|(c, is)| *is && group[c] == group[*b]))
+                .collect()
+        };
         let mut glue = glue;
         if !quants.is_empty() {
             let g = glue.as_mut().expect("the quantize regions need the wiring family");
@@ -1737,7 +1795,8 @@ impl Plan {
             }
         }
         Self { p: p.clone(), attn_variant, round, shapes, lays, cfg, head_offsets, corner, specs,
-               mat_lays, ao_lay, walks, rqs, rq_vars, quants, nn_bands, widths, log_norm,
+               mat_lays, ao_lay, walks, rqs, rq_vars, quants, nn_bands, nn_qbands,
+               widths, log_norm,
                log_frac, log_mul,
                glue, bounds,
                kv, group, rows_band, emb }
@@ -2720,6 +2779,8 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         let bc = claims.bands[b];
         // stream NN: the corner bands' own K, Q and V claims
         let nn = nn_band_ties(plan, b, w_glue, claims);
+        // stream NN (NN-2): a prefix band's Q claim, against its group's corner
+        let nn_q = nn_band_qtie(plan, b, w_glue, claims);
         // B11 stream S, lever 1: on the GKR arm a band component carries no
         // LogUp, so there is no claimed sum to hand it and none to consume.
         chans.push(FrameworkComponent::<ChanEval>::new(
@@ -2730,7 +2791,8 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                        // stream AA: empty unless `--kv-bind`, so the IR, the
                        // fingerprint and the proof are unmoved with it off
                        bound_k: crate::bounds::kv_bounds_of(&plan.kv, b, l.chan.pk),
-                       qk_bind: nn.as_ref().map(|(k, q, _)| (k.clone(), q.clone())) },
+                       qk_bind: nn.as_ref().map(|(k, q, _)| (k.clone(), q.clone())),
+                       q_bind: nn_q.clone() },
             if p.gkr_bands { SecureField::zero() } else { next_use(claims) },
         ));
         keys.push(FrameworkComponent::<KeyEval>::new(
@@ -5008,8 +5070,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // builder is handed a blank statement and its `claimed` fields are
         // unused here.
         let nn_t = nn_band_ties(&plan, b, w_glue, &Claims::default());
-        let nn_bind = nn_t.as_ref()
-            .map(|(k, q, v)| attn_trace::NnBind { k, q, v });
+        // stream NN (NN-2): and a prefix band's Q claim alone
+        let nn_qt = nn_band_qtie(&plan, b, w_glue, &Claims::default());
+        let nn_bind = match (nn_t.as_ref(), nn_qt.as_ref()) {
+            (Some((k, q, v)), _) =>
+                Some(attn_trace::NnBind { k: Some(k), q, v: Some(v) }),
+            (None, Some(q)) => Some(attn_trace::NnBind { k: None, q, v: None }),
+            (None, None) => None,
+        };
         let it = attn_trace::interaction_phase(a, l, &plan.cfg, &pow, &rels.exp, &rels.ranges,
                                                &band_committed[b], &plan.widths, false,
                                                plan.rows_band[b], air.as_ref(),
@@ -5023,6 +5091,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         if it.claimed_nn.len() == 3 {
             claims.band_qkv.push([qm(it.claimed_nn[0]), qm(it.claimed_nn[1]),
                                   qm(it.claimed_nn[2])]);
+        } else if it.claimed_nn.len() == 1 {
+            // stream NN (NN-2): a prefix band publishes Q alone
+            claims.band_q.push(qm(it.claimed_nn[0]));
         }
         claims.use_sums.extend(it.use_sums.iter().map(|v| qm(*v)));
     }
@@ -6130,6 +6201,11 @@ pub struct Verdict {
     /// is what stops a chunk from proving one block's angles while the chain
     /// puts it at another.  True when the statement declares no block.
     pub nn_pos_ok: bool,
+    /// Stream NN (NN-2), per prefix band of `Plan::nn_qbands`: "this band's own
+    /// Q column is its group's corner's".  The corner's Q is tied to the
+    /// rotated query (`nn_out_ok`), so this carries the tie to the band that
+    /// attends to the cache -- which NN-1 left untied, and asymmetrically so.
+    pub nn_q_ok: Vec<bool>,
     /// Stream NN: true when the chunk carries the wiring family but no rotation
     /// -- a shape whose q/k/v widths do not line up with its bands.  Reported so
     /// a reader cannot mistake an absent family for a checked one.
@@ -6177,7 +6253,7 @@ impl Verdict {
             && self.rq_in_ok.iter().all(|x| *x) && self.rq_out_ok.iter().all(|x| *x)
             && self.rq_scale_ok.iter().all(|x| *x) && self.ao_q_ok
             && self.nn_in_ok.iter().all(|x| *x) && self.nn_out_ok.iter().all(|x| *x)
-            && self.nn_pos_ok
+            && self.nn_pos_ok && self.nn_q_ok.iter().all(|x| *x)
     }
     fn rejected(msg: &str) -> Self {
         Self { stark_ok: false, root_ok: false, sums_cancel: false, qk_ok: vec![],
@@ -6188,7 +6264,7 @@ impl Verdict {
                rq_in_ok: vec![false], rq_out_ok: vec![false], rq_scale_ok: vec![false],
                ao_q_open: false, ao_q_ok: false,
                nn_in_ok: vec![false], nn_out_ok: vec![false], nn_pos_ok: false,
-               nn_open: false,
+               nn_q_ok: vec![false], nn_open: false,
                stream_in: None, stream_out: None,
                bound_roots: vec![], bound_sides: vec![],
                error: Some(msg.to_string()), verify_secs: 0.0 }
@@ -6244,6 +6320,8 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         || claims.nn_in.len() != plan.quants.len()
         || claims.nn_out.len() != plan.quants.len()
         || claims.band_qkv.len() != plan.nn_bands.len()
+        // stream NN (NN-2): and one per prefix band
+        || claims.band_q.len() != plan.nn_qbands.len()
     {
         return Verdict::rejected("claims shape mismatch");
     }
@@ -6655,11 +6733,27 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         _ => true,
     };
     let nn_open = plan.glue.as_ref().is_some_and(|g| !g.head_norm) && plan.quants.is_empty();
+    // Stream NN (NN-2): the prefix band's own Q against its group's corner.
+    // Both folds run over the same (query head, channel, token) set under the
+    // same canonical weights -- only the layout that scatters those cells over
+    // rows differs -- so equality is "the same queries", and the corner's side
+    // is already the rotated query by `nn_out_ok`.  The difference of the two
+    // folds is a polynomial in `w_glue` whose coefficients were fixed before
+    // `w_glue` was drawn, which is the argument every tie in this family rests
+    // on.
+    let nn_q_ok: Vec<bool> = plan.nn_qbands.iter().enumerate().map(|(k, b)| {
+        let corner = plan.nn_bands.iter().position(|c| plan.group[*c] == plan.group[*b]);
+        match corner {
+            Some(ci) => claims.band_q.get(k).copied().map(unqm)
+                == claims.band_qkv.get(ci).map(|c| unqm(c[1])),
+            None => false,
+        }
+    }).collect();
 
     Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
               deq_out_open, head_tie_ok, embed_ok, embed_tok_ok, head_tok_ok,
               rq_in_ok, rq_out_ok, rq_scale_ok, ao_q_open, ao_q_ok,
-              nn_in_ok, nn_out_ok, nn_pos_ok, nn_open,
+              nn_in_ok, nn_out_ok, nn_pos_ok, nn_q_ok, nn_open,
               sizes_ok, glue_ok, stream_in, stream_out, bound_roots, bound_sides, error,
               verify_secs: t0.elapsed().as_secs_f64() }
 }

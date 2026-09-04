@@ -1999,6 +1999,29 @@ synthetic generator (Layer::synth_glue_band_bent); on a dump the bands are B1's"
                                "the tie nn_out == the sum of the bands' own claims"),
                         "a band column the layer's matmuls did not produce accepted");
             }
+            // stream NN (NN-2): and the prefix band's own copy of Q, whose
+            // counterparty is its group's corner rather than a quantize region.
+            // The bend moves one prefix cell and the band's whole attention is
+            // rebuilt around it, so the chunk is an honest attention over the
+            // cache with queries the `q` matmul did not produce -- and only
+            // `nn_q_ok` can see that.
+            if arg_str(args, "--witness").is_some() {
+                eprintln!("  prefix Q: SKIP -- the consumer-side control needs the \
+synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B1's");
+            } else {
+                let mut lp = layer_of(args).0;
+                if lp.glue.is_none() {
+                    eprintln!("  prefix Q: SKIP -- no synthetic wiring family here");
+                } else if lp.bands.iter().all(|b| b.corner) {
+                    eprintln!("  prefix Q: SKIP -- this shape has no prefix band");
+                } else {
+                    lp.synth_glue_prefix_q_bent(seed, ga, round, 41);
+                    assert!(!probe("prefix band Q: one query the corner does not carry", &lp,
+                                   &Default::default(),
+                                   "the tie prefix.Q == corner.Q, per band group"),
+                            "a prefix band's queries that are not the corner's accepted");
+                }
+            }
         }
     }
 

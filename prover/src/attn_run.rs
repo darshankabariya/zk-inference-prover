@@ -212,7 +212,7 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
     let chan = FrameworkComponent::<ChanEval>::new(
         alloc,
         ChanEval { tag: 0, lay: l.chan, pow: pow.clone(), off, claimed: inter.claimed_chan,
-                   qk_bind: None,
+                   qk_bind: None, q_bind: None,
                    rel_k: rels[ridx(a.k_bits)].clone(), rel_q: rels[ridx(a.q_bits)].clone(),
                    range_check: cfg.range_check, gkr: false, bound_k: vec![] },
         if cfg.range_check { next_use() } else { SecureField::zero() },

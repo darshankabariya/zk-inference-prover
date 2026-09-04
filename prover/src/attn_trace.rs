@@ -709,13 +709,17 @@ pub struct Interaction {
     pub table_sums: Vec<SecureField>,
 }
 
-/// Stream NN: the three band-side Horner claims this band publishes over its own
-/// committed K, Q and V columns.  Present on a corner band of a chunk that
-/// carries the quantize regions and nowhere else.
+/// Stream NN: the band-side Horner claims this band publishes over its own
+/// committed K, Q and V columns.
+///
+/// A **corner** band of a chunk that carries the quantize regions publishes all
+/// three; a **prefix** band of the same chunk publishes `q` alone (NN-2), whose
+/// counterparty is its group's corner rather than a quantize region.  `Q` is
+/// therefore never optional and `K`/`V` always are.
 pub struct NnBind<'a> {
-    pub k: &'a crate::attn_air::BandTie,
+    pub k: Option<&'a crate::attn_air::BandTie>,
     pub q: &'a crate::attn_air::BandTie,
-    pub v: &'a crate::attn_air::BandTie,
+    pub v: Option<&'a crate::attn_air::BandTie>,
 }
 
 /// Everything committed after the challenges: the Horner accumulators and the
@@ -834,7 +838,14 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     // appended after the region's three so the AIR's mask order is the tree's.
     let mut claimed_nn: Vec<SecureField> = vec![];
     if let Some(b) = nn {
-        for (t, kind) in [(b.k, 0usize), (b.q, 1usize)] {
+        // K first where the band publishes one (the corner), then Q, which
+        // every bound band publishes -- the order `ChanEval::evaluate` reads
+        // the two masks in.
+        let sides: Vec<(&crate::attn_air::BandTie, usize)> = b.k.map(|k| (k, 0usize))
+            .into_iter()
+            .chain(std::iter::once((b.q, 1usize)))
+            .collect();
+        for (t, kind) in sides {
             let rows = lc.g.rows;
             let width = if kind == 0 { lc.pk } else { lc.pq };
             let off = SecureField::from(m31_of(if kind == 0 { a.off_k() as i64 }
@@ -1040,8 +1051,9 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         }
     };
     // ---- stream NN: the band's own V claim ---------------------------------
-    if let Some(b) = nn {
-        let t = b.v;
+    // Corner bands only: a prefix band's values are the cache, bound across
+    // blocks by root equality (stream AA/EE), and it publishes Q alone.
+    if let Some(t) = nn.and_then(|b| b.v) {
         let rows = lk.g.rows;
         let fold: Vec<(SecureField, bool, bool, bool)> = (0..rows)
             .into_par_iter()

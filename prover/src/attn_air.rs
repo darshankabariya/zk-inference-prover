@@ -364,6 +364,19 @@ pub struct ChanEval {
     /// which is why every other chunk's constraint IR and kernel fingerprint are
     /// byte-for-byte the old ones.
     pub qk_bind: Option<(BandTie, BandTie)>,
+    /// Stream NN (NN-2): this band's own Q claim alone, on a **prefix** band.
+    ///
+    /// A band group is a prefix band and a corner over the same heads and the
+    /// same `S` queries, and each commits its own `Q` column.  NN-1 tied the
+    /// corner's and left the prefix's untied, so a prover could attend to the
+    /// cache with queries the `q` matmul did not produce while attending to
+    /// this block's own keys with queries it did.  This is the other half: the
+    /// same fold under the same canonical weights, and one equality per group
+    /// (`nn_q_ok`) saying the two are the same queries.
+    ///
+    /// At most one of `qk_bind` and `q_bind` is `Some` on any band, so the
+    /// interaction masks below are read in one unambiguous order.
+    pub q_bind: Option<BandTie>,
 }
 
 impl FrameworkEval for ChanEval {
@@ -454,6 +467,24 @@ impl FrameworkEval for ChanEval {
                 eval.add_constraint(h.clone() - h_prev * step - f);
                 eval.add_constraint((h - t.claimed) * end.clone());
             }
+        }
+
+        // ---- stream NN (NN-2): the prefix band's Q claim ----------------------
+        // The same fold as the corner's `qt` above, on this band's own layout.
+        // The corner is not on this arm and the prefix is not on that one, so
+        // no band reads both and the mask order is the trace's.
+        if let Some(t) = &self.q_bind {
+            let [h_prev, h] =
+                eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+            let step = E::EF::from(nofirst.clone()) * t.s_in
+                + (E::EF::from(notzero.clone()) - E::EF::from(nofirst.clone())) * t.s_bd;
+            let off = E::F::from(M31::from_u32_unchecked(t.off));
+            let mut f = E::EF::zero();
+            for (k, c) in qs.iter().enumerate() {
+                f += E::EF::from(c.clone() - off.clone()) * t.w[k];
+            }
+            eval.add_constraint(h.clone() - h_prev * step - f);
+            eval.add_constraint((h - t.claimed) * end.clone());
         }
 
         if self.range_check && !self.gkr {

@@ -1133,16 +1133,28 @@ impl Layer {
         let mut qq = quant(&qrot, nq, &jq, qmax_q);
         let mut kk = quant(&krot, nk, &jk_kv, qmax_k);
         let mut vv = quant(&vdeq, nv, &jv_kv, 127);
+        // stream NN (NN-2): `which == 3` is the *prefix* band's own copy of Q --
+        // the grid above is untouched, so the corner keeps the honest queries
+        // and only the prefix's copy moves.  `rebuild_bands` applies it inside
+        // both of its passes, so the group's joint row maximum, its master
+        // exponent and the prefix's whole attention follow the bent query and
+        // the chunk is an honest attention over it.
+        let mut pre_q_bend = None;
         if let Some((which, at)) = bend {
-            let col: &mut Vec<i32> = match which % 3 { 0 => &mut qq, 1 => &mut kk, _ => &mut vv };
-            let n = col.len();
-            let i = at % n;
-            let lim = match which % 3 { 0 => qmax_q, 1 => qmax_k, _ => 127 } as i32;
-            col[i] += if col[i] < lim { 1 } else { -1 };
-            eprintln!("layer: band {} cell {i} bent (a rejection is the pass)",
-                      ["Q", "K", "V"][which % 3]);
+            if which == 3 {
+                pre_q_bend = Some(at);
+            } else {
+                let col: &mut Vec<i32> =
+                    match which % 3 { 0 => &mut qq, 1 => &mut kk, _ => &mut vv };
+                let n = col.len();
+                let i = at % n;
+                let lim = match which % 3 { 0 => qmax_q, 1 => qmax_k, _ => 127 } as i32;
+                col[i] += if col[i] < lim { 1 } else { -1 };
+                eprintln!("layer: band {} cell {i} bent (a rejection is the pass)",
+                          ["Q", "K", "V"][which % 3]);
+            }
         }
-        self.rebuild_bands(&qq, &kk, &vv);
+        self.rebuild_bands(&qq, &kk, &vv, pre_q_bend);
         Some(RopeCols { nkv, pos0, theta, rope_type: kind, rope_scale: vec![],
                         inv_ref: Some(inv_freq), jq, jk, jv })
     }
@@ -1161,7 +1173,14 @@ impl Layer {
     /// pair and rebuilding it means re-slicing that pair.  A real dump needs
     /// none of this -- its bands come from B1 -- so the restriction is the
     /// synthetic generator's alone.
-    pub fn rebuild_bands(&mut self, qq: &[i32], kk: &[i32], vv: &[i32]) {
+    ///
+    /// `pre_q_bend` is stream NN-2's control: one cell of the **first group's
+    /// prefix band's own** copy of Q, moved before that band's attention is
+    /// built, so the corner keeps the honest queries and the chunk is still an
+    /// honest attention over the cache -- and the only thing that can see it is
+    /// `nn_q_ok`, the equality between the two halves' Q folds.
+    pub fn rebuild_bands(&mut self, qq: &[i32], kk: &[i32], vv: &[i32],
+                         pre_q_bend: Option<usize>) {
         let (nh, hd, s) = (self.ao.nh, self.ao.hd, self.ao.s);
         assert!(self.nsub <= 1, "the q/k/v rewiring does not support a tiled prefix");
         let n_pre = self.bands.iter().filter(|b| !b.corner).count();
@@ -1177,6 +1196,32 @@ impl Layer {
                 })
                 .collect()
         };
+        // stream NN (NN-2): the prefix half of group 0 takes its Q through here,
+        // so both passes see the same bent cell and the band's own attention is
+        // rebuilt around it.
+        if let Some(at) = pre_q_bend {
+            if n_pre == 0 {
+                eprintln!("layer: prefix-band Q bend asked for on a chunk with no prefix \
+band -- nothing bent, and this control measures nothing");
+            } else {
+                eprintln!("layer: prefix band (group 0) Q cell {at} bent, the corner's \
+unmoved (a rejection is the pass)");
+            }
+        }
+        let q_bits0 = self.bands[0].q_bits;
+        let take_q = |src: &[i32], off: usize, insts: usize, rows: usize,
+                      bend_here: bool| -> Vec<i32> {
+            let mut q = take(src, off, insts, rows);
+            if bend_here {
+                if let Some(at) = pre_q_bend {
+                    let n = q.len();
+                    let i = at % n;
+                    let lim = ((1i64 << (q_bits0 - 1)) - 1) as i32;
+                    q[i] += if q[i] < lim { 1 } else { -1 };
+                }
+            }
+            q
+        };
         // pass 1: learn the master exponent and the table height the new data
         // needs, over both halves of every group -- the two-pass shape
         // `Layer::synthetic` uses, for the same reason
@@ -1186,7 +1231,7 @@ impl Layer {
                 let a = &self.bands[b];
                 let sh = a.shape;
                 let off = self.head_offsets[b];
-                let q = take(qq, off, sh.insts, sh.s);
+                let q = take_q(qq, off, sh.insts, sh.s, !a.corner && g == 0);
                 let (k, v) = if a.corner {
                     (take(kk, off, sh.insts, sh.c), take(vv, off, sh.insts, sh.c))
                 } else {
@@ -1216,7 +1261,7 @@ impl Layer {
                 let a = &self.bands[b];
                 let sh = a.shape;
                 let off = self.head_offsets[b];
-                let q = take(qq, off, sh.insts, sh.s);
+                let q = take_q(qq, off, sh.insts, sh.s, !a.corner && g == 0);
                 let (k, v) = if a.corner {
                     (take(kk, off, sh.insts, sh.c), take(vv, off, sh.insts, sh.c))
                 } else {
@@ -1583,6 +1628,17 @@ impl Layer {
     pub fn synth_glue_band_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
                                 which: usize, idx: usize) {
         self.synth_family(seed, a, round, 0, None, Some((which, idx)));
+    }
+
+    /// Stream NN (NN-2), the prefix band's control.  The same layer with **one**
+    /// cell of the first group's *prefix* band's own copy of Q moved, and that
+    /// band's whole attention rebuilt around it -- the corner's queries are
+    /// untouched, so the chunk proves an honest attention over the cache with
+    /// queries the `q` matmul did not produce, and the only thing that can see
+    /// it is `nn_q_ok`.
+    pub fn synth_glue_prefix_q_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
+                                    idx: usize) {
+        self.synth_family(seed, a, round, 0, None, Some((3, idx)));
     }
 
     /// Stream II (E11), the `o` seam's control.  The same layer, with **one**
