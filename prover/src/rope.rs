@@ -890,3 +890,52 @@ pub fn pow2_scale(col: &[u16], qmax: i64) -> i64 {
 pub fn f32_to_bf16(v: f32) -> u16 {
     bf16::from_f32(v)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stream NN-3: at eight bits the side's own division table **is**
+    /// `requant.rs`'s power-of-two table, row for row.  If this ever fails, an
+    /// eight-bit quantize region has changed what it proves, and every recorded
+    /// rope digest moved for a reason nobody wrote down.
+    #[test]
+    fn qdiv_at_eight_bits_is_the_shared_table() {
+        let mine = qdiv_table(8);
+        let theirs = crate::requant::rq_table(crate::requant::SVariant::Pow2);
+        assert_eq!(mine.len(), theirs.len());
+        for (a, b) in mine.iter().zip(&theirs) {
+            assert_eq!((a.0, a.1, a.2), (b.0, b.2, b.3));
+        }
+    }
+
+    /// One more quotient bit keeps exactly one more `tt`, and the table stops
+    /// at the side's own `qmax` -- the property the record's price rests on.
+    #[test]
+    fn qdiv_widens_by_one_tt_per_bit() {
+        for bits in 8..=13u32 {
+            let t = qdiv_table(bits);
+            let qmax = qmax_of(bits);
+            assert!(t.iter().all(|r| (1..=qmax as u32).contains(&r.2)),
+                    "{bits} bits: a row past qmax");
+            assert_eq!(t.iter().map(|r| r.0).max().unwrap() as i64, qtt_range(bits) - 1);
+        }
+    }
+
+    /// The clamp threshold is the smallest bf16 pattern at or above
+    /// `qmax + 1/2`: below it `round_half_away` stays inside the domain, at it
+    /// and above B1 clamps.
+    #[test]
+    fn clamp_threshold_is_the_rounding_boundary() {
+        for bits in [8u32, 11, 12] {
+            let (qmax, p) = (qmax_of(bits), clamp_pat(bits));
+            let val = |pat: i64| -> f64 {
+                let (ef, m7) = (pat / 128, pat % 128);
+                (128 + m7) as f64 * ((ef - 134) as f64).exp2()
+            };
+            assert!(val(p) >= qmax as f64 + 0.5, "{bits}: threshold below the boundary");
+            // and it is the *smallest* such pattern
+            assert!(val(p - 1) < qmax as f64 + 0.5, "{bits}: threshold not tight");
+        }
+    }
+}
