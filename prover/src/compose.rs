@@ -5491,20 +5491,8 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // run over different sequences and the equality is not statable.  That case
     // is *reported*, in `ao_q_open`, and never counted as a pass by silence;
     // it is stream JJ's `deq_out_open` convention, for the same reason.
-    //
-    // Stream OO: the wiring family has to be the *layer's*.  A dump written by
-    // `extract.py --head` carries no layer `glue` section, so `GlueCols::load`
-    // declines and `load_head` supplies the head chunk's own three-region
-    // family instead (`GluePlan::head_norm`).  That family ties the head's
-    // input to the model's final norm and says nothing about the `o` matmul --
-    // it publishes no requantized attention output for `walk_qx` to equal --
-    // so reading `plan.glue.is_some()` as "this chunk ties `o`" switched the
-    // seam on for a statement that cannot satisfy it, and an honest head dump
-    // with the final-norm columns was refused by `ao_q_ok` alone.  A dump with
-    // neither family was unaffected, which is why the E11 head dump proved and
-    // the same dump plus five columns did not.
     let ao_q_at = plan.walks.iter().position(|w| w.name == "o").filter(|_| {
-        plan.glue.as_ref().is_some_and(|g| !g.head_norm) && !claims.ao_q.is_empty()
+        plan.glue.is_some() && !claims.ao_q.is_empty()
     });
     let ao_q_wide = p.mats.iter().find(|m| m.name == "o")
         .is_some_and(|m| m.n_in == p.nh * p.hd);
