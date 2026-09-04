@@ -1133,6 +1133,10 @@ mod tests {
             head_key: false, head_argmax: false, head_argmax_lax: false,
             embed_vocab: if embed { 300 } else { 0 },
             embed_per_row: if embed { 32 } else { 0 },
+            // stream NN: this fixture's q/k/v widths do not line up with its
+            // bands, so it carries no rotation -- exactly as a shape whose
+            // matmuls are not the attention's does in the field
+            rope: None,
         }
     }
 

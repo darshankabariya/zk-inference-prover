@@ -535,6 +535,42 @@ impl Prog {
         Self { groups, kind: Kind::Mul, slots, outs: vec![(n..2 * n).collect()], n_pre: n }
     }
 
+    /// Stream NN: the products of B1's `rotate`, one row per (token, head).
+    ///
+    /// `rotate(t, cos, sin)` is `store(store(t cos) + store(r sin))` with
+    /// `r = cat([-t[h:], t[:h]])`, so per output channel `j` there are three
+    /// bf16 roundings in this order: `t[j] cos[j]`, `t[(j + h) mod hd] sin'[j]`,
+    /// then their sum.  A `Prog` carries one `Kind`, so the two multiplies live
+    /// here and the add is `Prog::rope_add`; one `eqs` entry joins them.
+    ///
+    /// The sign of `r` is folded into the table (`rope::sgn_sin`), so the
+    /// program is a pure permutation of committed leaves against preprocessed
+    /// operands and needs no negation node.  `cos[j]` is preprocessed value
+    /// `2 j` and `sin'[j]` is `2 j + 1`.
+    pub fn rope_mul(hd: usize) -> Self {
+        assert!(hd >= 2 && hd % 2 == 0, "a rotated head width is even");
+        let h = hd / 2;
+        let groups = vec![Group { n: hd, un: UnKind::None }];
+        let mut slots: Vec<(Src, Src)> = Vec::with_capacity(2 * hd);
+        for j in 0..hd {
+            slots.push((Src::Leaf(0, j), Src::Pre(2 * j)));
+            slots.push((Src::Leaf(0, (j + h) % hd), Src::Pre(2 * j + 1)));
+        }
+        Self { groups, kind: Kind::Mul, slots, outs: vec![(0..2 * hd).collect()], n_pre: 2 * hd }
+    }
+
+    /// Stream NN: the third rounding.  Its leaves are `rope_mul`'s `2 hd`
+    /// outputs in the same row order, so the join is one `GlueEq` between
+    /// `rope_mul.Out(0)` and this region's `In(0)`, and its own `Out(0)` is the
+    /// rotated value the quantize consumes.
+    pub fn rope_add(hd: usize) -> Self {
+        assert!(hd >= 2 && hd % 2 == 0, "a rotated head width is even");
+        let groups = vec![Group { n: 2 * hd, un: UnKind::None }];
+        let slots: Vec<(Src, Src)> =
+            (0..hd).map(|j| (Src::Leaf(0, 2 * j), Src::Leaf(0, 2 * j + 1))).collect();
+        Self { groups, kind: Kind::Add, slots, outs: vec![(0..hd).collect()], n_pre: 0 }
+    }
+
     pub fn leaf_width(&self, g: usize) -> usize {
         if self.groups[g].un == UnKind::None { 2 } else { 4 }
     }

@@ -1756,7 +1756,7 @@ pub fn cmd(args: &[String]) {
     let t0 = Instant::now();
     let inter = crate::attn_trace::interaction_phase(
         &a, &l, &cfg, &pow, &rel_exp, &rels, &com, &widths, true, !a.corner,
-        None, Some(&mut collect));
+        None, Some(&mut collect), None);
     let committed_secs = t0.elapsed().as_secs_f64();
 
     let sites: Vec<Site> = collect.sites.clone();

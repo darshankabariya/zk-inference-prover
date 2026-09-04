@@ -219,6 +219,83 @@ pub struct Layer {
     /// the `lm_head` chunk, which sits after the last layer of its block.
     pub layer: Option<usize>,
     pub block: Option<usize>,
+    /// Stream NN (E11): what the rotation and the q/k/v quantize need -- the
+    /// model's `inv_freq`, this block's absolute position offset, and the three
+    /// calibrated power-of-two scales.  `None` on a chunk that does not prove
+    /// them; `params_of` turns the first three fields into the statement's
+    /// `RopeParams` and the exponents go to tree 0, where `jv` already lived.
+    pub rope: Option<RopeCols>,
+}
+
+/// Stream NN: the witness side of the rotation and the quantize.
+///
+/// `inv_freq` is `hd/2` fp64 values; the three exponent vectors are `nh * hd`
+/// each, on the query-head grid B1 applies them on.
+#[derive(Clone, Debug)]
+pub struct RopeCols {
+    /// key/value heads; `nh / nkv` is the GQA replication factor
+    pub nkv: usize,
+    /// absolute position of this block's token 0 -- `block * S`
+    pub pos0: usize,
+    /// `rope_theta`, the branch of `inv_freq_of` this model takes, and that
+    /// branch's own constants -- what the *statement* carries, so the angle
+    /// table is a function of `Params` and of nothing read off the dump
+    pub theta: f64,
+    pub rope_type: String,
+    pub rope_scale: Vec<f64>,
+    /// B1's own `inv_freq`, when the dump wrote it: a reference the run
+    /// compares the derived vector against and never consumes
+    pub inv_ref: Option<Vec<f64>>,
+    /// `s_q`, `s_k`, `s_v` as power-of-two exponents on the **query-head** grid
+    /// (`nh * hd` each).  B1 applies all three after `repeat_interleave`, so
+    /// they are per query head even where the values behind them are shared;
+    /// `Layer::qkv_j` is where "and they agree inside a GQA group" is checked.
+    pub jq: Vec<i32>,
+    pub jk: Vec<i32>,
+    pub jv: Vec<i32>,
+}
+
+impl RopeCols {
+    /// The four files `extract.py` writes for this stream, beside `jv.i32`.
+    /// `Ok(None)` -- not an error -- when the dump carries none of them: a dump
+    /// written before this stream proves no rotation.
+    pub fn load(dir: &str, man: &serde_json::Value, nh: usize, hd: usize, s: usize)
+                -> Result<Option<Self>, String> {
+        let rp = &man["rope"];
+        let Some(theta) = rp["theta"].as_f64() else {
+            return Ok(None);
+        };
+        let kind = rp["rope_type"].as_str().unwrap_or("default").to_string();
+        let rope_scale: Vec<f64> = rp["scale"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
+            .unwrap_or_default();
+        let inv_ref = witread::read_file(&format!("{dir}/inv_freq.f64")).ok().map(|raw| {
+            raw.chunks_exact(8)
+                .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+                .take(hd / 2)
+                .collect::<Vec<f64>>()
+        }).filter(|v| v.len() == hd / 2);
+        let j = |n: &str| -> Result<Vec<i32>, String> {
+            let v = read_i32(&format!("{dir}/{n}.i32"))?;
+            if v.len() < nh * hd {
+                return Err(format!("{n}.i32: {} values is under {}", v.len(), nh * hd));
+            }
+            Ok(v[..nh * hd].iter().map(|x| *x as i32).collect())
+        };
+        let nkv = man["nkv"].as_u64().map(|v| v as usize).unwrap_or(nh);
+        let block = man["block"].as_u64().map(|v| v as usize).unwrap_or(0);
+        Ok(Some(Self {
+            nkv,
+            pos0: block * s,
+            theta,
+            rope_type: kind,
+            rope_scale,
+            inv_ref,
+            jq: j("jq")?,
+            jk: j("jk")?,
+            jv: j("jv")?,
+        }))
+    }
 }
 
 impl Layer {
@@ -945,7 +1022,289 @@ impl Layer {
             tok_in,
             layer: man["layer"].as_u64().map(|v| v as usize),
             block: man["block"].as_u64().map(|v| v as usize),
+            // stream NN: `extract.py` writes `inv_freq.f64`, `jq.i32` and
+            // `jk.i32` beside the `jv.i32` it already wrote; a dump without
+            // them proves no rotation and says so rather than guessing one.
+            rope: RopeCols::load(dir, &man, nh, hd, s).unwrap_or(None),
         })
+    }
+
+    /// Stream NN: derive the bands' Q, K and V from this layer's own `q`, `k`
+    /// and `v` matmuls, and rebuild the bands from them.
+    ///
+    /// Returns the `RopeCols` a chunk proving the rotation needs, or `None` when
+    /// the shapes do not admit the statement at all -- in which case nothing is
+    /// rewired and the run reports the family as absent.
+    ///
+    /// `bend` moves one *band* value after the derivation and rebuilds the
+    /// bands around it: the attention it proves is then honest, the matmuls are
+    /// untouched, and the only thing in the chunk that can see it is the band's
+    /// own claim against the quantize region's output.  `(which of q/k/v, cell)`.
+    pub fn rope_from_mats(&mut self, round: bf16::Round, bend: Option<(usize, usize)>)
+                          -> Option<RopeCols> {
+        use crate::glue::{Prog, UnKind, reference};
+        let (nh, hd, tokens) = (self.ao.nh, self.ao.hd, self.ao.s);
+        if hd % 2 != 0 || self.nsub > 1 || !self.bands.iter().any(|b| b.corner) {
+            return None;
+        }
+        let width = |n: &str| self.mats.iter().find(|m| m.name == n).map(|m| m.n_out);
+        let (nq, nk, nv) = (width("q")?, width("k")?, width("v")?);
+        if nq != nh * hd || nk != nv || nk % hd != 0 || nh % (nk / hd) != 0 {
+            return None;
+        }
+        let nkv = nk / hd;
+        let rep = nh / nkv;
+        let b0 = &self.bands[0];
+        let (q_bits, k_bits) = (b0.q_bits, b0.k_bits);
+        let (qmax_q, qmax_k) = ((1i64 << (q_bits - 1)) - 1, (1i64 << (k_bits - 1)) - 1);
+        // the model's own angles.  A synthetic layer has no model, so it takes
+        // Llama's default `inv_freq` at theta = 10000 and this block's own
+        // offset; a real dump carries both and never reaches here.
+        // a synthetic layer has no model, so it takes Llama's default branch at
+        // theta = 10000 and this block's own offset; a real dump carries both
+        let (theta, kind) = (10000.0f64, "default".to_string());
+        let inv_freq = crate::rope::inv_freq_of(hd, theta, &kind, &[]);
+        let pos0 = self.block.unwrap_or(0) * tokens;
+        let sp = |m: &Mat| crate::dequant::Spec {
+            variant: m.variant, round, kmax: 0, per_row: 1, limb_bits: (16, 14),
+            q_bits: 0, rem_bits: 0, fold_alpha: 0,
+        };
+        let deq = |me: &Self, name: &str, n: usize| -> Vec<u16> {
+            let mi = me.mats.iter().position(|m| m.name == name).unwrap();
+            let spec = sp(&me.mats[mi]);
+            let mut v = vec![0u16; tokens * n];
+            v.par_chunks_mut(n).enumerate().for_each(|(t, row)| {
+                for (c, slot) in row.iter_mut().enumerate() {
+                    *slot = deq_ref(&me.mats[mi], &spec, t, c);
+                }
+            });
+            v
+        };
+        // the rotation, through the regions' own programs: one row per
+        // (token, head), `hd` leaves, `cos`/`sgnsin` preprocessed
+        let rotate = |x: &[u16], heads: usize| -> Vec<u16> {
+            let rows = tokens * heads;
+            let mut pre = vec![0u16; rows * 2 * hd];
+            pre.par_chunks_mut(2 * hd).enumerate().for_each(|(j, row)| {
+                row.copy_from_slice(&crate::rope::pre_row(&inv_freq, hd, pos0 + j / heads));
+            });
+            let prod = reference(&[x.to_vec()], &pre, rows, &Prog::rope_mul(hd), round);
+            let out = reference(&[prod[0].clone()], &[], rows, &Prog::rope_add(hd), round);
+            out[0].clone()
+        };
+        let qrot = rotate(&deq(self, "q", nq), nh);
+        let krot = rotate(&deq(self, "k", nk), nkv);
+        let vdeq = deq(self, "v", nv);
+        // the scales.  B1 calibrates them offline; a synthetic layer picks the
+        // smallest power of two that leaves every value inside the domain, so
+        // the desk's witness is complete (`quantize`'s clamp has no honest
+        // witness in this region -- the table has no row past 127).
+        let scale = |x: &[u16], n: usize, qmax: i64| -> Vec<i32> {
+            (0..n)
+                .map(|c| {
+                    let col: Vec<u16> = (0..tokens).map(|t| x[t * n + c]).collect();
+                    crate::rope::pow2_scale(&col, qmax) as i32
+                })
+                .collect()
+        };
+        let jq = scale(&qrot, nq, qmax_q);
+        let jk_kv = scale(&krot, nk, qmax_k);
+        let jv_kv = scale(&vdeq, nv, 127);
+        // and on the query-head grid, which is where B1 applies them and where
+        // the statement carries them
+        let spread = |src: &[i32]| -> Vec<i32> {
+            (0..nh * hd).map(|i| src[(i / hd / rep) * hd + i % hd]).collect()
+        };
+        let (jk, jv) = (spread(&jk_kv), spread(&jv_kv));
+        // the bands' own columns, on the query-head grid: the kv head's values
+        // replicated across its `rep` query heads, exactly as
+        // `attention`'s `repeat_interleave` does
+        let quant = |x: &[u16], n: usize, jj: &[i32], qmax: i64| -> Vec<i32> {
+            let mut out = vec![0i32; tokens * nh * hd];
+            out.par_chunks_mut(nh * hd).enumerate().for_each(|(t, row)| {
+                for (i, slot) in row.iter_mut().enumerate() {
+                    let (h, ch) = (i / hd, i % hd);
+                    let c = (h / (nh / (n / hd))) * hd + ch;
+                    *slot = crate::rope::quant_ref(x[t * n + c], jj[c] as i64, qmax) as i32;
+                }
+            });
+            out
+        };
+        let mut qq = quant(&qrot, nq, &jq, qmax_q);
+        let mut kk = quant(&krot, nk, &jk_kv, qmax_k);
+        let mut vv = quant(&vdeq, nv, &jv_kv, 127);
+        if let Some((which, at)) = bend {
+            let col: &mut Vec<i32> = match which % 3 { 0 => &mut qq, 1 => &mut kk, _ => &mut vv };
+            let n = col.len();
+            let i = at % n;
+            let lim = match which % 3 { 0 => qmax_q, 1 => qmax_k, _ => 127 } as i32;
+            col[i] += if col[i] < lim { 1 } else { -1 };
+            eprintln!("layer: band {} cell {i} bent (a rejection is the pass)",
+                      ["Q", "K", "V"][which % 3]);
+        }
+        self.rebuild_bands(&qq, &kk, &vv);
+        Some(RopeCols { nkv, pos0, theta, rope_type: kind, rope_scale: vec![],
+                        inv_ref: Some(inv_freq), jq, jk, jv })
+    }
+
+    /// Stream NN: rebuild every band from Q, K and V on the query-head grid.
+    ///
+    /// The corner's keys *are* this block's tokens, so its K and V are what the
+    /// layer's own `k` and `v` matmuls produced; a prefix band's keys are the
+    /// cache and keep the ones they had, because this chunk did not produce
+    /// them (they are bound across blocks by root equality instead -- stream
+    /// AA/EE).  Every band of a group takes the new queries, and the group's two
+    /// halves share one row maximum and one master exponent, exactly as
+    /// `Attn::synthetic_pair` builds them.
+    ///
+    /// `nsub > 1` is not supported here: a tiled prefix is `nsub` windows of one
+    /// pair and rebuilding it means re-slicing that pair.  A real dump needs
+    /// none of this -- its bands come from B1 -- so the restriction is the
+    /// synthetic generator's alone.
+    pub fn rebuild_bands(&mut self, qq: &[i32], kk: &[i32], vv: &[i32]) {
+        let (nh, hd, s) = (self.ao.nh, self.ao.hd, self.ao.s);
+        assert!(self.nsub <= 1, "the q/k/v rewiring does not support a tiled prefix");
+        let n_pre = self.bands.iter().filter(|b| !b.corner).count();
+        let groups = self.bands.len() - n_pre;
+        assert!(groups > 0, "the q/k/v rewiring needs the causal corner");
+        assert!(n_pre == 0 || n_pre == groups, "one prefix band per group, or none");
+        let take = |src: &[i32], off: usize, insts: usize, rows: usize| -> Vec<i32> {
+            (0..insts * rows * hd)
+                .map(|i| {
+                    let (inst, rest) = (i / (rows * hd), i % (rows * hd));
+                    let (t, ch) = (rest / hd, rest % hd);
+                    src[t * nh * hd + (off + inst) * hd + ch]
+                })
+                .collect()
+        };
+        // pass 1: learn the master exponent and the table height the new data
+        // needs, over both halves of every group -- the two-pass shape
+        // `Layer::synthetic` uses, for the same reason
+        let mut probe = vec![];
+        for g in 0..groups {
+            for b in [(n_pre > 0).then_some(g), Some(n_pre + g)].into_iter().flatten() {
+                let a = &self.bands[b];
+                let sh = a.shape;
+                let off = self.head_offsets[b];
+                let q = take(qq, off, sh.insts, sh.s);
+                let (k, v) = if a.corner {
+                    (take(kk, off, sh.insts, sh.c), take(vv, off, sh.insts, sh.c))
+                } else {
+                    (a.kk.clone(), a.vv.clone())
+                };
+                probe.push(Attn::from_qkv(sh, a.variant, q, k, v, a.q_bits, a.k_bits, a.nmax,
+                                          a.log_table, None, None, a.source.clone(), a.corner,
+                                          None));
+            }
+        }
+        let frac = probe.iter().map(|b| b.frac).fold(f64::MIN, f64::max).ceil();
+        let d_bits = probe.iter().map(|b| b.d_bits()).max().unwrap() + 1;
+        let log_table = d_bits.clamp(4, 22);
+        // pass 2: the joint row maximum per group, then both halves under it
+        for g in 0..groups {
+            let ci = n_pre + g;
+            let pi = (n_pre > 0).then_some(g);
+            let mm: Vec<i64> = match pi {
+                Some(p) => {
+                    let (a, b) = (&probe[2 * g], &probe[2 * g + 1]);
+                    let _ = p;
+                    a.mm.iter().zip(&b.mm).map(|(x, y)| *x.max(y)).collect()
+                }
+                None => probe[g].mm.clone(),
+            };
+            for b in [pi, Some(ci)].into_iter().flatten() {
+                let a = &self.bands[b];
+                let sh = a.shape;
+                let off = self.head_offsets[b];
+                let q = take(qq, off, sh.insts, sh.s);
+                let (k, v) = if a.corner {
+                    (take(kk, off, sh.insts, sh.c), take(vv, off, sh.insts, sh.c))
+                } else {
+                    (a.kk.clone(), a.vv.clone())
+                };
+                let (variant, qb, kb, nmax, src) =
+                    (a.variant, a.q_bits, a.k_bits, a.nmax, a.source.clone());
+                let corner = a.corner;
+                self.bands[b] = Attn::from_qkv(sh, variant, q, k, v, qb, kb, nmax, log_table,
+                                               Some(vec![frac; sh.insts]), Some(frac), src,
+                                               corner, Some(mm.clone()));
+            }
+            if let Some(p) = pi {
+                let total: Vec<i64> = self.bands[p].zz.iter().zip(&self.bands[ci].zz)
+                    .map(|(x, y)| x + y).collect();
+                self.bands[p].zz_total = Some(total);
+            } else {
+                let total = self.bands[ci].zz.clone();
+                self.bands[ci].zz_total = Some(total);
+            }
+        }
+        // the attention output follows the bands: its accumulator and
+        // denominator *are* their sums, and the per-token output scale is the
+        // smallest power of two that leaves the quotient inside int8
+        let (mut acc, mut den) = (vec![0i64; nh * s * hd], vec![0i64; nh * s]);
+        for bi in 0..self.bands.len() {
+            let b = &self.bands[bi];
+            for i in 0..self.band_sizes[bi] {
+                let h = self.head_offsets[bi] + i;
+                for t in 0..s {
+                    den[h * s + t] += b.zz[i * s + t];
+                    for j in 0..hd {
+                        acc[(h * s + t) * hd + j] += b.out[(i * s + t) * hd + j];
+                    }
+                }
+            }
+        }
+        for d in den.iter_mut() {
+            *d = (*d).max(1);
+        }
+        let jv = self.ao.jv.clone();
+        let mut jo = vec![0i32; s];
+        for (t, slot) in jo.iter_mut().enumerate() {
+            let mut m = 0f64;
+            for h in 0..nh {
+                for j in 0..hd {
+                    let q = acc[(h * s + t) * hd + j].unsigned_abs() as f64
+                        * (jv[h * hd + j] as f64).exp2() / den[h * s + t] as f64;
+                    m = m.max(q);
+                }
+            }
+            *slot = (m / 127.0).log2().ceil().max(-30.0) as i32;
+        }
+        self.ao.acc = acc;
+        self.ao.den = den;
+        self.ao.jo = jo;
+    }
+
+    /// Stream NN: one side's quantize exponents, from the query-head grid onto
+    /// the producer's own.
+    ///
+    /// B1 quantizes q, k and v *after* `repeat_interleave`, so `s_k` and `s_v`
+    /// are per query head even though the values behind them are one kv head's.
+    /// A gadget over the kv grid is only the same statement when the `rep`
+    /// query heads of a group carry the same exponent -- `extract.py` asserts
+    /// exactly that for `s_v` and this asserts it for all three, rather than
+    /// picking the group's first head quietly.
+    pub fn qkv_j(&self, name: &str, heads: usize, hd: usize, rep: usize) -> Vec<i64> {
+        let r = self.rope.as_ref().expect("the quantize regions need the rope columns");
+        let src = match name {
+            "q" => &r.jq,
+            "k" => &r.jk,
+            "v" => &r.jv,
+            other => panic!("no quantize exponents for {other}"),
+        };
+        let mut out = vec![0i64; heads * hd];
+        for kv in 0..heads {
+            for ch in 0..hd {
+                let j = src[(kv * rep) * hd + ch];
+                for x in 1..rep {
+                    assert_eq!(src[(kv * rep + x) * hd + ch], j,
+                               "{name}: the scale disagrees inside GQA group {kv} at channel \
+                                {ch}; a gadget over the kv grid cannot state this model");
+                }
+                out[kv * hd + ch] = j as i64;
+            }
+        }
+        out
     }
 
     /// Stream Z: the fold's two data-derived pins, `None` when no matmul is a
@@ -1190,7 +1549,7 @@ impl Layer {
                ao: AttnOut { nh, s, hd, acc, den, jo, jv },
                source: format!("synthetic layer (seed={seed})"), glue: None,
                head_keys: None, head_tok: None, attn_out_bits: 8,
-               embed_tab: None, tok_in: None, layer: None, block: None }
+               embed_tab: None, tok_in: None, layer: None, block: None, rope: None }
     }
 }
 
@@ -1213,7 +1572,17 @@ impl Layer {
     /// requantize and its claim is stream JJ's, so there is nothing here for a
     /// consistent witness to satisfy yet.
     pub fn synth_glue(&mut self, seed: u64, a: usize, round: bf16::Round) {
-        self.synth_family(seed, a, round, 0, None);
+        self.synth_family(seed, a, round, 0, None, None);
+    }
+
+    /// Stream NN, the band side's control.  The same layer with **one** band
+    /// cell moved and the bands rebuilt around it: the attention is an honest
+    /// attention over the bent K (or Q, or V), the matmuls are untouched, and
+    /// the only thing that can see it is that band's claim against the
+    /// quantize region's output.  `which` picks Q, K or V.
+    pub fn synth_glue_band_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
+                                which: usize, idx: usize) {
+        self.synth_family(seed, a, round, 0, None, Some((which, idx)));
     }
 
     /// Stream II (E11), the `o` seam's control.  The same layer, with **one**
@@ -1239,7 +1608,7 @@ impl Layer {
         // and set `head`, so pass a nonzero vocabulary to keep the head branch.
         // `synth_family` reads only the sign of it.
         let vocab = usize::from(self.glue.as_ref().is_some_and(|g| g.head));
-        self.synth_family(seed, a, round, vocab, Some(at));
+        self.synth_family(seed, a, round, vocab, Some(at), None);
         Some(at)
     }
 
@@ -1271,11 +1640,11 @@ impl Layer {
                 .collect(),
             jv2: vec![],
         });
-        self.synth_family(seed, a, round, vocab, None);
+        self.synth_family(seed, a, round, vocab, None, None);
     }
 
     fn synth_family(&mut self, seed: u64, a: usize, round: bf16::Round, head_vocab: usize,
-                    o_bend: Option<usize>) {
+                    o_bend: Option<usize>, rope_bend: Option<(usize, usize)>) {
         use crate::glue::{Kind, Prog, Tiling, UnKind, canon, reference};
         let head = head_vocab > 0;
         let tokens = self.ao.s;
@@ -1364,6 +1733,34 @@ impl Layer {
                 .collect()
         };
 
+
+        let h1 = tail(&gc.xin, &gc.w1, &t1);
+        // the head chunk: the final norm's output is the head's committed
+        // input, and there is no add, no second norm and no SwiGLU after it
+        if head {
+            wire(self, &["lm_head"], &h1, d);
+            self.glue = Some(gc);
+            return;
+        }
+        wire(self, &["q", "k", "v"], &h1, d);
+        // ---- stream NN: the bands are the q/k/v matmuls' own outputs --------
+        //
+        // A synthetic layer's bands were three unrelated draws, so no shape it
+        // could prove carried a positionwise q/k/v tie
+        // (`briefs/jj-layerwire-out.md` section 11.4 item 2).  Here the layer's
+        // own `q`/`k`/`v` dequant outputs are rotated and quantized -- through
+        // `glue::reference` on the very programs the regions prove, so the two
+        // cannot disagree -- and the bands are rebuilt from the result.
+        //
+        // Wired exactly when the widths line up, the way `o` is: `q` must be
+        // `nh hd` channels wide, `k` and `v` equally wide and a whole number of
+        // heads, and `nh` a multiple of that number.  A shape where they do not
+        // leaves the family off and the run reports it, rather than proving
+        // something narrower quietly.
+        self.rope = self.rope_from_mats(round, rope_bend);
+        // the `o` matmul's committed input is the attention output requantized,
+        // and the attention output has just moved -- so this runs after the
+        // rebuild and not before it
         // Stream II (E11), at the JJ merge: the `o` matmul's committed input is
         // the attention output requantized, and `AttnOutEval` is that
         // requantize -- so on a synthetic layer, where the `o` activations are
@@ -1415,16 +1812,7 @@ impl Layer {
             ok
         };
         let _ = o_wired;
-
-        let h1 = tail(&gc.xin, &gc.w1, &t1);
-        // the head chunk: the final norm's output is the head's committed
-        // input, and there is no add, no second norm and no SwiGLU after it
-        if head {
-            wire(self, &["lm_head"], &h1, d);
-            self.glue = Some(gc);
-            return;
-        }
-        wire(self, &["q", "k", "v"], &h1, d);
+        let _ = o_wired;
         // Stream JJ's dequant output ties: `o_out` is the `o` region's own
         // dequant reference, so an honest run ties and a bent copy does not.
         // `o`'s input is not rewired (its requantize is `AttnOutEval`'s), so

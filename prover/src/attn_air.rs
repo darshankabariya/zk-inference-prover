@@ -280,6 +280,57 @@ fn sum_pow(p: &[SecureField]) -> SecureField {
     p.iter().fold(SecureField::zero(), |a, b| a + *b)
 }
 
+/// Stream NN: one Horner claim over a band's own committed Q, K or V column.
+///
+/// The band's three existing folds are all *bilinear* -- `u v` for `Q.K^T`,
+/// `wv zn` for `A.V` -- so none of them publishes Q, K or V alone, and the
+/// value the layer's matmuls produced had nothing in the proof to be compared
+/// against (`notes/witness-slack.md` section 1e).  This is that missing sum: one
+/// extension accumulator per column set, weighting the cell at (query head
+/// `hq`, channel `ch`, token `t`) by `w^(N - 1 - (t nh hd + hq hd + ch))` --
+/// the **token-major** canonical position the quantize region folds under, so
+/// the two claims are directly comparable.
+///
+/// The offset every band commits (`off_k`, `off_q`, 128) is subtracted here for
+/// the same reason `kf` subtracts it: an inert lead row and an out-of-range slot
+/// both commit exactly the offset, so they fold to zero and no `act` selector is
+/// needed.
+#[derive(Clone)]
+pub struct BandTie {
+    /// per slot within a row
+    pub w: Vec<SecureField>,
+    /// the row step inside one row group
+    pub s_in: SecureField,
+    /// the row step at a group boundary
+    pub s_bd: SecureField,
+    /// the row step at an *instance* boundary; `None` where the group index is
+    /// affine in the position (the channel region) and one boundary constant
+    /// serves
+    pub s_ib: Option<SecureField>,
+    /// the offset the band's cells carry
+    pub off: u32,
+    pub claimed: SecureField,
+}
+
+impl BandTie {
+    /// The claim, from the values rather than from the trace: `vals[j][k]` is
+    /// the band's own committed cell, offset included.
+    pub fn claim_of(&self, rows: usize, per_row: usize, vals: &[i64],
+                    step: &dyn Fn(usize) -> SecureField) -> SecureField {
+        let off = SecureField::from(M31::from_u32_unchecked(self.off));
+        let mut h = SecureField::zero();
+        for j in 0..rows {
+            let mut f = SecureField::zero();
+            for k in 0..per_row {
+                let v = SecureField::from(crate::attn_trace::m31_of(vals[j * per_row + k])) - off;
+                f += v * self.w[k];
+            }
+            h = h * step(j) + f;
+        }
+        h
+    }
+}
+
 // ------------------------------------------------------------ Q.K^T region ---
 
 /// One row group per channel: the two inner sums of `Q.K^T`, multiplied per
@@ -305,6 +356,14 @@ pub struct ChanEval {
     /// chunk's constraint IR, its kernel fingerprint and its proof are
     /// byte-for-byte the old ones.
     pub bound_k: Vec<crate::bounds::KvBound>,
+    /// Stream NN: this band's own K and Q claims, in that order.  `Some` only on
+    /// a **corner** band of a chunk that carries the RoPE regions -- the corner's
+    /// keys are this block's own tokens, which are the ones the layer's `k`
+    /// matmul produced; a prefix band's keys are the cache and are bound across
+    /// blocks by root equality instead (stream AA/EE).  `None` everywhere else,
+    /// which is why every other chunk's constraint IR and kernel fingerprint are
+    /// byte-for-byte the old ones.
+    pub qk_bind: Option<(BandTie, BandTie)>,
 }
 
 impl FrameworkEval for ChanEval {
@@ -365,15 +424,37 @@ impl FrameworkEval for ChanEval {
             qf += qp.clone() * self.pow.sq_pow[p];
         }
         qf = qf - sum_pow(&self.pow.sq_pow) * SecureField::from_u32_unchecked(self.off.q, 0, 0, 0);
-        eval.add_constraint(v.clone() - (v_prev * self.pow.sq_step) * nofirst - qf);
+        eval.add_constraint(v.clone() - (v_prev * self.pow.sq_step) * nofirst.clone() - qf);
 
         // a plain sum over channels within an instance, times r^C at each instance
         // start, so the packed claim carries the same weight the grid's r-Horner
         // gives its side of the identity
-        let mut mult: E::EF = E::EF::from(notzero - istart.clone());
+        let mut mult: E::EF = E::EF::from(notzero.clone() - istart.clone());
         mult += istart * self.pow.r_c;
         eval.add_constraint(acc.clone() - acc_prev * mult - (u * v) * last);
-        eval.add_constraint((acc - self.claimed) * end);
+        eval.add_constraint((acc - self.claimed) * end.clone());
+
+        // ---- stream NN: the K and Q claims -----------------------------------
+        // `u` and `v` above are inner sums of one row group and are consumed by
+        // the bilinear `acc`; these two run over the whole region under the
+        // quantize region's own weights, so an equality against it says the
+        // band's columns are the values the layer's matmuls produced.  Both
+        // steps are built from selectors the region already reads.
+        if let Some((kt, qt)) = &self.qk_bind {
+            for (t, vals) in [(kt, &ks), (qt, &qs)] {
+                let [h_prev, h] =
+                    eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+                let step = E::EF::from(nofirst.clone()) * t.s_in
+                    + (E::EF::from(notzero.clone()) - E::EF::from(nofirst.clone())) * t.s_bd;
+                let off = E::F::from(M31::from_u32_unchecked(t.off));
+                let mut f = E::EF::zero();
+                for (k, c) in vals.iter().enumerate() {
+                    f += E::EF::from(c.clone() - off.clone()) * t.w[k];
+                }
+                eval.add_constraint(h.clone() - h_prev * step - f);
+                eval.add_constraint((h - t.claimed) * end.clone());
+            }
+        }
 
         if self.range_check && !self.gkr {
             for kp in &ks {
@@ -425,6 +506,9 @@ pub struct KeyEval {
     /// order, so that one tree holds `[band's K][band's V]` per band in
     /// component-registration order.
     pub bound_v: Vec<crate::bounds::KvBound>,
+    /// Stream NN: this band's own V claim, the counterpart of `ChanEval::qk_bind`.
+    /// `Some` only on a corner band of a chunk that carries the quantize regions.
+    pub v_bind: Option<BandTie>,
 }
 
 impl FrameworkEval for KeyEval {
@@ -450,6 +534,8 @@ impl FrameworkEval for KeyEval {
             names.iter().map(|n| eval.get_preprocessed_column(band_id(self.tag, n))).collect();
         let (nofirst, last, notzero, end, m1, m2, istart) = (sel[0].clone(), sel[1].clone(),
             sel[2].clone(), sel[3].clone(), sel[4].clone(), sel[5].clone(), sel[6].clone());
+        // stream NN: the V claim's instance-boundary step reads the same column
+        let istart_v = sel[6].clone();
         // Stream CC (E11): 1 on a row the grid actually holds, 0 on the inert
         // lead rows `Grid` pads with.  Absent -- and read as the literal `1` --
         // on a grid that tiles exactly, which is every shape proved before E11,
@@ -549,7 +635,7 @@ impl FrameworkEval for KeyEval {
             vf += vp.clone() * self.pow.rv_pow[p];
         }
         vf = vf - sum_pow(&self.pow.rv_pow) * SecureField::from_u32_unchecked(self.off.v, 0, 0, 0);
-        eval.add_constraint(wv.clone() - (wv_prev * self.pow.rv_step) * nofirst - vf);
+        eval.add_constraint(wv.clone() - (wv_prev * self.pow.rv_step) * nofirst.clone() - vf);
 
         // sum over keys of wv * zn, closed on each key's last chunk row, times
         // rv^hd at each instance start (the A.V identity's per-instance weight,
@@ -560,7 +646,7 @@ impl FrameworkEval for KeyEval {
             - (wv * zn.clone()) * last.clone());
         // sum over keys of zn: the denominator statement, weighted by r^C to match
         // the per-token region's `az`
-        let mut sn_mult: E::EF = E::EF::from(notzero - istart.clone());
+        let mut sn_mult: E::EF = E::EF::from(notzero.clone() - istart.clone());
         sn_mult += istart * self.pow.sn_c;
         eval.add_constraint(sn.clone() - sn_prev * sn_mult - zn.clone() * last);
         // r^c on each completed key (keys are laid out in descending order).  On the
@@ -576,7 +662,31 @@ impl FrameworkEval for KeyEval {
 
         eval.add_constraint((hs - self.claimed_hs) * end.clone());
         eval.add_constraint((av - self.claimed_av) * end.clone());
-        eval.add_constraint((sn - self.claimed_sn) * end);
+        eval.add_constraint((sn - self.claimed_sn) * end.clone());
+
+        // ---- stream NN: the V claim ------------------------------------------
+        // `wv` above is one key row's inner sum and is consumed by the bilinear
+        // `av`; this runs over the whole region under the quantize region's own
+        // weights.  The key region groups by (instance, key), and the position
+        // is not affine in that group index -- an instance boundary jumps a whole
+        // context -- so this fold takes a third row step, on the region's own
+        // `istart` selector.
+        if let Some(t) = &self.v_bind {
+            let [h_prev, h] =
+                eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+            let s_ib = t.s_ib.expect("the V tie needs an instance-boundary step");
+            let step = E::EF::from(nofirst.clone()) * t.s_in
+                + (E::EF::from(notzero.clone()) - E::EF::from(nofirst.clone())
+                   - E::EF::from(istart_v.clone())) * t.s_bd
+                + E::EF::from(istart_v.clone()) * s_ib;
+            let off = E::F::from(M31::from_u32_unchecked(t.off));
+            let mut f = E::EF::zero();
+            for (k, c) in vals.iter().enumerate() {
+                f += E::EF::from(c.clone() - off.clone()) * t.w[k];
+            }
+            eval.add_constraint(h.clone() - h_prev * step - f);
+            eval.add_constraint((h - t.claimed) * end);
+        }
 
         if !self.gkr {
             // the exp lookups: index and numerator together, arity 2

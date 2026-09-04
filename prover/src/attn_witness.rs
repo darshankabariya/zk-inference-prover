@@ -582,6 +582,22 @@ impl Attn {
         (p, c)
     }
 
+    /// Stream NN: a band from given Q, K and V -- the whole forward pass
+    /// (scores, shift, table, numerators, denominator, A.V) re-derived from
+    /// them.  It is `build` with a public name, and it exists so a synthetic
+    /// layer's bands can be *the layer's own matmul outputs* rather than three
+    /// unrelated draws: without that no synthetic shape can carry a positionwise
+    /// q/k/v tie, which is what `briefs/jj-layerwire-out.md` section 11.4 item 2
+    /// names as the thing stream NN has to build first.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_qkv(sh: Shape, variant: Variant, qq: Vec<i32>, kk: Vec<i32>, vv: Vec<i32>,
+                    q_bits: u32, k_bits: u32, nmax: u32, log_table: u32,
+                    frac_in: Option<Vec<f64>>, master: Option<f64>, source: String,
+                    corner: bool, mm_in: Option<Vec<i64>>) -> Self {
+        Self::build(sh, variant, qq, kk, vv, None, q_bits, k_bits, nmax, log_table,
+                    frac_in, master, source, None, corner, mm_in)
+    }
+
     /// The same Q, K and V read as the causal corner: the row maximum, the table's
     /// exponent, the numerators, the denominator and the A.V outputs are all
     /// re-derived over the visible half.  `frac` is re-derived too rather than
