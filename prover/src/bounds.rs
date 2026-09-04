@@ -1425,7 +1425,54 @@ pub fn grid_cmd(args: &[String]) {
                                  declaration"}));
     let ids_ok = bad_ids.is_empty() && (prompt.is_none() || unbacked.is_empty());
 
+    // ---- stream LL: the model, per layer and across the grid ---------------
+    //
+    // `notes/witness-slack.md` section 5 item 1's last sentence: the token-axis
+    // chain compares K/V sides, not tree 0, so nothing said that two blocks of
+    // one layer used the same weights.  `Fixed.model` is the content hash of
+    // exactly the model data tree 0 reads (`Layer::model_hash`), and it is
+    // shape-independent, so the comparison is possible on the statements alone
+    // and needs no table.  Unconditional: a grid whose chunks name two models,
+    // or whose one layer carries two model hashes, is a named rejection.
+    let mut models: BTreeMap<usize, (String, String)> = BTreeMap::new();
+    let mut all_models: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut undeclared_model: Vec<String> = vec![];
+    for ch in &chunks {
+        let Some(m) = ch.fixed.model.clone() else {
+            undeclared_model.push(ch.tag.clone());
+            continue;
+        };
+        all_models.entry(m.clone()).or_default().push(ch.tag.clone());
+        match models.get(&ch.layer) {
+            Some((first, tag)) if *first != m => failures.push(format!(
+                "{}: layer {} names model {m}, and {tag} names {first} for the same layer",
+                ch.tag, ch.layer)),
+            Some(_) => {}
+            None => {
+                models.insert(ch.layer, (m, ch.tag.clone()));
+            }
+        }
+    }
+    // Deliberately *not* a failure: a grid of 32 layers has 32 model hashes,
+    // because a layer's weights are its own.  What ties the 32 into one model
+    // is the manifest `b65 model-roots` writes, which asserts one hash per
+    // layer and names them all; the grid's own check is the per-layer one
+    // above, which is what section 5 item 1's last sentence asks for.
+    if !undeclared_model.is_empty() {
+        declared.push(json!({"what": "which model these chunks used",
+                             "chunks": undeclared_model.len(),
+                             "why": "their statements predate Fixed.model, so nothing \
+                                     compares their weights against the rest of the grid"}));
+    }
+
     // ---- stream KK: the declared tree-0 roots, against a derived table ------
+    //
+    // Stream LL fills the table: `b65 model-roots --plan PLAN` runs
+    // `b65 expect-root` per plan line and writes one row per `(layer, c)`.  A
+    // row also carries the model hash it was derived under, and that is
+    // compared too -- a table derived from one model against a grid proved
+    // under another is the case the root comparison alone would only catch by
+    // accident.
     let mut pre_rows: Vec<Value> = vec![];
     if let Some(table) = &expect_pre {
         for ch in &chunks {
@@ -1442,14 +1489,44 @@ pub fn grid_cmd(args: &[String]) {
                     want.map(|r| r["pre_root"].to_string())
                         .unwrap_or_else(|| "nothing at all".into())));
             }
+            // the table's own model, against the statement's
+            let want_model = want.and_then(|r| r["model"].as_str());
+            let model_ok = match (want_model, ch.fixed.model.as_deref()) {
+                (Some(a), Some(b)) => a == b,
+                // a row or a statement written without one: the root comparison
+                // above is what stands, and the gap is declared below
+                _ => true,
+            };
+            if !model_ok {
+                failures.push(format!(
+                    "{}: the statement names model {} and the pre-root table's row for \
+                     (layer {}, c {}) was derived from {}", ch.tag,
+                    ch.fixed.model.clone().unwrap_or_default(), ch.layer,
+                    ch.fixed.params.c, want_model.unwrap_or("nothing")));
+            }
             pre_rows.push(json!({"tag": ch.tag, "layer": ch.layer, "c": ch.fixed.params.c,
-                                 "pre_root": got, "ok": ok}));
+                                 "pre_root": got, "ok": ok, "model_ok": model_ok}));
+        }
+        // every cell the grid uses must be in the table: a table that simply
+        // omits a layer would otherwise be a table that checks nothing there
+        let missing: Vec<String> = chunks.iter()
+            .filter(|ch| !table.iter().any(|r| {
+                r["layer"].as_u64() == Some(ch.layer as u64)
+                    && r["c"].as_u64() == Some(ch.fixed.params.c as u64)
+            }))
+            .map(|ch| ch.tag.clone())
+            .collect();
+        if !missing.is_empty() {
+            failures.push(format!(
+                "the pre-root table has no row for {} chunk(s): {}",
+                missing.len(), missing.join(", ")));
         }
     } else {
         declared.push(json!({"what": "which model each chunk's tree-0 root is",
                              "why": "no --expect-pre-roots table was given, so every \
                                      chunk's pre_root is compared only against its own \
-                                     proof"}));
+                                     proof; `b65 model-roots --plan PLAN` derives the \
+                                     table from the model"}));
     }
 
     let all_layer = run[0] == want_layer && passed[0] == run[0];
@@ -1502,6 +1579,13 @@ pub fn grid_cmd(args: &[String]) {
                        "mismatches": bad_ids, "unbacked": unbacked, "all": ids_ok},
             "pre_roots": {"table": crate::arg_str(args, "--expect-pre-roots"),
                           "chunks": pre_rows},
+            // stream LL: which model each chunk named, and how many the grid
+            // used -- one is the only answer that is not a failure
+            "models": {"distinct": all_models.len(),
+                       "per_layer": models.iter()
+                           .map(|(l, (m, _))| json!({"layer": l, "model": m}))
+                           .collect::<Vec<_>>(),
+                       "undeclared": undeclared_model},
             "declared_ends": declared,
             "failures": failures,
             "all_chain": all_chain,
