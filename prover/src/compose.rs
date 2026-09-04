@@ -1195,8 +1195,27 @@ impl Plan {
         assert!(1 + p.ao_acc_lo_bits + p.ao_acc_hi_bits + e_hi.max(0) as u32 <= 31,
                 "the attention output's no-wrap window does not fit:                  1 + {} + {} + {} > 31",
                 p.ao_acc_lo_bits, p.ao_acc_hi_bits, e_hi.max(0));
-        assert!(1 + p.ao_q_bits + p.ao_rem_bits <= 30,
-                "the attention output's quotient term does not fit: 1 + {} + {} > 30",
+        // Stream OO (E11): the same term, at the bound the identity actually
+        // needs.  The error identity is
+        // `d = 2 mag num - (2 qm - 1) denp`, and what makes it an *integer*
+        // identity rather than a field one is that both of its non-negative
+        // sides stay under `p = 2^31 - 1`.  The right-hand side is the other
+        // assert's (`2 mag num < 2^30`).  The left-hand side is
+        // `d + (2 qm - 1) denp`, and the range checks bound both factors:
+        // `qm` is looked up in the `qnz` table, whose domain is `2^ao_q_bits`
+        // rows, so `qm <= 2^q_bits - 1`; `denp` is looked up in the
+        // `ao_rem_bits` range table, so `denp <= 2^rem_bits - 1`, and `d` is in
+        // the same table.  So
+        //     d + (2 qm - 1) denp <= (2^(q+1) - 2)(2^rem - 1)
+        //                          = 2^(q+rem+1) - 2^(q+1) - 2^(rem+1) + 2,
+        // which is below `2^31 - 1` exactly when `q_bits + rem_bits <= 30`.
+        // Stream JJ wrote the bound with an extra `1 +`, which is one bit
+        // tighter and refuses `ao_rem_bits = 23` at `ao_q_bits = 7` -- the
+        // C=4096 `b10-final` dump's own worst case (`shapes.json`).  Nothing
+        // the assert protects is loosened: the two ends of the identity are the
+        // same two products, bounded by the same two range tables.
+        assert!(p.ao_q_bits + p.ao_rem_bits <= 30,
+                "the attention output's quotient term does not fit: {} + {} > 30",
                 p.ao_q_bits, p.ao_rem_bits);
         let mut widths = vec![p.k_bits, p.q_bits, 8, p.z_lo_bits, p.z_hi_bits, p.ao_rem_bits,
                               p.ao_acc_lo_bits, p.ao_acc_hi_bits];
@@ -2559,10 +2578,26 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     // its own span is the whole resolution -- the mask index
                     // *is* the column index within it, which is `Prog`'s order.
                     Reg::Glue(g) => {
-                        let RCol::Glue(i) = c else {
-                            panic!("a non-glue column named on a glue region")
+                        let (tree, gi) = match c {
+                            RCol::Glue(i) =>
+                                (1, span_of(glue[*g].trace_locations(), 1) + i),
+                            // stream OO: the norm weight is the statement's, so
+                            // it is a tree-0 column of the same region and the
+                            // link names it by its preprocessed id
+                            RCol::GluePre(i, k) => {
+                                let tag = &plan.glue.as_ref()
+                                    .expect("a glue column with no glue plan")
+                                    .regions[*g].tag;
+                                let want = crate::glue::glue_pre_col(tag, *i, *k).id;
+                                let gi = ids.iter().position(|x| x.id == want)
+                                    .expect("a glue preprocessed column missing \
+                                             from the preprocessed tree");
+                                pre_idx.push(gi);
+                                (0, gi)
+                            }
+                            _ => panic!("a non-glue column named on a glue region"),
                         };
-                        terms.push((1, span_of(glue[*g].trace_locations(), 1) + i, *w));
+                        terms.push((tree, gi, *w));
                         continue;
                     }
                     Reg::Walk(k) => {
@@ -4483,6 +4518,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 return match (c, &r.dev) {
                     (RCol::Glue(i), Some(d)) => Src::Dev(d.base[*i].device_ptr),
                     (RCol::Glue(i), None) => Src::Host(&r.base[*i]),
+                    // stream OO: `Prog::pre_at` is where the pair sits in the
+                    // region's own preprocessed list, the same index the fill
+                    // reads through `glue::src_cols_any`'s `PRE_TAG`
+                    (RCol::GluePre(i, k), Some(d)) =>
+                        Src::Dev(d.pre[r.prog.pre_at(*i, *k)].device_ptr),
+                    (RCol::GluePre(i, k), None) =>
+                        Src::Host(&r.pre[r.prog.pre_at(*i, *k)]),
                     _ => panic!("a non-glue column named on a glue region"),
                 };
             }
