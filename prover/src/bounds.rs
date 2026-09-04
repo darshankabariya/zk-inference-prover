@@ -1786,6 +1786,7 @@ mod tests {
             // the default here so every existing test keeps asking what it asked
             layer: None,
             block: None,
+            model: None,
             tok_in: vec![],
             tok_out: vec![],
         }

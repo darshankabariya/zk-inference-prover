@@ -221,6 +221,64 @@ pub struct Layer {
     pub block: Option<usize>,
 }
 
+impl Layer {
+    /// Stream LL (E11), `notes/witness-slack.md` section 5 item 1, deliverable 3:
+    /// the content hash of exactly the model data tree 0 reads -- the quantized
+    /// weights and the weight scales of every matmul, the attention output's
+    /// offline `jv` exponents, the two norm weights and the embedding table.
+    ///
+    /// It is *not* a hash of the dump directory: a dump also holds the
+    /// activations, which are this chunk's and not the model's, and two blocks
+    /// of one layer are supposed to differ in them.  Hashing the model half is
+    /// what makes "these two chunks used the same weights" a comparison the
+    /// grid can make, and it is **shape-independent** on purpose -- every block
+    /// of a layer hashes to the same value whatever its `c` or its table size,
+    /// which is the property the comparison needs.
+    ///
+    /// Two model-derived things it deliberately leaves out, because both are a
+    /// function of the *chunk's* shape as well as the layer's: the master exp
+    /// table (`1 << log_table` rows) and the bands' per-instance `dinv` scales.
+    /// Those are covered by the derived tree-0 root, not here.  SHA-256,
+    /// little-endian, in the order `Plan::pre_ids` walks the families.
+    pub fn model_hash(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"b65-model-v1");
+        h.update((self.ao.jv.len() as u64).to_le_bytes());
+        for v in &self.ao.jv {
+            h.update(v.to_le_bytes());
+        }
+        for m in &self.mats {
+            h.update(m.name.as_bytes());
+            h.update((m.qw.len() as u64).to_le_bytes());
+            let bytes: Vec<u8> = m.qw.iter().map(|x| *x as u8).collect();
+            h.update(&bytes);
+            for v in &m.jw {
+                h.update(v.to_le_bytes());
+            }
+            for (a, b) in &m.sw {
+                h.update(a.to_le_bytes());
+                h.update(b.to_le_bytes());
+            }
+        }
+        if let Some(g) = &self.glue {
+            for w in [&g.w1, &g.w2] {
+                h.update((w.len() as u64).to_le_bytes());
+                for x in w {
+                    h.update(x.to_le_bytes());
+                }
+            }
+        }
+        if let Some(e) = &self.embed_tab {
+            h.update((e.len() as u64).to_le_bytes());
+            for x in e {
+                h.update(x.to_le_bytes());
+            }
+        }
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
 pub struct GlueCols {
     pub d: usize,
     pub dff: usize,

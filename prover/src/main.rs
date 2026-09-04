@@ -1185,6 +1185,144 @@ fn pre_split_cmd(args: &[String]) {
     emit("pre_split", report);
 }
 
+/// Stream LL (E11), `notes/witness-slack.md` section 5 item 1, deliverable 2:
+/// the expected tree-0 root of one chunk, derived from the model.
+///
+///     b65 expect-root --witness DIR [--layer k] [--block b] <the chunk's flags>
+///
+/// It takes exactly the arguments the chunk's `compose` line takes -- the plan
+/// line, minus `--ser-tag` -- builds the chunk's `Plan` and its tree 0, and
+/// stops there: the root, the model hash and the classification, and no proof.
+/// The derived root is the prover's own by construction, because it is the
+/// prover's own code up to `commit_pre` and there is no second implementation
+/// of tree 0 to drift from it.
+///
+/// **What it still reads that a verifier does not have.** `Layer::load` reads
+/// the whole dump, activations included, and tree 0 needs only the model half
+/// (the weights, the weight scales, `jv`, the norm weights, the embedding
+/// table, and the manifest's `frac_per_head`).  Splitting the loader is the
+/// open item in stream LL's record; until it is split this command must be run
+/// where the dump is, and it costs the witness build as well as the commit.
+fn expect_root_cmd(args: &[String]) {
+    compose::PRE_ONLY.store(true, std::sync::atomic::Ordering::Relaxed);
+    compose_cmd(args);
+    unreachable!("expect-root: the prover did not stop after committing tree 0");
+}
+
+/// Stream LL (E11), deliverable 2: the model manifest KK's
+/// `bounds-grid --expect-pre-roots` consumes.
+///
+///     b65 model-roots --plan PLAN [--out FILE] [--limit N]
+///
+/// `PLAN` is an `o_plan.py` plan file: one `compose` argument line per chunk.
+/// Each line is run through `expect-root` in its own process -- one chunk's
+/// tree 0 at a time, which is what keeps the peak resident set to one chunk's
+/// -- and the rows are collected into
+///
+///     [{"layer": k, "block": b, "c": n, "pre_root": "...", "model": "..."}]
+///
+/// The rows a grid needs are keyed by `(layer, c)`, which is what
+/// `grid_cmd` looks them up by; `block` and `model` ride along so a reader can
+/// see which dump each row came from and so the grid can compare model hashes.
+fn model_roots_cmd(args: &[String]) {
+    let plan = arg_str(args, "--plan").expect("model-roots needs --plan FILE");
+    let text = std::fs::read_to_string(&plan)
+        .unwrap_or_else(|e| panic!("--plan {plan}: {e}"));
+    let limit = arg_scalar::<usize>(args, "--limit", usize::MAX);
+    let exe = std::env::current_exe().expect("model-roots: no path to this binary");
+    let mut rows: Vec<Value> = vec![];
+    let mut seen: std::collections::BTreeSet<(i64, u64)> = Default::default();
+    let mut skipped = 0usize;
+    let t0 = std::time::Instant::now();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if rows.len() >= limit {
+            break;
+        }
+        // the plan line's own arguments, minus the two that name the artifact
+        // rather than the chunk
+        let mut a: Vec<String> = vec![];
+        let mut it = line.split_whitespace();
+        while let Some(w) = it.next() {
+            if w == "--ser-tag" || w == "--ser-dir" {
+                it.next();
+                continue;
+            }
+            a.push(w.to_string());
+        }
+        let out = std::process::Command::new(&exe)
+            .arg("expect-root")
+            .args(&a)
+            .output()
+            .unwrap_or_else(|e| panic!("model-roots: cannot run {exe:?}: {e}"));
+        if !out.status.success() {
+            eprintln!("model-roots: {line}\n{}", String::from_utf8_lossy(&out.stderr));
+            panic!("model-roots: expect-root failed on a plan line");
+        }
+        let doc: Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("model-roots: expect-root wrote no JSON: {e}"));
+        let r = &doc["result"];
+        let layer = r["layer"].as_i64().unwrap_or(-1);
+        let c = r["c"].as_u64().unwrap_or(0);
+        // one row per (layer, c): every chunk of a grid at that cell has the
+        // same tree 0, and a second run of the same cell must agree with the
+        // first or the derivation is not a function of what it claims to be
+        if let Some(prev) = rows.iter().find(|p| {
+            p["layer"].as_i64() == Some(layer) && p["c"].as_u64() == Some(c)
+        }) {
+            assert_eq!(prev["pre_root"], r["pre_root"],
+                       "model-roots: two chunks at (layer {layer}, c {c}) derive \
+                        different tree-0 roots");
+            assert_eq!(prev["model"], r["model"],
+                       "model-roots: two chunks at (layer {layer}, c {c}) name \
+                        different models");
+            skipped += 1;
+            continue;
+        }
+        seen.insert((layer, c));
+        rows.push(json!({
+            "layer": layer,
+            "block": r["block"],
+            "c": c,
+            "pre_root": r["pre_root"],
+            "model": r["model"],
+            "source": r["source"],
+        }));
+    }
+    // the model hash is a per-layer constant: two rows at one layer that name
+    // two models is exactly the case section 5 item 1's last sentence names
+    let mut by_layer: std::collections::BTreeMap<i64, &Value> = Default::default();
+    for r in &rows {
+        let l = r["layer"].as_i64().unwrap_or(-1);
+        if let Some(prev) = by_layer.get(&l) {
+            assert_eq!(prev["model"], r["model"],
+                       "model-roots: layer {l} appears with two different model hashes");
+        } else {
+            by_layer.insert(l, r);
+        }
+    }
+    let body = json!({
+        "plan": plan,
+        "rows": rows,
+        "distinct_cells": rows.len(),
+        "repeat_cells": skipped,
+        "layers": by_layer.len(),
+        "models": by_layer.values()
+            .map(|r| r["model"].as_str().unwrap_or("").to_string())
+            .collect::<std::collections::BTreeSet<String>>().len(),
+        "secs": t0.elapsed().as_secs_f64(),
+    });
+    if let Some(f) = arg_str(args, "--out") {
+        std::fs::write(&f, serde_json::to_string_pretty(&body["rows"]).unwrap())
+            .unwrap_or_else(|e| panic!("--out {f}: {e}"));
+        eprintln!("model-roots: {} rows -> {f}", rows.len());
+    }
+    emit("model_roots", body);
+}
+
 fn compose_cmd(args: &[String]) {
     // Stream EE (open item 21): before anything, because `prove_gen` reads it.
     cudagen::fp_out_set(args);
@@ -2314,6 +2452,8 @@ fn main() {
         "attn-probes" => attn_probes_cmd(&args),
         "compose" => compose_cmd(&args),
         "pre-split" => pre_split_cmd(&args),
+        "expect-root" => expect_root_cmd(&args),
+        "model-roots" => model_roots_cmd(&args),
         "compose-chunks" => chunks::chunks_cmd(&args),
         "exprprobe" => exprprobe::cmd(&args),
         "cudacheck" => cudagen::cmd(&args),
@@ -2341,7 +2481,7 @@ fn main() {
             eprintln!("unknown subcommand {other:?}; \
                        expected tables|dequant|width|kmax|probes|pack|attn-probes|exprprobe|cudacheck|cudaemit|logupcheck|genemit|\
                        argmax|argmax-probes|embed|embed-probes|\
-                       compose|pre-split|compose-probes|bounds-chain|bounds-grid|psweep|requant|requant-probes|glue|glue-probes|selftest");
+                       compose|pre-split|expect-root|model-roots|compose-probes|bounds-chain|bounds-grid|psweep|requant|requant-probes|glue|glue-probes|selftest");
             std::process::exit(2);
         }
     }

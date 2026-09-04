@@ -368,6 +368,18 @@ pub struct Fixed {
     pub layer: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block: Option<usize>,
+    /// Stream LL (E11), `notes/witness-slack.md` section 5 item 1's last
+    /// sentence: the content hash of the model data tree 0 reads
+    /// (`Layer::model_hash`).  Declared, like `pre_root` and like `layer` --
+    /// but *compared*: `bounds-grid` refuses a grid whose chunks name two
+    /// different models, and refuses two chunks at the same layer whose model
+    /// hashes differ, so "two blocks of one layer used different weights" is
+    /// no longer unseen.  What ties the hash to the *proof* is the derived
+    /// tree-0 root (`--expect-pre-roots`), which `b65 model-roots` computes
+    /// from the same model.  `None` on a statement written before the field
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Stream KK (`notes/witness-slack.md` §1b): the token ids the embedding
     /// region committed, one per position of this block, in position order.
     /// `verify_composed` recomputes the Horner claim over them under the
@@ -977,6 +989,12 @@ impl GluePlan {
         3 + self.uns.len()
     }
 }
+
+/// Stream LL (E11): stop the prover after tree 0 is committed and report its
+/// root.  Set by `b65 expect-root` and by nothing else; the ordinary `compose`
+/// path never reads a set flag, so no recorded digest can move because of it.
+pub static PRE_ONLY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Stream LL (E11): what a preprocessed column needs in order to be rebuilt.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
@@ -4093,7 +4111,30 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             crate::precache::fill(pre_key, &sess);
         }
     }
-    crate::util::m4_add("wall/commit_pre", m4_t.elapsed().as_secs_f64());
+    let ll_pre_secs = m4_t.elapsed().as_secs_f64();
+    crate::util::m4_add("wall/commit_pre", ll_pre_secs);
+    // Stream LL (E11), `notes/witness-slack.md` section 5 item 1: `b65
+    // expect-root` wants tree 0's root and nothing after it.  The stop is here
+    // rather than in a second builder so that the derived root is the prover's
+    // own by construction -- there is no second implementation of tree 0 to
+    // drift.  `experiments/b13/ll/gate.sh` step 3 is the control that says the
+    // two agree: the same shape through `compose` and through `expect-root`.
+    if PRE_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
+        let root = sess.tree_root(0);
+        crate::util::emit("expect_root", json!({
+            "pre_root": root,
+            "model": layer.model_hash(),
+            "layer": layer.layer,
+            "block": layer.block,
+            "source": layer.source,
+            "c": p.c,
+            "s": p.s,
+            "split": plan.pre_split_report(),
+            "trace_secs": trace_secs,
+            "commit_pre_secs": ll_pre_secs,
+        }));
+        std::process::exit(0);
+    }
     let m4_t = std::time::Instant::now();
     if m4_refs {
         sess.commit_any(base_all);
@@ -5237,6 +5278,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // chunk being the one that cannot).
         layer: layer.layer,
         block: layer.block,
+        // stream LL: the content hash of this chunk's model half, so a grid can
+        // compare "which model" as well as "which layer".
+        model: Some(layer.model_hash()),
         // stream KK: the ids the embedding region committed, one per position,
         // and the tokens the argmax region emitted -- published so that a
         // reader of two chunks can compare them position by position.  Each is
