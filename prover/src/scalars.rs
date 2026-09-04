@@ -25,10 +25,12 @@
 //! share `b65_walk_eval` and differ in how many matmuls they carry). The probe
 //! also hashes the eval's structure as it runs -- every mask, preprocessed,
 //! relation and constraint call, every base-field constant's value, every
-//! arithmetic step's kind, and each extension constant's 0 / 1 / other class,
-//! which is the one thing about a scalar's value the lowering folds on -- and
-//! that hash is part of the key. Two evals with the same name, sizes and
-//! structure hash lower to the same ops.
+//! arithmetic step's kind, and, per extension constant, everything the lowering
+//! reads about its *value*: its 0 / 1 / base / extension class and the index of
+//! the first earlier constant equal to it (stream QQ, README item 23) -- and
+//! that hash is part of the key. Those three are the whole of the lowering's
+//! value dependence, so a hit is an IR the caller would have lowered. Two evals
+//! with the same name, sizes and structure hash lower to the same ops.
 //!
 //! `B7_M5_IRCACHE`: 0 off (the default, the proven path), 1 on, 2 on with every
 //! hit checked against the full lowering -- ops, widths, constraints, fractions,
@@ -54,13 +56,20 @@ use crate::cudagen::{Ir, RelEntry, relation_entries};
 
 /// What one evaluation of an eval through the probe leaves behind: every
 /// extension constant in order, and the hash of the eval's structure.
+#[derive(Default)]
 struct Probed {
     consts: Vec<SecureField>,
     h: u64,
+    /// Stream QQ (README item 23): value -> the index of the first occurrence
+    /// that carried it. `Lower::scalar` interns a slot *by value*, so two
+    /// constants that coincide share one slot and one op; that is a fact about
+    /// the values and it has to be in the key, or a hit serves an IR the caller
+    /// would not have lowered. Not part of `Probed`'s result -- only of `h`.
+    seen: HashMap<[u32; 4], usize>,
 }
 
 thread_local! {
-    static REC: RefCell<Probed> = const { RefCell::new(Probed { consts: Vec::new(), h: 0 }) };
+    static REC: RefCell<Probed> = RefCell::new(Probed::default());
 }
 
 /// fold bytes into the structure hash (FNV-1a)
@@ -79,15 +88,45 @@ fn tr_base(tag: u8, c: M31) {
     tr(&c.0.to_le_bytes());
 }
 
+/// Record one extension constant, and hash *exactly* what the lowering reads
+/// about its value -- no more, so the key stays a shape key, and no less, so a
+/// hit cannot serve an IR built from different values (README item 23).
+///
+/// The lowering reads three things and only three:
+///
+///  * `Lower::lit` -- is the value literally 0 or 1 (in the base field)? That
+///    decides whether `x + 0`, `x - 0`, `x * 1` and `0 * x` fold away.
+///  * `Lower::scalar` -- are the upper limbs zero? That is the node's width,
+///    m31 or qm31, and the width is in the fingerprint.
+///  * `Lower::scalar` again -- has this exact value been seen before? The slot
+///    table is keyed by value, so a repeat costs no slot and no op.
+///
+/// Class 0 and 1 cover the first, class 2 (base field, >= 2) and 3 (extension)
+/// the second, and the first-occurrence index the third. Before this the class
+/// was 0/1/other and the repeat was not hashed at all, which is how a band whose
+/// two claims coincided was served its sibling's IR and lost its `kernel
+/// fallback:` line.
 fn note(v: SecureField) {
     let l = v.to_m31_array();
-    let class: u8 = if l[1].0 == 0 && l[2].0 == 0 && l[3].0 == 0 && l[0].0 <= 1 {
-        l[0].0 as u8
-    } else {
-        2
+    let base = l[1].0 == 0 && l[2].0 == 0 && l[3].0 == 0;
+    let class: u8 = match (base, l[0].0) {
+        (true, 0) => 0,
+        (true, 1) => 1,
+        (true, _) => 2,
+        (false, _) => 3,
     };
     tr(&[b'S', class]);
-    REC.with(|r| r.borrow_mut().consts.push(v));
+    // `tr` borrows `REC` itself, so the first-occurrence lookup has to finish
+    // before it is called -- one borrow at a time.
+    let first = REC.with(|r| {
+        let mut r = r.borrow_mut();
+        let k = [l[0].0, l[1].0, l[2].0, l[3].0];
+        let i = r.consts.len();
+        let first = *r.seen.entry(k).or_insert(i);
+        r.consts.push(v);
+        first
+    });
+    tr(&(first as u64).to_le_bytes());
 }
 
 /// A base value. `Some` is a lone `BaseExpr::Const`, which becomes a scalar the
@@ -390,10 +429,11 @@ fn probe<E: FrameworkEval>(eval: &E) -> Probed {
     REC.with(|r| {
         let mut r = r.borrow_mut();
         r.consts.clear();
+        r.seen.clear();
         r.h = 0xcbf2_9ce4_8422_2325;
     });
     let _ = eval.evaluate(ScalarProbe);
-    REC.with(|r| std::mem::replace(&mut *r.borrow_mut(), Probed { consts: Vec::new(), h: 0 }))
+    REC.with(|r| std::mem::replace(&mut *r.borrow_mut(), Probed::default()))
 }
 
 // ---------------------------------------------------------------- the cache ----
@@ -534,7 +574,7 @@ pub fn cached_ir<E: FrameworkEval>(
     }
     let family = eval.cuda_eval_name();
     let t = std::time::Instant::now();
-    let Probed { consts, h } = probe(eval);
+    let Probed { consts, h, .. } = probe(eval);
     let key: Key = (family, log_size, eval_log_size, logup, h);
     let hit = {
         let g = cache().lock().unwrap();
@@ -579,4 +619,82 @@ pub fn cached_ir<E: FrameworkEval>(
         }
     }
     ir
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two claims and nothing else. The whole of the fixture is that its two
+    /// extension constants are the caller's, so the structure hash can be asked
+    /// what it does and does not distinguish.
+    struct TwoClaims {
+        a: SecureField,
+        b: SecureField,
+    }
+
+    impl FrameworkEval for TwoClaims {
+        fn cuda_eval_name(&self) -> &'static str {
+            "b65_qq_probe_test"
+        }
+        fn log_size(&self) -> u32 {
+            4
+        }
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            5
+        }
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let x = eval.next_trace_mask();
+            let y = eval.next_trace_mask();
+            eval.add_constraint(E::EF::from(x) - self.a);
+            eval.add_constraint(E::EF::from(y) - self.b);
+            eval
+        }
+    }
+
+    fn base(v: u32) -> SecureField {
+        SecureField::from(M31::from_u32_unchecked(v))
+    }
+    fn ext(v: u32) -> SecureField {
+        SecureField::from_m31_array([M31::from_u32_unchecked(v); 4])
+    }
+    fn h(a: SecureField, b: SecureField) -> u64 {
+        probe(&TwoClaims { a, b }).h
+    }
+
+    /// Stream QQ (README item 23). The cache key is the eval's structure plus
+    /// what the lowering reads about its scalars' *values*, and those are three
+    /// things: is a value 0 or 1 (`Lower::lit` folds `x - 0`, `x * 1`), are its
+    /// upper limbs zero (`Lower::scalar`'s width, which is in the fingerprint),
+    /// and has it been seen before (the slot table interns by value, so a
+    /// repeat costs neither slot nor op). Miss any of them and a hit serves an
+    /// IR the caller would not have lowered -- which is how a band whose two
+    /// claims coincided was handed its sibling's IR and lost its announced
+    /// `kernel fallback:` line.
+    #[test]
+    fn the_cache_key_carries_every_value_fact_the_lowering_reads() {
+        let ref_h = h(base(7), base(9));
+        assert_ne!(ref_h, h(base(7), base(7)), "two claims that coincide share a slot");
+        assert_ne!(ref_h, h(base(7), base(0)), "a zero claim folds `x - 0` away");
+        assert_ne!(ref_h, h(base(7), base(1)), "a one claim folds `x * 1` away");
+        assert_ne!(ref_h, h(base(7), ext(9)), "an extension claim is a qm31 node");
+        assert_ne!(ref_h, h(base(0), base(9)), "either side of the pair, not just the last");
+    }
+
+    /// And the other half: the key must not move with an ordinary value, or the
+    /// cache never hits and every chunk pays a full lowering.
+    #[test]
+    fn the_cache_key_is_a_shape_key_and_not_a_value_key() {
+        assert_eq!(h(base(7), base(9)), h(base(7), base(9)), "the same values");
+        assert_eq!(
+            h(base(7), base(9)),
+            h(base(11), base(13)),
+            "two distinct nonzero base-field claims are one shape"
+        );
+        assert_eq!(
+            h(ext(7), ext(9)),
+            h(ext(11), ext(13)),
+            "and so are two distinct extension claims"
+        );
+    }
 }

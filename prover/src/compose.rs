@@ -487,6 +487,43 @@ pub fn qm(v: SecureField) -> [u32; 4] {
     let a = v.to_m31_array();
     [a[0].0, a[1].0, a[2].0, a[3].0]
 }
+/// Stream QQ (log row 61): at emit time a claim the placeholder set does not
+/// supply is a defect, not a zero.
+///
+/// Every region reads its tie claims through `.get(..)`, and the missing case
+/// used to be `SecureField::zero()`. That zero is not neutral: `Lower::ext`
+/// folds `x - 0` and `Ir::schedule` drops the dead slot with it, so the emitter
+/// installs a shape two instructions and one slot shorter than the one every
+/// real chunk asks for, and the component takes the announced scalar fallback
+/// for the life of the store. It happened once on `b65_key_eval` (open item 21,
+/// the other direction: a claim the *witness* drove to zero) and again on
+/// `deq_sc` and `walk_qx`, which stream II added without extending
+/// `fill_tie_claims` -- ten of the wired C=4K chunk's thirteen fallback lines.
+///
+/// So on the emit path the missing case panics and names the vector. On the
+/// prove path it stays a zero: a statement written before a claim existed still
+/// parses, and that is what `#[serde(default)]` on those fields is for.
+static EMIT_STRICT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_emit_strict(on: bool) {
+    EMIT_STRICT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn claim_at(v: Option<[u32; 4]>, what: &str) -> SecureField {
+    match v {
+        Some(a) => unqm(a),
+        None => {
+            assert!(
+                !EMIT_STRICT.load(std::sync::atomic::Ordering::Relaxed),
+                "cudaemit: no placeholder for claim {what} -- every claim vector a plan \
+                 can carry must be filled in `cudagen::fill_tie_claims`, or the emitted \
+                 shape folds the missing claim away and no chunk ever finds it"
+            );
+            SecureField::zero()
+        }
+    }
+}
+
 pub fn unqm(a: [u32; 4]) -> SecureField {
     SecureField::from_m31_array([
         M31::from_u32_unchecked(a[0]),
@@ -973,12 +1010,10 @@ impl GluePlan {
                         kind: *kind,
                         w: we.iter().map(|e| w.pow(*e)).collect(),
                         step: w.pow(*se),
-                        claimed: claims
-                            .glue_ties
-                            .get(i)
-                            .and_then(|g| g.get(k))
-                            .map(|c| unqm(*c))
-                            .unwrap_or(SecureField::zero()),
+                        claimed: claim_at(
+                            claims.glue_ties.get(i).and_then(|g| g.get(k)).copied(),
+                            "glue_ties",
+                        ),
                     })
                     .collect(),
             })
@@ -2359,7 +2394,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             mu_den: r_c * s_span.inverse(),
             claimed_out: unqm(claims.ao_out),
             claimed_den: unqm(claims.ao_den),
-            claimed_q: claims.ao_q.first().copied().map(unqm).unwrap_or(SecureField::zero()),
+            claimed_q: claim_at(claims.ao_q.first().copied(), "ao_q"),
             qnz: rels.qnz.clone(),
             rel_rem: rels.range(p.ao_rem_bits).clone(),
             epow: rels.epow.clone(),
@@ -2411,7 +2446,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         lam: ow.lam,
                         k_in: ow.k_in,
                         k_bd: ow.k_bd,
-                        claimed: claimed.map(unqm).unwrap_or(SecureField::zero()),
+                        claimed: claim_at(claimed, "deq_out/head_key"),
                         kind,
                     }
                 }),
@@ -2424,8 +2459,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     .then(|| crate::dequant::SSide {
                         mu: w_glue,
                         lam: lam_glue,
-                        claimed: claims.deq_sc.get(mi).copied().map(unqm)
-                            .unwrap_or(SecureField::zero()),
+                        claimed: claim_at(claims.deq_sc.get(mi).copied(), "deq_sc"),
                     }),
                 // B11 stream U, lever 3: under the flag this region's lookups
                 // are the batched GKR's, so the AIR emits none of them and the
@@ -2468,8 +2502,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 qx: plan.glue.as_ref().map(|_| {
                     let m0 = &p.mats[w.mats[0]];
                     let nn = (m0.tokens * m0.n_in) as i128;
-                    let claimed = claims.walk_qx.get(wi).copied().map(unqm)
-                        .unwrap_or(SecureField::zero());
+                    let claimed = claim_at(claims.walk_qx.get(wi).copied(), "walk_qx");
                     // Stream II (E11), at the JJ merge: the `o` group folds
                     // under the *attnout* region's weights, not the wiring
                     // family's.  Every other group's counterparty is a
@@ -2737,12 +2770,9 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     if let Some(rr) = &rels.rq {
         for (k, rp) in plan.rqs.iter().enumerate() {
             let tie = rq_tie_w(w_glue, lam_glue, rp,
-                               claims.rq_in.get(k).copied().map(unqm)
-                                   .unwrap_or(SecureField::zero()),
-                               claims.rq_out.get(k).copied().map(unqm)
-                                   .unwrap_or(SecureField::zero()),
-                               claims.rq_sc.get(k).copied().map(unqm)
-                                   .unwrap_or(SecureField::zero()));
+                               claim_at(claims.rq_in.get(k).copied(), "rq_in"),
+                               claim_at(claims.rq_out.get(k).copied(), "rq_out"),
+                               claim_at(claims.rq_sc.get(k).copied(), "rq_sc"));
             rq_comps.push(FrameworkComponent::<crate::requant::RequantEval>::new(
                 alloc,
                 crate::requant::RequantEval {
@@ -2814,9 +2844,8 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         let lay = plan.mat_lays[mi];
         let m = &plan.p.mats[mi];
         let tie = crate::argmax::ATie {
-            claimed: claims.am_key.first().copied().map(unqm).unwrap_or(SecureField::zero()),
-            claimed_tok: claims.head_tok.first().copied().map(unqm)
-                .unwrap_or(SecureField::zero()),
+            claimed: claim_at(claims.am_key.first().copied(), "am_key"),
+            claimed_tok: claim_at(claims.head_tok.first().copied(), "head_tok"),
             tag: m.name.clone(),
             ..argmax_tie_w(w_glue, m.tokens, m.n_out, lay.per_row)
         };
@@ -2842,10 +2871,8 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         (Some(l), Some(er)) => {
             let g = plan.glue.as_ref().expect("the embedding gadget needs the wiring family");
             let mut tie = crate::embed::tie_w(w_glue, lam_glue, g.t.d, p.s, l);
-            tie.claimed =
-                claims.embed_out.first().copied().map(unqm).unwrap_or(SecureField::zero());
-            tie.claimed_tok =
-                claims.embed_tok.first().copied().map(unqm).unwrap_or(SecureField::zero());
+            tie.claimed = claim_at(claims.embed_out.first().copied(), "embed_out");
+            tie.claimed_tok = claim_at(claims.embed_tok.first().copied(), "embed_tok");
             let em = FrameworkComponent::<crate::embed::EmbedEval>::new(
                 alloc,
                 crate::embed::EmbedEval {
