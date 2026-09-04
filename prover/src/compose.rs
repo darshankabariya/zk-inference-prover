@@ -739,7 +739,12 @@ fn nn_band_ties(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
     let (hd, nh) = (p.hd as i128, p.nh as i128);
     let n = (p.s as i128) * nh * hd;
     let base = n - 1 - plan.head_offsets[b] as i128 * hd;
-    let cl = claims.band_qkv.get(k).copied().unwrap_or([[0u32; 4]; 3]);
+    // Stream QQ (log row 66): the same backstop the other claim vectors read
+    // through -- an emit that reaches here without a placeholder folds this
+    // band's three claims away and installs a `b65_chan_eval`/`b65_key_eval`
+    // shape no rotated chunk asks for.
+    let cl = claims.band_qkv.get(k).copied();
+    let cl = |j: usize| claim_at(cl.map(|c| c[j]), "band_qkv");
     let (pk, pq, pv) = (l.chan.pk as i128, l.chan.pq as i128, l.key.pv as i128);
     let (cc, kc) = (l.chan.g.chunks as i128, l.key.g.chunks as i128);
     // the channel region's group index is `inst hd + ch`, which is affine in the
@@ -750,7 +755,7 @@ fn nn_band_ties(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
         s_bd: wpow(w, (cc - 1) * pk * nh * hd - 1),
         s_ib: None,
         off: off.k,
-        claimed: unqm(cl[0]),
+        claimed: cl(0),
     };
     let qt = crate::attn_air::BandTie {
         w: (0..l.chan.pq).map(|q| wpow(w, base - q as i128 * nh * hd)).collect(),
@@ -758,7 +763,7 @@ fn nn_band_ties(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
         s_bd: wpow(w, (cc - 1) * pq * nh * hd - 1),
         s_ib: None,
         off: off.q,
-        claimed: unqm(cl[1]),
+        claimed: cl(1),
     };
     // the key region's group index is `inst C + key`, which is not: crossing an
     // instance moves the head by one and the key by a whole context
@@ -768,7 +773,7 @@ fn nn_band_ties(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
         s_bd: wpow(w, (kc - 1) * pv - nh * hd),
         s_ib: Some(wpow(w, (sh.c as i128 - 1) * nh * hd + (kc - 1) * pv - hd)),
         off: off.v,
-        claimed: unqm(cl[2]),
+        claimed: cl(2),
     };
     Some((kt, qt, vt))
 }
@@ -800,7 +805,7 @@ fn nn_band_qtie(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
         s_bd: wpow(w, (cc - 1) * pq * nh * hd - 1),
         s_ib: None,
         off: off.q,
-        claimed: claims.band_q.get(k).copied().map(unqm).unwrap_or(SecureField::zero()),
+        claimed: claim_at(claims.band_q.get(k).copied(), "band_q"),
     })
 }
 
@@ -3304,10 +3309,8 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         // tables -- the same order `Plan::pre_ids` and the component lists use
         for (k, qp) in plan.quants.iter().enumerate() {
             let tie = q_tie_w(w_glue, lam_glue, qp, p.nh,
-                              claims.nn_in.get(k).copied().map(unqm)
-                                  .unwrap_or(SecureField::zero()),
-                              claims.nn_out.get(k).copied().map(unqm)
-                                  .unwrap_or(SecureField::zero()));
+                              claim_at(claims.nn_in.get(k).copied(), "nn_in"),
+                              claim_at(claims.nn_out.get(k).copied(), "nn_out"));
             quant_comps.push(FrameworkComponent::<crate::rope::QuantEval>::new(
                 alloc,
                 crate::rope::QuantEval {

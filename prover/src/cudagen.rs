@@ -2381,6 +2381,16 @@ fn fill_tie_claims(plan: &crate::compose::Plan, claims: &mut crate::compose::Cla
     claims.rq_in = plan.rqs.iter().map(|_| felt()).collect();
     claims.rq_out = plan.rqs.iter().map(|_| felt()).collect();
     claims.rq_sc = plan.rqs.iter().map(|_| felt()).collect();
+    // Stream QQ at the NN merge (log row 66): stream NN's four, in the same
+    // state stream II's were in -- `nn_in`/`nn_out` are read per quantize
+    // region, `band_qkv` per rotated band and `band_q` per prefix band, all
+    // through `.get(..)`, and an unfilled one folds `x - 0` out of
+    // `b65_quant_eval` and of the corner and prefix `b65_chan_eval`s. Found by
+    // this stream's own guard on its first contact with someone else's work.
+    claims.nn_in = plan.quants.iter().map(|_| felt()).collect();
+    claims.nn_out = plan.quants.iter().map(|_| felt()).collect();
+    claims.band_qkv = plan.nn_bands.iter().map(|_| std::array::from_fn(|_| felt())).collect();
+    claims.band_q = plan.nn_qbands.iter().map(|_| felt()).collect();
 }
 
 /// `cudaemit`: lower every component, group by fingerprint into kernels, and

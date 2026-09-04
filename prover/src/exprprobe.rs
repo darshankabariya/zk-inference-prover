@@ -682,19 +682,42 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         // exp + norm/frac/mul/qnz + one per range width, and a margin (the
         // glue's table sides come out of the same margin).
         table_sums: (0..(5 + plan.widths.len() + 16)).map(|_| felt()).collect(),
-        // `Params::ties` reads these via `.get(..).unwrap_or(zero)`, so the
-        // placeholder claims can stay empty without changing the IR's shape.
-        glue_ties: vec![], deq_out: vec![], head_key: vec![], am_key: vec![],
-        head_tok: vec![],
-        // stream BB: the same, and `fill_tie_claims` gives them nonzero
-        // placeholders on the emit path so the emitted shape is the proved one
-        embed_out: vec![], embed_tok: vec![],
-        // stream II: the same again -- the seams read their claims through
-        // `.get(..).unwrap_or(zero)`, so empty placeholders keep the IR's shape
-        rq_in: vec![], rq_out: vec![], walk_qx: vec![], rq_sc: vec![], deq_sc: vec![],
-        // stream NN: and once more for the rotation's quantize regions and the
-        // bands' own K/Q/V claims
-        nn_in: vec![], nn_out: vec![], band_qkv: vec![], band_q: vec![],
+        // Stream QQ (log rows 61 and 66): every tie claim vector is filled here
+        // too, with the same distinct nonzero placeholders `felt()` gives the
+        // rest. The comment this replaces said empty placeholders "keep the
+        // IR's shape" and it was wrong three times over: a region reads a
+        // missing claim as `SecureField::zero()`, `Lower::ext` folds `x - 0`
+        // and `Ir::schedule` drops the slot with it, so an empty vector lowers
+        // to a shape two instructions and one slot short of the one every real
+        // chunk asks for. `cudagen::fill_tie_claims` overwrites all of these on
+        // the emit path; filling them here means the probe and `cudacheck` see
+        // the same shape, and that a vector added by a later stream is wrong in
+        // one place instead of two.
+        glue_ties: plan
+            .glue
+            .as_ref()
+            .map(|g| g.regions.iter().map(|r| r.ties.iter().map(|_| felt()).collect()).collect())
+            .unwrap_or_default(),
+        deq_out: plan
+            .glue
+            .as_ref()
+            .map(|g| g.out_ties.iter().map(|_| felt()).collect())
+            .unwrap_or_default(),
+        head_key: vec![felt()], am_key: vec![felt()],
+        head_tok: vec![felt()],
+        // stream BB: the embedding gadget's two
+        embed_out: vec![felt()], embed_tok: vec![felt()],
+        // stream II: the requantize seams' three, the walks' and the matmuls'
+        rq_in: (0..plan.rqs.len()).map(|_| felt()).collect(),
+        rq_out: (0..plan.rqs.len()).map(|_| felt()).collect(),
+        rq_sc: (0..plan.rqs.len()).map(|_| felt()).collect(),
+        walk_qx: (0..nw).map(|_| felt()).collect(),
+        deq_sc: (0..nm).map(|_| felt()).collect(),
+        // stream NN: the rotation's quantize regions and the bands' own K/Q/V
+        nn_in: (0..plan.quants.len()).map(|_| felt()).collect(),
+        nn_out: (0..plan.quants.len()).map(|_| felt()).collect(),
+        band_qkv: (0..plan.nn_bands.len()).map(|_| std::array::from_fn(|_| felt())).collect(),
+        band_q: (0..plan.nn_qbands.len()).map(|_| felt()).collect(),
         // B11 stream Q: the GKR bundle is bytes, not a claim; nothing the
         // components lower reads it, so the placeholder statement carries none.
         gkr: None,
