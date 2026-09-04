@@ -1386,6 +1386,11 @@ fn compose_probes_cmd(args: &[String]) {
         accepted
     };
 
+    // Stream OO: every `layer_clone` below is dropped as soon as its probe has
+    // run.  A shadowed `let mut l2` is not freed until the function returns, so
+    // the six of them were held for the whole run and the 8B suite was
+    // OOM-killed on the box at probe 31 of 46 (log row 57, rc 137).  Nothing
+    // about what a probe proves changes.
     // 1. a corrupted accumulator: the dequant region stays self-consistent and the
     //    Y = W X identity is what rejects
     let mut l2 = layer_clone(&l);
@@ -1394,6 +1399,7 @@ fn compose_probes_cmd(args: &[String]) {
     l2.mats[dn].acc[123 % n] += 1;
     assert!(!probe("corrupted accumulator (down)", &l2, &Default::default(),
                    "the Y = W X identity"), "corrupted acc accepted");
+    drop(l2);
 
     // 2. a corrupted activation: the same identity, other side
     let mut l2 = layer_clone(&l);
@@ -1405,6 +1411,7 @@ fn compose_probes_cmd(args: &[String]) {
     }
     assert!(!probe("corrupted activation (qkv)", &l2, &Default::default(),
                    "the Y = W X identity"), "corrupted qx accepted");
+    drop(l2);
 
     // 3. a corrupted key in band 0: the Q.K^T identity
     let mut l2 = layer_clone(&l);
@@ -1412,6 +1419,7 @@ fn compose_probes_cmd(args: &[String]) {
     l2.bands[0].kk[1234 % n] += 1;
     assert!(!probe("corrupted key (band 0)", &l2, &Default::default(), "Q.K^T"),
             "corrupted key accepted");
+    drop(l2);
 
     // 4. a corrupted attention output: the A.V link
     let mut l2 = layer_clone(&l);
@@ -1419,6 +1427,7 @@ fn compose_probes_cmd(args: &[String]) {
     l2.ao.acc[999 % n] += 1;
     assert!(!probe("corrupted attention output", &l2, &Default::default(), "A.V"),
             "corrupted attnout accepted");
+    drop(l2);
 
     // 5. a corrupted attnout denominator: the denominator link
     let mut l2 = layer_clone(&l);
@@ -1426,6 +1435,7 @@ fn compose_probes_cmd(args: &[String]) {
     l2.ao.den[7 % n] += 1;
     assert!(!probe("corrupted attnout denominator", &l2, &Default::default(),
                    "the denominator link"), "corrupted den accepted");
+    drop(l2);
 
     // 5b. B10 step 3: a token that attends to a key the causal mask removes.  The
     //     corner's `sn` and the prefix's `sn` are what the per-token region's `az`
@@ -1451,6 +1461,7 @@ fn compose_probes_cmd(args: &[String]) {
     l2.corrupt_exp_table(4321);
     assert!(!probe("corrupted exp table, witness rebuilt", &l2, &Default::default(),
                    "the pinned preprocessed root"), "corrupted exp table accepted");
+    drop(l2);
 
     // 7. the corrupted normalisation table, same discipline
     assert!(!probe("corrupted norm table, witness rebuilt", &l,
