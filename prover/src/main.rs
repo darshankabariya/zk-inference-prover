@@ -1564,8 +1564,20 @@ fn compose_probes_cmd(args: &[String]) {
         f
     };
 
+    // Stream NN-3: `--probe <substring>[,<substring>...]` runs only the controls
+    // whose name contains one of them (`arg_strs` splits on commas and reads
+    // one flag), so a control can have a process of its own.  Two reasons, both paid for on the H200's real 8B chunk: the suite
+    // is 46 probes and about two hours there, and one probe that cannot fire on
+    // a dump (`o seam`, whose rebuilt layer needs a bigger exp table than the
+    // honest statement declares) panics and takes every probe after it with it.
+    // With no `--probe` the list is what it always was.
+    let only = arg_strs(args, "--probe", &[]);
     let mut probe = |name: &str, l2: &layer::Layer, t: &compose::ProverTamper,
                      expect: &str| -> bool {
+        if !only.is_empty() && !only.iter().any(|w| name.contains(w.as_str())) {
+            out.push(json!({"probe": name, "skipped": "not selected by --probe"}));
+            return false;
+        }
         eprintln!("compose probe {name}");
         // verify against the HONEST fixed statement: the trusted half comes from
         // setup, never from the prover under test
