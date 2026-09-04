@@ -328,18 +328,27 @@ pub struct RopeParams {
     pub nkv: usize,
     /// absolute position of this block's token 0
     pub pos0: usize,
-    /// `inv_freq_of(rope_parameters)`, as IEEE-754 bit patterns.  The vector is
-    /// `hd/2` long and is a model constant: `rope(pos)` computes
-    /// `cat([pos inv, pos inv], -1)` in fp64 and stores the cosine and sine as
-    /// bf16.  It is carried as bits rather than as a formula because the three
-    /// `rope_type` branches (`default`, `llama3`, `proportional`) are three fp64
-    /// functions and the statement should name the vector, not the branch.
-    pub inv_freq: Vec<u64>,
+    /// `rope_theta`, as an IEEE-754 bit pattern -- exact, and reproducible from
+    /// a serialized statement without a float parser's rounding in the way
+    pub theta: u64,
+    /// which branch of `inv_freq_of` this model takes: `default`, `llama3` or
+    /// `proportional`
+    pub rope_type: String,
+    /// that branch's own constants, as bit patterns and in its own order:
+    /// `llama3` reads `[factor, low_freq_factor, high_freq_factor,
+    /// original_max_position_embeddings]`, `proportional` reads
+    /// `[partial_rotary_factor, factor]`, `default` reads none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rope_scale: Vec<u64>,
 }
 
 impl RopeParams {
-    pub fn inv(&self) -> Vec<f64> {
-        self.inv_freq.iter().map(|b| f64::from_bits(*b)).collect()
+    /// The angle table's frequencies, from the statement and nothing else.
+    /// Stream LL: this is what makes tree 0's `cos` and `sin` columns
+    /// `needs: Params, varies: Block` -- a verifier never reads them off a dump.
+    pub fn inv(&self, hd: usize) -> Vec<f64> {
+        let sc: Vec<f64> = self.rope_scale.iter().map(|b| f64::from_bits(*b)).collect();
+        crate::rope::inv_freq_of(hd, f64::from_bits(self.theta), &self.rope_type, &sc)
     }
 }
 
@@ -1584,7 +1593,7 @@ impl Plan {
             assert!(p.corner,
                     "the q/k/v ties read the corner band's own columns; --rope needs --corner");
             assert!(p.nh % rp.nkv == 0, "nh={} is not a multiple of nkv={}", p.nh, rp.nkv);
-            assert_eq!(rp.inv_freq.len(), p.hd / 2, "inv_freq must be hd/2 long");
+            assert_eq!(rp.inv(p.hd).len(), p.hd / 2, "inv_freq must be hd/2 long");
             for (i, (name, heads)) in
                 [("q", p.nh), ("k", rp.nkv), ("v", rp.nkv)].into_iter().enumerate()
             {
@@ -3063,6 +3072,12 @@ pub struct ProverTamper {
     /// the statement's `pre_root` is the rejection, and it is a different kind
     /// of rejection from every other control here.
     pub glue_w: Option<usize>,
+    /// Stream NN: bend one cell of a rotation's *preprocessed* angle block.
+    /// The products are recomputed from the bent `cos`, so every constraint in
+    /// both halves still holds and the tree-0 root is what moves -- the same
+    /// shape stream II's `glue_w` has, under its own field so the two controls
+    /// cannot fire together and the probe stays a one-field rejection.
+    pub rope_w: Option<usize>,
     /// Stream NN: a probe inside one quantize region -- `(region index, what)`.
     /// Each leaves the region internally consistent and aims at one of its two
     /// ties, at the division table, or at `pre_root`.
@@ -3704,8 +3719,18 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         // `sgnsin` are preprocessed and depend on the token's **absolute**
         // position, `pos0 + t`.
         if let Some(rp) = &p.rope {
-            let inv = rp.inv();
+            // the angle table, from the STATEMENT.  A dump that carries B1's own
+            // `inv_freq.f64` is checked against it below and never consumed:
+            // what tree 0 holds is a function of `Params`, which is stream LL's
+            // precondition for the cheap half of the weights-tree split.
             let hd = p.hd;
+            let inv = rp.inv(hd);
+            if let Some(refv) = layer.rope.as_ref().and_then(|r| r.inv_ref.as_ref()) {
+                let bad = inv.iter().zip(refv).filter(|(a, b)| a != b).count();
+                assert_eq!(bad, 0,
+                           "the statement's inv_freq disagrees with the dump's in {bad} of \
+{} places: the rotation this chunk would prove is not B1's", inv.len());
+            }
             for rr in &gp.ropes {
                 let mi = layer.mats.iter().position(|m| m.name == rr.name)
                     .unwrap_or_else(|| panic!("--rope needs the {} matmul", rr.name));
@@ -3741,11 +3766,14 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 // it, so `root_ok` against the statement's `pre_root` is the
                 // only thing that can reject -- the same shape stream II's
                 // norm-weight control has.
-                if let Some(x) = tamper.glue_w.filter(|_| rr.name == "q") {
+                if let Some(x) = tamper.rope_w.filter(|_| rr.name == "q") {
                     let at = x % pre.len();
-                    pre[at] ^= 1;
-                    eprintln!("compose: rope angle cell {at} of rp{}m bent \
-                               (a rejection is the pass)", rr.name);
+                    let was = pre[at];
+                    pre[at] = crate::rope::bend_pat(was);
+                    assert_ne!(crate::glue::split(pre[at]), crate::glue::split(was),
+                               "the rope angle probe did not fire at cell {at}");
+                    eprintln!("compose: rope angle cell {at} of rp{}m bent {was:#06x} -> \
+{:#06x} (a rejection is the pass)", rr.name, pre[at]);
                 }
                 let mprog = gp.regions[rr.mul].prog.clone();
                 let mtag = gp.regions[rr.mul].tag.clone();
@@ -5334,6 +5362,18 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             "exponent_out_of_range": g.bad_exp,
         })).collect::<Vec<_>>(),
         "glue_vs_b1": glue_b1,
+        // stream NN: the angle frequencies the STATEMENT derives against B1's
+        // own fp64 vector, when the dump carries it.  A reference and never an
+        // input -- what tree 0 holds is `RopeParams::inv`'s answer, so this
+        // number says whether this repo's `inv_freq_of` is torch's.
+        "rope_inv_vs_b1": match (&p.rope, layer.rope.as_ref().and_then(|r| r.inv_ref.as_ref())) {
+            (Some(rp), Some(refv)) => {
+                let inv = rp.inv(p.hd);
+                json!({"values": inv.len(), "rope_type": rp.rope_type,
+                       "mismatch": inv.iter().zip(refv).filter(|(a, b)| a != b).count()})
+            }
+            _ => json!(null),
+        },
         "head_key_vs_b1": head_key_b1,
         // stream BB: what the embedding gadget costs this chunk, or null with
         // the flag off.  Reported per position and per block so E1 folds it into

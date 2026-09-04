@@ -237,8 +237,15 @@ pub struct RopeCols {
     pub nkv: usize,
     /// absolute position of this block's token 0 -- `block * S`
     pub pos0: usize,
-    /// the model's `inv_freq`, `hd/2` long
-    pub inv_freq: Vec<f64>,
+    /// `rope_theta`, the branch of `inv_freq_of` this model takes, and that
+    /// branch's own constants -- what the *statement* carries, so the angle
+    /// table is a function of `Params` and of nothing read off the dump
+    pub theta: f64,
+    pub rope_type: String,
+    pub rope_scale: Vec<f64>,
+    /// B1's own `inv_freq`, when the dump wrote it: a reference the run
+    /// compares the derived vector against and never consumes
+    pub inv_ref: Option<Vec<f64>>,
     /// `s_q`, `s_k`, `s_v` as power-of-two exponents on the **query-head** grid
     /// (`nh * hd` each).  B1 applies all three after `repeat_interleave`, so
     /// they are per query head even where the values behind them are shared;
@@ -254,16 +261,20 @@ impl RopeCols {
     /// written before this stream proves no rotation.
     pub fn load(dir: &str, man: &serde_json::Value, nh: usize, hd: usize, s: usize)
                 -> Result<Option<Self>, String> {
-        let Ok(raw) = witread::read_file(&format!("{dir}/inv_freq.f64")) else {
+        let rp = &man["rope"];
+        let Some(theta) = rp["theta"].as_f64() else {
             return Ok(None);
         };
-        let inv_freq: Vec<f64> = raw
-            .chunks_exact(8)
-            .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
-            .collect();
-        if inv_freq.len() < hd / 2 {
-            return Err(format!("inv_freq.f64: {} values is under {}", inv_freq.len(), hd / 2));
-        }
+        let kind = rp["rope_type"].as_str().unwrap_or("default").to_string();
+        let rope_scale: Vec<f64> = rp["scale"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
+            .unwrap_or_default();
+        let inv_ref = witread::read_file(&format!("{dir}/inv_freq.f64")).ok().map(|raw| {
+            raw.chunks_exact(8)
+                .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+                .take(hd / 2)
+                .collect::<Vec<f64>>()
+        }).filter(|v| v.len() == hd / 2);
         let j = |n: &str| -> Result<Vec<i32>, String> {
             let v = read_i32(&format!("{dir}/{n}.i32"))?;
             if v.len() < nh * hd {
@@ -276,7 +287,10 @@ impl RopeCols {
         Ok(Some(Self {
             nkv,
             pos0: block * s,
-            inv_freq: inv_freq[..hd / 2].to_vec(),
+            theta,
+            rope_type: kind,
+            rope_scale,
+            inv_ref,
             jq: j("jq")?,
             jk: j("jk")?,
             jv: j("jv")?,
@@ -988,7 +1002,10 @@ impl Layer {
         // the model's own angles.  A synthetic layer has no model, so it takes
         // Llama's default `inv_freq` at theta = 10000 and this block's own
         // offset; a real dump carries both and never reaches here.
-        let inv_freq = crate::rope::inv_freq_default(hd, 10000.0);
+        // a synthetic layer has no model, so it takes Llama's default branch at
+        // theta = 10000 and this block's own offset; a real dump carries both
+        let (theta, kind) = (10000.0f64, "default".to_string());
+        let inv_freq = crate::rope::inv_freq_of(hd, theta, &kind, &[]);
         let pos0 = self.block.unwrap_or(0) * tokens;
         let sp = |m: &Mat| crate::dequant::Spec {
             variant: m.variant, round, kmax: 0, per_row: 1, limb_bits: (16, 14),
@@ -1068,7 +1085,8 @@ impl Layer {
                       ["Q", "K", "V"][which % 3]);
         }
         self.rebuild_bands(&qq, &kk, &vv);
-        Some(RopeCols { nkv, pos0, inv_freq, jq, jk, jv })
+        Some(RopeCols { nkv, pos0, theta, rope_type: kind, rope_scale: vec![],
+                        inv_ref: Some(inv_freq), jq, jk, jv })
     }
 
     /// Stream NN: rebuild every band from Q, K and V on the query-head grid.

@@ -184,6 +184,35 @@ def _pow2_mat(spec, name):
     return spec.pow2_scales in ("all", "linear") or name in spec.pow2_matmuls
 
 
+def _rope_params_block(m):
+    """Stream NN: `rope_theta`, the `inv_freq_of` branch and its constants.
+
+    Returned as `{theta, rope_type, scale}` with `scale` in the order the
+    prover's `rope::inv_freq_of` reads it: `llama3` takes
+    `[factor, low_freq_factor, high_freq_factor, original_max_position_embeddings]`,
+    `proportional` takes `[partial_rotary_factor, factor]`, `default` takes none.
+    `None` for a model whose layers have different rope parameters -- the
+    statement would have to name which, and this stream does not carry that.
+    """
+    if getattr(m, "inv_freq", None) is None:
+        return None
+    rp = dict(m.cfg.rope_parameters) if hasattr(m, "cfg") else None
+    if rp is None:
+        return None
+    kind = rp.get("rope_type", "default")
+    if kind == "llama3":
+        scale = [float(rp["factor"]), float(rp["low_freq_factor"]),
+                 float(rp["high_freq_factor"]),
+                 float(rp["original_max_position_embeddings"])]
+    elif kind == "proportional":
+        scale = [float(rp.get("partial_rotary_factor", 1.0)), float(rp.get("factor", 1.0))]
+    elif kind == "default":
+        scale = []
+    else:
+        raise NotImplementedError(f"rope_type {kind}")
+    return dict(theta=float(rp["rope_theta"]), rope_type=kind, scale=scale)
+
+
 def pow2_exponent(t):
     """`j` such that the value is exactly `2^j`; NaN-safe, and -1000 if it is not."""
     v = t.detach().to("cpu").double().numpy()
@@ -432,6 +461,50 @@ if __name__ == "__main__":
             jv = pow2_exponent(s_v.reshape(nh, hd))
             assert (jv != -1000).all(), "V scales are not powers of two -- wrong spec?"
             write("jv.i32", jv.reshape(-1), digests)
+
+            # ---- stream NN: what the rotation and the q/k/v quantize need ------------
+            # `jv.i32` above is `s_v`'s exponent.  `s_k` and (under
+            # `q_scale_mode == "head"`) `s_q` are the other two scales
+            # `attention_int` applies, and `inv_freq` is the model constant
+            # `rope(pos)` reads.  All three are per *query* head, because B1
+            # applies them after `repeat_interleave`; the prover asserts that a
+            # GQA group's heads agree before it states a gadget over the kv grid.
+            #
+            # Absent files are not an error: without `jq.i32` the q scale is the
+            # dynamic per-token one and its region is `requant.rs`'s `with_max`
+            # shape, which stream NN designed and did not build; without
+            # `inv_freq.f64` the model has per-layer-type frequencies and the
+            # statement would have to name which. The prover proves no rotation
+            # in either case and says so, rather than guessing one.
+            ascl = attention_scales(spec)
+            s_k = ascl[f"L{L}.k"]
+            jk = pow2_exponent(s_k.reshape(nh, -1).expand(nh, hd).contiguous())
+            assert (jk != -1000).all(), "K scales are not powers of two -- wrong spec?"
+            write("jk.i32", jk.reshape(-1), digests)
+            s_q = ascl.get(f"L{L}.q") if spec.q_scale_mode == "head" else None
+            if s_q is not None:
+                jq = pow2_exponent(s_q.reshape(nh, -1).expand(nh, hd).contiguous())
+                assert (jq != -1000).all(), "Q scales are not powers of two"
+                write("jq.i32", jq.reshape(-1), digests)
+            else:
+                print(f"  NN: q_scale_mode={spec.q_scale_mode!r} -- no jq.i32, so no "
+                      "q quantize region on this dump")
+            # The angle table itself is NOT written: the statement carries
+            # `rope_theta`, the branch of `inv_freq_of` this model takes and that
+            # branch's own constants, and the prover rebuilds `inv_freq` from
+            # them.  Stream LL's `pre-split` then classifies tree 0's cos/sin
+            # columns `needs: Params, varies: Block` instead of `needs: Model`,
+            # which is where the weights-tree design's margin lives.  What IS
+            # written is B1's own fp64 vector, as a *reference*: the prover
+            # compares its derivation against it and reports the mismatch count,
+            # so a branch this repo implements differently shows up as a number
+            # and not as a rejected proof.
+            inv = getattr(m, "inv_freq", None)
+            if inv is not None:
+                write("inv_freq.f64", inv.detach().to("cpu").double().numpy(), digests)
+            else:
+                print("  NN: this model has per-layer-type rope frequencies; "
+                      "inv_freq.f64 not written")
 
             # B9 step 1b: so must the *output* scale be the rectangle's.  Taking `s_o`
             # from the forward pass -- which attended to the prefix *and* the causal
@@ -778,6 +851,15 @@ if __name__ == "__main__":
                     rows=int(nh * S))
             stats = dict(
                 heads=nh, s=S, c=P, hd=hd, layer=L, spec=a.spec, qk_bits=list(spec.qk_bits),
+                # stream NN: the key/value head count, so the prover sizes the
+                # rotation's regions from the model rather than by dividing a
+                # matmul's width by `hd` and guessing which head count it is
+                nkv=int(m.nkv),
+                # stream NN: everything the verifier needs to build the rotation's
+                # angle table itself.  `scale` is the branch's own constants in
+                # `inv_freq_of`'s order, so the prover reads a list and not four
+                # differently-named keys.
+                rope=_rope_params_block(m),
                 # Stream DD: which token block this is.  `c` already says it (a
                 # block's prefix is `block * s`), but a driver that walks a
                 # sequence should not have to divide to find out, and `blocks`

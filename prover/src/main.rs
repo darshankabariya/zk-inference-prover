@@ -1022,7 +1022,9 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
             compose::RopeParams {
                 nkv: r.nkv,
                 pos0: r.pos0,
-                inv_freq: r.inv_freq.iter().map(|v| v.to_bits()).collect(),
+                theta: r.theta.to_bits(),
+                rope_type: r.rope_type.clone(),
+                rope_scale: r.rope_scale.iter().map(|v| v.to_bits()).collect(),
             }
         }),
     }
@@ -1361,7 +1363,35 @@ fn compose_probes_cmd(args: &[String]) {
     let (hj, ok) = compose_once(&l, &params, &Default::default(), None);
     assert!(ok, "honest composed proof rejected");
     let honest_root = hj["pre_root"].as_str().unwrap().to_string();
+    let honest_v = hj["verdict"].clone();
     let mut out = vec![json!({"probe": "honest", "result": hj.clone()})];
+    // Stream NN: which verdict fields a control actually turned off.  "The
+    // control rejects" is not the whole claim a record should make -- "and by
+    // exactly this one field" is, because a probe that trips three checks at
+    // once has not isolated the tie it was written for.  Fields that are true
+    // (or all-true) on the honest run and not on this one, and nothing else.
+    let falsified = |got: &serde_json::Value| -> Vec<String> {
+        let all_true = |v: &serde_json::Value| -> Option<bool> {
+            match v {
+                serde_json::Value::Bool(b) => Some(*b),
+                serde_json::Value::Array(a)
+                    if !a.is_empty() && a.iter().all(|x| x.is_boolean()) =>
+                    Some(a.iter().all(|x| x.as_bool().unwrap())),
+                _ => None,
+            }
+        };
+        let mut f = vec![];
+        if let Some(o) = honest_v.as_object() {
+            for (k, hv) in o {
+                if all_true(hv) == Some(true)
+                    && all_true(got.get(k).unwrap_or(&serde_json::Value::Null)) == Some(false)
+                {
+                    f.push(k.clone());
+                }
+            }
+        }
+        f
+    };
 
     let mut probe = |name: &str, l2: &layer::Layer, t: &compose::ProverTamper,
                      expect: &str| -> bool {
@@ -1388,9 +1418,13 @@ fn compose_probes_cmd(args: &[String]) {
             None => (None, false),
         };
         let accepted = verdict.as_ref().map(|v| v.accepts()).unwrap_or(false);
+        let flipped = verdict.as_ref()
+            .map(|v| falsified(&serde_json::to_value(v).unwrap()))
+            .unwrap_or_default();
         out.push(json!({
             "probe": name, "expect_reject_by": expect,
             "accepted": accepted,
+            "falsified": flipped,
             "tamper_fired": out2.glue_tamper_fired,
             "prove_error": out2.prove_error,
             "root_differs_from_honest": root_differs,
@@ -1694,6 +1728,85 @@ fn compose_probes_cmd(args: &[String]) {
                 None => eprintln!("  o seam: SKIP -- this shape has no wiring family, or its o \
 walk is not nh*hd wide, so the two folds are over different sequences and `ao_q_ok` is not \
 statable here"),
+            }
+        }
+
+        // ---- stream NN: the rotation and the quantize -----------------------
+        //
+        // Two ties per side and one preprocessed pin each, and every one of
+        // them has to reject by a *different* verdict field -- which is what
+        // `falsified` in the probe record says, rather than prose:
+        //
+        //   producer side, q and k   one dequant output copy      deq_out_ok
+        //   producer side, all three one committed input          nn_in_ok
+        //   consumer side, all three one band cell                nn_out_ok
+        //   the rotation's table     one angle cell               root_ok
+        //   the quantize's table     one scale exponent           root_ok
+        //   the division table       one quotient                 sums_cancel
+        if !rplan.quants.is_empty() {
+            let g = rplan.glue.as_ref().expect("the quantize regions need the wiring family");
+            let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
+            let (seed, ga) = (src_of(args).seed, arg_scalar(args, "--glue-a", 32usize));
+            // the input side of each rotation: one copy of the matmul's dequant
+            // output bent, the whole rotation and the quantize recomputed from
+            // it, so every constraint in three regions still holds and only the
+            // tie against the matmul's own published output can tell
+            for rr in &g.ropes {
+                assert!(!probe(&format!("rope {}: one dequant output copy", rr.name), &l,
+                               &compose::ProverTamper {
+                                   glue_add: Some((rr.mul, 4321)), ..Default::default() },
+                               &format!("the tie deq_out[{}] == rp{}m.In(0)", rr.name, rr.name)),
+                        "a rotation of values the matmul did not write accepted");
+            }
+            // one preprocessed angle: the products follow it, so every
+            // constraint holds and the *root* is what moves.  This is the probe
+            // that says `cos` and `sin` are the statement's and not the
+            // prover's -- and, because they are a function of the block, that
+            // tree 0 is pinned per block.
+            assert!(!probe("rope q: one cos cell of the angle table", &l,
+                           &compose::ProverTamper { rope_w: Some(97),
+                                                    ..Default::default() },
+                           "the pinned preprocessed root"),
+                    "a bent rotation angle accepted");
+            for (k, qp) in rplan.quants.iter().enumerate() {
+                let n = qp.name;
+                // the quantize's own input: another legal bf16 pattern, the
+                // quotient rebuilt around it.  For q and k the counterparty is
+                // the rotation's `Out(0)`; for v it is the matmul's `deq_out`.
+                assert!(!probe(&format!("quant {n}: one input value, replaced"), &l,
+                               &compose::ProverTamper {
+                                   quant: Some((k, rope::QTamper::In(37))),
+                                   ..Default::default() },
+                               &format!("the tie nn_in[{k}] == the producer's output")),
+                        "a quantize of values the producer did not write accepted");
+                assert!(!probe(&format!("quant {n}: one quotient off its own table row"), &l,
+                               &compose::ProverTamper {
+                                   quant: Some((k, rope::QTamper::Out(41))),
+                                   ..Default::default() },
+                               "the (tt, m7, q) division table"),
+                        "a quotient the division table does not carry accepted");
+                assert!(!probe(&format!("quant {n}: one preprocessed scale exponent"), &l,
+                               &compose::ProverTamper {
+                                   quant: Some((k, rope::QTamper::Scale(5))),
+                                   ..Default::default() },
+                               "the pinned preprocessed root"),
+                        "a bent quantize exponent accepted");
+            }
+            // the consumer side: one *band* cell moved and the bands rebuilt
+            // around it, so the attention this chunk proves is an honest
+            // attention over the bent column and nothing but the band's own
+            // claim against the quantize region's output can see it.  The
+            // generator is the witness's, so this needs a synthetic layer.
+            for (which, name) in [(0usize, "Q"), (1, "K"), (2, "V")] {
+                let mut lb = layer_of(args).0;
+                if lb.glue.is_none() {
+                    eprintln!("  band {name}: SKIP -- no synthetic wiring family here");
+                    continue;
+                }
+                lb.synth_glue_band_bent(seed, ga, round, which, 41);
+                assert!(!probe(&format!("band {name}: one committed cell the matmuls did not produce"), &lb, &Default::default(),
+                               "the tie nn_out == the sum of the bands' own claims"),
+                        "a band column the layer's matmuls did not produce accepted");
             }
         }
     }

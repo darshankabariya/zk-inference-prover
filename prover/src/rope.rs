@@ -77,6 +77,26 @@ pub fn sgn_sin(sin: &[u16], hd: usize) -> Vec<u16> {
         .collect()
 }
 
+/// A different legal bf16 value, for a control that must actually move a cell.
+///
+/// `p ^ 1` is the usual bend, and it is *silent* on a pattern the `(sm, ef)`
+/// representation collapses: `split` sends every subnormal and every
+/// infinity/NaN to `(0, 0)`, so flipping the low mantissa bit of a zero
+/// produces a subnormal and commits the identical pair.  At absolute position 0
+/// every `sin` is exactly that zero, so a probe aimed at the angle table's first
+/// rows measured nothing -- which is the shape `drop-big` had at layer 0 and the
+/// reason this exists rather than a bare `^ 1`.
+pub fn bend_pat(p: u16) -> u16 {
+    let p = crate::glue::canon(p);
+    let q = crate::glue::canon(p ^ 1);
+    if crate::glue::split(q) != crate::glue::split(p) {
+        q
+    } else {
+        // 1.0, which no zero and no subnormal can be mistaken for
+        crate::glue::join(128, 127)
+    }
+}
+
 /// The `Prog::rope_mul` leaf a slot's second operand reads: `2 j` is
 /// `cos[j]`, `2 j + 1` is `sgnsin[j]`.  One row of the region's preprocessed
 /// block, for the token at absolute position `pos`.
@@ -86,13 +106,60 @@ pub fn pre_row(inv: &[f64], hd: usize, pos: usize) -> Vec<u16> {
     (0..hd).flat_map(|j| [cos[j], sgn[j]]).collect()
 }
 
-/// Llama's default `inv_freq`: `1 / theta^(2 i / hd)`, `i < hd/2`, in fp64 --
-/// `inv_freq_of`'s `default` branch.  The other two rope types (`llama3`,
-/// `proportional`) are a further fp64 function of this vector; the statement
-/// carries the *result*, so this is the one the desk builds and the dump's own
-/// vector is what a real chunk carries.
-pub fn inv_freq_default(hd: usize, theta: f64) -> Vec<f64> {
-    (0..hd / 2).map(|i| 1.0 / theta.powf(2.0 * i as f64 / hd as f64)).collect()
+/// `b1/model.py`'s `inv_freq_of`, in fp64 and branch for branch.
+///
+/// The statement carries `theta`, the branch name and that branch's own
+/// constants, and **this function is the table** -- so tree 0's angle columns
+/// are a pure function of `Fixed.params` and a verifier never reads a `cos` or
+/// a `sin` off a dump.  Stream LL's `pre-split` classifies them `needs: Params,
+/// varies: Block`, which is what keeps the weights-tree design's margin; a
+/// table read off the dump would be `needs: Model` and cost most of it.
+///
+/// `scale` is the branch's constants in the order `RopeParams::rope_scale`
+/// documents: `llama3` reads four, `proportional` two, `default` none.
+pub fn inv_freq_of(hd: usize, theta: f64, kind: &str, scale: &[f64]) -> Vec<f64> {
+    let base: Vec<f64> =
+        (0..hd / 2).map(|i| 1.0 / theta.powf(2.0 * i as f64 / hd as f64)).collect();
+    match kind {
+        "default" => base,
+        // `llama3_inv_freq`: transformers' `_compute_llama3_parameters`
+        "llama3" => {
+            assert_eq!(scale.len(), 4,
+                       "rope_type llama3 reads factor, low, high, original_max");
+            let (factor, lo, hi, old) = (scale[0], scale[1], scale[2], scale[3]);
+            base.iter()
+                .map(|inv| {
+                    let wavelen = 2.0 * std::f64::consts::PI / inv;
+                    let scaled = if wavelen > old / lo { inv / factor } else { *inv };
+                    let smooth = (old / wavelen - lo) / (hi - lo);
+                    if wavelen >= old / hi && wavelen <= old / lo {
+                        (1.0 - smooth) * scaled / factor + smooth * scaled
+                    } else {
+                        scaled
+                    }
+                })
+                .collect()
+        }
+        // `proportional_inv_freq`: Gemma-4's global RoPE, where the pairs past
+        // `partial_rotary_factor` are NoPE -- `inv_freq` exactly zero, so they
+        // still go through the rotation algebra with cos 1 and sin 0
+        "proportional" => {
+            assert_eq!(scale.len(), 2,
+                       "rope_type proportional reads partial_rotary_factor, factor");
+            let (prf, factor) = (scale[0], scale[1]);
+            let pairs = (prf * hd as f64 / 2.0) as usize;
+            (0..hd / 2)
+                .map(|i| {
+                    if i < pairs {
+                        1.0 / theta.powf(2.0 * i as f64 / hd as f64) / factor
+                    } else {
+                        0.0
+                    }
+                })
+                .collect()
+        }
+        other => panic!("rope_type {other:?} is not implemented"),
+    }
 }
 
 // ------------------------------------------------------------------ the AIR ---
@@ -345,12 +412,41 @@ pub fn q_region(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, tokens: 
         je[at] += 1;
         fired += 1;
     }
+    // The input probe has to be *quiet on the output*: it moves the bf16 value
+    // this region rounded and must leave the integer it produced alone, or
+    // `nn_out_ok` sees it too and the control has not isolated the input tie it
+    // was written for.  A one-ulp move of the mantissa usually rounds to the
+    // same quotient; this scans forward from the asked-for site for one that
+    // does, and says so rather than silently taking a coupled site.
+    let quot = |pat: u16, j: i64| -> Option<u32> {
+        let (sm, ef) = crate::glue::split(crate::glue::canon(pat));
+        let m7 = if sm == 0 { 0 } else { sm.unsigned_abs() as u32 - 128 };
+        let path = (j + 126) * 128;
+        if (ef as i64 * 128 + m7 as i64) < path {
+            return Some(0);
+        }
+        rq_at(ef as i64 - j - (134 - TT_POW2), m7).map(|ri| rq[ri].3)
+    };
+    let bend_at: Option<usize> = match tamper {
+        Some(QTamper::In(t)) => {
+            let n_all = tokens * n;
+            let start = t % n_all;
+            let hit = (0..n_all).map(|d| (start + d) % n_all).find(|i| {
+                let (p, c) = (crate::glue::canon(x[*i]), *i % n);
+                let b = bend_pat(p);
+                b != p && quot(b, je[c]).is_some() && quot(b, je[c]) == quot(p, je[c])
+            });
+            if hit.is_none() {
+                eprintln!("{tag}: no quotient-preserving input bend exists on this data; \
+the probe would move the output too");
+            }
+            hit
+        }
+        _ => None,
+    };
     let bend = |i: usize| -> u16 {
         let p = crate::glue::canon(x[i]);
-        match tamper {
-            Some(QTamper::In(t)) if t % (tokens * n) == i => p ^ 1,
-            _ => p,
-        }
+        if bend_at == Some(i) { bend_pat(p) } else { p }
     };
 
     let ridx15 = tables.ridx(15);
@@ -441,7 +537,7 @@ pub fn q_region(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, tokens: 
             })
             .collect()));
     }
-    if matches!(tamper, Some(QTamper::In(_))) {
+    if bend_at.is_some() {
         fired += 1;
     }
     if tamper.is_some() && fired == 0 {
