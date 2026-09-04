@@ -1597,6 +1597,11 @@ fn compose_probes_cmd(args: &[String]) {
             "accepted": accepted,
             "falsified": flipped,
             "tamper_fired": out2.glue_tamper_fired,
+            // Stream NN-3: the `s_v` tie is an equality between two tree-0
+            // column families, so no verdict field can carry it -- a verifier
+            // holds it through `pre_root`.  The probe record carries the
+            // build's own reading, which is how a control on it is visible.
+            "sv_tie": out2.family_cells.get("sv_tie"),
             "prove_error": out2.prove_error,
             "root_differs_from_honest": root_differs,
             "verdict": verdict.as_ref().map(|v| serde_json::to_value(v).unwrap()),

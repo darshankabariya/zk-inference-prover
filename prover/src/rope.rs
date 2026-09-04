@@ -20,10 +20,11 @@
 //! `QuantEval` is `requant.rs`'s power-of-two requantize with the scale moved
 //! from a committed per-token column to a **preprocessed per-slot** one, which
 //! is the shape B1's offline `s_k` / `s_v` actually have: per (head, channel),
-//! constant down the tokens.  The tables are `requant.rs`'s own -- the same
-//! `rq_table(Pow2)` division table, the same `(sm, m7, sg)` sign table, the same
-//! `(q, nz)` pair table and the same 15-bit range -- so the identity proved here
-//! is the identity stream II already measured, on a different scale geometry.
+//! constant down the tokens.  The sign table and the 15-bit range are
+//! `requant.rs`'s own, so the identity proved here is the identity stream II
+//! already measured on a different scale geometry; the division table and the
+//! `(q, nz)` pair table are **this family's**, one per side and sized by that
+//! side's `qk_bits` (stream NN-3 -- see "the region's tables" below).
 
 use num_traits::{One, Zero};
 use stwo::core::fields::m31::M31;
@@ -38,7 +39,7 @@ use crate::bf16;
 use crate::common::{Eval, eval_of, m31_u32};
 use crate::dequant::{FracRel, PairRel, id};
 use crate::layer::MatLayout;
-use crate::requant::{TT_POW2, TT_RANGE, rq_table, rqv_at};
+use crate::requant::{TT_POW2, TT_RANGE, rqv_at};
 
 pub fn m31_of(v: i64) -> M31 {
     crate::attn_trace::m31_of(v)
@@ -160,6 +161,114 @@ pub fn inv_freq_of(hd: usize, theta: f64, kind: &str, scale: &[f64]) -> Vec<f64>
         }
         other => panic!("rope_type {other:?} is not implemented"),
     }
+}
+
+
+// ------------------------------------------------------ the region's tables ---
+//
+// Stream NN-3.  The quantize regions used to borrow the attention output's
+// `(q, nz)` pair table and `requant.rs`'s power-of-two division table, both of
+// which stop at 127: `rq_table(Pow2)` keeps only quotients in `[1, 127]` and the
+// shared `qnz` table is `Params::ao_q_bits` tall.  This model's `qk_bits` are
+// `(12, 11)`, so on a real 8B chunk 35.9% of the `q` sites and 20.7% of the `k`
+// sites had no row and the chunk did not prove.  The regions now own their
+// tables and each side's is filtered to **that side's own domain**, which is the
+// part that matters: a table wider than the side's `qmax` would silently prove
+// the unclamped quotient at a site B1 clamps, turning an incompleteness into a
+// disagreement with the model nothing in the statement could see.
+
+/// The `v` side's width.  `b1/model.py` writes the cache's values as `int8`
+/// (`vvc.i8`) whatever `qk_bits` says, and `Params` carries no `v_bits`; the
+/// constant is here so that a model which changes it changes one line.
+pub const V_BITS: u32 = 8;
+
+/// The largest integer this side's width admits, as `b1/model.py`'s `quantize`
+/// clamps it: `int8` gives 127, `qk_bits 12` gives 2047.
+pub fn qmax_of(bits: u32) -> i64 {
+    (1i64 << (bits - 1)) - 1
+}
+
+/// How many exponent differences the side's table carries.  `q = M 2^(tt - 9)`
+/// with `M` in `[128, 255]`, so one more quotient bit keeps exactly one more
+/// `tt`: eight bits is `requant.rs`'s own `TT_RANGE`, twelve is four rows of
+/// `tt` more.  The AIR's `tt` offset (`134 - TT_POW2`) is untouched -- only the
+/// top of the window moves.
+pub fn qtt_range(bits: u32) -> i64 {
+    TT_RANGE as i64 + (bits as i64 - 8)
+}
+
+/// `(tt, m7) -> q`, for the quotients this side can hold.  At `bits = 8` this is
+/// `rq_table(Pow2)`'s three columns row for row.
+pub fn qdiv_table(bits: u32) -> Vec<(u32, u32, u32)> {
+    assert!((8..=16).contains(&bits), "a quantize side is 8 to 16 bits, not {bits}");
+    let qmax = qmax_of(bits) as u64;
+    let mut rows = vec![];
+    for tt in 0..qtt_range(bits) as u32 {
+        for m7 in 0..128u32 {
+            let m = 128 + m7 as u64;
+            // q = round_half_up(M 2^(tt-9)) = (M 2^(tt+1) + 512) / 1024
+            let q = ((m << (tt + 1)) + 512) / 1024;
+            if (1..=qmax).contains(&q) {
+                rows.push((tt, m7, q as u32));
+            }
+        }
+    }
+    rows
+}
+
+/// The true quotient at a site, whatever its size -- used to tell a site B1
+/// *clamps* from a site that is off the table for any other reason.
+pub fn qdiv_ref(tt: i64, m7: u32) -> Option<i64> {
+    if !(0..64).contains(&tt) {
+        return None;
+    }
+    let m = 128 + m7 as u128;
+    Some((((m << (tt + 1)) + 512) / 1024) as i64)
+}
+
+pub const QDIV_COLS: usize = 3;
+
+pub fn qdiv_col(bits: u32, k: usize) -> PreProcessedColumnId {
+    id(format!("b65_qdiv{bits}_{k}"))
+}
+pub fn qdiv_log_rows(bits: u32) -> u32 {
+    crate::common::log_rows_for(qdiv_table(bits).len(), 1)
+}
+/// Padded by repeating the last real row, the rule every table in this repo
+/// pads by: a repeated row admits no triple the real rows do not.
+pub fn qdiv_tab_cols(bits: u32) -> Vec<Eval> {
+    let rows = qdiv_table(bits);
+    let lr = crate::common::log_rows_for(rows.len(), 1);
+    (0..QDIV_COLS)
+        .map(|k| {
+            eval_of(lr, (0..1usize << lr)
+                .map(|i| {
+                    let r = rows[i.min(rows.len() - 1)];
+                    m31_u32([r.0, r.1, r.2][k])
+                })
+                .collect())
+        })
+        .collect()
+}
+
+/// The quantize family's own `(q, nz)` pair table, one per chunk at the widest
+/// side's width.  It is not the attention output's: widening *that* one would
+/// move `b65_attn_out_eval`'s fingerprint and every digest this repo has
+/// recorded.  Its width is not load-bearing for soundness -- the division table
+/// is what fixes the admissible `q` -- so one table at the maximum serves all
+/// three regions.
+pub fn qnz_log_rows(bits: u32) -> u32 {
+    bits - 1
+}
+pub fn qnz_col(bits: u32, k: usize) -> PreProcessedColumnId {
+    id(format!("b65_qqnz{bits}_{k}"))
+}
+pub fn qnz_tab_cols(bits: u32) -> Vec<Eval> {
+    let lr = qnz_log_rows(bits);
+    vec![
+        eval_of(lr, (0..1u32 << lr).map(m31_u32).collect()),
+        eval_of(lr, (0..1u32 << lr).map(|q| m31_u32(u32::from(q != 0))).collect()),
+    ]
 }
 
 // ------------------------------------------------------------------ the AIR ---
@@ -352,11 +461,20 @@ pub struct QRegion {
     /// how many of the derived integers equal the band's committed value
     pub ref_ok: usize,
     pub ref_n: usize,
-    /// sites whose true quotient is past 127 -- B1 clamps them and this region
-    /// has no row for them, so a nonzero count is an incompleteness and not a
-    /// disagreement
+    /// Stream NN-3: sites whose true quotient is past **this side's own**
+    /// `qmax` -- B1 clamps them and the region has no row for them, so a nonzero
+    /// count is an incompleteness and not a disagreement.  Before NN-3 the
+    /// counter read "past the shared table's window", which at `qk_bits (12,
+    /// 11)` was overwhelmingly "the region is narrower than the model" instead.
     pub clamped: usize,
+    /// this side's integer width, and the two tables it owns
+    pub bits: u32,
+    /// Stream NN-3: the per-channel scale exponents this region *committed* to
+    /// tree 0 -- the plan's own, or the bent copy under a `Scale` probe.  The
+    /// `s_v` tie compares the `v` region's against the attention output's.
+    pub je: Vec<i64>,
     pub m_rq: Vec<u32>,
+    pub m_qnz: Vec<u32>,
     pub m_rqv: Vec<u32>,
     pub log_rq: u32,
     pub fired: usize,
@@ -379,26 +497,30 @@ pub const Q_PER_SLOT: usize = 6; // ef, m7, q, nz, sm, sg
 /// integers the band committed, which the region only *checks* against.
 #[allow(clippy::too_many_arguments)]
 pub fn q_region(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, tokens: usize,
-                n: usize, hd: usize, lay: MatLayout, tables: &mut crate::layer::Tables,
-                tamper: Option<QTamper>) -> QRegion {
+                n: usize, hd: usize, bits: u32, nz_bits: u32, lay: MatLayout,
+                tables: &mut crate::layer::Tables, tamper: Option<QTamper>) -> QRegion {
     assert_eq!(lay.lead, 0, "a quantize region needs an exact tiling ({tag})");
     assert_eq!(jj.len(), n, "{tag}: one exponent per channel");
     assert_eq!(hd % lay.per_row, 0,
                "{tag}: a quantize row must sit inside one head ({} does not divide {hd})",
                lay.per_row);
+    assert!(nz_bits >= bits, "{tag}: the (q, nz) table is the widest side's");
     let pr = lay.per_row;
     let rows = 1usize << lay.log_rows;
-    let rq = rq_table(crate::requant::SVariant::Pow2);
+    // stream NN-3: this side's own division table, filtered to its own domain
+    let (qmax, tt_top) = (qmax_of(bits), qtt_range(bits));
+    let rq = qdiv_table(bits);
     let log_rq = crate::common::log_rows_for(rq.len(), 1);
     let rq_at = |tt: i64, m7: u32| -> Option<usize> {
-        if !(0..TT_RANGE as i64).contains(&tt) {
+        if !(0..tt_top).contains(&tt) {
             return None;
         }
-        rq.binary_search_by_key(&(tt as u32, 0u32, m7), |r| (r.0, r.1, r.2)).ok()
+        rq.binary_search_by_key(&(tt as u32, m7), |r| (r.0, r.1)).ok()
     };
     let n_cols = pr * Q_PER_SLOT;
     let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); rows]; n_cols];
     let mut m_rq = vec![0u32; 1 << log_rq];
+    let mut m_qnz = vec![0u32; 1usize << qnz_log_rows(nz_bits)];
     let mut m_rqv = vec![0u32; 512];
     let (mut off_table, mut fired, mut clamped) = (0usize, 0usize, 0usize);
     let (mut ref_ok, mut ref_n) = (0usize, 0usize);
@@ -425,7 +547,7 @@ pub fn q_region(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, tokens: 
         if (ef as i64 * 128 + m7 as i64) < path {
             return Some(0);
         }
-        rq_at(ef as i64 - j - (134 - TT_POW2), m7).map(|ri| rq[ri].3)
+        rq_at(ef as i64 - j - (134 - TT_POW2), m7).map(|ri| rq[ri].2)
     };
     let bend_at: Option<usize> = match tamper {
         Some(QTamper::In(t)) => {
@@ -451,7 +573,6 @@ the probe would move the output too");
 
     let ridx15 = tables.ridx(15);
     let mut m_r15 = std::mem::take(&mut tables.m_r[ridx15]);
-    let mut m_qnz = std::mem::take(&mut tables.m_qnz);
     let mut in_nat: Vec<(i64, i64)> = Vec::with_capacity(rows * pr);
     let mut out_nat: Vec<i64> = Vec::with_capacity(rows * pr);
     for j in 0..rows {
@@ -470,13 +591,23 @@ the probe would move the output too");
                 let tt = ef as i64 - je[c] - (134 - TT_POW2);
                 match rq_at(tt, m7) {
                     Some(ri) => {
-                        q = rq[ri].3;
+                        q = rq[ri].2;
                         m_rq[ri] += 1;
                     }
                     None => {
-                        // past the table's window is exactly "B1 clamped here":
-                        // the quotient is over 127 and the region has no row
-                        if tt >= TT_RANGE as i64 { clamped += 1 } else { off_table += 1 }
+                        // stream NN-3: the table is this side's own, so "no row"
+                        // is "B1 clamped here" exactly when the true quotient is
+                        // past this side's `qmax` -- which is what the counter
+                        // now says.  Anything else is a real off-table site.
+                        // `nz` says |x| >= s/2, so the true quotient is at least
+                        // 1 and a missing row means it is past `qmax`: either
+                        // `tt` is past the window (where the smallest quotient
+                        // is already 2^(bits-1)) or it is the window's top row.
+                        if tt >= tt_top || qdiv_ref(tt, m7).is_some_and(|t| t > qmax) {
+                            clamped += 1
+                        } else {
+                            off_table += 1
+                        }
                     }
                 }
             } else {
@@ -489,7 +620,7 @@ the probe would move the output too");
             }
             if let Some(QTamper::Out(tt)) = tamper {
                 if tt % (tokens * n) == gi {
-                    q = if q < 127 { q + 1 } else { q - 1 };
+                    q = if (q as i64) < qmax { q + 1 } else { q - 1 };
                     fired += 1;
                 }
             }
@@ -519,7 +650,6 @@ the probe would move the output too");
         }
     }
     tables.m_r[ridx15] = m_r15;
-    tables.m_qnz = m_qnz;
     tables.off_table += off_table;
 
     // tree 0: two selectors and one exponent column per slot, in the order
@@ -546,7 +676,7 @@ the probe would move the output too");
     }
     let base: Vec<Eval> = cols.into_iter().map(|c| eval_of(lay.log_rows, c)).collect();
     QRegion { tag: tag.to_string(), lay, tokens, n, pre, base, in_nat, out_nat,
-              off_table, ref_ok, ref_n, clamped, m_rq, m_rqv, log_rq, fired }
+              off_table, ref_ok, ref_n, clamped, bits, je, m_rq, m_qnz, m_rqv, log_rq, fired }
 }
 
 /// One quantize region's interaction columns: the two tie accumulators, then
