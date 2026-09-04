@@ -1046,13 +1046,25 @@ impl Layer {
         let (nh, hd, tokens) = (self.ao.nh, self.ao.hd, self.ao.s);
         // stream NN-3: a tiled prefix (`--kv-bind`) is rebuilt like any other
         // now, so `nsub` is no longer a reason to leave the family off
-        if hd % 2 != 0 || !self.bands.iter().any(|b| b.corner) {
-            return None;
+        // stream NN-3: a shape that leaves the family off says which test it
+        // failed.  Silence here cost a session an afternoon of guessing.
+        let off = |why: &str| -> Option<RopeCols> {
+            eprintln!("layer: no rotation -- {why}");
+            None
+        };
+        if hd % 2 != 0 {
+            return off("hd is odd");
+        }
+        if !self.bands.iter().any(|b| b.corner) {
+            return off("no corner band");
         }
         let width = |n: &str| self.mats.iter().find(|m| m.name == n).map(|m| m.n_out);
-        let (nq, nk, nv) = (width("q")?, width("k")?, width("v")?);
+        let (nq, nk, nv) = match (width("q"), width("k"), width("v")) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => return off("this layer has no q/k/v matmul"),
+        };
         if nq != nh * hd || nk != nv || nk % hd != 0 || nh % (nk / hd) != 0 {
-            return None;
+            return off(&format!("widths do not line up: nq={nq} nk={nk} nv={nv} nh={nh} hd={hd}"));
         }
         let nkv = nk / hd;
         let rep = nh / nkv;
@@ -1066,10 +1078,10 @@ impl Layer {
         // panicked.  A shape the regions cannot tile leaves the family off and
         // reports `nn_open`, which is what the width test already does.
         if !(tokens * nh).is_power_of_two() || !(tokens * nkv).is_power_of_two() {
-            return None;
+            return off(&format!("the rotation's rows do not tile: tokens={tokens} nh={nh} nkv={nkv}"));
         }
         if !crate::rope::q_tiles(nq, hd, tokens) || !crate::rope::q_tiles(nk, hd, tokens) {
-            return None;
+            return off("a quantize region cannot tile this shape");
         }
         let b0 = &self.bands[0];
         let (q_bits, k_bits) = (b0.q_bits, b0.k_bits);
