@@ -1176,7 +1176,12 @@ impl Layer {
         }
         let n = self.mats[oi].qx.len();
         let at = idx % n;
-        self.synth_family(seed, a, round, 0, Some(at));
+        // which family this layer carries is the witness's to say, and a rebuild
+        // must not change it: `--synth-head` already pushed the `lm_head` matmul
+        // and set `head`, so pass a nonzero vocabulary to keep the head branch.
+        // `synth_family` reads only the sign of it.
+        let vocab = usize::from(self.glue.as_ref().is_some_and(|g| g.head));
+        self.synth_family(seed, a, round, vocab, Some(at));
         Some(at)
     }
 
