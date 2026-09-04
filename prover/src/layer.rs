@@ -1136,9 +1136,21 @@ impl Layer {
                 })
                 .collect()
         };
-        let jq = scale(&qrot, nq, qmax_q);
-        let jk_kv = scale(&krot, nk, qmax_k);
-        let jv_kv = scale(&vdeq, nv, 127);
+        // Stream NN-3: `B7_NN_CLAMP=n` calibrates every scale `n` exponents
+        // *below* the smallest one that fits, so a synthetic layer clamps where
+        // B1 does and the desk can prove a chunk that carries the clamp.  A
+        // witness-construction switch like `--synth-glue`: at 0 -- the default,
+        // and every recorded digest -- nothing here moves.
+        let shift = std::env::var("B7_NN_CLAMP").ok()
+            .and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        if shift != 0 {
+            eprintln!("layer: B7_NN_CLAMP={shift} -- the q/k/v scales are {shift} \
+exponent(s) small, so B1's clamp fires");
+        }
+        let down = |v: Vec<i32>| -> Vec<i32> { v.into_iter().map(|x| x - shift as i32).collect() };
+        let jq = down(scale(&qrot, nq, qmax_q));
+        let jk_kv = down(scale(&krot, nk, qmax_k));
+        let jv_kv = down(scale(&vdeq, nv, crate::rope::qmax_of(crate::rope::V_BITS)));
         // and on the query-head grid, which is where B1 applies them and where
         // the statement carries them
         let spread = |src: &[i32]| -> Vec<i32> {

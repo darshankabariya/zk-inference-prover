@@ -226,6 +226,32 @@ pub fn qdiv_ref(tt: i64, m7: u32) -> Option<i64> {
     Some((((m << (tt + 1)) + 512) / 1024) as i64)
 }
 
+/// Stream NN-3, the clamp.  `b1/model.py`'s `quantize` clamps at `qmax`, so a
+/// site whose true quotient is past it has no row in this side's division
+/// table and no honest witness without this: `round_half_away(v)` is over
+/// `qmax` exactly when `v >= qmax + 0.5`, and `|x| >= (qmax + 0.5) 2^j` is a
+/// comparison of the committed bf16 *pattern* against a threshold -- the same
+/// shape the `nz = 0` branch already proves, so it costs one committed boolean
+/// and one range lookup and never needs the true quotient at all.
+///
+/// This returns that threshold at `j = 0`, as `ef * 128 + m7`.  Multiplying by
+/// `2^j` is exact in bf16 (it adds `j` to `ef`), so the per-slot threshold is
+/// `scale * 128 + clamp_pat(bits)` and stays degree 1 in the preprocessed
+/// scale, exactly as `path` does.
+pub fn clamp_pat(bits: u32) -> i64 {
+    let v = qmax_of(bits) as f64 + 0.5;
+    let e = v.log2().floor() as i64;
+    let m = v / (e as f64).exp2();
+    // the smallest significand at or above `m`, and the carry when there is none
+    let mut m7 = (m * 128.0).ceil() as i64 - 128;
+    let mut ef = e + 127;
+    if m7 > 127 {
+        m7 = 0;
+        ef += 1;
+    }
+    ef * 128 + m7
+}
+
 pub const QDIV_COLS: usize = 3;
 
 pub fn qdiv_col(bits: u32, k: usize) -> PreProcessedColumnId {
@@ -327,6 +353,9 @@ pub struct QuantEval {
     pub log_rows: u32,
     pub per_row: usize,
     pub chunks: usize,
+    /// stream NN-3: this side's integer width -- it fixes `qmax` and the
+    /// clamp threshold, both of which the AIR reads as constants
+    pub bits: u32,
     pub qnz: PairRel,
     pub rq3: FracRel,
     pub rqv: FracRel,
@@ -359,6 +388,8 @@ impl FrameworkEval for QuantEval {
 
         let mut in_vals: Vec<(E::F, E::F)> = vec![];
         let mut out_vals: Vec<E::EF> = vec![];
+        let cpat = M31::from_u32_unchecked(clamp_pat(self.bits) as u32);
+        let qmax = M31::from_u32_unchecked(qmax_of(self.bits) as u32);
         for sl in 0..self.per_row {
             let ef = eval.next_trace_mask();
             let m7 = eval.next_trace_mask();
@@ -366,22 +397,39 @@ impl FrameworkEval for QuantEval {
             let nz = eval.next_trace_mask();
             let sm = eval.next_trace_mask();
             let sg = eval.next_trace_mask();
+            // stream NN-3: `cl` is "B1 clamped this site".  A clamped site has
+            // no division-table row -- the table stops at this side's `qmax` --
+            // so what the AIR proves instead is that the value was big enough
+            // to clamp, and that the committed integer is `qmax`.
+            let cl = eval.next_trace_mask();
             let pat = ef.clone() * c128 + m7.clone();
+            eval.add_constraint(cl.clone() * (E::F::one() - cl.clone()));
+            // a clamped site is a nonzero one, which is what lets the division
+            // lookup's multiplicity stay degree 1 below (`nz - cl` is `[nz and
+            // not cl]` exactly when `cl` implies `nz`)
+            eval.add_constraint(cl.clone() * (E::F::one() - nz.clone()));
+            eval.add_constraint(cl.clone() * (q.clone() - E::F::from(qmax)));
             // (q, nz) pins nz = [q != 0]
             eval.add_to_relation(RelationEntry::new(&self.qnz, E::EF::one(),
                                                     &[q.clone(), nz.clone()]));
-            // nz = 1: `requant.rs`'s own power-of-two division table, keyed by
-            // the exponent difference.  `scale[sl]` is preprocessed, so `tt`
-            // stays degree 1 in the committed fields exactly as it is there.
+            // nz = 1 and not clamped: this side's own power-of-two division
+            // table, keyed by the exponent difference.  `scale[sl]` is
+            // preprocessed, so `tt` stays degree 1 in the committed fields.
             let tt = ef.clone() - scale[sl].clone()
                 - E::F::from(M31::from_u32_unchecked((134 - TT_POW2) as u32));
             eval.add_to_relation(RelationEntry::new(
-                &self.rq3, E::EF::from(nz.clone()), &[tt, m7.clone(), q.clone()]));
+                &self.rq3, E::EF::from(nz.clone() - cl.clone()),
+                &[tt, m7.clone(), q.clone()]));
             // nz = 0: |x| < s/2, a pattern comparison
             let path = (scale[sl].clone() + E::F::from(M31::from_u32_unchecked(126))) * c128;
             eval.add_to_relation(RelationEntry::new(
                 &self.r15, E::EF::one() - E::EF::from(nz.clone()),
-                &[path - E::F::one() - pat]));
+                &[path - E::F::one() - pat.clone()]));
+            // cl = 1: |x| >= (qmax + 1/2) 2^j, the same comparison the other
+            // way round
+            let cpath = scale[sl].clone() * c128 + E::F::from(cpat);
+            eval.add_to_relation(RelationEntry::new(
+                &self.r15, E::EF::from(cl.clone()), &[pat - cpath]));
             // the signed significand, with `m7` and the sign read off it
             eval.add_to_relation(RelationEntry::new(
                 &self.rqv, E::EF::one(), &[sm.clone(), m7.clone(), sg.clone()]));
@@ -489,7 +537,7 @@ impl QRegion {
     }
 }
 
-pub const Q_PER_SLOT: usize = 6; // ef, m7, q, nz, sm, sg
+pub const Q_PER_SLOT: usize = 7; // ef, m7, q, nz, sm, sg, cl
 
 /// Build one quantize region.  `x` is the bf16 stream in `(token, channel)`
 /// order -- the rotation's output for q and k, the dequant's for v -- `jj` the
@@ -509,6 +557,7 @@ pub fn q_region(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, tokens: 
     let rows = 1usize << lay.log_rows;
     // stream NN-3: this side's own division table, filtered to its own domain
     let (qmax, tt_top) = (qmax_of(bits), qtt_range(bits));
+    let cpat = clamp_pat(bits);
     let rq = qdiv_table(bits);
     let log_rq = crate::common::log_rows_for(rq.len(), 1);
     let rq_at = |tt: i64, m7: u32| -> Option<usize> {
@@ -587,6 +636,7 @@ the probe would move the output too");
             let path = (je[c] + 126) * 128;
             let nz = pat >= path;
             let (mut q, nzc) = (0u32, u32::from(nz));
+            let mut clc = 0u32;
             if nz {
                 let tt = ef as i64 - je[c] - (134 - TT_POW2);
                 match rq_at(tt, m7) {
@@ -597,14 +647,23 @@ the probe would move the output too");
                     None => {
                         // stream NN-3: the table is this side's own, so "no row"
                         // is "B1 clamped here" exactly when the true quotient is
-                        // past this side's `qmax` -- which is what the counter
-                        // now says.  Anything else is a real off-table site.
-                        // `nz` says |x| >= s/2, so the true quotient is at least
-                        // 1 and a missing row means it is past `qmax`: either
-                        // `tt` is past the window (where the smallest quotient
-                        // is already 2^(bits-1)) or it is the window's top row.
+                        // past this side's `qmax`.  `nz` says |x| >= s/2, so the
+                        // quotient is at least 1 and a missing row means it is
+                        // past `qmax`: either `tt` is past the window (where the
+                        // smallest quotient is already 2^(bits-1)) or it is the
+                        // window's top row.  Such a site is B1's clamp, and the
+                        // region proves it by the pattern comparison rather than
+                        // by a table row it does not have.
                         if tt >= tt_top || qdiv_ref(tt, m7).is_some_and(|t| t > qmax) {
-                            clamped += 1
+                            let d = pat - (je[c] * 128 + cpat);
+                            if (0..1 << 15).contains(&d) {
+                                m_r15[d as usize] += 1;
+                                q = qmax as u32;
+                                clc = 1;
+                                clamped += 1;
+                            } else {
+                                off_table += 1;
+                            }
                         } else {
                             off_table += 1
                         }
@@ -619,7 +678,7 @@ the probe would move the output too");
                 }
             }
             if let Some(QTamper::Out(tt)) = tamper {
-                if tt % (tokens * n) == gi {
+                if tt % (tokens * n) == gi && clc == 0 {
                     q = if (q as i64) < qmax { q + 1 } else { q - 1 };
                     fired += 1;
                 }
@@ -638,6 +697,7 @@ the probe would move the output too");
             cols[c0 + 3][j] = m31_u32(nzc);
             cols[c0 + 4][j] = m31_of(sm);
             cols[c0 + 5][j] = m31_u32(sg);
+            cols[c0 + 6][j] = m31_u32(clc);
             let signed = if sg == 1 { -(q as i64) } else { q as i64 };
             in_nat.push((sm, ef as i64));
             out_nat.push(signed);
@@ -719,7 +779,7 @@ pub fn q_interaction(r: &QRegion, tie: &QTie, hd: usize, qnz: &PairRel, rq3: &Fr
         claims[side] = h[rows - 1];
         cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
     }
-    let n_looks_slot = 4; // qnz, division, sub-half, RQV
+    let n_looks_slot = 5; // qnz, division, sub-half, clamp, RQV
     let n_looks = pr * n_looks_slot;
     let one = PackedQM31::broadcast(SecureField::one());
     let getb = |c: usize, vr: usize| r.base[c].data[vr];
@@ -728,19 +788,22 @@ pub fn q_interaction(r: &QRegion, tie: &QTie, hd: usize, qnz: &PairRel, rq3: &Fr
     let c126 = PackedM31::broadcast(m31_u32(126));
     let c141 = PackedM31::broadcast(m31_u32((134 - TT_POW2) as u32));
     let onep = PackedM31::broadcast(M31::one());
+    let cpatp = PackedM31::broadcast(m31_u32(clamp_pat(r.bits) as u32));
     let fr = |i: usize, vr: usize| -> (PackedQM31, PackedQM31) {
         let (sl, which) = (i / n_looks_slot, i % n_looks_slot);
         let c0 = sl * Q_PER_SLOT;
         let (ef, m7, q, nz) =
             (getb(c0, vr), getb(c0 + 1, vr), getb(c0 + 2, vr), getb(c0 + 3, vr));
+        let cl = getb(c0 + 6, vr);
         // the preprocessed block is `[gt0, end, hstart]` then one exponent per slot
         let sc = getp(3 + sl, vr);
         let pat = ef * c128p + m7;
         let path = (sc + c126) * c128p;
         match which {
             0 => (one, qnz.combine(&[q, nz])),
-            1 => (PackedQM31::from(nz), rq3.combine(&[ef - sc - c141, m7, q])),
+            1 => (PackedQM31::from(nz - cl), rq3.combine(&[ef - sc - c141, m7, q])),
             2 => (one - PackedQM31::from(nz), r15.combine(&[path - onep - pat])),
+            3 => (PackedQM31::from(cl), r15.combine(&[pat - (sc * c128p + cpatp)])),
             _ => (one, rqv.combine(&[getb(c0 + 4, vr), m7, getb(c0 + 5, vr)])),
         }
     };

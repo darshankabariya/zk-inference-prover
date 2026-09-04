@@ -3375,6 +3375,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     log_rows: qp.lay.log_rows,
                     per_row: qp.lay.per_row,
                     chunks: qp.lay.chunks,
+                    bits: qp.bits,
                     qnz: qr.qnz.clone(),
                     rq3: qr.div[plan.q_tab_at(qp.bits)].clone(),
                     rqv: rr.rqv.clone(),
