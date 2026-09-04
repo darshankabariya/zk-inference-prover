@@ -978,6 +978,34 @@ impl GluePlan {
     }
 }
 
+/// Stream LL (E11): what a preprocessed column needs in order to be rebuilt.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+pub enum PreNeeds {
+    /// `Fixed.params` alone determines every cell.
+    Params,
+    /// the model dump: a weight, a weight scale, or a per-layer calibration
+    /// constant that lives only in the dump's manifest.
+    Model,
+}
+
+/// Stream LL (E11): does the column move down the block axis of a grid?
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+pub enum PreVaries {
+    /// identical on every token block of the layer.
+    Layer,
+    /// its height or its contents are a function of the chunk's own `c`.
+    Block,
+}
+
+/// Stream LL (E11): one entry of `Plan::pre_split`.
+pub struct PreCol {
+    pub id: PreProcessedColumnId,
+    pub family: String,
+    pub log_size: u32,
+    pub needs: PreNeeds,
+    pub varies: PreVaries,
+}
+
 /// Everything both sides derive from `Params` alone: layouts, specs, widths,
 /// the preprocessed id list.  One constructor, used by prover and verifier, so
 /// they cannot disagree.
@@ -1401,6 +1429,262 @@ impl Plan {
         } else {
             crate::dequant::OKind::Pair
         }
+    }
+
+    /// Stream LL (E11), `notes/witness-slack.md` section 5 item 1: the same list
+    /// `pre_ids` produces, with what each column needs in order to be rebuilt and
+    /// whether it is the same column on every token block of a layer.
+    ///
+    /// Two axes, because the two questions the item asks are not the same one:
+    ///
+    /// * `needs` -- `Params` means `Fixed.params` determines every cell, so a
+    ///   verifier holding the statement can rebuild the column. `Model` means it
+    ///   cannot: the column holds a weight, a weight scale, or a per-layer
+    ///   calibration constant that lives only in the dump's manifest
+    ///   (`b6_k_dinv` / `b6_x_dinv`, `b6_exp_y`).
+    /// * `varies` -- `Layer` means the column is identical on every block of the
+    ///   layer, so one published constant per layer covers a whole grid; `Block`
+    ///   means its height or its contents move with the chunk's own `c`.
+    ///
+    /// `pre_split_sizes` is asserted against the committed tree in `compose`, so
+    /// this list and tree 0 cannot drift apart.
+    pub fn pre_split(&self) -> Vec<PreCol> {
+        let mut v: Vec<PreCol> = vec![];
+        let mut put = |id: PreProcessedColumnId, family: &str, log_size: u32,
+                       needs: PreNeeds, varies: PreVaries| {
+            v.push(PreCol { id, family: family.to_string(), log_size, needs, varies });
+        };
+        for b in 0..self.shapes.len() {
+            let (lc, lk) = (&self.lays[b].chan, &self.lays[b].key);
+            for n in CHAN_SEL {
+                put(band_id(b, n), "band/sel", lc.g.log_rows, PreNeeds::Params,
+                    PreVaries::Block);
+            }
+            if self.corner[b] {
+                for n in CORNER_SEL {
+                    // the eighth is `dinv`, the per-instance master-table scale:
+                    // a model constant off the dump's `frac_per_head`, and the
+                    // one column of a band that is not a function of the shape
+                    let (fam, needs) = if n == CORNER_SEL[7] {
+                        ("band/dinv", PreNeeds::Model)
+                    } else {
+                        ("band/sel", PreNeeds::Params)
+                    };
+                    put(band_id(b, n), fam, lk.g.log_rows, needs, PreVaries::Block);
+                }
+                for i in 0..self.lays[b].key.q {
+                    put(msk_id(b, i), "band/mask", lk.g.log_rows, PreNeeds::Params,
+                        PreVaries::Block);
+                }
+            } else {
+                for n in KEY_SEL {
+                    let (fam, needs) = if n == KEY_SEL[7] {
+                        ("band/dinv", PreNeeds::Model)
+                    } else {
+                        ("band/sel", PreNeeds::Params)
+                    };
+                    put(band_id(b, n), fam, lk.g.log_rows, needs, PreVaries::Block);
+                }
+            }
+            if let Some(a) = crate::attn_air::act_id(b, self.corner[b], lk.g.lead) {
+                put(a, "band/sel", lk.g.log_rows, PreNeeds::Params, PreVaries::Block);
+            }
+            if self.rows_band[b] {
+                for n in ROW_SEL {
+                    put(band_id(b, n), "band/sel", self.lays[b].log_row,
+                        PreNeeds::Params, PreVaries::Block);
+                }
+            }
+        }
+        for s in 0..self.ao_lay.per_row {
+            put(ao_chan("jv", s), "attnout/jv", self.ao_lay.log_rows, PreNeeds::Model,
+                PreVaries::Layer);
+        }
+        for n in AO_SEL {
+            put(ao_sel(n), "attnout/sel", self.ao_lay.log_rows, PreNeeds::Params,
+                PreVaries::Layer);
+        }
+        for ((m, sp), lay) in self.p.mats.iter().zip(&self.specs).zip(&self.mat_lays) {
+            for s in 0..sp.per_row {
+                let names: &[&str] = match sp.variant {
+                    DeqVariant::Pow2 => &["j"],
+                    DeqVariant::Chain => &["m", "e"],
+                    DeqVariant::Fold => &["m", "p"],
+                    _ => unreachable!(),
+                };
+                for nm in names {
+                    put(chan_col(&m.name, nm, s), "dequant/scale", lay.log_rows,
+                        PreNeeds::Model, PreVaries::Layer);
+                }
+            }
+            for n in DEQ_SEL {
+                put(deq_sel(&m.name, n), "dequant/sel", lay.log_rows, PreNeeds::Params,
+                    PreVaries::Layer);
+            }
+            if self.has_oside(&m.name) {
+                for n in crate::dequant::DEQ_OSEL {
+                    put(deq_sel(&m.name, n), "dequant/sel", lay.log_rows,
+                        PreNeeds::Params, PreVaries::Layer);
+                }
+            }
+        }
+        for w in &self.walks {
+            for (mi, _) in w.mats.iter().enumerate() {
+                for pp in 0..w.lay.pk {
+                    put(walk_w(&w.name, mi, pp), "walk/weight", w.lay.g.log_rows,
+                        PreNeeds::Model, PreVaries::Layer);
+                }
+            }
+            for n in WALK_SEL {
+                put(walk_sel(&w.name, n), "walk/sel", w.lay.g.log_rows, PreNeeds::Params,
+                    PreVaries::Layer);
+            }
+        }
+        if let Some(g) = &self.glue {
+            for r in &g.regions {
+                put(crate::glue::glue_sel(&r.tag, "nofirst"), "glue/sel", r.log_rows,
+                    PreNeeds::Params, PreVaries::Layer);
+                put(crate::glue::glue_sel(&r.tag, "end"), "glue/sel", r.log_rows,
+                    PreNeeds::Params, PreVaries::Layer);
+                for i in 0..r.prog.n_pre {
+                    for k in 0..2 {
+                        put(crate::glue::glue_pre_col(&r.tag, i, k), "glue/normw",
+                            r.log_rows, PreNeeds::Model, PreVaries::Layer);
+                    }
+                }
+            }
+        }
+        // the master exp table: the index column is `0..2^log_table`, the value
+        // column is this layer's own table and its exponent is the dump's
+        put(id(TBL_EXP_X), "table/exp", self.p.log_table, PreNeeds::Params,
+            PreVaries::Layer);
+        put(id(TBL_EXP_Y), "table/exp", self.p.log_table, PreNeeds::Model,
+            PreVaries::Layer);
+        for c in NORM_COLS {
+            put(id(c), "table/norm", self.log_norm, PreNeeds::Params, PreVaries::Layer);
+        }
+        for c in FRAC_COLS {
+            put(id(c), "table/frac", self.log_frac, PreNeeds::Params, PreVaries::Layer);
+        }
+        for c in MUL_COLS {
+            put(id(c), "table/mul", self.log_mul, PreNeeds::Params, PreVaries::Layer);
+        }
+        for c in QNZ_COLS {
+            put(id(c), "table/qnz", self.p.ao_q_bits, PreNeeds::Params, PreVaries::Layer);
+        }
+        for w in &self.widths {
+            put(tbl_range(*w), "table/range", *w, PreNeeds::Params, PreVaries::Layer);
+        }
+        for c in EPOW_COLS {
+            put(id(c), "table/epow", self.log_epow(), PreNeeds::Params, PreVaries::Layer);
+        }
+        if let Some(g) = &self.glue {
+            let t = crate::glue::GlueTables::new(self.p.kmax, self.round, &g.uns);
+            let mut logs: Vec<u32> = vec![t.log_pow; crate::glue::POW_COLS.len()];
+            logs.extend(vec![t.log_smul; crate::glue::SMUL_COLS.len()]);
+            logs.extend(vec![t.log_val; crate::glue::VAL_COLS.len()]);
+            logs.extend(vec![t.log_un; 4 * g.uns.len()]);
+            for (gid, ls) in crate::glue::glue_table_ids(&g.uns).into_iter().zip(logs) {
+                put(gid, "table/glue", ls, PreNeeds::Params, PreVaries::Layer);
+            }
+        }
+        for r in &self.rqs {
+            for n in crate::requant::RQ_SEL {
+                put(crate::requant::rq_sel(&r.name, n), "requant/sel", r.lay.log_rows,
+                    PreNeeds::Params, PreVaries::Layer);
+            }
+        }
+        for sv in &self.rq_vars {
+            for k in 0..crate::requant::rq_tab_width(*sv) {
+                put(crate::requant::rq_tab_col(*sv, k), "table/requant",
+                    crate::requant::rq_log_rows(*sv), PreNeeds::Params, PreVaries::Layer);
+            }
+            for k in 0..crate::requant::scl_tab_width(*sv) {
+                put(crate::requant::scl_tab_col(*sv, k), "table/requant", 15,
+                    PreNeeds::Params, PreVaries::Layer);
+            }
+        }
+        if !self.rqs.is_empty() {
+            for c in crate::requant::RQV_COLS {
+                put(id(c), "table/requant", 9, PreNeeds::Params, PreVaries::Layer);
+            }
+        }
+        if let Some(mi) = self.argmax_mat() {
+            for n in crate::argmax::AM_SEL {
+                put(crate::argmax::id(n), "argmax/sel", self.mat_lays[mi].log_rows,
+                    PreNeeds::Params, PreVaries::Layer);
+            }
+        }
+        if let Some(l) = &self.emb {
+            for n in crate::embed::EMB_SEL {
+                put(crate::embed::id(n), "embed/sel", l.log_use, PreNeeds::Params,
+                    PreVaries::Layer);
+            }
+            put(crate::embed::cb_id(), "embed/sel", l.log_use, PreNeeds::Params,
+                PreVaries::Layer);
+            put(crate::embed::tab_v_id(), "embed/table", l.log_tab, PreNeeds::Params,
+                PreVaries::Layer);
+            put(crate::embed::tab_cb_id(), "embed/table", l.log_tab, PreNeeds::Params,
+                PreVaries::Layer);
+            for k in 0..l.pe {
+                put(crate::embed::tab_e_id(k), "embed/table", l.log_tab, PreNeeds::Model,
+                    PreVaries::Layer);
+            }
+        }
+        if self.p.gkr_bands {
+            for h in crate::gkrlink::link_heights(self) {
+                put(crate::gkrlink::first_id(h), "gkrlink/sel", h, PreNeeds::Params,
+                    PreVaries::Block);
+                put(crate::gkrlink::second_id(h), "gkrlink/sel", h, PreNeeds::Params,
+                    PreVaries::Block);
+            }
+        }
+        v
+    }
+
+    /// The log sizes `pre_split` says tree 0 has, in commit order.
+    pub fn pre_split_sizes(&self) -> Vec<u32> {
+        self.pre_split().iter().map(|c| c.log_size).collect()
+    }
+
+    /// The rollup stream LL's record quotes: per family, and per the two axes.
+    pub fn pre_split_report(&self) -> Value {
+        let cols = self.pre_split();
+        let mut fam: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+        let (mut model_c, mut model_n) = (0usize, 0usize);
+        let (mut block_c, mut block_n) = (0usize, 0usize);
+        for c in &cols {
+            let cells = 1usize << c.log_size;
+            let e = fam.entry(c.family.clone()).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += cells;
+            if c.needs == PreNeeds::Model {
+                model_c += 1;
+                model_n += cells;
+            }
+            if c.varies == PreVaries::Block {
+                block_c += 1;
+                block_n += cells;
+            }
+        }
+        let total: usize = cols.iter().map(|c| 1usize << c.log_size).sum();
+        let sh = |n: usize| n as f64 / total as f64;
+        json!({
+            "columns": cols.len(),
+            "cells": total,
+            "families": fam.iter().map(|(k, (c, n))| json!({
+                "family": k, "columns": c, "cells": n, "share": sh(*n),
+            })).collect::<Vec<_>>(),
+            // what a verifier cannot rebuild from `Fixed.params` alone
+            "needs_model": {"columns": model_c, "cells": model_n, "share": sh(model_n)},
+            "needs_params": {"columns": cols.len() - model_c, "cells": total - model_n,
+                             "share": sh(total - model_n)},
+            // what moves down the block axis: what a per-layer published root
+            // could not cover, and so what the verifier must rebuild per chunk
+            "varies_block": {"columns": block_c, "cells": block_n, "share": sh(block_n)},
+            "varies_layer": {"columns": cols.len() - block_c, "cells": total - block_n,
+                             "share": sh(total - block_n)},
+        })
     }
 
     pub fn pre_ids(&self) -> Vec<PreProcessedColumnId> {
@@ -3790,6 +4074,11 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // committed it before (`B7_M5_PRECACHE=1`); otherwise committed here and,
     // with the cache on, kept -- or, in mode 2, checked against what is kept.
     let pre_sizes: Vec<u32> = pre_all.iter().map(|c| c.log_size()).collect();
+    // Stream LL (E11): the classification is the same list, in the same order,
+    // at the same heights -- asserted here so `pre_split` and tree 0 cannot
+    // drift apart, on every shape any gate runs.
+    assert_eq!(pre_sizes, plan.pre_split_sizes(),
+               "pre_split disagrees with the committed tree 0");
     match crate::precache::take(pre_key, &pre_sizes) {
         Some(tree) => {
             sess.commit_cached(tree, pre_sizes);

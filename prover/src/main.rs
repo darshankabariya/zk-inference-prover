@@ -1152,6 +1152,39 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
     (j, accepts)
 }
 
+/// Stream LL (E11), `notes/witness-slack.md` section 5 item 1, deliverable 1:
+/// what tree 0 is made of, from `Params` alone.
+///
+///     b65 pre-split --params FILE
+///
+/// `FILE` is a JSON `Params` -- `result.point.params` of any `compose` run, so
+/// the 8B reference chunk's tree 0 can be priced without the dump. The rollup
+/// answers the two questions the design fork turns on: how much of tree 0 a
+/// verifier could rebuild from the statement alone (`needs_params`), and how
+/// much of it is the same on every token block of the layer (`varies_layer`),
+/// which is what a published per-layer root would cover.
+fn pre_split_cmd(args: &[String]) {
+    let f = arg_str(args, "--params").expect("pre-split needs --params FILE");
+    let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--params {f}: {e}"));
+    let p: compose::Params = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|e| panic!("--params {f}: not a Params document: {e}"));
+    let plan = compose::Plan::new(&p);
+    let mut report = plan.pre_split_report();
+    report["params_file"] = json!(f);
+    report["c"] = json!(p.c);
+    report["s"] = json!(p.s);
+    let cols: Vec<Value> = plan.pre_split().iter()
+        .map(|c| json!({"id": c.id.id, "family": c.family, "log_size": c.log_size,
+                        "needs": c.needs, "varies": c.varies}))
+        .collect();
+    report["column_list"] = json!(cols);
+    eprintln!("pre-split: {} columns, {} cells; needs_model {:.2}%, varies_block {:.2}%",
+              report["columns"], report["cells"],
+              100.0 * report["needs_model"]["share"].as_f64().unwrap(),
+              100.0 * report["varies_block"]["share"].as_f64().unwrap());
+    emit("pre_split", report);
+}
+
 fn compose_cmd(args: &[String]) {
     // Stream EE (open item 21): before anything, because `prove_gen` reads it.
     cudagen::fp_out_set(args);
@@ -2280,6 +2313,7 @@ fn main() {
         "pack" => pack_cmd(&args),
         "attn-probes" => attn_probes_cmd(&args),
         "compose" => compose_cmd(&args),
+        "pre-split" => pre_split_cmd(&args),
         "compose-chunks" => chunks::chunks_cmd(&args),
         "exprprobe" => exprprobe::cmd(&args),
         "cudacheck" => cudagen::cmd(&args),
@@ -2307,7 +2341,7 @@ fn main() {
             eprintln!("unknown subcommand {other:?}; \
                        expected tables|dequant|width|kmax|probes|pack|attn-probes|exprprobe|cudacheck|cudaemit|logupcheck|genemit|\
                        argmax|argmax-probes|embed|embed-probes|\
-                       compose|compose-probes|bounds-chain|bounds-grid|psweep|requant|requant-probes|glue|glue-probes|selftest");
+                       compose|pre-split|compose-probes|bounds-chain|bounds-grid|psweep|requant|requant-probes|glue|glue-probes|selftest");
             std::process::exit(2);
         }
     }
