@@ -161,7 +161,7 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
     // The standalone path has no `Plan`, so no components and no evals: it
     // keeps the hand-written builder, which is also what mode 2 compares against.
     let mut inter = attn_trace::interaction_phase(a, &l, cfg, &pow, &rel_exp, &rels, &com,
-                                                  &widths, true, true, None, None);
+                                                  &widths, true, true, None, None, None);
     let pre_x = attn_trace::pre_exp_x(a, &l);
     let mult0 = com.at[4];
     let pre_ranges: Vec<&crate::common::Eval> =
@@ -212,6 +212,7 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
     let chan = FrameworkComponent::<ChanEval>::new(
         alloc,
         ChanEval { tag: 0, lay: l.chan, pow: pow.clone(), off, claimed: inter.claimed_chan,
+                   qk_bind: None,
                    rel_k: rels[ridx(a.k_bits)].clone(), rel_q: rels[ridx(a.q_bits)].clone(),
                    range_check: cfg.range_check, gkr: false, bound_k: vec![] },
         if cfg.range_check { next_use() } else { SecureField::zero() },
@@ -219,6 +220,7 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
     let key = FrameworkComponent::<KeyEval>::new(
         alloc,
         KeyEval { tag: 0, lay: l.key, pow: pow.clone(), off, variant: a.variant,
+                  v_bind: None,
                   claimed_hs: inter.claimed_hs, claimed_av: inter.claimed_av,
                   claimed_sn: inter.claimed_sn, rel_exp: rel_exp.clone(),
                   rel_v: rels[ridx(8.min(a.k_bits))].clone(),

@@ -702,8 +702,20 @@ pub struct Interaction {
     pub claimed_out: SecureField,
     pub claimed_am: SecureField,
     pub claimed_az: SecureField,
+    /// Stream NN: this band's own K, Q and V claims -- the sums the quantize
+    /// regions are read against.  Empty on a band with no `NnBind`.
+    pub claimed_nn: Vec<SecureField>,
     pub use_sums: Vec<SecureField>,
     pub table_sums: Vec<SecureField>,
+}
+
+/// Stream NN: the three band-side Horner claims this band publishes over its own
+/// committed K, Q and V columns.  Present on a corner band of a chunk that
+/// carries the quantize regions and nowhere else.
+pub struct NnBind<'a> {
+    pub k: &'a crate::attn_air::BandTie,
+    pub q: &'a crate::attn_air::BandTie,
+    pub v: &'a crate::attn_air::BandTie,
 }
 
 /// Everything committed after the challenges: the Horner accumulators and the
@@ -714,7 +726,8 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
                          ranges: &[RangeRel], com: &Committed, widths: &[u32],
                          with_out: bool, with_rows: bool,
                          air: Option<&crate::devfrac::BandAir<'_>>,
-                         mut gkr: Option<&mut crate::gkrband::Collect>)
+                         mut gkr: Option<&mut crate::gkrband::Collect>,
+                         nn: Option<&NnBind<'_>>)
                          -> Interaction {
     let sh = a.shape;
     let (lc, lk, lo) = (&l.chan, &l.key, &l.out);
@@ -815,6 +828,53 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             acc[lc.g.rows - 1]
         }
     };
+    // ---- stream NN: the band's own K and Q claims --------------------------
+    // Built on the host whatever `B7_M4_ACC` says: the values are the witness's
+    // `kk` and `qq`, which the host holds either way, and the two columns are
+    // appended after the region's three so the AIR's mask order is the tree's.
+    let mut claimed_nn: Vec<SecureField> = vec![];
+    if let Some(b) = nn {
+        for (t, kind) in [(b.k, 0usize), (b.q, 1usize)] {
+            let rows = lc.g.rows;
+            let width = if kind == 0 { lc.pk } else { lc.pq };
+            let off = SecureField::from(m31_of(if kind == 0 { a.off_k() as i64 }
+                                               else { a.off_q() as i64 }));
+            let fold: Vec<(SecureField, bool, bool)> = (0..rows)
+                .into_par_iter()
+                .map(|j| {
+                    let mut f = SecureField::zero();
+                    let mut nofirst = false;
+                    if let Some((g, chunk)) = lc.g.row(j) {
+                        nofirst = chunk + 1 < lc.g.chunks;
+                        let (inst, ch) = split(g, sh.hd);
+                        for p in 0..width {
+                            let val = if kind == 0 {
+                                let c = chunk * lc.pk + p;
+                                if c < sh.c { a.kk[(inst * sh.c + c) * sh.hd + ch] } else { 0 }
+                            } else {
+                                let tt = chunk * lc.pq + p;
+                                if tt < sh.s { a.qq[(inst * sh.s + tt) * sh.hd + ch] } else { 0 }
+                            };
+                            if val != 0 {
+                                f += t.w[p] * SecureField::from(m31_of(val as i64));
+                            }
+                        }
+                    }
+                    (f, nofirst, j > 0)
+                })
+                .collect();
+            let _ = off;
+            let mut h = vec![SecureField::zero(); rows];
+            for j in 0..rows {
+                let (f, nofirst, notzero) = fold[j];
+                let step = if nofirst { t.s_in } else if notzero { t.s_bd }
+                           else { SecureField::zero() };
+                h[j] = if j > 0 { h[j - 1] * step } else { SecureField::zero() } + f;
+            }
+            cols.extend(secure_cols(lc.g.log_rows, &h));
+            claimed_nn.push(h[rows - 1]);
+        }
+    }
     if cfg.range_check {
         let base0 = com.at[0];
         let mut looks = vec![];
@@ -979,6 +1039,43 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             (hs[n - 1], av[n - 1], sn[n - 1])
         }
     };
+    // ---- stream NN: the band's own V claim ---------------------------------
+    if let Some(b) = nn {
+        let t = b.v;
+        let rows = lk.g.rows;
+        let fold: Vec<(SecureField, bool, bool, bool)> = (0..rows)
+            .into_par_iter()
+            .map(|j| {
+                let mut f = SecureField::zero();
+                let (mut nofirst, mut istart) = (false, false);
+                if let Some((g, chunk)) = lk.g.row(j) {
+                    nofirst = chunk + 1 < lk.g.chunks;
+                    istart = j > 0 && key_istart(lk, sh.c, j);
+                    let (inst, c) = split(g, sh.c);
+                    for p in 0..lk.pv {
+                        let ch = chunk * lk.pv + p;
+                        let val = if ch < sh.hd { a.vv[(inst * sh.c + c) * sh.hd + ch] }
+                                  else { 0 };
+                        if val != 0 {
+                            f += t.w[p] * SecureField::from(m31_of(val as i64));
+                        }
+                    }
+                }
+                (f, nofirst, istart, j > 0)
+            })
+            .collect();
+        let mut h = vec![SecureField::zero(); rows];
+        for j in 0..rows {
+            let (f, nofirst, istart, notzero) = fold[j];
+            let step = if nofirst { t.s_in }
+                       else if istart { t.s_ib.expect("the V tie needs an instance step") }
+                       else if notzero { t.s_bd }
+                       else { SecureField::zero() };
+            h[j] = if j > 0 { h[j - 1] * step } else { SecureField::zero() } + f;
+        }
+        cols.extend(secure_cols(lk.g.log_rows, &h));
+        claimed_nn.push(h[rows - 1]);
+    }
     {
         let b = com.at[1];
         let n_aux = if a.variant == Variant::IntExp { 0 } else { lk.q };
@@ -1160,7 +1257,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     }
     }
 
-    Interaction { cols: cols.into_inner(), claimed_chan, claimed_hs, claimed_av,
+    Interaction { cols: cols.into_inner(), claimed_chan, claimed_hs, claimed_av, claimed_nn,
                   claimed_sn, claimed_out, claimed_am, claimed_az, use_sums,
                   table_sums: vec![] }
 }

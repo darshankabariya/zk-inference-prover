@@ -191,9 +191,9 @@ pub struct RqTie {
 }
 
 /// `tt` offsets: quotients in [1/2, 127.5) need only these exponent windows.
-const TT_POW2: i64 = 9; // Delta' = ef - 134 - jx in [-9, -1]  (|x| = (128+m7) 2^(ef-134))
-const TT_BF16: i64 = 1; // Delta  = ef - es in [-1, 7]
-const TT_RANGE: usize = 9;
+pub const TT_POW2: i64 = 9; // Delta' = ef - 134 - jx in [-9, -1]  (|x| = (128+m7) 2^(ef-134))
+pub const TT_BF16: i64 = 1; // Delta  = ef - es in [-1, 7]
+pub const TT_RANGE: usize = 9;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SVariant {

@@ -37,6 +37,7 @@ mod layer;
 mod layout;
 mod plogup;
 mod requant;
+mod rope;
 mod walk_air;
 mod witread;
 mod spans;
@@ -1012,6 +1013,18 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         } else {
             0
         },
+        // Stream NN: the rotation and the q/k/v quantize, present exactly when
+        // the witness carries what they need.  Not a flag: on a real dump the
+        // columns are there or they are not, and on a synthetic layer
+        // `--synth-glue` builds them exactly when the widths line up.  The
+        // wiring family is a precondition -- the input side ties into it.
+        rope: l.glue.as_ref().filter(|g| !g.head).and(l.rope.as_ref()).map(|r| {
+            compose::RopeParams {
+                nkv: r.nkv,
+                pos0: r.pos0,
+                inv_freq: r.inv_freq.iter().map(|v| v.to_bits()).collect(),
+            }
+        }),
     }
 }
 
@@ -1899,6 +1912,7 @@ fn layer_clone(l: &layer::Layer) -> layer::Layer {
         tok_in: l.tok_in.clone(),
         layer: l.layer,
         block: l.block,
+        rope: l.rope.clone(),
         source: l.source.clone(),
     }
 }
