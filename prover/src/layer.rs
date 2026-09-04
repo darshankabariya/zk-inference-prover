@@ -1054,6 +1054,21 @@ impl Layer {
         }
         let nkv = nk / hd;
         let rep = nh / nkv;
+        // NN-2: and the regions have to *tile* the shape, not only fit its
+        // widths.  A rotation region's rows are `tokens * heads` and a quantize
+        // region's are `q_layout`'s, and both must be an exact power of two --
+        // `GluePlan::new` and `q_layout` assert it.  Stream II's synthetic gate
+        // shape is `nh = nkv = 3` at `hd = 32`, so `nq = nk = nv = 96` passes
+        // the width test above and `tokens * nh = 96` fails the tiling one:
+        // before this the family turned on where nobody meant it to and the run
+        // panicked.  A shape the regions cannot tile leaves the family off and
+        // reports `nn_open`, which is what the width test already does.
+        if !(tokens * nh).is_power_of_two() || !(tokens * nkv).is_power_of_two() {
+            return None;
+        }
+        if !crate::rope::q_tiles(nq, hd, tokens) || !crate::rope::q_tiles(nk, hd, tokens) {
+            return None;
+        }
         let b0 = &self.bands[0];
         let (q_bits, k_bits) = (b0.q_bits, b0.k_bits);
         let (qmax_q, qmax_k) = ((1i64 << (q_bits - 1)) - 1, (1i64 << (k_bits - 1)) - 1);
@@ -1791,14 +1806,16 @@ impl Layer {
 
 
         let h1 = tail(&gc.xin, &gc.w1, &t1);
-        // the head chunk: the final norm's output is the head's committed
-        // input, and there is no add, no second norm and no SwiGLU after it
-        if head {
-            wire(self, &["lm_head"], &h1, d);
-            self.glue = Some(gc);
-            return;
+        // NN-2: the head chunk's own early return is BELOW, after the `o` seam
+        // is wired, which is where it has always been.  Stream NN moved it up
+        // here so that the q/k/v wiring and the rotation could run before the
+        // `o` requantize -- and took the head chunk's `o` seam with it, so a
+        // synthetic head chunk stopped rewiring `o`'s committed input and
+        // rejected by `ao_q_ok` and nothing else (stream II's gate step 6,
+        // `6075044491ce8db0`).  Only the *non-head* half moves up.
+        if !head {
+            wire(self, &["q", "k", "v"], &h1, d);
         }
-        wire(self, &["q", "k", "v"], &h1, d);
         // ---- stream NN: the bands are the q/k/v matmuls' own outputs --------
         //
         // A synthetic layer's bands were three unrelated draws, so no shape it
@@ -1813,7 +1830,9 @@ impl Layer {
         // heads, and `nh` a multiple of that number.  A shape where they do not
         // leaves the family off and the run reports it, rather than proving
         // something narrower quietly.
-        self.rope = self.rope_from_mats(round, rope_bend);
+        if !head {
+            self.rope = self.rope_from_mats(round, rope_bend);
+        }
         // the `o` matmul's committed input is the attention output requantized,
         // and the attention output has just moved -- so this runs after the
         // rebuild and not before it
@@ -1868,7 +1887,15 @@ impl Layer {
             ok
         };
         let _ = o_wired;
-        let _ = o_wired;
+        // the head chunk: the final norm's output is the head's committed
+        // input, and there is no add, no second norm and no SwiGLU after it.
+        // It returns here, after the `o` seam, exactly as it did before stream
+        // NN (NN-2).
+        if head {
+            wire(self, &["lm_head"], &h1, d);
+            self.glue = Some(gc);
+            return;
+        }
         // Stream JJ's dequant output ties: `o_out` is the `o` region's own
         // dequant reference, so an honest run ties and a bent copy does not.
         // `o`'s input is not rewired (its requantize is `AttnOutEval`'s), so

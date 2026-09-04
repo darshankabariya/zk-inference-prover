@@ -646,6 +646,19 @@ pub fn q_layout(n: usize, hd: usize, tokens: usize, target: usize) -> MatLayout 
     best.unwrap_or_else(|| panic!("no exact quantize tiling for n={n} hd={hd} tokens={tokens}"))
 }
 
+/// NN-2: does a quantize region tile this shape at all?  `q_layout` panics when
+/// it does not, and the witness generator has to ask before it turns the family
+/// on -- a shape whose widths line up but whose rows do not tile leaves the
+/// rotation off and reports `nn_open`, exactly as a shape whose widths do not.
+pub fn q_tiles(n: usize, hd: usize, tokens: usize) -> bool {
+    (1..=hd).any(|pr| {
+        hd % pr == 0 && n % pr == 0 && {
+            let active = tokens * (n / pr);
+            active.is_power_of_two() && active >= (1 << crate::layer::MIN_MAT_LOG_ROWS)
+        }
+    })
+}
+
 /// The reference: `round_half_away(x / 2^j)`, clamped, as B1's `quantize` does
 /// it.  Used by the synthetic witness generator to build the bands' own columns
 /// and by the desk's B1 check.

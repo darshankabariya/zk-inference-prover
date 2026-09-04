@@ -4152,10 +4152,43 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             let hd = p.hd;
             let inv = rp.inv(hd);
             if let Some(refv) = layer.rope.as_ref().and_then(|r| r.inv_ref.as_ref()) {
+                // Two comparisons, because the f64 vector is not what the proof
+                // commits and equality of it is the wrong bar.
+                //
+                // `theta ** x` is a libm `pow` in this crate and torch's own in
+                // `b1/model.py`, and the two round differently: on
+                // Llama-3.1-8B's `llama3` branch they disagree in 3 of 64 pairs
+                // by exactly one ulp of f64.  That is a rounding difference in
+                // a transcendental, not a different rotation, and asserting
+                // f64 equality made every real chunk refuse to prove.
+                //
+                // What tree 0 holds is `rope_at`'s bf16 `cos` and `sgnsin` at
+                // this chunk's own positions.  So the f64 gap is *reported*
+                // (`rope_inv_vs_b1`, which is what NN session 1 section 6 said
+                // it was), and the bf16 table the region actually commits is
+                // *asserted* -- every cell, at every position this chunk uses.
                 let bad = inv.iter().zip(refv).filter(|(a, b)| a != b).count();
-                assert_eq!(bad, 0,
-                           "the statement's inv_freq disagrees with the dump's in {bad} of \
-{} places: the rotation this chunk would prove is not B1's", inv.len());
+                let t_iv = std::time::Instant::now();
+                let cells: usize = (0..p.s)
+                    .into_par_iter()
+                    .map(|t| {
+                        let pos = rp.pos0 + t;
+                        let a = crate::rope::pre_row(&inv, hd, pos);
+                        let b = crate::rope::pre_row(refv, hd, pos);
+                        a.iter().zip(&b).filter(|(x, y)| x != y).count()
+                    })
+                    .sum();
+                crate::util::m4_add("gen/rope_invref", t_iv.elapsed().as_secs_f64());
+                assert_eq!(cells, 0,
+                           "the angle table the statement builds differs from the dump's \
+inv_freq in {cells} of {} committed bf16 cells: the rotation this chunk would prove is not \
+B1's (the f64 vectors differ in {bad} of {} places)",
+                           2 * hd * p.s, inv.len());
+                if bad != 0 {
+                    eprintln!("compose: rope inv_freq differs from the dump's in {bad} of {} \
+f64 places and in 0 of {} committed bf16 cells -- a `pow` rounding difference, not a \
+different rotation", inv.len(), 2 * hd * p.s);
+                }
             }
             for rr in &gp.ropes {
                 let mi = layer.mats.iter().position(|m| m.name == rr.name)
@@ -5839,8 +5872,19 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         "rope_inv_vs_b1": match (&p.rope, layer.rope.as_ref().and_then(|r| r.inv_ref.as_ref())) {
             (Some(rp), Some(refv)) => {
                 let inv = rp.inv(p.hd);
+                // `mismatch` is the f64 vector's; `cell_mismatch` is the bf16
+                // table the region commits, which is the one that is asserted.
+                let cells: usize = (0..p.s)
+                    .into_par_iter()
+                    .map(|t| {
+                        let a = crate::rope::pre_row(&inv, p.hd, rp.pos0 + t);
+                        let b = crate::rope::pre_row(refv, p.hd, rp.pos0 + t);
+                        a.iter().zip(&b).filter(|(x, y)| x != y).count()
+                    })
+                    .sum();
                 json!({"values": inv.len(), "rope_type": rp.rope_type,
-                       "mismatch": inv.iter().zip(refv).filter(|(a, b)| a != b).count()})
+                       "mismatch": inv.iter().zip(refv).filter(|(a, b)| a != b).count(),
+                       "cells": 2 * p.hd * p.s, "cell_mismatch": cells})
             }
             _ => json!(null),
         },
