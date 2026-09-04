@@ -2363,6 +2363,24 @@ fn fill_tie_claims(plan: &crate::compose::Plan, claims: &mut crate::compose::Cla
     claims.embed_tok = vec![felt()];
     // stream JJ: the attnout region's output claim, the same shape of tie
     claims.ao_q = vec![felt()];
+    // stream KK: the argmax region's token claim
+    claims.head_tok = vec![felt()];
+    // Stream QQ (log row 61): stream II's four claim vectors. Leaving them
+    // empty is what cost the wired C=4K chunk ten of its thirteen `kernel
+    // fallback:` lines -- `deq_sc` and `walk_qx` are read through
+    // `.get(..).unwrap_or(zero)`, the zero folds, and the emitted dequant and
+    // walk shapes came out two instructions and one slot short of every shape
+    // a real chunk asks for. Sized from the plan, exactly as the ones above.
+    //
+    // A vector is filled here whether or not this design point reads it: an
+    // unread placeholder changes nothing, and the rule "every claim vector is
+    // filled" is one a later stream can keep without knowing which regions
+    // read which claim. `compose::claim_at` is the backstop that says so.
+    claims.walk_qx = plan.walks.iter().map(|_| felt()).collect();
+    claims.deq_sc = plan.mat_lays.iter().map(|_| felt()).collect();
+    claims.rq_in = plan.rqs.iter().map(|_| felt()).collect();
+    claims.rq_out = plan.rqs.iter().map(|_| felt()).collect();
+    claims.rq_sc = plan.rqs.iter().map(|_| felt()).collect();
 }
 
 /// `cudaemit`: lower every component, group by fingerprint into kernels, and
@@ -2388,6 +2406,9 @@ pub fn emit_cmd(args: &[String]) {
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b03);
     fill_tie_claims(&plan, &mut claims, 0x7135_2b03);
+    // Stream QQ (log row 61): from here on a claim the placeholder set does
+    // not supply is a panic naming the vector, not a zero that folds away.
+    crate::compose::set_emit_strict(true);
     let link = plan.p.gkr_bands.then(|| crate::gkrlink::link_for(&plan, 0x0b65_1157));
     let b = crate::compose::build_components_linked(&plan, &rels, f[0], f[1], f[2], f[3], f[4],
                                                     f[5], &claims, link.as_deref());  // family -> shapes, in first-seen order; a shape is a fingerprint. Seeded
@@ -2477,6 +2498,19 @@ pub fn emit_cmd(args: &[String]) {
         }
         for i in 0..b.walks.len() {
             go!(b.walks[i], format!("walk{i}"));
+        }
+        // Stream QQ (log row 61): the requantize seams and their tables.
+        // `BuiltComponents::fp_rows` has walked them since stream EE and
+        // `cudacheck` since stream II, but no emitter ever did -- so
+        // `b65_requant_eval` had not one shape in a 208-shape store, and all
+        // three seams of the wired C=4K chunk took the scalar route. This is
+        // not open item 21's kind: nothing folds, the family was simply never
+        // asked for.
+        for i in 0..b.rqs.len() {
+            go!(b.rqs[i], format!("requant{i}"));
+        }
+        for i in 0..b.rq_tabs.len() {
+            go!(b.rq_tabs[i], format!("rqtable{i}"));
         }
         go!(b.exp_t, "exp_table".to_string());
         for i in 0..b.tables.len() {
@@ -3250,6 +3284,9 @@ pub fn gen_emit_cmd(args: &[String]) {
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b05);
     fill_tie_claims(&plan, &mut claims, 0x7135_4b05);
+    // Stream QQ (log row 61): from here on a claim the placeholder set does
+    // not supply is a panic naming the vector, not a zero that folds away.
+    crate::compose::set_emit_strict(true);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
 
     // Same accumulate-across-design-points store as `cudaemit`, in its own file:
@@ -3359,6 +3396,14 @@ pub fn gen_emit_cmd(args: &[String]) {
         }
         for i in 0..b.walks.len() {
             go!(b.walks[i], format!("walk{i}"));
+        }
+        // Stream QQ (log row 61): the requantize seams and their tables, so
+        // `--families b65_requant_eval` can reach them at all.
+        for i in 0..b.rqs.len() {
+            go!(b.rqs[i], format!("requant{i}"));
+        }
+        for i in 0..b.rq_tabs.len() {
+            go!(b.rq_tabs[i], format!("rqtable{i}"));
         }
         go!(b.exp_t, "exp_table".to_string());
         for i in 0..b.tables.len() {
