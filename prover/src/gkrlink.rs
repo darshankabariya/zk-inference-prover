@@ -312,6 +312,13 @@ pub enum RCol {
     /// columns in the same order, which is what lets `glue_interaction`'s
     /// builder index `r.base` by what `Prog` returns.
     Glue(usize),
+    /// Stream OO (E11): a glue region's preprocessed value `i`, half `k` --
+    /// the `(sm, ef)` pair of a `Src::Pre` operand. Stream II's norm tails read
+    /// the model's norm weight, which is the statement's and so lives in tree 0
+    /// under `pre_root`; the pair sits at `Prog::pre_at(i, k)` in the region's
+    /// own `pre` list and is named by `glue::glue_pre_col(tag, i, k)`. The only
+    /// preprocessed column a glue lookup reads.
+    GluePre(usize, usize),
     /// B11 stream V: a walk group's `i`-th trace mask. The activations are the
     /// region's first `pq` committed columns, which is the slice
     /// `walk_interaction`'s builder range-checks.
@@ -695,7 +702,7 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
 /// nothing else -- the verifier has no evaluator to lower.
 pub fn glue_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
                   -> Vec<SiteLooks> {
-    use crate::glue::{Kind, UnKind};
+    use crate::glue::{Kind, Src, UnKind};
     let Some(gp) = plan.glue.as_ref() else { return vec![] };
     let Some(gr) = rels.glue.as_ref() else { return vec![] };
     let one = SecureField::one();
@@ -721,6 +728,23 @@ pub fn glue_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
         // one of the region's committed masks, or the constant zero
         let col = |x: usize| -> Option<Affine> {
             (x != usize::MAX).then(|| Affine::col(RCol::Glue(x), one))
+        };
+        // Stream OO: a slot operand's half `k` (0 the mantissa, 1 the exponent).
+        // `Prog::src_cols` answers `None` for `Src::Pre` because the *fill*
+        // reads a preprocessed operand out of a second vector
+        // (`glue::src_cols_any`'s `PRE_TAG`), and the two callers that took the
+        // `None` for the constant zero dropped the operand's term from the
+        // affine form -- so a tail's slots folded under a form missing one
+        // column and `gkrlink`'s own assert fired at the first tail height.
+        // A preprocessed operand is a tree-0 column of the same region: the
+        // look is the same shape, at a different tree index.
+        let src = |s: &Src, k: usize| -> Option<Affine> {
+            match s {
+                Src::Pre(i) => Some(Affine::col(RCol::GluePre(*i, k), one)),
+                _ => prog.src_cols(s, plan.round).map(|c| {
+                    Affine::col(RCol::Glue(if k == 0 { c.0 } else { c.1 }), one)
+                }),
+            }
         };
         let unit = |den: Affine| LinkLook { num: None, den };
         let mut looks = vec![];
@@ -752,14 +776,16 @@ pub fn glue_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
             let (o0, o1) = prog.out_cols(si, plan.round);
             match prog.kind {
                 Kind::Add => {
-                    let ea = prog.src_cols(sa, plan.round).map(|c| c.1);
-                    let eb = prog.src_cols(sb, plan.round).map(|c| c.1);
-                    // `ef - etop + DMAX`: an affine form in two committed masks
-                    // with a constant, not a bare column
-                    let align = |ef: Option<usize>| {
+                    let ea = src(sa, 1);
+                    let eb = src(sb, 1);
+                    // `ef - etop + DMAX`: an affine form in two masks with a
+                    // constant, not a bare column.  `ef` is a column of either
+                    // tree; the constant zero contributes no term.
+                    let align = |ef: Option<Affine>| {
                         let mut a = Affine { terms: vec![], k: dmax };
                         if let Some(e) = ef {
-                            a.terms.push((RCol::Glue(e), one));
+                            a.terms.extend(e.terms);
+                            a.k += e.k;
                         }
                         a.terms.push((RCol::Glue(b + 2), -one));
                         Some(a)
@@ -778,12 +804,10 @@ pub fn glue_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
                     looks.push(unit(rel(z, al, &[col(o0), col(o1)])));
                 }
                 Kind::Mul => {
-                    let ca = prog.src_cols(sa, plan.round).map(|c| c.0)
-                        .unwrap_or(usize::MAX);
-                    let cb = prog.src_cols(sb, plan.round).map(|c| c.0)
-                        .unwrap_or(usize::MAX);
+                    let ca = src(sa, 0);
+                    let cb = src(sb, 0);
                     let (z, al) = gr.smul.parts();
-                    looks.push(unit(rel(z, al, &[col(ca), col(cb), col(b),
+                    looks.push(unit(rel(z, al, &[ca, cb, col(b),
                                                  col(b + 1), col(b + 2)])));
                     let (z, al) = gr.val.parts();
                     looks.push(unit(rel(z, al, &[col(o0), col(o1)])));

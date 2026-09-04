@@ -1364,6 +1364,35 @@ pub fn cmd(args: &[String]) {
         for i in 0..b.tables.len() {
             go!(format!("table{i}"), &b.tables[i]);
         }
+        // Stream OO: the list has to be every *dispatched* component, and until
+        // here it was eight families of thirteen -- the glue, the glue's
+        // tables, the argmax, the embedding gadget's two and stream II's
+        // requantize seams and their tables were dispatched to a generated
+        // kernel and never once checked against `CpuDomainEvaluator`. That is
+        // the only thing in the tree that compares a lowering against the AIR
+        // it claims to be, and it is a desk check: `prewarm_blobs` and
+        // `fp_rows` have carried the full list for two streams.
+        for i in 0..b.glue.len() {
+            go!(format!("glue{i}"), &b.glue[i]);
+        }
+        for i in 0..b.gtables.len() {
+            go!(format!("g_table{i}"), &b.gtables[i]);
+        }
+        for i in 0..b.rqs.len() {
+            go!(format!("requant{i}"), &b.rqs[i]);
+        }
+        for i in 0..b.rq_tabs.len() {
+            go!(format!("rq_table{i}"), &b.rq_tabs[i]);
+        }
+        if let Some(c) = &b.argmax {
+            go!("argmax".to_string(), c);
+        }
+        if let Some(c) = &b.embed {
+            go!("embed".to_string(), c);
+        }
+        if let Some(c) = &b.emb_tab {
+            go!("emb_table".to_string(), c);
+        }
 
         let bad: Vec<&Value> = rows.iter().filter(|r| r["mismatches"] != json!(0)).collect();
         let caught: Vec<String> = bad
@@ -2248,6 +2277,21 @@ fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
     // B7b (README 26): by shape, with this proof's scalars replayed.
     let ir = lowered_ir(eval);
     let fp = ir.fingerprint();
+    // Stream OO: the bisect switch. `B7_KERNEL_SKIP` is a comma-separated list
+    // of `cuda_eval_name`s whose constraint kernel declines to the CPU on this
+    // run, exactly as an absent kernel does -- the same announced fallback the
+    // store has taken for the glue and corner shapes since stream B. It is a
+    // diagnostic and not a configuration: the CPU path evaluates the same AIR,
+    // so a run that sets it must reproduce the run that does not, and the
+    // family whose name makes an otherwise-rejected chunk prove is the family
+    // whose generated kernel disagrees with the AIR.
+    if let Ok(skip) = std::env::var("B7_KERNEL_SKIP") {
+        if skip.split(',').any(|s| s.trim() == name) {
+            eprintln!("kernel fallback: {name} fingerprint {fp:#010x} \
+                       ({} instructions) evaluates on the CPU (B7_KERNEL_SKIP)", ir.ops.len());
+            return None;
+        }
+    }
     let shape = match crate::cudakernels::shape_of(name, fp) {
         Some(s) => s,
         // B10 step 5 (stream B): the glue and the corner-witness shapes lower

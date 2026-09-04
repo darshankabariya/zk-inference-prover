@@ -703,9 +703,22 @@ impl FrameworkEval for GlueEval {
         let c127 = m31_u32(127);
         let dmax = m31_u32(DMAX);
 
-        // ---- the statement's own values (stream II) ---------------------------
-        // Read before the leaves so the id order matches `pre_ids`; they are
-        // preprocessed, so nothing pins them but the root every table hangs on.
+        // ---- tree 0, in the region's own column order (stream OO) -------------
+        // The order these are *read* in is the order the lowered IR indexes
+        // tree 0 in, and `devfrac::frac_cols` is handed the region's `pre`
+        // vector by position -- so the read order has to be `glue_region`'s
+        // build order and `Plan::pre_ids`' registration order, which are both
+        // the two selectors and then the `Src::Pre` pairs. Stream II read the
+        // pairs first, which made no difference while `n_pre` was zero
+        // everywhere and made the generated fraction builder read the `nofirst`
+        // selector as a norm-weight mantissa on every chunk with a norm tail.
+        // The selectors are read whether or not this region carries a tie: the
+        // region commits them either way, so a conditional read would leave the
+        // supplied column list two longer than the IR's.
+        let nofirst = eval.get_preprocessed_column(glue_sel(&self.tag, "nofirst"));
+        let end = eval.get_preprocessed_column(glue_sel(&self.tag, "end"));
+        // the statement's own values (stream II): preprocessed, so nothing pins
+        // them but the root every table hangs on.
         let pre_vals: Vec<(E::F, E::F)> = (0..self.prog.n_pre)
             .map(|i| (eval.get_preprocessed_column(glue_pre_col(&self.tag, i, 0)),
                       eval.get_preprocessed_column(glue_pre_col(&self.tag, i, 1))))
@@ -866,8 +879,6 @@ impl FrameworkEval for GlueEval {
 
         // ---- the ties ---------------------------------------------------------
         if let Some(t) = &self.tie {
-            let nofirst = eval.get_preprocessed_column(glue_sel(&self.tag, "nofirst"));
-            let end = eval.get_preprocessed_column(glue_sel(&self.tag, "end"));
             for spec in &t.specs {
                 let [h_prev, h] =
                     eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
