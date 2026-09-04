@@ -6831,3 +6831,48 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
               sizes_ok, glue_ok, stream_in, stream_out, bound_roots, bound_sides, error,
               verify_secs: t0.elapsed().as_secs_f64() }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stream QQ, at the NN merge (log row 66): the guard itself, gated.
+    ///
+    /// Everything else in this stream says "the vectors are filled"; nothing
+    /// said what happens when the next stream adds one and forgets. That is the
+    /// case the guard exists for, and it fired on stream NN's four before this
+    /// test was written -- `cudaemit` on NN's rotation shapes panicked naming
+    /// `band_q`. Here it is as a control, so a later refactor that turns the
+    /// panic back into a zero fails at `cargo test` and not on a card.
+    #[test]
+    fn the_emit_guard_names_the_claim_vector_it_is_missing() {
+        // the prove path is unchanged: a statement written before a claim
+        // existed still parses, which is what `#[serde(default)]` is for
+        assert_eq!(claim_at(None, "band_q"), SecureField::zero());
+        assert_eq!(claim_at(Some([1, 2, 3, 4]), "band_q"), unqm([1, 2, 3, 4]));
+
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        set_emit_strict(true);
+        // a claim that IS supplied is returned on the emit path too
+        let ok = std::panic::catch_unwind(|| claim_at(Some([1, 2, 3, 4]), "band_q"));
+        let missing = std::panic::catch_unwind(|| claim_at(None, "band_q"));
+        set_emit_strict(false);
+        std::panic::set_hook(prev);
+
+        assert_eq!(ok.expect("a supplied claim must not panic"), unqm([1, 2, 3, 4]));
+        let e = missing.expect_err("a missing claim must panic on the emit path");
+        let msg = e
+            .downcast_ref::<String>()
+            .map(|s| s.as_str())
+            .or_else(|| e.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(msg.contains("no placeholder for claim band_q"),
+                "the panic must name the vector, got: {msg}");
+        assert!(msg.contains("fill_tie_claims"),
+                "the panic must name where to fix it, got: {msg}");
+
+        // and the flag is off again, so nothing else in the suite sees it
+        assert_eq!(claim_at(None, "band_q"), SecureField::zero());
+    }
+}
