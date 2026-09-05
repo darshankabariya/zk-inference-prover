@@ -59,6 +59,10 @@ use crate::cudagen::{Ir, RelEntry, relation_entries};
 #[derive(Default)]
 struct Probed {
     consts: Vec<SecureField>,
+    /// Stream RR: the `EvalAtRow::claim` values, in call order. A claim is not
+    /// a constant of the eval and its value is not in `h`; it is recorded here
+    /// because the slot it fills still has to be replayed on a later chunk.
+    claims: Vec<SecureField>,
     h: u64,
     /// Stream QQ (README item 23): value -> the index of the first occurrence
     /// that carried it. `Lower::scalar` interns a slot *by value*, so two
@@ -127,6 +131,19 @@ fn note(v: SecureField) {
         first
     });
     tr(&(first as u64).to_le_bytes());
+}
+
+/// Stream RR: record one claim. A fixed tag, so the *number* and the *place* of
+/// an eval's claims are in the structure hash and their values are not -- which
+/// is the whole of the change this stream makes to the key. `Lower` no longer
+/// folds on a claim, no longer interns one by value and no longer widths one by
+/// value, so there is nothing left about the value for the key to carry.
+///
+/// It does not go into `seen`: a claim shares no slot with anything, so an
+/// ordinary constant that coincides with one is not a repeat.
+fn note_claim(v: SecureField) {
+    tr(b"Sc");
+    REC.with(|r| r.borrow_mut().claims.push(v));
 }
 
 /// A base value. `Some` is a lone `BaseExpr::Const`, which becomes a scalar the
@@ -399,6 +416,14 @@ impl EvalAtRow for ScalarProbe {
         tr(b"C;");
     }
 
+    /// Stream RR, the counterpart of `cudagen::LogupProbe::claim`: the value is
+    /// kept for provenance and hashed as a fixed tag, because a claim's value
+    /// stopped being a shape fact.
+    fn claim(&mut self, value: SecureField) -> Self::EF {
+        note_claim(value);
+        RecE
+    }
+
     fn combine_ef(values: [Self::F; SECURE_EXTENSION_DEGREE]) -> Self::EF {
         tr(b"E");
         if values.iter().all(|v| v.0.is_some()) {
@@ -429,6 +454,7 @@ fn probe<E: FrameworkEval>(eval: &E) -> Probed {
     REC.with(|r| {
         let mut r = r.borrow_mut();
         r.consts.clear();
+        r.claims.clear();
         r.seen.clear();
         r.h = 0xcbf2_9ce4_8422_2325;
     });
@@ -447,6 +473,11 @@ enum Prov {
     Z(usize),
     /// relation entry k's `alpha_j`
     Alpha(usize, usize),
+    /// Stream RR: the `n`-th `EvalAtRow::claim` of the eval. Matched by ordinal
+    /// and never by value -- two claims that coincide on the chunk that filled
+    /// the entry are two slots, and matching by value would hand both of them
+    /// the first one's value on a chunk where they differ.
+    Claim(usize),
 }
 
 struct Entry {
@@ -522,8 +553,8 @@ fn find(v: SecureField, consts: &[SecureField], rels: &[RelEntry]) -> Option<Pro
     None
 }
 
-fn replay(prov: &[Prov], consts: &[SecureField], rels: &[RelEntry], family: &str)
-          -> Vec<SecureField> {
+fn replay(prov: &[Prov], consts: &[SecureField], claims: &[SecureField], rels: &[RelEntry],
+          family: &str) -> Vec<SecureField> {
     prov.iter()
         .map(|p| match *p {
             Prov::Const(i) => *consts.get(i).unwrap_or_else(|| {
@@ -532,6 +563,10 @@ fn replay(prov: &[Prov], consts: &[SecureField], rels: &[RelEntry], family: &str
             }),
             Prov::Z(k) => rels[k].z,
             Prov::Alpha(k, j) => rels[k].alphas[j],
+            Prov::Claim(n) => *claims.get(n).unwrap_or_else(|| {
+                panic!("{family}: the probe recorded {} claims, slot wants claim#{n}",
+                       claims.len())
+            }),
         })
         .collect()
 }
@@ -545,6 +580,7 @@ fn same(a: &Ir, b: &Ir, family: &str) {
     assert_eq!(a.cols, b.cols, "{family}: cached IR differs in its column counts");
     assert_eq!(a.pre_ids, b.pre_ids, "{family}: cached IR differs in its preprocessed ids");
     assert_eq!(a.scalar_refs, b.scalar_refs, "{family}: cached IR differs in its scalar refs");
+    assert_eq!(a.claim_slots, b.claim_slots, "{family}: cached IR differs in its claim slots");
     assert_eq!(a.log_size, b.log_size, "{family}: cached IR differs in log_size");
     assert_eq!(a.eval_log_size, b.eval_log_size, "{family}: cached IR differs in eval_log_size");
     assert_eq!(a.cumsum_shift, b.cumsum_shift, "{family}: cached IR differs in cumsum_shift");
@@ -574,7 +610,7 @@ pub fn cached_ir<E: FrameworkEval>(
     }
     let family = eval.cuda_eval_name();
     let t = std::time::Instant::now();
-    let Probed { consts, h, .. } = probe(eval);
+    let Probed { consts, claims, h, .. } = probe(eval);
     let key: Key = (family, log_size, eval_log_size, logup, h);
     let hit = {
         let g = cache().lock().unwrap();
@@ -588,7 +624,7 @@ pub fn cached_ir<E: FrameworkEval>(
             _ => {}
         }
         if !prov.is_empty() {
-            ir.scalars = replay(&prov, &consts, &rels, family);
+            ir.scalars = replay(&prov, &consts, &claims, &rels, family);
         }
         HIT_NS.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
         HITS.fetch_add(1, Relaxed);
@@ -601,7 +637,15 @@ pub fn cached_ir<E: FrameworkEval>(
     }
     let ir = lower();
     let rels = relation_entries(eval);
-    let prov: Option<Vec<Prov>> = ir.scalars.iter().map(|v| find(*v, &consts, &rels)).collect();
+    // Stream RR: a claim slot's provenance is its ordinal, read off the IR;
+    // every other slot is still matched by value.
+    let claim_of: HashMap<usize, usize> = ir.claim_slots.iter().copied().collect();
+    let prov_of = |k: usize, v: SecureField| match claim_of.get(&k) {
+        Some(n) => Some(Prov::Claim(*n)),
+        None => find(v, &consts, &rels),
+    };
+    let prov: Option<Vec<Prov>> =
+        ir.scalars.iter().enumerate().map(|(k, v)| prov_of(k, *v)).collect();
     FILL_NS.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
     match prov {
         Some(prov) => {
@@ -612,10 +656,11 @@ pub fn cached_ir<E: FrameworkEval>(
             // A slot no probe can account for: this family stays uncached, and
             // the count says so rather than a silently slower chunk.
             UNCACHEABLE.fetch_add(1, Relaxed);
-            let k = ir.scalars.iter().position(|v| find(*v, &consts, &rels).is_none()).unwrap();
+            let k = ir.scalars.iter().enumerate()
+                .position(|(k, v)| prov_of(k, *v).is_none()).unwrap();
             eprintln!("ircache: {family} at 2^{log_size} is not cacheable: slot {k} of {} \
-                       matches none of {} recorded constants or {} relation entries",
-                      ir.scalars.len(), consts.len(), rels.len());
+                       matches none of {} recorded constants, {} claims or {} relation entries",
+                      ir.scalars.len(), consts.len(), claims.len(), rels.len());
         }
     }
     ir
