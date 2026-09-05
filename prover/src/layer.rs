@@ -1346,7 +1346,17 @@ impl Layer {
             ao: AttnOut { nh, s, hd, acc, den, jo: vec![0i32; s], jv },
             source: format!("B6.5 model-only witness [{dir}]"),
             glue,
-            head_keys: vocab.map(|v| vec![0u16; s * v]),
+            // stream E's order key is a *committed* column and carries an
+            // argmax claim, so the stand-in has to have a unique maximum per
+            // row or the head chunk's argmax region has no answer to give.
+            // Column 0 wins on every row, and `head_tok` says so.
+            head_keys: vocab.map(|v| {
+                let mut k = vec![1u16; s * v];
+                for t in 0..s {
+                    k[t * v] = 2;
+                }
+                k
+            }),
             head_tok: vocab.map(|_| vec![0u32; s]),
             attn_out_bits,
             tok_in: embed_tab.as_ref().map(|_| vec![0u32; s]),
