@@ -445,7 +445,8 @@ impl FrameworkEval for ChanEval {
         let mut mult: E::EF = E::EF::from(notzero.clone() - istart.clone());
         mult += istart * self.pow.r_c;
         eval.add_constraint(acc.clone() - acc_prev * mult - (u * v) * last);
-        eval.add_constraint((acc - self.claimed) * end.clone());
+        let claim = eval.claim(self.claimed);
+        eval.add_constraint((acc - claim) * end.clone());
 
         // ---- stream NN: the K and Q claims -----------------------------------
         // `u` and `v` above are inner sums of one row group and are consumed by
@@ -465,7 +466,8 @@ impl FrameworkEval for ChanEval {
                     f += E::EF::from(c.clone() - off.clone()) * t.w[k];
                 }
                 eval.add_constraint(h.clone() - h_prev * step - f);
-                eval.add_constraint((h - t.claimed) * end.clone());
+                let claim = eval.claim(t.claimed);
+                eval.add_constraint((h - claim) * end.clone());
             }
         }
 
@@ -484,7 +486,8 @@ impl FrameworkEval for ChanEval {
                 f += E::EF::from(c.clone() - off.clone()) * t.w[k];
             }
             eval.add_constraint(h.clone() - h_prev * step - f);
-            eval.add_constraint((h - t.claimed) * end.clone());
+            let claim = eval.claim(t.claimed);
+            eval.add_constraint((h - claim) * end.clone());
         }
 
         if self.range_check && !self.gkr {
@@ -691,9 +694,12 @@ impl FrameworkEval for KeyEval {
         }
         eval.add_constraint(hs.clone() - hs_prev * mult - zs * self.key_end(&sel));
 
-        eval.add_constraint((hs - self.claimed_hs) * end.clone());
-        eval.add_constraint((av - self.claimed_av) * end.clone());
-        eval.add_constraint((sn - self.claimed_sn) * end.clone());
+        let claim_hs = eval.claim(self.claimed_hs);
+        eval.add_constraint((hs - claim_hs) * end.clone());
+        let claim_av = eval.claim(self.claimed_av);
+        eval.add_constraint((av - claim_av) * end.clone());
+        let claim_sn = eval.claim(self.claimed_sn);
+        eval.add_constraint((sn - claim_sn) * end.clone());
 
         // ---- stream NN: the V claim ------------------------------------------
         // `wv` above is one key row's inner sum and is consumed by the bilinear
@@ -716,7 +722,8 @@ impl FrameworkEval for KeyEval {
                 f += E::EF::from(c.clone() - off.clone()) * t.w[k];
             }
             eval.add_constraint(h.clone() - h_prev * step - f);
-            eval.add_constraint((h - t.claimed) * end);
+            let claim = eval.claim(t.claimed);
+            eval.add_constraint((h - claim) * end);
         }
 
         if !self.gkr {
@@ -807,7 +814,8 @@ impl FrameworkEval for OutEval {
         let mut mult: E::EF = E::EF::from(m1);
         mult += m2 * self.pow.rv;
         eval.add_constraint(h.clone() - h_prev * mult - z * chanend);
-        eval.add_constraint((h - self.claimed) * end);
+        let claim = eval.claim(self.claimed);
+        eval.add_constraint((h - claim) * end);
         eval
     }
 }
@@ -886,8 +894,10 @@ impl FrameworkEval for RowEval {
         }
         eval.add_constraint(
             az.clone() - az_prev * step(istart, notzero, &self.pow) - zf);
-        eval.add_constraint((am - self.claimed_am) * end.clone());
-        eval.add_constraint((az - self.claimed_az) * end);
+        let claim_am = eval.claim(self.claimed_am);
+        eval.add_constraint((am - claim_am) * end.clone());
+        let claim_az = eval.claim(self.claimed_az);
+        eval.add_constraint((az - claim_az) * end);
 
         // Z = lo + 2^b hi and Z - z_min = lo2 + 2^b hi2, all four limbs
         // range-checked.  The upper bound is what the A.V integer reading relies

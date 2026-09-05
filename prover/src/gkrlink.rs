@@ -150,7 +150,7 @@ fn eval_prefix_sum_constraints<E: EvalAtRow>(
     interaction: usize,
     eval: &mut E,
     row_diff: E::EF,
-    cumulative_sum_shift: SecureField,
+    cumulative_sum_shift: E::EF,
 ) {
     let [curr, prev] = eval.next_extension_interaction_mask(interaction, [0, -1]);
     eval.add_constraint(curr - prev - row_diff + cumulative_sum_shift);
@@ -1552,7 +1552,10 @@ impl FrameworkEval for LinkEval {
         let eq_cur = eval_eq_constraints(INTERACTION_TRACE_IDX, &mut eval, &self.mle_point,
                                          q_cur, is_first, is_second);
         let terms = coeff_cur * eq_cur;
-        eval_prefix_sum_constraints(INTERACTION_TRACE_IDX, &mut eval, terms, self.shift);
+        // stream RR: `shift` is `claim / 2^h`, a value of the statement -- so a
+        // height whose folded claim is zero must not lower to a shorter shape
+        let shift = eval.claim(self.shift);
+        eval_prefix_sum_constraints(INTERACTION_TRACE_IDX, &mut eval, terms, shift);
         eval
     }
 }

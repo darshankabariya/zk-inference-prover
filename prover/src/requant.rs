@@ -453,7 +453,8 @@ impl FrameworkEval for RequantEval {
                 fi += (E::EF::from(sm.clone()) + E::EF::from(ef.clone()) * t.lam) * t.w[k];
             }
             eval.add_constraint(ui.clone() - ui_prev * step.clone() - fi);
-            eval.add_constraint((ui - t.claimed_in) * end.clone());
+            let claim_in = eval.claim(t.claimed_in);
+            eval.add_constraint((ui - claim_in) * end.clone());
 
             let [uo_prev, uo] =
                 eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
@@ -462,7 +463,8 @@ impl FrameworkEval for RequantEval {
                 fo += v.clone() * t.w[k];
             }
             eval.add_constraint(uo.clone() - uo_prev * step - fo);
-            eval.add_constraint((uo - t.claimed_out) * end.clone());
+            let claim_out = eval.claim(t.claimed_out);
+            eval.add_constraint((uo - claim_out) * end.clone());
 
             // ---- stream II (E11): the third side, the per-token scale --------
             //
@@ -486,7 +488,8 @@ impl FrameworkEval for RequantEval {
                 fs += E::EF::from(scale[1].clone()) * t.lam;
             }
             eval.add_constraint(us.clone() - us_prev * smult - fs * E::EF::from(last.clone()));
-            eval.add_constraint((us - t.claimed_sc) * end.clone());
+            let claim_sc = eval.claim(t.claimed_sc);
+            eval.add_constraint((us - claim_sc) * end.clone());
         }
         eval.finalize_logup_in_pairs();
         eval

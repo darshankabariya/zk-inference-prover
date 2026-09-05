@@ -877,7 +877,8 @@ impl FrameworkEval for DequantEval {
             let mut mult: E::EF = E::EF::from(m1);
             mult += m2 * y.s;
             eval.add_constraint(h.clone() - h_prev * mult - z * last);
-            eval.add_constraint((h - y.claimed_h) * end);
+            let claim_h = eval.claim(y.claimed_h);
+            eval.add_constraint((h - claim_h) * end);
         }
         // stream E: the output side.  One accumulator, a two-valued row step,
         // and the same `end` the claimed side closes on.
@@ -923,7 +924,8 @@ impl FrameworkEval for DequantEval {
             }
             let mult: E::EF = E::EF::from(oin) * o.k_in + E::EF::from(obd) * o.k_bd;
             eval.add_constraint(u.clone() - u_prev * mult - f * oact);
-            eval.add_constraint((u - o.claimed) * oend);
+            let claim = eval.claim(o.claimed);
+            eval.add_constraint((u - claim) * oend);
         }
         // Stream II (E11): the x-side scale, folded on the `last` rows.  `m1`
         // and `m2` are `[j > 0 and not last]` and `[j > 0 and last]`, so the
@@ -944,7 +946,8 @@ impl FrameworkEval for DequantEval {
             }
             let mult: E::EF = E::EF::from(m1) + E::EF::from(m2) * sc.mu;
             eval.add_constraint(v.clone() - v_prev * mult - f * E::EF::from(last));
-            eval.add_constraint((v - sc.claimed) * end);
+            let claim = eval.claim(sc.claimed);
+            eval.add_constraint((v - claim) * end);
         }
         if !self.gkr {
             eval.finalize_logup_in_pairs();
