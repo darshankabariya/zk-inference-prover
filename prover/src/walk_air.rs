@@ -242,6 +242,13 @@ pub struct AttnOutEval {
     pub rel_acc_hi: RangeRel,
     pub acc_lo_bits: u32,
     pub acc_hi_bits: u32,
+    /// Stream TT (E11), log row 73: the magnitude form.  The slot commits
+    /// `amag` as a tenth column, pinned to `|acc|` by `(amag - acc)(amag + acc)
+    /// = 0` together with its own range check, and the two limbs read *it*
+    /// rather than `acc + 2^(lo+hi-1)`.  The window then needs `acc_bits()`
+    /// bits and not `acc_bits() + 1`, because the sign is the pin's and not the
+    /// offset's -- which is the bit `y-delay-vw12`'s layer 0 is short.
+    pub acc_mag: bool,
     /// B11 stream V, lever 4: as `WalkEval::gkr`.
     pub gkr: bool,
 }
@@ -313,8 +320,10 @@ impl FrameworkEval for AttnOutEval {
         // in this family has to put offset 0 first for the same reason.
         let [joff, joff_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
         eval.add_constraint((joff.clone() - joff_prev) * nofirst.clone());
+        // stream TT: zero in the magnitude form -- the limbs read the committed
+        // `amag`, so nothing is offset
         let acc_off = E::F::from(M31::from_u32_unchecked(
-            1 << (self.acc_lo_bits + self.acc_hi_bits - 1)));
+            if self.acc_mag { 0 } else { 1 << (self.acc_lo_bits + self.acc_hi_bits - 1) }));
         let inv_lo = M31::from_u32_unchecked(1 << self.acc_lo_bits).inverse();
         let mut accs: Vec<E::F> = Vec::with_capacity(self.per_row);
         let mut qouts: Vec<E::F> = Vec::with_capacity(self.per_row);
@@ -329,6 +338,19 @@ impl FrameworkEval for AttnOutEval {
             let num = eval.next_trace_mask();
             let pj = eval.next_trace_mask();
             let alo = eval.next_trace_mask();
+            // stream TT (E11), log row 73: the magnitude column, last of the
+            // slot so every column before it keeps its index.  Two things pin
+            // it: this product, which says it is `acc` or `-acc` and nothing
+            // else, and the two limbs below, which say it is in
+            // `[0, 2^(lo+hi))`.  Together they say `amag = |acc|` and
+            // `|acc| <= 2^(lo+hi) - 1`, which is the `mag` half of
+            // `2 mag num < p` at one bit less window than the offset form --
+            // the offset spends a bit on the sign and this reads it off the
+            // product.  Degree 2, and the limb arguments stay degree 1.
+            let amag = self.acc_mag.then(|| eval.next_trace_mask());
+            if let Some(m) = &amag {
+                eval.add_constraint((m.clone() - acc.clone()) * (m.clone() + acc.clone()));
+            }
             accs.push(acc.clone());
             eval.add_constraint(sg.clone() * sg.clone() - sg.clone());
             // the sign pin (B6 review, gap 7), as in the standalone gadget
@@ -387,7 +409,16 @@ impl FrameworkEval for AttnOutEval {
                 // `ao_acc_hi_bits` one, so `|acc| < 2^(lo + hi - 1)`.
                 // `Plan::new` asserts
                 // `1 + ao_acc_lo_bits + ao_acc_hi_bits + max(ao_e_max, 0) <= 31`.
-                let ahi = (acc + acc_off.clone() - alo.clone()) * inv_lo;
+                //
+                // Stream TT (E11): in the magnitude form the value decomposed
+                // is the committed `amag`, not the offset accumulator, and the
+                // window is `[0, 2^(lo+hi))` rather than `[-2^(lo+hi-1),
+                // 2^(lo+hi-1))`.
+                let av = match &amag {
+                    Some(m) => m.clone(),
+                    None => acc.clone() + acc_off.clone(),
+                };
+                let ahi = (av - alo.clone()) * inv_lo;
                 eval.add_to_relation(RelationEntry::new(
                     &self.rel_acc_lo, E::EF::one(), core::slice::from_ref(&alo)));
                 eval.add_to_relation(RelationEntry::new(

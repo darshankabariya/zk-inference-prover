@@ -765,6 +765,9 @@ pub fn ao(dev: &crate::devwfill::DevAo, lay: &crate::layer::AoLayout, nh: usize,
     // reads `den` and each slot's `acc`.  It was `1 + 6 per_row`; the two must
     // move together (`layer::ao_region`, `devwfill::ao_region_dev`,
     // `gkrlink`'s `c0`).
+    // stream TT (E11), log row 73: the magnitude form's layout is `2 + 10 pr`,
+    // but it never reaches here -- `ao_region` fills it on the host on both
+    // arms, so `dev` is `None` and this fold is the host's.
     assert_eq!(dev.base.len(), 2 + 9 * pr, "the attnout region's column count");
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, pr);
     let cols: Vec<*const u32> =

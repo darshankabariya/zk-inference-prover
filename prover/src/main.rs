@@ -923,6 +923,82 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
     } else {
         (b0.shape.c * l.nsub, l.band_sizes[..n_pre].iter().step_by(l.nsub).copied().collect())
     };
+    // Stream JJ (E11): data-derived and overridable exactly as `ao_rem_bits`
+    // is, and for the same reason -- a driver pins the model-wide worst case
+    // and proves every layer as one shape.  Below the witness's own value an
+    // `EPOW` lookup or an accumulator limb would land off its table, so that is
+    // an error and not a smaller proof.
+    //
+    // Stream TT (E11), log row 73: these four come out of the struct literal
+    // because the two limb widths now depend on the exponent window -- which
+    // form of the magnitude bound fits is a question about `e_hi`.
+    let ao_jv_min = {
+        let want = arg_scalar(args, "--ao-jv-min", l.ao.jv_range().0);
+        assert!(want <= l.ao.jv_range().0,
+                "--ao-jv-min {want} is above this witness's {}", l.ao.jv_range().0);
+        want
+    };
+    let ao_jv_max = {
+        let want = arg_scalar(args, "--ao-jv-max", l.ao.jv_range().1);
+        assert!(want >= l.ao.jv_range().1,
+                "--ao-jv-max {want} is below this witness's {}", l.ao.jv_range().1);
+        want
+    };
+    let ao_jo_min = {
+        let want = arg_scalar(args, "--ao-jo-min", l.ao.jo_range().0);
+        assert!(want <= l.ao.jo_range().0,
+                "--ao-jo-min {want} is above this witness's {}", l.ao.jo_range().0);
+        want
+    };
+    let ao_jo_max = {
+        let want = arg_scalar(args, "--ao-jo-max", l.ao.jo_range().1);
+        assert!(want >= l.ao.jo_range().1,
+                "--ao-jo-max {want} is below this witness's {}", l.ao.jo_range().1);
+        want
+    };
+    // Stream JJ: `|acc| <= 2^(lo + hi - 1)` under the offset form, so the two
+    // limbs together carry one bit more than the accumulator needs.  16 is the
+    // widest range table the layer already builds, which is why the low limb
+    // stops there; neither limb ever goes below `MIN_LOG_ROWS`, since a range
+    // table *is* its own `1 << bits` rows and the LogUp builder has no shorter
+    // column.
+    //
+    // Stream TT (E11), log row 73: and the magnitude form is the same split one
+    // bit narrower.  There the limbs range-check the committed `mag = |acc|`
+    // rather than `acc + 2^(lo+hi-1)`, so they need `acc_bits()` and not
+    // `acc_bits() + 1` -- the sign is read off the `sg` column the region
+    // already commits.  The wider form is kept wherever it fits, so that every
+    // chunk that composed before this existed keeps its columns and its digest;
+    // the narrow one is taken only when `Plan::new`'s window would refuse.
+    // `--ao-acc-mag` forces it, which is what the controls and the gate use.
+    let e_hi = (ao_jv_max - ao_jo_min).max(0) as u32;
+    let split = |need: u32| -> (u32, u32) {
+        let lo = arg_scalar(args, "--ao-acc-lo-bits",
+                            need.clamp(crate::common::MIN_LOG_ROWS, 16));
+        let hi = arg_scalar(args, "--ao-acc-hi-bits",
+                            need.saturating_sub(lo).max(crate::common::MIN_LOG_ROWS));
+        (lo, hi)
+    };
+    let need_off = l.ao.acc_bits() + 1;
+    let (lo_off, hi_off) = split(need_off);
+    let (lo_mag, hi_mag) = split(l.ao.acc_bits());
+    let ao_acc_mag =
+        flag(args, "--ao-acc-mag") || 1 + lo_off + hi_off + e_hi > 31;
+    let (ao_acc_lo_bits, ao_acc_hi_bits, need) = if ao_acc_mag {
+        (lo_mag, hi_mag, l.ao.acc_bits())
+    } else {
+        (lo_off, hi_off, need_off)
+    };
+    assert!(ao_acc_lo_bits + ao_acc_hi_bits >= need,
+            "--ao-acc-*-bits {ao_acc_lo_bits}+{ao_acc_hi_bits} is below this witness's {need}");
+    assert!(ao_acc_lo_bits >= crate::common::MIN_LOG_ROWS
+                && ao_acc_hi_bits >= crate::common::MIN_LOG_ROWS,
+            "--ao-acc-*-bits {ao_acc_lo_bits}+{ao_acc_hi_bits}: a limb is below \
+             MIN_LOG_ROWS");
+    if ao_acc_mag && !flag(args, "--ao-acc-mag") {
+        eprintln!("compose: the attention output takes the magnitude form -- the \
+                   offset window is 1 + {lo_off} + {hi_off} + {e_hi} > 31 (log row 73)");
+    }
     compose::Params {
         s: l.ao.s, c, hd: l.ao.hd, nh: l.ao.nh,
         bands,
@@ -967,59 +1043,8 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
                     "--ao-rem-bits {want} is below this witness's {}", l.ao.rem_bits());
             want
         },
-        // Stream JJ (E11): data-derived and overridable exactly as
-        // `ao_rem_bits` is, and for the same reason -- a driver pins the
-        // model-wide worst case and proves every layer as one shape.  Below the
-        // witness's own value an `EPOW` lookup or an accumulator limb would land
-        // off its table, so that is an error and not a smaller proof.
-        ao_jv_min: {
-            let want = arg_scalar(args, "--ao-jv-min", l.ao.jv_range().0);
-            assert!(want <= l.ao.jv_range().0,
-                    "--ao-jv-min {want} is above this witness's {}", l.ao.jv_range().0);
-            want
-        },
-        ao_jv_max: {
-            let want = arg_scalar(args, "--ao-jv-max", l.ao.jv_range().1);
-            assert!(want >= l.ao.jv_range().1,
-                    "--ao-jv-max {want} is below this witness's {}", l.ao.jv_range().1);
-            want
-        },
-        ao_jo_min: {
-            let want = arg_scalar(args, "--ao-jo-min", l.ao.jo_range().0);
-            assert!(want <= l.ao.jo_range().0,
-                    "--ao-jo-min {want} is above this witness's {}", l.ao.jo_range().0);
-            want
-        },
-        ao_jo_max: {
-            let want = arg_scalar(args, "--ao-jo-max", l.ao.jo_range().1);
-            assert!(want >= l.ao.jo_range().1,
-                    "--ao-jo-max {want} is below this witness's {}", l.ao.jo_range().1);
-            want
-        },
-        // `|acc| < 2^(lo + hi - 1)`, so the two limbs together carry one bit
-        // more than the accumulator needs.  16 is the widest range table the
-        // layer already builds, which is why the low limb stops there; the high
-        // one never goes below `MIN_LOG_ROWS`, since a range table *is* its own
-        // `1 << bits` rows and the LogUp builder has no shorter column.
-        ao_acc_lo_bits: {
-            let want = arg_scalar(args, "--ao-acc-lo-bits",
-                                  (l.ao.acc_bits() + 1).clamp(crate::common::MIN_LOG_ROWS, 16));
-            assert!(want >= crate::common::MIN_LOG_ROWS,
-                    "--ao-acc-lo-bits {want} is below MIN_LOG_ROWS");
-            want
-        },
-        ao_acc_hi_bits: {
-            let need = l.ao.acc_bits() + 1;
-            let lo: u32 = arg_scalar(args, "--ao-acc-lo-bits",
-                                     need.clamp(crate::common::MIN_LOG_ROWS, 16));
-            let want = arg_scalar(args, "--ao-acc-hi-bits",
-                                  need.saturating_sub(lo).max(crate::common::MIN_LOG_ROWS));
-            assert!(lo + want >= need,
-                    "--ao-acc-*-bits {lo}+{want} is below this witness's {need}");
-            assert!(want >= crate::common::MIN_LOG_ROWS,
-                    "--ao-acc-hi-bits {want} is below MIN_LOG_ROWS");
-            want
-        },
+        ao_jv_min, ao_jv_max, ao_jo_min, ao_jo_max,
+        ao_acc_lo_bits, ao_acc_hi_bits, ao_acc_mag,
         // Stream Z: the fold's two pins, data-derived exactly as `ao_rem_bits`
         // and overridable the same way so a driver can pin the model-wide worst
         // case.  Zero -- absent from the serialized statement -- on a witness
@@ -1577,6 +1602,8 @@ fn compose_cmd(args: &[String]) {
                         ("--corrupt-ao-num", &mut tamper.ao_num),
                         ("--corrupt-ao-acc", &mut tamper.ao_acc),
                         ("--corrupt-ao-jo-tok", &mut tamper.ao_jo_tok),
+                        // stream TT (log row 73): the magnitude window's own
+                        ("--corrupt-ao-mag", &mut tamper.ao_mag),
                         ("--corrupt-walk-act", &mut tamper.walk_over)] {
         if let Some(i) = arg_str(args, key) {
             *slot = Some(i.parse().unwrap_or_else(|_| panic!("{key} wants an index")));
@@ -1589,6 +1616,9 @@ acc={}+{}",
               l.source, l.band_sizes, vname, params.kmax, params.ao_rem_bits, params.walk_p,
               params.ao_jv_min, params.ao_jv_max, params.ao_jo_min, params.ao_jo_max,
               params.ao_acc_lo_bits, params.ao_acc_hi_bits);
+    if params.ao_acc_mag {
+        eprintln!("compose: attnout accumulator in the magnitude form (log row 73)");
+    }
     // Stream I: `--ser-dir DIR [--ser-tag TAG]` leaves this chunk's statement and
     // proof on disk under that tag, which is what `bounds-chain` reads back.
     let ser_dir = arg_str(args, "--ser-dir");
@@ -2394,6 +2424,24 @@ synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B
                                                 ..Default::default() },
                        "the accumulator window's high limb"),
                 "an unbounded accumulator accepted");
+        // Stream TT (E11), log row 73: the magnitude form's own.  `amag` is
+        // pinned by `(amag - acc)(amag + acc) = 0`, which has two roots; this
+        // commits the other one.  Every constraint of the region holds and
+        // every other lookup lands, and the committed magnitude is about
+        // `2^31`, so `2 mag num` would run past the field -- which is the
+        // forgery the window exists to refuse.  Only the range check on the
+        // magnitude's limbs can see it.  Present only in the magnitude form,
+        // because the offset form commits no such column.
+        if params.ao_acc_mag {
+            assert!(!probe("attnout: the magnitude committed as the negative root", &l,
+                           &compose::ProverTamper { ao_mag: Some(params.hd + 3),
+                                                    ..Default::default() },
+                           "the magnitude window's limbs"),
+                    "a magnitude past the no-wrap window accepted");
+        } else {
+            eprintln!("compose probe SKIP attnout magnitude root: this statement is in \
+                       the offset form (--ao-acc-mag forces the other)");
+        }
         // And the counterpart, whose verdict is now the *chunk's* to decide.  A
         // whole token's `jo` moved by one inside the window, with the region
         // rederived, changes every one of that token's requantized outputs.

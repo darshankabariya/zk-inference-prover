@@ -876,14 +876,18 @@ pub fn ao_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
     let (rlo, rhi) = (rels.range(plan.p.ao_acc_lo_bits), rels.range(plan.p.ao_acc_hi_bits));
     let inv_lo = SecureField::from(M31::from_u32_unchecked(1 << plan.p.ao_acc_lo_bits))
         .inverse();
+    // stream TT (E11), log row 73: the magnitude form offsets nothing -- the
+    // high limb reads the committed `amag` at `c0 + 9` instead
     let acc_off = SecureField::from(M31::from_u32_unchecked(
-        1 << (plan.p.ao_acc_lo_bits + plan.p.ao_acc_hi_bits - 1)));
+        if plan.p.ao_acc_mag { 0 }
+        else { 1 << (plan.p.ao_acc_lo_bits + plan.p.ao_acc_hi_bits - 1) }));
+    let ncs = if plan.p.ao_acc_mag { 10 } else { 9 };
     let mut looks = vec![];
     for sl in 0..lay.per_row {
         // `ao_interaction`'s own indexing: slot `sl` starts at `2 + 9 * sl`,
         // and the builder reads `+2`..`+8` off it.  `joff` is column 1 and the
         // slot's `jvp` is preprocessed column `sl`.
-        let c0 = 2 + 9 * sl;
+        let c0 = 2 + ncs * sl;
         // the `EPOW` window: `(jvp + joff, num, pj)`
         looks.push(LinkLook {
             num: None,
@@ -924,7 +928,8 @@ pub fn ao_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
         looks.push(LinkLook {
             num: None,
             den: range_den(rhi, Affine {
-                terms: vec![(RCol::Ao(c0), inv_lo), (RCol::Ao(c0 + 8), -inv_lo)],
+                terms: vec![(RCol::Ao(if plan.p.ao_acc_mag { c0 + 9 } else { c0 }), inv_lo),
+                            (RCol::Ao(c0 + 8), -inv_lo)],
                 k: acc_off * inv_lo,
             }),
         });

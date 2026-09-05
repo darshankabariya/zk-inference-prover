@@ -4007,13 +4007,23 @@ pub struct AoRegion {
     /// and the offset that makes it non-negative
     pub acc_lo_bits: u32,
     pub acc_hi_bits: u32,
+    /// stream TT (log row 73): the magnitude form -- the slot commits
+    /// `mag = |acc|` as a tenth column and the two limbs range-check *it*, so
+    /// `acc_off` is not used and the widths cover one bit less
+    pub acc_mag: bool,
 }
 
 impl AoRegion {
     /// `2^(acc_lo_bits + acc_hi_bits - 1)`: what a committed `acc` is shifted by
-    /// so its two limbs are a range check on `|acc|`.
+    /// so its two limbs are a range check on `|acc|`.  Zero in the magnitude
+    /// form, where the limbs read the committed magnitude directly.
     pub fn acc_off(&self) -> i64 {
-        1i64 << (self.acc_lo_bits + self.acc_hi_bits - 1)
+        if self.acc_mag { 0 } else { 1i64 << (self.acc_lo_bits + self.acc_hi_bits - 1) }
+    }
+    /// Columns per channel slot: `acc, sg, qm, nz2, denp, d, num, pj, alo`, and
+    /// in the magnitude form `mag` after them.
+    pub fn per_slot(&self) -> usize {
+        if self.acc_mag { 10 } else { 9 }
     }
 }
 
@@ -4026,7 +4036,7 @@ impl AoRegion {
 }
 
 /// Column order: the row's `den` and `joff`, then per slot acc, sg, qm, nz2,
-/// denp, d, num, pj, alo.
+/// denp, d, num, pj, alo -- and, in stream TT's magnitude form, `mag` tenth.
 ///
 /// Stream JJ (E11), `witness-slack.md` section 1f: `joff = jo_max - jo` is the
 /// per-token output exponent, committed because `jo` is prover data and pinned
@@ -4036,20 +4046,33 @@ impl AoRegion {
 /// `jvp + joff`, where `jvp = jv - jv_min` is preprocessed and model-only.
 /// `alo` is the low limb of the offset accumulator, the other half of the
 /// no-wrap window.
+///
+/// Stream TT (E11), log row 73: under `acc_mag` the slot carries a tenth
+/// column `mag = |acc|` and `alo` is *its* low limb, not the offset
+/// accumulator's.  `acc` stays where it was, so the `z` fold, the device
+/// accumulator and `gkrlink`'s tie read the same column they always did.
 #[allow(clippy::too_many_arguments)]
 pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32,
-                 acc_bits: (u32, u32), jv_min: i32, jo_max: i32,
+                 acc_bits: (u32, u32), acc_mag: bool, jv_min: i32, jo_max: i32,
                  tables: &mut Tables, corrupt: Option<usize>,
                  corrupt_q: Option<usize>, corrupt_den: Option<usize>,
                  corrupt_jo: Option<usize>, corrupt_num: Option<usize>,
-                 corrupt_acc: Option<usize>, corrupt_jo_tok: Option<usize>) -> AoRegion {
+                 corrupt_acc: Option<usize>, corrupt_jo_tok: Option<usize>,
+                 corrupt_mag: Option<usize>) -> AoRegion {
     let lay = AoLayout::choose(ao.nh, ao.s, ao.hd, per_row_target);
     let rows = 1usize << lay.log_rows;
     let pr = lay.per_row;
     // B7a milestone 4 (section 3 row 1): the same three-value mode.
+    //
+    // Stream TT: the magnitude form fills on the host on both arms.  The
+    // fork's `b65_fill_attnout` writes the nine-column layout and bumps the
+    // limbs at `acc + acc_off`; it has no tenth column and no `mag`, so a
+    // device fill here would write the wrong region rather than a slow one.
+    // `compose::note_host_fill` knows, which is what keeps the shared
+    // multiplicity columns on the host with it.
     let m4d = if corrupt_q.is_some() || corrupt_den.is_some() || corrupt_jo.is_some()
                  || corrupt_num.is_some() || corrupt_acc.is_some()
-                 || corrupt_jo_tok.is_some() {
+                 || corrupt_jo_tok.is_some() || corrupt_mag.is_some() || acc_mag {
         0
     } else {
         crate::util::m4b_mode("B7_M4_WFILL")
@@ -4125,7 +4148,9 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
         }
     };
     let (acc_lo_bits, acc_hi_bits) = acc_bits;
-    let acc_off = 1i64 << (acc_lo_bits + acc_hi_bits - 1);
+    // stream TT: zero in the magnitude form -- the limbs read `mag` itself
+    let acc_off = if acc_mag { 0 } else { 1i64 << (acc_lo_bits + acc_hi_bits - 1) };
+    let ncs = if acc_mag { 10 } else { 9 };
     let bend_den: Option<usize> = corrupt_den.map(|idx| {
         let (ht, ch) = (idx / ao.hd, idx % ao.hd);
         let (h, t) = (ht / ao.s, ht % ao.s);
@@ -4146,7 +4171,7 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
         let (ref_bad, q_out) = (dev.ref_bad, dev.q_out.clone());
         return AoRegion { lay, pre: vec![], base: vec![], dev: Some(dev), ref_bad, q_out,
                           n: ao.nh * ao.s * ao.hd, rem_bits, q_bits,
-                          acc_lo_bits, acc_hi_bits };
+                          acc_lo_bits, acc_hi_bits, acc_mag };
     }
     // `B7_M4_WFILL=2` builds this region twice -- host here, device below --
     // and the device call bumps the same counters a second time, so every
@@ -4164,7 +4189,7 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
     };
     let m4d_before = (m4d == 2).then(|| m4d_snap(tables));
     let mut want_host = vec![0u32; if m4d == 2 { rows * pr } else { 0 }];
-    let n_cols = 2 + 9 * pr;
+    let n_cols = 2 + ncs * pr;
     let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); rows]; n_cols];
     let mut q_out = vec![0i64; ao.nh * ao.s * ao.hd];
     let mut ref_bad = 0usize;
@@ -4180,9 +4205,11 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                 let (num0, pj0) = (1i64 << tables.e_lo.max(0),
                                    1i64 << (-tables.e_lo).max(0));
                 for s in 0..pr {
-                    let c0 = 2 + 9 * s;
+                    let c0 = 2 + ncs * s;
                     // `acc` stays the raw accumulator (the `z` fold reads it);
-                    // what the two limbs range-check is `acc + acc_off`
+                    // what the two limbs range-check is `acc + acc_off` --
+                    // and in the magnitude form the tenth column `mag`, which
+                    // on an inert row is `|0| = 0`, so both limbs are 0 too
                     cols[c0 + 4][j] = m31_of(pj0);                 // denp = den pj
                     cols[c0 + 5][j] = m31_of(pj0);                 // d = denp
                     cols[c0 + 6][j] = m31_of(num0);
@@ -4220,6 +4247,9 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                     if corrupt == Some(idx) {
                         a += 1;
                     }
+                    assert!(corrupt_mag.is_none() || acc_mag,
+                            "--corrupt-ao-mag is the magnitude form's control; this \
+                             statement is in the offset form");
                     let jv = ao.jv[h * ao.hd + ch];
                     let e = jv - jo;
                     // the window pair, and the control that bends it: a `num`
@@ -4243,19 +4273,38 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                     let sg = i64::from(a < 0 && qm != 0);
                     let d = if a < 0 && qm == 0 { denp - 2 * pm }
                             else { 2 * pm - (2 * qm - 1) * denp };
-                    let c0 = 2 + 9 * s;
+                    let c0 = 2 + ncs * s;
                     // the offset accumulator's two limbs.  The control moves the
                     // committed low limb by one *inside its own table*, so both
                     // range lookups still land on real rows and the only thing
                     // that can see it is that `(acc + acc_off - alo) / 2^lo` is
                     // no longer the integer the high table was bumped at.
-                    let ao_v = a + acc_off;
-                    assert!(ao_v >= 0 && ao_v < 1i64 << (acc_lo_bits + acc_hi_bits),
+                    //
+                    // stream TT: in the magnitude form the limbs read `mag`
+                    // itself -- `acc_off` is 0 and the value decomposed is the
+                    // tenth column's, not the accumulator's.
+                    //
+                    // stream TT's control commits the *other* root of that pin:
+                    // `amag = -|acc|`, which satisfies `(amag - acc)(amag + acc)
+                    // = 0` exactly as the honest magnitude does and leaves every
+                    // other column of the slot alone.  As a field element it is
+                    // `p - |acc|`, about `2^31`, so it is the forgery the bound
+                    // exists to stop -- `2 mag num` would run past `p` -- and
+                    // the only thing in the statement that can see it is the
+                    // high limb's range lookup.
+                    let magv = if corrupt_mag == Some(idx) { -mag } else { mag };
+                    let ao_v = if acc_mag { magv } else { a + acc_off };
+                    assert!(corrupt_mag == Some(idx)
+                                || (ao_v >= 0
+                                    && ao_v < 1i64 << (acc_lo_bits + acc_hi_bits)),
                             "attnout: |acc| outside its declared window: {a}");
+                    // the limbs are of the *field* representative, so a bent
+                    // negative magnitude decomposes the way the AIR reads it
+                    let fv = if ao_v < 0 { ((1i64 << 31) - 1) + ao_v } else { ao_v };
                     let alo = if corrupt_acc == Some(idx) {
-                        ((ao_v & ((1i64 << acc_lo_bits) - 1)) + 1) & ((1i64 << acc_lo_bits) - 1)
+                        ((fv & ((1i64 << acc_lo_bits) - 1)) + 1) & ((1i64 << acc_lo_bits) - 1)
                     } else {
-                        ao_v & ((1i64 << acc_lo_bits) - 1)
+                        fv & ((1i64 << acc_lo_bits) - 1)
                     };
                     cols[c0][j] = m31_of(a);
                     cols[c0 + 1][j] = m31_of(sg);
@@ -4266,6 +4315,18 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                     cols[c0 + 6][j] = m31_of(num);
                     cols[c0 + 7][j] = m31_of(pj);
                     cols[c0 + 8][j] = m31_of(alo);
+                    // stream TT (log row 73): the tenth column, `|acc|`.  It is
+                    // committed rather than derived so its two limbs stay
+                    // degree 1; the AIR pins it with `(amag - acc)(amag + acc)
+                    // = 0`, which with `amag` in `[0, 2^(lo+hi))` says `amag`
+                    // is the accumulator's magnitude and nothing else.  Note it
+                    // is *not* the AIR's `mag = acc (1 - 2 sg)`: on a negative
+                    // accumulator that rounds to zero the sign pin forces
+                    // `sg = 0` and that expression is the negative value, which
+                    // is why the bound needs a column of its own.
+                    if acc_mag {
+                        cols[c0 + 9][j] = m31_of(magv);
+                    }
                     tables.bump_ek(e, "ao_epow");
                     tables.bump_qnzk(qm, "ao_qnz");
                     tables.bump_rk(rem_bits, d, "ao_rem_d");
@@ -4277,7 +4338,7 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                     // is `2 mag num` with `num <= 2^e_hi` from the `EPOW` table
                     // and `mag` bounded here, in two limbs
                     tables.bump_rk(acc_lo_bits, alo, "ao_acc_lo");
-                    tables.bump_rk(acc_hi_bits, (ao_v - alo) >> acc_lo_bits, "ao_acc_hi");
+                    tables.bump_rk(acc_hi_bits, (fv - alo) >> acc_lo_bits, "ao_acc_hi");
                     q_out[idx] = if a < 0 { -qm } else { qm };
                     // the reference: one f64 rounding, half away from zero.  It
                     // reads `num / pj` rather than `2^(jv - jo)` -- the same
@@ -4376,11 +4437,12 @@ all five multiplicity tables and the f64 reference all match",
     // here is `None` on an honest run, which is exactly when the assert holds.
     if bend_den.is_none() && bend_jo.is_none() && corrupt.is_none() && corrupt_q.is_none()
         && corrupt_num.is_none() && corrupt_acc.is_none() && corrupt_jo_tok.is_none()
+        && corrupt_mag.is_none()
     {
         debug_assert_eq!(q_out, ao.q_ref(), "attnout: q_out and AttnOut::q_ref disagree");
     }
     AoRegion { lay, pre, base, dev: None, ref_bad, q_out, n: ao.nh * ao.s * ao.hd,
-               rem_bits, q_bits, acc_lo_bits, acc_hi_bits }
+               rem_bits, q_bits, acc_lo_bits, acc_hi_bits, acc_mag }
 }
 
 pub struct AoInteraction {
@@ -4532,9 +4594,10 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
         M31::from_u32_unchecked(1 << r.acc_lo_bits).inverse());
     let acc_off = stwo::prover::backend::simd::m31::PackedM31::broadcast(
         M31::from_u32_unchecked(r.acc_off() as u32));
+    let ncs = r.per_slot();
     let fr = |i: usize, vr: usize| -> (PackedQM31, PackedQM31) {
         let (s, which) = (i / 7, i % 7);
-        let c0 = 2 + 9 * s;
+        let c0 = 2 + ncs * s;
         match which {
             // the window: `(jvp + joff, num, pj)`, `jvp` preprocessed and
             // model-only, `joff` the row's committed output exponent
@@ -4552,10 +4615,13 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
             }
             // section 7 item 1: `denp` itself
             4 => (one, rels.range(r.rem_bits).combine(&[r.base[c0 + 4].data[vr]])),
-            // the no-wrap window's two limbs on `acc + acc_off`
+            // the no-wrap window's two limbs on `acc + acc_off` -- and, in
+            // stream TT's magnitude form, on the committed `|acc|` at `c0 + 9`
             5 => (one, rels.range(r.acc_lo_bits).combine(&[r.base[c0 + 8].data[vr]])),
             _ => {
-                let hi = (r.base[c0].data[vr] + acc_off - r.base[c0 + 8].data[vr]) * inv_lo;
+                let v = if r.acc_mag { r.base[c0 + 9].data[vr] }
+                        else { r.base[c0].data[vr] + acc_off };
+                let hi = (v - r.base[c0 + 8].data[vr]) * inv_lo;
                 (one, rels.range(r.acc_hi_bits).combine(&[hi]))
             }
         }
