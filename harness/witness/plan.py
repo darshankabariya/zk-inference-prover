@@ -57,6 +57,23 @@ layer-0 re-extract with `--embed`).  The E11 plan at C=4096 is
 (the `=` form, because the value starts with a dash), and a line's flags are
 part of its emit key, so the emit set grows by the lines whose flags make a
 new kernel shape and by nothing else.
+
+**Stream MM (E11): what the model manifest needs of a plan.**  `b65
+model-roots` requires `master_table_bits` to be **one value per layer across
+blocks** -- `table/exp` is `1 << log_table` rows, so a layer whose blocks
+declare two widths has two tree-0 roots and no per-layer model root exists at
+all.  Each block's shape table gives that block's own tightest width, and on
+the recorded C=4096 extraction seven of the 33 layers carry two, so the
+recorded plan is rejected (stream LL's open item 3).  `--table-bits-per-layer`
+writes, for every block of a layer, the widest width any block of that layer
+asked for; the extra rows are the price of a manifest, and the plan must then
+run **without `--tight-table`**, which re-sizes the table off the witness
+after the flag is read and which no manifest and no flag names.
+
+`--head-per-block` says the head dump for block `b` is `<--head>_B<b>` rather
+than `--head` itself: a head dump carries its own `base_pos`, so the two seam
+blocks a `--verify --prompt` grid needs (stream KK) are two dumps, written by
+one `extract.py --blocks 7,8 --head --corner` pass (stream OO).
 """
 
 import argparse
@@ -174,6 +191,16 @@ def main():
     ap.add_argument("--ao-rem-per-line", action="store_true",
                     help="write each layer line's own --ao-rem-bits, off the shape table's "
                          "row, instead of leaving it to the shared pin")
+    # ---- stream MM (E11): one master table width per layer ------------------
+    ap.add_argument("--table-bits-per-layer", action="store_true",
+                    help="give every block of a layer the widest --table-bits any block of "
+                         "that layer asked for, so `b65 model-roots` can derive one model "
+                         "root per layer (it rejects a layer whose blocks declare two "
+                         "widths). Run the plan WITHOUT --tight-table, which re-sizes the "
+                         "table off the witness and which no manifest names.")
+    ap.add_argument("--head-per-block", action="store_true",
+                    help="the head dump for block b is <--head>_B<b>, not --head itself "
+                         "(one `extract.py --blocks 7,8 --head --corner` pass writes both)")
     a = ap.parse_args()
     lf, l0f, hf = flags(a.layer_flags), flags(a.l0_flags), flags(a.head_flags)
 
@@ -201,6 +228,21 @@ def main():
     n_layers = 1 + max(read_rows(f"{a.dir}/shapes.json" if blocks == [None]
                                  else f"{a.dir}/shapes_B{blocks[-1]}.json"))
 
+    # stream MM: the widest `table_bits` any block of a layer asked for, so one
+    # model root per layer exists.  Built over the blocks the plan actually
+    # writes -- a width from a block this plan skips is not this plan's.
+    widest = {}
+    if a.table_bits_per_layer:
+        for b in blocks:
+            if b is None:
+                rows_b = read_rows(f"{a.dir}/shapes.json")
+            else:
+                if b == 0 and not a.with_block_0:
+                    continue
+                rows_b = read_rows(f"{a.dir}/shapes_B{b}.json")
+            for k, r in rows_b.items():
+                widest[k] = max(widest.get(k, 0), r["table_bits"])
+
     lines, emit = [], {}
     n_rows, n_layer_rows = 0, 0
     for b in blocks:
@@ -217,7 +259,7 @@ def main():
             lines.append(f"# block {b}: prefix c = {rows[sorted(rows)[0]]['c']}")
         want = want_layers(a.layers, rows)
         for k in want:
-            tb = rows[k]["table_bits"]
+            tb = widest.get(k, rows[k]["table_bits"])
             extra = lf + (l0f if k == 0 else "")
             if a.ao_rem_per_line:
                 rem = rows[k].get("ao_rem_bits")
@@ -232,11 +274,17 @@ def main():
             n_layer_rows += 1
             emit.setdefault((rows[k]["c"], tb, False, extra), line)
         if a.head and (b in head_blocks if head_blocks is not None else b == blocks[-1]):
-            htb = json.load(open(f"{a.head}/manifest.json"))["master_table_bits"]
+            hdir = f"{a.head}_B{b}" if a.head_per_block else a.head
+            htb = json.load(open(f"{hdir}/manifest.json"))["master_table_bits"]
+            if a.table_bits_per_layer and a.head_per_block:
+                # the head chunks sit at one layer coordinate too, so they need
+                # one width between them for the same reason the layers do
+                htb = max(json.load(open(f"{a.head}_B{hb}/manifest.json"))
+                          ["master_table_bits"] for hb in sorted(head_blocks))
             lines.append("# the head, last, and it is the same compose family with two extra "
                          "arguments")
             solo = head_blocks is None or len(head_blocks) == 1
-            hl = head_line(a.head, htb, "head" if solo else f"{pre}head", hf,
+            hl = head_line(hdir, htb, "head" if solo else f"{pre}head", hf,
                            layer=n_layers, block=b)
             lines.append(hl)
             n_rows += 1
