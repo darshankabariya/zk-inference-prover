@@ -1934,12 +1934,11 @@ impl Plan {
         // the region's rows sit inside one kv head so that the step is the two
         // constants `oside_w_band` derives.  Without them the fold still
         // publishes its integer and the verdict names it open.
-        if let (Some(g), Some(rp)) = (glue.as_mut(), p.rope.as_ref()) {
+        if let (Some(g), true) = (glue.as_mut(), p.rope.is_some()) {
             if let Some(mi) = p.mats.iter().position(|m| m.name == "v") {
                 let pr = mat_lays[mi].per_row;
                 let fits = mat_lays[mi].lead == 0 && pr <= p.hd && p.hd % pr == 0;
                 if specs[mi].variant == DeqVariant::Fold && !nn_bands.is_empty() && fits {
-                    let _ = rp;
                     if let Some(t) = g.out_ties.iter_mut().find(|t| t.name == "v") {
                         t.band = true;
                     }
