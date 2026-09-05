@@ -201,6 +201,16 @@ def main():
     ap.add_argument("--head-per-block", action="store_true",
                     help="the head dump for block b is <--head>_B<b>, not --head itself "
                          "(one `extract.py --blocks 7,8 --head --corner` pass writes both)")
+    ap.add_argument("--table-bits-map", default="",
+                    help="a JSON {\"<layer>\": bits, ...} (and optionally \"head\") giving "
+                         "each layer's declared master table width, instead of the shape "
+                         "table's. The shape table carries the EXTRACTION's "
+                         "`master_table_bits`, which stream J measured 1-3 bits loose, and "
+                         "declaring that without --tight-table put the C=4096 grid 137.9 GB "
+                         "into a 150.1 GB card (stream MM). A map built from a previous "
+                         "run's own tightened `params.log_table`, maxed over the blocks of "
+                         "each layer, is both tight and one width per layer, which is what "
+                         "`b65 model-roots` needs.")
     a = ap.parse_args()
     lf, l0f, hf = flags(a.layer_flags), flags(a.l0_flags), flags(a.head_flags)
 
@@ -232,7 +242,10 @@ def main():
     # model root per layer exists.  Built over the blocks the plan actually
     # writes -- a width from a block this plan skips is not this plan's.
     widest = {}
-    if a.table_bits_per_layer:
+    if a.table_bits_map:
+        m = json.load(open(a.table_bits_map))
+        widest = {int(k): int(v) for k, v in m.items() if k != "head"}
+    elif a.table_bits_per_layer:
         for b in blocks:
             if b is None:
                 rows_b = read_rows(f"{a.dir}/shapes.json")
@@ -276,7 +289,11 @@ def main():
         if a.head and (b in head_blocks if head_blocks is not None else b == blocks[-1]):
             hdir = f"{a.head}_B{b}" if a.head_per_block else a.head
             htb = json.load(open(f"{hdir}/manifest.json"))["master_table_bits"]
-            if a.table_bits_per_layer and a.head_per_block:
+            if a.table_bits_map:
+                hm = json.load(open(a.table_bits_map)).get("head")
+                if hm is not None:
+                    htb = int(hm)
+            elif a.table_bits_per_layer and a.head_per_block:
                 # the head chunks sit at one layer coordinate too, so they need
                 # one width between them for the same reason the layers do
                 htb = max(json.load(open(f"{a.head}_B{hb}/manifest.json"))
