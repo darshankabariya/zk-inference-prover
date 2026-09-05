@@ -761,6 +761,22 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
         };
         match loaded {
             Ok(mut l) => {
+                // Stream LL: the one stand-in the statement has to choose.
+                // `jo` is the attention output's per-token scale exponent --
+                // committed data, not model data, so the model-only load has
+                // none -- and the AO region admits it only inside the declared
+                // window (`joff = jo_max - jo >= 0`, `layer.rs`'s "attnout: jo
+                // above the window's top").  The window's *floor* is the safe
+                // end: it makes `e = jv - jo` non-negative, so the fold's `pj`
+                // is 1 and `denp` stays small, where the ceiling would put
+                // `2 denp` within a factor of two of the field.  No
+                // preprocessed column reads `jo`, so this moves no tree-0 cell.
+                if weights_only {
+                    let (_, p) = plan_params(args);
+                    for x in l.ao.jo.iter_mut() {
+                        *x = p.ao_jo_min;
+                    }
+                }
                 tighten_of(&mut l, args);
                 coord_of(&mut l, args);
                 return (l, vname);
