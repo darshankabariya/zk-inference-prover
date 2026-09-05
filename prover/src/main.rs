@@ -1380,9 +1380,13 @@ fn model_roots_cmd(args: &[String]) {
         if rows.len() >= limit {
             break;
         }
-        // the plan line's own arguments, minus the two that name the artifact
-        // rather than the chunk
-        let mut a: Vec<String> = pins.clone();
+        // The plan line's own arguments **first**, then the shared pins, minus
+        // the two that name the artifact rather than the chunk.  The order is
+        // load-bearing: `arg_str` and `arg_scalar` take the *first* match, so a
+        // line's own `--table-bits` or `--ao-rem-bits` has to precede the
+        // shared one or the shared one silently wins (stream SS's rider 1,
+        // `o_plan.py --ao-rem-per-line`).
+        let mut a: Vec<String> = vec![];
         let mut tag = String::new();
         let mut it = line.split_whitespace();
         while let Some(w) = it.next() {
@@ -1396,6 +1400,7 @@ fn model_roots_cmd(args: &[String]) {
             }
             a.push(w.to_string());
         }
+        a.extend(pins.iter().cloned());
         if weights_only {
             let d = params_dir.as_ref().unwrap();
             let f = format!("{d}/{tag}.fixed.json");
