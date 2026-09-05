@@ -553,6 +553,21 @@ fn find(v: SecureField, consts: &[SecureField], rels: &[RelEntry]) -> Option<Pro
     None
 }
 
+/// Where slot `k`'s value comes from. Stream RR: a claim slot is matched by its
+/// *ordinal*, read off the IR, and never by value -- two claims that coincide
+/// on the chunk that filled the entry are two slots, and value matching would
+/// hand both of them the first one's value on a chunk where they differ.
+fn slot_prov(ir: &Ir, k: usize, consts: &[SecureField], rels: &[RelEntry]) -> Option<Prov> {
+    if let Some((_, n)) = ir.claim_slots.iter().find(|(slot, _)| *slot == k) {
+        return Some(Prov::Claim(*n));
+    }
+    find(ir.scalars[k], consts, rels)
+}
+
+fn provenance(ir: &Ir, consts: &[SecureField], rels: &[RelEntry]) -> Option<Vec<Prov>> {
+    (0..ir.scalars.len()).map(|k| slot_prov(ir, k, consts, rels)).collect()
+}
+
 fn replay(prov: &[Prov], consts: &[SecureField], claims: &[SecureField], rels: &[RelEntry],
           family: &str) -> Vec<SecureField> {
     prov.iter()
@@ -637,15 +652,7 @@ pub fn cached_ir<E: FrameworkEval>(
     }
     let ir = lower();
     let rels = relation_entries(eval);
-    // Stream RR: a claim slot's provenance is its ordinal, read off the IR;
-    // every other slot is still matched by value.
-    let claim_of: HashMap<usize, usize> = ir.claim_slots.iter().copied().collect();
-    let prov_of = |k: usize, v: SecureField| match claim_of.get(&k) {
-        Some(n) => Some(Prov::Claim(*n)),
-        None => find(v, &consts, &rels),
-    };
-    let prov: Option<Vec<Prov>> =
-        ir.scalars.iter().enumerate().map(|(k, v)| prov_of(k, *v)).collect();
+    let prov: Option<Vec<Prov>> = provenance(&ir, &consts, &rels);
     FILL_NS.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
     match prov {
         Some(prov) => {
@@ -656,8 +663,8 @@ pub fn cached_ir<E: FrameworkEval>(
             // A slot no probe can account for: this family stays uncached, and
             // the count says so rather than a silently slower chunk.
             UNCACHEABLE.fetch_add(1, Relaxed);
-            let k = ir.scalars.iter().enumerate()
-                .position(|(k, v)| prov_of(k, *v).is_none()).unwrap();
+            let k = (0..ir.scalars.len())
+                .find(|k| slot_prov(&ir, *k, &consts, &rels).is_none()).unwrap();
             eprintln!("ircache: {family} at 2^{log_size} is not cacheable: slot {k} of {} \
                        matches none of {} recorded constants, {} claims or {} relation entries",
                       ir.scalars.len(), consts.len(), claims.len(), rels.len());
@@ -741,5 +748,121 @@ mod tests {
             h(ext(11), ext(13)),
             "and so are two distinct extension claims"
         );
+    }
+}
+
+/// Stream RR's controls. QQ's fixture above reads its two values as ordinary
+/// extension constants, which is what every claim in the AIR was before this
+/// stream and what the key above is still right about. This one reads them
+/// through `EvalAtRow::claim`, and the two things that must hold of a claim are
+/// the opposite ones: the key must *not* move with the value, and a hit must
+/// replay the slot by ordinal rather than by value.
+#[cfg(test)]
+mod rr {
+    use super::*;
+
+    struct TwoClaims {
+        a: SecureField,
+        b: SecureField,
+    }
+
+    impl FrameworkEval for TwoClaims {
+        fn cuda_eval_name(&self) -> &'static str {
+            "b65_rr_probe_test"
+        }
+        fn log_size(&self) -> u32 {
+            4
+        }
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            5
+        }
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let x = eval.next_trace_mask();
+            let y = eval.next_trace_mask();
+            let ca = eval.claim(self.a);
+            let cb = eval.claim(self.b);
+            eval.add_constraint(E::EF::from(x) - ca);
+            eval.add_constraint(E::EF::from(y) - cb);
+            eval
+        }
+    }
+
+    /// One claim, so the key can be asked whether the *number* of claims is
+    /// still a shape fact.
+    struct OneClaim {
+        a: SecureField,
+    }
+
+    impl FrameworkEval for OneClaim {
+        fn cuda_eval_name(&self) -> &'static str {
+            "b65_rr_probe_test"
+        }
+        fn log_size(&self) -> u32 {
+            4
+        }
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            5
+        }
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let x = eval.next_trace_mask();
+            let y = eval.next_trace_mask();
+            let ca = eval.claim(self.a);
+            eval.add_constraint(E::EF::from(x) - ca);
+            eval.add_constraint(E::EF::from(y));
+            eval
+        }
+    }
+
+    fn base(v: u32) -> SecureField {
+        SecureField::from(M31::from_u32_unchecked(v))
+    }
+    fn ext(v: u32) -> SecureField {
+        SecureField::from_m31_array([M31::from_u32_unchecked(v); 4])
+    }
+    fn h(a: SecureField, b: SecureField) -> u64 {
+        probe(&TwoClaims { a, b }).h
+    }
+
+    /// The lowering reads nothing about a claim's value, so neither may the
+    /// key. Every row here is a row QQ's `assert_ne!` list asserts for an
+    /// ordinary constant, and every one of them is now an equality.
+    #[test]
+    fn a_claims_value_is_not_in_the_cache_key() {
+        let r = h(ext(7), ext(9));
+        assert_eq!(r, h(ext(11), ext(13)), "two other distinct claims");
+        assert_eq!(r, h(ext(7), ext(7)), "two claims that coincide (EE's second collapse)");
+        assert_eq!(r, h(SecureField::zero(), SecureField::zero()), "both claims zero (item 21)");
+        assert_eq!(r, h(ext(7), SecureField::zero()), "one claim zero (log rows 61, 66)");
+        assert_eq!(r, h(SecureField::one(), SecureField::one()), "both claims one");
+        assert_eq!(r, h(base(5), base(6)), "base-field claims -- the width is fixed too");
+    }
+
+    /// And the key is still a key: how many claims an eval has, and where, is
+    /// structure and stays in the hash.
+    #[test]
+    fn how_many_claims_an_eval_has_is_still_in_the_key() {
+        assert_ne!(h(ext(7), ext(9)), probe(&OneClaim { a: ext(7) }).h);
+    }
+
+    /// The hazard the ordinal provenance exists for. The entry is filled by a
+    /// chunk whose two claims coincide -- one value, two slots -- and a later
+    /// chunk of the same shape has two different ones. Matching a slot by value
+    /// would find the first occurrence for both and hand the later chunk one
+    /// value twice, which is a blob that does not compute its own statement.
+    #[test]
+    fn a_hit_replays_a_claim_by_ordinal_and_not_by_value() {
+        let fill = TwoClaims { a: ext(5), b: ext(5) };
+        let ir = crate::cudagen::lower(&fill, SecureField::zero(), 4, 5);
+        let rels = relation_entries(&fill);
+        let filled = probe(&fill);
+        assert_eq!(ir.claim_slots.len(), 2, "two claims, two slots, coinciding values");
+        let prov = provenance(&ir, &filled.consts, &rels).expect("every slot accounted for");
+
+        let later = probe(&TwoClaims { a: ext(11), b: ext(13) });
+        let got = replay(&prov, &later.consts, &later.claims, &rels, "b65_rr_probe_test");
+        let want = [ext(11), ext(13)];
+        for (slot, n) in &ir.claim_slots {
+            assert_eq!(got[*slot], want[*n], "slot {slot} is claim #{n}");
+        }
     }
 }

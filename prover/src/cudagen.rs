@@ -3646,3 +3646,149 @@ pub fn gen_emit_cmd(args: &[String]) {
     );
     crate::util::emit("genemit", man);
 }
+
+// ------------------------------------------------------------ stream RR ----
+
+/// The class this stream closes, reproduced and then closed, on the smallest
+/// AIR that can carry it: two Horner-style closings, one per claim.
+///
+/// `Consts` reads its two values the way every call site in the AIR read them
+/// before this stream -- as ordinary extension constants -- and its shape moves
+/// with the values. `Claims` reads the same two values through
+/// `EvalAtRow::claim` and its shape does not move at all. Those are README
+/// items 21 and 23 and log rows 53, 61 and 66: a claim that is zero by data, or
+/// two claims that coincide, lowered to a fingerprint no emit had produced, and
+/// the component took the announced `kernel fallback:`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Claims {
+        a: SecureField,
+        b: SecureField,
+    }
+
+    impl FrameworkEval for Claims {
+        fn cuda_eval_name(&self) -> &'static str {
+            "b65_rr_claim_test"
+        }
+        fn log_size(&self) -> u32 {
+            4
+        }
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            5
+        }
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let x = eval.next_trace_mask();
+            let y = eval.next_trace_mask();
+            let ca = eval.claim(self.a);
+            let cb = eval.claim(self.b);
+            eval.add_constraint(E::EF::from(x) - ca);
+            eval.add_constraint(E::EF::from(y) - cb);
+            eval
+        }
+    }
+
+    /// The same AIR, the same two values, read as literals.
+    struct Consts {
+        a: SecureField,
+        b: SecureField,
+    }
+
+    impl FrameworkEval for Consts {
+        fn cuda_eval_name(&self) -> &'static str {
+            "b65_rr_const_test"
+        }
+        fn log_size(&self) -> u32 {
+            4
+        }
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            5
+        }
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let x = eval.next_trace_mask();
+            let y = eval.next_trace_mask();
+            eval.add_constraint(E::EF::from(x) - self.a);
+            eval.add_constraint(E::EF::from(y) - self.b);
+            eval
+        }
+    }
+
+    fn base(v: u32) -> SecureField {
+        SecureField::from(M31::from_u32_unchecked(v))
+    }
+    fn ext(v: u32) -> SecureField {
+        SecureField::from_m31_array([M31::from_u32_unchecked(v); 4])
+    }
+    /// what the store is keyed on, and the two counts a fold moves
+    fn shape<E: FrameworkEval>(e: &E) -> (u32, usize, usize) {
+        let ir = lower(e, SecureField::zero(), 4, 5);
+        (ir.fingerprint(), ir.ops.len(), ir.scalars.len())
+    }
+
+    /// Every pair of values a chunk can carry lowers to one shape.
+    #[test]
+    fn a_claims_value_is_not_a_shape_fact() {
+        let want = shape(&Claims { a: ext(7), b: ext(9) });
+        for (why, a, b) in [
+            ("two other distinct claims", ext(11), ext(13)),
+            ("both claims zero -- README item 21", SecureField::zero(), SecureField::zero()),
+            ("one claim zero -- log rows 61 and 66", ext(7), SecureField::zero()),
+            ("two claims that coincide -- EE's 0x18afbca6", ext(7), ext(7)),
+            ("both claims one", SecureField::one(), SecureField::one()),
+            ("base-field claims -- the node width", base(5), base(6)),
+            ("one of each", base(5), ext(6)),
+        ] {
+            assert_eq!(shape(&Claims { a, b }), want, "{why}");
+        }
+    }
+
+    /// The reproduction, in the same test file: read as literals, the same
+    /// seven pairs are four different shapes, and each difference is the
+    /// fingerprint of a kernel no emit produced.
+    #[test]
+    fn read_as_literals_the_same_values_are_four_shapes() {
+        let want = shape(&Consts { a: ext(7), b: ext(9) });
+        assert_eq!(shape(&Consts { a: ext(11), b: ext(13) }), want,
+                   "two distinct nonzero claims are one shape -- this is the case that works");
+        for (why, a, b) in [
+            ("both claims zero", SecureField::zero(), SecureField::zero()),
+            ("one claim zero", ext(7), SecureField::zero()),
+            ("two claims that coincide", ext(7), ext(7)),
+            ("base-field claims", base(5), base(6)),
+        ] {
+            assert_ne!(shape(&Consts { a, b }), want, "{why}");
+        }
+    }
+
+    /// And the shape a claim lowers to is the shape the literal route lowered a
+    /// distinct nonzero pair to -- which is why nothing in any store moves.
+    #[test]
+    fn the_claim_route_lowers_to_what_a_distinct_nonzero_pair_always_did() {
+        assert_eq!(
+            shape(&Claims { a: ext(7), b: ext(9) }).1,
+            shape(&Consts { a: ext(7), b: ext(9) }).1,
+            "instruction count"
+        );
+        assert_eq!(
+            shape(&Claims { a: ext(7), b: ext(9) }).2,
+            shape(&Consts { a: ext(7), b: ext(9) }).2,
+            "slot count"
+        );
+    }
+
+    /// The shape stops seeing the value; the blob does not. Two coinciding
+    /// claims are two slots and both carry the value, so the kernel computes
+    /// the statement the chunk published.
+    #[test]
+    fn the_claim_values_still_reach_their_slots() {
+        let ir = lower(&Claims { a: ext(7), b: ext(9) }, SecureField::zero(), 4, 5);
+        assert_eq!(ir.claim_slots.len(), 2);
+        for (slot, n) in &ir.claim_slots {
+            assert_eq!(ir.scalars[*slot], [ext(7), ext(9)][*n]);
+        }
+        let ir = lower(&Claims { a: ext(7), b: ext(7) }, SecureField::zero(), 4, 5);
+        assert_eq!(ir.claim_slots.len(), 2, "coinciding claims still get a slot each");
+        assert_eq!(ir.scalars.iter().filter(|v| **v == ext(7)).count(), 2);
+    }
+}
