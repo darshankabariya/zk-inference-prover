@@ -161,6 +161,19 @@ def main():
     ap.add_argument("--head-flags", default="",
                     help="appended to the head line, e.g. '--ao-rem-bits 23' to keep the "
                          "head at its own pin when the shared pins are the layers'")
+    # ---- stream SS (E11): the attention-output remainder, per line ----------
+    # A shared `--ao-rem-bits` is the model-wide worst case, and a chunk whose
+    # own `ao_q_bits` is wide refuses it: `compose.rs` asserts
+    # `ao_q_bits + ao_rem_bits <= 30`, so the E11 set's `attn_out_bits 12`
+    # (`ao_q_bits` 11) refuses the shared 20 that its own worst block needs,
+    # while its own 19 is legal.  A line's arguments are placed BEFORE the
+    # shared ones (`chunks.rs::specs`) and `arg_scalar` takes the first match,
+    # so a per-line pin simply wins and the shared one stays as the default for
+    # the lines that do not carry one.  Off by default: with it absent every
+    # plan this repo has recorded is byte-identical.
+    ap.add_argument("--ao-rem-per-line", action="store_true",
+                    help="write each layer line's own --ao-rem-bits, off the shape table's "
+                         "row, instead of leaving it to the shared pin")
     a = ap.parse_args()
     lf, l0f, hf = flags(a.layer_flags), flags(a.l0_flags), flags(a.head_flags)
 
@@ -206,6 +219,10 @@ def main():
         for k in want:
             tb = rows[k]["table_bits"]
             extra = lf + (l0f if k == 0 else "")
+            if a.ao_rem_per_line:
+                rem = rows[k].get("ao_rem_bits")
+                assert rem, f"--ao-rem-per-line: {a.dir}'s shape table has no ao_rem_bits"
+                extra += f" --ao-rem-bits {rem}"
             wdir = f"{wpre}{k}"
             if k == 0 and a.l0_dir:
                 wdir = f"{a.l0_dir}/{os.path.basename(wpre)}{k}"
