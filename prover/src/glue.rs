@@ -929,7 +929,8 @@ impl FrameworkEval for GlueEval {
                     f += (E::EF::from(sm.clone()) + E::EF::from(ef.clone()) * t.lam) * spec.w[k];
                 }
                 eval.add_constraint(h.clone() - (h_prev * nofirst.clone()) * spec.step - f);
-                eval.add_constraint((h - spec.claimed) * end.clone());
+                let claim = eval.claim(spec.claimed);
+                eval.add_constraint((h - claim) * end.clone());
             }
         }
         if !self.gkr {

@@ -450,7 +450,8 @@ impl FrameworkEval for QuantEval {
                 fi += (E::EF::from(sm.clone()) + E::EF::from(ef.clone()) * t.lam) * t.w_in[k];
             }
             eval.add_constraint(ui.clone() - ui_prev * step_in - fi);
-            eval.add_constraint((ui - t.claimed_in) * end.clone());
+            let claim_in = eval.claim(t.claimed_in);
+            eval.add_constraint((ui - claim_in) * end.clone());
 
             // `hstart` is a subset of `gt0`, so this stays degree 1
             let step_out = E::EF::from(gt0.clone()) * t.step_out
@@ -462,7 +463,8 @@ impl FrameworkEval for QuantEval {
                 fo += v.clone() * t.w_out[k];
             }
             eval.add_constraint(uo.clone() - uo_prev * step_out - fo);
-            eval.add_constraint((uo - t.claimed_out) * end);
+            let claim_out = eval.claim(t.claimed_out);
+            eval.add_constraint((uo - claim_out) * end);
         }
         eval.finalize_logup_in_pairs();
         eval

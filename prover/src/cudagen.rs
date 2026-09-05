@@ -152,12 +152,27 @@ pub struct LogupProbe {
     pub inner: ExprEvaluator,
     /// one per `add_to_relation`, in call order
     pub mults: Vec<ExtExpr>,
+    /// Stream RR: one per `EvalAtRow::claim`, in call order. The expression
+    /// carries `Param(claim_param(n))` in the claim's place, so the value is
+    /// out of the tree and the n-th call is what the lowering resolves.
+    pub claims: Vec<SecureField>,
 }
 
 impl LogupProbe {
     pub fn new() -> Self {
-        Self { inner: ExprEvaluator::new(), mults: vec![] }
+        Self { inner: ExprEvaluator::new(), mults: vec![], claims: vec![] }
     }
+}
+
+/// The extension parameter that stands for the `n`-th `EvalAtRow::claim` call.
+/// `#` cannot occur in a Rust identifier, so it cannot collide with a relation
+/// name's `{name}_z` / `{name}_alpha{i}` or with `intermediate{k}`.
+pub fn claim_param(n: usize) -> String {
+    format!("claim#{n}")
+}
+
+fn claim_ordinal(p: &str) -> Option<usize> {
+    p.strip_prefix("claim#").and_then(|s| s.parse::<usize>().ok())
 }
 
 impl Default for LogupProbe {
@@ -207,6 +222,20 @@ impl EvalAtRow for LogupProbe {
 
     fn add_extension_intermediate(&mut self, expr: Self::EF) -> Self::EF {
         self.inner.add_extension_intermediate(expr)
+    }
+
+    /// Stream RR. The one method that does not delegate, and the only place
+    /// this probe changes the expression the inner evaluator would have built:
+    /// a claim becomes a named parameter instead of a constant node, and its
+    /// value goes into `claims` where `Lower` reads it by ordinal.
+    ///
+    /// `ExprEvaluator` has no notion of a parameter's value, so nothing else in
+    /// the fork sees a difference; `Lower::ext`'s `Param` arm is what turns the
+    /// name back into a slot.
+    fn claim(&mut self, value: SecureField) -> Self::EF {
+        let n = self.claims.len();
+        self.claims.push(value);
+        ExtExpr::Param(claim_param(n))
     }
 
     fn combine_ef(values: [Self::F; SECURE_EXTENSION_DEGREE]) -> Self::EF {
@@ -294,6 +323,17 @@ pub struct Ir {
     /// the generated kernel, so a value collision or a drift in the B6.5 crate
     /// aborts instead of proving the wrong statement
     pub scalar_refs: Vec<u32>,
+    /// Stream RR: `(slot, n)` for every slot that holds the `n`-th
+    /// `EvalAtRow::claim` of this eval, in slot order. A claim slot is
+    /// allocated by *occurrence*: never interned by value, never folded, always
+    /// four limbs wide -- so the fingerprint stops being a function of what the
+    /// claim happens to be. Not hashed by `fingerprint`, and not part of the
+    /// shape: it is how `scalars::cached_ir` replays the slot on a later chunk,
+    /// where matching by value would give two coinciding claims one value.
+    /// Empty on an IR serialized before the field existed and on any IR with no
+    /// claim, which is every shape a store emitted before this stream.
+    #[serde(default)]
+    pub claim_slots: Vec<(usize, usize)>,
     /// columns per tree: `[preprocessed, base, interaction]`
     pub cols: [usize; 3],
     /// columns per interaction, all of them (B11 stream K).  A component under
@@ -432,6 +472,14 @@ struct Lower {
     ir: Ir,
     intern: HashMap<String, usize>,
     slot: HashMap<[u32; 4], usize>,
+    /// Stream RR: the `EvalAtRow::claim` values, in call order -- `LogupProbe`'s
+    /// `claims`, which `Param(claim#n)` indexes.
+    claims: Vec<SecureField>,
+    /// claim ordinal -> its slot. The second reference to one claim is the same
+    /// slot and the same node, exactly as a repeated value used to be.
+    claim_at: HashMap<usize, usize>,
+    /// the slots those are, so `lit` refuses to read their values
+    claim_slot: std::collections::HashSet<usize>,
     /// interaction -> symbolic `idx` -> real column index in that interaction
     colmap: Vec<HashMap<usize, usize>>,
     /// preprocessed id -> the first slot of tree 0 holding it
@@ -548,6 +596,42 @@ impl Lower {
         self.push(format!("S{k}"), Op::Scalar(k), w)
     }
 
+    /// Stream RR: the slot of the `n`-th claim. `scalar` above interns by value
+    /// and widths by value; this does neither.
+    ///
+    ///  * **allocated by occurrence.** Two claims that happen to be equal get
+    ///    two slots and two nodes, exactly as two unequal ones do -- which is
+    ///    the half of the class EE's `b65_key_eval 0x18afbca6` was (one slot and
+    ///    one instruction short of its group, because a band's two claims
+    ///    coincided).
+    ///  * **width 4, always.** The width is in the fingerprint, and whether a
+    ///    claim's upper limbs are zero is a fact about the chunk. Four limbs is
+    ///    what a Horner sum under an extension challenge is, so this is the
+    ///    width every real and every placeholder claim already had.
+    ///  * **never folded**, via `lit` above.
+    ///
+    /// The value still goes into the slot: the blob replays it and the kernel
+    /// computes with it. Only the *shape* stops seeing it.
+    fn claim_slot(&mut self, n: usize) -> usize {
+        let k = match self.claim_at.get(&n) {
+            Some(k) => *k,
+            None => {
+                let v = *self.claims.get(n).unwrap_or_else(|| {
+                    panic!("claim#{n} lowered but the probe recorded {} claims",
+                           self.claims.len())
+                });
+                let k = self.ir.scalars.len();
+                self.ir.scalars.push(v);
+                self.ir.scalar_refs.push(0);
+                self.ir.claim_slots.push((k, n));
+                self.claim_at.insert(n, k);
+                self.claim_slot.insert(k);
+                k
+            }
+        };
+        self.push(format!("S{k}"), Op::Scalar(k), 4)
+    }
+
     fn constm31(&mut self, c: M31) -> usize {
         self.push(format!("K{}", c.0), Op::ConstM31(c.0), 1)
     }
@@ -573,10 +657,16 @@ impl Lower {
     /// consequence is safe by construction: the fingerprint would not be in the
     /// generated table and `blob_for` aborts the prover rather than handing the
     /// component to a kernel that computes something else.
+    ///
+    /// Stream RR: a *claim* slot is excluded, and that is not a 2^-124 event
+    /// but a data property -- a Horner tie over an all-zero sub-band closes on
+    /// zero, and two bands' claims coincide when their values do (README items
+    /// 21 and 23, log rows 53, 61 and 66). A claim's value is never read here,
+    /// so `x - claim` is an instruction whatever the claim is.
     fn lit(&self, id: usize) -> Option<u32> {
         match self.ir.ops[id] {
             Op::ConstM31(c) => Some(c),
-            Op::Scalar(k) => {
+            Op::Scalar(k) if !self.claim_slot.contains(&k) => {
                 let l = limbs(self.ir.scalars[k]);
                 if l[1] == 0 && l[2] == 0 && l[3] == 0 { Some(l[0]) } else { None }
             }
@@ -676,6 +766,10 @@ impl Lower {
             ExtExpr::Param(p) => {
                 if let Some(id) = self.inter.get(p).copied() {
                     return id;
+                }
+                // Stream RR: the AIR said this one is a claim.
+                if let Some(n) = claim_ordinal(p) {
+                    return self.claim_slot(n);
                 }
                 assert_ne!(
                     p, "claimed_sum",
@@ -880,6 +974,7 @@ fn lower_impl<E: FrameworkEval>(
     // alone would have produced; `mults` is the one thing it adds.
     let probe = eval.evaluate(LogupProbe::new());
     let mults = probe.mults;
+    let claims = probe.claims;
     let ev = probe.inner;
     let info = eval.evaluate(InfoEvaluator::new(log_size, vec![], claimed_sum));
     let rels = relation_entries(eval);
@@ -976,6 +1071,7 @@ fn lower_impl<E: FrameworkEval>(
             fracs: vec![],
             scalars: vec![],
             scalar_refs: vec![],
+            claim_slots: vec![],
             cols,
             tree_cols,
             pre_ids,
@@ -986,6 +1082,9 @@ fn lower_impl<E: FrameworkEval>(
         },
         intern: HashMap::new(),
         slot: HashMap::new(),
+        claims,
+        claim_at: HashMap::new(),
+        claim_slot: std::collections::HashSet::new(),
         colmap,
         pre_index,
         inter: HashMap::new(),
@@ -3546,4 +3645,150 @@ pub fn gen_emit_cmd(args: &[String]) {
         dir.display()
     );
     crate::util::emit("genemit", man);
+}
+
+// ------------------------------------------------------------ stream RR ----
+
+/// The class this stream closes, reproduced and then closed, on the smallest
+/// AIR that can carry it: two Horner-style closings, one per claim.
+///
+/// `Consts` reads its two values the way every call site in the AIR read them
+/// before this stream -- as ordinary extension constants -- and its shape moves
+/// with the values. `Claims` reads the same two values through
+/// `EvalAtRow::claim` and its shape does not move at all. Those are README
+/// items 21 and 23 and log rows 53, 61 and 66: a claim that is zero by data, or
+/// two claims that coincide, lowered to a fingerprint no emit had produced, and
+/// the component took the announced `kernel fallback:`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Claims {
+        a: SecureField,
+        b: SecureField,
+    }
+
+    impl FrameworkEval for Claims {
+        fn cuda_eval_name(&self) -> &'static str {
+            "b65_rr_claim_test"
+        }
+        fn log_size(&self) -> u32 {
+            4
+        }
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            5
+        }
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let x = eval.next_trace_mask();
+            let y = eval.next_trace_mask();
+            let ca = eval.claim(self.a);
+            let cb = eval.claim(self.b);
+            eval.add_constraint(E::EF::from(x) - ca);
+            eval.add_constraint(E::EF::from(y) - cb);
+            eval
+        }
+    }
+
+    /// The same AIR, the same two values, read as literals.
+    struct Consts {
+        a: SecureField,
+        b: SecureField,
+    }
+
+    impl FrameworkEval for Consts {
+        fn cuda_eval_name(&self) -> &'static str {
+            "b65_rr_const_test"
+        }
+        fn log_size(&self) -> u32 {
+            4
+        }
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            5
+        }
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let x = eval.next_trace_mask();
+            let y = eval.next_trace_mask();
+            eval.add_constraint(E::EF::from(x) - self.a);
+            eval.add_constraint(E::EF::from(y) - self.b);
+            eval
+        }
+    }
+
+    fn base(v: u32) -> SecureField {
+        SecureField::from(M31::from_u32_unchecked(v))
+    }
+    fn ext(v: u32) -> SecureField {
+        SecureField::from_m31_array([M31::from_u32_unchecked(v); 4])
+    }
+    /// what the store is keyed on, and the two counts a fold moves
+    fn shape<E: FrameworkEval>(e: &E) -> (u32, usize, usize) {
+        let ir = lower(e, SecureField::zero(), 4, 5);
+        (ir.fingerprint(), ir.ops.len(), ir.scalars.len())
+    }
+
+    /// Every pair of values a chunk can carry lowers to one shape.
+    #[test]
+    fn a_claims_value_is_not_a_shape_fact() {
+        let want = shape(&Claims { a: ext(7), b: ext(9) });
+        for (why, a, b) in [
+            ("two other distinct claims", ext(11), ext(13)),
+            ("both claims zero -- README item 21", SecureField::zero(), SecureField::zero()),
+            ("one claim zero -- log rows 61 and 66", ext(7), SecureField::zero()),
+            ("two claims that coincide -- EE's 0x18afbca6", ext(7), ext(7)),
+            ("both claims one", SecureField::one(), SecureField::one()),
+            ("base-field claims -- the node width", base(5), base(6)),
+            ("one of each", base(5), ext(6)),
+        ] {
+            assert_eq!(shape(&Claims { a, b }), want, "{why}");
+        }
+    }
+
+    /// The reproduction, in the same test file: read as literals, the same
+    /// seven pairs are four different shapes, and each difference is the
+    /// fingerprint of a kernel no emit produced.
+    #[test]
+    fn read_as_literals_the_same_values_are_four_shapes() {
+        let want = shape(&Consts { a: ext(7), b: ext(9) });
+        assert_eq!(shape(&Consts { a: ext(11), b: ext(13) }), want,
+                   "two distinct nonzero claims are one shape -- this is the case that works");
+        for (why, a, b) in [
+            ("both claims zero", SecureField::zero(), SecureField::zero()),
+            ("one claim zero", ext(7), SecureField::zero()),
+            ("two claims that coincide", ext(7), ext(7)),
+            ("base-field claims", base(5), base(6)),
+        ] {
+            assert_ne!(shape(&Consts { a, b }), want, "{why}");
+        }
+    }
+
+    /// And the shape a claim lowers to is the shape the literal route lowered a
+    /// distinct nonzero pair to -- which is why nothing in any store moves.
+    #[test]
+    fn the_claim_route_lowers_to_what_a_distinct_nonzero_pair_always_did() {
+        assert_eq!(
+            shape(&Claims { a: ext(7), b: ext(9) }).1,
+            shape(&Consts { a: ext(7), b: ext(9) }).1,
+            "instruction count"
+        );
+        assert_eq!(
+            shape(&Claims { a: ext(7), b: ext(9) }).2,
+            shape(&Consts { a: ext(7), b: ext(9) }).2,
+            "slot count"
+        );
+    }
+
+    /// The shape stops seeing the value; the blob does not. Two coinciding
+    /// claims are two slots and both carry the value, so the kernel computes
+    /// the statement the chunk published.
+    #[test]
+    fn the_claim_values_still_reach_their_slots() {
+        let ir = lower(&Claims { a: ext(7), b: ext(9) }, SecureField::zero(), 4, 5);
+        assert_eq!(ir.claim_slots.len(), 2);
+        for (slot, n) in &ir.claim_slots {
+            assert_eq!(ir.scalars[*slot], [ext(7), ext(9)][*n]);
+        }
+        let ir = lower(&Claims { a: ext(7), b: ext(7) }, SecureField::zero(), 4, 5);
+        assert_eq!(ir.claim_slots.len(), 2, "coinciding claims still get a slot each");
+        assert_eq!(ir.scalars.iter().filter(|v| **v == ext(7)).count(), 2);
+    }
 }

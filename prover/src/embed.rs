@@ -355,7 +355,8 @@ impl FrameworkEval for EmbedEval {
                 * self.tie.w[i];
         }
         eval.add_constraint(h.clone() - h_prev * mult - f * act.clone());
-        eval.add_constraint((h - self.tie.claimed) * s_end.clone());
+        let claim = eval.claim(self.tie.claimed);
+        eval.add_constraint((h - claim) * s_end.clone());
 
         // the id claim: one step per token, so the ids are a named value of the
         // statement and not merely columns inside it
@@ -365,7 +366,8 @@ impl FrameworkEval for EmbedEval {
         eval.add_constraint(
             g.clone() - g_prev * kmult - E::EF::from(tk * (E::F::one() - s_in) * act),
         );
-        eval.add_constraint((g - self.tie.claimed_tok) * s_end);
+        let claim_tok = eval.claim(self.tie.claimed_tok);
+        eval.add_constraint((g - claim_tok) * s_end);
 
         eval.finalize_logup_in_pairs();
         eval

@@ -247,7 +247,8 @@ impl FrameworkEval for ArgmaxEval {
             let mult: E::EF =
                 E::EF::from(oin.clone()) * t.k_in + E::EF::from(obd.clone()) * t.k_bd;
             eval.add_constraint(u.clone() - u_prev * mult.clone() - f * oact.clone());
-            eval.add_constraint((u - t.claimed) * end.clone());
+            let claim = eval.claim(t.claimed);
+            eval.add_constraint((u - claim) * end.clone());
 
             // stream KK: the same shape over the emitted token, one step per
             // token instead of one per row -- `oin` carries the accumulator
@@ -263,7 +264,8 @@ impl FrameworkEval for ArgmaxEval {
                 g.clone() - g_prev * kmult
                     - E::EF::from(tk.clone() * (E::F::one() - oin) * oact),
             );
-            eval.add_constraint((g - t.claimed_tok) * end);
+            let claim_tok = eval.claim(t.claimed_tok);
+            eval.add_constraint((g - claim_tok) * end);
         } else {
             let _ = end;
         }

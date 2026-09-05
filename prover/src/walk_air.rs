@@ -173,7 +173,8 @@ impl FrameworkEval for WalkEval {
             }
             eval.add_constraint(u.clone() - (u_prev * self.rv_step) * nofirst.clone() - uf);
             eval.add_constraint(acc.clone() - acc_prev * notzero.clone() - (u * v.clone()) * last.clone());
-            eval.add_constraint((acc - self.claimed[m]) * end.clone());
+            let claim = eval.claim(self.claimed[m]);
+            eval.add_constraint((acc - claim) * end.clone());
         }
         // stream II: the activation claim, allocated before the LogUp columns
         // so that the interaction order is ties-then-fractions, as the wiring
@@ -190,7 +191,8 @@ impl FrameworkEval for WalkEval {
             let mult = E::EF::from(nofirst.clone()) * q.m_in
                 + (E::EF::from(notzero.clone()) - E::EF::from(nofirst.clone())) * q.m_bd;
             eval.add_constraint(x.clone() - x_prev * mult - xf);
-            eval.add_constraint((x - q.claimed) * end.clone());
+            let claim = eval.claim(q.claimed);
+            eval.add_constraint((x - claim) * end.clone());
         }
         if self.range_check && !self.gkr {
             for a in &acts {
@@ -412,8 +414,10 @@ impl FrameworkEval for AttnOutEval {
         let mut multq: E::EF = E::EF::from(m1q);
         multq += m2q * self.s;
         multq += m3q * self.mu_out;
-        eval.add_constraint((h - self.claimed_out) * end.clone());
-        eval.add_constraint((dz - self.claimed_den) * end.clone());
+        let claim_out = eval.claim(self.claimed_out);
+        eval.add_constraint((h - claim_out) * end.clone());
+        let claim_den = eval.claim(self.claimed_den);
+        eval.add_constraint((dz - claim_den) * end.clone());
         // stream JJ: the fourth claim, `z`/`h`'s shape over the region's own
         // output instead of over `acc`.  Same slot weights, same row step, same
         // token and head boundaries, so a consumer that folds the attention
@@ -426,7 +430,8 @@ impl FrameworkEval for AttnOutEval {
         }
         eval.add_constraint(zq.clone() - (zq_prev * self.rv_step) * nofirst2 - qf);
         eval.add_constraint(hq.clone() - hq_prev * multq - zq * last2);
-        eval.add_constraint((hq - self.claimed_q) * end);
+        let claim_q = eval.claim(self.claimed_q);
+        eval.add_constraint((hq - claim_q) * end);
         if !self.gkr {
             eval.finalize_logup_in_pairs();
         }
