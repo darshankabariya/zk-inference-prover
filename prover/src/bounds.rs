@@ -1418,11 +1418,18 @@ pub fn grid_cmd(args: &[String]) {
                              "why": "no --prompt was given: every published id was \
                                      compared only against an argmax, where one exists"}));
     }
-    declared.push(json!({"what": "one tree-0 root per chunk", "chunks": chunks.len(),
-                         "why": "root_ok compares the proof's commitment 0 against its \
-                                 own statement's pre_root; that the root is the model's, \
-                                 for this layer and this shape, is the verifier's \
-                                 declaration"}));
+    // Stream LL: declared only where no derived table was handed in.  With
+    // `--expect-pre-roots` the grid compares every chunk's `pre_root` against a
+    // root derived from the model and the chunk's own coordinates, so the roots
+    // stop being an input the verifier takes on trust and become a check --
+    // which is the whole of `notes/witness-slack.md` section 5 item 1.
+    if expect_pre.is_none() {
+        declared.push(json!({"what": "one tree-0 root per chunk", "chunks": chunks.len(),
+                             "why": "root_ok compares the proof's commitment 0 against its \
+                                     own statement's pre_root; that the root is the model's, \
+                                     for this layer and this shape, is the verifier's \
+                                     declaration"}));
+    }
     let ids_ok = bad_ids.is_empty() && (prompt.is_none() || unbacked.is_empty());
 
     // ---- stream LL: the model, per layer and across the grid ---------------
@@ -2147,5 +2154,25 @@ mod tests {
         assert!(v.kv_roots_equal && !v.roots_equal);
         assert!(!merged(&v));
         assert!(v.chains(), "the new predicate asks only for the K/V link here");
+    }
+
+    /// Stream LL (E11), log row 58: the precondition tree 0 depends on.
+    ///
+    /// With `frac_shared_per_head` false the master exponent is derived from
+    /// the chunk's own scores, so the bands' `dinv` and the exp table -- both
+    /// preprocessed -- become functions of the witness and no derived root
+    /// could check anything.  Both loaders refuse on this predicate; the test
+    /// is here so `cargo test bounds` covers it.
+    #[test]
+    fn a_dump_without_a_shared_master_exponent_is_refused_by_name() {
+        use serde_json::json;
+        assert!(crate::layer::frac_shared_refusal(
+            &json!({"frac_shared_per_head": true})).is_none());
+        for m in [json!({"frac_shared_per_head": false}), json!({})] {
+            let why = crate::layer::frac_shared_refusal(&m)
+                .expect("a dump without a shared master exponent must be refused");
+            assert!(why.contains("frac_shared_per_head"), "the refusal names the key: {why}");
+            assert!(why.contains("pre_root"), "the refusal says what it costs: {why}");
+        }
     }
 }

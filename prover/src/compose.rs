@@ -5173,9 +5173,19 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             "source": layer.source,
             "c": p.c,
             "s": p.s,
+            // Stream LL box half: `master_table_bits` is the one shape field that
+            // is neither the statement's nor the model's -- it comes off each
+            // extraction's own manifest -- so the row carries it and
+            // `model-roots` pins it per layer across blocks.
+            "log_table": p.log_table,
+            // whether this row was derived from the model half of the dump alone
+            // (`--weights-only`), which is the property that makes it a
+            // *verifier's* derivation and not a second prover's
+            "weights_only": layer.source.starts_with("B6.5 model-only"),
             "split": plan.pre_split_report(),
             "trace_secs": trace_secs,
             "commit_pre_secs": ll_pre_secs,
+            "peak_rss_bytes": crate::util::peak_rss_bytes(),
         }));
         std::process::exit(0);
     }

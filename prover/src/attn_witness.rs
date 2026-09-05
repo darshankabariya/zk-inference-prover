@@ -1031,3 +1031,88 @@ impl Attn {
         if den == 0.0 { 0.0 } else { num / den }
     }
 }
+
+impl Attn {
+    /// Stream LL (E11), the model-only load: a band at this shape carrying the
+    /// model's exp table and its per-instance scales, and **no witness**.
+    ///
+    /// Tree 0 holds three things off a band -- the layout's selectors, the
+    /// causal mask and `dinv`, the per-instance table-key scale `2^(F - frac_i)`
+    /// -- plus the master exp table itself, which `Tables::new` takes off
+    /// `bands[0]`. All four are functions of the shape and of the dump's
+    /// *manifest* (`frac_per_head`, `master_table_bits`), and of no activation.
+    /// So a verifier deriving the chunk's tree-0 root can build the band from
+    /// the manifest alone; the grid arrays are allocated at their shape and left
+    /// zero, so that the rest of the generator still runs over a well-formed
+    /// witness of the right shape.
+    ///
+    /// This is deliberately **not** `build`: `build` recomputes `Q.K^T` over the
+    /// whole rectangle, which is the single largest term in the witness build
+    /// (`briefs/w-genbuild.md` lever 3) and is exactly what a verifier must not
+    /// have to pay.
+    #[allow(clippy::too_many_arguments)]
+    pub fn weights_only(sh: Shape, variant: Variant, q_bits: u32, k_bits: u32, nmax: u32,
+                        log_table: u32, fracs: Vec<f64>, master: Option<f64>,
+                        corner: bool, source: String) -> Self {
+        assert!(sh.insts.is_power_of_two(), "insts must be a power of two, got {}", sh.insts);
+        assert!(!corner || sh.c == sh.s, "the causal corner is square");
+        assert!(log_table > 0 || matches!(variant, Variant::Bf16x),
+                "the model-only load needs a pinned table size: the dump's \
+                 `master_table_bits`, or `--table-bits N` on the line");
+        assert!(!fracs.is_empty(), "the model-only load needs `frac_per_head`");
+        let (ni, ns, nc, nhd) = (sh.insts, sh.s, sh.c, sh.hd);
+        let frac_per_inst: Vec<f64> = (0..ni).map(|i| fracs[i % fracs.len()]).collect();
+        let natural = frac_per_inst.iter().cloned().fold(f64::MIN, f64::max);
+        let frac = match master {
+            Some(m) => {
+                assert!(m >= natural - 1e-9,
+                        "master exponent {m} is below this band's own maximum {natural}");
+                m
+            }
+            None => natural,
+        };
+        // the same two expressions `build` uses, so `dinv` and the table are the
+        // same columns cell for cell
+        let delta: Vec<i64> = frac_per_inst
+            .iter()
+            .map(|f| 1i64 << ((frac - f).round().max(0.0) as u32).min(30))
+            .collect();
+        let (log_table, table) = match variant {
+            Variant::Bf16x => (LOG_EXP_TABLE, bf16::exp_bf16_table(nmax)),
+            Variant::IntExp => (log_table, table_of(1 << log_table, nmax, frac)),
+            Variant::IntSplit(k) => (log_table,
+                                     table_of(1 << log_table, nmax, frac - k as f64)),
+        };
+        let grid = ni * ns * nc;
+        Self {
+            shape: sh,
+            variant,
+            qq: vec![0i32; ni * ns * nhd],
+            kk: vec![0i32; ni * nc * nhd],
+            vv: vec![0i32; ni * nc * nhd],
+            sc: vec![0i64; grid],
+            mm: vec![0i64; ni * ns],
+            dd: vec![0i64; grid],
+            xx: vec![0u16; if matches!(variant, Variant::Bf16x) { grid } else { 0 }],
+            num: vec![0i64; grid],
+            // `Z >= nmax` is the band's own lower bound and a zero denominator
+            // divides in the attention-output fold, so the stand-in sits on the
+            // bound rather than at zero.
+            zz: vec![nmax as i64; ni * ns],
+            out: vec![0i64; ni * ns * nhd],
+            table,
+            log_table,
+            nmax,
+            frac,
+            frac_per_inst,
+            delta,
+            q_bits,
+            k_bits,
+            source,
+            off_table: 0,
+            torch_mismatch: None,
+            corner,
+            zz_total: None,
+        }
+    }
+}

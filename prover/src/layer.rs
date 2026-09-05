@@ -36,6 +36,36 @@ pub fn m31_of(v: i64) -> M31 {
     crate::attn_trace::m31_of(v)
 }
 
+/// Stream LL (E11), `notes/inconsistency-log.md` row 58: the precondition tree 0
+/// silently depends on, pinned.
+///
+/// Two preprocessed families come off the dump's *manifest* and not off the
+/// statement -- the bands' `dinv` (`b6_k_dinv` / `b6_x_dinv`, the per-instance
+/// master-table scale `2^-(F - frac_i)`) and the master exp table's value column
+/// (`b6_exp_y`) -- and both are functions of `frac_per_head`. With
+/// `frac_shared_per_head` **false** the forward pass did not publish one
+/// exponent per head, `Attn::build` derives `frac_per_inst` from the band's own
+/// shifts (`attn_witness.rs`, `d_max_of`), and tree 0 is then a function of the
+/// *witness*: two chunks of one layer would legitimately carry two different
+/// tree-0 roots, and a derived root would be checking nothing.
+///
+/// Every 8B dump on the box sets the flag, so this refuses nothing that has ever
+/// been proved; what it removes is the possibility of proving a chunk whose
+/// tree 0 the verifier cannot derive. `Some(why)` is the refusal, named.
+pub fn frac_shared_refusal(man: &serde_json::Value) -> Option<String> {
+    if man["frac_shared_per_head"].as_bool().unwrap_or(false) {
+        return None;
+    }
+    Some(format!(
+        "manifest: frac_shared_per_head is {} -- the master exponent is then \
+         derived from this chunk's own scores, so the bands' `dinv` and the exp \
+         table (tree 0) would be a function of the witness and no verifier could \
+         derive this chunk's `pre_root` from the model. Re-extract the layer with \
+         a per-head Q scale (`extract.py` writes `frac_per_head`).",
+        if man["frac_shared_per_head"].is_null() { "absent".into() }
+        else { man["frac_shared_per_head"].to_string() }))
+}
+
 // ------------------------------------------------------------------ the witness --
 
 /// One matmul's dequant + walk witness.
@@ -515,6 +545,81 @@ impl GlueCols {
             head: true,
         }))
     }
+
+    /// Stream LL (E11): the wiring family's **model half** -- the two norm
+    /// weights and the manifest's `eps` / `inv_d`, which are the only things
+    /// this family puts in tree 0 (stream II's `Src::Pre` norm weights and the
+    /// `NormR` table's two constants).  Every other column here is the chunk's
+    /// residual stream, so it is allocated at its shape and left zero.
+    pub fn load_weights(dir: &str, man: &serde_json::Value, tokens: usize)
+                        -> Result<Option<Self>, String> {
+        let g = &man["glue"];
+        let Some(d) = g["d"].as_u64().map(|v| v as usize) else {
+            return Ok(None);
+        };
+        let dff = g["dff"].as_u64().unwrap_or(0) as usize;
+        Ok(Some(Self {
+            d,
+            dff,
+            tokens,
+            xin: vec![0u16; tokens * d],
+            o_out: vec![0u16; tokens * d],
+            xmid: vec![0u16; tokens * d],
+            d_out: vec![0u16; tokens * d],
+            xout: vec![0u16; tokens * d],
+            r1: vec![0u16; tokens],
+            r2: vec![0u16; tokens],
+            w1: read_u16(&format!("{dir}/w1.u16"))?,
+            w2: read_u16(&format!("{dir}/w2.u16"))?,
+            h1: None,
+            h2: None,
+            silu_in: None,
+            silu_out: None,
+            x_down: None,
+            eps: g["eps"].as_u64().ok_or("manifest: glue.eps")? as u16,
+            inv_d: g["inv_d"].as_u64().ok_or("manifest: glue.inv_d")? as u16,
+            reduce: g["reduce"].as_str().unwrap_or("").to_string(),
+            head: false,
+        }))
+    }
+
+    /// The head chunk's final norm, model half: `w_head.u16` and the two
+    /// constants.  `GlueCols::load_weights`' counterpart.
+    pub fn load_head_weights(dir: &str, man: &serde_json::Value, tokens: usize)
+                             -> Result<Option<Self>, String> {
+        let h = &man["head"];
+        if !h["final_norm"].as_bool().unwrap_or(false) {
+            return Ok(None);
+        }
+        let d = h["d_in"].as_u64().ok_or("manifest: head.d_in")? as usize;
+        let w1 = read_u16(&format!("{dir}/w_head.u16"))?;
+        if w1.len() < d {
+            return Err(format!("w_head: {} values is under {d}", w1.len()));
+        }
+        Ok(Some(Self {
+            d,
+            dff: 0,
+            tokens,
+            xin: vec![0u16; tokens * d],
+            o_out: vec![],
+            xmid: vec![],
+            d_out: vec![],
+            xout: vec![],
+            r1: vec![0u16; tokens],
+            r2: vec![],
+            w1: w1[..d].to_vec(),
+            w2: vec![],
+            h1: None,
+            h2: None,
+            silu_in: None,
+            silu_out: None,
+            x_down: None,
+            eps: h["eps"].as_u64().ok_or("manifest: head.eps")? as u16,
+            inv_d: h["inv_d"].as_u64().ok_or("manifest: head.inv_d")? as u16,
+            reduce: h["reduce"].as_str().unwrap_or("").to_string(),
+            head: true,
+        }))
+    }
 }
 
 impl GlueCols {
@@ -671,6 +776,12 @@ impl Layer {
         let (nh, s, c, hd) = (g("heads")? as usize, g("s")? as usize,
                               g("c")? as usize, g("hd")? as usize);
         assert_eq!(band_sizes.iter().sum::<usize>(), nh, "bands must cover every head");
+        // Stream LL (E11), log row 58: refused here rather than caught later, so
+        // that no chunk whose tree 0 depends on its own scores can be composed at
+        // all.  `Layer::load_weights` refuses on the same predicate.
+        if let Some(why) = frac_shared_refusal(&man) {
+            return Err(why);
+        }
         // B9 step 1a: the master exponent is layer-wide.  `Attn::build` takes the
         // largest `frac` over the band's *own* heads, so which table a band builds
         // depends on how the heads were split -- and the three assertions below
@@ -1025,6 +1136,223 @@ impl Layer {
             // stream NN: `extract.py` writes `inv_freq.f64`, `jq.i32` and
             // `jk.i32` beside the `jv.i32` it already wrote; a dump without
             // them proves no rotation and says so rather than guessing one.
+            rope: RopeCols::load(dir, &man, nh, hd, s).unwrap_or(None),
+        })
+    }
+
+    /// Stream LL (E11), `notes/witness-slack.md` section 5 item 1: the dump's
+    /// **model half**, and nothing else.
+    ///
+    /// `Layer::load` reads the whole dump -- the bands' `qq`/`kk`/`vv`/`mm`/
+    /// `num`/`zz`, every matmul's `acc` and `qx`, the wiring stream's seven
+    /// activation columns -- and recomputes `Q.K^T` over the whole rectangle on
+    /// the way. Tree 0 reads none of it: every preprocessed column is a function
+    /// of `Fixed.params` and of the model, which is the weights (`qw_*.i8`), the
+    /// weight scales (`jw_*.i32`, `sw_*.i32`), the attention output's offline
+    /// `jv.i32`, the two norm weights, the embedding table, this stream's rope
+    /// exponents, and the manifest's own `frac_per_head` / `master_table_bits`.
+    /// So a verifier deriving a chunk's expected tree-0 root reads exactly those
+    /// files here, and every activation array is allocated at its shape and left
+    /// at a well-formed constant.
+    ///
+    /// Two consequences the caller has to honour, both checked rather than
+    /// assumed:
+    ///
+    /// * the `Params` cannot be derived from this layer -- `ao_jo_min/max` and
+    ///   `ao_acc_*_bits` come off the activations -- so `b65 expect-root
+    ///   --weights-only` requires `--params FILE`, the statement's own
+    ///   `Fixed.params`, and that is the right shape for the check anyway: the
+    ///   verifier derives the root from *the statement's* declared shape and the
+    ///   model, not from the prover's re-derivation of either;
+    /// * the table size must be pinned (the manifest's `master_table_bits` or
+    ///   `--table-bits N`), because `--tight-table` sizes it off the witness's
+    ///   own shifts and there is no witness here.
+    pub fn load_weights(dir: &str, cfg: &Src, band_sizes: &[usize], variant: Variant)
+                        -> Result<Self, String> {
+        let man: serde_json::Value = witread::read_json(&format!("{dir}/manifest.json"))?;
+        let g = |k: &str| man[k].as_u64().ok_or(format!("manifest: missing {k}"));
+        let (nh, s, c, hd) = (g("heads")? as usize, g("s")? as usize,
+                              g("c")? as usize, g("hd")? as usize);
+        assert_eq!(band_sizes.iter().sum::<usize>(), nh, "bands must cover every head");
+        if let Some(why) = frac_shared_refusal(&man) {
+            return Err(why);
+        }
+        let master: Option<f64> = man["frac_per_head"].as_array().map(|a| {
+            a.iter().take(nh).filter_map(|v| v.as_f64()).fold(f64::MIN, f64::max)
+        }).filter(|f| *f > f64::MIN);
+        let cfg = &if cfg.log_table == 0 {
+            match man["master_table_bits"].as_u64() {
+                Some(m) if m > 0 => Src { log_table: m as u32, ..cfg.clone() },
+                _ => cfg.clone(),
+            }
+        } else {
+            cfg.clone()
+        };
+        let has_corner = man["corner"].as_bool().unwrap_or(false);
+        assert!(c > 0 || has_corner,
+                "a c = 0 dump is block 0: it is the solo corner and needs a `--corner` dump");
+        assert!(!cfg.tile || cfg.corner, "`--kv-bind` needs a `--corner` dump");
+        assert!(!cfg.tile || c % s == 0,
+                "`--kv-bind` tiles the prefix in blocks of S: C={c} is not a multiple of S={s}");
+        let q_bits = man["qk_bits"][0].as_u64().unwrap_or(8) as u32;
+        let k_bits = man["qk_bits"][1].as_u64().unwrap_or(8) as u32;
+        // the per-head exponents this band's instances take, in `Attn::load_from`'s
+        // own order, so `dinv` is the column the full load builds
+        let fracs_at = |head: usize, insts: usize| -> Vec<f64> {
+            (0..insts)
+                .map(|i| man["frac_per_head"][(head + i) % nh].as_f64().unwrap_or(0.0))
+                .collect()
+        };
+        let mut bands = vec![];
+        let mut head_offsets = vec![];
+        let mut sizes = vec![];
+        let nsub = if c == 0 { 0 } else if cfg.tile { c / s } else { 1 };
+        let sub_c = if cfg.tile { s } else { c };
+        let mut off = 0usize;
+        for insts in band_sizes {
+            for k in 0..nsub {
+                let sh = Shape { s, c: sub_c, hd, insts: *insts };
+                bands.push(Attn::weights_only(
+                    sh, variant, q_bits, k_bits, cfg.nmax, cfg.log_table,
+                    fracs_at(off, *insts), master, false,
+                    format!("model-only [{nh}x{s}x{c}, heads {off}..+{insts}, keys {}..]",
+                            k * sub_c)));
+                head_offsets.push(off);
+                sizes.push(*insts);
+            }
+            off += insts;
+        }
+        if has_corner {
+            let mut off = 0usize;
+            for insts in band_sizes {
+                let sh = Shape { s, c: s, hd, insts: *insts };
+                bands.push(Attn::weights_only(
+                    sh, variant, q_bits, k_bits, cfg.nmax, cfg.log_table,
+                    fracs_at(off, *insts), master, true,
+                    format!("model-only [{nh}x{s}x{s}, heads {off}..+{insts}, causal corner]")));
+                head_offsets.push(off);
+                sizes.push(*insts);
+                off += insts;
+            }
+            // `Layer::load`'s own accumulation, over the stand-in denominators:
+            // the group's region commits the total, so the total has to be the
+            // sum of the parts here too or the AO fold divides by the wrong one
+            let n_pre = band_sizes.len() * nsub;
+            let first = |g: usize| if nsub > 0 { g * nsub } else { n_pre + g };
+            for gi in 0..band_sizes.len() {
+                let mut tot = vec![0i64; bands[first(gi)].zz.len()];
+                for b in (gi * nsub..(gi + 1) * nsub).chain(std::iter::once(n_pre + gi)) {
+                    for (a, x) in tot.iter_mut().zip(&bands[b].zz) {
+                        *a += x;
+                    }
+                }
+                bands[first(gi)].zz_total = Some(tot);
+            }
+        }
+        let band_sizes = &sizes[..];
+        let vars = if !cfg.layout.is_empty() {
+            mat_variants(&cfg.layout)
+        } else if let serde_json::Value::Object(o) = &man["deq_variants"] {
+            let mut v = MAT_VARIANTS;
+            for (i, name) in MAT_NAMES.iter().enumerate() {
+                let d = o.get(*name).and_then(|x| x.as_str())
+                    .ok_or(format!("manifest: deq_variants is missing {name}"))?;
+                v[i] = (name, match d {
+                    "pow2" => DeqVariant::Pow2,
+                    "chain" => DeqVariant::Chain,
+                    "fold" => DeqVariant::Fold,
+                    other => return Err(format!("manifest: {name} has dequant {other}")),
+                });
+            }
+            v
+        } else {
+            MAT_VARIANTS
+        };
+        let attn_out_bits = man["attn_out_bits"].as_u64().unwrap_or(8) as u32;
+        let mut mats = vec![];
+        let mut one_mat = |name: &str, var: DeqVariant| -> Result<(), String> {
+            let am = &man["accumulators"][name];
+            let (n_in, n_out, tokens) = (am["n_in"].as_u64().unwrap() as usize,
+                                         am["n_out"].as_u64().unwrap() as usize,
+                                         am["tokens"].as_u64().unwrap() as usize);
+            let qw = read_i8(&format!("{dir}/qw_{name}.i8"))?;
+            let jw = read_i32_narrow(&format!("{dir}/jw_{name}.i32"))?;
+            let sw: Vec<(u32, u32)> = read_i32(&format!("{dir}/sw_{name}.i32"))?
+                .chunks_exact(2).map(|p| (p[0] as u32, p[1] as u32)).collect();
+            assert_eq!(qw.len(), n_in * n_out, "{name}: qw shape");
+            mats.push(Mat {
+                name: name.into(), variant: var, n_in, n_out, tokens,
+                acc: vec![0i64; tokens * n_out],
+                qx: vec![0i32; tokens * n_in],
+                qw,
+                jx: vec![0i32; tokens],
+                jw,
+                // a per-token scale of 1.0, not of zero: `fold_gt` reads the
+                // biased exponent and a subnormal there is not a shape the
+                // dequant gadget is built for
+                sx: vec![(0u32, 127u32); tokens],
+                sw,
+                jv2: vec![],
+            });
+            Ok(())
+        };
+        for (name, var) in vars {
+            one_mat(name, var)?;
+        }
+        if man["accumulators"]["lm_head"].is_object() {
+            let var = match man["deq_variants"]["lm_head"].as_str() {
+                Some("pow2") => DeqVariant::Pow2,
+                Some("chain") => DeqVariant::Chain,
+                other => return Err(format!("manifest: lm_head deq_variant {other:?}")),
+            };
+            one_mat("lm_head", var)?;
+        }
+        let jv: Vec<i32> = read_i32_narrow(&format!("{dir}/jv.i32"))?;
+        if jv.len() != nh * hd {
+            return Err(format!("jv.i32: {} values, need {}", jv.len(), nh * hd));
+        }
+        for m in &mut mats {
+            if m.variant != DeqVariant::Fold {
+                continue;
+            }
+            assert_eq!(m.name, "v", "the fold's only wired site is v");
+            let rep = nh * hd / m.n_out;
+            assert!(rep >= 1 && m.n_out % hd == 0, "fold: v shape vs heads");
+            m.jv2 = (0..m.n_out).map(|ch| jv[((ch / hd) * rep) * hd + ch % hd]).collect();
+        }
+        // the AO region's denominators are the bands' stand-ins, summed exactly
+        // as `Layer::load` sums the real ones
+        let (acc, mut den) = (vec![0i64; nh * s * hd], vec![0i64; nh * s]);
+        for (bi, b) in bands.iter().enumerate() {
+            for i in 0..band_sizes[bi] {
+                let h = head_offsets[bi] + i;
+                for t in 0..s {
+                    den[h * s + t] += b.zz[i * s + t];
+                }
+            }
+        }
+        let glue = match GlueCols::load_weights(dir, &man, s)? {
+            Some(g) => Some(g),
+            None => GlueCols::load_head_weights(dir, &man, s)?,
+        };
+        let vocab = man["head"]["vocab"].as_u64().map(|v| v as usize);
+        let embed_tab = read_u16(&format!("{dir}/embed.u16")).ok();
+        Ok(Self {
+            bands,
+            band_sizes: band_sizes.to_vec(),
+            head_offsets,
+            nsub,
+            mats,
+            ao: AttnOut { nh, s, hd, acc, den, jo: vec![0i32; s], jv },
+            source: format!("B6.5 model-only witness [{dir}]"),
+            glue,
+            head_keys: vocab.map(|v| vec![0u16; s * v]),
+            head_tok: vocab.map(|_| vec![0u32; s]),
+            attn_out_bits,
+            tok_in: embed_tab.as_ref().map(|_| vec![0u32; s]),
+            embed_tab,
+            layer: man["layer"].as_u64().map(|v| v as usize),
+            block: man["block"].as_u64().map(|v| v as usize),
             rope: RopeCols::load(dir, &man, nh, hd, s).unwrap_or(None),
         })
     }

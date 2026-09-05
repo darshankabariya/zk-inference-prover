@@ -718,7 +718,48 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     let bands = arg_list(args, "--bands", &[8usize, 4, 2]);
     let src = src_of(args);
     if let Some(dir) = &src.dir {
-        match layer::Layer::load(dir, &src, &bands, variant) {
+        // Stream LL (E11): the verifier's load.  Only the model half of the dump
+        // is read; see `layer::Layer::load_weights`.  `--tight-table` sizes the
+        // exp table off the witness's own shifts, so it is refused here rather
+        // than silently sizing a table from stand-in zeros.
+        let weights_only = flag(args, "--weights-only");
+        assert!(!weights_only || !args.iter().any(|a| a == "--tight-table"),
+                "--weights-only and --tight-table are exclusive: --tight-table \
+                 sizes the exp table off the witness's own shifts, and the \
+                 model-only load has no witness -- the size comes from the \
+                 statement's `log_table` instead");
+        // Under `--weights-only` **every** loader knob comes off the statement,
+        // not off the command line: the variant, the prefix band list, whether
+        // the dump is read with its corner and whether the prefix is tiled, the
+        // master table's size and `nmax`.  A verifier holds `Fixed`, not the
+        // plan line that produced it -- and a chunk proved with `--tight-table`
+        // carries a `log_table` that neither the manifest nor any flag names.
+        // So `b65 expect-root --weights-only --params <tag>.fixed.json --witness
+        // DIR` is the whole command, and there is no line to get wrong.
+        let (variant, vname, bands, src) = if weights_only {
+            let f = arg_str(args, "--params").expect(
+                "--weights-only needs --params FILE (the chunk's own `Fixed.params`)");
+            let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--params {f}: {e}"));
+            let v: serde_json::Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|e| panic!("--params {f}: not JSON: {e}"));
+            let p: compose::Params =
+                serde_json::from_value(v.get("params").cloned().unwrap_or(v))
+                    .unwrap_or_else(|e| panic!("--params {f}: not a statement's params: {e}"));
+            eprintln!("expect-root: model-only load from the statement \
+(variant={} bands={:?} corner={} kv_bind={} log_table={} nmax={})",
+                      p.variant, p.bands, p.corner, p.kv_bind, p.log_table, p.nmax);
+            (attn_witness::Variant::parse(&p.variant), p.variant.clone(), p.bands.clone(),
+             attn_witness::Src { log_table: p.log_table, nmax: p.nmax,
+                                 corner: p.corner, tile: p.kv_bind, ..src.clone() })
+        } else {
+            (variant, vname, bands, src.clone())
+        };
+        let loaded = if weights_only {
+            layer::Layer::load_weights(dir, &src, &bands, variant)
+        } else {
+            layer::Layer::load(dir, &src, &bands, variant)
+        };
+        match loaded {
             Ok(mut l) => {
                 tighten_of(&mut l, args);
                 coord_of(&mut l, args);
@@ -808,6 +849,43 @@ pub fn plan_params(args: &[String]) -> (String, compose::Params) {
     let (l, vname) = layer_of(args);
     let params = params_of(&l, args, &vname);
     (l.source.clone(), params)
+}
+
+/// Stream LL (E11): where a derivation's `Params` come from.
+///
+/// `b65 compose` derives them from the witness, as it always has. `b65
+/// expect-root` may instead be handed `--params FILE` -- a `Fixed` or a bare
+/// `Params`, `plan_params`' own two shapes -- and then the plan is built from
+/// *the statement's* declared shape rather than from a re-derivation of it.
+/// That is the shape the check wants: the verifier holds the statement, and
+/// four of the fields (`ao_jo_min` / `ao_jo_max` and `ao_acc_lo_bits` /
+/// `ao_acc_hi_bits`) are read off activations a verifier does not have, so
+/// `--weights-only` cannot derive them at all and requires the file.
+///
+/// Gated on `PRE_ONLY` so that `compose`'s own behaviour is untouched: nothing
+/// but `expect-root` reads `--params` here.
+fn expect_root_params(l: &layer::Layer, args: &[String], vname: &str) -> compose::Params {
+    if !compose::PRE_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
+        assert!(!flag(args, "--weights-only"),
+                "--weights-only is `expect-root`'s: it loads no activations, so \
+                 there is nothing to prove");
+        return params_of(l, args, vname);
+    }
+    match arg_str(args, "--params") {
+        Some(_) => {
+            let (src, p) = plan_params(args);
+            eprintln!("expect-root: params from the statement ({src})");
+            p
+        }
+        None => {
+            assert!(!flag(args, "--weights-only"),
+                    "--weights-only needs --params FILE (the chunk's own \
+                     `Fixed.params`): `ao_jo_min`/`ao_jo_max` and \
+                     `ao_acc_lo_bits`/`ao_acc_hi_bits` are read off activations \
+                     this load does not have");
+            params_of(l, args, vname)
+        }
+    }
 }
 
 pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Params {
@@ -1204,6 +1282,7 @@ fn pre_split_cmd(args: &[String]) {
 /// the expected tree-0 root of one chunk, derived from the model.
 ///
 ///     b65 expect-root --witness DIR [--layer k] [--block b] <the chunk's flags>
+///     b65 expect-root --weights-only --params <tag>.fixed.json --witness DIR ...
 ///
 /// It takes exactly the arguments the chunk's `compose` line takes -- the plan
 /// line, minus `--ser-tag` -- builds the chunk's `Plan` and its tree 0, and
@@ -1212,12 +1291,21 @@ fn pre_split_cmd(args: &[String]) {
 /// prover's own code up to `commit_pre` and there is no second implementation
 /// of tree 0 to drift from it.
 ///
-/// **What it still reads that a verifier does not have.** `Layer::load` reads
-/// the whole dump, activations included, and tree 0 needs only the model half
-/// (the weights, the weight scales, `jv`, the norm weights, the embedding
-/// table, and the manifest's `frac_per_head`).  Splitting the loader is the
-/// open item in stream LL's record; until it is split this command must be run
-/// where the dump is, and it costs the witness build as well as the commit.
+/// **`--weights-only` is the verifier's form.** Without it `Layer::load` reads
+/// the whole dump, activations included, and recomputes `Q.K^T` on the way; tree
+/// 0 needs only the model half (the weights, the weight scales, `jv`, the norm
+/// weights, the embedding table, this stream's rope exponents, and the
+/// manifest's `frac_per_head` / `master_table_bits`).  With it,
+/// `Layer::load_weights` reads exactly those files and nothing else, and the
+/// derived root must be the same -- which is what `ll_box.sh`'s `root` step
+/// checks on a real dump, three ways: the full load's, the weights-only load's
+/// and the recorded proof's own `pre_root`.
+///
+/// `--weights-only` requires `--params FILE`, the chunk's own `Fixed.params`:
+/// `ao_jo_min`/`ao_jo_max` and `ao_acc_lo_bits`/`ao_acc_hi_bits` are read off
+/// activations, so they cannot be re-derived here -- and taking them from the
+/// statement is what the check wants anyway, since it is the statement's
+/// declared shape a verifier holds.
 fn expect_root_cmd(args: &[String]) {
     compose::PRE_ONLY.store(true, std::sync::atomic::Ordering::Relaxed);
     compose_cmd(args);
@@ -1227,9 +1315,27 @@ fn expect_root_cmd(args: &[String]) {
 /// Stream LL (E11), deliverable 2: the model manifest KK's
 /// `bounds-grid --expect-pre-roots` consumes.
 ///
-///     b65 model-roots --plan PLAN [--out FILE] [--limit N]
+///     b65 model-roots --plan PLAN [--pins "..."] [--out FILE] [--limit N]
+///                     [--weights-only --params-dir DIR]
 ///
 /// `PLAN` is an `o_plan.py` plan file: one `compose` argument line per chunk.
+/// A plan line carries only the chunk's *own* arguments, so `--pins` supplies
+/// the driver's shared prefix (`--round`, `--numbits`, `--variants`, `--bands`,
+/// `--kmax` and the fold's two -- `ss_box.sh`'s `SEQPT`).
+///
+/// `--weights-only --params-dir DIR` is the verifier's form: each row is derived
+/// from the model half of the dump and from `DIR/<ser-tag>.fixed.json`, the
+/// statement `compose --ser-dir` wrote.  Without it the rows are derived the
+/// prover's way, from the whole dump, which is what a manifest built before any
+/// chunk has been proved has to do.
+///
+/// Three things it checks and one it reports: two chunks at one `(layer, c)`
+/// must derive the same root and name the same model; one layer must name one
+/// model; and **`master_table_bits` must be one value per layer across blocks**,
+/// or the layer is a named rejection and no manifest is written (the desk
+/// record's open item 3 -- `table/exp` is `1 << log_table` rows and `log_table`
+/// comes off each extraction's own manifest, so this is a requirement on the
+/// plan that nothing else states).
 /// Each line is run through `expect-root` in its own process -- one chunk's
 /// tree 0 at a time, which is what keeps the peak resident set to one chunk's
 /// -- and the rows are collected into
@@ -1244,10 +1350,27 @@ fn model_roots_cmd(args: &[String]) {
     let text = std::fs::read_to_string(&plan)
         .unwrap_or_else(|e| panic!("--plan {plan}: {e}"));
     let limit = arg_scalar::<usize>(args, "--limit", usize::MAX);
+    // Stream LL box half.  A plan file holds a chunk's *own* arguments; the
+    // shared pins (`--round`, `--numbits`, `--variants`, `--bands`, `--kmax`,
+    // the fold's two) live in the driver that runs it (`ss_box.sh`'s `SEQPT`),
+    // so a plan line alone does not compose.  `--pins` is that prefix.
+    let pins: Vec<String> = arg_str(args, "--pins").unwrap_or_default()
+        .split_whitespace().map(|s| s.to_string()).collect();
+    // The verifier's mode: derive each row from the model half of the dump and
+    // the *statement's* own params, `<tag>.fixed.json` in `--params-dir` (what
+    // `compose --ser-dir` writes).  Without it the rows are derived the
+    // prover's way, from the whole dump, which is what a manifest built ahead
+    // of any proof has to do.
+    let weights_only = flag(args, "--weights-only");
+    let params_dir = arg_str(args, "--params-dir");
+    assert!(!weights_only || params_dir.is_some(),
+            "model-roots --weights-only needs --params-dir DIR (the serialized \
+             statements: DIR/<ser-tag>.fixed.json)");
     let exe = std::env::current_exe().expect("model-roots: no path to this binary");
     let mut rows: Vec<Value> = vec![];
     let mut seen: std::collections::BTreeSet<(i64, u64)> = Default::default();
     let mut skipped = 0usize;
+    let mut missing: Vec<String> = vec![];
     let t0 = std::time::Instant::now();
     for line in text.lines() {
         let line = line.trim();
@@ -1259,14 +1382,30 @@ fn model_roots_cmd(args: &[String]) {
         }
         // the plan line's own arguments, minus the two that name the artifact
         // rather than the chunk
-        let mut a: Vec<String> = vec![];
+        let mut a: Vec<String> = pins.clone();
+        let mut tag = String::new();
         let mut it = line.split_whitespace();
         while let Some(w) = it.next() {
-            if w == "--ser-tag" || w == "--ser-dir" {
+            if w == "--ser-dir" {
                 it.next();
                 continue;
             }
+            if w == "--ser-tag" {
+                tag = it.next().unwrap_or("").to_string();
+                continue;
+            }
             a.push(w.to_string());
+        }
+        if weights_only {
+            let d = params_dir.as_ref().unwrap();
+            let f = format!("{d}/{tag}.fixed.json");
+            if !std::path::Path::new(&f).exists() {
+                missing.push(tag.clone());
+                continue;
+            }
+            a.push("--weights-only".into());
+            a.push("--params".into());
+            a.push(f);
         }
         let out = std::process::Command::new(&exe)
             .arg("expect-root")
@@ -1305,6 +1444,9 @@ fn model_roots_cmd(args: &[String]) {
             "pre_root": r["pre_root"],
             "model": r["model"],
             "source": r["source"],
+            "tag": tag,
+            "log_table": r["log_table"],
+            "weights_only": r["weights_only"],
         }));
     }
     // the model hash is a per-layer constant: two rows at one layer that name
@@ -1319,6 +1461,30 @@ fn model_roots_cmd(args: &[String]) {
             by_layer.insert(l, r);
         }
     }
+    // Stream LL box half, the desk record's open item 3: `master_table_bits` has
+    // to be pinned per layer across blocks, or the model part of tree 0 is not a
+    // per-layer constant -- `table/exp` is `1 << log_table` rows and `log_table`
+    // comes off *each extraction's own manifest*, so two blocks of one layer can
+    // legitimately carry two table sizes and neither is wrong.  A requirement on
+    // the plan, checked here rather than assumed: a layer with two sizes is a
+    // named rejection and no manifest is written, because a manifest whose rows
+    // disagree about the layer's table is a manifest that pins nothing.
+    let mut tb: std::collections::BTreeMap<i64, std::collections::BTreeMap<u64, Vec<String>>> =
+        Default::default();
+    for r in &rows {
+        let l = r["layer"].as_i64().unwrap_or(-1);
+        let n = r["log_table"].as_u64().unwrap_or(0);
+        tb.entry(l).or_default().entry(n).or_default()
+            .push(r["tag"].as_str().unwrap_or("").to_string());
+    }
+    let rejections: Vec<Value> = tb.iter().filter(|(_, m)| m.len() > 1)
+        .map(|(l, m)| json!({
+            "layer": l,
+            "why": "master_table_bits is not pinned across this layer's blocks",
+            "table_bits": m.iter().map(|(n, tags)| json!({"log_table": n, "chunks": tags}))
+                .collect::<Vec<Value>>(),
+        }))
+        .collect();
     let body = json!({
         "plan": plan,
         "rows": rows,
@@ -1328,8 +1494,25 @@ fn model_roots_cmd(args: &[String]) {
         "models": by_layer.values()
             .map(|r| r["model"].as_str().unwrap_or("").to_string())
             .collect::<std::collections::BTreeSet<String>>().len(),
+        "weights_only": weights_only,
+        "no_statement": missing,
+        "table_bits_by_layer": tb.iter()
+            .map(|(l, m)| json!({"layer": l,
+                                 "log_table": m.keys().collect::<Vec<&u64>>()}))
+            .collect::<Vec<Value>>(),
+        "rejections": rejections,
         "secs": t0.elapsed().as_secs_f64(),
     });
+    if !rejections.is_empty() {
+        for r in &rejections {
+            eprintln!("model-roots: REJECT layer {}: {}",
+                      r["layer"], r["why"].as_str().unwrap_or(""));
+        }
+        emit("model_roots", body);
+        eprintln!("model-roots: {} layer(s) rejected; no manifest written",
+                  rejections.len());
+        std::process::exit(1);
+    }
     if let Some(f) = arg_str(args, "--out") {
         std::fs::write(&f, serde_json::to_string_pretty(&body["rows"]).unwrap())
             .unwrap_or_else(|e| panic!("--out {f}: {e}"));
@@ -1379,7 +1562,7 @@ fn compose_cmd(args: &[String]) {
             eprintln!("compose: bend {key} at {i} armed (a rejection is the pass)");
         }
     }
-    let params = params_of(&l, args, &vname);
+    let params = expect_root_params(&l, args, &vname);
     eprintln!("compose: {} bands={:?} variant={} kmax={} rem={} p={} jv=[{},{}] jo=[{},{}] \
 acc={}+{}",
               l.source, l.band_sizes, vname, params.kmax, params.ao_rem_bits, params.walk_p,
