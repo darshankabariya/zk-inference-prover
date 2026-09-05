@@ -1331,12 +1331,24 @@ impl Layer {
                 }
             }
         }
-        let glue = match GlueCols::load_weights(dir, &man, s)? {
+        let mut glue = match GlueCols::load_weights(dir, &man, s)? {
             Some(g) => Some(g),
             None => GlueCols::load_head_weights(dir, &man, s)?,
         };
         let vocab = man["head"]["vocab"].as_u64().map(|v| v as usize);
         let embed_tab = read_u16(&format!("{dir}/embed.u16")).ok();
+        // Stream BB's gadget checks the wiring family's committed input against
+        // the embedding row the block's ids name (`EWitness::from_cols`), so on
+        // a layer-0 chunk the two stand-ins have to agree with each other.  The
+        // ids stand in as zero, so the residual stream stands in as row 0 --
+        // which is model data, read from `embed.u16` and from nothing else.
+        if let (Some(g), Some(e)) = (glue.as_mut(), embed_tab.as_ref()) {
+            if e.len() >= g.d && g.xin.len() == s * g.d {
+                for t in 0..s {
+                    g.xin[t * g.d..(t + 1) * g.d].copy_from_slice(&e[..g.d]);
+                }
+            }
+        }
         Ok(Self {
             bands,
             band_sizes: band_sizes.to_vec(),
