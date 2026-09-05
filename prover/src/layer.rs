@@ -1123,7 +1123,14 @@ impl Layer {
         };
         let qrot = rotate(&deq(self, "q", nq), nh);
         let krot = rotate(&deq(self, "k", nk), nkv);
-        let vdeq = deq(self, "v", nv);
+        // Stream SS: a folded `v` has no bf16 stream to quantize -- the fold's
+        // one rounding *is* the quantize -- so the region below is not built for
+        // it and `vv` comes off `fold_out` directly.  `deq` would panic here
+        // (`deq_ref` answers for `pow2` and `chain` only), which is why a
+        // `--layout zfold` shape could not carry the wiring family at all.
+        let vmi = self.mats.iter().position(|m| m.name == "v").unwrap();
+        let v_fold = self.mats[vmi].variant == DeqVariant::Fold;
+        let vdeq = if v_fold { vec![] } else { deq(self, "v", nv) };
         // the scales.  B1 calibrates them offline; a synthetic layer picks the
         // smallest power of two that leaves every value inside the domain, so
         // the desk's witness is complete (`quantize`'s clamp has no honest
@@ -1150,7 +1157,14 @@ exponent(s) small, so B1's clamp fires");
         let down = |v: Vec<i32>| -> Vec<i32> { v.into_iter().map(|x| x - shift as i32).collect() };
         let jq = down(scale(&qrot, nq, qmax_q));
         let jk_kv = down(scale(&krot, nk, qmax_k));
-        let jv_kv = down(scale(&vdeq, nv, crate::rope::qmax_of(crate::rope::V_BITS)));
+        // stream SS: the fold's `s_v` is the witness's own `jv2` and is not
+        // calibrated off a bf16 column, so `B7_NN_CLAMP` does not move it --
+        // the clamp a folded site takes is the fold's own `qc = min(qm, 127)`.
+        let jv_kv = if v_fold {
+            self.mats[vmi].jv2.clone()
+        } else {
+            down(scale(&vdeq, nv, crate::rope::qmax_of(crate::rope::V_BITS)))
+        };
         // and on the query-head grid, which is where B1 applies them and where
         // the statement carries them
         let spread = |src: &[i32]| -> Vec<i32> {
@@ -1180,7 +1194,19 @@ exponent(s) small, so B1's clamp fires");
         };
         let mut qq = quant(&qrot, nq, &jq, qmax_q);
         let mut kk = quant(&krot, nk, &jk_kv, qmax_k);
-        let mut vv = quant(&vdeq, nv, &jv_kv, 127);
+        let mut vv = if v_fold {
+            let m = &self.mats[vmi];
+            let mut out = vec![0i32; tokens * nh * hd];
+            out.par_chunks_mut(nh * hd).enumerate().for_each(|(t, row)| {
+                for (i, slot) in row.iter_mut().enumerate() {
+                    let (h, ch) = (i / hd, i % hd);
+                    *slot = fold_out(m, t, (h / rep) * hd + ch) as i32;
+                }
+            });
+            out
+        } else {
+            quant(&vdeq, nv, &jv_kv, 127)
+        };
         // stream NN (NN-2): `which == 3` is the *prefix* band's own copy of Q --
         // the grid above is untouched, so the corner keeps the honest queries
         // and only the prefix's copy moves.  `rebuild_bands` applies it inside
@@ -1616,6 +1642,17 @@ unmoved (a rejection is the pass)");
                 let g_min = (64 - worst.leading_zeros() as i64) - 7 + 1;
                 m.sx = (0..s)
                     .map(|_| (rng.random_range(0..128), 118 - rng.random_range(0..3)))
+                    .collect();
+                // Stream SS: `s_v`'s exponent is the fold's own `jv2`, and the
+                // attention output's `e` is `jv - jo` -- so the weight scale's
+                // spread here comes straight back as the width of `ao_rem`, and
+                // the 20-exponent draw above put it at 33 bits, past the field
+                // wall `ao_q_bits + ao_rem_bits <= 30`.  A synthetic weight
+                // scale is arbitrary; a real dump's spread is B1's and is what
+                // `--ao-rem-bits` pins.  Nothing outside `--layout zfold` sees
+                // this line.
+                m.sw = (0..no)
+                    .map(|_| (rng.random_range(0..128), 110 + rng.random_range(0..3)))
                     .collect();
                 let gc = (g_min - 16).max(1);
                 m.jv2 = m.sw.iter()
@@ -2503,7 +2540,13 @@ impl MatRegion {
 /// Build one matmul's dequant region: witness columns in the compose layout,
 /// multiplicities bumped into the shared tables.  Mirrors `dequant::run`'s
 /// witness loop without the tampers (compose probes corrupt the layer witness).
+/// Stream SS: `ohead` is `Some(rows per kv head)` on the one region whose output
+/// side folds under the *band* grid -- a folded `v`, whose published output is an
+/// integer and whose counterparty is the bands' own V (`dequant::OKind::Int`).
+/// It changes nothing but which rows the `oin`/`obd` step selectors mark, so no
+/// preprocessed column is added and no other region moves.
 pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool,
+                  ohead: Option<usize>,
                   fold_bend: (Option<usize>, Option<usize>)) -> MatRegion {
     assert!(spec.sound(), "unsound spec for {}", m.name);
     let lay = MatLayout::choose_or_padded(m.n_out, m.tokens, spec.per_row);
@@ -2707,10 +2750,26 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool,
         // the last row of the circle domain.  An inert lead row is neither, so
         // the accumulator is multiplied by zero there, which is exact because it
         // is still zero at that point.
+        //
+        // Stream SS: with `ohead` the step is the band grid's instead, and the
+        // row it changes on is the row *after* one that begins a kv head --
+        // `j % mh == 0`, exactly `rope::Q_SEL`'s `nn_q_hstart` on the same
+        // layout.  A token boundary is a head start (the channel index wraps to
+        // zero), so the same constant serves both and the pair of columns keeps
+        // its shape; only which rows are marked changes.
         let first = |j: usize| matches!(lay.at_opt(m.tokens, j),
                                         Some((_, b)) if b + 1 == lay.chunks);
-        pre.push(sel(&|j| j > 0 && lay.at_opt(m.tokens, j).is_some() && !first(j)));
-        pre.push(sel(&|j| j > 0 && first(j)));
+        let bd: Box<dyn Fn(usize) -> bool> = match ohead {
+            Some(mh) => {
+                assert_eq!(lay.lead, 0,
+                           "{}: a band-grid output side needs an exact tiling", m.name);
+                assert!(mh > 0, "{}: a band-grid output side needs hd % per_row == 0", m.name);
+                Box::new(move |j: usize| j % mh == 0)
+            }
+            None => Box::new(first),
+        };
+        pre.push(sel(&|j| j > 0 && lay.at_opt(m.tokens, j).is_some() && !bd(j)));
+        pre.push(sel(&|j| j > 0 && bd(j)));
         pre.push(sel(&|j| lay.at_opt(m.tokens, j).is_some()));
     }
 
@@ -2842,6 +2901,38 @@ pub fn deq_ref_a(a: i64, m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
         }
         _ => unreachable!("matmul regions are pow2 or chain"),
     }
+}
+
+/// Stream SS: a `Variant::Fold` region's **output**, as an integer.
+///
+/// `deq_ref` cannot answer for the fold: the whole point of `y-delay-v` is that
+/// there is no bf16 waypoint between the accumulator and the int8 cell, so this
+/// region's output is not a bf16 pattern at all.  What it publishes is
+/// `qc (1 - 2 sg)` -- the clamped quotient with its sign -- which is
+/// `experiments/b1`'s `quantize(v, s_v)` cell for cell, and which
+/// `experiments/b65/extract.py` byte-compares against the recorder's own `vvc`
+/// at extraction ("v fold identity holds on N sites").
+///
+/// The arithmetic is the fill's, on integers, so the reference and the committed
+/// cells are the same value by construction and not by a second rounding: `fill_mat_row`
+/// computes exactly `qm = (mag mxw + 2^(G-1)) >> G` and `qc = min(qm, 127)`.
+pub fn fold_out(m: &Mat, t: usize, c: usize) -> i64 {
+    fold_out_a(m.acc[t * m.n_out + c], m, t, c)
+}
+
+/// The same, for an accumulator the caller already has -- `deq_ref_a`'s role for
+/// the fold, and what a probe that bends an accumulator asks in order to see
+/// whether the output moved.
+pub fn fold_out_a(a: i64, m: &Mat, t: usize, c: usize) -> i64 {
+    debug_assert_eq!(m.variant, DeqVariant::Fold, "fold_out on a non-fold matmul");
+    let (ms, _) = m.sx[t];
+    let (mw, _) = m.sw[c];
+    let g = (m.fold_gt(t) + m.fold_gc(c)) as u32;
+    let mxw = (128 + ms as i128) * (128 + mw as i128);
+    let mag = a.unsigned_abs() as i128;
+    let qm = ((mag * mxw + (1i128 << (g - 1))) >> g) as i64;
+    let qc = qm.min(127);
+    if a < 0 { -qc } else { qc }
 }
 
 /// One row of a matmul dequant region: the witness fields of `per_row`
@@ -3058,6 +3149,12 @@ pub struct OSideW {
     pub k_in: SecureField,
     pub k_bd: SecureField,
     pub kind: crate::dequant::OKind,
+    /// Stream SS: rows per kv head, on the one output side that folds under the
+    /// band grid (a folded `v`).  `None` everywhere else, and then `k_bd` is
+    /// taken at a token boundary exactly as stream E wrote it.  Whatever this
+    /// says, `mat_region` marks the same rows -- the two have to agree or the
+    /// interaction column and its AIR read different steps.
+    pub head: Option<usize>,
 }
 
 /// B11 stream U, lever 3: `gkr` is `--gkr-dequant`, and it is the one thing in
@@ -3188,7 +3285,14 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
             let mut f = SecureField::zero();
             if let Some((t, b)) = lay.at_opt(m.tokens, j) {
                 for s in 0..lay.per_row {
-                    let pat = crate::glue::canon(deq_ref(m, &r.spec, t, b * lay.per_row + s));
+                    let c = b * lay.per_row + s;
+                    // stream SS: the fold has no bf16 image, so its reference is
+                    // the integer itself and `deq_ref` is not asked for one.
+                    if o.kind == crate::dequant::OKind::Int {
+                        f += SecureField::from(m31_of(fold_out(m, t, c))) * o.w[s];
+                        continue;
+                    }
+                    let pat = crate::glue::canon(deq_ref(m, &r.spec, t, c));
                     f += match o.kind {
                         crate::dequant::OKind::Pair => {
                             let (sm, ef) = crate::glue::split(pat);
@@ -3197,15 +3301,21 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
                         }
                         // the same key the argmax region compares, off the same
                         // host function the extractor's column was built with
+                        // taken above, off `fold_out`, before `deq_ref` is asked
+                        crate::dequant::OKind::Int => unreachable!(),
                         crate::dequant::OKind::Key => SecureField::from(
                             m31_u32(crate::argmax::order_key(pat))) * o.w[s],
                     };
                 }
             }
             // the multiplier is the step *into* this row: an ordinary chunk step
-            // inside a token, the boundary jump on a row that begins one
+            // inside a token, the boundary jump on a row that begins one --
+            // and, with `o.head`, the band grid's jump on the row after one that
+            // begins a kv head.  The same predicate `mat_region` marked.
             let mult = if j == 0 {
                 SecureField::zero()
+            } else if let Some(mh) = o.head {
+                if j % mh == 0 { o.k_bd } else { o.k_in }
             } else {
                 match lay.at_opt(m.tokens, j) {
                     Some((_, b)) if b + 1 == lay.chunks => o.k_bd,

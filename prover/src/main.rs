@@ -1492,6 +1492,12 @@ fn bend_walk_qx(l: &mut layer::Layer, specs: &[dequant::Spec], mats: &[usize],
             (0..m.n_out).filter(|c| {
                 let a0 = m.acc[t * m.n_out + c];
                 let a1 = a0 + d * m.qw[k * m.n_out + c] as i64;
+                // stream SS: a folded matmul's output is an integer, not a bf16
+                // pattern -- `deq_ref_a` has no answer for it and used to panic
+                // here the moment a `y-delay-v` witness reached a probe.
+                if m.variant == dequant::Variant::Fold {
+                    return layer::fold_out_a(a1, m, t, *c) != layer::fold_out_a(a0, m, t, *c);
+                }
                 layer::deq_ref_a(a1, m, &specs[*mi], t, *c)
                     != layer::deq_ref_a(a0, m, &specs[*mi], t, *c)
             }).count()
@@ -2012,8 +2018,17 @@ synthetic generator (Layer::synth_glue_band_bent); on a dump the bands are B1's"
                     continue;
                 }
                 lb.synth_glue_band_bent(seed, ga, round, which, 41);
+                // stream SS: with a folded `v` there is no quantize region on
+                // that side, so the falsified field is the dequant output tie
+                // and not `nn_out_ok` -- the fold publishes the int8 cell
+                // itself and the bands' V is what reads it
+                let tie = if which == 2 && rplan.oside_band("v") {
+                    "the tie deq_out[v] == the sum of the bands' own V claims"
+                } else {
+                    "the tie nn_out == the sum of the bands' own claims"
+                };
                 assert!(!probe(&format!("band {name}: one committed cell the matmuls did not produce"), &lb, &Default::default(),
-                               "the tie nn_out == the sum of the bands' own claims"),
+                               tie),
                         "a band column the layer's matmuls did not produce accepted");
             }
             // stream NN (NN-2): and the prefix band's own copy of Q, whose

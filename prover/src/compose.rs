@@ -851,6 +851,39 @@ fn oside_w(w: SecureField, lam: SecureField, tokens: usize, n_out: usize,
         k_in: wpow(w, -(pr * tok)),
         k_bd: wpow(w, (no - pr) * tok - 1),
         kind,
+        head: None,
+    }
+}
+
+/// Stream SS: a folded `v`'s output side, on the **band grid**.
+///
+/// The fold publishes an integer, and the only thing in the statement that holds
+/// that integer is the corner bands' own V column -- so the weights are
+/// `rope::QTie::w_out`'s, not a producer-grid Horner's: the canonical position is
+/// `p = t nh hd + h hd + ch` over the *query* heads, and grouped-query attention
+/// is inside the weight (`r_sum` folds the `rep` copies one kv channel has).  A
+/// single equality still forces each copy separately, for the reason NN gives:
+/// the exponents are distinct over (query head, channel, token), so the
+/// difference is a polynomial in `w` whose coefficients were fixed before `w` was
+/// drawn.
+///
+/// The row step is two constants keyed on the row *after* one that begins a kv
+/// head, which is where the expanded channel index jumps by `(rep - 1) hd`; a
+/// token boundary is such a row too, so no third constant is wanted.  It needs
+/// `per_row` to divide `hd` -- asserted by the caller, and true of every layout
+/// `MatLayout::choose` picks beside `rope::q_layout`'s.
+fn oside_w_band(w: SecureField, lam: SecureField, tokens: usize, nh: usize, hd: usize,
+                rep: usize, per_row: usize) -> crate::layer::OSideW {
+    let n = (tokens * nh * hd) as i128;
+    let (pr, hdi, repi) = (per_row as i128, hd as i128, rep as i128);
+    let r_sum = (0..repi).fold(SecureField::zero(), |a, k| a + wpow(w, -(k * hdi)));
+    crate::layer::OSideW {
+        w: (0..per_row).map(|s| r_sum * wpow(w, n - 1 - s as i128)).collect(),
+        lam,
+        k_in: wpow(w, -pr),
+        k_bd: wpow(w, -pr - (repi - 1) * hdi),
+        kind: crate::dequant::OKind::Int,
+        head: Some(hd / per_row),
     }
 }
 
@@ -874,6 +907,7 @@ fn oside_w_tok(w: SecureField, lam: SecureField, tokens: usize, n_out: usize,
         k_in: step,
         k_bd: step,
         kind,
+        head: None,
     }
 }
 
@@ -1053,6 +1087,12 @@ pub struct OutTie {
     /// into the band's V column with no rotation between.  An index into
     /// `Plan::quants`.
     pub quant: Option<usize>,
+    /// Stream SS: the counterparty is the corner bands' own V fold -- a folded
+    /// `v`, whose dequant output already *is* the integer the band commits, so
+    /// there is no quantize region between the two and the claim is compared
+    /// against `sum_b band_qkv[b][2]` directly.  Set by `Plan::new`, which is
+    /// where the bands and the layouts are known.
+    pub band: bool,
 }
 
 impl GluePlan {
@@ -1349,6 +1389,7 @@ impl GluePlan {
                 // filled in by `Plan::new`, which is where the quantize regions
                 // are laid out; the wiring plan does not know their order
                 quant: None,
+                band: false,
             })
             .collect();
         Self {
@@ -1658,9 +1699,18 @@ impl Plan {
         // limbs at 13 bits, its low-product quotient at 16, and its high
         // remainder at the pinned fold width; a widened attention output ranges
         // `o`'s committed activations at `ao_q_bits + 1`.
+        //
+        // Stream SS: and its clamped output `qc` at 7, and its quotient and
+        // clamp slack at `ao_q_bits` (`dequant.rs`'s `Fold` arm asks for
+        // `self.rel(7)` and `self.rel(sp.q_bits)`).  Neither was ever listed:
+        // every fold shape run so far carried `--z-hi-bits 7` and a `k_bits`
+        // equal to `ao_q_bits`, which put both in the list by accident, and a
+        // shape that does not panicked in `Tables::ridx`.  The list is
+        // deduplicated and sorted, so this moves no shape that already had them
+        // -- the E11 set (`--z-hi-bits 7`, `k_bits = ao_q_bits = 11`) included.
         if p.mats.iter().any(|m| m.variant == "fold") {
             assert!(p.fold_rem_bits > 0, "a fold matmul needs --fold-rem-bits");
-            widths.extend([crate::dequant::FOLD_LIMB, 16, p.fold_rem_bits]);
+            widths.extend([crate::dequant::FOLD_LIMB, 16, p.fold_rem_bits, 7, p.ao_q_bits]);
         }
         if p.ao_q_bits > 7 {
             widths.push(p.ao_q_bits + 1);
@@ -1785,6 +1835,16 @@ impl Plan {
             {
                 let mi = p.mats.iter().position(|m| m.name == name)
                     .unwrap_or_else(|| panic!("--rope needs the {name} matmul"));
+                // Stream SS: a folded `v` has no quantize region, because the
+                // fold *is* the quantize -- `y-delay-v` states
+                // `round_hafz(acc s_x s_w / s_v)` in one rounding, so there is
+                // no bf16 stream for `rope::QuantEval` to round and nothing for
+                // it to prove.  The dequant region publishes the integer
+                // instead, and the bands' own V is what reads it
+                // (`Plan::oside_band`).
+                if name == "v" && specs[mi].variant == DeqVariant::Fold {
+                    continue;
+                }
                 let m = &p.mats[mi];
                 assert_eq!(m.n_out, heads * p.hd,
                            "the {name} matmul is {} wide, not {heads} x {}", m.n_out, p.hd);
@@ -1863,6 +1923,25 @@ impl Plan {
                 if q.producer.is_none() {
                     if let Some(t) = g.out_ties.iter_mut().find(|t| t.name == q.name) {
                         t.quant = Some(qi);
+                    }
+                }
+            }
+        }
+        // Stream SS: and the folded `v`'s counterparty, which is the bands' own
+        // V.  Three conditions, each of which the band weights need: the bands
+        // are in the statement (`nn_bands`, i.e. the rotation is on), the
+        // rotation says how many query heads a kv head is replicated into, and
+        // the region's rows sit inside one kv head so that the step is the two
+        // constants `oside_w_band` derives.  Without them the fold still
+        // publishes its integer and the verdict names it open.
+        if let (Some(g), Some(rp)) = (glue.as_mut(), p.rope.as_ref()) {
+            if let Some(mi) = p.mats.iter().position(|m| m.name == "v") {
+                let pr = mat_lays[mi].per_row;
+                let fits = mat_lays[mi].lead == 0 && pr <= p.hd && p.hd % pr == 0;
+                if specs[mi].variant == DeqVariant::Fold && !nn_bands.is_empty() && fits {
+                    let _ = rp;
+                    if let Some(t) = g.out_ties.iter_mut().find(|t| t.name == "v") {
+                        t.band = true;
                     }
                 }
             }
@@ -1984,13 +2063,39 @@ impl Plan {
     }
     pub fn oside_of(&self, w: SecureField, lam: SecureField, name: &str, tokens: usize,
                     n_out: usize, per_row: usize) -> crate::layer::OSideW {
+        if self.oside_band(name) {
+            let (nh, hd) = (self.p.nh, self.p.hd);
+            let nkv = self.p.rope.as_ref().map(|r| r.nkv).unwrap_or(nh);
+            return oside_w_band(w, lam, tokens, nh, hd, nh / nkv, per_row);
+        }
         let f = if self.oside_tok(name) { oside_w_tok } else { oside_w };
         f(w, lam, tokens, n_out, per_row, self.oside_kind(name))
+    }
+
+    /// Stream SS: is this matmul's dequant the delayed requantize?  The fold is
+    /// the one variant whose output is an integer rather than a bf16 pattern,
+    /// and every side that reads an output has to ask.
+    pub fn is_fold(&self, name: &str) -> bool {
+        self.p.mats.iter().position(|m| m.name == name)
+            .is_some_and(|mi| self.specs[mi].variant == DeqVariant::Fold)
+    }
+
+    /// Stream SS: does this matmul's output side fold under the band grid --
+    /// i.e. is it a folded `v` whose bands are in the statement and whose layout
+    /// the band weights fit?  When the answer is no, a folded `v` still publishes
+    /// its integer, on the producer grid, with nothing to read it against
+    /// (`deq_out_open`).
+    pub fn oside_band(&self, name: &str) -> bool {
+        self.glue.as_ref()
+            .is_some_and(|g| g.out_ties.iter().any(|t| t.name == name && t.band))
     }
 
     pub fn oside_kind(&self, name: &str) -> crate::dequant::OKind {
         if name == "lm_head" {
             crate::dequant::OKind::Key
+        } else if self.is_fold(name) {
+            // stream SS: the fold has no bf16 output to publish
+            crate::dequant::OKind::Int
         } else {
             crate::dequant::OKind::Pair
         }
@@ -3051,8 +3156,16 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 // requantize seam feeds.  `mu` is the wiring family's own `w`
                 // and `lam` its `lam`, the same two the seam's own fold uses,
                 // so the two claims are comparable with no scale factor.
-                sside: plan.rqs.iter()
-                    .any(|rp| plan.walks[rp.walk].mats.contains(&mi))
+                //
+                // Stream SS: never on a `Variant::Fold` region -- its second
+                // shared column is the divisor's token half, not the scale's
+                // exponent, so there is no claim to state (see `mat_interaction`'s
+                // caller and `rq_scale_open`).  The predicate is the same one
+                // there: the two have to agree or the AIR reads an interaction
+                // column the fill never wrote.
+                sside: (plan.rqs.iter()
+                        .any(|rp| plan.walks[rp.walk].mats.contains(&mi))
+                        && plan.specs[mi].variant != DeqVariant::Fold)
                     .then(|| crate::dequant::SSide {
                         mu: w_glue,
                         lam: lam_glue,
@@ -3926,8 +4039,10 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
 
     let m4_t = std::time::Instant::now();
     let mut mat_regions = vec![];
-    for (m, sp) in layer.mats.iter().zip(&plan.specs) {
+    for (mi, (m, sp)) in layer.mats.iter().zip(&plan.specs).enumerate() {
         let r = mat_region(m, sp, &mut tables, plan.has_oside(&m.name),
+                           plan.oside_band(&m.name)
+                               .then(|| plan.p.hd / plan.mat_lays[mi].per_row),
                            (tamper.fold_qm, tamper.fold_dent));
         mat_regions.push(r);
     }
@@ -5598,9 +5713,19 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         let ow = plan.has_oside(&m.name).then(|| {
             plan.oside_of(w_glue, lam_glue, &m.name, m.tokens, m.n_out, reg.lay.per_row)
         });
-        // stream II (E11): the x-side scale's fold, on the matmuls a seam feeds
-        let sc = plan.rqs.iter()
-            .any(|rp| plan.walks[rp.walk].mats.contains(&mi))
+        // stream II (E11): the x-side scale's fold, on the matmuls a seam feeds.
+        //
+        // Stream SS: not on a folded one.  This claim folds the region's *shared*
+        // columns as `(ms, es)`, the language the seam's own scale claim is in,
+        // and a fold region's second shared column is not `es` -- it is
+        // `dent = 2^(G_t - alpha)`, the token half of the divisor.  Folding it
+        // would compare two different quantities and the honest proof would not
+        // prove.  The tie is named open instead (`rq_scale_open`); closing it
+        // wants `es` committed beside `dent` with a power-of-two lookup pinning
+        // the one to the other, which is a column and a table this stream did
+        // not add.
+        let sc = (plan.rqs.iter().any(|rp| plan.walks[rp.walk].mats.contains(&mi))
+                  && plan.specs[mi].variant != DeqVariant::Fold)
             .then_some((w_glue, lam_glue));
         let it = mat_interaction(m, reg, rv, s, &rels, ow.as_ref(), p.gkr_dequant, sc);
         inter_all.extend(it.cols);
@@ -6453,6 +6578,11 @@ pub struct Verdict {
     /// scale this matmul dequantized by is the scale the requantize pinned to
     /// its input's attained maximum".  Empty on a chunk with no seams.
     pub rq_scale_ok: Vec<bool>,
+    /// Stream SS: the `(seam, matmul)` pairs whose consumer is a `Variant::Fold`
+    /// region.  The fold's second shared column is the divisor's token half and
+    /// not the scale's exponent, so the claim cannot be stated in the seam's
+    /// language; these are named rather than counted.
+    pub rq_scale_open: Vec<String>,
     /// Stream II (E11): true when this chunk publishes both the attnout
     /// region's `ao_q` and the `o` walk's `qX` but its `o` matmul does not read
     /// `nh * hd` channels -- so the two folds are over different sequences and
@@ -6538,6 +6668,7 @@ impl Verdict {
                deq_out_open: vec![], head_tie_ok: false, embed_ok: false,
                embed_tok_ok: false, head_tok_ok: false,
                rq_in_ok: vec![false], rq_out_ok: vec![false], rq_scale_ok: vec![false],
+               rq_scale_open: vec![],
                ao_q_open: false, ao_q_ok: false,
                nn_in_ok: vec![false], nn_out_ok: vec![false], nn_pos_ok: false,
                nn_q_ok: vec![false], nn_open: false,
@@ -6809,6 +6940,17 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
                     // region's input claim and `nn_in_ok` is where it is read
                     (None, Some(qi)) => ok.push(
                         claims.deq_out.get(k).copied() == claims.nn_in.get(qi).copied()),
+                    // stream SS: a *folded* `v` has no quantize region either --
+                    // the fold is the quantize -- so the published output is the
+                    // int8 cell itself and the counterparty is the corner bands'
+                    // own V fold, the sum `nn_out_ok` compares the other two
+                    // against.  Under the same weights, so the equality says the
+                    // bands attended over the very integers this region rounded.
+                    (None, None) if t.band => {
+                        let sum = claims.band_qkv.iter()
+                            .fold(SecureField::zero(), |acc, c| acc + unqm(c[2]));
+                        ok.push(claims.deq_out.get(k).copied().map(unqm) == Some(sum));
+                    }
                     (None, None) => open.push(t.name.to_string()),
                 }
             }
@@ -6866,8 +7008,17 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // producer's scale is the attnout region's preprocessed `num`/`pj`, so that
     // comparison is preprocessed against committed and not a claim pair.
     let mut rq_scale_ok: Vec<bool> = vec![];
+    let mut rq_scale_open: Vec<String> = vec![];
     for (k, rp) in plan.rqs.iter().enumerate() {
         for mi in &plan.walks[rp.walk].mats {
+            // stream SS: a folded matmul publishes no x-side scale -- its shared
+            // columns are `(ms, dent)` and not `(ms, es)` -- so it is named,
+            // not counted as a pass by silence (stream JJ's `deq_out_open`
+            // convention, for the same reason).
+            if plan.specs[*mi].variant == DeqVariant::Fold {
+                rq_scale_open.push(format!("{}/{}", rp.name, plan.p.mats[*mi].name));
+                continue;
+            }
             rq_scale_ok.push(claims.rq_sc.get(k).copied() == claims.deq_sc.get(*mi).copied());
         }
     }
@@ -7028,7 +7179,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
 
     Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
               deq_out_open, head_tie_ok, embed_ok, embed_tok_ok, head_tok_ok,
-              rq_in_ok, rq_out_ok, rq_scale_ok, ao_q_open, ao_q_ok,
+              rq_in_ok, rq_out_ok, rq_scale_ok, rq_scale_open, ao_q_open, ao_q_ok,
               nn_in_ok, nn_out_ok, nn_pos_ok, nn_q_ok, nn_open,
               sizes_ok, glue_ok, stream_in, stream_out, bound_roots, bound_sides, error,
               verify_secs: t0.elapsed().as_secs_f64() }

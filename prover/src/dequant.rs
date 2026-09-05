@@ -490,8 +490,24 @@ pub enum OKind {
     /// product), which is the whole reason the head's tie is cheap: the key
     /// never becomes a column, it is read off the dequant's own output.
     Key,
+    /// Stream SS: the signed **integer** `qc (1 - 2 sg)`, the only output a
+    /// `Variant::Fold` region has.  The fold's single rounding *is* B1's
+    /// `quantize(v, s_v)` -- there is no bf16 waypoint to publish -- so what a
+    /// consumer reads off this region is the int8 cell the band commits, and
+    /// the claim is a Horner over those integers rather than over `(sm, ef)`
+    /// pairs.  Degree 2, like `Pair` and `Key`: one `qc sg` product.
+    Int,
 }
 
+/// Stream SS: `k_in`/`k_bd` are a two-valued row step and the `oin`/`obd`
+/// selectors say which row takes which -- the AIR does not care what the two
+/// mean.  For `Pair` and `Key` they are stream E's: the ordinary chunk step
+/// inside a token, and the jump at the row that begins one.  For `Int` they are
+/// the *band grid*'s: the ordinary step, and the jump on the row after one that
+/// begins a kv head (`rope::QTie::step_out` and `step_out_h`), which is what
+/// makes the claim comparable with the bands' own V fold under grouped-query
+/// attention.  A token boundary is a head start, so one pair of constants
+/// serves both.
 #[derive(Clone)]
 pub struct OSide {
     /// the within-row weight per slot
@@ -596,7 +612,13 @@ impl FrameworkEval for DequantEval {
         let mut accs: Vec<E::F> = Vec::with_capacity(sp.per_row);
         // stream E: `(sg, nz, m7, eo)` per slot, from whichever rung ran, so the
         // output side can read the result as an expression rather than as a
-        // column nobody committed
+        // column nobody committed.
+        //
+        // Stream SS: the `Fold` arm has no bf16 rung and so no `(nz, m7, eo)`.
+        // It pushes `(sg, 0, qc, 0)` and its output side is `OKind::Int`, which
+        // reads the pair `(sg, qc)` and ignores the two zeros -- so every
+        // variant fills this vector and the `assert_eq!` below is a statement
+        // about the plan and not about which rung ran.
         let mut outs: Vec<(E::F, E::F, E::F, E::F)> = vec![];
         for slot in 0..sp.per_row {
             // ---- stream Z: the delayed requantize, one rounding, in limbs.
@@ -657,6 +679,13 @@ impl FrameworkEval for DequantEval {
                 );
                 let fep = fdp * two - E::F::one() - fe.clone();
                 let qd = qm.clone() - qc.clone();
+                // stream SS: this region's output, for the output side.  `qc` is
+                // the clamped quotient and `sg` its sign, and `qc (1 - 2 sg)` is
+                // cell for cell what `experiments/b1`'s `quantize(v, s_v)`
+                // returns -- the value the band commits as `vv.i8`.  The two
+                // zeros stand where a bf16 rung's `nz` and `eo` would; `OKind`
+                // says which pair is read.
+                outs.push((sg.clone(), E::F::zero(), qc.clone(), E::F::zero()));
                 if !self.gkr {
                     eval.add_to_relation(RelationEntry::new(
                         self.rel(sp.q_bits), E::EF::one(), core::slice::from_ref(&qm)));
@@ -881,6 +910,14 @@ impl FrameworkEval for DequantEval {
                         let key = E::F::from(m31_u32(0x8000)) + mag.clone()
                             - sg.clone() * (mag * two + E::F::one());
                         f += key * o.w[i];
+                    }
+                    // stream SS: the fold's integer.  `m7` holds `qc` here and
+                    // `nz`/`eo` are zero (see the `Fold` arm), so this is
+                    // `qc (1 - 2 sg)` and nothing else -- the same signed
+                    // integer `rope::QuantEval`'s output side folds and the
+                    // band's V column commits.
+                    OKind::Int => {
+                        f += (m7.clone() * (E::F::one() - sg.clone() * two)) * o.w[i];
                     }
                 }
             }
