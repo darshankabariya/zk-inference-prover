@@ -45,15 +45,34 @@ not supposed to alter the proof must reproduce, on both arms, the recorded
 `proof_sha256` for 8B L16 at S=512, C=16K
 (`experiments/b10/out/prove8b.json` and `ref8b.json`).
 
-**The reference digest is moving while the statement is being closed
-(2026-09-03, `briefs/README.md` "Closing the statement").** It was
-`6c3fb61524dee2ec` from 2026-08-24 (reproduced on the H200 on both arms) until
-stream JJ's soundness fix and `EPOW` table moved it to **`616d6a80ca9c003f`**
-(H200, both arms, three ways — ref arm, cuda defaults, cuda with every device
-switch off; `briefs/jj-layerwire-out.md`, JJ-3's box record). Stream II's
-requant seams will move it again; stream MM re-records the final value here
-with the negative-control suite. Until then a change is gated against the
-digest of the tree it branched from, on both arms.
+**The reference digest is `616d6a80ca9c003f`, and it has stopped moving
+(2026-09-05, stream MM).** It was `6c3fb61524dee2ec` from 2026-08-24
+(reproduced on the H200 on both arms) until stream JJ's soundness fix and
+`EPOW` table moved it to **`616d6a80ca9c003f`** (`briefs/jj-layerwire-out.md`,
+JJ-3's box record). Every later stream of "Closing the statement" — II, KK, LL,
+NN, OO, QQ, SS, RR — left it there: re-taken on the merged tree `d64e68c` on
+the H200, both arms, it is `616d6a80ca9c003f` with `accepts: true`, 0
+`kernel fallback:` lines and 2,475,623,152 fresh cells, in 29.00 s of stwo
+total on the reference arm and 1.19 s on the cuda arm
+(`experiments/b13/mm/out/h200/r10/ref16k_{simd,cuda}.json`). The recipe is the
+command below.
+
+Four more points are re-recorded on the same tree and the same card, all four
+equal across arms (same directory, `briefs/mm-flip.md`'s Record for the table):
+BB's block-0 chunk **`4e6253e10762092c`** — this one *moved*, from
+`78c47d698c795f0b`, and its witness moved too, so the value is the closed
+statement's on a `y-delay-vw12` dump and not a clean before/after; NN-3's wired
+C=4096 rotation chunk **`f6bca206a4f43054`**, unmoved; and stream OO's two
+`lm_head` chunks at the seam positions `c = 3584` and `c = 4096`,
+**`0fe00214c5539cc6`** and **`f5096e74beacacc2`**, unmoved. The eleven
+synthetic shapes of `experiments/b13/ll/digests.sh` are byte-identical on the
+two arms; ten reproduce LL's pins, and the eleventh — the glue shape under all
+five GKR flags, which stream II left BLOCKED — now composes, at
+`27d1d0852911d298`.
+
+One `kernel fallback:` line remains under the CUDA defaults, on the block-0
+chunk alone: `b65_dequant_eval` fingerprint `0xece2b12f` (1,616 instructions).
+The other nine runs have none.
 
 `--norm-tails`, `--swiglu` and `--deq-ties` are accepted and ignored since
 2026-09-03: the regions and ties they enabled are unconditional. The remaining
@@ -67,16 +86,20 @@ env RAYON_NUM_THREADS=16 ./target/release/b65 compose \
     --table-bits 25 --bands 16,8,8 --witness $B8_ROOT/witness8b_b10/witness
 ```
 
-**Verified on the H200, 2026-08-24**, on exactly this tree and the vendored
-fork, three ways: the reference arm (54 s), the cuda arm with every device
+**Re-taken on the H200, 2026-09-05** (stream MM, `mm_box.sh r10`), on the
+merged tree and the vendored fork, both arms under the CUDA defaults:
+`616d6a80ca9c003f`, `accepts: true`, 0 fallback lines.
+
+The history the digest replaced: **verified on the H200, 2026-08-24**, on that
+tree, three ways — the reference arm (54 s), the cuda arm with every device
 switch off (220 s, the scalar constraint fallback as expected before an
-emit-install), and the cuda arm with `B7_M4_FILL=2 B7_M4_WFILL=2 B7_M4_ACC=2`
-— the check mode that builds host and device sides and asserts every cell
-(all three bands, attnout and all seven matmul fills reported their
-multiplicity tables and f64 cross-checks matching). All three runs reproduced
-`proof_sha256 = 6c3fb61524dee2ec…` with `accepts: true`. The `PRE`/`TABDEV`
-switches and kernel-speed constraint evaluation still wait on the emit-install
-(below).
+emit-install), and the cuda arm with `B7_M4_FILL=2 B7_M4_WFILL=2 B7_M4_ACC=2`,
+the check mode that builds host and device sides and asserts every cell (all
+three bands, attnout and all seven matmul fills reported their multiplicity
+tables and f64 cross-checks matching). All three runs reproduced
+`proof_sha256 = 6c3fb61524dee2ec…` with `accepts: true`. That value is history:
+stream JJ's soundness fix moved it, and the paragraph above carries what the
+tree proves now.
 
 To type-check off-box on a machine without CUDA: temporarily replace
 `../nitroo/crates/stwo/build.rs` with `fn main() {}` (checking does not link,
