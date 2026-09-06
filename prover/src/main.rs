@@ -999,6 +999,22 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         eprintln!("compose: the attention output takes the magnitude form -- the \
                    offset window is 1 + {lo_off} + {hi_off} + {e_hi} > 31 (log row 73)");
     }
+    // Stream TT (E11), log row 73: the sibling bound, decided the same way.
+    // `ao_q_bits` is `attn_out_bits - 1` and `ao_rem_bits` is the witness's own
+    // (a driver may only widen it), so `11 + 20 = 31` is not a pin anything can
+    // choose its way out of either -- the `denp2` form is what admits it.
+    let ao_q_bits = l.attn_out_bits - 1;
+    let ao_rem_bits = {
+        let want = arg_scalar(args, "--ao-rem-bits", l.ao.rem_bits());
+        assert!(want >= l.ao.rem_bits(),
+                "--ao-rem-bits {want} is below this witness's {}", l.ao.rem_bits());
+        want
+    };
+    let ao_denp2 = flag(args, "--ao-denp2") || ao_q_bits + ao_rem_bits > 30;
+    if ao_denp2 && !flag(args, "--ao-denp2") {
+        eprintln!("compose: the attention output takes the denp2 form -- the quotient \
+                   term is {ao_q_bits} + {ao_rem_bits} > 30 (log row 73)");
+    }
     compose::Params {
         s: l.ao.s, c, hd: l.ao.hd, nh: l.ao.nh,
         bands,
@@ -1030,21 +1046,17 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // attention output declares it in the manifest, and a dump that
         // predates the knob reads back 8 -- so every pre-change statement is
         // parameter-identical and the standing digests stand.
-        ao_q_bits: l.attn_out_bits - 1,
+        ao_q_bits,
         // B9 step 1: `ao_rem_bits` and `kmax` are data-derived, so two real layers
         // of one model are two shapes and the chunk loop rejects the pair.  Both
         // are overridable now, so a driver can pin them at the model-wide worst
         // case and prove every layer of a model as one shape -- a few extra table
         // rows against a second emit chain.  Below the witness's own value the
         // range check would just push rows into `off_table`, so that is an error.
-        ao_rem_bits: {
-            let want = arg_scalar(args, "--ao-rem-bits", l.ao.rem_bits());
-            assert!(want >= l.ao.rem_bits(),
-                    "--ao-rem-bits {want} is below this witness's {}", l.ao.rem_bits());
-            want
-        },
+        // (Both are derived above, with the `denp2` decision that reads them.)
+        ao_rem_bits,
         ao_jv_min, ao_jv_max, ao_jo_min, ao_jo_max,
-        ao_acc_lo_bits, ao_acc_hi_bits, ao_acc_mag,
+        ao_acc_lo_bits, ao_acc_hi_bits, ao_acc_mag, ao_denp2,
         // Stream Z: the fold's two pins, data-derived exactly as `ao_rem_bits`
         // and overridable the same way so a driver can pin the model-wide worst
         // case.  Zero -- absent from the serialized statement -- on a witness

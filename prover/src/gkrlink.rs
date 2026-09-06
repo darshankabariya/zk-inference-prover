@@ -915,10 +915,12 @@ pub fn ao_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
                 k: -one,
             }),
         });
-        // stream JJ: `denp`'s own range check
+        // stream JJ: `denp`'s own range check -- stream TT's `denp2` form
+        // looks up `2 denp`, one bit better on the same table
         looks.push(LinkLook {
             num: None,
-            den: range_den(rem, Affine::col(RCol::Ao(c0 + 4), one)),
+            den: range_den(rem, Affine::col(RCol::Ao(c0 + 4),
+                                            if plan.p.ao_denp2 { two } else { one })),
         });
         // stream JJ: the accumulator window's two limbs
         looks.push(LinkLook {

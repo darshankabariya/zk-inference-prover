@@ -246,6 +246,16 @@ pub struct Params {
     /// either.  `y-delay-vw12`'s layer-0 chunks are what need it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ao_acc_mag: bool,
+    /// Stream TT (E11), log row 73, the sibling bound's half.  With it on the
+    /// region looks up `2 denp` in the `ao_rem_bits` table rather than `denp`,
+    /// which states `denp <= 2^(rem-1) - 1` -- the width an honest `denp`
+    /// actually has, since `AttnOut::rem_bits` is the bit length of `max
+    /// 2 denp`.  It costs no table, no column and no lookup, and it moves
+    /// `Plan::new`'s quotient assert from `ao_q_bits + ao_rem_bits <= 30` to
+    /// `<= 31`.  Off, and skipped in the serialization, unless the plain form
+    /// does not fit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ao_denp2: bool,
     /// Stream Z: the fold's two data-derived pins, present only on a statement
     /// with a `fold` matmul (a witness whose manifest declares one).  Zero --
     /// and skipped in the serialization, so every pre-change statement is
@@ -1717,9 +1727,32 @@ impl Plan {
         // C=4096 `b10-final` dump's own worst case (`shapes.json`).  Nothing
         // the assert protects is loosened: the two ends of the identity are the
         // same two products, bounded by the same two range tables.
-        assert!(p.ao_q_bits + p.ao_rem_bits <= 30,
-                "the attention output's quotient term does not fit: {} + {} > 30",
-                p.ao_q_bits, p.ao_rem_bits);
+        //
+        // Stream TT (E11), log row 73: and the same one bit is loose here, for
+        // the same reason.  `ao_rem_bits` is the bit length of `max 2 denp`
+        // (`AttnOut::rem_bits`), so an honest `denp` needs `rem - 1` bits and
+        // it is only the *lookup* -- `denp` in the `ao_rem_bits` table -- that
+        // states the wider `denp <= 2^rem - 1`.  Looking up `2 denp` in the
+        // same table instead states `denp <= 2^(rem-1) - 1`, at no new table
+        // and no new column, and then
+        //     d + (2 qm - 1) denp <= (2^rem - 1) + (2^(q+1) - 3)(2^(rem-1) - 1)
+        //                          = 2^(q+rem) - 2^(q+1) - 2^(rem-1) + 2
+        // for `q + rem = 31`, which is below `2^31 - 1`.  So the `denp2` form
+        // admits `q_bits + rem_bits <= 31`.  `y-delay-vw12`'s layer 0 reads
+        // `11 + 20 = 31` and is the reason it exists; `params_of` takes the
+        // form only when the plain one does not fit, so no statement that
+        // composed before this moves.
+        let qcap = if p.ao_denp2 { 31 } else { 30 };
+        assert!(p.ao_q_bits + p.ao_rem_bits <= qcap,
+                "the attention output's quotient term does not fit: {} + {} > {qcap}{}",
+                p.ao_q_bits, p.ao_rem_bits,
+                if p.ao_denp2 { " (denp2 form)" } else { "" });
+        // The inert lead row commits `denp = 2^max(-e_lo, 0)`, forced by the
+        // `EPOW` lookup at key 0, so the `denp2` form needs twice that to still
+        // be a row of the range table.
+        assert!(!p.ao_denp2 || 1 + (-e_lo).max(0) as u32 <= p.ao_rem_bits,
+                "the denp2 form needs 2^(1 + {}) inside the {}-bit remainder table",
+                (-e_lo).max(0), p.ao_rem_bits);
         let mut widths = vec![p.k_bits, p.q_bits, 8, p.z_lo_bits, p.z_hi_bits, p.ao_rem_bits,
                               p.ao_acc_lo_bits, p.ao_acc_hi_bits];
         if let AttnVariant::IntSplit(k) = attn_variant {
@@ -3134,6 +3167,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             acc_lo_bits: p.ao_acc_lo_bits,
             acc_hi_bits: p.ao_acc_hi_bits,
             acc_mag: p.ao_acc_mag,
+            denp2: p.ao_denp2,
             gkr: p.gkr_attnout,
         },
         if p.gkr_attnout { SecureField::zero() } else { next_use(claims) },
@@ -4006,7 +4040,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // stream TT (E11), log row 73: and the magnitude form, whose tenth
             // column the fork's `b65_fill_attnout` does not write -- `ao_region`
             // sets its own mode to 0 for it on both arms
-            || p.ao_acc_mag,
+            || p.ao_acc_mag || p.ao_denp2,
     );
     let mut mult_exp = std::mem::take(&mut tables.m_exp);
     let mut mult_r = std::mem::take(&mut tables.m_r);
@@ -4074,7 +4108,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
 
     let m4_t = std::time::Instant::now();
     let aor = ao_region(&layer.ao, p.ao_target, p.ao_q_bits, p.ao_rem_bits,
-                        (p.ao_acc_lo_bits, p.ao_acc_hi_bits), p.ao_acc_mag,
+                        (p.ao_acc_lo_bits, p.ao_acc_hi_bits), p.ao_acc_mag, p.ao_denp2,
                         p.ao_jv_min, p.ao_jo_max,
                         &mut tables, None, tamper.ao_clamp, tamper.ao_den, tamper.ao_jo,
                         tamper.ao_num, tamper.ao_acc, tamper.ao_jo_tok, tamper.ao_mag);

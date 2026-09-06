@@ -249,6 +249,11 @@ pub struct AttnOutEval {
     /// bits and not `acc_bits() + 1`, because the sign is the pin's and not the
     /// offset's -- which is the bit `y-delay-vw12`'s layer 0 is short.
     pub acc_mag: bool,
+    /// Stream TT (E11), log row 73: the sibling bound's half.  `denp`'s own
+    /// range check is on `2 denp` instead, which states `denp <= 2^(rem-1) - 1`
+    /// -- the width `AttnOut::rem_bits` was derived from -- and buys the bit
+    /// `Plan::new`'s quotient assert is short at `attn_out_bits` 12.
+    pub denp2: bool,
     /// B11 stream V, lever 4: as `WalkEval::gkr`.
     pub gkr: bool,
 }
@@ -396,8 +401,9 @@ impl FrameworkEval for AttnOutEval {
                 // `denp < 2^(rem_bits-1)` -- and makes the error identity an
                 // integer identity.  Before it, the only guard was the host-side
                 // assert at `layer.rs`'s `ao_region`.
+                let denp_look = if self.denp2 { denp.clone() * two } else { denp.clone() };
                 eval.add_to_relation(RelationEntry::new(
-                    &self.rel_rem, E::EF::one(), core::slice::from_ref(&denp)));
+                    &self.rel_rem, E::EF::one(), core::slice::from_ref(&denp_look)));
                 // Stream JJ (E11): the other half of the no-wrap window,
                 // which until now was a host-side assert alone.  `2 mag num`
                 // needs both factors bounded; the lookup above bounds `num` by

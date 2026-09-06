@@ -4011,6 +4011,10 @@ pub struct AoRegion {
     /// `mag = |acc|` as a tenth column and the two limbs range-check *it*, so
     /// `acc_off` is not used and the widths cover one bit less
     pub acc_mag: bool,
+    /// stream TT (log row 73): the sibling bound's half -- `2 denp` is looked
+    /// up in the `rem_bits` table instead of `denp`, which is the width an
+    /// honest `denp` has and one bit better than the plain form states
+    pub denp2: bool,
 }
 
 impl AoRegion {
@@ -4053,7 +4057,8 @@ impl AoRegion {
 /// accumulator and `gkrlink`'s tie read the same column they always did.
 #[allow(clippy::too_many_arguments)]
 pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32,
-                 acc_bits: (u32, u32), acc_mag: bool, jv_min: i32, jo_max: i32,
+                 acc_bits: (u32, u32), acc_mag: bool, denp2: bool,
+                 jv_min: i32, jo_max: i32,
                  tables: &mut Tables, corrupt: Option<usize>,
                  corrupt_q: Option<usize>, corrupt_den: Option<usize>,
                  corrupt_jo: Option<usize>, corrupt_num: Option<usize>,
@@ -4072,7 +4077,8 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
     // multiplicity columns on the host with it.
     let m4d = if corrupt_q.is_some() || corrupt_den.is_some() || corrupt_jo.is_some()
                  || corrupt_num.is_some() || corrupt_acc.is_some()
-                 || corrupt_jo_tok.is_some() || corrupt_mag.is_some() || acc_mag {
+                 || corrupt_jo_tok.is_some() || corrupt_mag.is_some()
+                 || acc_mag || denp2 {
         0
     } else {
         crate::util::m4b_mode("B7_M4_WFILL")
@@ -4171,7 +4177,7 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
         let (ref_bad, q_out) = (dev.ref_bad, dev.q_out.clone());
         return AoRegion { lay, pre: vec![], base: vec![], dev: Some(dev), ref_bad, q_out,
                           n: ao.nh * ao.s * ao.hd, rem_bits, q_bits,
-                          acc_lo_bits, acc_hi_bits, acc_mag };
+                          acc_lo_bits, acc_hi_bits, acc_mag, denp2 };
     }
     // `B7_M4_WFILL=2` builds this region twice -- host here, device below --
     // and the device call bumps the same counters a second time, so every
@@ -4219,7 +4225,8 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                     tables.bump_qnzk(0, "ao_qnz_lead");
                     tables.bump_rk(rem_bits, pj0, "ao_rem_lead");           // d
                     tables.bump_rk(rem_bits, pj0 - 1, "ao_rem_lead");       // dp
-                    tables.bump_rk(rem_bits, pj0, "ao_rem_lead");           // denp
+                    tables.bump_rk(rem_bits, if denp2 { 2 * pj0 } else { pj0 },
+                                   "ao_rem_lead");                           // denp
                     tables.bump_rk(acc_lo_bits, acc_off & ((1i64 << acc_lo_bits) - 1),
                                    "ao_acc_lead");
                     tables.bump_rk(acc_hi_bits, acc_off >> acc_lo_bits, "ao_acc_lead");
@@ -4333,7 +4340,8 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                     tables.bump_rk(rem_bits, 2 * denp - 1 - d, "ao_rem_dp");
                     // section 7 item 1: `denp`'s own bound, without which the
                     // pair above leaves the `2 denp = d + dp + 1` halving branch
-                    tables.bump_rk(rem_bits, denp, "ao_rem_denp");
+                    tables.bump_rk(rem_bits, if denp2 { 2 * denp } else { denp },
+                                   "ao_rem_denp");
                     // and the other half of the no-wrap window: `2 mag num < p`
                     // is `2 mag num` with `num <= 2^e_hi` from the `EPOW` table
                     // and `mag` bounded here, in two limbs
@@ -4442,7 +4450,7 @@ all five multiplicity tables and the f64 reference all match",
         debug_assert_eq!(q_out, ao.q_ref(), "attnout: q_out and AttnOut::q_ref disagree");
     }
     AoRegion { lay, pre, base, dev: None, ref_bad, q_out, n: ao.nh * ao.s * ao.hd,
-               rem_bits, q_bits, acc_lo_bits, acc_hi_bits, acc_mag }
+               rem_bits, q_bits, acc_lo_bits, acc_hi_bits, acc_mag, denp2 }
 }
 
 pub struct AoInteraction {
@@ -4614,7 +4622,16 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
                 (one, rels.range(r.rem_bits).combine(&[dp]))
             }
             // section 7 item 1: `denp` itself
-            4 => (one, rels.range(r.rem_bits).combine(&[r.base[c0 + 4].data[vr]])),
+            4 => {
+                // stream TT: the `denp2` form looks up `2 denp`, which states
+                // the width an honest `denp` has
+                let v = r.base[c0 + 4].data[vr];
+                let v = if r.denp2 {
+                    v * stwo::prover::backend::simd::m31::PackedM31::broadcast(
+                        M31::from_u32_unchecked(2))
+                } else { v };
+                (one, rels.range(r.rem_bits).combine(&[v]))
+            }
             // the no-wrap window's two limbs on `acc + acc_off` -- and, in
             // stream TT's magnitude form, on the committed `|acc|` at `c0 + 9`
             5 => (one, rels.range(r.acc_lo_bits).combine(&[r.base[c0 + 8].data[vr]])),

@@ -1120,6 +1120,10 @@ mod tests {
             // `Plan::new`'s asserts.
             ao_jv_min: -8, ao_jv_max: -6, ao_jo_min: -10, ao_jo_max: -10,
             ao_acc_lo_bits: 16, ao_acc_hi_bits: 4,
+            // stream TT (E11), log row 73: the offset form and the plain
+            // quotient bound, which is what every statement that composed
+            // before these two fields existed carries.
+            ao_acc_mag: false, ao_denp2: false,
             fold_rem_bits: 0, fold_alpha: 0, walk_p: 136,
             glue: Some(crate::compose::GlueParams {
                 // stream II: the two additive regions are unconditional, so this
