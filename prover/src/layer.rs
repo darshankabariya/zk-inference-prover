@@ -299,14 +299,27 @@ impl RopeCols {
         let rope_scale: Vec<f64> = rp["scale"].as_array()
             .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
             .unwrap_or_default();
-        let inv_ref = witread::read_file(&format!("{dir}/inv_freq.f64")).ok().map(|raw| {
-            raw.chunks_exact(8)
-                .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
-                .take(hd / 2)
-                .collect::<Vec<f64>>()
-        }).filter(|v| v.len() == hd / 2);
+        // Stream PP (E11): `inv_freq.f64` is a *reference*, not an input -- the
+        // angle table tree 0 commits is built from `RopeParams::inv`, and this
+        // vector is only compared against it (`compose.rs`'s "the angle table
+        // the statement builds differs from the dump's inv_freq").  A verifier
+        // deriving the shape root holds no dump and so has nothing to compare,
+        // so under `--shape-only` there is no reference and the comparison does
+        // not run.  It is skipped rather than zeroed: a zeroed `inv_freq` is not
+        // a missing reference, it is a *wrong* one, and the assert fires on it
+        // (measured -- the box record's section 14b).
+        let shape_only =
+            crate::compose::SHAPE_ONLY.load(std::sync::atomic::Ordering::Relaxed);
+        let inv_ref = if shape_only { None } else {
+            witread::read_file(&format!("{dir}/inv_freq.f64")).ok().map(|raw| {
+                raw.chunks_exact(8)
+                    .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
+                    .take(hd / 2)
+                    .collect::<Vec<f64>>()
+            }).filter(|v| v.len() == hd / 2)
+        };
         let j = |n: &str| -> Result<Vec<i32>, String> {
-            let v = read_i32(&format!("{dir}/{n}.i32"))?;
+            let v = model_i32(dir, man, &format!("{n}.i32"))?;
             if v.len() < nh * hd {
                 return Err(format!("{n}.i32: {} values is under {}", v.len(), nh * hd));
             }
@@ -569,8 +582,8 @@ impl GlueCols {
             xout: vec![0u16; tokens * d],
             r1: vec![0u16; tokens],
             r2: vec![0u16; tokens],
-            w1: read_u16(&format!("{dir}/w1.u16"))?,
-            w2: read_u16(&format!("{dir}/w2.u16"))?,
+            w1: model_u16(dir, man, "w1.u16")?,
+            w2: model_u16(dir, man, "w2.u16")?,
             h1: None,
             h2: None,
             silu_in: None,
@@ -592,7 +605,7 @@ impl GlueCols {
             return Ok(None);
         }
         let d = h["d_in"].as_u64().ok_or("manifest: head.d_in")? as usize;
-        let w1 = read_u16(&format!("{dir}/w_head.u16"))?;
+        let w1 = model_u16(dir, man, "w_head.u16")?;
         if w1.len() < d {
             return Err(format!("w_head: {} values is under {d}", w1.len()));
         }
@@ -686,6 +699,57 @@ impl GlueCols {
     }
 }
 
+
+/// Stream PP (E11), box half: the model half of a dump, when the derivation is
+/// the **shape** tree's and the files need not exist.
+///
+/// `expect-root --shape-only` commits tree 0 alone, and tree 0 holds no model
+/// value. That is not an argument here, it is a measurement: on the 8B chunk
+/// `B8L16` the shape root is bit-identical against a dump whose every model
+/// file has been replaced by the same number of zero bytes, while the model
+/// root moves (the box record's section 14b). So under `--shape-only` these
+/// four readers **allocate instead of reading**, and a directory holding only
+/// `manifest.json` is a whole dump as far as the shape root is concerned.
+///
+/// The lengths are the manifest's own: `files[<name>].values` is the element
+/// count the extractor wrote, so the allocation is exact rather than inferred
+/// from a shape the loader would have to re-derive. A file the manifest does
+/// not describe falls through to the real read, which is what keeps a dump
+/// written before the `files` map existed working.
+///
+/// This is `Layer::from_params` (the brief's open item 1) in the form the box
+/// half could reach: the files are not *opened*, though the manifest still is.
+fn model_values(man: &serde_json::Value, name: &str) -> Option<usize> {
+    if !crate::compose::SHAPE_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    man["files"][name]["values"].as_u64().map(|v| v as usize)
+}
+fn model_i8(dir: &str, man: &serde_json::Value, name: &str) -> Result<Vec<i32>, String> {
+    match model_values(man, name) {
+        Some(n) => Ok(vec![0i32; n]),
+        None => read_i8(&format!("{dir}/{name}")),
+    }
+}
+fn model_i32(dir: &str, man: &serde_json::Value, name: &str) -> Result<Vec<i64>, String> {
+    match model_values(man, name) {
+        Some(n) => Ok(vec![0i64; n]),
+        None => read_i32(&format!("{dir}/{name}")),
+    }
+}
+fn model_i32_narrow(dir: &str, man: &serde_json::Value, name: &str)
+                    -> Result<Vec<i32>, String> {
+    match model_values(man, name) {
+        Some(n) => Ok(vec![0i32; n]),
+        None => read_i32_narrow(&format!("{dir}/{name}")),
+    }
+}
+fn model_u16(dir: &str, man: &serde_json::Value, name: &str) -> Result<Vec<u16>, String> {
+    match model_values(man, name) {
+        Some(n) => Ok(vec![0u16; n]),
+        None => read_u16(&format!("{dir}/{name}")),
+    }
+}
 
 fn read_i32(path: &str) -> Result<Vec<i64>, String> {
     let raw = witread::read_file(path)?;
@@ -1275,9 +1339,9 @@ impl Layer {
             let (n_in, n_out, tokens) = (am["n_in"].as_u64().unwrap() as usize,
                                          am["n_out"].as_u64().unwrap() as usize,
                                          am["tokens"].as_u64().unwrap() as usize);
-            let qw = read_i8(&format!("{dir}/qw_{name}.i8"))?;
-            let jw = read_i32_narrow(&format!("{dir}/jw_{name}.i32"))?;
-            let sw: Vec<(u32, u32)> = read_i32(&format!("{dir}/sw_{name}.i32"))?
+            let qw = model_i8(dir, &man, &format!("qw_{name}.i8"))?;
+            let jw = model_i32_narrow(dir, &man, &format!("jw_{name}.i32"))?;
+            let sw: Vec<(u32, u32)> = model_i32(dir, &man, &format!("sw_{name}.i32"))?
                 .chunks_exact(2).map(|p| (p[0] as u32, p[1] as u32)).collect();
             assert_eq!(qw.len(), n_in * n_out, "{name}: qw shape");
             mats.push(Mat {
@@ -1307,7 +1371,7 @@ impl Layer {
             };
             one_mat("lm_head", var)?;
         }
-        let jv: Vec<i32> = read_i32_narrow(&format!("{dir}/jv.i32"))?;
+        let jv: Vec<i32> = model_i32_narrow(dir, &man, "jv.i32")?;
         if jv.len() != nh * hd {
             return Err(format!("jv.i32: {} values, need {}", jv.len(), nh * hd));
         }
@@ -1336,7 +1400,13 @@ impl Layer {
             None => GlueCols::load_head_weights(dir, &man, s)?,
         };
         let vocab = man["head"]["vocab"].as_u64().map(|v| v as usize);
-        let embed_tab = read_u16(&format!("{dir}/embed.u16")).ok();
+        // `.ok()`, because a layer that is not layer 0 has no embedding table
+        // and its absence is the signal.  Under `--shape-only` the manifest's
+        // own `files` map is that signal instead: a dump that declares the file
+        // has the gadget whether or not the file is on disk.
+        let embed_tab = model_values(&man, "embed.u16")
+            .map(|n| vec![0u16; n])
+            .or_else(|| read_u16(&format!("{dir}/embed.u16")).ok());
         // Stream BB's gadget checks the wiring family's committed input against
         // the embedding row the block's ids name (`EWitness::from_cols`), so on
         // a layer-0 chunk the two stand-ins have to agree with each other.  The
