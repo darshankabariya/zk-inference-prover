@@ -1253,13 +1253,21 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
         "proof_bytes": proof_bytes_len,
         "statement_bytes": {"fixed": fixed_bytes.len(), "claims": claims_bytes.len()},
         "pre_root": out.fixed.pre_root,
+        // stream PP: the per-layer model commitment this chunk proves against
+        "model_root": out.fixed.model_root,
         "columns": {"preprocessed": out.n_columns[0], "base": out.n_columns[1],
                     "interaction": out.n_columns[2],
                     "total": out.n_columns.iter().sum::<usize>()},
-        "cells": {"preprocessed": out.stats.tree_cells.first().copied().unwrap_or(0),
-                  "base": out.stats.tree_cells.get(1).copied().unwrap_or(0),
-                  "interaction": out.stats.tree_cells.get(2).copied().unwrap_or(0),
-                  "fresh": out.stats.tree_cells[1..].iter().sum::<usize>()},
+        // stream PP: `preprocessed` is the shape tree and the model tree
+        // together, so the number stays comparable with the pre-split records.
+        "cells": {"preprocessed": out.stats.pre_cells(),
+                  "shape": out.stats.tree_cells.first().copied().unwrap_or(0),
+                  "model": out.stats.model_cells(),
+                  "base": out.stats.tree_cells.get(crate::common::BASE_TREE)
+                      .copied().unwrap_or(0),
+                  "interaction": out.stats.tree_cells.get(crate::common::INTER_TREE)
+                      .copied().unwrap_or(0),
+                  "fresh": out.stats.fresh_cells()},
         "family_cells": out.family_cells,
         "ref_mismatch": out.ref_bad, "off_table": out.off_table,
         "glue_ties_ok": out.glue_ties_ok,

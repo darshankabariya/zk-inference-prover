@@ -142,6 +142,8 @@ impl<B: Backend> Poly<B> {
 pub struct ComponentProvers<'a, B: Backend> {
     pub components: Vec<&'a dyn ComponentProver<B>>,
     pub n_preprocessed_columns: usize,
+    /// Stream PP (E11): tree 1's width -- the model columns.
+    pub n_model_columns: usize,
 }
 
 impl<B: Backend> ComponentProvers<'_, B> {
@@ -153,6 +155,7 @@ impl<B: Backend> ComponentProvers<'_, B> {
                 .map(|c| *c as &dyn Component)
                 .collect_vec(),
             n_preprocessed_columns: self.n_preprocessed_columns,
+            n_model_columns: self.n_model_columns,
         }
     }
     pub fn compute_composition_polynomial(

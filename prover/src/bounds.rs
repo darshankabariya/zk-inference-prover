@@ -64,10 +64,11 @@ use crate::glue::{GlueRegion, TieKind};
 /// for a degree-1 packing, and it is what the tree commits.
 pub const PACK: i64 = 512;
 
-/// The first tree index the boundary sides take. Trees 0–2 are the
-/// preprocessed, base and interaction trees, in that order, and the note says
-/// why the boundary trees follow rather than precede them.
-pub const FIRST_TREE: usize = 3;
+/// The first tree index the boundary sides take. Stream PP (E11): trees 0–3 are
+/// the shape tree, the model tree, the base trace and the interaction trace, in
+/// that order, and the note says why the boundary trees follow rather than
+/// precede them.
+pub const FIRST_TREE: usize = 4;
 
 /// Whether the feature is on for this run. Off by default, deliberately: with
 /// the flag off not one committed cell moves, which is what lets the recorded

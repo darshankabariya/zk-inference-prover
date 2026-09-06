@@ -42,6 +42,12 @@ struct Entry {
     tree: SendTree,
     sizes: Vec<u32>,
     root: String,
+    /// Stream PP (E11): the model tree, committed beside the shape tree and
+    /// cached with it -- one key covers both, because both are functions of the
+    /// same (layer, shape) pair.
+    model: SendTree,
+    model_sizes: Vec<u32>,
+    model_root: String,
 }
 
 static CACHE: OnceLock<Mutex<HashMap<u64, Entry>>> = OnceLock::new();
@@ -169,7 +175,7 @@ fn view(t: &Tree) -> Tree {
 /// The cached tree for this key, as a view, when mode 1 has one. The column
 /// log sizes are asserted: a key collision between two shapes would otherwise
 /// be a wrong proof rather than a loud one.
-pub fn take(k: Option<u64>, sizes: &[u32]) -> Option<Tree> {
+pub fn take(k: Option<u64>, sizes: &[u32], model_sizes: &[u32]) -> Option<(Tree, Tree)> {
     if mode() != 1 {
         return None;
     }
@@ -177,11 +183,14 @@ pub fn take(k: Option<u64>, sizes: &[u32]) -> Option<Tree> {
     let g = cache().lock().unwrap();
     let e = g.get(&k)?;
     assert_eq!(e.sizes, sizes, "precache: a cached tree with different column sizes under key {k:#x}");
+    assert_eq!(e.model_sizes, model_sizes,
+               "precache: a cached model tree with different column sizes under key {k:#x}");
     let t = std::time::Instant::now();
     let tree = view(&e.tree.0);
+    let model = view(&e.model.0);
     CLONE_NS.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
     HITS.fetch_add(1, Relaxed);
-    Some(tree)
+    Some((tree, model))
 }
 
 /// After a fresh commit of tree 0: store it under the key, or -- when the key
@@ -192,6 +201,7 @@ pub fn fill(k: Option<u64>, sess: &crate::common::Session<'_>) {
     }
     let Some(k) = key(k) else { return };
     let root = sess.tree_root(0);
+    let model_root = sess.tree_root(1);
     let mut g = cache().lock().unwrap();
     match g.get(&k) {
         Some(e) => {
@@ -201,13 +211,22 @@ pub fn fill(k: Option<u64>, sess: &crate::common::Session<'_>) {
                 "precache: the preprocessed tree committed for key {k:#x} has a different root \
                  from the cached one -- the key does not determine the tree"
             );
+            assert_eq!(
+                e.model_root, model_root,
+                "precache: the model tree committed for key {k:#x} has a different root from \
+                 the cached one -- the key does not determine the tree"
+            );
         }
         None => {
             MISSES.fetch_add(1, Relaxed);
             let t = std::time::Instant::now();
             let tree = sess.tree_clone(0);
+            let model = sess.tree_clone(1);
             CLONE_NS.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
-            g.insert(k, Entry { tree: SendTree(tree), sizes: sess.tree_sizes(0), root });
+            g.insert(k, Entry {
+                tree: SendTree(tree), sizes: sess.tree_sizes(0), root,
+                model: SendTree(model), model_sizes: sess.tree_sizes(1), model_root,
+            });
             PEAK_ENTRIES.fetch_max(g.len() as u64, Relaxed);
         }
     }

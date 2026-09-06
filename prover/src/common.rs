@@ -165,6 +165,15 @@ pub type PcsB = stwo::prover::backend::cuda::CudaBackend;
 #[cfg(not(feature = "cuda"))]
 pub type PcsB = SimdBackend;
 
+/// Stream PP (E11): the physical commitment tree indices this crate speaks.
+/// Tree 0 is the shape tree and tree 1 the model tree -- both preprocessed,
+/// both committed before the base trace, because their cells enter the LogUp
+/// numerators.  `bounds::FIRST_TREE` is the first boundary tree.
+pub const SHAPE_TREE: usize = 0;
+pub const MODEL_TREE: usize = 1;
+pub const BASE_TREE: usize = 2;
+pub const INTER_TREE: usize = 3;
+
 pub struct Session<'a> {
     pub config: PcsConfig,
     pub channel: Blake2sM31Channel,
@@ -312,28 +321,32 @@ impl<'a> Session<'a> {
     /// `mark_bounds` when the caller has committed the last of them.
     fn mark_tree(&self) {
         let i = self.tree_cols.len() - 1;
+        // Stream PP (E11): tree 0 is the shape tree and tree 1 the model tree;
+        // `commit_pre` keeps its name for the shape tree so the mark series is
+        // comparable with the records made before the split.
         let label = match i {
             0 => "commit_pre",
-            1 => "commit_base",
-            2 => "commit_inter",
+            1 => "commit_model",
+            2 => "commit_base",
+            3 => "commit_inter",
             _ => return,
         };
         crate::device::mem_mark_tree(label, i, self.tree_cols[i], self.tree_cells[i],
                                      self.tree_max_log[i]);
     }
 
-    /// The boundary trees (3 and up), as one mark: their columns and cells
-    /// summed, their tallest column.  Nothing when there are none.
+    /// The boundary trees (stream PP: 4 and up), as one mark: their columns and
+    /// cells summed, their tallest column.  Nothing when there are none.
     pub fn mark_bounds(&self) {
-        if self.tree_cols.len() <= 3 {
+        if self.tree_cols.len() <= 4 {
             return;
         }
         crate::device::mem_mark_tree(
             "commit_bounds",
-            3,
-            self.tree_cols[3..].iter().sum(),
-            self.tree_cells[3..].iter().sum(),
-            self.tree_max_log[3..].iter().copied().max().unwrap_or(0),
+            4,
+            self.tree_cols[4..].iter().sum(),
+            self.tree_cells[4..].iter().sum(),
+            self.tree_max_log[4..].iter().copied().max().unwrap_or(0),
         );
     }
 
@@ -488,6 +501,21 @@ pub struct RawStats {
     pub tree_cells: Vec<usize>,
 }
 
+impl RawStats {
+    /// Stream PP (E11): the preprocessed trace, both trees.
+    pub fn pre_cells(&self) -> usize {
+        self.tree_cells[..BASE_TREE.min(self.tree_cells.len())].iter().sum()
+    }
+    /// Stream PP (E11): the model tree alone.
+    pub fn model_cells(&self) -> usize {
+        self.tree_cells.get(MODEL_TREE).copied().unwrap_or(0)
+    }
+    /// Everything a chunk pays for again.
+    pub fn fresh_cells(&self) -> usize {
+        self.tree_cells[BASE_TREE.min(self.tree_cells.len())..].iter().sum()
+    }
+}
+
 pub struct Proven {
     pub prove_secs: f64,
     pub verify_secs: f64,
@@ -505,8 +533,18 @@ pub struct Proven {
 }
 
 impl Proven {
+    /// Everything a chunk pays for again: stream PP moved the preprocessed
+    /// trace into two trees, so the fresh trees start at `BASE_TREE`.
     pub fn fresh_cells(&self) -> usize {
-        self.tree_cells[1..].iter().sum()
+        self.tree_cells[BASE_TREE..].iter().sum()
+    }
+    /// Stream PP (E11): the preprocessed trace, both trees.
+    pub fn pre_cells(&self) -> usize {
+        self.tree_cells[..BASE_TREE.min(self.tree_cells.len())].iter().sum()
+    }
+    /// Stream PP (E11): the model tree alone.
+    pub fn model_cells(&self) -> usize {
+        self.tree_cells.get(MODEL_TREE).copied().unwrap_or(0)
     }
     pub fn total_cells(&self) -> usize {
         self.tree_cells.iter().sum()
@@ -520,13 +558,21 @@ impl Proven {
             "proof_bytes": self.proof_bytes, "peak_rss_bytes": self.peak_rss,
             "stark_ok": self.stark_ok, "prove_error": self.prove_error,
             "preprocessed_is_widest": self.pre_ok,
-            "cells": {"preprocessed": self.tree_cells.first().copied().unwrap_or(0),
-                      "base": self.tree_cells.get(1).copied().unwrap_or(0),
-                      "interaction": self.tree_cells.get(2).copied().unwrap_or(0),
+            // stream PP: `preprocessed` is the two preprocessed trees together,
+            // so it is comparable with the records made before the split;
+            // `shape` and `model` are the halves.
+            "cells": {"preprocessed": self.pre_cells(),
+                      "shape": self.tree_cells.first().copied().unwrap_or(0),
+                      "model": self.model_cells(),
+                      "base": self.tree_cells.get(BASE_TREE).copied().unwrap_or(0),
+                      "interaction": self.tree_cells.get(INTER_TREE).copied().unwrap_or(0),
                       "fresh": self.fresh_cells(), "total": self.total_cells()},
-            "columns": {"preprocessed": self.tree_cols.first().copied().unwrap_or(0),
-                        "base": self.tree_cols.get(1).copied().unwrap_or(0),
-                        "interaction": self.tree_cols.get(2).copied().unwrap_or(0),
+            "columns": {"preprocessed": self.tree_cols[..BASE_TREE.min(self.tree_cols.len())]
+                            .iter().sum::<usize>(),
+                        "shape": self.tree_cols.first().copied().unwrap_or(0),
+                        "model": self.tree_cols.get(MODEL_TREE).copied().unwrap_or(0),
+                        "base": self.tree_cols.get(BASE_TREE).copied().unwrap_or(0),
+                        "interaction": self.tree_cols.get(INTER_TREE).copied().unwrap_or(0),
                         "total": self.n_columns()},
             "phases": self.phases,
         })
