@@ -1519,11 +1519,32 @@ fn model_roots_cmd(args: &[String]) {
             continue;
         }
         seen.insert((layer, c));
+        // Stream PP (E11), the desk record's open item 2: the shape tree holds
+        // two columns that are functions of the *calibration* and of no weight
+        // -- `band/dinv` and the exp table's value column, both classified
+        // `PreNeeds::Manifest` -- and the calibration they need is
+        // `frac_per_head` and `master_table_bits`.  `model-roots` published
+        // `log_table` and not `frac_per_head`, so a verifier deriving the shape
+        // root on a real dump had to take `frac_per_head` off the dump's own
+        // manifest.  Publishing it here is what makes it public input: the
+        // manifest carries the model root the verifier compares AND the
+        // calibration the verifier derives with, and the dump is needed for
+        // neither.
+        let calib = a.iter().position(|w| w == "--witness")
+            .and_then(|i| a.get(i + 1))
+            .and_then(|d| std::fs::read(format!("{d}/manifest.json")).ok())
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+        let field = |k: &str| calib.as_ref().map(|m| m[k].clone()).unwrap_or(Value::Null);
         rows.push(json!({
             "layer": layer,
             "block": r["block"],
             "c": c,
             "pre_root": r["pre_root"],
+            // stream PP: the per-layer calibration the shape derivation needs,
+            // published beside the root rather than read off the dump
+            "frac_per_head": field("frac_per_head"),
+            "frac_shared_per_head": field("frac_shared_per_head"),
+            "master_table_bits": field("master_table_bits"),
             // stream PP: the per-layer model commitment.  The shape root is
             // keyed by `(layer, c)` because the shape moves with the chunk;
             // this one is keyed by the layer alone, and the rejection below is
@@ -1548,14 +1569,25 @@ fn model_roots_cmd(args: &[String]) {
             by_layer.insert(l, r);
         }
     }
-    // Stream LL box half, the desk record's open item 3: `master_table_bits` has
-    // to be pinned per layer across blocks, or the model part of tree 0 is not a
-    // per-layer constant -- `table/exp` is `1 << log_table` rows and `log_table`
-    // comes off *each extraction's own manifest*, so two blocks of one layer can
-    // legitimately carry two table sizes and neither is wrong.  A requirement on
-    // the plan, checked here rather than assumed: a layer with two sizes is a
-    // named rejection and no manifest is written, because a manifest whose rows
-    // disagree about the layer's table is a manifest that pins nothing.
+    // Stream LL box half, the desk record's open item 3: `master_table_bits` had
+    // to be pinned per layer across blocks, or the model part of tree 0 was not
+    // a per-layer constant -- `table/exp` is `1 << log_table` rows, it was a
+    // model column, and `log_table` comes off each chunk's own statement, so two
+    // blocks of one layer can legitimately carry two table sizes and neither is
+    // wrong.  A layer with two sizes was a named rejection and no manifest was
+    // written.
+    //
+    // **Stream PP (E11) retires that rejection.** The exp table's index column
+    // is `PreNeeds::Params` and its value column `PreNeeds::Manifest`, so the
+    // whole table is in the SHAPE tree and no model-tree column's height depends
+    // on the width any more (`Plan::pre_split`).  The shape root is derived per
+    // chunk from that chunk's own `Fixed.params`, which is where the tightened
+    // width lives, so a per-block width costs the derivation nothing.  Two
+    // widths in one layer is now a **report**, not a rejection -- and it is the
+    // report that says `--tight-table` is admissible again, which is what
+    // design (a)'s per-layer `--table-bits` map (+0.496% preprocessed, log row
+    // 75) existed to avoid.  What still has to hold is the model root itself,
+    // and that is the check below.
     let mut tb: std::collections::BTreeMap<i64, std::collections::BTreeMap<u64, Vec<String>>> =
         Default::default();
     for r in &rows {
@@ -1564,14 +1596,19 @@ fn model_roots_cmd(args: &[String]) {
         tb.entry(l).or_default().entry(n).or_default()
             .push(r["tag"].as_str().unwrap_or("").to_string());
     }
-    let mut rejections: Vec<Value> = tb.iter().filter(|(_, m)| m.len() > 1)
+    let widths_vary: Vec<Value> = tb.iter().filter(|(_, m)| m.len() > 1)
         .map(|(l, m)| json!({
             "layer": l,
-            "why": "master_table_bits is not pinned across this layer's blocks",
             "table_bits": m.iter().map(|(n, tags)| json!({"log_table": n, "chunks": tags}))
                 .collect::<Vec<Value>>(),
         }))
         .collect();
+    for w in &widths_vary {
+        eprintln!("model-roots: layer {} carries two exp-table widths across its \
+                   blocks; the exp table is a shape column, so the model root is \
+                   unaffected", w["layer"]);
+    }
+    let mut rejections: Vec<Value> = vec![];
     // Stream PP (E11): the model root is the *published commitment* for a
     // layer, so it has to be one value across that layer's blocks.  The
     // classification is what should make that true -- every model-tree column
@@ -1608,6 +1645,10 @@ fn model_roots_cmd(args: &[String]) {
             .map(|(l, m)| json!({"layer": l,
                                  "log_table": m.keys().collect::<Vec<&u64>>()}))
             .collect::<Vec<Value>>(),
+        // stream PP: the layers whose blocks tightened to two different exp-table
+        // widths.  A report, not a rejection: the exp table is a shape column, so
+        // the width reaches the shape root (per chunk) and not the model root.
+        "table_bits_vary": widths_vary,
         // stream PP: the published model commitment, one per layer
         "model_roots_by_layer": mr.iter()
             .map(|(l, m)| json!({"layer": l,
