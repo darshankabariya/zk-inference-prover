@@ -45,8 +45,26 @@ not supposed to alter the proof must reproduce, on both arms, the recorded
 `proof_sha256` for 8B L16 at S=512, C=16K
 (`experiments/b10/out/prove8b.json` and `ref8b.json`).
 
-**The reference digest is `616d6a80ca9c003f`, and it has stopped moving
-(2026-09-05, stream MM).** It was `6c3fb61524dee2ec` from 2026-08-24
+**The reference digest is `42fceb1f3a8643cd` (2026-09-06, stream PP).** It
+moved by design: the preprocessed trace is now two committed trees — tree 0
+the shape tree (selectors, masks, tables, cos/sin: functions of public
+parameters, whose root the verifier derives itself) and tree 1 the model tree
+(the weights, whose per-layer root is compared with the published model
+commitment) — so every digest moved once more while every fresh and
+preprocessed cell count stayed byte-identical. Re-taken on the H200 on both
+arms at PP-2's tree: `42fceb1f3a8643cd`, `accepts: true`, 0 `kernel
+fallback:` lines, `off_table` 0 (`briefs/pp-modelcommit.md`, Record — box
+half, the digest table). The ten companion lines moved with it, all equal
+across arms with 0 fallback lines: the wired C=4096 chunk `0dad0ea4e43b9415`
+→ `14cb1198598afbe5`, the two `lm_head` seam chunks `0fe00214c5539cc6` →
+`93a4e9859eab30de` and `f5096e74beacacc2` → `bf80b4ece42b39de`, the rotation
+chunk `f6bca206a4f43054` → `b501e23abfd2fad5`, and the six slice lines
+(`B2L0` `e439ee92770291e7` → `2a9aca395ff98065`, the rest in the same table).
+The kernel store needed nothing new (`cudaemit` adds 0 shapes; 0 missing
+fingerprints on the proved lines).
+
+The value before PP, `616d6a80ca9c003f`, is history from here on; the
+paragraph below is kept as the record of how it was taken. It was `6c3fb61524dee2ec` from 2026-08-24
 (reproduced on the H200 on both arms) until stream JJ's soundness fix and
 `EPOW` table moved it to **`616d6a80ca9c003f`** (`briefs/jj-layerwire-out.md`,
 JJ-3's box record). Every later stream of "Closing the statement" — II, KK, LL,
@@ -88,7 +106,9 @@ env RAYON_NUM_THREADS=16 ./target/release/b65 compose \
 
 **Re-taken on the H200, 2026-09-05** (stream MM, `mm_box.sh r10`), on the
 merged tree and the vendored fork, both arms under the CUDA defaults:
-`616d6a80ca9c003f`, `accepts: true`, 0 fallback lines.
+`616d6a80ca9c003f`, `accepts: true`, 0 fallback lines. **Re-taken on the
+H200, 2026-09-06** (stream PP-2) after the shape/model tree split, both arms:
+`42fceb1f3a8643cd`, `accepts: true`, 0 fallback lines — the standing value.
 
 The history the digest replaced: **verified on the H200, 2026-08-24**, on that
 tree, three ways — the reference arm (54 s), the cuda arm with every device
