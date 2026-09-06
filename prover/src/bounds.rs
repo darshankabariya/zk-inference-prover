@@ -2045,7 +2045,9 @@ mod tests {
             glue: Some(GlueParams { d: 64, a: 4, ..Default::default() }),
             ..Default::default()
         };
-        let n = 3 + 2 + kv_layout(&params).map(|k| k.n_sides()).unwrap_or(0);
+        // stream PP: four trees before the boundary ones -- the shape tree, the
+        // model tree, the base trace and the interaction trace.
+        let n = FIRST_TREE + 2 + kv_layout(&params).map(|k| k.n_sides()).unwrap_or(0);
         Fixed {
             params,
             log_blowup: 1,
@@ -2053,6 +2055,9 @@ mod tests {
             pow_bits: 0,
             sizes: vec![vec![4]; n],
             pre_root: "pre".into(),
+            // stream PP: the model commitment; the tests below drive the
+            // per-layer comparison through `--expect-model-roots`
+            model_root: "model".into(),
             // stream KK: the tests below drive the coordinate comparison
             // through `at`, which sets these; undeclared is the pre-KK case and
             // the default here so every existing test keeps asking what it asked
@@ -2079,16 +2084,17 @@ mod tests {
         f.params.head_argmax = true;
         f.params.corner = false;
         f.params.glue = Some(GlueParams { d: 64, a: 4, head_norm: true, ..Default::default() });
-        f.sizes = vec![vec![4]; 3 + glue_sides(&f.params)];
+        f.sizes = vec![vec![4]; FIRST_TREE + glue_sides(&f.params)];
         f
     }
 
     /// Root lists for a pair, with the boundaries the caller asks for made
     /// equal and every other root distinct.
     ///
-    /// Tree layout for `--kv-bind` with two head band groups and `c > 0`:
-    /// `[0 pre][1 base][2 inter][3 glue in][4 glue out][5 g0 out][6 g0 in]
-    ///  [7 g1 out][8 g1 in]`.
+    /// Tree layout for `--kv-bind` with two head band groups and `c > 0`
+    /// (stream PP: the preprocessed trace is two trees, so the boundary ones
+    /// start at 4): `[0 shape][1 model][2 base][3 inter][4 glue in][5 glue out]
+    /// [6 g0 out][7 g0 in][8 g1 out][9 g1 in]`.
     fn roots(fa: &Fixed, fb: &Fixed, kv_equal: bool, residual_equal: bool)
         -> (Vec<String>, Vec<String>) {
         let (na, nb) = (fa.sizes.len(), fb.sizes.len());
@@ -2320,9 +2326,10 @@ mod tests {
     #[test]
     fn head_chunk_commits_the_input_side_only() {
         let h = head_fixed(1024, 512);
-        assert_eq!(glue_sides(&h.params), 1, "the head takes tree 3 and no tree 4");
+        assert_eq!(glue_sides(&h.params), 1,
+                   "the head takes the first boundary tree and no second one");
         assert!(has_in_side(&h.params));
-        assert_eq!(h.sizes.len(), 4);
+        assert_eq!(h.sizes.len(), FIRST_TREE + 1);
         let l = fixed(1024, 512, true);
         assert_eq!(glue_sides(&l.params), 2, "a layer chunk still takes both");
     }
