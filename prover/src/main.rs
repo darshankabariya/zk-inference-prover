@@ -2274,6 +2274,30 @@ synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B
                 "an argmax on keys that are not the head's output accepted");
     }
 
+    // 11c. Stream UU (E11): one cell of a *residual* boundary tree moved alone,
+    //     the glue region it is tied to left exactly as it was.  Stream H's
+    //     `bounds` probe made this assertion for the pair of sides a layer
+    //     chunk carries, but only on real witness dirs; here it runs on every
+    //     shape the probe command is given, which is what puts the head chunk's
+    //     single input side (`bounds::sides`, one side, tree 3) under it.
+    //     Nothing else in the chunk moves, so the only thing that can reject is
+    //     the plain equality constraint that binds the tree to the region --
+    //     which is the whole statement that the root is bound to the proof and
+    //     not merely appended to it.
+    if params.bounds {
+        let n_glue = compose::Plan::new(&params).bounds.len();
+        assert!(n_glue > 0,
+                "--bounds produced no residual boundary side: the chunk has no wiring family");
+        for k in 0..n_glue {
+            assert!(!probe(&format!("residual boundary side {k}, its glue region untouched"),
+                           &l,
+                           &compose::ProverTamper { bounds: Some((k, 4321)),
+                                                    ..Default::default() },
+                           "the residual boundary equality constraint"),
+                    "a residual boundary column that disagrees with its region accepted");
+        }
+    }
+
     // 12. Stream AA (E11): one cell of a K/V boundary tree moved *alone*, the
     //     region it is tied to left exactly as it was.  Nothing else in the
     //     chunk changes, so the only thing that can reject is `ChanEval`'s /

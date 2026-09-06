@@ -1112,10 +1112,13 @@ impl GluePlan {
     /// squared) and `ntf.In(1) == G gnfb.Out(0)` (`r` is that reduction's own
     /// `rsqrt` answer, one per token across all `a` of its rows).
     ///
-    /// `stream_in` is the residual claim, which is **the hook for the head
-    /// chunk's tree-3 residual-in boundary** -- stream KK's, not built here:
-    /// a boundary taken over `claims.glue_ties[0][0]` says the residual this
-    /// chunk normalized is the one the last layer's chunk published.
+    /// `stream_in` is the residual claim, and **stream UU took the hook**: with
+    /// `--bounds` the head chunk commits tree 3 over exactly that claim
+    /// (`claims.glue_ties[0][0]`), which says the residual this chunk normalized
+    /// is the one the last layer's chunk published, and `bounds::chain_of`
+    /// compares the two roots on the ordinary layer axis.  `stream_out` is the
+    /// norm's output, which no chunk consumes, so `bounds::sides` gives the head
+    /// the input side alone.
     fn head(p: &Params, gp: &GlueParams) -> Self {
         let t = Tiling::new(p.s, gp.d, gp.a);
         let (a, tok, nreal) = (t.a, t.tokens, t.nreal);

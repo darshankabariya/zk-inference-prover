@@ -100,9 +100,21 @@ pub struct Side {
 /// name the two ties that are the layer's boundary, so this is only turning that
 /// naming into a tree assignment — the input side first, so tree 3 is always the
 /// input and tree 4 always the output, in every chunk of every shape.
+///
+/// **Stream UU: the `lm_head` chunk takes the input side and only the input
+/// side.**  Its `stream_in` is the residual its final norm consumed, which is
+/// the last layer chunk's `stream_out` and is bound to it by the ordinary
+/// layer-axis pair check.  Its `stream_out` is that norm's *output*, which no
+/// chunk consumes -- there is no layer 33 -- so committing it would be a tree
+/// whose root nothing ever compares, at the price of one more `nreal` x
+/// `2^log_rows` tree per head chunk.  One side, and the head chunk is therefore
+/// structurally never the producer of a residual edge.
 pub fn sides(gp: &GluePlan) -> Vec<Side> {
-    [gp.stream_in, gp.stream_out]
-        .iter()
+    let mut want = vec![gp.stream_in];
+    if !gp.head_norm {
+        want.push(gp.stream_out);
+    }
+    want.iter()
         .enumerate()
         .map(|(i, (region, tie))| {
             let r = &gp.regions[*region];
@@ -354,7 +366,9 @@ impl ChainVerdict {
         let need = |ok: bool, what: &str| (!ok).then(|| what.to_string());
         match axis {
             Axis::Layer => need(v.present, "the residual boundary is absent from one of the \
-                                            statements (`--bounds` was off)")
+                                            statements: `--bounds` was off, or the first chunk \
+                                            is an `lm_head` chunk, which commits an input side \
+                                            and no output side")
                 .or_else(|| need(v.shape_ok, "the two statements disagree about the residual \
                                               boundary's layout"))
                 .or_else(|| need(v.coord_ok, "the two statements' declared (layer, block) \
@@ -423,10 +437,53 @@ impl KvLayout {
     }
 }
 
-/// How many glue boundary sides a statement's parameters imply (stream H's two,
-/// or none).
+/// How many glue boundary sides a statement's parameters imply: stream H's two
+/// on a layer chunk, stream UU's one on an `lm_head` chunk (the input side
+/// only, see `sides`), or none.
+///
+/// Arithmetic on `Fixed.params` alone, like `kv_layout`'s, so the pair check
+/// derives the tree layout without building a plan.
 fn glue_sides(p: &crate::compose::Params) -> usize {
-    if p.bounds && p.glue.is_some() { 2 } else { 0 }
+    match &p.glue {
+        Some(g) if p.bounds => {
+            if g.head_norm { 1 } else { 2 }
+        }
+        _ => 0,
+    }
+}
+
+/// Stream UU: does this statement commit a residual **input** side at all?
+///
+/// This is what says whether the edge into a chunk is a link or a declared end,
+/// and it is deliberately a fact about the statement and not about the flag: a
+/// head chunk proved with `--bounds` from a dump that carries no final norm has
+/// `glue: None`, commits nothing, and must still be reported as a declared end
+/// rather than as a link that failed.
+pub fn has_in_side(p: &crate::compose::Params) -> bool {
+    glue_sides(p) >= 1
+}
+
+/// Everything about two chunks' wiring parameters that has to agree for their
+/// boundary trees to be comparable.
+///
+/// `head_norm` is the one field a layer -> head edge differs in, and it is the
+/// one field that does *not* fix the boundary's layout: both families take the
+/// input side from the same claim over the same residual in the same canonical
+/// channel-major order (`GluePlan::head`), which is why the head needed a side
+/// and not a shape.  Everything else is compared exactly as `params.glue`
+/// equality compared it before.
+fn glue_layout_eq(a: &crate::compose::Params, b: &crate::compose::Params) -> bool {
+    match (&a.glue, &b.glue) {
+        (Some(ga), Some(gb)) => {
+            ga.d == gb.d
+                && ga.a == gb.a
+                && ga.dff == gb.dff
+                && ga.eps == gb.eps
+                && ga.inv_d == gb.inv_d
+                && ga.deq_ties == gb.deq_ties
+        }
+        _ => false,
+    }
 }
 
 pub fn kv_layout(p: &crate::compose::Params) -> Option<KvLayout> {
@@ -512,17 +569,27 @@ pub fn chain_of(
             "neither chunk carries a boundary: there is nothing to compare",
         );
     }
-    // The residual boundary exists only when *both* chunks committed stream H's
-    // two trees; without them there is no `FIRST_TREE + 1` to read.
-    let glue_present = ga == 2 && gb == 2;
-    // everything the boundary layout depends on: the token count, the two
-    // wiring shape numbers, the blowup, and the two trees' own column sizes
+    // The residual edge exists only when the producer committed an *out* side
+    // and the consumer an *in* side.  A layer chunk has both (`ga == 2`); an
+    // `lm_head` chunk has the input side alone (`gb == 1`), which is why it can
+    // be the second of a pair and never the first -- there is no layer 33.
+    let glue_present = ga == 2 && gb >= 1;
+    // Stream UU: the consumer is a head chunk, so it has no tree 4 and the
+    // conjuncts over one are not asked.
+    let head_b = gb == 1;
+    // everything the boundary layout depends on: the token count, the wiring
+    // shape numbers, the blowup, and the column sizes of the two trees the link
+    // actually compares -- the producer's out tree against the consumer's in
+    // tree.  On a layer -> layer pair the old pairwise comparison is still made
+    // as well, so nothing that used to be checked stopped being checked.
     let shape_ok = glue_present
         && fa.params.s == fb.params.s
-        && fa.params.glue == fb.params.glue
+        && glue_layout_eq(&fa.params, &fb.params)
         && fa.log_blowup == fb.log_blowup
-        && fa.sizes[FIRST_TREE] == fb.sizes[FIRST_TREE]
-        && fa.sizes[FIRST_TREE + 1] == fb.sizes[FIRST_TREE + 1];
+        && fa.sizes[FIRST_TREE + 1] == fb.sizes[FIRST_TREE]
+        && (head_b
+            || (fa.sizes[FIRST_TREE] == fb.sizes[FIRST_TREE]
+                && fa.sizes[FIRST_TREE + 1] == fb.sizes[FIRST_TREE + 1]));
     let out_root = glue_present.then(|| roots_a[FIRST_TREE + 1].clone());
     let in_root = glue_present.then(|| roots_b[FIRST_TREE].clone());
     // ---- stream AA: the K/V link ------------------------------------------
@@ -1174,13 +1241,23 @@ pub fn grid_cmd(args: &[String]) {
         }
     }
     // stream KK: a `lm_head` chunk takes a cell of the grid -- it is verified,
-    // its emitted tokens are read, and its coordinate is compared -- but it
-    // carries neither the residual boundary nor the K/V one, so the edges that
-    // would touch it are declared ends, listed below, and not links that ran
-    // and failed.  Deleting it from the link sets is what keeps "every implied
-    // link chained" an honest sentence rather than one the head always breaks.
-    let head_of = |i: &usize| chunks[*i].is_head && !chunks[*i].fixed.params.bounds;
+    // its emitted tokens are read, and its coordinate is compared.
+    //
+    // Stream UU: it now also commits the residual **input** side (`bounds::sides`),
+    // so the edge from the last layer chunk into it is an ordinary layer-axis
+    // link and is run below with every other one.  `head_end` is what is left of
+    // stream KK's rule: a head chunk that committed no input side -- `--bounds`
+    // off, or a dump too old to carry the final norm, so `glue` is null -- is
+    // still a declared end and not a link that ran and failed.
+    let head_end = |i: &usize| {
+        chunks[*i].is_head && !has_in_side(&chunks[*i].fixed.params)
+    };
     let mut declared: Vec<Value> = vec![];
+    // Stream UU: edges the grid's shape suggests and the statement does not
+    // imply.  Distinct from `declared_ends`: a declared end is a boundary that
+    // exists and is taken on trust, and this is a pair with no boundary between
+    // them to take on trust in the first place.
+    let mut not_implied: Vec<Value> = vec![];
     let mut gaps: Vec<Value> = vec![];
     // layer links: inside every block, consecutive layers
     let mut layer_links: Vec<(usize, usize)> = vec![];
@@ -1189,13 +1266,14 @@ pub fn grid_cmd(args: &[String]) {
         for w in ks.windows(2) {
             if w[1] == w[0] + 1 {
                 let (i, j) = (layers[&w[0]], layers[&w[1]]);
-                if head_of(&j) {
+                if head_end(&j) {
                     declared.push(json!({
                         "what": "the lm_head chunk's input",
                         "block": b, "from": chunks[i].tag, "to": chunks[j].tag,
-                        "why": "the head chunk carries no wiring family, so the last \
-                                layer's stream_out joins it by declaration, not by a root \
-                                equality (notes/witness-slack.md section 5 item 3)"}));
+                        "why": "this head chunk committed no residual input side (`--bounds` \
+                                off, or a dump with no final norm and so no wiring family), \
+                                so the last layer's stream_out joins it by declaration, not \
+                                by a root equality (notes/witness-slack.md section 5 item 3)"}));
                 } else {
                     layer_links.push((i, j));
                 }
@@ -1217,13 +1295,22 @@ pub fn grid_cmd(args: &[String]) {
         for w in bs.windows(2) {
             if w[1] == w[0] + 1 {
                 let (i, j) = (blocks[&w[0]], blocks[&w[1]]);
-                if head_of(&i) || head_of(&j) {
-                    declared.push(json!({
+                if chunks[i].is_head || chunks[j].is_head {
+                    // Stream UU: not a declared end.  A head chunk attends to
+                    // nothing, so it holds no K/V cache and there is no state
+                    // for two blocks' heads to hand over: its input is the
+                    // block's own residual (bound on the layer axis above) and
+                    // its output is the block's ids (compared by the emitted ->
+                    // consumed check below).  The grid's shape puts them side by
+                    // side; the statement implies no edge between them.
+                    not_implied.push(json!({
                         "what": "two lm_head chunks are not a K/V edge",
                         "layer": k, "from": chunks[i].tag, "to": chunks[j].tag,
-                        "why": "the head chunk commits no K/V boundary; its own \
-                                inputs are the block's, and nothing here compares two \
-                                blocks' heads"}));
+                        "why": "the head chunk performs no attention and commits no K/V \
+                                boundary, so there is no cache to hand over: its input is \
+                                its own block's residual, tied on the layer axis, and its \
+                                output is its own block's ids, tied by the emitted -> \
+                                consumed check"}));
                 } else {
                     token_links.push((i, j));
                 }
@@ -1594,6 +1681,10 @@ pub fn grid_cmd(args: &[String]) {
                            .collect::<Vec<_>>(),
                        "undeclared": undeclared_model},
             "declared_ends": declared,
+            // stream UU: pairs the grid's shape puts next to each other and the
+            // statements imply no edge between -- not slack, and not counted as
+            // a declared end
+            "not_implied": not_implied,
             "failures": failures,
             "all_chain": all_chain,
             "links": links,
@@ -1890,6 +1981,18 @@ mod tests {
         f
     }
 
+    /// Stream UU: an `lm_head` chunk's statement -- the head's wiring family,
+    /// the residual input side and no output side, no K/V boundary, and the
+    /// argmax composed.  Four trees, not five.
+    fn head_fixed(c: usize, s: usize) -> Fixed {
+        let mut f = fixed(c, s, false);
+        f.params.head_argmax = true;
+        f.params.corner = false;
+        f.params.glue = Some(GlueParams { d: 64, a: 4, head_norm: true, ..Default::default() });
+        f.sizes = vec![vec![4]; 3 + glue_sides(&f.params)];
+        f
+    }
+
     /// Root lists for a pair, with the boundaries the caller asks for made
     /// equal and every other root distinct.
     ///
@@ -1901,7 +2004,10 @@ mod tests {
         let (na, nb) = (fa.sizes.len(), fb.sizes.len());
         let a: Vec<String> = (0..na).map(|i| format!("a{i}")).collect();
         let mut b: Vec<String> = (0..nb).map(|i| format!("b{i}")).collect();
-        if residual_equal {
+        // stream UU: a head chunk has no tree 4, so there is no out root on it
+        // to hand over -- the caller asking for one gets the honest answer that
+        // the two lists simply differ there
+        if residual_equal && a.len() > FIRST_TREE + 1 && b.len() > FIRST_TREE {
             b[FIRST_TREE] = a[FIRST_TREE + 1].clone();
         }
         if let (Some(ka), Some(kb)) = (kv_layout(&fa.params), kv_layout(&fb.params)) {
@@ -2117,6 +2223,68 @@ mod tests {
         assert_eq!(v.axis, Axis::Layer);
         assert!(!v.kv_roots_equal, "the K/V roots differ, and that is expected here");
         assert!(v.chains(), "reason: {:?}", v.reason);
+    }
+
+    // ---- stream UU: the last layer -> `lm_head` edge ------------------------
+
+    #[test]
+    fn head_chunk_commits_the_input_side_only() {
+        let h = head_fixed(1024, 512);
+        assert_eq!(glue_sides(&h.params), 1, "the head takes tree 3 and no tree 4");
+        assert!(has_in_side(&h.params));
+        assert_eq!(h.sizes.len(), 4);
+        let l = fixed(1024, 512, true);
+        assert_eq!(glue_sides(&l.params), 2, "a layer chunk still takes both");
+    }
+
+    #[test]
+    fn layer_edge_into_the_head_chunk_chains() {
+        // L31 -> head, one block: the layer's residual out root is the head's
+        // residual in root, and the head's `head_norm` is the one wiring field
+        // the two statements are allowed to differ in
+        let a = at(fixed(1024, 512, true), 31, 2);
+        let b = at(head_fixed(1024, 512), 32, 2);
+        let (ra, rb) = roots(&a, &b, false, true);
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert_eq!(v.axis, Axis::Layer);
+        assert!(v.present && v.shape_ok && v.coord_ok && v.roots_equal);
+        assert!(v.chains(), "reason: {:?}", v.reason);
+    }
+
+    #[test]
+    fn layer_edge_into_the_head_chunk_rejects_a_moved_residual_root() {
+        let a = at(fixed(1024, 512, true), 31, 2);
+        let b = at(head_fixed(1024, 512), 32, 2);
+        let (ra, rb) = roots(&a, &b, false, false);
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert_eq!(v.axis, Axis::Layer);
+        assert!(!v.roots_equal);
+        assert!(!v.chains());
+        assert!(v.reason.as_deref().unwrap().contains("residual out root"),
+                "the refusal names the side: {:?}", v.reason);
+    }
+
+    #[test]
+    fn a_head_chunk_is_never_the_producer_of_a_residual_edge() {
+        // it has no out side, so an edge *out* of it cannot be compared at all
+        let a = at(head_fixed(1024, 512), 32, 2);
+        let b = at(fixed(1024, 512, true), 33, 2);
+        let (ra, rb) = roots(&a, &b, false, true);
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert!(!v.present);
+        assert!(!v.chains());
+        assert!(v.reason.as_deref().unwrap().contains("lm_head"),
+                "the refusal names the case: {:?}", v.reason);
+    }
+
+    #[test]
+    fn a_head_chunk_without_a_wiring_family_is_still_a_declared_end() {
+        // a dump too old to carry the final norm: `glue` is null, so no input
+        // side exists however the flag was set
+        let mut h = head_fixed(1024, 512);
+        h.params.glue = None;
+        h.sizes = vec![vec![4]; 3];
+        assert!(!has_in_side(&h.params));
     }
 
     // ---- what the merged predicate did, kept as a regression ---------------

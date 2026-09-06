@@ -111,13 +111,22 @@ def head_line(hdir, htb, tag="head", extra="", layer=None, block=None):
     reads.  `--layer` / `--block` declare that, `Fixed` carries it, and
     `bounds-grid` places the chunk by the statement rather than by the tag --
     which is what lets the head take a cell at all.
+
+    **Stream UU (E11): `--bounds`.**  The head chunk commits the residual its
+    final norm consumed as tree 3, exactly as a layer chunk commits its
+    `stream_in`, so the last layer's out root and the head's in root are
+    compared by the pair check like every other layer link.  It commits no tree
+    4 -- its norm's output is nobody's residual -- so the head is the last chunk
+    of the layer axis and never a producer.  A head dump too old to carry the
+    final norm has no wiring family and commits nothing here; the grid reports
+    that as a declared end rather than as a link that failed.
     """
     coord = ""
     if layer is not None:
         coord += f" --layer {layer}"
     if block is not None:
         coord += f" --block {block}"
-    return (f"--table-bits {htb} --head-argmax --deq-per-row 501{extra}{coord} "
+    return (f"--table-bits {htb} --bounds --head-argmax --deq-per-row 501{extra}{coord} "
             f"--witness {hdir} --ser-tag {tag}")
 
 
