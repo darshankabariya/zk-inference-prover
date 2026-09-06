@@ -1478,6 +1478,15 @@ impl GluePlan {
 pub static PRE_ONLY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Stream PP (E11): stop one tree earlier -- after the **shape** tree and
+/// before the model tree.  This is the verifier's own derivation: the shape
+/// tree is a function of `Fixed.params` and of the manifest's per-layer
+/// calibration, so a run that stops here has read no weight, and the desk gate
+/// says so by deriving the same root at two seeds.  Set by
+/// `b65 expect-root --shape-only` and by nothing else.
+pub static SHAPE_ONLY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Stream LL (E11): what a preprocessed column needs in order to be rebuilt.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
 pub enum PreNeeds {
@@ -5386,14 +5395,39 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             sess.commit(cols.iter().map(|c| c.host().clone()).collect());
         }
     };
-    match crate::precache::take(pre_key, &shape_sizes, &model_sizes) {
-        Some((shape_tree, model_tree)) => {
-            sess.commit_cached(shape_tree, shape_sizes.clone());
+    let cached = crate::precache::take(pre_key, &shape_sizes, &model_sizes);
+    let shape_t = std::time::Instant::now();
+    match &cached {
+        Some((shape_tree, _)) => sess.commit_cached(shape_tree.clone(), shape_sizes.clone()),
+        None => commit_one(&mut sess, shape_all),
+    }
+    let pp_shape_secs = shape_t.elapsed().as_secs_f64();
+    crate::util::m4_add("wall/commit_shape", pp_shape_secs);
+    // Stream PP (E11): the verifier's own work stops here.  Everything after
+    // this line reads the model; the shape root does not.
+    if SHAPE_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
+        crate::util::emit("shape_root", json!({
+            "pre_root": sess.tree_root(0),
+            "layer": layer.layer,
+            "block": layer.block,
+            "c": p.c,
+            "s": p.s,
+            "log_table": p.log_table,
+            "columns": shape_sizes.len(),
+            "cells": shape_sizes.iter().map(|s| 1usize << s).sum::<usize>(),
+            "split": plan.pre_split_report(),
+            "trace_secs": trace_secs,
+            "commit_shape_secs": pp_shape_secs,
+            "peak_rss_bytes": crate::util::peak_rss_bytes(),
+        }));
+        std::process::exit(0);
+    }
+    match cached {
+        Some((_, model_tree)) => {
             sess.commit_cached(model_tree, model_sizes.clone());
             crate::util::m4_add("wall/commit_pre_cached", m4_t.elapsed().as_secs_f64());
         }
         None => {
-            commit_one(&mut sess, shape_all);
             commit_one(&mut sess, model_all);
             crate::precache::fill(pre_key, &sess);
         }
