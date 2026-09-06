@@ -1115,6 +1115,15 @@ pub struct GlueTables {
     pub off_table: usize,
 }
 
+/// Stream PP (E11): the glue tables' four `round`-only heights, for the
+/// preprocessed split.  See `GlueTables::log_sizes`.
+pub struct GlueLogSizes {
+    pub pow: u32,
+    pub smul: u32,
+    pub un: u32,
+    pub val: u32,
+}
+
 impl GlueTables {
     pub fn new(kmax: u32, round: Round, uns: &[UnKind]) -> Self {
         assert!(kmax >= DMAX + 1, "kmax {kmax} is below the add's DMAX + 1 = {}", DMAX + 1);
@@ -1146,6 +1155,30 @@ impl GlueTables {
             pow, smul, uns: uns.to_vec(), un, val, norm, frac,
             log_pow, log_smul, log_un, log_val, log_norm, log_frac,
             kmax, sticky, off_table: 0,
+        }
+    }
+
+    /// Stream PP (E11): the four glue-table heights the preprocessed split
+    /// needs, without building the tables.
+    ///
+    /// `Plan::pre_split` classifies a column by its id and its `log_size`, and
+    /// the four glue tables it has to size -- `pow`, `smul`, `val` and the
+    /// unary ones -- depend on `round` alone.  Only `log_norm` and `log_frac`
+    /// depend on `kmax`, and the split names neither.  Asking `GlueTables::new`
+    /// for them built a `frac` table of `2^(kmax+1)` rows on every call to
+    /// `pre_split_report`, and -- the reason this exists -- it asserts
+    /// `kmax >= DMAX + 1`, which a plan that carries a glue gadget it never
+    /// proves need not satisfy (`embed`'s fixture, `kmax` 12).
+    ///
+    /// The heights are `new`'s own, `log_un` included: it is `val`'s length
+    /// there and it is `val`'s length here.
+    pub fn log_sizes(round: Round) -> GlueLogSizes {
+        let log_val = log_rows_for(val_table().len(), 1);
+        GlueLogSizes {
+            pow: log_rows_for(pow_table().len(), 1),
+            smul: log_rows_for(smul_table(round).len(), 1),
+            un: log_val,
+            val: log_val,
         }
     }
 

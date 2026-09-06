@@ -2379,11 +2379,15 @@ impl Plan {
             put(id(c), "table/epow", self.log_epow(), PreNeeds::Params, PreVaries::Layer);
         }
         if let Some(g) = &self.glue {
-            let t = crate::glue::GlueTables::new(self.p.kmax, self.round, &g.uns);
-            let mut logs: Vec<u32> = vec![t.log_pow; crate::glue::POW_COLS.len()];
-            logs.extend(vec![t.log_smul; crate::glue::SMUL_COLS.len()]);
-            logs.extend(vec![t.log_val; crate::glue::VAL_COLS.len()]);
-            logs.extend(vec![t.log_un; 4 * g.uns.len()]);
+            // Stream PP (E11): the four heights, and not the tables.  Building
+            // the tables here cost a `2^(kmax+1)`-row `frac` on every call and
+            // asserted `kmax >= DMAX + 1`, which a plan that carries a glue
+            // gadget it never proves need not satisfy.
+            let t = crate::glue::GlueTables::log_sizes(self.round);
+            let mut logs: Vec<u32> = vec![t.pow; crate::glue::POW_COLS.len()];
+            logs.extend(vec![t.smul; crate::glue::SMUL_COLS.len()]);
+            logs.extend(vec![t.val; crate::glue::VAL_COLS.len()]);
+            logs.extend(vec![t.un; 4 * g.uns.len()]);
             for (gid, ls) in crate::glue::glue_table_ids(&g.uns).into_iter().zip(logs) {
                 put(gid, "table/glue", ls, PreNeeds::Params, PreVaries::Layer);
             }
