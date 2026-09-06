@@ -466,21 +466,29 @@ pub fn has_in_side(p: &crate::compose::Params) -> bool {
 /// Everything about two chunks' wiring parameters that has to agree for their
 /// boundary trees to be comparable.
 ///
-/// `head_norm` is the one field a layer -> head edge differs in, and it is the
-/// one field that does *not* fix the boundary's layout: both families take the
-/// input side from the same claim over the same residual in the same canonical
-/// channel-major order (`GluePlan::head`), which is why the head needed a side
-/// and not a shape.  Everything else is compared exactly as `params.glue`
-/// equality compared it before.
+/// Two fields are exempt on a layer -> head edge, and both for the same reason:
+/// they describe parts of the wiring family a head chunk has not got.
+///
+///  * `head_norm` says which family this is. Both families take the input side
+///    from the same claim over the same residual in the same canonical
+///    channel-major order (`GluePlan::head`), which is why the head needed a
+///    side and not a shape.
+///  * `dff` is the SwiGLU's own tiling width. A head chunk has no FFN, so its
+///    `dff` is 0 by construction, and it fixes nothing about the residual
+///    boundary -- the boundary's layout is `d`, `a` and `s`, and the two trees'
+///    own column sizes are compared directly besides.
+///
+/// Between two layer chunks `dff` is still compared, so nothing that used to be
+/// checked on the recorded path stopped being checked.
 fn glue_layout_eq(a: &crate::compose::Params, b: &crate::compose::Params) -> bool {
     match (&a.glue, &b.glue) {
         (Some(ga), Some(gb)) => {
             ga.d == gb.d
                 && ga.a == gb.a
-                && ga.dff == gb.dff
                 && ga.eps == gb.eps
                 && ga.inv_d == gb.inv_d
                 && ga.deq_ties == gb.deq_ties
+                && (gb.head_norm || ga.dff == gb.dff)
         }
         _ => false,
     }
