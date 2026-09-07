@@ -3195,6 +3195,17 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     let alloc =
         &mut TraceLocationAllocator::new_with_split_preprocessed_columns(&shape_ids, &model_ids);
     let off = Offsets::new(p.q_bits, p.k_bits);
+    // One claimed sum per component that carries lookups, in `use_sums` order,
+    // which is what `Plan::n_use()` counts.  Said here rather than discovered as
+    // an index panic at whichever component the vector ran out under: a caller
+    // that sizes the vector from anything but the plan is the defect, and a
+    // chunk with no prefix key tile -- token block 0's, whose plan has no prefix
+    // key tiles and whose layer-0 chunk carries the embedding gadget -- is where
+    // that used to happen.
+    assert!(claims.use_sums.len() >= plan.n_use(),
+            "the claims carry {} claimed sums; this plan has {} components that carry \
+             lookups (`Plan::n_use`)",
+            claims.use_sums.len(), plan.n_use());
     let mut use_k = 0usize;
     let mut next_use = |claims: &Claims| {
         let v = unqm(claims.use_sums[use_k]);
@@ -3879,6 +3890,15 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         _ => (None, None),
     };
 
+
+    // The other half of the same statement: what the plan counts is what this
+    // function consumed.  `Plan::n_use()` is what every caller sizes its claims
+    // vector from and what `verify_composed` rejects a statement on, so the two
+    // parting company is a defect wherever it happens -- and on a chunk with no
+    // prefix key tile there is no slack anywhere to hide it.
+    assert_eq!(use_k, plan.n_use(),
+               "build_components consumed {use_k} claimed sums; `Plan::n_use` counts {}",
+               plan.n_use());
 
     BuiltComponents { chans, keys, rows, links, link_binding, ao, mats, freivalds, residual_stream, exp_t, tables,
                       gtables, argmax, embed, emb_tab, rqs: rq_comps, quants: quant_comps,
@@ -5558,7 +5578,12 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // B7a milestone 4 (section 3 row 1): the evals every family's interaction
     // lowers, built by `build_components` -- the verifier's own route, and the
     // one `genemit` lowers -- with `claims_for`'s placeholders in place of the
-    // claimed sums, which the accumulators below have not produced yet. 19.1 is
+    // claimed sums, which the accumulators below have not produced yet.  The
+    // placeholders are sized from `Plan::n_use()`, which is why this call
+    // survives a chunk with no prefix key tile: the prover's own path reaches
+    // `build_components` here, before it has a claimed sum of its own, so a
+    // placeholder short of the plan's count stops the prove and not only the
+    // emitters. 19.1 is
     // what makes that correct: a claimed sum enters constraints and never a
     // lookup. `Ir::fingerprint` records the number of scalars and not their
     // values, so the shape a component lowers to here is the shape `genemit`
@@ -7992,5 +8017,35 @@ mod tests {
 
         // and the flag is off again, so nothing else in the suite sees it
         assert_eq!(claim_at(None, "key_tile_q"), SecureField::zero());
+    }
+
+    /// What `Plan::n_use` counts is what `build_components` consumes, on the
+    /// chunk that has no slack anywhere: the segment with no prefix, whose plan
+    /// builds no prefix key tile at all, with the five reductions off, so every
+    /// component that can carry lookups does. The two asserts inside
+    /// `build_components` are what fail if the two part company; here they run
+    /// on a claims vector that is exactly the plan's count, which is the vector
+    /// the prover, the verifier and both emitters hand it.
+    #[test]
+    fn a_chunk_with_no_prefix_consumes_exactly_the_plans_claimed_sums() {
+        let plan = Plan::new(&crate::exprprobe::tests::params_no_prefix());
+        assert_eq!(plan.shapes.len(), plan.p.head_groups.len(),
+                   "no prefix key tile: one key tile per head group, its diagonal block");
+        assert!(plan.rows_key_tile.iter().all(|r| *r),
+                "each diagonal block carries its group's per-token component");
+        let mut ch = stwo::core::channel::Blake2sM31Channel::default();
+        Channel::mix_u64(&mut ch, 0x0b65_5900);
+        let rels = Rels::draw(&mut ch, &plan.widths,
+                              plan.residual_stream.as_ref().map(|g| g.uns.as_slice()),
+                              plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
+                              plan.q_tabs.len());
+        let f = ch.draw_secure_felts(6);
+        let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_5900);
+        claims.use_sums.truncate(plan.n_use());
+        assert_eq!(claims.use_sums.len(), plan.n_use());
+        let b = build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
+        assert_eq!(b.chans.len(), plan.shapes.len());
+        assert_eq!(b.rows.len(), plan.shapes.len(),
+                   "every key tile of this chunk carries a per-token component");
     }
 }
