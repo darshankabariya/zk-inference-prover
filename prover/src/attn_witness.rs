@@ -238,7 +238,7 @@ pub struct Src {
     pub log_table: u32,
     pub seed: u64,
     /// B10 step 0: which dequant gadget each of the seven layer matmuls takes
-    /// (`b65` = B6.5's mixed layout, `b10` = the bf16 chain on all seven).  Empty
+    /// (`zk-prover` = B6.5's mixed layout, `b10` = the bf16 chain on all seven).  Empty
     /// means "whatever the witness says", which is what a real dump carries.
     pub layout: String,
     /// B10 step 3: build the band as the causal corner (`C == S`, key `c` is

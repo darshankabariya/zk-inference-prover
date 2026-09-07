@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write the segment loop's plan file for `b65 compose-chunks --plan`.
+"""Write the segment loop's plan file for `zk-prover compose-chunks --plan`.
 
 One line per chunk, in the order the sequence proves them: the 32 layers and
 then the head. A line carries only what that chunk decides for itself -- its
@@ -58,7 +58,7 @@ layer-0 re-extract with `--embed`).  The E11 plan at C=4096 is
 part of its emit key, so the emit set grows by the lines whose flags make a
 new kernel shape and by nothing else.
 
-**Stream MM (E11): what the model manifest needs of a plan.**  `b65
+**Stream MM (E11): what the model manifest needs of a plan.**  `zk-prover
 model-roots` requires `master_table_bits` to be **one value per layer across
 blocks** -- `table/exp` is `1 << log_table` rows, so a layer whose blocks
 declare two widths has two tree-0 roots and no per-layer model root exists at
@@ -205,7 +205,7 @@ def main():
     # ---- stream MM (E11): one master table width per layer ------------------
     ap.add_argument("--table-bits-per-layer", action="store_true",
                     help="give every block of a layer the widest --table-bits any block of "
-                         "that layer asked for, so `b65 model-roots` can derive one model "
+                         "that layer asked for, so `zk-prover model-roots` can derive one model "
                          "root per layer (it rejects a layer whose blocks declare two "
                          "widths). Run the plan WITHOUT --tight-table, which re-sizes the "
                          "table off the witness and which no manifest names.")
@@ -221,7 +221,7 @@ def main():
                          "into a 150.1 GB card (stream MM). A map built from a previous "
                          "run's own tightened `params.log_table`, maxed over the blocks of "
                          "each layer, is both tight and one width per layer, which is what "
-                         "`b65 model-roots` needs.")
+                         "`zk-prover model-roots` needs.")
     a = ap.parse_args()
     lf, l0f, hf = flags(a.layer_flags), flags(a.l0_flags), flags(a.head_flags)
 

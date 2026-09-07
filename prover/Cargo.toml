@@ -1,5 +1,5 @@
 [package]
-name = "b65-pipeline"
+name = "zk-prover"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -26,5 +26,5 @@ tracing-subscriber = { version = "0.3", features = ["registry", "std"] }
 
 
 [[bin]]
-name = "b65"
+name = "zk-prover"
 path = "src/main.rs"

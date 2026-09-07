@@ -8,7 +8,7 @@ proof serialization and the digest.
 
 ```sh
 cargo build --release                                   # SIMD backend
-cargo build --release -p b65-pipeline --features cuda   # CUDA backend
+cargo build --release -p zk-prover --features cuda   # CUDA backend
 ```
 
 The vendored library in `../nitroo` links its CUDA library on every Linux
@@ -64,7 +64,7 @@ stands for the five flags
 ```sh
 SYN="--round away --variants intsplit6 --table-bits 16 --s 32 --ctx 128 --hd 32"
 GLUE="--nout 64 --glue-a 32 --kmax 16 --synth-glue"
-b65 compose $SYN <flags>
+zk-prover compose $SYN <flags>
 ```
 
 **The sound defaults.** Three heads of 32 over 64-wide matmuls cannot state the
@@ -103,7 +103,7 @@ segments are recorded by `zk-results` with the runs that produce them.
 
 | proof | command | digest (first 16 hex) | recorded |
 |---|---|---|---|
-| Llama-3.1-8B layer 16, `S = 512`, `C = 16384` | `RAYON_NUM_THREADS=16 b65 compose --round away --numbits 9 --z-hi-bits 7 --variants intexp --table-bits 25 --bands 16,8,8 --unsound-skip-kv-boundary --witness <dir>` | `42fceb1f3a8643cd` | both backends, 2026-09-06, before the sound defaults; the skip reproduces it |
+| Llama-3.1-8B layer 16, `S = 512`, `C = 16384` | `RAYON_NUM_THREADS=16 zk-prover compose --round away --numbits 9 --z-hi-bits 7 --variants intexp --table-bits 25 --bands 16,8,8 --unsound-skip-kv-boundary --witness <dir>` | `42fceb1f3a8643cd` | both backends, 2026-09-06, before the sound defaults; the skip reproduces it |
 
 The 8B witness is one layer's dump written by `harness.witness.extract` under
 the `b10-final` quantization configuration; `zk-results` records which run

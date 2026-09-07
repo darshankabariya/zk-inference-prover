@@ -781,7 +781,7 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
         // master table's size and `nmax`.  A verifier holds `Fixed`, not the
         // plan line that produced it -- and a chunk proved with `--tight-table`
         // carries a `log_table` that neither the manifest nor any flag names.
-        // So `b65 expect-root --weights-only --params <tag>.fixed.json --witness
+        // So `zk-prover expect-root --weights-only --params <tag>.fixed.json --witness
         // DIR` is the whole command, and there is no line to get wrong.
         let (variant, vname, bands, src) = if weights_only {
             let f = arg_str(args, "--params").expect(
@@ -916,7 +916,7 @@ pub fn plan_params(args: &[String]) -> (String, compose::Params) {
 
 /// Stream LL (E11): where a derivation's `Params` come from.
 ///
-/// `b65 compose` derives them from the witness, as it always has. `b65
+/// `zk-prover compose` derives them from the witness, as it always has. `zk-prover
 /// expect-root` may instead be handed `--params FILE` -- a `Fixed` or a bare
 /// `Params`, `plan_params`' own two shapes -- and then the plan is built from
 /// *the statement's* declared shape rather than from a re-derivation of it.
@@ -1394,7 +1394,7 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
 /// Stream LL (E11), `notes/witness-slack.md` section 5 item 1, deliverable 1:
 /// what tree 0 is made of, from `Params` alone.
 ///
-///     b65 pre-split --params FILE
+///     zk-prover pre-split --params FILE
 ///
 /// `FILE` is a JSON `Params` -- `result.point.params` of any `compose` run, so
 /// the 8B reference chunk's tree 0 can be priced without the dump. The rollup
@@ -1427,8 +1427,8 @@ fn pre_split_cmd(args: &[String]) {
 /// Stream LL (E11), `notes/witness-slack.md` section 5 item 1, deliverable 2:
 /// the expected tree-0 root of one chunk, derived from the model.
 ///
-///     b65 expect-root --witness DIR [--layer k] [--block b] <the chunk's flags>
-///     b65 expect-root --weights-only --params <tag>.fixed.json --witness DIR ...
+///     zk-prover expect-root --witness DIR [--layer k] [--block b] <the chunk's flags>
+///     zk-prover expect-root --weights-only --params <tag>.fixed.json --witness DIR ...
 ///
 /// It takes exactly the arguments the chunk's `compose` line takes -- the plan
 /// line, minus `--ser-tag` -- builds the chunk's `Plan` and its tree 0, and
@@ -1474,7 +1474,7 @@ fn expect_root_cmd(args: &[String]) {
 /// Stream LL (E11), deliverable 2: the model manifest KK's
 /// `boundary-grid --expect-pre-roots` consumes.
 ///
-///     b65 model-roots --plan PLAN [--pins "..."] [--out FILE] [--limit N]
+///     zk-prover model-roots --plan PLAN [--pins "..."] [--out FILE] [--limit N]
 ///                     [--weights-only --params-dir DIR]
 ///
 /// `PLAN` is an `o_plan.py` plan file: one `compose` argument line per chunk.

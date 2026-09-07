@@ -1,4 +1,4 @@
-// Placeholder, replaced by `b65 cudaemit`'s output (see gpu/m2b_kernels.sh).
+// Placeholder, replaced by `zk-prover cudaemit`'s output (see gpu/m2b_kernels.sh).
 //
 // With an empty table `cuda_eval_blob` returns None for every component, so the
 // crate builds and proves exactly as milestone 2a did -- on the fork's scalar

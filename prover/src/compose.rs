@@ -474,7 +474,7 @@ pub struct Fixed {
     /// different models, and refuses two chunks at the same layer whose model
     /// hashes differ, so "two blocks of one layer used different weights" is
     /// no longer unseen.  What bindings the hash to the *proof* is the derived
-    /// tree-0 root (`--expect-pre-roots`), which `b65 model-roots` computes
+    /// tree-0 root (`--expect-pre-roots`), which `zk-prover model-roots` computes
     /// from the same model.  `None` on a statement written before the field
     /// existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1473,7 +1473,7 @@ impl GluePlan {
 }
 
 /// Stream LL (E11): stop the prover after tree 0 is committed and report its
-/// root.  Set by `b65 expect-root` and by nothing else; the ordinary `compose`
+/// root.  Set by `zk-prover expect-root` and by nothing else; the ordinary `compose`
 /// path never reads a set flag, so no recorded digest can move because of it.
 pub static PRE_ONLY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -1483,7 +1483,7 @@ pub static PRE_ONLY: std::sync::atomic::AtomicBool =
 /// tree is a function of `Fixed.params` and of the manifest's per-layer
 /// calibration, so a run that stops here has read no weight, and the desk gate
 /// says so by deriving the same root at two seeds.  Set by
-/// `b65 expect-root --shape-only` and by nothing else.
+/// `zk-prover expect-root --shape-only` and by nothing else.
 pub static SHAPE_ONLY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -1494,7 +1494,7 @@ pub enum PreNeeds {
     Params,
     /// Stream PP (E11): a per-layer calibration constant -- `frac_per_head` and
     /// `master_table_bits` -- that is not in the weights but is published, per
-    /// layer, by the model manifest `b65 model-roots` writes.  Public input, so
+    /// layer, by the model manifest `zk-prover model-roots` writes.  Public input, so
     /// the verifier rebuilds the column; it is not a weight, so it does not
     /// belong to the model tree.
     Manifest,
@@ -5438,7 +5438,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     let ll_pre_secs = m4_t.elapsed().as_secs_f64();
     crate::util::m4_add("wall/commit_pre", ll_pre_secs);
-    // Stream LL (E11), `notes/witness-slack.md` section 5 item 1: `b65
+    // Stream LL (E11), `notes/witness-slack.md` section 5 item 1: `zk-prover
     // expect-root` wants tree 0's root and nothing after it.  The stop is here
     // rather than in a second builder so that the derived root is the prover's
     // own by construction -- there is no second implementation of tree 0 to

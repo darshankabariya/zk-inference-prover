@@ -2,7 +2,7 @@
 
 Decode proves one token against C cached keys; prefill proves S tokens against S
 keys with a causal mask, and **the mask is the term no AIR in this project has**.
-`b65`'s grid runs its row axis over `(instance, key)` and its column axis over
+`zk-prover`'s grid runs its row axis over `(instance, key)` and its column axis over
 tokens, exactly tiled, so a mask that is a function of `(instance, key, token)`
 cannot be expressed by the tiling: the AIR proves the whole `S x C` rectangle and
 a masked entry is an honest zero that still costs a committed cell.  At `C = S`

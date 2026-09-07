@@ -1120,7 +1120,7 @@ pub fn grid_cmd(args: &[String]) {
     // Stream PP (E11): the published model commitment, one root per layer.
     // `Fixed.model_root` is a *declaration* -- the verifier's own replay only
     // says the proof's second commitment is the one the statement names -- so
-    // this is where it is pinned to a model.  The file is `b65 model-roots`'
+    // this is where it is pinned to a model.  The file is `zk-prover model-roots`'
     // own manifest; the same file serves `--expect-pre-roots`, whose rows are
     // keyed by `(layer, c)` because the shape moves with the chunk.
     let expect_model: Option<Vec<Value>> = crate::arg_str(args, "--expect-model-roots").map(|f| {
@@ -1568,7 +1568,7 @@ pub fn grid_cmd(args: &[String]) {
     }
     // Deliberately *not* a failure: a grid of 32 layers has 32 model hashes,
     // because a layer's weights are its own.  What bindings the 32 into one model
-    // is the manifest `b65 model-roots` writes, which asserts one hash per
+    // is the manifest `zk-prover model-roots` writes, which asserts one hash per
     // layer and names them all; the grid's own check is the per-layer one
     // above, which is what section 5 item 1's last sentence asks for.
     if !undeclared_model.is_empty() {
@@ -1580,8 +1580,8 @@ pub fn grid_cmd(args: &[String]) {
 
     // ---- stream KK: the declared tree-0 roots, against a derived table ------
     //
-    // Stream LL fills the table: `b65 model-roots --plan PLAN` runs
-    // `b65 expect-root` per plan line and writes one row per `(layer, c)`.  A
+    // Stream LL fills the table: `zk-prover model-roots --plan PLAN` runs
+    // `zk-prover expect-root` per plan line and writes one row per `(layer, c)`.  A
     // row also carries the model hash it was derived under, and that is
     // compared too -- a table derived from one model against a grid proved
     // under another is the case the root comparison alone would only catch by
@@ -1638,7 +1638,7 @@ pub fn grid_cmd(args: &[String]) {
         declared.push(json!({"what": "which model each chunk's shape root is",
                              "why": "no --expect-pre-roots table was given, so every \
                                      chunk's pre_root is compared only against its own \
-                                     proof; `b65 model-roots --plan PLAN` derives the \
+                                     proof; `zk-prover model-roots --plan PLAN` derives the \
                                      table from the model"}));
     }
 
@@ -1646,7 +1646,7 @@ pub fn grid_cmd(args: &[String]) {
     //
     // This is the whole of the committed-model setting.  The verifier holds a
     // commitment to the model as public input and never the weights: it derives
-    // the *shape* root itself (above, and `b65 expect-root --shape-only` needs
+    // the *shape* root itself (above, and `zk-prover expect-root --shape-only` needs
     // no weights at all) and compares the *model* root against the manifest's
     // row for this chunk's layer.  A chunk whose model root is not the
     // manifest's for its layer is a named failure, and so is a manifest that has
@@ -1700,7 +1700,7 @@ pub fn grid_cmd(args: &[String]) {
                              "chunks": chunks.len(),
                              "why": "no --expect-model-roots manifest was given, so every \
                                      chunk's model_root is compared only against its own \
-                                     proof; `b65 model-roots --plan PLAN` publishes the \
+                                     proof; `zk-prover model-roots --plan PLAN` publishes the \
                                      manifest from the weights"}));
     }
 

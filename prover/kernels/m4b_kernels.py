@@ -5,7 +5,7 @@ not dispatch these: our own crate calls `gen_b65_dispatch` directly, so there is
 no case to add to `evaluate_constraints.cu` and no `cuda_eval_name` to key on.
 Two asserted, idempotent edits:
 
-  1. copy `gen_b65_*.cu` / `.cuh` (from `b65 genemit`) and the hand-written
+  1. copy `gen_b65_*.cu` / `.cuh` (from `zk-prover genemit`) and the hand-written
      `gen_b65_logup.cu` / `.cuh` into `crates/stwo/src/stwo_cuda/cuda/`;
   2. add each `.cu` to the explicit source list in `CMakeLists.txt`.
 
@@ -34,7 +34,7 @@ GEN = Path(opt("--gen"))
 HAND = Path(opt("--src", str(Path(__file__).resolve().parent)))
 UNDO = "--undo" in args
 CUDA = FORK / "crates" / "stwo" / "src" / "stwo_cuda" / "cuda"
-BEGIN = "        # B7a m4: generated b65 generation kernels\n"
+BEGIN = "        # B7a m4: generated zk-prover generation kernels\n"
 END = "        # end B7a m4\n"
 ANCHOR = "        batch_inverse.cu\n"
 

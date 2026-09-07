@@ -10,7 +10,7 @@ that produced every run.
 
 | path | what |
 |---|---|
-| `prover/` | the prover crate, binary `b65`; `prover/README.md` lists the recorded proof digests; `prover/kernels/` installs generated device kernels into the CUDA backend |
+| `prover/` | the prover crate, binary `zk-prover`; `prover/README.md` lists the recorded proof digests; `prover/kernels/` installs generated device kernels into the CUDA backend |
 | `nitroo/` | the vendored Circle STARK library the prover builds on; its `README.md` names the upstream commit and each local change |
 | `harness/` | one uv package: `witness/` (deterministic quantized forward pass, greedy continuation, witness extraction, shape table, plan file), `eval/` (perplexity, task suite, the unproved baseline), `costmodel/` |
 | `docs/statement.md` | what the proof binds, edge by edge, and which `--unsound-skip-<name>` flag unbinds each |
@@ -30,7 +30,7 @@ is needed to build either one.
 
 ```sh
 cargo build --release                                   # SIMD backend
-cargo build --release -p b65-pipeline --features cuda   # CUDA backend
+cargo build --release -p zk-prover --features cuda   # CUDA backend
 ```
 
 Requirements: the toolchain pinned in `rust-toolchain.toml` (rustup selects
@@ -51,7 +51,7 @@ Without `--witness` the prover builds a small synthetic layer segment and
 proves it. This is the shape check CI pins:
 
 ```sh
-./target/release/b65 compose --s 32 --ctx 64 --bands 2,1 --corner
+./target/release/zk-prover compose --s 32 --ctx 64 --bands 2,1 --corner
 ```
 
 The JSON on stdout carries `result.point.accepts` and `result.point.proof_sha256`.

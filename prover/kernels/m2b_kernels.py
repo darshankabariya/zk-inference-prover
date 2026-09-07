@@ -1,6 +1,6 @@
 """B7a milestone 2b step 3: install the generated constraint kernels into the fork.
 
-Reads `$B7_GEN/manifest.json` (written by `b65 cudaemit`) and applies three
+Reads `$B7_GEN/manifest.json` (written by `zk-prover cudaemit`) and applies three
 asserted, idempotent edits to the fork's CUDA tree:
 
   1. copy the generated `evaluate_b65_*.cu` / `.cuh` and `b65_ops.cuh` into
@@ -38,11 +38,11 @@ FORK = Path(opt("--fork"))
 GEN = Path(opt("--gen"))
 UNDO = "--undo" in args
 CUDA = FORK / "crates" / "stwo" / "src" / "stwo_cuda" / "cuda"
-BEGIN = "        # B7a 2b: generated b65 constraint kernels\n"
+BEGIN = "        # B7a 2b: generated zk-prover constraint kernels\n"
 END = "        # end B7a 2b\n"
-INC_BEGIN = "// B7a 2b: generated b65 constraint kernels\n"
+INC_BEGIN = "// B7a 2b: generated zk-prover constraint kernels\n"
 INC_END = "// end B7a 2b includes\n"
-CASE_BEGIN = "        // B7a 2b: generated b65 constraint kernels\n"
+CASE_BEGIN = "        // B7a 2b: generated zk-prover constraint kernels\n"
 CASE_END = "        // end B7a 2b cases\n"
 
 

@@ -5,8 +5,8 @@
 # 595.84; any driver that supports CUDA 12.9 runs the CUDA backend.
 #
 #   docker build -t zk-prover .
-#   docker run --rm zk-prover b65-simd compose --s 32 --ctx 64 --bands 2,1 --corner
-#   docker run --rm --gpus all zk-prover b65-cuda compose --s 32 --ctx 64 --bands 2,1 --corner
+#   docker run --rm zk-prover zk-prover-simd compose --s 32 --ctx 64 --bands 2,1 --corner
+#   docker run --rm --gpus all zk-prover zk-prover-cuda compose --s 32 --ctx 64 --bands 2,1 --corner
 FROM nvidia/cuda:12.9.1-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -27,8 +27,8 @@ WORKDIR /src
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY prover prover
 COPY nitroo nitroo
-RUN cargo build --release --locked && cp target/release/b65 /usr/local/bin/b65-simd && \
-    cargo build --release --locked -p b65-pipeline --features cuda && cp target/release/b65 /usr/local/bin/b65-cuda
+RUN cargo build --release --locked && cp target/release/zk-prover /usr/local/bin/zk-prover-simd && \
+    cargo build --release --locked -p zk-prover --features cuda && cp target/release/zk-prover /usr/local/bin/zk-prover-cuda
 
 COPY harness harness
 RUN cd harness && uv sync --frozen

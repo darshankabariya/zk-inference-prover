@@ -38,7 +38,7 @@ jobs:
       - name: tests, SIMD backend (pinned synthetic digests)
         run: cargo test --release --locked
       - name: build, CUDA backend
-        run: cargo build --release --locked -p b65-pipeline --features cuda
+        run: cargo build --release --locked -p zk-prover --features cuda
 
   words:
     runs-on: ubuntu-latest

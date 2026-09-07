@@ -92,14 +92,14 @@ fn args_of(flags: &[&str]) -> Vec<String> {
 }
 
 fn prove(args: &[String]) -> serde_json::Value {
-    let out = Command::new(env!("CARGO_BIN_EXE_b65"))
+    let out = Command::new(env!("CARGO_BIN_EXE_zk-prover"))
         .args(args)
         .env("RAYON_NUM_THREADS", "4")
         .output()
         .expect("run the prover binary");
     assert!(
         out.status.success(),
-        "b65 {} failed:\n{}",
+        "zk-prover {} failed:\n{}",
         args.join(" "),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -112,11 +112,11 @@ fn synthetic_segment_digests_and_binding_tables_are_pinned() {
         let args = args_of(c.flags);
         let v = prove(&args);
         let point = &v["result"]["point"];
-        assert_eq!(point["accepts"], serde_json::Value::Bool(true), "{}: b65 {}", c.name, args.join(" "));
+        assert_eq!(point["accepts"], serde_json::Value::Bool(true), "{}: zk-prover {}", c.name, args.join(" "));
         let got = point["proof_sha256"].as_str().unwrap_or("");
         assert!(
             got.starts_with(c.digest),
-            "{}: proof digest moved for `b65 {}`: got {got}, pinned {}; if the change is meant \
+            "{}: proof digest moved for `zk-prover {}`: got {got}, pinned {}; if the change is meant \
              to alter the proof, record the new digest in prover/README.md and here in the \
              same pull request",
             c.name, args.join(" "), c.digest

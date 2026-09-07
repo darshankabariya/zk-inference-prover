@@ -992,7 +992,7 @@ mod feedimpl {
                 family, ir.fingerprint())
                 .unwrap_or_else(|| panic!(
                     "no feed kernel for {family} fingerprint {:#010x} ({n_looks} lookups): \
-                     regenerate with `b65 genemit --families {family}` and rebuild \
+                     regenerate with `zk-prover genemit --families {family}` and rebuild \
                      libstwo_cuda.a", ir.fingerprint()));
             assert_eq!(kernel_looks, n_looks, "{family}: the kernel's look count");
 
@@ -1698,7 +1698,7 @@ const _: () = assert!(N_LANES == 1usize << LOG_N_LANES);
 
 // ------------------------------------------------------------------ the test ---
 
-/// `b65 gkr` -- the GKR arm's own self-test on a synthetic band.
+/// `zk-prover gkr` -- the GKR arm's own self-test on a synthetic band.
 ///
 /// What it establishes, in the order the record reports it:
 ///

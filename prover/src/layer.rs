@@ -804,7 +804,7 @@ pub const MAT_VARIANTS_CHAIN: [(&str, DeqVariant); 7] = [
     ("gate", DeqVariant::Chain), ("up", DeqVariant::Chain), ("down", DeqVariant::Chain),
 ];
 
-/// B10 step 0: the layout by name.  `b65` is B6.5's mixed one, `b10` the chain
+/// B10 step 0: the layout by name.  `zk-prover` is B6.5's mixed one, `b10` the chain
 /// on all seven; a real witness carries its own (`deq_variants` in the manifest,
 /// written by `extract.py` from the spec) and this is only the fallback and the
 /// synthetic layer's choice.
@@ -1223,7 +1223,7 @@ impl Layer {
     /// assumed:
     ///
     /// * the `Params` cannot be derived from this layer -- `ao_jo_min/max` and
-    ///   `ao_acc_*_bits` come off the activations -- so `b65 expect-root
+    ///   `ao_acc_*_bits` come off the activations -- so `zk-prover expect-root
     ///   --weights-only` requires `--params FILE`, the statement's own
     ///   `Fixed.params`, and that is the right shape for the check anyway: the
     ///   verifier derives the root from *the statement's* declared shape and the
@@ -3869,7 +3869,7 @@ fn mat_logup_ir(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
             stwo_constraint_framework::FrameworkEval>::cuda_eval_name(&eval);
         let fp = ir.fingerprint();
         let (shape, looks) = crate::gencudakernels::gen_shape_of(family, fp).unwrap_or_else(|| {
-            panic!("no generation kernel for {family} fingerprint {fp:#010x}                     ({} lookups): regenerate with `b65 genemit` and rebuild libstwo_cuda.a",
+            panic!("no generation kernel for {family} fingerprint {fp:#010x}                     ({} lookups): regenerate with `zk-prover genemit` and rebuild libstwo_cuda.a",
                    ir.fracs.len())
         });
         assert_eq!(looks, ir.fracs.len(), "{family}: lookup count disagrees with the kernel");

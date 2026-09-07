@@ -199,7 +199,7 @@ fn shape_of(family: &str, ir: &Ir) -> usize {
         let fp = ir.fingerprint();
         panic!(
             "no generation kernel for {family} fingerprint {fp:#010x} ({} lookups): \
-             regenerate with `b65 genemit --families {family}` and rebuild libstwo_cuda.a",
+             regenerate with `zk-prover genemit --families {family}` and rebuild libstwo_cuda.a",
             ir.fracs.len()
         )
     })
