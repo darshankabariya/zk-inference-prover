@@ -1329,13 +1329,13 @@ pub struct ResidualStreamComponent {
     /// natural row order, for the Horner bindings: per group, then per `outs` group
     pub in_nat: Vec<Vec<(i64, i64)>>,
     pub out_nat: Vec<Vec<(i64, i64)>>,
-    /// B11 stream M: the component's columns when the fill left them on the card,
+    /// B11 stream M: the component's columns when the witness generation left them on the card,
     /// under `ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM=1`. `pre` and `base` are then empty and this is where
     /// the columns are. The three arrays above are *not* on the card: the bindings
     /// and the boundary sides read them by row, they are a fifth of the
     /// columns' bytes, and bringing them back is what lets the whole binding half
     /// stay exactly where it was.
-    pub dev: Option<crate::dev_residual_stream_fill::DevResidualStream>,
+    pub dev: Option<crate::dev_residual_stream_witness_gen::DevResidualStream>,
 }
 
 impl ResidualStreamComponent {
@@ -1400,7 +1400,7 @@ struct RowOut {
     fired: usize,
 }
 
-/// The tag a row's lookup carries so the parallel fill's multiplicities can be
+/// The tag a row's lookup carries so the parallel witness generation's multiplicities can be
 /// merged into the right table afterwards.  `T_UN + i` is the `i`-th unary
 /// table, so the base has to sit above every fixed tag: with one unary the old
 /// base of 5 worked by luck, and the second one collided with `T_SMUL`, which
@@ -1440,7 +1440,7 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
                               -> ResidualStreamComponent {
     let log_rows = log_rows_for(w.rows, 1);
     let rows = 1usize << log_rows;
-    // B11 stream M: which fill runs. 1 is the device's alone -- `pre` and
+    // B11 stream M: which witness generation runs. 1 is the device's alone -- `pre` and
     // `base` stay empty and the columns live in `dev` -- and 2 builds both and
     // asserts every cell, every multiplicity delta, `off_table`, `bad_exp` and
     // both natural arrays before either is used.
@@ -1449,31 +1449,31 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
     // path rather than running a kernel that has never heard of them. That is
     // announced: a probe that silently proved the untampered witness would read
     // as a gadget that accepts.
-    let m4g = crate::dev_residual_stream_fill::mode();
+    let m4g = crate::dev_residual_stream_witness_gen::mode();
     let m4g = if m4g != 0 && tamper.is_some() {
-        eprintln!("residual_stream_fill-dev: {tag}: a residual-stream tamper is set, \
-                  so this component fills on the host");
+        eprintln!("residual_stream_witness_gen-dev: {tag}: a residual-stream tamper is set, \
+                  so this component generates its witness on the host");
         0
     } else if m4g != 0 && prog.n_pre > 0 {
         // stream II: `FSlot` has no encoding for a preprocessed operand -- a
         // `Src::Pre` lowers to `(NONE, NONE)`, which the kernel reads as the
-        // constant zero -- so a component with one takes the host fill whatever the
+        // constant zero -- so a component with one takes the host witness generation whatever the
         // switch says, as a wide Freivalds group already does.  Announced, because a
-        // device fill that silently multiplied by zero would look like a bad
+        // device witness generation that silently multiplied by zero would look like a bad
         // witness.
-        eprintln!("residual_stream_fill-dev: {tag}: the component reads preprocessed values, \
-                  so it fills on the host");
+        eprintln!("residual_stream_witness_gen-dev: {tag}: the component reads preprocessed values, \
+                  so it generates its witness on the host");
         0
     } else {
         m4g
     };
     if m4g == 1 {
-        let dev = crate::dev_residual_stream_fill::residual_stream_component_dev(w, prog, round, tables);
+        let dev = crate::dev_residual_stream_witness_gen::residual_stream_component_dev(w, prog, round, tables);
         let (ref_ok, ref_n) = ref_count(w, prog, &dev.outs);
         let bad_exp = dev.bad_exp;
         let (in_nat, out_nat, outs) =
             (dev.in_nat.clone(), dev.out_nat.clone(), dev.outs.clone());
-        crate::dev_residual_stream_fill::merge(tables, &dev);
+        crate::dev_residual_stream_witness_gen::merge(tables, &dev);
         return ResidualStreamComponent {
             pre: vec![], base: vec![], log_rows, rows: w.rows,
             n_ops: w.rows * prog.slots.len(),
@@ -1483,7 +1483,7 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
             dev: Some(dev),
         };
     }
-    let m4g_snap = (m4g == 2).then(|| crate::dev_residual_stream_fill::ResidualStreamSnap::of(tables));
+    let m4g_snap = (m4g == 2).then(|| crate::dev_residual_stream_witness_gen::ResidualStreamSnap::of(tables));
     let m4g_off = tables.off_table;
     let n_cols = prog.n_cols(round);
     let sticky = round.needs_sticky();
@@ -1496,7 +1496,7 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
         }).collect();
     let out_w: usize = prog.outs.iter().map(|o| o.len()).sum();
 
-    let filled: Vec<RowOut> = (0..rows)
+    let witness_gen: Vec<RowOut> = (0..rows)
         .into_par_iter()
         .map(|j| {
             let mut cells = vec![M31::zero(); n_cols];
@@ -1784,13 +1784,13 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
 
     let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); rows]; n_cols];
     let (mut ref_ok, mut ref_n, mut bad_exp) = (0usize, 0usize, 0usize);
-    let fired: usize = filled.iter().map(|f| f.fired).sum();
+    let fired: usize = witness_gen.iter().map(|f| f.fired).sum();
     if tamper.is_some() && fired == 0 {
         eprintln!("{tag}: the {} tamper did not fire -- this component is the honest one",
                   tamper.unwrap().name());
     }
     let mut outs: Vec<Vec<u16>> = prog.outs.iter().map(|o| vec![0u16; rows * o.len()]).collect();
-    for (j, f) in filled.iter().enumerate() {
+    for (j, f) in witness_gen.iter().enumerate() {
         for (c, v) in f.cells.iter().enumerate() {
             cols[c][j] = *v;
         }
@@ -1850,7 +1850,7 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
         prog.groups.iter().map(|g| Vec::with_capacity(rows * g.n)).collect();
     let mut out_nat: Vec<Vec<(i64, i64)>> =
         prog.outs.iter().map(|o| Vec::with_capacity(rows * o.len())).collect();
-    for f in &filled {
+    for f in &witness_gen {
         let mut b = 0usize;
         for (g, gr) in prog.groups.iter().enumerate() {
             in_nat[g].extend_from_slice(&f.in_nat[b..b + gr.n]);
@@ -1862,18 +1862,18 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
             b += o.len();
         }
     }
-    // B11 stream M, mode 2: both fills built, everything asserted equal before
+    // B11 stream M, mode 2: both witness generations built, everything asserted equal before
     // any column is used. The device's own bumps are the check's and not the
-    // proof's, so the host's tables go back where the host fill left them.
+    // proof's, so the host's tables go back where the host witness generation left them.
     if m4g == 2 {
-        let after = crate::dev_residual_stream_fill::ResidualStreamSnap::of(tables);
+        let after = crate::dev_residual_stream_witness_gen::ResidualStreamSnap::of(tables);
         let after_off = tables.off_table;
-        let dev = crate::dev_residual_stream_fill::residual_stream_component_dev(w, prog, round, tables);
-        crate::dev_residual_stream_fill::check_residual_stream_dev(tag, &base, &pre, &dev,
+        let dev = crate::dev_residual_stream_witness_gen::residual_stream_component_dev(w, prog, round, tables);
+        crate::dev_residual_stream_witness_gen::check_residual_stream_dev(tag, &base, &pre, &dev,
                                                                    after_off - m4g_off, bad_exp,
                                                                    &in_nat, &out_nat, &outs,
                                                                    &m4g_snap.unwrap(), &after);
-        crate::dev_residual_stream_fill::restore(tables, &after, after_off);
+        crate::dev_residual_stream_witness_gen::restore(tables, &after, after_off);
     }
     ResidualStreamComponent {
         pre, base, log_rows, rows: w.rows, n_ops, n_leaves: n_leaf_tot,
@@ -1937,13 +1937,13 @@ fn src_cols_any(prog: &Prog, s: &Src, round: Round) -> (usize, usize) {
     }
 }
 
-/// Where each binding's sequence sits in the fill's two row-flat natural arrays.
+/// Where each binding's sequence sits in the witness generation's two row-flat natural arrays.
 ///
 /// B11 stream N. The host reads a binding through `binding_vals`, which hands back the
 /// one regrouped vector for that group or output. The device has no regrouped
-/// vectors -- `b65_fill_residual_stream` writes one array per kind, `n_leaves` or `out_w`
+/// vectors -- `b65_witness_gen_residual_stream` writes one array per kind, `n_leaves` or `out_w`
 /// `(sm, ef)` pairs to a row -- so a binding is named by where its sequence starts
-/// in a row and how wide it is. Both offsets are the same running sums the fill
+/// in a row and how wide it is. Both offsets are the same running sums the witness generation
 /// itself uses: `FGroup::flat` for the leaves, and `out_slot`'s concatenation
 /// order for the outputs.
 ///
@@ -2007,8 +2007,8 @@ pub fn residual_stream_interaction(r: &ResidualStreamComponent, rels: &ResidualS
     let mut claimed: Vec<SecureField> = vec![];
     if let Some(t) = binding {
         // B11 stream N: which side folds the bindings. The device route needs the
-        // fill's own natural arrays, so it exists exactly when this component
-        // filled on the card; mode 2 builds both and asserts every cell and
+        // witness generation's own natural arrays, so it exists exactly when this component
+        // built on the card; mode 2 builds both and asserts every cell and
         // every claim.
         let m4t = r.dev.as_ref().filter(|_| crate::devacc::binding_mode() >= 1);
         let host = m4t.is_none() || crate::devacc::binding_mode() == 2;
@@ -2556,7 +2556,7 @@ pub fn run(w: &ResidualStreamWitness, prog: &Prog, round: Round, kmax: u32,
     let mut sums = Sums { uses: it.use_sum, tables: SecureField::zero() };
     // B11 stream M: this rung is the SimdBackend probe path and commits through
     // a `Session`, so the router's columns come back to the host here. They are
-    // already the host's -- the rung has no device fill for `frac_cols` to
+    // already the host's -- the rung has no device witness generation for `frac_cols` to
     // notice -- and `into_host` is loud if that ever stops being true.
     let mut icols: Vec<Eval> = it.cols.into_iter().map(|c| c.into_host()).collect();
 

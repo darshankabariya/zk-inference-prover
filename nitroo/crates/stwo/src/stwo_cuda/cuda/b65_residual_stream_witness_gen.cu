@@ -1,14 +1,14 @@
-// B11 stream M: the residual stream's generation, on the device. See `b65_residual_stream_fill.cuh` for
+// B11 stream M: the residual stream's generation, on the device. See `b65_residual_stream_witness_gen.cuh` for
 // why this is an interpreter and not an emit.
 #include "fields.cuh"
 #include "utils.cuh"
-#include "b65_residual_stream_fill.cuh"
+#include "b65_residual_stream_witness_gen.cuh"
 
-#define B65_RESIDUAL_STREAM_FILL_BLOCK 128u
+#define B65_RESIDUAL_STREAM_WITNESS_GEN_BLOCK 128u
 
 // ---------------------------------------------------------------- the permutation --
 
-// `common.rs`'s `m4_perm`, the same involution `b65_fill.cu` uses: the thread
+// `common.rs`'s `m4_perm`, the same involution `b65_dequant_witness_gen.cu` uses: the thread
 // that owns committed output `i` computes the value of coset row `f(i)`.
 __device__ __forceinline__ unsigned g_perm(unsigned i, unsigned log_n) {
     const unsigned n = 1u << log_n;
@@ -36,7 +36,7 @@ __device__ __forceinline__ long long g_sgn_of(m31 v) {
 
 // ------------------------------------------------------------------ the multiplicities --
 
-// The same warp-aggregated scatter-add `b65_fill.cu` uses. The residual stream's lookups
+// The same warp-aggregated scatter-add `b65_dequant_witness_gen.cu` uses. The residual stream's lookups
 // concentrate hard -- every leaf of a padded row hits `val_at(0, 0) = 0` -- so
 // without this one address serialises the kernel.
 __device__ __forceinline__ void g_bump(unsigned *m, unsigned idx) {
@@ -49,10 +49,10 @@ __device__ __forceinline__ void g_bump(unsigned *m, unsigned idx) {
 }
 
 // `residual_stream_component`'s `match ... { Some(i) => look.push(..), None => off += 1 }`,
-// as one call: the index is `B65_RESIDUAL_STREAM_FILL_NONE` when the host's lookup is `None`.
+// as one call: the index is `B65_RESIDUAL_STREAM_WITNESS_GEN_NONE` when the host's lookup is `None`.
 __device__ __forceinline__ void g_bump_or_off(B65ResidualStreamMult t, unsigned idx,
                                               unsigned *off, unsigned drop) {
-    if (idx == B65_RESIDUAL_STREAM_FILL_NONE || idx >= t.n) {
+    if (idx == B65_RESIDUAL_STREAM_WITNESS_GEN_NONE || idx >= t.n) {
         *off += 1u;
         return;
     }
@@ -98,7 +98,7 @@ __device__ __forceinline__ unsigned g_pow_at(long long u) {
     if (u >= -(long long)B65_RESIDUAL_STREAM_UMIN && u < 0) {
         return B65_RESIDUAL_STREAM_DMAX + 1u + (unsigned)(-u - 1);
     }
-    return B65_RESIDUAL_STREAM_FILL_NONE;
+    return B65_RESIDUAL_STREAM_WITNESS_GEN_NONE;
 }
 
 // `residual_stream::val_at`: the zero row, then `(ef, m7, sign)`.
@@ -108,7 +108,7 @@ __device__ __forceinline__ unsigned g_val_at(long long sm, unsigned ef) {
     }
     const unsigned long long a = (unsigned long long)(sm < 0 ? -sm : sm);
     if (ef == 0u || ef >= 0xffu || a < 128ull || a >= 256ull) {
-        return B65_RESIDUAL_STREAM_FILL_NONE;
+        return B65_RESIDUAL_STREAM_WITNESS_GEN_NONE;
     }
     const unsigned m7 = (unsigned)(a - 128ull);
     return 1u + ((ef - 1u) * 128u + m7) * 2u + (sm < 0 ? 1u : 0u);
@@ -121,7 +121,7 @@ __device__ __forceinline__ unsigned g_smul_idx(long long v) {
     }
     const unsigned long long a = (unsigned long long)(v < 0 ? -v : v);
     if (a < 128ull || a >= 256ull) {
-        return B65_RESIDUAL_STREAM_FILL_NONE;
+        return B65_RESIDUAL_STREAM_WITNESS_GEN_NONE;
     }
     return 1u + (v < 0 ? 128u : 0u) + (unsigned)(a - 128ull);
 }
@@ -129,8 +129,8 @@ __device__ __forceinline__ unsigned g_smul_idx(long long v) {
 __device__ __forceinline__ unsigned g_smul_at(long long a, long long b) {
     const unsigned ia = g_smul_idx(a);
     const unsigned ib = g_smul_idx(b);
-    if (ia == B65_RESIDUAL_STREAM_FILL_NONE || ib == B65_RESIDUAL_STREAM_FILL_NONE) {
-        return B65_RESIDUAL_STREAM_FILL_NONE;
+    if (ia == B65_RESIDUAL_STREAM_WITNESS_GEN_NONE || ib == B65_RESIDUAL_STREAM_WITNESS_GEN_NONE) {
+        return B65_RESIDUAL_STREAM_WITNESS_GEN_NONE;
     }
     return ia * 257u + ib;
 }
@@ -172,11 +172,11 @@ __device__ __forceinline__ unsigned g_norm_at(unsigned m2, unsigned ph, unsigned
         return m2;
     }
     if (ph == 0u || (ph & (ph - 1u)) != 0u || m2 < 256u || m2 >= 512u) {
-        return B65_RESIDUAL_STREAM_FILL_NONE;
+        return B65_RESIDUAL_STREAM_WITNESS_GEN_NONE;
     }
     const unsigned k = (unsigned)(31 - __clz((int)ph));
     if (k > kmax) {
-        return B65_RESIDUAL_STREAM_FILL_NONE;
+        return B65_RESIDUAL_STREAM_WITNESS_GEN_NONE;
     }
     const unsigned per = 1u + sticky;
     return 256u + (k * 256u + (m2 - 256u)) * per + (sticky ? st : 0u);
@@ -186,14 +186,14 @@ __device__ __forceinline__ unsigned g_norm_at(unsigned m2, unsigned ph, unsigned
 __device__ __forceinline__ unsigned g_frac_at(unsigned ph, unsigned long long r,
                                               unsigned kmax) {
     if (ph == 0u) {
-        return (r == 0ull) ? 0u : B65_RESIDUAL_STREAM_FILL_NONE;
+        return (r == 0ull) ? 0u : B65_RESIDUAL_STREAM_WITNESS_GEN_NONE;
     }
     if ((ph & (ph - 1u)) != 0u) {
-        return B65_RESIDUAL_STREAM_FILL_NONE;
+        return B65_RESIDUAL_STREAM_WITNESS_GEN_NONE;
     }
     const unsigned k = (unsigned)(31 - __clz((int)ph));
     if (k > kmax || r >= (unsigned long long)ph) {
-        return B65_RESIDUAL_STREAM_FILL_NONE;
+        return B65_RESIDUAL_STREAM_WITNESS_GEN_NONE;
     }
     return ph + (unsigned)r;
 }
@@ -208,7 +208,7 @@ __device__ __forceinline__ unsigned g_frac_at(unsigned ph, unsigned long long r,
 __device__ __forceinline__ void g_operand(unsigned *const *cols, unsigned at,
                                           unsigned c_sm, unsigned c_ef, bool from_slot,
                                           unsigned mutate, long long *sm, unsigned *ef) {
-    if (c_sm == B65_RESIDUAL_STREAM_FILL_NONE) {
+    if (c_sm == B65_RESIDUAL_STREAM_WITNESS_GEN_NONE) {
         *sm = 0;
         *ef = 0u;
         return;
@@ -228,7 +228,7 @@ __device__ __forceinline__ void g_operand(unsigned *const *cols, unsigned at,
     }
 }
 
-__global__ __launch_bounds__(B65_RESIDUAL_STREAM_FILL_BLOCK) void b65_residual_stream_fill_kernel(
+__global__ __launch_bounds__(B65_RESIDUAL_STREAM_WITNESS_GEN_BLOCK) void b65_residual_stream_witness_gen_kernel(
     const unsigned *wit, const B65ResidualStreamGroup *groups, const B65ResidualStreamSlot *slots,
     const unsigned *norm3, unsigned n_norm, const int *smul3, unsigned n_smul,
     const int *const *un2, unsigned n_val, const unsigned *out_slot,
@@ -261,7 +261,7 @@ __global__ __launch_bounds__(B65_RESIDUAL_STREAM_FILL_BLOCK) void b65_residual_s
             const unsigned b = gr.leaf_col + k * gr.width;
             cols[b][i] = g_m31_of(sm);
             cols[b + 1][i] = g_m31_of((long long)ef);
-            // `j`, not `i`: the host builds `in_nat` by walking `filled` in
+            // `j`, not `i`: the host builds `in_nat` by walking `witness_gen` in
             // *coset* row order and never permutes it -- only the committed
             // columns go through `eval_of`. The bindings read this array by row, so
             // it stays in row order here too.
@@ -278,7 +278,7 @@ __global__ __launch_bounds__(B65_RESIDUAL_STREAM_FILL_BLOCK) void b65_residual_s
                 // the unary image, tabulated: `residual_stream::un_table` over `val_at`
                 long long osm = 0;
                 unsigned oef = 0u;
-                if (v != B65_RESIDUAL_STREAM_FILL_NONE && v < n_val) {
+                if (v != B65_RESIDUAL_STREAM_WITNESS_GEN_NONE && v < n_val) {
                     osm = (long long)un2[u][(size_t)v * 2];
                     oef = (unsigned)un2[u][(size_t)v * 2 + 1];
                 } else {
@@ -317,13 +317,13 @@ __global__ __launch_bounds__(B65_RESIDUAL_STREAM_FILL_BLOCK) void b65_residual_s
                 const long long u = (long long)a_ef - etop + (long long)B65_RESIDUAL_STREAM_DMAX;
                 const unsigned p = g_pow_at(u);
                 g_bump_or_off(m_pow, p, &off, drop);
-                fa = (p != B65_RESIDUAL_STREAM_FILL_NONE && u >= 0) ? (1LL << u) : 0LL;
+                fa = (p != B65_RESIDUAL_STREAM_WITNESS_GEN_NONE && u >= 0) ? (1LL << u) : 0LL;
             }
             {
                 const long long u = (long long)b_ef - etop + (long long)B65_RESIDUAL_STREAM_DMAX;
                 const unsigned p = g_pow_at(u);
                 g_bump_or_off(m_pow, p, &off, drop);
-                fb = (p != B65_RESIDUAL_STREAM_FILL_NONE && u >= 0) ? (1LL << u) : 0LL;
+                fb = (p != B65_RESIDUAL_STREAM_WITNESS_GEN_NONE && u >= 0) ? (1LL << u) : 0LL;
             }
             cols[b][i] = g_m31_of(fa);
             cols[b + 1][i] = g_m31_of(fb);
@@ -346,7 +346,7 @@ __global__ __launch_bounds__(B65_RESIDUAL_STREAM_FILL_BLOCK) void b65_residual_s
             }
             const unsigned ni = g_norm_at(m2, ph, st, cfg.kmax, cfg.sticky);
             unsigned m7n = 0u, efn = 0u, nzn = 0u;
-            if (ni != B65_RESIDUAL_STREAM_FILL_NONE && ni < n_norm) {
+            if (ni != B65_RESIDUAL_STREAM_WITNESS_GEN_NONE && ni < n_norm) {
                 m7n = norm3[(size_t)ni * 3];
                 efn = norm3[(size_t)ni * 3 + 1];
                 nzn = norm3[(size_t)ni * 3 + 2];
@@ -384,7 +384,7 @@ __global__ __launch_bounds__(B65_RESIDUAL_STREAM_FILL_BLOCK) void b65_residual_s
             const unsigned si = g_smul_at(a_sm, b_sm);
             long long c_sm0 = 0;
             unsigned cy = 0u, nzc = 0u;
-            if (si != B65_RESIDUAL_STREAM_FILL_NONE && si < n_smul) {
+            if (si != B65_RESIDUAL_STREAM_WITNESS_GEN_NONE && si < n_smul) {
                 c_sm0 = (long long)smul3[(size_t)si * 3];
                 cy = (unsigned)smul3[(size_t)si * 3 + 1];
                 nzc = (unsigned)smul3[(size_t)si * 3 + 2];
@@ -412,7 +412,7 @@ __global__ __launch_bounds__(B65_RESIDUAL_STREAM_FILL_BLOCK) void b65_residual_s
         // the slot's own output value, looked up like any other committed pair
         const unsigned vo = (c_ef >= 0 && c_ef < 0xff)
                                 ? g_val_at(c_sm, (unsigned)(c_ef < 0 ? 0 : c_ef))
-                                : B65_RESIDUAL_STREAM_FILL_NONE;
+                                : B65_RESIDUAL_STREAM_WITNESS_GEN_NONE;
         g_bump_or_off(m_val, vo, &off, drop);
     }
 
@@ -439,7 +439,7 @@ __global__ __launch_bounds__(B65_RESIDUAL_STREAM_FILL_BLOCK) void b65_residual_s
     }
 }
 
-extern "C" void b65_fill_residual_stream(
+extern "C" void b65_witness_gen_residual_stream(
     const unsigned *wit, const B65ResidualStreamGroup *groups, const B65ResidualStreamSlot *slots,
     const unsigned *norm3, unsigned n_norm, const int *smul3, unsigned n_smul,
     const int *const *un2, unsigned n_un, unsigned n_val, const unsigned *out_slot,
@@ -448,16 +448,16 @@ extern "C" void b65_fill_residual_stream(
     B65ResidualStreamMult m_smul, const B65ResidualStreamMult *m_un, unsigned *counts, B65ResidualStreamCfg cfg) {
     // The two *arrays of pointers* the caller builds on the host have to be on
     // the card before a kernel can index them -- the same `clone_to_device`
-    // `b65_fill_dequant` does for its column lists. Everything else the caller
+    // `b65_witness_gen_dequant` does for its column lists. Everything else the caller
     // hands over is already device memory.
-    const unsigned blocks = (cfg.rows + B65_RESIDUAL_STREAM_FILL_BLOCK - 1u) / B65_RESIDUAL_STREAM_FILL_BLOCK;
+    const unsigned blocks = (cfg.rows + B65_RESIDUAL_STREAM_WITNESS_GEN_BLOCK - 1u) / B65_RESIDUAL_STREAM_WITNESS_GEN_BLOCK;
     unsigned **d_cols =
         clone_to_device<unsigned *>(const_cast<unsigned **>(cols), cfg.n_cols);
     const int **d_un = nullptr;
     if (n_un > 0u) {
         d_un = clone_to_device<const int *>(const_cast<const int **>(un2), n_un);
     }
-    b65_residual_stream_fill_kernel<<<blocks, B65_RESIDUAL_STREAM_FILL_BLOCK>>>(
+    b65_residual_stream_witness_gen_kernel<<<blocks, B65_RESIDUAL_STREAM_WITNESS_GEN_BLOCK>>>(
         wit, groups, slots, norm3, n_norm, smul3, n_smul, d_un, n_val, out_slot,
         d_cols, out_pat, out_nat, in_nat, m_pow, m_norm, m_val, m_frac, m_smul,
         m_un, counts, cfg);

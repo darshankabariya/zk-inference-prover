@@ -1,12 +1,12 @@
-//! B7a milestone 4 (19.6): the dequant witness fill, on the device.
+//! B7a milestone 4 (19.6): the dequant witness generation, on the device.
 //!
-//! 18.7's row 1 is "the four family fills, 1.98 s and 46% of the wall, the only
+//! 18.7's row 1 is "the four family witness generations, 1.98 s and 46% of the wall, the only
 //! row with no shortcut". This is the first of the four, and what it moves is
 //! not only the arithmetic:
 //!
 //! | what the host does per component | what happens here |
 //! |---|---|
-//! | `fill_mat_row` over 2^17 rows x `per_row` slots | one kernel, one thread per committed row |
+//! | `witness_gen_mat_row` over 2^17 rows x `per_row` slots | one kernel, one thread per committed row |
 //! | `eval_of` -- the coset shuffle and the SIMD repack, 37% of trace generation | nothing: the thread owns the output index and reads `m4_perm(i)` |
 //! | per-block `HashMap` multiplicities, merged serially | a warp-aggregated scatter-add, one D2H of the counters |
 //! | 1.26 GB of columns uploaded at `Session::commit` | nothing: the columns are already there |
@@ -17,7 +17,7 @@
 //! scales, and the two shared tables, which are cached across components.
 //!
 //! `ZK_DEVICE_WITNESS_GEN_DEQUANT` says which path runs, on the same three-value pattern
-//! `ZK_GENERATED_LOGUP` uses: 0 the host fill, 1 the device fill, 2 both with every
+//! `ZK_GENERATED_LOGUP` uses: 0 the host witness generation, 1 the device witness generation, 2 both with every
 //! cell asserted equal. `ZK_KERNEL_REFERENCE_CHECK=0` turns off the f64 cross-check inside
 //! the kernel.
 
@@ -28,10 +28,10 @@ use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
 use crate::dequant::{Map, Spec, Variant as DeqVariant};
 use crate::layer::{Mat, MatLayout, Tables};
 
-/// Mirrors `B65FillCfg` in `b65_fill.cuh`, field for field and in order.
+/// Mirrors `B65DequantWitnessGenCfg` in `b65_dequant_witness_gen.cuh`, field for field and in order.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct FillCfg {
+pub struct WitnessGenCfg {
     pub variant: u32,
     pub sticky: u32,
     pub kmax: u32,
@@ -64,9 +64,9 @@ pub struct FillCfg {
     pub mutate: u32,
 }
 
-/// `ZK_MUT_WITNESS_GEN_DEQUANT`: one deliberate defect in the device fill, so mode 2's
+/// `ZK_MUT_WITNESS_GEN_DEQUANT`: one deliberate defect in the device witness generation, so mode 2's
 /// check has negative controls. The names are the kernel's.
-fn fill_mut() -> u32 {
+fn witness_gen_mut() -> u32 {
     match std::env::var("ZK_MUT_WITNESS_GEN_DEQUANT").ok().as_deref() {
         None | Some("") | Some("none") => 0,
         Some("noperm") => 1,
@@ -82,7 +82,7 @@ fn fill_mut() -> u32 {
 const NONE: u32 = u32::MAX;
 
 unsafe extern "C" {
-    fn b65_fill_dequant(
+    fn b65_witness_gen_dequant(
         acc: *const i32,
         jx: *const i32,
         jw: *const i32,
@@ -100,7 +100,7 @@ unsafe extern "C" {
         m_r8: *mut u32,
         counts: *mut u32,
         want_out: *mut u32,
-        cfg: FillCfg,
+        cfg: WitnessGenCfg,
     );
 }
 
@@ -161,11 +161,11 @@ fn up_u32(v: Vec<u32>) -> Uint32Vec {
 }
 
 /// One component's columns, on the device, in committed order.
-pub struct DevFill {
+pub struct DevDequantWitnessGen {
     pub pre: Vec<BaseFieldVec>,
     pub base: Vec<BaseFieldVec>,
     /// B7a milestone 4 (section 3 row 1): the four multiplicity counters this
-    /// fill scatter-added into, left where it left them. `b65_pre_fill` sums
+    /// witness generation scatter-added into, left where it left them. `b65_pre_witness_gen` sums
     /// one per component into the column, so with `ZK_DEVICE_PREPROCESSED=1` the download and
     /// the parallel merge below never happen -- 23.1's `m_exp`, four more times.
     pub m_norm: Uint32Vec,
@@ -189,12 +189,12 @@ pub struct DevFill {
 /// stream M's head fix. The kernel's preprocessed list is the per-channel
 /// scale columns and five selectors; a component that publishes an output-side
 /// claim commits three more (`layer.rs`, the `if output_claim` block), and until this
-/// parameter existed the device fill was never told. It sized `n_pre` three
+/// parameter existed the device witness generation was never told. It sized `n_pre` three
 /// columns short -- 506 against the host's 509 on `lm_head`, the sequence's
 /// only o-side matmul -- and every later component's preprocessed indices
 /// shifted by three. The three are functions of the row index alone, so they
 /// are built here on the host and appended in the host's order; nothing about
-/// `b65_fill_dequant` moves, which is what keeps the installed kernel
+/// `b65_witness_gen_dequant` moves, which is what keeps the installed kernel
 /// fingerprints out of it.
 pub fn mat_component_dev(
     m: &Mat,
@@ -204,13 +204,13 @@ pub fn mat_component_dev(
     tables: &mut Tables,
     with_want: bool,
     output_claim: bool,
-) -> DevFill {
+) -> DevDequantWitnessGen {
     let rows = 1usize << lay.log_rows;
     let f = map.f;
     let sticky = spec.round.needs_sticky();
     let chan_w = if spec.variant == DeqVariant::Chain { 2 } else { 1 };
     // what the kernel writes. The o-side trio is appended after it returns, so
-    // this stays exactly the count `b65_fill_dequant` has always been handed.
+    // this stays exactly the count `b65_witness_gen_dequant` has always been handed.
     let n_pre = chan_w * lay.per_row + 5;
     let do_ref = spec.round == crate::bf16::Round::Even
         && crate::util::m4_switch("ZK_KERNEL_REFERENCE_CHECK");
@@ -266,7 +266,7 @@ pub fn mat_component_dev(
 
     crate::util::m4_add("gen/deq_dev_h2d", t_h2d.elapsed().as_secs_f64());
 
-    // the columns, in committed order, uninitialised because the fill writes
+    // the columns, in committed order, uninitialised because the witness generation writes
     // every cell of every one of them
     let t_alloc = std::time::Instant::now();
     let pre: Vec<BaseFieldVec> =
@@ -286,7 +286,7 @@ pub fn mat_component_dev(
     crate::util::m4_add("gen/deq_dev_alloc", t_alloc.elapsed().as_secs_f64());
     crate::util::m4_add("gen/deq_dev_up", t_up.elapsed().as_secs_f64());
 
-    let cfg = FillCfg {
+    let cfg = WitnessGenCfg {
         variant: u32::from(spec.variant == DeqVariant::Chain),
         sticky: u32::from(sticky),
         kmax: spec.kmax,
@@ -319,13 +319,13 @@ pub fn mat_component_dev(
         n_frac: tables.frac.len() as u32,
         n_mul: tbl.n_mul,
         n_r8: tables.m_r[r8].len() as u32,
-        mutate: fill_mut(),
+        mutate: witness_gen_mut(),
     };
 
     let t_k = std::time::Instant::now();
     let null32 = std::ptr::null::<u32>();
     unsafe {
-        b65_fill_dequant(
+        b65_witness_gen_dequant(
             d_acc.device_ptr as *const i32,
             d_jx.as_ref().map(|d| d.device_ptr as *const i32).unwrap_or(std::ptr::null()),
             d_jw.as_ref().map(|d| d.device_ptr as *const i32).unwrap_or(std::ptr::null()),
@@ -393,7 +393,7 @@ pub fn mat_component_dev(
     let want = want.map(|d| d.to_vec());
     crate::util::m4_add("gen/deq_dev_counters", t_d.elapsed().as_secs_f64());
     eprintln!(
-        "fill-dev: {} {} shape 2^{} x {} slots -- {} base and {} pre columns, \
+        "witness-gen-dev: {} {} shape 2^{} x {} slots -- {} base and {} pre columns, \
          kernel {:.4} s",
         m.name,
         if spec.variant == DeqVariant::Chain { "chain" } else { "pow2" },
@@ -404,7 +404,7 @@ pub fn mat_component_dev(
         kernel_secs
     );
 
-    DevFill { pre, base, m_norm, m_frac, m_mul, m_r8, ref_bad: got[1] as usize, want }
+    DevDequantWitnessGen { pre, base, m_norm, m_frac, m_mul, m_r8, ref_bad: got[1] as usize, want }
 }
 
 fn off(v: usize) -> u32 {

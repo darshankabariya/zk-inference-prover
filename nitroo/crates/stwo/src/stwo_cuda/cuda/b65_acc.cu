@@ -8,7 +8,7 @@
 static __device__ const qm31 B65A_QZERO = {{0u, 0u}, {0u, 0u}};
 
 // The permutation, `Grid::row` and the flag closed forms are in `b65_acc.cuh`:
-// `b65_pre_fill.cu` builds `commit_pre`'s 48 selector columns out of exactly
+// `b65_pre_witness_gen.cu` builds `commit_pre`'s 48 selector columns out of exactly
 // the same three lines these kernels segment on (section 25).
 
 // ------------------------------------------------------------------ field helpers --
@@ -74,7 +74,7 @@ __device__ __forceinline__ qm31 b65a_step(bool nofirst, qm31 step, unsigned muta
 // the three component kernels below. It is a kernel of its own because the 48
 // preprocessed selector columns `commit_pre` builds are *these bits* -- and
 // they are needed before the challenges are drawn, where the accumulators run
-// after. One array, written once at fill time, read by both.
+// after. One array, written once at witness-generation time, read by both.
 __global__ void b65a_flags_kernel(unsigned *__restrict__ flags,
                                   const B65AccFlags cfg) {
     const unsigned rows = cfg.g.rows;
@@ -358,7 +358,7 @@ __global__ void b65a_grid_kernel(const m31 *const *__restrict__ key_cols,
     //
     // Stream CC (E11): the AIR now agrees with both builders.  `KeyEval`'s
     // numerator fold carries an `act` factor of its own, read out of tree 0 from
-    // the column `b65_pre_fill.cu` writes from this same flag bit.  Before that
+    // the column `b65_pre_witness_gen.cu` writes from this same flag bit.  Before that
     // the AIR was the odd one out -- it demanded the pad -- so a padded grid
     // rejected honestly and `nomask` made it accept.  Both of those are now the
     // other way round, which is what turns this line from a difference nobody
@@ -615,7 +615,7 @@ extern "C" void b65_acc_ao(const m31 *den_col, const m31 *const *acc_cols,
 
 // ============================================================== the residual-stream bindings ==
 
-// `residual_stream::m31_of` again -- `b65_residual_stream_fill.cu` has its own copy for the same reason,
+// `residual_stream::m31_of` again -- `b65_residual_stream_witness_gen.cu` has its own copy for the same reason,
 // that the natural arrays hold the witness's signed values and not field
 // elements. `(((v % p) + p) % p)`, which is a ring map, so folding here is
 // folding what the host folded.
@@ -638,7 +638,7 @@ __global__ void b65a_residual_stream_bind_kernel(const int *__restrict__ in_nat,
     }
     const unsigned lane = blockIdx.y;
     const B65AccResidualStreamBind S = specs[lane];
-    // Coset row order, as `b65_residual_stream_fill.cu` wrote it and as the host folded it:
+    // Coset row order, as `b65_residual_stream_witness_gen.cu` wrote it and as the host folded it:
     // the bindings never permute, only the committed columns do.
     const int *src = (S.src == 0u) ? in_nat : out_nat;
     const size_t row = (size_t)j * S.stride + S.off;

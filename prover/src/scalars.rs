@@ -14,12 +14,12 @@
 //!
 //! So the cache holds, per shape, the IR of the first lowering and a provenance
 //! per scalar slot -- "the i-th recorded constant" or "entry k's z / alpha_j" --
-//! established at fill time by matching values. A later chunk of the same shape
+//! established at witness-generation time by matching values. A later chunk of the same shape
 //! runs the two numeric probes, replays the provenance, and has the IR with its
 //! own scalars in it. Values are 124-bit transcript draws, so two different
 //! quantities matching by value is the same 2^-124 event `Lower::lit` already
 //! accepts; two structurally equal quantities (the eval computing `z` twice)
-//! match at fill time and are equal on every chunk.
+//! match at witness-generation time and are equal on every chunk.
 //!
 //! The *shape* is not the family name (section 5 rule 9: the four Freivalds groups
 //! share `b65_freivalds_eval` and differ in how many matmuls they carry). The probe
@@ -504,7 +504,7 @@ pub fn mode() -> u32 {
 }
 
 /// `ZK_MUT_LOWERING_CACHE`, aimed (rule 5): `shift` replays every slot's provenance one
-/// slot over; `stale` replays nothing and keeps the fill-time scalars.
+/// slot over; `stale` replays nothing and keeps the witness generation-time scalars.
 fn mutation(family: &str) -> &'static str {
     let Ok(spec) = std::env::var("ZK_MUT_LOWERING_CACHE") else { return "none" };
     let (name, fam) = match spec.split_once(':') {
@@ -854,9 +854,9 @@ mod rr {
         let fill = TwoClaims { a: ext(5), b: ext(5) };
         let ir = crate::cudagen::lower(&fill, SecureField::zero(), 4, 5);
         let rels = relation_entries(&fill);
-        let filled = probe(&fill);
+        let witness_gen = probe(&fill);
         assert_eq!(ir.claim_slots.len(), 2, "two claims, two slots, coinciding values");
-        let prov = provenance(&ir, &filled.consts, &rels).expect("every slot accounted for");
+        let prov = provenance(&ir, &witness_gen.consts, &rels).expect("every slot accounted for");
 
         let later = probe(&TwoClaims { a: ext(11), b: ext(13) });
         let got = replay(&prov, &later.consts, &later.claims, &rels, "b65_rr_probe_test");

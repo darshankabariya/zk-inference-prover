@@ -355,7 +355,7 @@ impl Collect {
 /// B11 stream T: one site's fractions, computed where its columns already are.
 ///
 /// This is the call `interaction_phase` makes at each of the three key tile sites,
-/// in place of `Collect::push` alone. When the key tile's fill left its columns on
+/// in place of `Collect::push` alone. When the key tile's witness generation left its columns on
 /// the device there is nothing on the host to read -- `com.base` is empty and
 /// the collector's own `look_frac` would index straight out of it, which is
 /// what stream S's empty-env control recorded -- so the fractions are computed
@@ -380,7 +380,7 @@ fn unit_of(looks: &[crate::attn_trace::Look]) -> Vec<bool> {
 }
 
 /// Whether `cols` actually holds this component's committed span. A
-/// device-filled key tile has no host columns at all -- but the per-token site
+/// device-built key tile has no host columns at all -- but the per-token site
 /// passes a list that always carries its two derived high-limb blocks, so
 /// "non-empty" is not the question; "long enough to hold the span" is.
 fn host_span(at: &[usize], which: usize, cols: &[crate::common::Eval]) -> bool {
@@ -417,7 +417,7 @@ pub fn feed_site(
     };
     let air = air.expect("a key tile with device columns and no AIR");
     assert_eq!(at, &d.at[..],
-               "the committed component split disagrees with the device fill's");
+               "the committed component split disagrees with the device witness generation's");
     #[cfg(not(feature = "cuda"))]
     {
         let _ = (air, which, log_rows, looks, exp, ranges);
@@ -597,7 +597,7 @@ pub struct FamSite<'a> {
     pub mut_key: usize,
     pub log_rows: u32,
     pub unit: Vec<bool>,
-    /// the host mirrors; empty when the fill left the columns on the card
+    /// the host mirrors; empty when the witness generation left the columns on the card
     pub pre: &'a [crate::common::Eval],
     pub base: &'a [crate::common::Eval],
     #[cfg(feature = "cuda")]
@@ -642,7 +642,7 @@ pub fn fam_site<E: FrameworkEval>(c: &mut Collect, s: FamSite<'_>, eval: &E) {
     };
     // The family's own control bends one of *this component's* fractions, which is
     // a statement about the host builder's values, so it takes the host path
-    // even where the fill left the columns on the card. Nothing else moves.
+    // even where the witness generation left the columns on the card. Nothing else moves.
     let mutating = std::env::var(s.mut_env).ok()
         .and_then(|v| v.parse::<usize>().ok()) == Some(s.mut_key);
     #[cfg(feature = "cuda")]
@@ -661,7 +661,7 @@ pub fn fam_site<E: FrameworkEval>(c: &mut Collect, s: FamSite<'_>, eval: &E) {
         eprintln!("{tag}: off the feed for a control, columns downloaded");
     }
     // The host builder's inputs: the component's own columns. Only the controls
-    // reach here with a device fill, and the download they need is theirs.
+    // reach here with a device witness generation, and the download they need is theirs.
     #[cfg(feature = "cuda")]
     let down = s.dev.map(|(dpre, dbase)| {
         // `common::eval_of` takes values in *coset* order and permutes them into
@@ -795,7 +795,7 @@ mod feedimpl {
         /// `input_layer` puts it on the host. Nothing is copied, permuted or
         /// reshaped afterwards -- the permutation the plan's unit/non-unit
         /// split induces lives in the pointer table.
-        pub fn fill(&self) -> (Vec<Layer<CudaBackend>>, Vec<Inst>) {
+        pub fn witness_gen(&self) -> (Vec<Layer<CudaBackend>>, Vec<Inst>) {
             let at = self.site_at;
             let n_rows = 1usize << self.site.log_rows;
             let n_looks = self.site.n_looks();
@@ -894,7 +894,7 @@ mod feedimpl {
             let f = self.owner[instance].expect("a host instance was never dropped");
             if self.built.borrow()[instance].is_none() {
                 let fp = &self.feeds[f];
-                let (layers, _) = fp.fill();
+                let (layers, _) = fp.witness_gen();
                 self.calls.set(self.calls.get() + 1);
                 let mut b = self.built.borrow_mut();
                 for (k, l) in fp.insts.iter().zip(layers) {
@@ -1002,7 +1002,7 @@ mod feedimpl {
             let nulls = vec![std::ptr::null::<u32>(); ir.cols[0]];
             let pre = if pre_ptrs.is_empty() { nulls } else { pre_ptrs.to_vec() };
 
-            // B11 stream V, lever 1: the launch is now `FeedPlan::fill`, and
+            // B11 stream V, lever 1: the launch is now `FeedPlan::witness_gen`, and
             // everything it needs is plain data that outlives the GKR -- the
             // dispatch key, the committed columns' device pointers, the scalar
             // blob, and the site, whose instance split `plan` reproduces. So
@@ -1021,7 +1021,7 @@ mod feedimpl {
                 base_ptrs: base_ptrs.to_vec(),
                 sc,
             };
-            let (layers, insts) = fp.fill();
+            let (layers, insts) = fp.witness_gen();
             self.dev_layers.extend(layers);
             self.on_dev.extend(std::iter::repeat_n(true, insts.len()));
             self.insts.extend(insts);
@@ -1031,7 +1031,7 @@ mod feedimpl {
             self.feed_secs += t0.elapsed().as_secs_f64();
         }
 
-        /// `ZK_GKR_FEED_CHECK=1` on a host-filled key tile: the feed over an uploaded
+        /// `ZK_GKR_FEED_CHECK=1` on a host-built key tile: the feed over an uploaded
         /// copy of this site's committed columns, against the host builder,
         /// cell for cell. The fed layers are the check's and are dropped.
         #[allow(clippy::too_many_arguments)]
@@ -1385,7 +1385,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             let t0 = Instant::now();
             // B11 stream T: a fed instance is already device-resident in MLE
             // layout and crosses nothing; only a host-built one -- a diagonal block
-            // key tile, whose fill stays on the host -- is uploaded. The two lists
+            // key tile, whose witness generation stays on the host -- is uploaded. The two lists
             // interleave back into instance order, which is the transcript's.
             let mut hs = c.layers.iter();
             let mut ds = c.dev_layers.into_iter();
@@ -1437,7 +1437,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             // B11 stream V, lever 1: the fed instances' input layers are freed
             // as their first halving is produced and re-fed in the last round,
             // which is the only round that reads them. The uploaded instances
-            // -- a host-filled diagonal block key tile's -- have no feed behind them, so
+            // -- a host-built diagonal block key tile's -- have no feed behind them, so
             // `Refeed::droppable` says no and they are held as stream Q held
             // them. `ZK_GKR_REFEED=0` puts every input layer back for the
             // whole run: the same binary, the before against the after.

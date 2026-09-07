@@ -2,7 +2,7 @@
 //
 // `gen/residual_stream` was the one named host term with no device path at all -- 49.8 s
 // of seq3's 190.9 s wall at C=4K, 97% of it inside four `residual_stream::residual_stream_component`
-// calls per chunk. This is that fill.
+// calls per chunk. This is that witness generation.
 //
 // **Interpreted, not emitted, and the measurement is why.** The alternative was
 // a new `genemit` target compiling each component's straight-line `Prog` to CUDA,
@@ -27,7 +27,7 @@
 //    the whole `Src` enum disappears. Per-thread state is a few registers.
 //  * **the reads are coalesced.** One thread per committed row means
 //    consecutive threads read consecutive cells of the same column, which is
-//    the same property that makes `b65_fill.cu` fast.
+//    the same property that makes `b65_dequant_witness_gen.cu` fast.
 //  * **the unary is a table, not a function.** `un_image_parts` is
 //    f64 -> f32 -> bf16 through `rsqrt` and `silu`; reproducing that bit for bit
 //    on device transcendentals would be the one genuinely risky part of the
@@ -39,18 +39,18 @@
 // The six index maps (`pow_at`, `val_at`, `smul_at`, `norm_at`, `frac_at` and
 // the leaf/slot column maps) are all closed forms in `residual_stream.rs`, so they port as
 // written -- 20.1's property again, on a sixth family.
-#ifndef B65_RESIDUAL_STREAM_FILL_CUH
-#define B65_RESIDUAL_STREAM_FILL_CUH
+#ifndef B65_RESIDUAL_STREAM_WITNESS_GEN_CUH
+#define B65_RESIDUAL_STREAM_WITNESS_GEN_CUH
 #include "fields.cuh"
 
-#define B65_RESIDUAL_STREAM_FILL_NONE 0xffffffffu
+#define B65_RESIDUAL_STREAM_WITNESS_GEN_NONE 0xffffffffu
 
 // `residual_stream.rs`'s constants, which the kernel needs as literals.
 #define B65_RESIDUAL_STREAM_DMAX 12u
 #define B65_RESIDUAL_STREAM_UMIN 260
 #define B65_RESIDUAL_STREAM_EXP_BIAS 134
 
-// The negative controls (`ZK_MUT_WITNESS_GEN_RESIDUAL_STREAM`). Each is a way this fill could
+// The negative controls (`ZK_MUT_WITNESS_GEN_RESIDUAL_STREAM`). Each is a way this witness generation could
 // plausibly be wrong and mode 2 must catch. Section 5 rule 5: a control that
 // cannot fire on the shape under test is a finding, not a pass, so `nomul` is
 // on the list even though the sequence's four components are all `Add` -- it fires
@@ -74,7 +74,7 @@ struct B65ResidualStreamGroup {
 };
 
 // One slot: `Prog::slots[s]` with every `Src` already resolved to the column
-// its `(sm, ef)` lives in. `B65_RESIDUAL_STREAM_FILL_NONE` is `Src::Zero`.
+// its `(sm, ef)` lives in. `B65_RESIDUAL_STREAM_WITNESS_GEN_NONE` is `Src::Zero`.
 struct B65ResidualStreamSlot {
     unsigned a_sm, a_ef;
     unsigned b_sm, b_ef;
@@ -104,7 +104,7 @@ struct B65ResidualStreamCfg {
     unsigned mutate;
 };
 
-extern "C" void b65_fill_residual_stream(
+extern "C" void b65_witness_gen_residual_stream(
     // the witness: `rows * n_leaves` bf16 patterns, widened, in row-flat order
     const unsigned *wit,
     const B65ResidualStreamGroup *groups,

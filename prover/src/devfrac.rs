@@ -21,7 +21,7 @@
 //! * **which builder ran.** `ZK_GENERATED_LOGUP` keeps 19.3's meaning for every
 //!   family: 0 the hand-written builder, 1 the IR on the host, 2 both asserted
 //!   equal, 3 the generated kernel, 4 the kernel against the hand-written one.
-//! * **where the columns end up.** A component whose fill left its columns on the
+//! * **where the columns end up.** A component whose witness generation left its columns on the
 //!   device has no host columns to build from and no reason to bring its LogUp
 //!   columns back, so it takes the kernel unconditionally and hands the
 //!   commitment `AnyCol::OwnedDev` -- 19.4's "both transfers disappear
@@ -46,7 +46,7 @@ pub enum Cols<'a> {
     Unread,
 }
 
-/// A component's columns of one tree: on the device if its fill left them
+/// A component's columns of one tree: on the device if its witness generation left them
 /// there, on the host otherwise.
 pub fn cols_of<'a>(host: &'a [Eval], dev: Option<&'a [BaseFieldVec]>) -> Cols<'a> {
     match dev {
@@ -109,7 +109,7 @@ impl Cols<'_> {
     }
 }
 
-/// A key tile's three components, and its columns when its fill left them on the
+/// A key tile's three components, and its columns when its witness generation left them on the
 /// device.
 ///
 /// A key tile is one component with three components in it -- the channel grid, the
@@ -121,7 +121,7 @@ pub struct KeyTileAir<'a> {
     pub chan: &'a crate::attn_air::ChanEval,
     pub key: &'a crate::attn_air::KeyEval,
     pub row: &'a crate::attn_air::RowEval,
-    pub dev: Option<&'a crate::devwfill::DevKeyTile>,
+    pub dev: Option<&'a crate::dev_witness_gen::DevKeyTile>,
     /// B7a milestone 4 (section 3 row 1): this key tile's selector columns and the
     /// flags they came from. `Some` whenever `dev` is, because the accumulators
     /// read the flags.
@@ -207,7 +207,7 @@ fn shape_of(family: &str, ir: &Ir) -> usize {
 
 /// The same lookup, as a question rather than a demand.
 ///
-/// B11 stream M: a *host-filled* component has a hand-written builder to fall back
+/// B11 stream M: a *host-built* component has a hand-written builder to fall back
 /// to, so a fingerprint the installed store does not carry can decline the
 /// kernel instead of ending the proof -- announced per component, never
 /// silent, on the same `ZK_KERNEL_FALLBACK` switch the constraint side has used
@@ -325,7 +325,7 @@ pub fn frac_cols<E: FrameworkEval>(
         assert!(
             mode < 4,
             "{tag}: mode 4 has no host columns to compare against -- \
-             run the check with the host fills"
+             run the check with the host witness generations"
         );
         return (dev.into_iter().map(|c| AnyCol::OwnedDev(c, log_rows)).collect(), sum);
     }

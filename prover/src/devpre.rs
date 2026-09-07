@@ -1,7 +1,7 @@
 //! B7a milestone 4 (section 3 row 1): 4a's last 79 columns.
 //!
 //! 24.4 left sub-bar 4a at **0.016 GB in 79 uploads** and named both halves.
-//! This file is their fill, and it closes the sub-bar.
+//! This file is their witness generation, and it closes the sub-bar.
 //!
 //! | half | columns | bytes at the synthetic point | what they are |
 //! |---|---|---|---|
@@ -19,14 +19,14 @@
 //! conversion is exact and the device does the same bit surgery the host does.
 //!
 //! **The 10 multiplicities are 23.1's counter trick, nine more times.** Every
-//! one of them is already a device counter that a fill scatter-added into:
-//! `b65_fill_dequant` bumps `m_norm`, `m_frac`, `m_mul` and the 8-bit range,
-//! `b65_fill_freivalds` the 8-bit range, `b65_fill_attnout` `m_qnz` and the
-//! remainder range, `b65_fill_key_tile_chan` the key and query ranges,
-//! `b65_fill_key_tile_grid` `m_exp`, the auxiliary range and the value range, and
-//! `b65_fill_key_tile_tok` the two `z` ranges. They came back to the host only to
+//! one of them is already a device counter that a witness generation scatter-added into:
+//! `b65_witness_gen_dequant` bumps `m_norm`, `m_frac`, `m_mul` and the 8-bit range,
+//! `b65_witness_gen_freivalds` the 8-bit range, `b65_witness_gen_attnout` `m_qnz` and the
+//! remainder range, `b65_witness_gen_key_tile_chan` the key and query ranges,
+//! `b65_witness_gen_key_tile_grid` `m_exp`, the auxiliary range and the value range, and
+//! `b65_witness_gen_key_tile_tok` the two `z` ranges. They came back to the host only to
 //! be merged and re-uploaded, which is 21.4's line and 23.1's fix -- so the
-//! sums happen where the counters already are and `gen/wfill_counters` and
+//! sums happen where the counters already are and `gen/witness_gen_counters` and
 //! `gen/deq_dev_counters` go with them.
 //!
 //! **Section 5 rule 8, and the probe that makes it bite.** Rung 3's seventh
@@ -50,12 +50,12 @@
 //! 48 columns say. What it could not do is compute them at the right time:
 //! `commit_pre` runs before the challenges are drawn and the accumulators run
 //! after. `b65_flags_key_tile` is that computation lifted out into a kernel of its
-//! own, called here at fill time; the array outlives the challenge draw, this
+//! own, called here at witness-generation time; the array outlives the challenge draw, this
 //! file turns it into columns, and `b65_acc_chan` / `_grid` / `_tok` read it
 //! rather than recompute it. The AIR's selectors and the accumulator's
 //! segmentation are now one array instead of two transcriptions that agree.
 //!
-//! `ZK_DEVICE_PREPROCESSED` says which path runs, on the three-value pattern every fill in
+//! `ZK_DEVICE_PREPROCESSED` says which path runs, on the three-value pattern every witness generation in
 //! this series uses: 0 the host builds all 79, 1 the device does and they are
 //! never on the host, 2 both with every cell asserted equal.
 
@@ -77,7 +77,7 @@ use crate::layer::Tables;
 
 // ---------------------------------------------------------------- the FFI shapes --
 
-/// Mirrors `B65PreCfg` in `b65_pre_fill.cuh`, field for field.
+/// Mirrors `B65PreCfg` in `b65_pre_witness_gen.cuh`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FPreCfg {
@@ -120,10 +120,10 @@ pub struct FAccFlags {
 }
 
 unsafe extern "C" {
-    fn b65_fill_pre_table(counters: *const *const u32, patch_idx: *const u32,
+    fn b65_witness_gen_pre_table(counters: *const *const u32, patch_idx: *const u32,
                           patch_val: *const u32, n_patch: u32, cols: *const *mut u32,
                           m_col: *mut u32, cfg: FPreCfg);
-    fn b65_fill_sel(flags: *const u32, cols: *const *mut u32, scale: *const u32,
+    fn b65_witness_gen_sel(flags: *const u32, cols: *const *mut u32, scale: *const u32,
                     cfg: FSelCfg);
     fn b65_flags_key_tile(flags: *mut u32, cfg: FAccFlags);
 }
@@ -195,41 +195,41 @@ pub fn premut() -> (u32, u32) {
     (m, t)
 }
 
-/// B11 stream M: does some fill in this chunk bump a *host* multiplicity
+/// B11 stream M: does some witness generation in this chunk bump a *host* multiplicity
 /// counter, for a reason no switch states?
 ///
 /// One key tile can be on the host while the switch says device -- a diagonal block key tile,
-/// which fills on the host whatever `ZK_DEVICE_WITNESS_GEN_KEY_TILE` says because the device
-/// fill has no notion of its layout. `fills_dev` has to know, and it is asked
-/// from inside the fills themselves (`merge_counters` is read by
+/// which generates its witness on the host whatever `ZK_DEVICE_WITNESS_GEN_KEY_TILE` says because the device
+/// witness generation has no notion of its layout. `witness_gen_dev` has to know, and it is asked
+/// from inside the witness generations themselves (`merge_counters` is read by
 /// `mat_component_dev`, `freivalds_component_dev` and `commit_base_dev`), none of which
 /// has the layer in hand. So the layer's answer is recorded once, before the
-/// first fill runs, and read from here.
+/// first witness generation runs, and read from here.
 ///
 /// Keyed by chunk exactly as the phase timers are, so a pipelined loop -- chunk
 /// k proving while chunk k+1 generates -- cannot have one chunk read another's
 /// answer. A run that never records one is a run with no key tiles to ask about.
-static HOST_FILL: OnceLock<Mutex<std::collections::BTreeMap<u64, bool>>> = OnceLock::new();
+static HOST_WITNESS_GEN: OnceLock<Mutex<std::collections::BTreeMap<u64, bool>>> = OnceLock::new();
 
-fn host_fill_map() -> &'static Mutex<std::collections::BTreeMap<u64, bool>> {
-    HOST_FILL.get_or_init(|| Mutex::new(Default::default()))
+fn host_witness_gen_map() -> &'static Mutex<std::collections::BTreeMap<u64, bool>> {
+    HOST_WITNESS_GEN.get_or_init(|| Mutex::new(Default::default()))
 }
 
-/// Record this chunk's answer. Called once, before the first fill.
-pub fn note_host_fill(v: bool) {
-    host_fill_map().lock().unwrap().insert(crate::util::m4_chunk(), v);
+/// Record this chunk's answer. Called once, before the first witness generation.
+pub fn note_host_witness_gen(v: bool) {
+    host_witness_gen_map().lock().unwrap().insert(crate::util::m4_chunk(), v);
 }
 
-fn host_fill() -> bool {
-    host_fill_map().lock().unwrap().get(&crate::util::m4_chunk()).copied().unwrap_or(false)
+fn host_witness_gen() -> bool {
+    host_witness_gen_map().lock().unwrap().get(&crate::util::m4_chunk()).copied().unwrap_or(false)
 }
 
-/// Did every fill that bumps one of the ten multiplicity counters run on the
-/// device? Mode 2 of a fill builds both ways and returns the *host* columns
+/// Did every witness generation that bumps one of the ten multiplicity counters run on the
+/// device? Mode 2 of a witness generation builds both ways and returns the *host* columns
 /// (20.2's shape), so only mode 1 leaves a counter where the kernel can sum it.
-pub fn fills_dev() -> bool {
-    // B11 stream L: the key tile fill has its own switch now, and a host-built key tile
-    // bumps the host multiplicity arrays. So "every fill that bumps a counter
+pub fn witness_gen_dev() -> bool {
+    // B11 stream L: the key tile witness generation has its own switch now, and a host-built key tile
+    // bumps the host multiplicity arrays. So "every witness generation that bumps a counter
     // ran on the device" has to read the key tile gate too -- otherwise
     // `ZK_DEVICE_WITNESS_GEN=1 ZK_DEVICE_WITNESS_GEN_KEY_TILE=0` would claim the counters are on the
     // device while three key tiles' worth of bumps sit on the host.
@@ -240,26 +240,26 @@ pub fn fills_dev() -> bool {
     // counters alone and drop the diagonal block key tiles' chan and key bumps -- accepted
     // by every other check and rejected by `sums_cancel`. Stream L had already
     // met this for the tenth counter, `m_exp`, and fixed it there alone
-    // (`devwfill::exp_mult_on_host`); this is the same predicate asked of all
+    // (`dev_witness_gen::exp_mult_on_host`); this is the same predicate asked of all
     // ten.
     crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_DEQUANT") == 1
         && crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN") == 1
-        && crate::devwfill::key_tile_mode() == 1
-        && !host_fill()
+        && crate::dev_witness_gen::key_tile_mode() == 1
+        && !host_witness_gen()
 }
 
 /// The ten multiplicity columns are the device's exactly when every counter
-/// that feeds one is there. With a fill on the host they stay host columns and
+/// that feeds one is there. With a generate its witness on the host they stay host columns and
 /// 4a uploads them -- the honest accounting, not a special case.
 pub fn mult_dev() -> bool {
-    mode() >= 1 && fills_dev()
+    mode() >= 1 && witness_gen_dev()
 }
 
-/// Does a fill still owe the host its counters? 21.4's "D2H and merge" line,
+/// Does a witness generation still owe the host its counters? 21.4's "D2H and merge" line,
 /// for the nine counters 23.1 left behind: it disappears exactly when the
 /// kernel sums them instead.
 pub fn merge_counters() -> bool {
-    !(mode() == 1 && fills_dev())
+    !(mode() == 1 && witness_gen_dev())
 }
 
 fn round_code(r: Round) -> u32 {
@@ -339,7 +339,7 @@ fn patch_of(what: &str, n: usize, w: usize,
         .collect();
     assert!(
         bad.len() <= MAX,
-        "the {what} table differs from its closed form in {} rows: b65_pre_fill \
+        "the {what} table differs from its closed form in {} rows: b65_pre_witness_gen \
          expects the closed form plus at most a probe's tamper",
         bad.len()
     );
@@ -365,7 +365,7 @@ struct TabShape {
 /// The 21 preprocessed columns and the 10 multiplicity columns, on the device.
 pub struct DevPreTables {
     pub pre: Vec<BaseFieldVec>,
-    /// empty when some fill that bumps one of these tables ran on the host, so
+    /// empty when some witness generation that bumps one of these tables ran on the host, so
     /// there is a counter missing and the host keeps all ten -- the honest
     /// accounting, not a special case
     pub mult: Vec<BaseFieldVec>,
@@ -376,8 +376,8 @@ pub struct DevPreTables {
 ///
 /// `counters` is one list per table in the order the lists are laid out --
 /// norm, frac, mul, qnz, then one per range width -- holding the device counter
-/// arrays every fill that bumps that table scatter-added into. `want_mult` is
-/// false when any of those fills ran on the host instead.
+/// arrays every witness generation that bumps that table scatter-added into. `want_mult` is
+/// false when any of those witness generations ran on the host instead.
 pub fn tables_dev(t: &Tables, log_norm: u32, log_frac: u32, log_mul: u32, q_bits: u32,
                   widths: &[u32], counters: &[Vec<&Uint32Vec>], want_mult: bool)
                   -> DevPreTables {
@@ -478,7 +478,7 @@ pub fn tables_dev(t: &Tables, log_norm: u32, log_frac: u32, log_mul: u32, q_bits
             _ => (std::ptr::null(), std::ptr::null(), 0),
         };
         unsafe {
-            b65_fill_pre_table(
+            b65_witness_gen_pre_table(
                 cptr.as_ptr(),
                 pi,
                 pv,
@@ -631,7 +631,7 @@ pub fn key_tile_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> 
             at,
         };
         unsafe {
-            b65_fill_sel(flags[k].device_ptr, p.as_ptr(), d_scale.device_ptr, cfg);
+            b65_witness_gen_sel(flags[k].device_ptr, p.as_ptr(), d_scale.device_ptr, cfg);
         }
         logs.extend(std::iter::repeat(g.log_rows).take(*n_cols));
         cols.extend(mine);
@@ -645,7 +645,7 @@ pub fn key_tile_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> 
 /// Assert a run of device columns against the host's, cell for cell, naming the
 /// column and the cell on a mismatch.
 ///
-/// Not a sample: a fill that is wrong on one cell of one column is wrong, and
+/// Not a sample: a witness generation that is wrong on one cell of one column is wrong, and
 /// the point of checking here rather than against a proof digest is that the
 /// panic says where.
 pub fn check_run(what: &str, host: &[&Eval], got: &[BaseFieldVec]) {

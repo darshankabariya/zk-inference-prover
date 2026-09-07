@@ -1,11 +1,11 @@
-// B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and key tile fills, on the
+// B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and key tile witness generations, on the
 // device.
 #include "fields.cuh"
 #include "utils.cuh"
-#include "b65_wfill.cuh"
+#include "b65_witness_gen.cuh"
 
 #define B65W_BLOCK 128u
-// Slots per block in the y direction, as `B65_FILL_SLOT_TILE` is for the
+// Slots per block in the y direction, as `B65_DEQUANT_WITNESS_GEN_SLOT_TILE` is for the
 // dequant: one thread owns a row and loops its slots, so consecutive threads
 // write consecutive cells of the same column, and splitting the slots across
 // blocks keeps a small component off 32 blocks of a 132-SM device.
@@ -13,7 +13,7 @@
 
 // ---------------------------------------------------------------- the permutation --
 
-// `common.rs`'s `m4_perm`, verbatim from `b65_fill.cu`: the closed form of
+// `common.rs`'s `m4_perm`, verbatim from `b65_dequant_witness_gen.cu`: the closed form of
 // `bit_reverse_coset_to_circle_domain_order`, an involution, so the thread that
 // owns output `i` reads coset row `f(i)`.
 __device__ __forceinline__ unsigned b65w_perm(unsigned i, unsigned log_n) {
@@ -125,7 +125,7 @@ __device__ __forceinline__ void b65w_bump_at(unsigned *m, unsigned idx) {
 
 // `attn_trace::bump_slice` and `layer::bump`, which are the same function: in
 // range, count it; out of range, count it as off-table. A null counter array is
-// the host's "this fill does not bump that table at all" -- `range_check` off,
+// the host's "this witness generation does not bump that table at all" -- `range_check` off,
 // or a variant with no auxiliary column -- and skips the call entirely, which
 // is what the host does too, so it must not touch `off_table` either.
 __device__ __forceinline__ void b65w_bump(B65Mult mm, long long v, unsigned *off) {
@@ -146,7 +146,7 @@ __device__ __forceinline__ bool b65w_drop(unsigned mutate, unsigned i) {
     return mutate == B65W_MUT_NOBUMP && (i & 1023u) == 0u;
 }
 
-// ========================================================= the Freivalds fill ==
+// ========================================================= the Freivalds witness generation ==
 
 // `freivalds_component`'s committed half: `pq` activation columns, every cell bumped
 // into the 8-bit range table (padding included -- the host bumps outside the
@@ -225,7 +225,7 @@ __global__ void b65w_freivalds_pre(const signed char *const *__restrict__ qw,
     }
 }
 
-extern "C" void b65_fill_freivalds(const signed char *qx,
+extern "C" void b65_witness_gen_freivalds(const signed char *qx,
                                    const signed char *const *qw, const unsigned *n_out,
                                    m31 *const *base_cols, unsigned n_base,
                                    m31 *const *pre_cols, unsigned n_pre,
@@ -250,7 +250,7 @@ extern "C" void b65_fill_freivalds(const signed char *qx,
     cuda_free_memory(d_nout);
 }
 
-// =========================================================== the attnout fill ==
+// =========================================================== the attnout witness generation ==
 
 // `ao_component`, whose per-row body is the rounding fold: `qm` is the nearest
 // integer to `|a| 2^e / den` with ties away from zero, written as the exact
@@ -426,7 +426,7 @@ __global__ void b65w_ao(const unsigned *__restrict__ acc,
     }
 }
 
-extern "C" void b65_fill_attnout(const unsigned *acc, const unsigned *den,
+extern "C" void b65_witness_gen_attnout(const unsigned *acc, const unsigned *den,
                                  const int *jo, const int *jv,
                                  m31 *const *base_cols, unsigned n_base,
                                  m31 *const *pre_cols, unsigned n_pre,
@@ -447,7 +447,7 @@ extern "C" void b65_fill_attnout(const unsigned *acc, const unsigned *den,
     cuda_free_memory(d_pre);
 }
 
-// ============================================================== the key tile fill ==
+// ============================================================== the key tile witness generation ==
 
 // The channel component: `pk` key columns then `pq` query columns, each cell
 // offset into its range table so the committed value is non-negative.
@@ -573,7 +573,7 @@ __global__ void b65w_key_tile_grid(const int *__restrict__ dd,
                     // masked, and a masked slot is not a lookup at all -- the
                     // AIR reads it at multiplicity zero -- so it bumps nothing
                     // and cannot be off-table. This is the *only* thing the
-                    // mask changes for the fill: the committed value below is
+                    // mask changes for the witness generation: the committed value below is
                     // `col_idx(g)` either way, which is why a diagonal block key tile's
                     // columns matched cell for cell before this line existed
                     // and only its counters did not.
@@ -618,7 +618,7 @@ __global__ void b65w_key_tile_grid(const int *__restrict__ dd,
     }
 }
 
-extern "C" void b65_fill_key_tile_chan(const int *kk, const int *qq,
+extern "C" void b65_witness_gen_key_tile_chan(const int *kk, const int *qq,
                                    m31 *const *cols,
                                    B65Mult m_k, B65Mult m_q,
                                    unsigned *counts, B65KeyTileCfg cfg) {
@@ -632,7 +632,7 @@ extern "C" void b65_fill_key_tile_chan(const int *kk, const int *qq,
     cuda_free_memory(d);
 }
 
-extern "C" void b65_fill_key_tile_grid(const int *dd, const unsigned short *num,
+extern "C" void b65_witness_gen_key_tile_grid(const int *dd, const unsigned short *num,
                                    const unsigned short *xx, const unsigned *sc,
                                    const unsigned *delta, const int *vv,
                                    long long table0,
@@ -680,7 +680,7 @@ __global__ void b65w_key_tile_out(const unsigned *__restrict__ out,
     }
 }
 
-extern "C" void b65_fill_key_tile_out(const unsigned *out, m31 *const *cols,
+extern "C" void b65_witness_gen_key_tile_out(const unsigned *out, m31 *const *cols,
                                   unsigned *counts, B65KeyTileCfg cfg) {
     (void)counts;
     m31 **d = clone_to_device<m31 *>(const_cast<m31 **>(cols), cfg.oq);
@@ -730,7 +730,7 @@ __global__ void b65w_key_tile_tok(const unsigned *__restrict__ mm,
     }
 }
 
-extern "C" void b65_fill_key_tile_tok(const unsigned *mm, const unsigned *zz,
+extern "C" void b65_witness_gen_key_tile_tok(const unsigned *mm, const unsigned *zz,
                                   m31 *const *cols, unsigned with_max,
                                   B65Mult m_lo, B65Mult m_hi,
                                   unsigned *counts, B65KeyTileCfg cfg) {

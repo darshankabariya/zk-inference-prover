@@ -1,11 +1,11 @@
-// B7a milestone 4 (19.6): the dequant witness fill, on the device.
+// B7a milestone 4 (19.6): the dequant witness generation, on the device.
 //
-// 18.7's row 1 -- "the four family fills, the only row with no shortcut". This
+// 18.7's row 1 -- "the four family witness generations, the only row with no shortcut". This
 // is the first of the four, and it is one kernel per variant because the
-// per-row work is `fill_mat_row` verbatim: an integer normalisation, two table
+// per-row work is `witness_gen_mat_row` verbatim: an integer normalisation, two table
 // reads that are closed forms, and the variant's scale arithmetic.
 //
-// Three things make it the whole of the fill rather than a piece of it:
+// Three things make it the whole of the witness generation rather than a piece of it:
 //
 //  * **the permutation is free.** The thread owns the *output* index `i` and
 //    computes the coset row `j = m4_perm(i, log_rows)`, so the column is born
@@ -18,22 +18,22 @@
 //    the host as a few hundred kB -- which 4a permits: it forbids H2D of trace
 //    columns, not D2H of a counter.
 //
-// The one part that is not integer arithmetic is `ref_bad`, `fill_mat_row`'s
+// The one part that is not integer arithmetic is `ref_bad`, `witness_gen_mat_row`'s
 // f64 cross-check of the table path against a single IEEE rounding. It is
 // deterministic on both sides -- `exp2`/`ldexp` of an integer is exact, bf16
 // rounding is bit manipulation, and the products are plain `double` multiplies
 // with no add to contract into an FMA -- so it ports, and `ZK_DEVICE_WITNESS_GEN_DEQUANT=2`
 // compares the f64 result cell for cell rather than comparing the counts,
 // which on an honest witness are both zero and would agree vacuously.
-#ifndef B65_FILL_CUH
-#define B65_FILL_CUH
+#ifndef B65_DEQUANT_WITNESS_GEN_CUH
+#define B65_DEQUANT_WITNESS_GEN_CUH
 #include "fields.cuh"
 
 // Everything about the component's shape that `Map`, `MatLayout` and `Spec` fix.
-// Mirrored by `#[repr(C)] struct FillCfg` in `devfill.rs`; the column indices
+// Mirrored by `#[repr(C)] struct WitnessGenCfg` in `dev_dequant_witness_gen.rs`; the column indices
 // are passed rather than recomputed so the kernel and `Map::at` agree by
 // construction, exactly as the host builders do.
-struct B65FillCfg {
+struct B65DequantWitnessGenCfg {
     unsigned variant;  // 0 = pow2, 1 = chain
     unsigned sticky;   // Round::needs_sticky()
     unsigned kmax;
@@ -46,7 +46,7 @@ struct B65FillCfg {
     unsigned slot0;    // Map::slot0
     unsigned per_slot; // Map::per_slot
     unsigned chan_w;   // preprocessed scale columns per slot: 1 pow2, 2 chain
-    // Fields, as `Map::new` assigns them. `B65_FILL_NONE` = this variant has
+    // Fields, as `Map::new` assigns them. `B65_DEQUANT_WITNESS_GEN_NONE` = this variant has
     // no such field.
     unsigned f_acc, f_sg, f_m2, f_ph, f_st, f_r, f_m7, f_ef, f_nz, f_eo;
     unsigned f_mul[6]; // chain: [t][0..3] = (product mantissa, carry, exponent)
@@ -58,10 +58,10 @@ struct B65FillCfg {
     unsigned mutate;   // ZK_MUT_WITNESS_GEN_DEQUANT: a deliberate defect, for the controls
 };
 
-#define B65_FILL_NONE 0xffffffffu
+#define B65_DEQUANT_WITNESS_GEN_NONE 0xffffffffu
 
 // The negative controls (`ZK_MUT_WITNESS_GEN_DEQUANT`). A check is only worth reporting if
-// it fails when the fill is wrong in the ways this design could plausibly be
+// it fails when the witness generation is wrong in the ways this design could plausibly be
 // wrong, and each of these is one of them: the permutation forgotten, a slot
 // misaddressed, a multiplicity dropped, and two ways of getting the f64
 // cross-check wrong -- through f32, which is the double rounding `bf16.rs`
@@ -85,7 +85,7 @@ struct B65FillCfg {
 //
 // `want_out`, when non-null, receives the f64 cross-check's bf16 pattern per
 // (natural row, slot) -- the check's, never the prover's.
-extern "C" void b65_fill_dequant(const int *acc,
+extern "C" void b65_witness_gen_dequant(const int *acc,
                                  const int *jx, const int *jw,
                                  const unsigned *sx, const unsigned *sw,
                                  const unsigned *norm3, const unsigned *mul2,
@@ -94,6 +94,6 @@ extern "C" void b65_fill_dequant(const int *acc,
                                  unsigned *m_norm, unsigned *m_frac,
                                  unsigned *m_mul, unsigned *m_r8,
                                  unsigned *counts, unsigned *want_out,
-                                 B65FillCfg cfg);
+                                 B65DequantWitnessGenCfg cfg);
 
 #endif

@@ -683,7 +683,7 @@ impl Attn {
         let vis = |i: usize| !diagonal_block || i % nc <= (i / nc) % ns;
         // exact integer scores, one (instance, token) row at a time
         //
-        // Stream W: the allocation is timed apart from the loop that fills it.
+        // Stream W: the allocation is timed apart from the loop that witness generations it.
         // These bare `vec![]`s sat between two of stream P's scopes and so were
         // charged to neither -- at the sequence's sizes this one alone is a
         // quarter of a gigabyte -- and naming them is what says whether the

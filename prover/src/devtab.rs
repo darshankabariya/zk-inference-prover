@@ -2,14 +2,14 @@
 //!
 //! 22.5 left 4a at 0.166 GB in 354 uploads and said where every byte of it was:
 //! **0.101 GB is three columns**, `x`, `y` and `m_exp` at 2^23 rows, and none of
-//! them is a witness. This file is their fill, in 20.1's shape -- one thread
+//! them is a witness. This file is their witness generation, in 20.1's shape -- one thread
 //! owns the *committed* row, so `eval_of` never runs on the column.
 //!
 //! | column | what it is | where it comes from here |
 //! |---|---|---|
 //! | `x` | the row index | the closed form, on the device |
 //! | `y` | `Tables::exp` | a 2^16 bf16 map, gathered at `bf16(-d 2^-frac)` |
-//! | `m_exp` | the exp table's multiplicities | the counters every key tile's fill already bumped (21.1), summed on the device |
+//! | `m_exp` | the exp table's multiplicities | the counters every key tile's witness generation already bumped (21.1), summed on the device |
 //!
 //! **Why `y` is a gather and not an `exp()`.** `exp_int_table` rounds its
 //! argument to bf16 *before* the exponential -- B1's own arithmetic, and the
@@ -21,7 +21,7 @@
 //!
 //! **Section 5 rule 8, and the one host pass that stays.** Rung 3's sixth probe
 //! flips one row of the exp table and rebuilds the witness to match, so that
-//! *only* the pinned preprocessed root rejects it. A fill that computed the
+//! *only* the pinned preprocessed root rejects it. A witness generation that computed the
 //! closed form and stopped would repair it silently. So the host diffs its
 //! actual table against the closed form -- 8.4 M rows, one parallel pass, ~4 ms
 //! -- and uploads the rows that differ. That pass is in the **measured** path,
@@ -29,7 +29,7 @@
 //! table by construction rather than by assumption, on any witness.
 //!
 //! `ZK_DEVICE_TABLES` says which path runs, on the same three-value pattern the
-//! other fills use: 0 the host builds all 34 shared-table columns, 1 these
+//! other witness generations use: 0 the host builds all 34 shared-table columns, 1 these
 //! three are the device's and never the host's, 2 both with every cell
 //! asserted equal.
 
@@ -43,7 +43,7 @@ use crate::devfrac::Cols;
 
 // ---------------------------------------------------------------- the FFI shape --
 
-/// Mirrors `B65TabCfg` in `b65_table_fill.cuh`, field for field.
+/// Mirrors `B65TabCfg` in `b65_table_witness_gen.cuh`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FTabCfg {
@@ -57,7 +57,7 @@ pub struct FTabCfg {
 }
 
 unsafe extern "C" {
-    fn b65_fill_tables(
+    fn b65_witness_gen_tables(
         expmap: *const u32,
         counters: *const *const u32,
         patch_idx: *const u32,
@@ -182,20 +182,20 @@ fn exp_patch(a: &Attn, exp: &[u32], map: &[u32], tp: f64) -> (Vec<u32>, Vec<u32>
         .unzip();
     assert!(
         idx.len() <= MAX,
-        "the exp table differs from exp_int_table in {} rows: b65_table_fill expects \
+        "the exp table differs from exp_int_table in {} rows: b65_table_witness_gen expects \
          the closed form plus at most a probe's tamper",
         idx.len()
     );
     (idx, val)
 }
 
-// ------------------------------------------------------------------- the fill --
+// ------------------------------------------------------------------- the witness generation --
 
 /// The three columns, on the device.
 pub struct DevTabCols {
     pub x: BaseFieldVec,
     pub y: BaseFieldVec,
-    /// `None` when no key tile fill ran on the device, so there is no counter to sum
+    /// `None` when no key tile witness generation ran on the device, so there is no counter to sum
     /// and `m_exp` stays a host column and a 4a upload.
     pub m: Option<BaseFieldVec>,
     pub patch: usize,
@@ -209,7 +209,7 @@ fn up_u32(v: Vec<u32>) -> Uint32Vec {
     d
 }
 
-/// Build `x`, `y` and (when the key tiles filled on the device) `m_exp`.
+/// Build `x`, `y` and (when the key tiles built on the device) `m_exp`.
 ///
 /// `counters` are the per-key-tile exp counters `commit_base_dev` left on the
 /// device. They are summed here, which is what deletes 21.4's "counters: D2H
@@ -264,7 +264,7 @@ pub fn table_cols_dev(a: &Attn, log_rows: u32, exp: &[u32],
 
     let t_k = std::time::Instant::now();
     unsafe {
-        b65_fill_tables(
+        b65_witness_gen_tables(
             d_map.device_ptr,
             cptr.as_ptr(),
             d_pidx.device_ptr,

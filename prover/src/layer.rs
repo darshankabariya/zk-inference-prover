@@ -814,7 +814,7 @@ pub fn mat_variants(layout: &str) -> [(&str, DeqVariant); 7] {
         "b10" | "chain" => MAT_VARIANTS_CHAIN,
         // stream Z: the wired layout on a synthetic layer -- the chain
         // everywhere, the delayed requantize on v.  A smoke shape for the fold's
-        // AIR, fill and LogUp before a real witness is anywhere near it.
+        // AIR, witness generation and LogUp before a real witness is anywhere near it.
         "zfold" => {
             let mut v = MAT_VARIANTS_CHAIN;
             v[2] = ("v", DeqVariant::Fold);
@@ -2943,7 +2943,7 @@ pub struct MatComponent {
     /// B7a milestone 4 (19.6): the same columns, born on the device. `Some`
     /// only under `ZK_DEVICE_WITNESS_GEN_DEQUANT=1`, where `pre` and `base` are empty and this is
     /// the component.
-    pub dev: Option<crate::devfill::DevFill>,
+    pub dev: Option<crate::dev_dequant_witness_gen::DevDequantWitnessGen>,
 }
 
 impl MatComponent {
@@ -2978,13 +2978,13 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
     let f = map.f;
     let n = m.tokens * m.n_out;
 
-    // B7a milestone 4 (19.6): which fill runs. 1 is the device's alone -- the
+    // B7a milestone 4 (19.6): which witness generation runs. 1 is the device's alone -- the
     // component has no host columns at all and `pre`/`base` stay empty -- and 2
     // builds both and asserts every cell equal before either is used.
     //
-    // Stream Z: the fold has no device fill; its component takes the host path
+    // Stream Z: the fold has no device witness generation; its component takes the host path
     // whatever the switch says (the diagonal block key tiles' pattern), and
-    // `devpre::note_host_fill` is told in `generate`.
+    // `devpre::note_host_witness_gen` is told in `generate`.
     let m4c = if spec.variant == DeqVariant::Fold {
         0
     } else {
@@ -2994,9 +2994,9 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
     if m4c == 1 {
         // B11 stream M: `output_claim` is the component's, not `with_want`'s. The two
         // parameters sit next to each other and the o-side one was missing
-        // entirely, so the head's device fill built 506 preprocessed columns
+        // entirely, so the head's device witness generation built 506 preprocessed columns
         // where the host builds 510.
-        let dev = crate::devfill::mat_component_dev(m, &spec, &lay, &map, tables, false, output_claim);
+        let dev = crate::dev_dequant_witness_gen::mat_component_dev(m, &spec, &lay, &map, tables, false, output_claim);
         let ref_bad = dev.ref_bad;
         return MatComponent { lay, spec, map, pre: vec![], base: vec![], ref_bad, n,
                            dev: Some(dev) };
@@ -3023,7 +3023,7 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
         rw: Vec<((u32, i64), u32)>,
         ref_bad: usize,
         /// B7a milestone 4 (19.6): the f64 cross-check's own bf16 answer per
-        /// (row, slot), so `ZK_DEVICE_WITNESS_GEN_DEQUANT=2` can compare the one part of the fill
+        /// (row, slot), so `ZK_DEVICE_WITNESS_GEN_DEQUANT=2` can compare the one part of the witness generation
         /// that is not integer arithmetic cell for cell instead of comparing
         /// two counts that are both zero on an honest witness.
         want: Vec<u16>,
@@ -3045,7 +3045,7 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
             let mut want = vec![0u16; if m4c_want { len * lay.per_row } else { 0 }];
             for jj in 0..len {
                 let j = start + jj;
-                fill_mat_row(m, &spec, &lay, &map, tref, j, jj, &mut local,
+                witness_gen_mat_row(m, &spec, &lay, &map, tref, j, jj, &mut local,
                              &mut bn, &mut bf2, &mut bm, &mut br, &mut bq, &mut brw,
                              &mut ref_bad, &mut want, fold_bend);
             }
@@ -3198,7 +3198,7 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
         // `ZK_DEVICE_WITNESS_GEN_DEQUANT=2`: the check with teeth, and it runs before any column
         // has changed hands. Every committed and preprocessed cell, the four
         // multiplicity tables, `off_table`, `ref_bad` and -- because it is the
-        // only non-integer arithmetic in the fill -- the f64 cross-check's own
+        // only non-integer arithmetic in the witness generation -- the f64 cross-check's own
         // answer per (row, slot).
         let after = m4c_snap(tables);
         let before = m4c_before.unwrap();
@@ -3208,11 +3208,11 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
             want_host[start * lay.per_row..start * lay.per_row + w.len()]
                 .copy_from_slice(w);
         }
-        let dev = crate::devfill::mat_component_dev(m, &spec, &lay, &map, tables, true, output_claim);
-        check_fill_dev(m, &lay, &base, &pre, ref_bad, &want_host, &dev, tables,
+        let dev = crate::dev_dequant_witness_gen::mat_component_dev(m, &spec, &lay, &map, tables, true, output_claim);
+        check_witness_gen_dev(m, &lay, &base, &pre, ref_bad, &want_host, &dev, tables,
                        &before, &after);
         // the device's own bumps are the check's, not the proof's: put the
-        // shared tables back where the host fill left them
+        // shared tables back where the host witness generation left them
         let r8 = tables.ridx(8);
         tables.m_norm.copy_from_slice(&after.0);
         tables.m_frac.copy_from_slice(&after.1);
@@ -3223,15 +3223,15 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
     MatComponent { lay, spec, map, pre, base, ref_bad, n, dev: None }
 }
 
-/// `ZK_DEVICE_WITNESS_GEN_DEQUANT=2`: the device fill against the host fill, everything at once.
+/// `ZK_DEVICE_WITNESS_GEN_DEQUANT=2`: the device witness generation against the host witness generation, everything at once.
 ///
-/// Not a sample: a fill that is wrong on one slot of one row is wrong, and the
+/// Not a sample: a witness generation that is wrong on one slot of one row is wrong, and the
 /// point of checking here rather than against a proof digest is that a
 /// mismatch names the column and the cell.
 #[allow(clippy::too_many_arguments)]
-fn check_fill_dev(m: &Mat, lay: &MatLayout, base: &[Eval], pre: &[Eval],
+fn check_witness_gen_dev(m: &Mat, lay: &MatLayout, base: &[Eval], pre: &[Eval],
                   ref_bad: usize, want_host: &[u16],
-                  dev: &crate::devfill::DevFill, tables: &Tables,
+                  dev: &crate::dev_dequant_witness_gen::DevDequantWitnessGen, tables: &Tables,
                   before: &(Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, usize),
                   after: &(Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, usize)) {
     use stwo::prover::backend::Column as _;
@@ -3270,7 +3270,7 @@ fn check_fill_dev(m: &Mat, lay: &MatLayout, base: &[Eval], pre: &[Eval],
                "{}: off-table bumps differ", m.name);
     if let Some(w) = &dev.want {
         assert_eq!(dev.ref_bad, ref_bad, "{}: ref_bad differs", m.name);
-        // The one unknown 19.6 named: `fill_mat_row`'s f64 cross-check, on
+        // The one unknown 19.6 named: `witness_gen_mat_row`'s f64 cross-check, on
         // device fp64. Compared per (row, slot), not as a count.
         assert_eq!(w.len(), want_host.len(), "{}: want length", m.name);
         if let Some(k) = (0..w.len()).find(|k| w[*k] as u16 != want_host[*k]) {
@@ -3279,14 +3279,14 @@ fn check_fill_dev(m: &Mat, lay: &MatLayout, base: &[Eval], pre: &[Eval],
                    m.name, k / lay.per_row, k % lay.per_row, want_host[k], w[k]);
         }
     }
-    eprintln!("fill-dev: {} -- {} base and {} pre columns, {} cells, the four \
+    eprintln!("witness-gen-dev: {} -- {} base and {} pre columns, {} cells, the four \
 multiplicity tables and the f64 cross-check all match",
               m.name, base.len(), pre.len(),
               (base.len() + pre.len()) << lay.log_rows);
 }
 
 /// B1's own answer for one dequantized accumulator: the `Round::Even` reference
-/// `fill_mat_row` cross-checks its committed columns against.  It lives here as
+/// `witness_gen_mat_row` cross-checks its committed columns against.  It lives here as
 /// one function so that a consumer of a matmul's bf16 output -- the residual stream's
 /// SwiGLU reads the `gate` and `up` components' -- reads exactly the value the
 /// dequant component proves, rather than a second implementation of the rung.
@@ -3333,8 +3333,8 @@ pub fn deq_ref_a(a: i64, m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
 /// `experiments/b65/extract.py` byte-compares against the recorder's own `vvc`
 /// at extraction ("v fold identity holds on N sites").
 ///
-/// The arithmetic is the fill's, on integers, so the reference and the committed
-/// cells are the same value by construction and not by a second rounding: `fill_mat_row`
+/// The arithmetic is the witness generation's, on integers, so the reference and the committed
+/// cells are the same value by construction and not by a second rounding: `witness_gen_mat_row`
 /// computes exactly `qm = (mag mxw + 2^(G-1)) >> G` and `qc = min(qm, 127)`.
 pub fn fold_out(m: &Mat, t: usize, c: usize) -> i64 {
     fold_out_a(m.acc[t * m.n_out + c], m, t, c)
@@ -3360,7 +3360,7 @@ pub fn fold_out_a(a: i64, m: &Mat, t: usize, c: usize) -> i64 {
 /// multiplicities accumulated block-locally (merged by `mat_component`).
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
-fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Tables,
+fn witness_gen_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Tables,
                 j: usize, jj: usize, local: &mut [Vec<M31>],
                 bn: &mut std::collections::HashMap<usize, u32>,
                 bf2: &mut std::collections::HashMap<usize, u32>,
@@ -3381,7 +3381,7 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
         Some((t, b)) => (t, b, false),
         None => (0, 0, true),
     };
-    // ---- stream Z: the fold's own fill (see `dequant.rs`'s `Fold` arm) ------
+    // ---- stream Z: the fold's own witness generation (see `dequant.rs`'s `Fold` arm) ------
     if spec.variant == DeqVariant::Fold {
         let _ = tables;
         let (ms, es) = m.sx[t];
@@ -3437,7 +3437,7 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
             set(f.fe, m31_of(fe), local);
             set(f.fdp, m31_of(fdp), local);
             // the bit-for-bit gate's cross-check: the harness's own arithmetic,
-            // exact in f64 (the product is 42 bits), against the fill's integers
+            // exact in f64 (the product is 42 bits), against the witness generation's integers
             let sxf = (128.0 + ms as f64) * (es as f64 - 134.0).exp2();
             let (mws, ews) = m.sw[c];
             let swf = (128.0 + mws as f64) * (ews as f64 - 134.0).exp2();
@@ -3603,7 +3603,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
     // B11 stream M: the component's real height, kept before `rows` is shadowed to
     // zero. `devacc` builds `z` and `h`; it does *not* build stream E's output
     // side, which is a third accumulator over the *witness* rather than over
-    // this component's columns and so has nothing to do with where the fill went.
+    // this component's columns and so has nothing to do with where the witness generation went.
     // Suppressing it with the other two left `u[rows - 1]` indexing an empty
     // vector -- reachable only on an o-side matmul with `ZK_DEVICE_ACCUMULATORS` on, which
     // is `lm_head` and only `lm_head`, and `ACC` had never been on.
@@ -3893,7 +3893,7 @@ fn mat_logup_ir(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
             np
         };
         if let Some(d) = &r.dev {
-            // B7a milestone 4 (19.6): the fill left this component's columns on
+            // B7a milestone 4 (19.6): the witness generation left this component's columns on
             // the device, so the fractions read them where they are and the
             // LogUp columns never come back. 19.4 measured both transfers and
             // said they disappear together; this is the together.
@@ -3921,13 +3921,13 @@ fn mat_logup_ir(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
 fn mat_logup(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
              rels: &crate::compose::Rels)
              -> (Vec<crate::device::AnyCol<'static>>, SecureField) {
-    // B7a milestone 4 (19.6): with the fill on the device there is no host
+    // B7a milestone 4 (19.6): with the generate its witness on the device there is no host
     // column to build the fractions from, so the device path is the only one
     // -- and it is also the one that leaves 4a's bytes at zero.
     if r.dev.is_some() {
         return mat_logup_ir(m, r, rv, s_ch, rels, true);
     }
-    // Stream Z: the fold's fill is on the host and so is its LogUp -- the
+    // Stream Z: the fold's witness generation is on the host and so is its LogUp -- the
     // hand-written builder below carries its looks, and no generated fraction
     // kernel is asked for.
     let m4b = if r.spec.variant == DeqVariant::Fold {
@@ -4066,7 +4066,7 @@ pub struct AoComponent {
     pub pre: Vec<Eval>,
     pub base: Vec<Eval>,
     /// B7a milestone 4 (section 3 row 1): the same columns, born on the device.
-    pub dev: Option<crate::devwfill::DevAo>,
+    pub dev: Option<crate::dev_witness_gen::DevAo>,
     pub ref_bad: usize,
     /// the committed int8 outputs, for cross-checks
     pub q_out: Vec<i64>,
@@ -4139,11 +4139,11 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
     let pr = lay.per_row;
     // B7a milestone 4 (section 3 row 1): the same three-value mode.
     //
-    // Stream TT: the magnitude form fills on the host on both backends.  The
-    // fork's `b65_fill_attnout` writes the nine-column layout and bumps the
+    // Stream TT: the magnitude form generates its witness on the host on both backends.  The
+    // fork's `b65_witness_gen_attnout` writes the nine-column layout and bumps the
     // limbs at `acc + acc_off`; it has no tenth column and no `mag`, so a
-    // device fill here would write the wrong component rather than a slow one.
-    // `compose::note_host_fill` knows, which is what keeps the shared
+    // device witness generation here would write the wrong component rather than a slow one.
+    // `compose::note_host_witness_gen` knows, which is what keeps the shared
     // multiplicity columns on the host with it.
     let m4d = if corrupt_q.is_some() || corrupt_den.is_some() || corrupt_jo.is_some()
                  || corrupt_num.is_some() || corrupt_acc.is_some()
@@ -4154,7 +4154,7 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
         crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN")
     };
     assert!(m4d == 0 || corrupt.is_none(),
-            "attnout: the device fill has no `corrupt` path");
+            "attnout: the device witness generation has no `corrupt` path");
     // Stream JJ (witness-slack section 7 item 1, and the row-`den` hole beside
     // it): the row whose denominator is bent.  `den` was read once per row and
     // folded into `dz` only on the token's *last* row, so on any other row it
@@ -4242,7 +4242,7 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
         j
     });
     if m4d == 1 {
-        let dev = crate::devwfill::ao_component_dev(ao, &lay, q_bits, rem_bits, acc_bits,
+        let dev = crate::dev_witness_gen::ao_component_dev(ao, &lay, q_bits, rem_bits, acc_bits,
                                                  jv_min, jo_max, tables, false);
         let (ref_bad, q_out) = (dev.ref_bad, dev.q_out.clone());
         return AoComponent { lay, pre: vec![], base: vec![], dev: Some(dev), ref_bad, q_out,
@@ -4251,10 +4251,10 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
     }
     // `ZK_DEVICE_WITNESS_GEN=2` builds this component twice -- host here, device below --
     // and the device call bumps the same counters a second time, so every
-    // counter this fill touches has to be snapshotted before, compared as a
+    // counter this witness generation touches has to be snapshotted before, compared as a
     // delta, and restored after.  Stream JJ (E11) added three: the two
     // accumulator limb tables and `m_epow` (whose bumps are a host loop on
-    // *both* sides, `devwfill::ao_component_dev`).  A counter left out of this
+    // *both* sides, `dev_witness_gen::ao_component_dev`).  A counter left out of this
     // tuple is counted twice and the honest proof is then rejected with
     // `sums_cancel: false` -- which is what it did on the H200's reference
     // chunk, and what no desk shape shows, because the desk never runs mode 2.
@@ -4465,29 +4465,29 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
     if m4d == 2 {
         let after = m4d_snap(tables);
         let before = m4d_before.unwrap();
-        let dev = crate::devwfill::ao_component_dev(ao, &lay, q_bits, rem_bits, acc_bits,
+        let dev = crate::dev_witness_gen::ao_component_dev(ao, &lay, q_bits, rem_bits, acc_bits,
                                                  jv_min, jo_max, tables, true);
-        crate::devwfill::check_cols("attnout base", &base, &dev.base);
-        crate::devwfill::check_cols("attnout pre", &pre, &dev.pre);
+        crate::dev_witness_gen::check_cols("attnout base", &base, &dev.base);
+        crate::dev_witness_gen::check_cols("attnout pre", &pre, &dev.pre);
         let ri = tables.ridx(rem_bits);
         let (rlo, rhi) = (tables.ridx(acc_lo_bits), tables.ridx(acc_hi_bits));
-        crate::devwfill::check_delta("attnout m_qnz", &before.0, &after.0,
+        crate::dev_witness_gen::check_delta("attnout m_qnz", &before.0, &after.0,
                                      &sub_slice(&tables.m_qnz, &after.0));
-        crate::devwfill::check_delta("attnout m_rem", &before.1, &after.1,
+        crate::dev_witness_gen::check_delta("attnout m_rem", &before.1, &after.1,
                                      &sub_slice(&tables.m_r[ri], &after.1));
         // stream JJ (E11): the accumulator window's two limbs, and the `EPOW`
         // window, whose column is a host loop on both sides
-        crate::devwfill::check_delta("attnout m_acc_lo", &before.2, &after.2,
+        crate::dev_witness_gen::check_delta("attnout m_acc_lo", &before.2, &after.2,
                                      &sub_slice(&tables.m_r[rlo], &after.2));
-        crate::devwfill::check_delta("attnout m_acc_hi", &before.3, &after.3,
+        crate::dev_witness_gen::check_delta("attnout m_acc_hi", &before.3, &after.3,
                                      &sub_slice(&tables.m_r[rhi], &after.3));
-        crate::devwfill::check_delta("attnout m_epow", &before.4, &after.4,
+        crate::dev_witness_gen::check_delta("attnout m_epow", &before.4, &after.4,
                                      &sub_slice(&tables.m_epow, &after.4));
         assert_eq!(tables.off_table - after.5, after.5 - before.5,
                    "attnout: off-table bumps differ");
         assert_eq!(dev.ref_bad, ref_bad, "attnout: ref_bad differs");
         assert_eq!(dev.q_out, q_out, "attnout: the committed int8 outputs differ");
-        // the one part of this family's fill that is not integer arithmetic,
+        // the one part of this family's witness generation that is not integer arithmetic,
         // compared per (row, slot) rather than as a count -- which on an honest
         // witness is zero on both sides and would agree vacuously
         let w = dev.want.as_ref().expect("mode 2 asks for the reference");
@@ -4504,7 +4504,7 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
         tables.m_r[rhi].copy_from_slice(&after.3);
         tables.m_epow.copy_from_slice(&after.4);
         tables.off_table = after.5;
-        eprintln!("wfill-dev: attnout -- {} base and {} pre columns, {} cells, \
+        eprintln!("witness_gen-dev: attnout -- {} base and {} pre columns, {} cells, \
 all five multiplicity tables and the f64 reference all match",
                   base.len(), pre.len(), (base.len() + pre.len()) << lay.log_rows);
     }
@@ -4550,10 +4550,10 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoComponent, rr: SecureField, s_ch: Secu
     let mu_den = r_c * s_span.inverse();
 
     // B7a milestone 4 (section 3 row 1): the attnout's z, h and dz, on the same
-    // three-value mode every fill in this series uses.
+    // three-value mode every witness generation in this series uses.
     let m4g = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
     let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
-    // stream JJ's fourth accumulator is the host's whatever the device fill
+    // stream JJ's fourth accumulator is the host's whatever the device witness generation
     // did with the other three (stream M's lesson in `mat_interaction`: keep
     // the real height before `rows` is shadowed to zero)
     let n_rows = rows;
@@ -4753,7 +4753,7 @@ pub struct FreivaldsComponent {
     pub base: Vec<Eval>,
     pub n_weights: usize,
     /// B7a milestone 4 (section 3 row 1): the same columns, born on the device.
-    pub dev: Option<crate::devwfill::DevFreivalds>,
+    pub dev: Option<crate::dev_witness_gen::DevFreivalds>,
 }
 
 impl FreivaldsComponent {
@@ -4787,19 +4787,19 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
         assert_eq!(layer.mats[*i].qx, m0.qx, "Freivalds group inputs differ");
     }
 
-    // B7a milestone 4 (section 3 row 1): which fill runs. 1 is the device's
+    // B7a milestone 4 (section 3 row 1): which witness generation runs. 1 is the device's
     // alone -- `pre` and `base` become the mirror the interaction reads -- and
     // 2 builds both and asserts every cell equal before either is used.
     //
-    // Stream Z: the device fill packs activations as int8 and bumps the 8-bit
-    // table in its kernel, so a wide group takes the host fill whatever the
-    // switch says -- the diagonal block key tiles' pattern, and `devpre::note_host_fill`
+    // Stream Z: the device witness generation packs activations as int8 and bumps the 8-bit
+    // table in its kernel, so a wide group takes the host witness generation whatever the
+    // switch says -- the diagonal block key tiles' pattern, and `devpre::note_host_witness_gen`
     // is told in `generate`.
     let m4d = if act_bits == 8 { crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN") } else { 0 };
     assert!(m4d == 0 || corrupt_qx.is_none(),
-            "{name}: the device Freivalds fill has no `corrupt_qx` path");
+            "{name}: the device Freivalds witness generation has no `corrupt_qx` path");
     if m4d == 1 {
-        let dev = crate::devwfill::freivalds_component_dev(layer, mat_idx, &lay, tables);
+        let dev = crate::dev_witness_gen::freivalds_component_dev(layer, mat_idx, &lay, tables);
         // B7a milestone 4 (section 3 row 1): no mirror. `freivalds_interaction` reads
         // the device columns now, and nothing else reads a device component's host
         // columns -- `base_cells` counts them off `dev`.
@@ -4871,18 +4871,18 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
         // the check with teeth, before any column has changed hands
         let after = m4d_snap(tables);
         let before = m4d_before.unwrap();
-        let dev = crate::devwfill::freivalds_component_dev(layer, mat_idx, &lay, tables);
-        crate::devwfill::check_cols(&format!("freivalds {name} base"), &base, &dev.base);
-        crate::devwfill::check_cols(&format!("freivalds {name} pre"), &pre, &dev.pre);
+        let dev = crate::dev_witness_gen::freivalds_component_dev(layer, mat_idx, &lay, tables);
+        crate::dev_witness_gen::check_cols(&format!("freivalds {name} base"), &base, &dev.base);
+        crate::dev_witness_gen::check_cols(&format!("freivalds {name} pre"), &pre, &dev.pre);
         let r8 = tables.ridx(8);
-        crate::devwfill::check_delta(&format!("freivalds {name} m_r8"), &before.0, &after.0,
+        crate::dev_witness_gen::check_delta(&format!("freivalds {name} m_r8"), &before.0, &after.0,
                                      &sub_slice(&tables.m_r[r8], &after.0));
         assert_eq!(tables.off_table - after.1, after.1 - before.1,
                    "freivalds {name}: off-table bumps differ");
         // the device's own bumps are the check's, not the proof's
         tables.m_r[r8].copy_from_slice(&after.0);
         tables.off_table = after.1;
-        eprintln!("wfill-dev: freivalds {name} -- {} base and {} pre columns, {} cells, \
+        eprintln!("witness_gen-dev: freivalds {name} -- {} base and {} pre columns, {} cells, \
 the 8-bit range multiplicities all match",
                   base.len(), pre.len(), (base.len() + pre.len()) << lay.g.log_rows);
     }
@@ -4918,7 +4918,7 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
     let (s_pow, s_step) = crate::attn_air::powers(s_ch, lay.pq);
 
     // B7a milestone 4 (section 3 row 1): the Freivalds checks' v, us and accs, on the same
-    // three-value mode every fill in this series uses.
+    // three-value mode every witness generation in this series uses.
     let m4g = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
     let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
     let rows = if m4g_host { rows } else { 0 };
@@ -4998,7 +4998,7 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
     };
     // stream II: the activation claim, in the AIR's own mask order -- after the
     // per-matmul accumulators and before the LogUp columns.  It is built from
-    // `m0.qx` and not from `r.base`, so it is the same column whether the fill
+    // `m0.qx` and not from `r.base`, so it is the same column whether the witness generation
     // left the component on the host or on the card, and it does not depend on
     // `rows` having been zeroed for the device accumulator path above.
     let mut qx_claim = SecureField::zero();

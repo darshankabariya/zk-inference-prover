@@ -14,14 +14,14 @@
 //! overhead sits against a normalisation and four table lookups and disappears.
 //! And an emit would have to be re-run for every new residual-stream shape, on the family
 //! whose *constraint* kernel took 617.7 s of ptxas before stream K split it.
-//! `b65_residual_stream_fill.cuh` carries the argument in full.
+//! `b65_residual_stream_witness_gen.cuh` carries the argument in full.
 //!
 //! What the kernel needs from here is the program as *column indices*: every
 //! `Src` resolves to the columns its `(sm, ef)` pair lives in, so the kernel
 //! keeps no per-row state and reads its operands back out of cells it wrote.
 //! `Prog::src_cols` is that resolution, and it already existed for the AIR.
 //!
-//! `ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM` says which path runs, on the three-value pattern every fill in
+//! `ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM` says which path runs, on the three-value pattern every witness generation in
 //! this series uses: 0 the host, 1 the device, 2 both with every cell, every
 //! multiplicity delta, `off_table`, `bad_exp` and both natural-value arrays
 //! asserted equal.
@@ -91,7 +91,7 @@ struct FResidualStreamCfg {
 const NONE: u32 = u32::MAX;
 
 unsafe extern "C" {
-    fn b65_fill_residual_stream(
+    fn b65_witness_gen_residual_stream(
         wit: *const u32,
         groups: *const FGroup,
         slots: *const FSlot,
@@ -155,9 +155,9 @@ pub fn binding_host() -> bool {
     true
 }
 
-/// `ZK_MUT_WITNESS_GEN_RESIDUAL_STREAM`: one deliberate defect in the device fill, so mode 2's
+/// `ZK_MUT_WITNESS_GEN_RESIDUAL_STREAM`: one deliberate defect in the device witness generation, so mode 2's
 /// check has negative controls. The names are the kernel's.
-fn residual_stream_fill_mut() -> u32 {
+fn residual_stream_witness_gen_mut() -> u32 {
     match std::env::var("ZK_MUT_WITNESS_GEN_RESIDUAL_STREAM").ok().as_deref() {
         None | Some("") | Some("none") => 0,
         Some("noperm") => 1,
@@ -270,7 +270,7 @@ fn up_u32(v: Vec<u32>) -> Uint32Vec {
 pub struct DevResidualStream {
     pub pre: Vec<BaseFieldVec>,
     pub base: Vec<BaseFieldVec>,
-    /// the multiplicity counters this fill scatter-added into, left where the
+    /// the multiplicity counters this witness generation scatter-added into, left where the
     /// kernel left them
     pub m_pow: Uint32Vec,
     pub m_norm: Uint32Vec,
@@ -283,14 +283,14 @@ pub struct DevResidualStream {
     /// `(sm, ef)` per leaf and per output, in row order, regrouped the way
     /// `ResidualStreamComponent` holds them. **Empty when the bindings fold on the device**
     /// (`ZK_DEVICE_RESIDUAL_STREAM_BINDING=1`): nothing on the host reads them then, and bringing them
-    /// back is all `gen/residual_stream_fill_d2h` ever was.
+    /// back is all `gen/residual_stream_witness_gen_d2h` ever was.
     pub in_nat: Vec<Vec<(i64, i64)>>,
     pub out_nat: Vec<Vec<(i64, i64)>>,
     pub outs: Vec<Vec<u16>>,
     /// B11 stream N: the same two arrays where the kernel wrote them, row-flat
     /// and in coset row order, kept alive for `devacc::residual_stream_bind`. The `Uint32Vec`
     /// owns the allocation; the bindings read it as `i32`, which is how
-    /// `b65_fill_residual_stream` wrote it.
+    /// `b65_witness_gen_residual_stream` wrote it.
     pub d_in_nat: Uint32Vec,
     pub d_out_nat: Uint32Vec,
     /// the two arrays' row widths, which are the bindings' strides
@@ -361,7 +361,7 @@ pub fn residual_stream_component_dev(w: &ResidualStreamWitness, prog: &Prog, rou
     // ---- the witness, row-flat ---------------------------------------------
     // `w.groups[g]` is `[j * gr.n + i]` per group; the kernel wants one array
     // indexed `[j * n_leaves + flat]`, so the groups interleave here. This is
-    // the one host pass this fill keeps, and it is a widening copy: 4.2 M
+    // the one host pass this witness generation keeps, and it is a widening copy: 4.2 M
     // values on the sequence's `gn1`.
     use rayon::prelude::*;
     let mut wit = vec![0u32; w.rows * n_leaves];
@@ -380,7 +380,7 @@ pub fn residual_stream_component_dev(w: &ResidualStreamWitness, prog: &Prog, rou
     let d_out_slot = up_u32(out_slot.clone());
     let tbl = dev_gtables(tables);
     let un_ptrs = tbl.un_ptrs();
-    crate::util::m4_add("gen/residual_stream_fill_up", t_up.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/residual_stream_witness_gen_up", t_up.elapsed().as_secs_f64());
 
     // ---- the columns and the counters --------------------------------------
     let t_alloc = std::time::Instant::now();
@@ -400,7 +400,7 @@ pub fn residual_stream_component_dev(w: &ResidualStreamWitness, prog: &Prog, rou
     let d_out_pat = Uint32Vec::new_zeroes(rows * out_w.max(1));
     let d_out_nat = Uint32Vec::new_zeroes(rows * out_w.max(1) * 2);
     let d_in_nat = Uint32Vec::new_zeroes(rows * n_leaves * 2);
-    crate::util::m4_add("gen/residual_stream_fill_alloc", t_alloc.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/residual_stream_witness_gen_alloc", t_alloc.elapsed().as_secs_f64());
 
     let cfg = FResidualStreamCfg {
         log_rows,
@@ -414,12 +414,12 @@ pub fn residual_stream_component_dev(w: &ResidualStreamWitness, prog: &Prog, rou
         sticky: u32::from(sticky),
         kmax: tables.kmax,
         out_w: out_w as u32,
-        mutate: residual_stream_fill_mut(),
+        mutate: residual_stream_witness_gen_mut(),
     };
 
     let t_k = std::time::Instant::now();
     unsafe {
-        b65_fill_residual_stream(
+        b65_witness_gen_residual_stream(
             d_wit.device_ptr,
             d_groups.device_ptr as *const FGroup,
             d_slots.device_ptr as *const FSlot,
@@ -446,14 +446,14 @@ pub fn residual_stream_component_dev(w: &ResidualStreamWitness, prog: &Prog, rou
         );
     }
     let kernel_secs = t_k.elapsed().as_secs_f64();
-    crate::util::m4_add("gen/residual_stream_fill_kernel", kernel_secs);
+    crate::util::m4_add("gen/residual_stream_witness_gen_kernel", kernel_secs);
 
     // ---- back to the host: the counters and the three natural arrays -------
     let t_d = std::time::Instant::now();
     let got = counts.to_vec();
     assert_eq!(
         got[2], 0,
-        "residual-stream fill: {} leaves whose unary input is off the value table -- the host \
+        "residual-stream witness generation: {} leaves whose unary input is off the value table -- the host \
          evaluates the unary there and the device has no table row to read",
         got[2]
     );
@@ -514,7 +514,7 @@ pub fn residual_stream_component_dev(w: &ResidualStreamWitness, prog: &Prog, rou
             }
         }
     }
-    crate::util::m4_add("gen/residual_stream_fill_d2h", t_d.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/residual_stream_witness_gen_d2h", t_d.elapsed().as_secs_f64());
 
     // ---- the two preprocessed selectors, which are row-index functions -----
     let t_p = std::time::Instant::now();
@@ -526,10 +526,10 @@ pub fn residual_stream_component_dev(w: &ResidualStreamWitness, prog: &Prog, rou
         .into_iter()
         .map(|c| crate::device::upload_col(&eval_of(log_rows, c)))
         .collect();
-    crate::util::m4_add("gen/residual_stream_fill_pre", t_p.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/residual_stream_witness_gen_pre", t_p.elapsed().as_secs_f64());
 
     eprintln!(
-        "residual_stream_fill-dev: {} 2^{} x {} slots -- {} base and {} pre columns, {} cells, \
+        "residual_stream_witness_gen-dev: {} 2^{} x {} slots -- {} base and {} pre columns, {} cells, \
          kernel {:.4} s",
         prog.slots.len(),
         log_rows,
@@ -562,9 +562,9 @@ fn up_struct<T: Copy>(v: &[T]) -> Uint32Vec {
     up_u32(raw)
 }
 
-/// `ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM=2`: the device fill against the host's, everything at once.
+/// `ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM=2`: the device witness generation against the host's, everything at once.
 ///
-/// Not a sample. A fill that is wrong on one cell of one row is wrong, and the
+/// Not a sample. A witness generation that is wrong on one cell of one row is wrong, and the
 /// point of checking here rather than against a digest is that a mismatch names
 /// the column and the cell.
 #[allow(clippy::too_many_arguments)]
@@ -626,13 +626,13 @@ pub fn check_residual_stream_dev(tag: &str, base: &[Eval], pre: &[Eval], dev: &D
         }
     }
     eprintln!(
-        "residual_stream_fill-dev: {tag} -- {} base and {} pre columns, {} cells, the five \
+        "residual_stream_witness_gen-dev: {tag} -- {} base and {} pre columns, {} cells, the five \
          multiplicity tables, off_table, bad_exp and both natural arrays all match",
         base.len(), pre.len(), (base.len() + pre.len()) << dev.pre[0].size.trailing_zeros()
     );
 }
 
-/// The five counter families, snapshotted around the host fill.
+/// The five counter families, snapshotted around the host witness generation.
 pub struct ResidualStreamSnap {
     pub pow: Vec<u32>,
     pub norm: Vec<u32>,
@@ -676,7 +676,7 @@ pub fn merge(t: &mut ResidualStreamTables, dev: &DevResidualStream) {
     t.off_table += dev.off_table;
 }
 
-/// Restore the host's counters to where the host fill left them, so mode 2's
+/// Restore the host's counters to where the host witness generation left them, so mode 2's
 /// device bumps are the check's and not the proof's.
 pub fn restore(t: &mut ResidualStreamTables, after: &ResidualStreamSnap, off: usize) {
     t.m_pow.copy_from_slice(&after.pow);

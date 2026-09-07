@@ -11,7 +11,7 @@
 //    table is a gather out of a 2^16-entry map of bf16 patterns to numerators.
 //    The map is built on the host -- 262 kB, and `exp()` never runs on the
 //    device, so there is no libm to agree with.
-//  * `m_exp` is a counter every key tile's fill already scatter-adds into (21.1).
+//  * `m_exp` is a counter every key tile's witness generation already scatter-adds into (21.1).
 //    It came back to the host only to be merged and re-uploaded.
 //
 // **Rule 8 is the reason for the patch.** `Layer::corrupt_exp_table` is rung
@@ -21,11 +21,11 @@
 // diffs its actual table against the closed form -- one parallel pass, and it
 // is the *measured* path, not a check mode -- and uploads the rows that differ.
 // On an honest witness the list is empty; on the probe it has one entry.
-#ifndef B65_TABLE_FILL_CUH
-#define B65_TABLE_FILL_CUH
+#ifndef B65_TABLE_WITNESS_GEN_CUH
+#define B65_TABLE_WITNESS_GEN_CUH
 #include "fields.cuh"
 
-// `Variant`, as `b65_wfill.cuh` numbers it.
+// `Variant`, as `b65_witness_gen.cuh` numbers it.
 #define B65T_VAR_BF16X 0u
 #define B65T_VAR_INTEXP 1u
 #define B65T_VAR_INTSPLIT 2u
@@ -54,7 +54,7 @@ struct B65TabCfg {
     unsigned log_rows;    // `p.log_table`
     unsigned rows;        // `1 << log_rows`
     unsigned variant;
-    unsigned n_counters;  // one per key tile whose fill ran on the device
+    unsigned n_counters;  // one per key tile whose witness generation ran on the device
     // `frac.exp2()` as the host computed it, passed rather than recomputed so
     // the division is the same IEEE division on both sides.
     double two_pow;
@@ -64,8 +64,8 @@ struct B65TabCfg {
 
 // `x_col`, `y_col` and `m_col` are `1 << log_rows` cells each, in committed
 // order. `expmap` is 2^16 numerators. `counters` are the device counter arrays
-// the key tile fills bumped, each `1 << log_rows` wide.
-extern "C" void b65_fill_tables(const unsigned *expmap,
+// the key tile witness generations bumped, each `1 << log_rows` wide.
+extern "C" void b65_witness_gen_tables(const unsigned *expmap,
                                 const unsigned *const *counters,
                                 const unsigned *patch_idx, const unsigned *patch_val,
                                 unsigned n_patch,

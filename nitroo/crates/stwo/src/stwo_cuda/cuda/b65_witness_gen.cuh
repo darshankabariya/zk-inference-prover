@@ -1,13 +1,13 @@
-// B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and key tile fills, on the
+// B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and key tile witness generations, on the
 // device.
 //
-// 20.6's row 1 -- "the other three fills, 0.975 s, and none of them needs a new
+// 20.6's row 1 -- "the other three witness generations, 0.975 s, and none of them needs a new
 // idea". The idea is 20.1's, three more times: the thread owns the *committed*
 // row, so `eval_of` never runs; the layout maps are closed forms and port as
 // written; the multiplicities are a warp-aggregated scatter-add whose counters
 // come back as a D2H, which 4a permits.
 //
-// What is different from `b65_fill.cu`, and why this is its own file:
+// What is different from `b65_dequant_witness_gen.cu`, and why this is its own file:
 //
 //  * **a component is several grids, not one.** The dequant component is one
 //    `MatLayout`; a key tile is four sub-components on three different `Grid`s plus a
@@ -24,14 +24,14 @@
 //    numerator with a different *legal* table output, and a kernel that
 //    recomputed it from the table would silently repair the probe and turn a
 //    rung-3 rejection into an acceptance.
-#ifndef B65_WFILL_CUH
-#define B65_WFILL_CUH
+#ifndef B65_WITNESS_GEN_CUH
+#define B65_WITNESS_GEN_CUH
 #include "fields.cuh"
 
-#define B65_WFILL_NONE 0xffffffffu
+#define B65_WITNESS_GEN_NONE 0xffffffffu
 
 // The negative controls (`ZK_MUT_WITNESS_GEN`). Each is a way one of these three
-// fills could plausibly be wrong, and 19.6's caution is the reason `inst` is on
+// witness generations could plausibly be wrong, and 19.6's caution is the reason `inst` is on
 // the list: a control that cannot fire on the shape under test is a finding and
 // not a pass, and the key tile's instance split is invisible on a one-instance
 // key tile.
@@ -59,7 +59,7 @@ struct B65Grid {
 };
 
 // One counter array, as `Tables` holds it: `m_exp`, one `m_r[t]` per range
-// width, or `m_qnz`. A null `m` means this fill does not bump that table at all
+// width, or `m_qnz`. A null `m` means this witness generation does not bump that table at all
 // (`range_check` off, or a variant with no auxiliary column).
 struct B65Mult {
     unsigned *m;
@@ -80,7 +80,7 @@ struct B65FreivaldsCfg {
     unsigned mutate;
 };
 
-extern "C" void b65_fill_freivalds(const signed char *qx,
+extern "C" void b65_witness_gen_freivalds(const signed char *qx,
                                    const signed char *const *qw, const unsigned *n_out,
                                    m31 *const *base_cols, unsigned n_base,
                                    m31 *const *pre_cols, unsigned n_pre,
@@ -107,7 +107,7 @@ struct B65AoCfg {
     unsigned acc_hi_bits;
 };
 
-extern "C" void b65_fill_attnout(const unsigned *acc, const unsigned *den,
+extern "C" void b65_witness_gen_attnout(const unsigned *acc, const unsigned *den,
                                  const int *jo, const int *jv,
                                  m31 *const *base_cols, unsigned n_base,
                                  m31 *const *pre_cols, unsigned n_pre,
@@ -148,12 +148,12 @@ struct B65KeyTileCfg {
 };
 
 // `counts[0]` is the off-table total the host adds to `Tables::off_table`.
-extern "C" void b65_fill_key_tile_chan(const int *kk, const int *qq,
+extern "C" void b65_witness_gen_key_tile_chan(const int *kk, const int *qq,
                                    m31 *const *cols,
                                    B65Mult m_k, B65Mult m_q,
                                    unsigned *counts, B65KeyTileCfg cfg);
 
-extern "C" void b65_fill_key_tile_grid(const int *dd, const unsigned short *num,
+extern "C" void b65_witness_gen_key_tile_grid(const int *dd, const unsigned short *num,
                                    const unsigned short *xx, const unsigned *sc,
                                    const unsigned *delta, const int *vv,
                                    long long table0,
@@ -161,10 +161,10 @@ extern "C" void b65_fill_key_tile_grid(const int *dd, const unsigned short *num,
                                    B65Mult m_exp, B65Mult m_aux, B65Mult m_v,
                                    unsigned *counts, B65KeyTileCfg cfg);
 
-extern "C" void b65_fill_key_tile_out(const unsigned *out, m31 *const *cols,
+extern "C" void b65_witness_gen_key_tile_out(const unsigned *out, m31 *const *cols,
                                   unsigned *counts, B65KeyTileCfg cfg);
 
-extern "C" void b65_fill_key_tile_tok(const unsigned *mm, const unsigned *zz,
+extern "C" void b65_witness_gen_key_tile_tok(const unsigned *mm, const unsigned *zz,
                                   m31 *const *cols, unsigned with_max,
                                   B65Mult m_lo, B65Mult m_hi,
                                   unsigned *counts, B65KeyTileCfg cfg);

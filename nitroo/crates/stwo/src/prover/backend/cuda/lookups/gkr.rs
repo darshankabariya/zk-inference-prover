@@ -42,7 +42,7 @@ use crate::stwo_cuda::{bindings, secure_field_vec::SecureFieldVec};
 const GKR_SUM_MAX_BLOCKS: usize = 264;
 
 /// A device buffer straight from the pool, with no zeroing pass: every cell of
-/// a sumcheck buffer is written by the kernel that fills it, so the memset in
+/// a sumcheck buffer is written by the kernel that witness generations it, so the memset in
 /// `cuda_malloc_uint32_t` would be an extra launch and an extra full write per
 /// layer. Freed by the ordinary `Drop`, which is pool-aware.
 pub(crate) fn alloc_secure(n: usize) -> SecureFieldVec {

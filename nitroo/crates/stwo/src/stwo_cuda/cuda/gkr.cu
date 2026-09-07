@@ -477,7 +477,7 @@ void gkr_read_partials(const qm31 *dev, uint32_t n_pairs, qm31 *out_host) {
 // B11 stream T: the link's coefficient column, folded where its columns are.
 //
 // `gkrlink::build_height_cols` needs `konst + sum_j w_j * col_j` pointwise over
-// the base columns the fold references. Under a device fill those columns have
+// the base columns the fold references. Under a device witness generation those columns have
 // no host mirror, so the fold happens here: the same affine combine the feed
 // kernel computes per look, under the link's own weights. The accumulation
 // order is the caller's weight order, which is the host builder's -- and field

@@ -511,7 +511,7 @@ def gg_point(path):
     p = json.loads(pathlib.Path(path).read_text())["result"]["point"]
     marks = p["mem_marks"]
     peak = max(marks, key=lambda m: m["pool_used_high"])
-    fill = next(m for m in marks if m["mark"] == "after_fill")
+    witness_gen = next(m for m in marks if m["mark"] == "after_witness_gen")
     fam = p["family_cells"]
     return dict(
         h=p["params"]["log_table"], cells=p["cells"],
@@ -521,7 +521,7 @@ def gg_point(path):
         freivalds_pre=sum(w["pre_cells"] for w in fam["freivalds_weights"]),
         # trees 0 and 1, as far as they are resident on the device before commit
         devcopy_cells=p["upload"]["devcopy_bytes"] // 4,
-        fill_resident=fill["pool_used"] - p["upload"]["devcopy_bytes"],
+        witness_gen_resident=witness_gen["pool_used"] - p["upload"]["devcopy_bytes"],
         peak=peak["pool_used_high"], peak_mark=peak["mark"],
         driver=peak["driver_used"] - peak["pool_reserved"],
         slack=peak["pool_reserved_high"] - peak["pool_used_high"],
@@ -553,14 +553,14 @@ def memory_coeffs():
     base_cols, base_a = cols("cells", "base")
     inter_cols, inter_a = cols("cells", "interaction")
     dev_cols, dev_a = cols("devcopy_cells")
-    fill_bytes_cols, fill_a = cols("fill_resident")
+    witness_gen_bytes_cols, witness_gen_a = cols("witness_gen_resident")
     peak_cols, peak_a = cols("peak")
     # the three cell terms, each at 12 B / 4 B, leave the height term
     cell_b, copy_b = 12.0, 4.0
     # the height term is `height_b * 2**(h+1)`, so its slope in 2**h is twice it
     height_b = (peak_cols - cell_b * (fresh_cols + pre_cols)
-                - copy_b * dev_cols - fill_bytes_cols) / 2.0
-    resid = peak_a - (cell_b * (fresh_a + pre_a) + copy_b * dev_a + fill_a
+                - copy_b * dev_cols - witness_gen_bytes_cols) / 2.0
+    resid = peak_a - (cell_b * (fresh_a + pre_a) + copy_b * dev_a + witness_gen_a
                       + height_b * 2 ** (a["h"] + 1))
     bounds = a["cells"]["fresh"] - a["cells"]["base"] - a["cells"]["interaction"]
     return dict(
@@ -569,8 +569,8 @@ def memory_coeffs():
         # name; GG's brackets put the second part at a few kB
         residual_bytes=resid, bounds_cells=bounds,
         fresh_h_cols=fresh_cols, pre_h_cols=pre_cols, base_h_cols=base_cols,
-        inter_h_cols=inter_cols, dev_h_cols=dev_cols, fill_h_bytes=fill_bytes_cols,
-        fill_fixed=fill_a - fill_bytes_cols * 2 ** a["h"],
+        inter_h_cols=inter_cols, dev_h_cols=dev_cols, witness_gen_h_bytes=witness_gen_bytes_cols,
+        witness_gen_fixed=witness_gen_a - witness_gen_bytes_cols * 2 ** a["h"],
         # the Freivalds check's OWN preprocessed trace, per covered weight, as the
         # composed chunk commits it.  B3's `preprocessed_per_weight` is a standalone
         # width-sweep slope and does not carry the composed chunk's padding.
@@ -581,7 +581,7 @@ def memory_coeffs():
         pre_shared_fixed=pre_a - a["freivalds_pre"] - pre_cols * 2 ** a["h"],
         pre_host_built=pre_a - (dev_a - a["cells"]["base"]),
         # base's share of the height-independent trace, used to split a modelled
-        # fresh count into the base half the device fills clone and the
+        # fresh count into the base half the device witness generations clone and the
         # interaction half they do not
         base_share=((base_a - base_cols * 2 ** a["h"])
                     / (base_a + inter_a - (base_cols + inter_cols) * 2 ** a["h"])),
@@ -614,13 +614,13 @@ def chunk_memory(mc, fresh, weights, h, measured=None):
         base_fixed = mc["base_share"] * (fresh - mc["boundary_cells"]
                                          - mc["fresh_h_cols"] * 2 ** 23)
         D = base_fixed + mc["base_h_cols"] * h_cells + (P - mc["pre_host_built"])
-    fill = mc["fill_fixed"] + mc["fill_h_bytes"] * h_cells
+    witness_gen = mc["witness_gen_fixed"] + mc["witness_gen_h_bytes"] * h_cells
     cells_b = mc["cell_bytes"] * (F + P)
     copies_b = mc["copy_bytes"] * D
     height_b = mc["height_bytes"] * 2 * h_cells
-    pool = cells_b + copies_b + fill + height_b + mc["residual_bytes"]
+    pool = cells_b + copies_b + witness_gen + height_b + mc["residual_bytes"]
     return dict(fresh=F, pre=P, dev=D, cells_bytes=cells_b, copies_bytes=copies_b,
-                fill_bytes=fill, height_bytes=height_b, pool=pool,
+                witness_gen_bytes=witness_gen, height_bytes=height_b, pool=pool,
                 card=pool + mc["driver_bytes"] + mc["slack_bytes"])
 
 
@@ -630,7 +630,7 @@ def head_cross_check(mc, ref):
     seq5's `lm_head` chunk is a different chunk on a different card, and none of
     it entered GG's solve, so it is a real held-out point.  It is informational
     and not gated: its peak is an `nvidia-smi` sample every 2 s (so a floor on a
-    transient, which GG showed can be 2.5 GiB tall), and its fill residents were
+    transient, which GG showed can be 2.5 GiB tall), and its witness generation residents were
     never marked, so the layer chunk's are used for them."""
     p = ROOT / "b10" / "out" / "seq5" / "seq_c4096_head.json"
     if not p.exists():
@@ -711,7 +711,7 @@ def hh_point(path):
         committed=c["fresh"] + c["preprocessed"],
         boundary_cells=c["fresh"] - c["base"] - c["interaction"],
         devcopy_cells=p["upload"]["devcopy_bytes"] // 4,
-        fill=marks["after_fill"]["pool_used"], marks=marks,
+        witness_gen=marks["after_witness_gen"]["pool_used"], marks=marks,
         peak=peak["pool_used_high"], peak_mark=peak["mark"],
         prove=p["prove_secs"],
         phase={k: v["secs"] for k, v in p["phases"]["phases"].items()},
@@ -740,7 +740,7 @@ def _lde_terms(r):
     return dict(
         cell_bytes=cell_b, merkle=merkle,
         merkle_check=d_inter - (cell_b * c["interaction"] + merkle * n),
-        twiddles=(m["after_twiddles"]["pool_used"] - r["fill"]) / n,
+        twiddles=(m["after_twiddles"]["pool_used"] - r["witness_gen"]) / n,
         composition=(m["composition"]["pool_used"]
                      - m["commit_boundary"]["pool_used"]) / n,
         comp_tree=(m["composition_commit"]["pool_used"]
@@ -751,10 +751,10 @@ def _lde_terms(r):
 
 
 def _lde_levels(r, co):
-    """Replay `co`'s coefficients against run `r`'s own cells and fill level."""
+    """Replay `co`'s coefficients against run `r`'s own cells and witness-generation level."""
     n = 2.0 ** (r["h"] + 1)
     c, out = r["cells"], {}
-    lv = r["fill"] + co["twiddles"] * n
+    lv = r["witness_gen"] + co["twiddles"] * n
     out["after_twiddles"] = lv
     for k, cc in (("commit_pre", c["preprocessed"]), ("commit_base", c["base"]),
                   ("commit_inter", c["interaction"])):
@@ -787,9 +787,9 @@ def ldeonly_coeffs(mc):
         return None
 
     def X(r):
-        # the copies term is (7b)'s `4 B x D + other fill residents`, which is
-        # exactly what the run's own `after_fill` level reads
-        return r["peak"] - 4.0 * r["committed"] - r["fill"]
+        # the copies term is (7b)'s `4 B x D + other witness_gen residents`, which is
+        # exactly what the run's own `after_witness_gen` level reads
+        return r["peak"] - 4.0 * r["committed"] - r["witness_gen"]
 
     hb = (X(b) - X(a)) / (2 ** (b["h"] + 1) - 2 ** (a["h"] + 1))
     ha = X(a) - hb * 2 ** (a["h"] + 1)
@@ -846,7 +846,7 @@ def ldeonly_memory(mc, lo, part, h):
 
     Three variants, in the order they would have to be built:
       (i)   as built -- the switch as stream HH measured it;
-      (ii)  the fills' trace-domain copies dropped once the tree is committed,
+      (ii)  the witness generations' trace-domain copies dropped once the tree is committed,
             designed and not built: they are redundant with the coefficients;
       (iii) the coefficients host-resident and streamed per log-size group,
             designed and not built: the card then holds only the height terms
@@ -854,7 +854,7 @@ def ldeonly_memory(mc, lo, part, h):
     n = 2 ** (h + 1)
     cells = part["fresh"] + part["pre"]
     cells4 = lo["terms"]["cell_bytes"] * cells
-    copies = part["copies_bytes"] + part["fill_bytes"]
+    copies = part["copies_bytes"] + part["witness_gen_bytes"]
     fixed = lo["driver_bytes"] + lo["slack_bytes"]
     X = lo["a_bytes"] + lo["b_bytes"] * n
     group = lo["group_share"] * cells
@@ -1503,11 +1503,11 @@ def main(argv=None):
         print(f"    {mc['cell_bytes']:.0f} B x (fresh + preprocessed cells)   "
               "every tree, base and interaction alike")
         print(f"    {mc['copy_bytes']:.0f} B x device-resident cells of trees 0 and 1"
-              "   base cells plus the tables the fills clone")
+              "   base cells plus the tables the witness generations clone")
         print(f"    {mc['height_bytes']:.0f} B x 2^(h+1)                      "
               "h = log rows of the tallest column")
-        print(f"    + {mc['fill_fixed'] / GIB:.3f} GiB + {mc['fill_h_bytes']:.0f} B x 2^h "
-              f"of other fill residents, + {mc['residual_bytes'] / 2 ** 20:.2f} MiB "
+        print(f"    + {mc['witness_gen_fixed'] / GIB:.3f} GiB + {mc['witness_gen_h_bytes']:.0f} B x 2^h "
+              f"of other witness generation residents, + {mc['residual_bytes'] / 2 ** 20:.2f} MiB "
               "of boundary-tree Merkle")
         print(f"    + {mc['driver_bytes'] / GIB:.3f} GiB the driver holds outside the pool"
               f", + {mc['slack_bytes'] / 2 ** 20:.0f} MiB of pool slack")
@@ -1727,7 +1727,7 @@ def main(argv=None):
         print(f"\n  one layer chunk at S={args.seq}, C=4096, all [projected], three "
               "variants:")
         print("   (i)   as built      -- HH's switch, measured on this card")
-        print("   (ii)  copies dropped -- DESIGNED, NOT BUILT: the fills' trace-domain "
+        print("   (ii)  copies dropped -- DESIGNED, NOT BUILT: the witness generations' trace-domain "
               "copies are")
         print("         redundant with the coefficients once the tree is committed")
         print("   (iii) host coeffs   -- DESIGNED, NOT BUILT: the coefficients live in "

@@ -33,10 +33,10 @@
 //
 // **What is read, and why it is the columns and not the witness.** The host
 // builds `b[j]` from the witness (`a.kk`, `m.acc`, `m0.qx`, ...); the kernels
-// build it from the columns those witnesses were filled into by 20-22's fills,
+// build it from the columns those witnesses were filled into by 20-22's witness generations,
 // which are already on the device in committed order and already checked cell
 // for cell. That is the AIR's own route -- the constraint reads the same
-// columns -- and it means no witness is uploaded twice and no fill is
+// columns -- and it means no witness is uploaded twice and no witness generation is
 // recomputed here, so section 5 rule 8 has nothing to bite on: a probe that
 // corrupts a witness corrupts the column, and the accumulator carries it.
 //
@@ -84,7 +84,7 @@
 // `src1` of a stage-2 lane that has only one factor.
 #define B65A_ONE 0xffffffffu
 
-// `Grid`, as `b65_wfill.cuh` spells it.
+// `Grid`, as `b65_witness_gen.cuh` spells it.
 struct B65AccGrid {
     unsigned log_rows;
     unsigned rows;
@@ -99,7 +99,7 @@ struct B65AccGrid {
 // B7a milestone 4 (section 3 row 1, section 25): these four were `static` inside
 // `b65_acc.cu` until the key tile selectors needed them. They are the *only* thing
 // `commit_pre`'s 48 preprocessed columns say -- ACTIVE, NOFIRST, LAST and
-// ISTART per coset row -- so they live in the header and `b65_pre_fill.cu`
+// ISTART per coset row -- so they live in the header and `b65_pre_witness_gen.cu`
 // builds the columns from the same three lines the accumulators segment on.
 
 // `common.rs`'s `m4_perm`: the closed form of
@@ -112,7 +112,7 @@ __device__ __forceinline__ unsigned b65a_perm(unsigned i, unsigned log_n) {
     return __brev(c) >> (32u - log_n);
 }
 
-// `Grid::row`, as `b65_wfill.cu` has it.
+// `Grid::row`, as `b65_witness_gen.cu` has it.
 __device__ __forceinline__ bool b65a_grid_row(const B65AccGrid &g, unsigned j,
                                               unsigned *grp, unsigned *chunk) {
     if (j < g.lead) {
@@ -277,10 +277,10 @@ struct B65AccAo {
 // So a binding needs no flags and no stage 2 -- it is one stage-1 lane and the
 // shared scan, and `a[j]` is the constant `step` everywhere but row 0.
 //
-// What it reads is not a committed column. `b65_residual_stream_fill.cu` leaves `(sm, ef)`
+// What it reads is not a committed column. `b65_residual_stream_witness_gen.cu` leaves `(sm, ef)`
 // per leaf and per output in `in_nat` / `out_nat`, in **coset row order**, for
 // exactly this purpose; before this stream those two arrays were copied back
-// across the link and folded on the host, which is all `gen/residual_stream_fill_d2h` was.
+// across the link and folded on the host, which is all `gen/residual_stream_witness_gen_d2h` was.
 // `src` picks the array, `off` and `width` cut this binding's sequence out of a
 // row of it, and `stride` is that array's own row width.
 struct B65AccResidualStreamBind {
@@ -324,8 +324,7 @@ extern "C" void b65_acc_last(const qm31 *v, qm31 *host, unsigned rows,
 
 // ------------------------------------------------------------- the six components --
 
-// B7a milestone 4 (section 25): the key tile shapes' flags, written once at fill
-// time. `commit_pre` runs before the challenges are drawn and the accumulators
+// B7a milestone 4 (section 25): the key tile shapes' flags, written once at witness-generation time. `commit_pre` runs before the challenges are drawn and the accumulators
 // run after, so the array outlives both and the selectors and the segmentation
 // are one computation rather than two that agree.
 extern "C" void b65_flags_key_tile(unsigned *flags, B65AccFlags cfg);
@@ -363,7 +362,7 @@ extern "C" void b65_acc_ao(const m31 *den_col, const m31 *const *acc_cols,
 
 // B11 stream N: every binding of one residual-stream component, one lane each. `specs` and
 // `weights` are host arrays and are cloned to the card here; `in_nat` and
-// `out_nat` are already there, where `b65_residual_stream_fill.cu` left them.
+// `out_nat` are already there, where `b65_residual_stream_witness_gen.cu` left them.
 extern "C" void b65_acc_residual_stream_bind(const int *in_nat, const int *out_nat,
                              const qm31 *weights, unsigned n_weights, qm31 lam,
                              const B65AccResidualStreamBind *specs, unsigned n_specs, qm31 *a,

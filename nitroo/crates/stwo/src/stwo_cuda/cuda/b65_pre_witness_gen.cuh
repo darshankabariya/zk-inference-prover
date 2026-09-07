@@ -7,7 +7,7 @@
 //    multiply, `q != 0` and range rows and their ten multiplicities. 23.1 wrote
 //    that they "are data, not closed forms, so moving them would trade an
 //    upload for an upload". Measured column by column that is wrong twice over:
-//    the ten multiplicities are counters every fill already scatter-adds into
+//    the ten multiplicities are counters every witness generation already scatter-adds into
 //    (23.1's trick, nine more times), and `norm_table`, the fraction table and
 //    `mul_table` are all closed forms of the *row index* -- integer bit surgery
 //    and one exact float conversion, no `exp`, no libm, nothing uploaded.
@@ -46,14 +46,14 @@
 // are `0..2^w` generated inline, so their closed form *is* their definition.
 //
 // The multiplicities are the other side of the same coin: they are counted from
-// the witness, and they are counted *by the fills*, so a probe that corrupts a
+// the witness, and they are counted *by the witness generations*, so a probe that corrupts a
 // witness is carried into the counter it bumps before it reaches this file.
-#ifndef B65_PRE_FILL_CUH
-#define B65_PRE_FILL_CUH
+#ifndef B65_PRE_WITNESS_GEN_CUH
+#define B65_PRE_WITNESS_GEN_CUH
 #include "fields.cuh"
 #include "b65_acc.cuh"
 
-// Which shared table a `b65_fill_pre_table` call is building.
+// Which shared table a `b65_witness_gen_pre_table` call is building.
 #define B65P_KIND_NORM 0u
 #define B65P_KIND_FRAC 1u
 #define B65P_KIND_MUL 2u
@@ -110,7 +110,7 @@ struct B65PreCfg {
     unsigned round;
     unsigned sticky;     // `round.needs_sticky()`
     unsigned n_cols;     // the preprocessed columns this table has
-    unsigned n_counters; // one per component whose fill bumped this table
+    unsigned n_counters; // one per component whose witness generation bumped this table
     unsigned mutate;
     unsigned at;         // which family the defect is aimed at
 };
@@ -130,12 +130,12 @@ struct B65SelCfg {
 // One shared table's preprocessed columns and its multiplicity column.
 //
 // `cols` are `cfg.n_cols` columns of `cfg.rows` cells in committed order.
-// `m_col` is the multiplicity column, or null when no fill's counter is on the
+// `m_col` is the multiplicity column, or null when no witness generation's counter is on the
 // device and the host keeps it. `counters` are the device counter arrays those
-// fills bumped, each `cfg.rows` wide. `patch_idx` / `patch_val` are the rows
+// witness generations bumped, each `cfg.rows` wide. `patch_idx` / `patch_val` are the rows
 // where this run's own table is not the closed form -- `n_patch` rows of
 // `cfg.n_cols` values each, row-major, and empty on an honest run.
-extern "C" void b65_fill_pre_table(const unsigned *const *counters,
+extern "C" void b65_witness_gen_pre_table(const unsigned *const *counters,
                                    const unsigned *patch_idx, const unsigned *patch_val,
                                    unsigned n_patch, m31 *const *cols, m31 *m_col,
                                    B65PreCfg cfg);
@@ -143,7 +143,7 @@ extern "C" void b65_fill_pre_table(const unsigned *const *counters,
 // One key tile sub-component's selector columns, out of the flags `b65_flags_key_tile`
 // wrote for exactly those rows. `inv_delta` is the master exp table's key
 // scale, inverted, per instance -- null unless the key component wants it.
-extern "C" void b65_fill_sel(const unsigned *flags, m31 *const *cols,
+extern "C" void b65_witness_gen_sel(const unsigned *flags, m31 *const *cols,
                              const m31 *inv_delta, B65SelCfg cfg);
 
 #endif

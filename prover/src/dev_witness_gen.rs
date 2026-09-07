@@ -1,4 +1,4 @@
-//! B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and key tile fills, on the
+//! B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and key tile witness generations, on the
 //! device.
 //!
 //! 20.6's row 1, and 20.1's design three more times. What it moves, per family:
@@ -25,7 +25,7 @@
 //! acceptance. So `num` is uploaded, narrowed to u16 and checked.
 //!
 //! `ZK_DEVICE_WITNESS_GEN` says which path runs, on the same three-value pattern
-//! `ZK_DEVICE_WITNESS_GEN_DEQUANT` uses: 0 the host fills, 1 the device fills, 2 both with every
+//! `ZK_DEVICE_WITNESS_GEN_DEQUANT` uses: 0 the host witness generations, 1 the device witness generations, 2 both with every
 //! cell asserted equal.
 
 use rayon::prelude::*;
@@ -39,7 +39,7 @@ use crate::layer::{AoLayout, AttnOut, FreivaldsLayout, Layer, Tables};
 
 // ---------------------------------------------------------------- the FFI shapes --
 
-/// Mirrors `B65Grid` in `b65_wfill.cuh`, field for field.
+/// Mirrors `B65Grid` in `b65_witness_gen.cuh`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FGrid {
@@ -65,7 +65,7 @@ impl FGrid {
 }
 
 /// Mirrors `B65Mult`: one counter array with its length. A null pointer is the
-/// host's "this fill does not bump that table at all", and the kernel skips the
+/// host's "this witness generation does not bump that table at all", and the kernel skips the
 /// call rather than counting an off-table bump.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -149,7 +149,7 @@ pub struct FKeyTileCfg {
 }
 
 unsafe extern "C" {
-    fn b65_fill_freivalds(
+    fn b65_witness_gen_freivalds(
         qx: *const i8,
         qw: *const *const i8,
         n_out: *const u32,
@@ -161,7 +161,7 @@ unsafe extern "C" {
         counts: *mut u32,
         cfg: FFreivaldsCfg,
     );
-    fn b65_fill_attnout(
+    fn b65_witness_gen_attnout(
         acc: *const u32,
         den: *const u32,
         jo: *const i32,
@@ -179,7 +179,7 @@ unsafe extern "C" {
         counts: *mut u32,
         cfg: FAoCfg,
     );
-    fn b65_fill_key_tile_chan(
+    fn b65_witness_gen_key_tile_chan(
         kk: *const i32,
         qq: *const i32,
         cols: *const *mut u32,
@@ -188,7 +188,7 @@ unsafe extern "C" {
         counts: *mut u32,
         cfg: FKeyTileCfg,
     );
-    fn b65_fill_key_tile_grid(
+    fn b65_witness_gen_key_tile_grid(
         dd: *const i32,
         num: *const u16,
         xx: *const u16,
@@ -204,13 +204,13 @@ unsafe extern "C" {
         counts: *mut u32,
         cfg: FKeyTileCfg,
     );
-    fn b65_fill_key_tile_out(
+    fn b65_witness_gen_key_tile_out(
         out: *const u32,
         cols: *const *mut u32,
         counts: *mut u32,
         cfg: FKeyTileCfg,
     );
-    fn b65_fill_key_tile_tok(
+    fn b65_witness_gen_key_tile_tok(
         mm: *const u32,
         zz: *const u32,
         cols: *const *mut u32,
@@ -222,7 +222,7 @@ unsafe extern "C" {
     );
 }
 
-/// Which family a fill belongs to, so a control can be aimed at one of them.
+/// Which family a witness generation belongs to, so a control can be aimed at one of them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fam {
     Freivalds,
@@ -240,7 +240,7 @@ impl Fam {
     }
 }
 
-/// `ZK_MUT_WITNESS_GEN`: one deliberate defect in the device fills, so mode 2's
+/// `ZK_MUT_WITNESS_GEN`: one deliberate defect in the device witness generations, so mode 2's
 /// check has negative controls. The names are the kernel's.
 ///
 /// **The `:family` suffix matters, and 19.6 is why.** The key tiles are checked
@@ -249,7 +249,7 @@ impl Fam {
 /// checks would have caught the same defect. `ZK_MUT_WITNESS_GEN=chan:freivalds` aims it
 /// at one family, so each check is shown to bite on its own rather than
 /// inheriting the key tiles' evidence.
-pub fn wfill_mut(fam: Fam) -> u32 {
+pub fn witness_gen_mut(fam: Fam) -> u32 {
     let raw = std::env::var("ZK_MUT_WITNESS_GEN").ok();
     let raw = raw.as_deref().unwrap_or("");
     let (name, want) = match raw.split_once(':') {
@@ -271,7 +271,7 @@ pub fn wfill_mut(fam: Fam) -> u32 {
         "descend" => 4,
         "inst" => 5,
         "aoref" => 6,
-        // B11 stream N, lever 2: the two ways a diagonal block key tile's fill could be
+        // B11 stream N, lever 2: the two ways a diagonal block key tile's witness generation could be
         // wrong that no earlier control reaches. `nomask` is the kernel's (a
         // masked slot bumping the exp table); `notok` is this side's (a diagonal block
         // key tile building the per-token component it does not own).
@@ -281,18 +281,18 @@ pub fn wfill_mut(fam: Fam) -> u32 {
     }
 }
 
-/// B11 stream L: the key tile fill's own switch, defaulting to `ZK_DEVICE_WITNESS_GEN`.
+/// B11 stream L: the key tile witness generation's own switch, defaulting to `ZK_DEVICE_WITNESS_GEN`.
 ///
 /// `ZK_DEVICE_WITNESS_GEN` turns on three device generation paths at once -- the Freivalds check
 /// components, the attnout, and every non-diagonal block key tile. Stream L measured them
 /// apart on the sequence's own witness and they are not in the same state: the
-/// Freivalds check and attnout fills reproduce the host cell for cell, while the key tile fill
+/// Freivalds check and attnout witness generations reproduce the host cell for cell, while the key tile witness generation
 /// disagrees with the host on the grid component and the proof is then rejected
 /// (`off_table` bumps that the host never makes). One switch cannot express
 /// that, so the key tile gate becomes its own three-value variable which falls back
 /// to `ZK_DEVICE_WITNESS_GEN` when it is not set. `ZK_DEVICE_WITNESS_GEN=1 ZK_DEVICE_WITNESS_GEN_KEY_TILE=0` is
 /// the configuration that takes the Freivalds checks' win and leaves the key tiles on the host
-/// until the fill is fixed.
+/// until the witness generation is fixed.
 pub fn key_tile_mode() -> u32 {
     match std::env::var("ZK_DEVICE_WITNESS_GEN_KEY_TILE") {
         Ok(v) => v.parse().unwrap_or(0),
@@ -300,24 +300,24 @@ pub fn key_tile_mode() -> u32 {
     }
 }
 
-/// B11 stream M: which fill *this* key tile takes, switch and layout together.
+/// B11 stream M: which witness generation *this* key tile takes, switch and layout together.
 ///
 /// A diagonal block key tile commits no per-token component and `commit_base_dev` has no
-/// notion of that layout, so it fills on the host whatever the switch says
+/// notion of that layout, so it generates its witness on the host whatever the switch says
 /// (`attn_trace::commit_base_any`). That override used to live inline at the
 /// one place that picked the path, and the consequence -- that a diagonal-block-bearing
 /// witness therefore leaves multiplicity bumps on the host -- had to be
-/// rediscovered by whoever else needed it. `devpre::fills_dev` needs it, so the
+/// rediscovered by whoever else needed it. `devpre::witness_gen_dev` needs it, so the
 /// decision lives here now and both callers read the same function: this one
 /// picks the path, and `compose::generate` asks it of every key tile before the
-/// first fill runs.
-pub fn key_tile_fill_mode(a: &Attn) -> u32 {
+/// first witness generation runs.
+pub fn key_tile_witness_gen_mode(a: &Attn) -> u32 {
     if a.diagonal_block { diagonal_block_mode() } else { key_tile_mode() }
 }
 
-/// `ZK_DEVICE_WITNESS_GEN_DIAGONAL_BLOCK`: the diagonal block key tiles' own fill switch, defaulting **off**.
+/// `ZK_DEVICE_WITNESS_GEN_DIAGONAL_BLOCK`: the diagonal block key tiles' own witness generation switch, defaulting **off**.
 ///
-/// B11 stream N, lever 2. Until this stream a diagonal block key tile filled on the host
+/// B11 stream N, lever 2. Until this stream a diagonal block key tile built on the host
 /// whatever any switch said, because `commit_base_dev` had no notion of a
 /// layout with no per-token component and would have committed columns the AIR
 /// does not expect. It has that notion now (`commit_base_dev` takes
@@ -338,8 +338,8 @@ pub fn diagonal_block_mode() -> u32 {
 ///
 /// `ZK_DEVICE_TABLES=1` builds `m_exp` on the card, by summing the per-key-tile exp
 /// counters `commit_base_dev` left there. That is right exactly when *every*
-/// key tile's bumps are on the card -- and a diagonal block key tile always fills on the host,
-/// because it commits no per-token component and the device fill has no notion of
+/// key tile's bumps are on the card -- and a diagonal block key tile always generates its witness on the host,
+/// because it commits no per-token component and the device witness generation has no notion of
 /// its layout. So on a diagonal-block-bearing witness the bumps are split across the
 /// two sides and neither half alone is the column.
 ///
@@ -360,7 +360,7 @@ pub fn exp_mult_on_host(a: &Attn) -> bool {
     // B11 stream N, lever 2: `a.zz_total.is_some()` says a diagonal block key tile rides
     // with this one, and the reason that forced this key tile's counter back to the
     // host was that the diagonal block's own bumps were made *there*. Once the diagonal block
-    // fills on the card that reason is gone and both halves are device
+    // generates its witness on the card that reason is gone and both halves are device
     // counters, so the condition gains the diagonal block's mode.
     //
     // This predicate and `compose::generate`'s `host_diagonal_block` are twins and must
@@ -381,7 +381,7 @@ fn up_u32(v: Vec<u32>) -> Uint32Vec {
 
 /// B11 stream F: the same upload with its two halves timed apart.
 ///
-/// `gen/wfill_*_up` is a *host pack* — a rayon pass that narrows an `i64` or
+/// `gen/witness_gen_*_up` is a *host pack* — a rayon pass that narrows an `i64` or
 /// `i32` witness array into a fresh `Vec<u32>` — followed by a `cudaMemcpy` of
 /// that vector. The two answer different questions (a device-side generation
 /// path deletes the first and shrinks the second), so each family's `_up` timer
@@ -462,7 +462,7 @@ fn timed_up_into(
 
 /// One key tile array, packed and uploaded, with its own byte line.
 fn key_tile_up(byte_tag: &'static str, f: impl FnOnce() -> Vec<u32>) -> Uint32Vec {
-    timed_up("gen/wfill_key_tile_pack", "gen/wfill_key_tile_h2d", byte_tag, f)
+    timed_up("gen/witness_gen_key_tile_pack", "gen/witness_gen_key_tile_h2d", byte_tag, f)
 }
 
 /// The same, with the pack able to target the pinned pool.
@@ -472,7 +472,7 @@ fn key_tile_up_into(
     into: impl FnOnce(&mut [u32]),
     f: impl FnOnce() -> Vec<u32>,
 ) -> Uint32Vec {
-    timed_up_into("gen/wfill_key_tile_pack", "gen/wfill_key_tile_h2d", byte_tag, words, into, f)
+    timed_up_into("gen/witness_gen_key_tile_pack", "gen/witness_gen_key_tile_h2d", byte_tag, words, into, f)
 }
 
 // ------------------------------------------------ the key tile dump (stream F) --
@@ -724,7 +724,7 @@ pub fn freivalds_component_dev(
     // The quantised weights are the Freivalds check's bytes (stream F: 231.7 MB a chunk,
     // 218.10 of it `qw`), and their pack is a four-to-a-word narrowing -- the
     // case the pinned pool is for.
-    let d_qx = timed_up_into("gen/wfill_freivalds_pack", "gen/wfill_freivalds_h2d", "freivalds/qx",
+    let d_qx = timed_up_into("gen/witness_gen_freivalds_pack", "gen/witness_gen_freivalds_h2d", "freivalds/qx",
                              m0.qx.len().div_ceil(4),
                              |d| pack_i8_into(d, &m0.qx, "freivalds qx"),
                              || pack_i8(&m0.qx, "freivalds qx"));
@@ -732,7 +732,7 @@ pub fn freivalds_component_dev(
         .iter()
         .map(|i| {
             let qw = &layer.mats[*i].qw;
-            timed_up_into("gen/wfill_freivalds_pack", "gen/wfill_freivalds_h2d", "freivalds/qw",
+            timed_up_into("gen/witness_gen_freivalds_pack", "gen/witness_gen_freivalds_h2d", "freivalds/qw",
                           qw.len().div_ceil(4),
                           |d| pack_i8_into(d, qw, "freivalds qw"),
                           || pack_i8(qw, "freivalds qw"))
@@ -740,7 +740,7 @@ pub fn freivalds_component_dev(
         .collect();
     let qw_ptrs: Vec<*const i8> = d_qw.iter().map(|d| d.device_ptr as *const i8).collect();
     let n_out: Vec<u32> = mat_idx.iter().map(|i| layer.mats[*i].n_out as u32).collect();
-    crate::util::m4_add("gen/wfill_freivalds_up", t_up.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/witness_gen_freivalds_up", t_up.elapsed().as_secs_f64());
 
     let t_alloc = std::time::Instant::now();
     let base = uninit(lay.pq, rows);
@@ -750,7 +750,7 @@ pub fn freivalds_component_dev(
     let r8 = tables.ridx(8);
     let m_r8 = zeroes(tables.m_r[r8].len());
     let counts = zeroes(3);
-    crate::util::m4_add("gen/wfill_alloc", t_alloc.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/witness_gen_alloc", t_alloc.elapsed().as_secs_f64());
 
     let cfg = FFreivaldsCfg {
         g: FGrid::of(&lay.g),
@@ -759,12 +759,12 @@ pub fn freivalds_component_dev(
         n_in: m0.n_in as u32,
         tokens: m0.tokens as u32,
         n_mats: mat_idx.len() as u32,
-        mutate: wfill_mut(Fam::Freivalds),
+        mutate: witness_gen_mut(Fam::Freivalds),
     };
 
     let t_k = std::time::Instant::now();
     unsafe {
-        b65_fill_freivalds(
+        b65_witness_gen_freivalds(
             d_qx.device_ptr as *const i8,
             qw_ptrs.as_ptr(),
             n_out.as_ptr(),
@@ -777,7 +777,7 @@ pub fn freivalds_component_dev(
             cfg,
         );
     }
-    crate::util::m4_add("gen/wfill_freivalds_kernel", t_k.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/witness_gen_freivalds_kernel", t_k.elapsed().as_secs_f64());
 
     let t_d = std::time::Instant::now();
     let got = counts.to_vec();
@@ -785,7 +785,7 @@ pub fn freivalds_component_dev(
         add_into(&mut tables.m_r[r8], &m_r8.to_vec());
     }
     tables.off_table += got[0] as usize;
-    crate::util::m4_add("gen/wfill_counters", t_d.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/witness_gen_counters", t_d.elapsed().as_secs_f64());
 
     DevFreivalds { pre, base, log_rows: lay.g.log_rows, m_r8 }
 }
@@ -823,15 +823,15 @@ pub fn ao_component_dev(
     let rows = 1usize << lay.log_rows;
     let pr = lay.per_row;
     let t_up = std::time::Instant::now();
-    let d_acc = timed_up("gen/wfill_ao_pack", "gen/wfill_ao_h2d", "ao/acc",
+    let d_acc = timed_up("gen/witness_gen_ao_pack", "gen/witness_gen_ao_h2d", "ao/acc",
                          || pack_i64(&ao.acc));
-    let d_den = timed_up("gen/wfill_ao_pack", "gen/wfill_ao_h2d", "ao/den",
+    let d_den = timed_up("gen/witness_gen_ao_pack", "gen/witness_gen_ao_h2d", "ao/den",
                          || pack_i64(&ao.den));
-    let d_jo = timed_up("gen/wfill_ao_pack", "gen/wfill_ao_h2d", "ao/jo",
+    let d_jo = timed_up("gen/witness_gen_ao_pack", "gen/witness_gen_ao_h2d", "ao/jo",
                         || pack_i32_from_i32(&ao.jo));
-    let d_jv = timed_up("gen/wfill_ao_pack", "gen/wfill_ao_h2d", "ao/jv",
+    let d_jv = timed_up("gen/witness_gen_ao_pack", "gen/witness_gen_ao_h2d", "ao/jv",
                         || pack_i32_from_i32(&ao.jv));
-    crate::util::m4_add("gen/wfill_ao_up", t_up.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/witness_gen_ao_up", t_up.elapsed().as_secs_f64());
 
     let t_alloc = std::time::Instant::now();
     let base = uninit(2 + 9 * pr, rows);
@@ -847,7 +847,7 @@ pub fn ao_component_dev(
     let counts = zeroes(3);
     let q_out = zeroes(ao.nh * ao.s * ao.hd);
     let want = with_want.then(|| zeroes(rows * pr));
-    crate::util::m4_add("gen/wfill_alloc", t_alloc.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/witness_gen_alloc", t_alloc.elapsed().as_secs_f64());
 
     assert_eq!(tables.m_qnz.len(), 1usize << q_bits, "attnout qnz table width");
     let cfg = FAoCfg {
@@ -861,7 +861,7 @@ pub fn ao_component_dev(
         // `ao_component` has no switch for its f64 reference: it computes it on
         // every active site, and so does this.
         do_ref: 1,
-        mutate: wfill_mut(Fam::Ao),
+        mutate: witness_gen_mut(Fam::Ao),
         // stream JJ (E11): the exponent window's offsets and the accumulator
         // window's two limb widths.  `e = jv - jo` is what the kernel derives
         // `num` and `pj` from; the key it commits is `(jv - jv_min) + (jo_max
@@ -874,7 +874,7 @@ pub fn ao_component_dev(
 
     let t_k = std::time::Instant::now();
     unsafe {
-        b65_fill_attnout(
+        b65_witness_gen_attnout(
             d_acc.device_ptr,
             d_den.device_ptr,
             d_jo.device_ptr as *const i32,
@@ -893,7 +893,7 @@ pub fn ao_component_dev(
             cfg,
         );
     }
-    crate::util::m4_add("gen/wfill_ao_kernel", t_k.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/witness_gen_ao_kernel", t_k.elapsed().as_secs_f64());
 
     let t_d = std::time::Instant::now();
     let got = counts.to_vec();
@@ -929,7 +929,7 @@ pub fn ao_component_dev(
     tables.off_table += got[0] as usize;
     let q_out: Vec<i64> = q_out.to_vec().into_iter().map(|v| v as i32 as i64).collect();
     let want = want.map(|d| d.to_vec());
-    crate::util::m4_add("gen/wfill_counters", t_d.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/witness_gen_counters", t_d.elapsed().as_secs_f64());
 
     DevAo { pre, base, log_rows: lay.log_rows, m_qnz, m_rem, m_acc_lo, m_acc_hi,
             ref_bad: got[1] as usize, q_out, want }
@@ -945,13 +945,13 @@ pub struct DevKeyTile {
     pub logs: Vec<u32>,
     pub at: Vec<usize>,
     /// B7a milestone 4 (section 3 row 1): this key tile's exp-table counter, left
-    /// where the scatter-add put it. `b65_table_fill` sums one per key tile into
+    /// where the scatter-add put it. `b65_table_witness_gen` sums one per key tile into
     /// the `m_exp` column, so with `ZK_DEVICE_TABLES=1` the 33.5 MB download and
     /// the parallel merge below never happen.
     pub m_exp: Uint32Vec,
     /// B7a milestone 4 (section 3 row 1): the five range counters this key tile's
-    /// three fills bumped -- the key, query, value and the two `z` limbs -- and
-    /// `intsplit`'s auxiliary one where the variant has it. `b65_pre_fill` sums
+    /// three witness generations bumped -- the key, query, value and the two `z` limbs -- and
+    /// `intsplit`'s auxiliary one where the variant has it. `b65_pre_witness_gen` sums
     /// one per key tile into each range table's multiplicity column.
     pub m_k: Uint32Vec,
     pub m_q: Uint32Vec,
@@ -966,17 +966,17 @@ pub struct DevKeyTile {
 /// `mult_exp` and `mult_r` are the caller's, exactly as `commit_base` takes
 /// them: 20.6 called this the awkward part, and it is a counter array, which is
 /// what the scatter-add already handles.
-/// One key tile's committed base columns, filled on the device.
+/// One key tile's committed base columns, built on the device.
 ///
 /// B11 stream N, lever 2 (a): `with_rows` is `!a.diagonal_block`, and it says whether
 /// this key tile commits the **per-token component** -- the row maxima, the
 /// denominator and its low limb. A diagonal block key tile does not: there is one maximum
 /// and one denominator per *token*, not per key tile, so the diagonal block rides on the
 /// prefix key tile's. That distinction was the whole of why a diagonal block key tile could
-/// not fill on the card. The fill had no notion of it and would have committed
+/// not generate its witness on the card. The witness generation had no notion of it and would have committed
 /// a per-token component the AIR does not expect there, so `commit_base_any` sent
-/// every diagonal block to the host whatever the switch said; now the fill knows, and
-/// `devwfill::diagonal_block_mode` is what opens the path.
+/// every diagonal block to the host whatever the switch said; now the witness generation knows, and
+/// `dev_witness_gen::diagonal_block_mode` is what opens the path.
 pub fn commit_base_dev(
     a: &Attn,
     l: &Layouts,
@@ -991,7 +991,7 @@ pub fn commit_base_dev(
 ) -> DevKeyTile {
     let sh = a.shape;
     // the host's two layout assertions, kept here because they are about the
-    // layout and not about where the fill runs
+    // layout and not about where the witness generation runs
     assert_eq!(
         l.key.q * l.key.g.chunks,
         sh.s,
@@ -1014,7 +1014,7 @@ pub fn commit_base_dev(
     // what `commit_base_any` used to send every diagonal block to the host to avoid.
     // It has to be decided here, before the uploads, because the two arrays
     // that component reads are skipped with it.
-    let with_rows = with_rows || wfill_mut(Fam::KeyTile) == 8;
+    let with_rows = with_rows || witness_gen_mut(Fam::KeyTile) == 8;
 
     let t_up = std::time::Instant::now();
     // The four arrays that are 99.99% of the key tile's bytes (stream F's table:
@@ -1037,7 +1037,7 @@ pub fn commit_base_dev(
     let d_mm = with_rows.then(|| key_tile_up("key_tile/mm", || pack_i64(&a.mm)));
     // B11 stream L: `zz_row()`, not `zz`.
     //
-    // This is the whole of what b-port called the prefix key tiles' fill kernels
+    // This is the whole of what b-port called the prefix key tiles' witness-generation kernels
     // "predating the diagonal block's key discipline", and it is on this side of the
     // link rather than in the kernel. When a diagonal block key tile rides with this one the
     // per-token component belongs to the *pair*, and the denominator it commits is
@@ -1058,7 +1058,7 @@ pub fn commit_base_dev(
     let d_xx = bf16x.then(|| key_tile_up("key_tile/xx", || pack_u16_raw(&a.xx)));
     let d_sc = bf16x.then(|| key_tile_up("key_tile/sc", || pack_i64(&a.sc)));
     let d_out = with_out.then(|| key_tile_up("key_tile/out", || pack_i64(&a.out)));
-    crate::util::m4_add("gen/wfill_key_tile_up", t_up.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/witness_gen_key_tile_up", t_up.elapsed().as_secs_f64());
 
     let (variant, split_k) = match a.variant {
         Variant::Bf16x => (0u32, 0u32),
@@ -1091,7 +1091,7 @@ pub fn commit_base_dev(
         z_hi_bits: cfg.z_hi_bits,
         z_min: cfg.z_min as i64,
         diagonal_block: u32::from(a.diagonal_block),
-        mutate: wfill_mut(Fam::KeyTile),
+        mutate: witness_gen_mut(Fam::KeyTile),
     };
 
     let t_alloc = std::time::Instant::now();
@@ -1109,11 +1109,11 @@ pub fn commit_base_dev(
     } else {
         (zeroes(1), zeroes(1))
     };
-    crate::util::m4_add("gen/wfill_alloc", t_alloc.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/witness_gen_alloc", t_alloc.elapsed().as_secs_f64());
 
     let t_k = std::time::Instant::now();
     unsafe {
-        b65_fill_key_tile_chan(
+        b65_witness_gen_key_tile_chan(
             d_kk.device_ptr as *const i32,
             d_qq.device_ptr as *const i32,
             chan_p.as_ptr(),
@@ -1137,7 +1137,7 @@ pub fn commit_base_dev(
     };
     let m_v = zeroes(mult_r[ridx(8)].len());
     unsafe {
-        b65_fill_key_tile_grid(
+        b65_witness_gen_key_tile_grid(
             d_dd.device_ptr as *const i32,
             d_num.device_ptr as *const u16,
             d_xx.as_ref().map(|d| d.device_ptr as *const u16).unwrap_or(std::ptr::null()),
@@ -1163,7 +1163,7 @@ pub fn commit_base_dev(
         let outc = uninit(lo.q, lo.g.rows);
         let out_p = ptrs(&outc);
         unsafe {
-            b65_fill_key_tile_out(
+            b65_witness_gen_key_tile_out(
                 d_out.as_ref().unwrap().device_ptr,
                 out_p.as_ptr(),
                 counts.device_ptr as *mut u32,
@@ -1187,7 +1187,7 @@ pub fn commit_base_dev(
         let m_lo = zeroes(mult_r[ridx(cfg.z_lo_bits)].len());
         let m_hi = zeroes(mult_r[ridx(cfg.z_hi_bits)].len());
         unsafe {
-            b65_fill_key_tile_tok(
+            b65_witness_gen_key_tile_tok(
                 d_mm.as_ref().unwrap().device_ptr,
                 d_zz.as_ref().unwrap().device_ptr,
                 tok_p.as_ptr(),
@@ -1204,21 +1204,21 @@ pub fn commit_base_dev(
     } else {
         // The two `z` range counters this component would have bumped, at their
         // real width and all zero. A diagonal block key tile makes no `z` lookups at all,
-        // but `b65_pre_fill` sums one counter *per key tile* into each range
+        // but `b65_pre_witness_gen` sums one counter *per key tile* into each range
         // table's multiplicity column and asserts every one of them is the
         // table's width -- so the shape has to be there even when the content
         // is nothing.
         (zeroes(mult_r[ridx(cfg.z_lo_bits)].len()), zeroes(mult_r[ridx(cfg.z_hi_bits)].len()))
     };
     at.push(base.len());
-    crate::util::m4_add("gen/wfill_key_tile_kernel", t_k.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/witness_gen_key_tile_kernel", t_k.elapsed().as_secs_f64());
 
     // ---- the counters, back to the host ------------------------------------
     let t_d = std::time::Instant::now();
     let got = counts.to_vec();
     // 21.4's "counters: D2H and merge" line, for the widest counter there is:
     // 33.5 MB back and a parallel add, per key tile, for an array whose only reader
-    // was `base_mults[0]`. The table fill sums the device copies instead.
+    // was `base_mults[0]`. The table witness generation sums the device copies instead.
     if merge_m_exp {
         add_into(mult_exp, &m_exp.to_vec());
     }
@@ -1239,23 +1239,23 @@ pub fn commit_base_dev(
         }
     }
     *off_table += got[0] as usize;
-    crate::util::m4_add("gen/wfill_counters", t_d.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/witness_gen_counters", t_d.elapsed().as_secs_f64());
 
     DevKeyTile { base, logs, at, m_exp, m_k: mk, m_q: mq, m_v,
               m_aux: matches!(a.variant, Variant::IntSplit(_)).then_some(m_aux),
               m_lo, m_hi }
 }
 
-/// Assert the M31 columns a device fill produced against the host's, cell for
+/// Assert the M31 columns a device witness generation produced against the host's, cell for
 /// cell, naming the column and the cell on a mismatch.
 ///
-/// Not a sample: a fill that is wrong on one cell of one column is wrong, and
+/// Not a sample: a witness generation that is wrong on one cell of one column is wrong, and
 /// the point of checking here rather than against a proof digest is that the
 /// panic says where.
 /// B11 stream L: `ZK_DEVICE_WITNESS_GEN_DIFF=1` turns the first-mismatch panic into a
 /// survey.
 ///
-/// The default is right for a control -- a fill that is wrong anywhere is
+/// The default is right for a control -- a witness generation that is wrong anywhere is
 /// wrong, and stopping at the first cell keeps the panic short. But when the
 /// mirror does bite, the *shape* of the disagreement is the diagnosis: one
 /// column or every column, one row or all of them, a whole component or a single
@@ -1300,31 +1300,31 @@ fn survey_cols(what: &str, host: &[Eval], got: &[BaseFieldVec]) {
         return;
     }
     eprintln!(
-        "wfill-diff: {what} -- {} of {} columns differ ({} rows each)",
+        "witness_gen-diff: {what} -- {} of {} columns differ ({} rows each)",
         bad.len(),
         host.len(),
         rows
     );
     for (i, n, len, k, h, d) in bad.iter().take(64) {
         eprintln!(
-            "wfill-diff:   column {i:5} {n:9} of {len} cells differ; \
+            "witness_gen-diff:   column {i:5} {n:9} of {len} cells differ; \
 first at row {k}: host {h:?}, device {d:?}"
         );
     }
     if bad.len() > 64 {
-        eprintln!("wfill-diff:   ... and {} more columns", bad.len() - 64);
+        eprintln!("witness_gen-diff:   ... and {} more columns", bad.len() - 64);
     }
     let cols: Vec<usize> = bad.iter().map(|x| x.0).collect();
     let all = bad.iter().all(|x| x.1 == x.2);
     eprintln!(
-        "wfill-diff: {what} -- columns {:?}{}, every cell wrong in all of them: {}",
+        "witness_gen-diff: {what} -- columns {:?}{}, every cell wrong in all of them: {}",
         &cols[..cols.len().min(32)],
         if cols.len() > 32 { " (truncated)" } else { "" },
         all
     );
     let (i, n, len, k, h, d) = bad[0];
     panic!("{what}: column {i} differs at cell {k}: host {h:?}, device {d:?} \
-({n} of {len} cells; {} columns in all -- see the wfill-diff lines)", bad.len());
+({n} of {len} cells; {} columns in all -- see the witness_gen-diff lines)", bad.len());
 }
 
 /// The multiplicity deltas: what the host's bumps added against what the

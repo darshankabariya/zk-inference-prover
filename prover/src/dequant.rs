@@ -201,7 +201,7 @@ pub struct Spec {
     /// `fold`: how the divisor `2^G` splits between the committed per-token
     /// `dent = 2^(G_t - alpha)` and the preprocessed per-channel
     /// `pj = 2^(G_c - (14 - alpha))`.  Data-derived: `alpha <= min_t G_t` and
-    /// `14 - alpha <= min_c G_c` must both hold or the fill cannot build an
+    /// `14 - alpha <= min_c G_c` must both hold or the witness generation cannot build an
     /// integer column, and together they are what guarantees `G >= 14` on
     /// every slot.  Zero for every other variant.
     pub fold_alpha: u32,

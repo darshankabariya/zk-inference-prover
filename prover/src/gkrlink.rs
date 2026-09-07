@@ -308,7 +308,7 @@ pub enum RCol {
     DeqPre(usize),
     /// B11 stream V: a residual-stream component's `i`-th trace mask. The index is the
     /// component's own committed column index, which *is* the mask index: the
-    /// evaluator reads its masks in `Prog` order and the fill writes the
+    /// evaluator reads its masks in `Prog` order and the witness generation writes the
     /// columns in the same order, which is what lets `residual_stream_interaction`'s
     /// builder index `r.base` by what `Prog` returns.
     ResidualStream(usize),
@@ -730,7 +730,7 @@ pub fn residual_stream_looks(plan: &crate::compose::Plan, rels: &crate::compose:
             (x != usize::MAX).then(|| Affine::col(RCol::ResidualStream(x), one))
         };
         // Stream OO: a slot operand's half `k` (0 the mantissa, 1 the exponent).
-        // `Prog::src_cols` answers `None` for `Src::Pre` because the *fill*
+        // `Prog::src_cols` answers `None` for `Src::Pre` because the *witness generation*
         // reads a preprocessed operand out of a second vector
         // (`residual_stream::src_cols_any`'s `PRE_TAG`), and the two callers that took the
         // `None` for the constant zero dropped the operand's term from the
@@ -1390,15 +1390,15 @@ fn coords_to_evals(h: u32, c: SecureColumnByCoords<SimdBackend>) -> Vec<Eval> {
 
 /// Where one referenced column of the fold lives.
 ///
-/// B11 stream T: under a device fill a key tile's committed base columns have no
+/// B11 stream T: under a device witness generation a key tile's committed base columns have no
 /// host mirror, so the fold has to reach them where they are. A diagonal block key tile is
-/// always host-filled and the causal-mask columns are always host-built, so a
+/// always host-built and the causal-mask columns are always host-built, so a
 /// single height can mix the two -- which costs nothing, because field addition
 /// is exact and associative and the two partial folds add up to the same column
 /// whichever order they are taken in.
 pub enum Src<'a> {
     Host(&'a Eval),
-    /// a device-resident base column, as the fill left it
+    /// a device-resident base column, as the witness generation left it
     Dev(*const u32),
 }
 
@@ -1876,7 +1876,7 @@ pub mod dev {
     /// downloaded the column so the host loops could read it, adding the
     /// host-resident terms on the way. There is nothing left on the host to
     /// read it, so the host-resident terms -- the preprocessed causal masks,
-    /// and every base column of a host-filled key tile -- are uploaded instead and
+    /// and every base column of a host-built key tile -- are uploaded instead and
     /// the whole affine combine is one launch. The accumulation order is the
     /// weight order either way and field addition is exact, so it is the same
     /// column.

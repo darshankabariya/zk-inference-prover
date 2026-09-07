@@ -30,14 +30,14 @@ pub type DevEval = CircleEvaluation<CudaBackend, M31, BitReversedOrder>;
 static UPLOAD_NS: AtomicU64 = AtomicU64::new(0);
 static UPLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
 static UPLOAD_COLS: AtomicU64 = AtomicU64::new(0);
-/// B7a milestone 4 (19.6): what the device fill uploads instead of columns --
+/// B7a milestone 4 (19.6): what the device witness generation uploads instead of columns --
 /// the accumulators, the scales and the shared tables. Counted apart, because
 /// 4a is a claim about *trace columns* and this is not one.
 static WITNESS_NS: AtomicU64 = AtomicU64::new(0);
 static WITNESS_BYTES: AtomicU64 = AtomicU64::new(0);
 static WITNESS_UPS: AtomicU64 = AtomicU64::new(0);
 
-/// B7a milestone 4 (section 3 row 1): the download that hands a device-filled
+/// B7a milestone 4 (section 3 row 1): the download that hands a device-built
 /// component's columns back to its *interaction*, which still runs on the host.
 /// Section 3's row 2 -- the other ten families' LogUp kernels -- is what
 /// deletes this, and until then it is reported and not hidden.
@@ -63,7 +63,7 @@ pub fn note_witness(bytes: u64, secs: f64) {
 ///
 /// Stream F measured every upload in this crate at **6.95 GB/s on a link that
 /// delivers 45.5 GB/s out of page-locked host memory**, and established that
-/// the whole gap is the source being pageable (`briefs/f-wfill.md` §1). It also
+/// the whole gap is the source being pageable (`briefs/f-witness_gen.md` §1). It also
 /// established the shape of the fix, which is the part that is easy to get
 /// wrong: **pinning pays exactly where a pass over the data already happens.**
 /// A pack that narrows an `i64` witness array into `u32` words has to write its
@@ -151,7 +151,7 @@ mod pinned {
         if !enabled() || words == 0 {
             return None;
         }
-        // `try_lock`, not `lock`: the fills are sequential today (one key tile, then
+        // `try_lock`, not `lock`: the witness generations are sequential today (one key tile, then
         // the next), so contention means an assumption has changed and the right
         // answer is the old path rather than a wait or a second pinned buffer.
         let mut g = POOL.try_lock().ok()?;
@@ -219,7 +219,7 @@ pub fn pool_peak_bytes() -> usize {
 
 /// Pack `words` u32s straight into page-locked memory and upload them.
 ///
-/// The one entry point the fills use. Hands back the device handle and the two
+/// The one entry point the witness generations use. Hands back the device handle and the two
 /// halves' seconds — the pack and the copy — so the caller's `_pack` / `_h2d`
 /// timers keep the meaning they had on the pageable path and the two are
 /// comparable across the A/B. `None` means the pool was not available and the
@@ -318,7 +318,7 @@ mod marks {
 
     // B12 stream GG, the C=16K half: under `compose-chunks --plan` the marks of
     // two chunks interleave on one stderr, and under `ZK_PIPELINE=1` they
-    // interleave in time as well -- chunk k+1's `after_fill` lands between
+    // interleave in time as well -- chunk k+1's `after_witness_gen` lands between
     // chunk k's `commit_inter` and its `prove_values`. The tag is the plan
     // line's `--ser-tag`, set per thread the way `m4_set_chunk` is, so a mark
     // says which chunk made it and the reporter can split the run.
@@ -499,7 +499,7 @@ static DEVCOPY_COLS: AtomicU64 = AtomicU64::new(0);
 
 /// A column the commitment scheme is about to take, wherever it lives.
 ///
-/// B7a milestone 4 (19.6): the dequant fill writes its columns straight onto
+/// B7a milestone 4 (19.6): the dequant witness generation writes its columns straight onto
 /// the device in committed order, and the shared tables' columns are still
 /// built on the host, so one tree holds both kinds. Borrowed for trees 0 and 1,
 /// whose columns the interaction phase reads again; owned for tree 2, whose
@@ -536,7 +536,7 @@ impl AnyCol<'_> {
 
     /// The same, by value, for the standalone probe paths that hand their
     /// columns straight to a `Session`. B11 stream M: the residual stream's rung is one
-    /// of those, and it is a SimdBackend path -- it has no device fill to take
+    /// of those, and it is a SimdBackend path -- it has no device witness generation to take
     /// and no device column to hand over -- so a device column here is the same
     /// loud bug as above.
     pub fn into_host(self) -> HostEval {
@@ -551,7 +551,7 @@ impl AnyCol<'_> {
     /// reader that needs the cells on this side of the bus and knows it is
     /// paying for them.  Open item 18: the one such reader is the K/V boundary
     /// tamper (`boundary::kv_cols`), which bumps one cell of a side whose key tiles
-    /// filled on the card; the honest commit takes the device references
+    /// built on the card; the honest commit takes the device references
     /// instead and never comes here.
     ///
     /// `common::eval_of` takes values in coset order and permutes them into the

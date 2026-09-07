@@ -225,7 +225,7 @@ pub fn logup_cols_dev_to_host(
         cols.iter().map(|e| BaseFieldVec::from_vec(e.values.to_cpu())).collect()
     };
     // The three costs, apart, because only the middle one is the milestone's:
-    // the upload is here because the *fills* are still on the host (18.7's row
+    // the upload is here because the *witness generations* are still on the host (18.7's row
     // 1, still open) and the download is the check's alone.
     let t = std::time::Instant::now();
     let dpre = up(pre);

@@ -3363,7 +3363,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 // exponent, so there is no claim to state (see `mat_interaction`'s
                 // caller and `rq_scale_open`).  The predicate is the same one
                 // there: the two have to agree or the AIR reads an interaction
-                // column the fill never wrote.
+                // column the witness generation never wrote.
                 sside: (plan.rqs.iter()
                         .any(|rp| plan.freivalds[rp.freivalds].mats.contains(&mi))
                         && plan.specs[mi].variant != DeqVariant::Fold)
@@ -4051,7 +4051,7 @@ pub struct ProverTamper {
 
 pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Composed {
     // B7a milestone 4 (19.6): 4a counts bytes host to device across the whole
-    // wall, and the fill's uploads happen before `Session::new` exists.
+    // wall, and the witness generation's uploads happen before `Session::new` exists.
     crate::device::reset();
     let g = generate(layer, params, tamper, None);
     prove_gen(layer, params, g)
@@ -4064,7 +4064,7 @@ pub struct Gen {
     pub plan: Plan,
     pub tables: Tables,
     pub key_tile_committed: Vec<Committed>,
-    pub key_tile_dev: Vec<Option<crate::devwfill::DevKeyTile>>,
+    pub key_tile_dev: Vec<Option<crate::dev_witness_gen::DevKeyTile>>,
     pub key_tile_pre: Vec<Option<crate::devpre::DevPreKeyTile>>,
     pub aor: crate::layer::AoComponent,
     pub mat_components: Vec<crate::layer::MatComponent>,
@@ -4103,7 +4103,7 @@ pub struct Gen {
     pub residual_stream_tamper_fired: Option<usize>,
 }
 
-/// B7b (README 26): the first half of `prove_layer` -- every fill, every
+/// B7b (README 26): the first half of `prove_layer` -- every witness generation, every
 /// table, every column born where it will be committed -- up to the
 /// transcript.
 pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: Option<u64>)
@@ -4150,21 +4150,21 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // B7a milestone 4 (section 3 row 1): the key tile columns, when they are on the
     // device. Parallel to `key_tile_committed` because `Committed` belongs to the
     // standalone path too and has no business knowing about a backend.
-    let mut key_tile_dev: Vec<Option<crate::devwfill::DevKeyTile>> = vec![];
+    let mut key_tile_dev: Vec<Option<crate::dev_witness_gen::DevKeyTile>> = vec![];
     let m4_t = std::time::Instant::now();
-    // B11 stream M: before the first fill, because the fills read the answer.
+    // B11 stream M: before the first witness generation, because the witness generations read the answer.
     //
-    // `devpre::fills_dev` decides whether the ten multiplicity columns are
+    // `devpre::witness_gen_dev` decides whether the ten multiplicity columns are
     // built on the card from device counters alone, and it is asked from inside
-    // the fills, where the layer is not in scope. It has to be told about every
-    // fill that bumps one of those counters and is *not* on the card, for a
+    // the witness generations, where the layer is not in scope. It has to be told about every
+    // witness generation that bumps one of those counters and is *not* on the card, for a
     // reason no switch states. There are two:
     //
-    //  * a **diagonal block key tile**, which fills on the host whatever
-    //    `ZK_DEVICE_WITNESS_GEN_KEY_TILE` says because the device fill has no notion of its
-    //    layout (`devwfill::key_tile_fill_mode`, the one place that decision
+    //  * a **diagonal block key tile**, which generates its witness on the host whatever
+    //    `ZK_DEVICE_WITNESS_GEN_KEY_TILE` says because the device witness generation has no notion of its
+    //    layout (`dev_witness_gen::key_tile_witness_gen_mode`, the one place that decision
     //    lives);
-    //  * the **argmax component**, which has no device fill at all and whose range
+    //  * the **argmax component**, which has no device witness generation at all and whose range
     //    lookups go on the layer's 16-bit table -- the block below takes
     //    `tables.m_r[ri]` and bumps it on the host.
     //
@@ -4172,22 +4172,22 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // on: with the columns host-built the split does not matter. With it on,
     // the kernel sums the device counters and the host half is simply dropped,
     // and the proof is rejected by `sums_cancel` with every other check green.
-    crate::devpre::note_host_fill(
-        layer.key_tiles.iter().any(|a| crate::devwfill::key_tile_fill_mode(a) != 1)
-            // stream AA: a key tile that does not carry the per-token component fills
-            // on the host too (`commit_base_any`), and `key_tile_fill_mode` has no
+    crate::devpre::note_host_witness_gen(
+        layer.key_tiles.iter().any(|a| crate::dev_witness_gen::key_tile_witness_gen_mode(a) != 1)
+            // stream AA: a key tile that does not carry the per-token component witness generations
+            // on the host too (`commit_base_any`), and `key_tile_witness_gen_mode` has no
             // way to know that -- it is told the `Attn`, not the plan
             || plan.rows_key_tile.iter().any(|r| !*r)
             || plan.argmax_mat().is_some()
-            // stream BB: the embedding gadget has no device fill either, and
+            // stream BB: the embedding gadget has no device witness generation either, and
             // its `ef` range checks bump the layer's own 8-bit table on the host
             || plan.emb.is_some()
             // stream Z: the fold component and the widened attention output's Freivalds check
-            // both fill on the host, whatever the switches say
+            // both generate its witness on the host, whatever the switches say
             || plan.specs.iter().any(|s| s.variant == DeqVariant::Fold)
             || plan.freivalds.iter().any(|w| w.act_bits != 8)
             // stream JJ (E11): an armed attnout tamper does too -- `ao_component`
-            // sets its own mode to 0 because the device fill has no `corrupt`
+            // sets its own mode to 0 because the device witness generation has no `corrupt`
             // path -- so its counters are the host's and the shared
             // multiplicity columns have to be as well.  Without this the
             // defaults cuda regime stops at "ZK_DEVICE_WITNESS_GEN=1 but the attnout is
@@ -4197,7 +4197,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             || tamper.ao_acc.is_some() || tamper.ao_jo_tok.is_some()
             || tamper.ao_mag.is_some()
             // stream TT (E11), log row 73: and the magnitude form, whose tenth
-            // column the fork's `b65_fill_attnout` does not write -- `ao_component`
+            // column the fork's `b65_witness_gen_attnout` does not write -- `ao_component`
             // sets its own mode to 0 for it on both backends
             || p.ao_acc_mag || p.ao_denp2,
     );
@@ -4211,7 +4211,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         // every cell against the kernel's below.  A diagonal block key tile always builds
         // and keeps its `pre`: the interaction phase reads the causal-mask
         // columns back (the exp lookup's multiplicity is `1 - msk`), and its
-        // fill is host-side, so devpre never owns its selectors.
+        // witness generation is host-side, so devpre never owns its selectors.
         let pre = if crate::devpre::mode() == 1 && !a.diagonal_block {
             vec![]
         } else {
@@ -4230,8 +4230,8 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
 
     // B7a milestone 4 (section 3 row 1): the flags, and the 48 selector columns
     // built out of them. The flags are wanted whenever the accumulators will
-    // run -- which is whenever the key tile's fill was on the device -- so this
-    // happens one line after that fill and not inside the switch.
+    // run -- which is whenever the key tile's witness generation was on the device -- so this
+    // happens one line after that witness generation and not inside the switch.
     let m4_t = std::time::Instant::now();
     let pre_mode = crate::devpre::mode();
     // The shared tables' 31 columns share one flat list with `x`, `y` and
@@ -4245,7 +4245,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         .enumerate()
         .map(|(b, a)| {
             // B11 stream N, lever 2 (b): a diagonal block key tile gets its flags too, once
-            // its fill is on the card -- the accumulators segment on them and
+            // its witness generation is on the card -- the accumulators segment on them and
             // `interaction_phase` asserts they are there. Its *columns* are a
             // separate question: `commit_pre` still builds a diagonal block's selectors
             // on the host below, because the interaction phase reads the
@@ -4842,7 +4842,7 @@ different rotation", inv.len(), 2 * hd * p.s);
     let m4_t = std::time::Instant::now();
     // ---- shared tables (tree 0 tail) and their multiplicities (tree 1 tail) --
     // The residual stream's shared tables, built once and owned here: the tree assembly
-    // below references them last (the order the by-value fill used), and the
+    // below references them last (the order the by-value witness generation used), and the
     // table-sides block reads them again.
     let residual_stream_tcols: Vec<Eval> =
         gtables.as_ref().map(crate::residual_stream::residual_stream_table_cols).unwrap_or_default();
@@ -4851,7 +4851,7 @@ different rotation", inv.len(), 2 * hd * p.s);
     let tbl_rows = 1usize << p.log_table;
     // B7a milestone 4 (section 3 row 1): the 31 columns 23.1 called "data, not
     // closed forms". Measured column by column that is wrong twice over: the
-    // ten multiplicities are counters the fills already scatter-added into, and
+    // ten multiplicities are counters the witness generations already scatter-added into, and
     // the normalisation, fraction and multiply rows are closed forms of the row
     // index -- a leading-zero count, a shift and one rounding step apiece. Mode
     // 1 never builds them here; 2 builds them and asserts every cell.
@@ -4950,24 +4950,24 @@ different rotation", inv.len(), 2 * hd * p.s);
                 .map(|r| m31_u32(match k { 0 => r.0, 1 => r.1, _ => r.2 })).collect())));
         }
     }
-    // `m_exp` needs a counter to sum, and there is one only where a key tile's fill
+    // `m_exp` needs a counter to sum, and there is one only where a key tile's witness generation
     // ran on the device (21.1). With the key tiles on the host it stays a host
     // column and a 4a upload -- the honest accounting, not a special case.
     //
-    // B11 stream L: and only where *every* key tile's are. A diagonal block key tile fills on
+    // B11 stream L: and only where *every* key tile's are. A diagonal block key tile witness generations on
     // the host, so on a diagonal-block-bearing witness the bumps are split and the
-    // device half alone is not the column -- see `devwfill::exp_mult_on_host`,
+    // device half alone is not the column -- see `dev_witness_gen::exp_mult_on_host`,
     // which is the same predicate `commit_base_dev` was given, asked here of the
     // whole layer. With a diagonal block present the device key tiles merged their counters
     // into `tables.m_exp`, so the host column is complete and the counter list
     // is dropped rather than summed into a column nothing commits.
     // B11 stream N, lever 2: this asked "is there a diagonal block key tile?" because a
-    // diagonal block key tile's fill was always on the host. Now it asks the question it
-    // always meant -- "is any key tile's fill on the host?" -- which is
-    // `devwfill::exp_mult_on_host`'s twin read over the whole layer, and the
+    // diagonal block key tile's witness generation was always on the host. Now it asks the question it
+    // always meant -- "is any key tile's generate its witness on the host?" -- which is
+    // `dev_witness_gen::exp_mult_on_host`'s twin read over the whole layer, and the
     // two have to move together or `sums_cancel` rejects with everything else
     // green.
-    let host_diagonal_block = layer.key_tiles.iter().any(|b| crate::devwfill::key_tile_fill_mode(b) != 1);
+    let host_diagonal_block = layer.key_tiles.iter().any(|b| crate::dev_witness_gen::key_tile_witness_gen_mode(b) != 1);
     let dev_counters: Vec<&stwo::stwo_cuda::base_field_vec::Uint32Vec> = if host_diagonal_block {
         vec![]
     } else {
@@ -5022,9 +5022,9 @@ different rotation", inv.len(), 2 * hd * p.s);
     }
     // B7a milestone 4 (section 3 row 1): one counter list per shared table, in
     // the order the two flat lists lay them out. Every one of these arrays is
-    // where a fill's scatter-add left it (20.1, 21.1), and the kernel sums them
+    // where a witness generation's scatter-add left it (20.1, 21.1), and the kernel sums them
     // there rather than downloading, merging and uploading -- which is what
-    // deletes `gen/deq_dev_counters` and `gen/wfill_counters`.
+    // deletes `gen/deq_dev_counters` and `gen/witness_gen_counters`.
     let mult_dev = crate::devpre::mult_dev();
     let mut pre_counters: Vec<Vec<&stwo::stwo_cuda::base_field_vec::Uint32Vec>> =
         vec![vec![]; 4 + plan.widths.len()];
@@ -5046,7 +5046,7 @@ different rotation", inv.len(), 2 * hd * p.s);
         pre_counters[3].push(&d.m_qnz);
         pre_counters[ri(p.ao_rem_bits)].push(&d.m_rem);
         // stream JJ (E11): the accumulator window's two limb tables.  Every
-        // shared table a device fill bumps must hand its counter over here, or
+        // shared table a device witness generation bumps must hand its counter over here, or
         // `tables_dev` has nothing to sum for it and stops -- which is what the
         // `ao_acc_hi_bits` table did on the reference chunk ("shared
         // table 4 has no device counter to sum"), the defaults cuda regime
@@ -5055,7 +5055,7 @@ different rotation", inv.len(), 2 * hd * p.s);
         pre_counters[ri(p.ao_acc_lo_bits)].push(&d.m_acc_lo);
         pre_counters[ri(p.ao_acc_hi_bits)].push(&d.m_acc_hi);
         for (b, a) in layer.key_tiles.iter().enumerate() {
-            // A diagonal block key tile is host-built (the static fill kernels do not know
+            // A diagonal block key tile is host-built (the static witness generation kernels do not know
             // its layout), so its bumps sit in the host multiplicity arrays and
             // reach the table through the patch rows -- no device counter to sum.
             let Some(d) = key_tile_dev[b].as_ref() else {
@@ -5220,7 +5220,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     // The residual-stream components' columns follow the Freivalds checks, as they did when the lists
     // were built by value. B11 stream M: and they are on the card under
-    // `ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM=1`, where the fill left them.
+    // `ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM=1`, where the witness generation left them.
     for r in &residual_stream_components {
         match &r.dev {
             Some(d) => {
@@ -5360,9 +5360,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let m4_t = std::time::Instant::now();
     crate::util::m4_touch_device();
     crate::util::m4_add("wall/cuda_init", m4_t.elapsed().as_secs_f64());
-    // B12 stream GG: after every fill and upload, before the transcript --
+    // B12 stream GG: after every witness generation and upload, before the transcript --
     // what the device-generated columns and their staging hold.
-    crate::device::mem_mark("after_fill");
+    crate::device::mem_mark("after_witness_gen");
     let m4_t = std::time::Instant::now();
     let tw = twiddles(widest);
     crate::util::m4_add("wall/twiddles", m4_t.elapsed().as_secs_f64());
@@ -5839,28 +5839,28 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         let mut hl = crate::gkrlink::link_params(&plan, &rels, &pr.insts, &pr.artifact, alpha)
             .expect("the prover's own GKR artifact fails the link derivation");
         let msk0 = crate::attn_air::CHAN_SEL.len() + crate::attn_air::DIAGONAL_BLOCK_SEL.len();
-        // B11 stream T: a key tile whose fill left its columns on the device has no
+        // B11 stream T: a key tile whose witness generation left its columns on the device has no
         // host mirror to fold, so the fold reaches them where they are. The
         // causal-mask columns are preprocessed and always host-built, and a
-        // diagonal block key tile is always host-filled, so one height can mix the two.
+        // diagonal block key tile is always host-built, so one height can mix the two.
         let src_of = |reg: crate::gkrlink::Comp, c: &crate::gkrlink::RCol| {
             use crate::gkrlink::{RCol, Comp, Src};
             // B11 stream U, lever 3: the same resolution for the second family.
             // A dequant component's own `base` and `pre` are the columns its masks
-            // name, in committed order, and under a device fill they live where
-            // the fill left them -- so this is `key_tile_committed`'s two lines with
+            // name, in committed order, and under a device witness generation they live where
+            // the witness generation left them -- so this is `key_tile_committed`'s two lines with
             // the component's own vectors in place of the key tile's spans.
             // B11 stream V, lever 3: the same resolution for the residual-stream family.
             // A residual-stream component's own `base` and `pre` are the columns its masks
-            // name, in committed order, and under a device fill they live where
-            // the fill left them.
+            // name, in committed order, and under a device witness generation they live where
+            // the witness generation left them.
             if let Comp::ResidualStream(g) = reg {
                 let r = &residual_stream_components[g];
                 return match (c, &r.dev) {
                     (RCol::ResidualStream(i), Some(d)) => Src::Dev(d.base[*i].device_ptr),
                     (RCol::ResidualStream(i), None) => Src::Host(&r.base[*i]),
                     // stream OO: `Prog::pre_at` is where the pair sits in the
-                    // component's own preprocessed list, the same index the fill
+                    // component's own preprocessed list, the same index the witness generation
                     // reads through `residual_stream::src_cols_any`'s `PRE_TAG`
                     (RCol::ResidualStreamPre(i, k), Some(d)) =>
                         Src::Dev(d.pre[r.prog.pre_at(*i, *k)].device_ptr),
@@ -6678,14 +6678,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // `[key_tile's K][key_tile's V]` -- so byte-for-byte with the component is by
     // construction and not by a second copy of `attn_trace`'s index map.
     //
-    // Open item 18: the columns are wherever the key tile's fill left them.  Under
+    // Open item 18: the columns are wherever the key tile's witness generation left them.  Under
     // the CUDA default `ZK_DEVICE_WITNESS_GEN_KEY_TILE=1` a key tile's committed columns are on
     // the card (`key_tile_dev[b].base`, `commit_base_dev`) and `com.base` is empty;
     // tree 1 committed them from there as `AnyCol::Dev` references (the
     // `base_all` loop above), and a boundary side takes the same references
     // to the same buffers -- `device::take_all` clones a borrowed device column
     // on the device, so the side sees the bytes tree 1 saw and nothing crosses
-    // the bus.  A host-filled key tile (the reference backend, `ZK_DEVICE_WITNESS_GEN_KEY_TILE=0`,
+    // the bus.  A host-built key tile (the reference backend, `ZK_DEVICE_WITNESS_GEN_KEY_TILE=0`,
     // every diagonal block key tile) hands its host columns over exactly as before.  The
     // one reader that needs the cells on the host is the tamper probe, which
     // bumps one cell of one column: that side comes down (`AnyCol::download`)

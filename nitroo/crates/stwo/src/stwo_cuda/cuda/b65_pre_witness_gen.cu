@@ -1,7 +1,7 @@
 // B7a milestone 4 (section 3 row 1): 4a's last 79 columns.
 #include "fields.cuh"
 #include "utils.cuh"
-#include "b65_pre_fill.cuh"
+#include "b65_pre_witness_gen.cuh"
 
 #define B65P_BLOCK 256u
 
@@ -188,9 +188,9 @@ __global__ void b65p_table(const unsigned *const *__restrict__ counters,
         cols[c][i] = (m31)o[c];
     }
 
-    // The multiplicity column: every fill scatter-added into a counter of its
+    // The multiplicity column: every witness generation scatter-added into a counter of its
     // own (20.1, 21.1) and the host's array was their sum. The sum happens here
-    // instead and nothing comes back. A null column is "no fill that bumps this
+    // instead and nothing comes back. A null column is "no witness generation that bumps this
     // table ran on the device", so the host keeps it and it stays a 4a upload.
     if (m_col != nullptr) {
         unsigned n = cfg.n_counters;
@@ -236,7 +236,7 @@ static unsigned b65p_fam_of(unsigned kind) {
     }
 }
 
-extern "C" void b65_fill_pre_table(const unsigned *const *counters,
+extern "C" void b65_witness_gen_pre_table(const unsigned *const *counters,
                                    const unsigned *patch_idx, const unsigned *patch_val,
                                    unsigned n_patch, m31 *const *cols, m31 *m_col,
                                    B65PreCfg cfg) {
@@ -373,7 +373,7 @@ __global__ void b65p_sel(const unsigned *__restrict__ flags,
     }
 }
 
-extern "C" void b65_fill_sel(const unsigned *flags, m31 *const *cols,
+extern "C" void b65_witness_gen_sel(const unsigned *flags, m31 *const *cols,
                              const m31 *scale, B65SelCfg cfg) {
     m31 **d_cols = clone_to_device<m31 *>(const_cast<m31 **>(cols), cfg.n_cols);
     const unsigned rows = cfg.g.rows;

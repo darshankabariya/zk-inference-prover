@@ -23,7 +23,7 @@
 //!
 //! **What the kernels read.** The host builds `b[j]` out of the witness
 //! (`a.kk`, `m.acc`, `m0.qx`, `ao.acc`); the kernels build it out of the
-//! columns 20-22's fills wrote those witnesses into, which are already on the
+//! columns 20-22's witness generations wrote those witnesses into, which are already on the
 //! device in committed order. That is the AIR's own route -- the constraint
 //! reads the same columns -- so nothing is uploaded, nothing is recomputed, and
 //! a probe that corrupts a witness corrupts the column and the accumulator
@@ -53,12 +53,12 @@
 //! sum is the one the AIR wants and `nomask` is a real divergence from it. Run it
 //! at a shape with `key_tile_leads.key > 0` or it says nothing.
 //!
-//! `ZK_DEVICE_ACCUMULATORS` says which path runs, on the three-value pattern every fill in
+//! `ZK_DEVICE_ACCUMULATORS` says which path runs, on the three-value pattern every witness generation in
 //! this series uses: 0 the host builds them, 1 the device does and they are
 //! never on the host, 2 both with every cell asserted equal. Mode 2 is a check
-//! with teeth even with every fill on the device, because the host side reads
+//! with teeth even with every generate its witness on the device, because the host side reads
 //! the *witness* and the device side reads the *columns*: it closes the
-//! witness -> fill -> column -> accumulator chain end to end.
+//! witness -> witness generation -> column -> accumulator chain end to end.
 
 use num_traits::{One, Zero};
 use stwo::core::fields::FieldExpOps;
@@ -335,7 +335,7 @@ struct Acc {
     b: SecureFieldVec,
     /// B7a milestone 4 (section 3 row 1): the three key tile shapes' flags belong
     /// to `devpre` now -- one array per sub-component, written by
-    /// `b65_flags_key_tile` at fill time, read both by the selector columns
+    /// `b65_flags_key_tile` at witness-generation time, read both by the selector columns
     /// `commit_pre` used to build on the host and by the segmentation here. The
     /// Freivalds check, dequant and attnout components have no preprocessed selectors left on
     /// the host, so they still own theirs. `own` keeps a borrowed array's owner
@@ -486,7 +486,7 @@ pub fn place(tag: &str, got: DevAccCols, host: Option<(Vec<Eval>, Vec<SecureFiel
 /// point of checking here rather than against a proof digest is that the panic
 /// says which column and which cell.
 pub fn check(tag: &str, host: &[Eval], want: &[SecureField], got: &DevAccCols) {
-    crate::devwfill::check_cols(tag, host, &got.cols);
+    crate::dev_witness_gen::check_cols(tag, host, &got.cols);
     assert_eq!(want.len(), got.claims.len(), "{tag}: claim count");
     for (i, (a, b)) in want.iter().zip(&got.claims).enumerate() {
         assert_eq!(a, b, "{tag}: claim {i} differs: host {a:?}, device {b:?}");
@@ -661,8 +661,8 @@ pub fn tok(base: &[BaseFieldVec], at: &[usize], log_row: u32, rw: usize, a: &Att
 
 /// `v`, then `us[m]` and `accs[m]` per matmul, in the order the host commits
 /// them. The activations are the committed side and the weights the
-/// preprocessed one, both already on the device from 21's Freivalds fill.
-pub fn freivalds(dev: &crate::devwfill::DevFreivalds, lay: &crate::layer::FreivaldsLayout,
+/// preprocessed one, both already on the device from 21's Freivalds witness generation.
+pub fn freivalds(dev: &crate::dev_witness_gen::DevFreivalds, lay: &crate::layer::FreivaldsLayout,
                 n_mats: usize, rv: SecureField, s_ch: SecureField) -> DevAccCols {
     let t = std::time::Instant::now();
     let mutate = accmut(Comp::Freivalds);
@@ -714,8 +714,8 @@ pub fn freivalds(dev: &crate::devwfill::DevFreivalds, lay: &crate::layer::Freiva
 // =============================================================== the dequant ==
 
 /// `z` and `h`: the matmul component's Freivalds claimed side, over the same
-/// committed accumulator columns 20's dequant fill wrote.
-pub fn deq(dev: &crate::devfill::DevFill, lay: &crate::layer::MatLayout,
+/// committed accumulator columns 20's dequant witness generation wrote.
+pub fn deq(dev: &crate::dev_dequant_witness_gen::DevDequantWitnessGen, lay: &crate::layer::MatLayout,
            map: &crate::dequant::Map, f_acc: usize, rv: SecureField,
            s_ch: SecureField) -> DevAccCols {
     let t = std::time::Instant::now();
@@ -754,7 +754,7 @@ pub fn deq(dev: &crate::devfill::DevFill, lay: &crate::layer::MatLayout,
 /// `a = 0` at every row comes out of the scan holding itself, so stage 2 reads
 /// it exactly like a scanned one and there is no second kind of source.
 #[allow(clippy::too_many_arguments)]
-pub fn ao(dev: &crate::devwfill::DevAo, lay: &crate::layer::AoLayout, nh: usize,
+pub fn ao(dev: &crate::dev_witness_gen::DevAo, lay: &crate::layer::AoLayout, nh: usize,
           s: usize, rv: SecureField, s_ch: SecureField, mu_out: SecureField,
           mu_den: SecureField) -> DevAccCols {
     let t = std::time::Instant::now();
@@ -763,7 +763,7 @@ pub fn ao(dev: &crate::devwfill::DevAo, lay: &crate::layer::AoLayout, nh: usize,
     // stream JJ (E11): the base layout is `2 + 9 per_row` -- `den`, `joff`,
     // then `acc, sg, qm, nz2, denp, d, num, pj, alo` per slot -- and this fold
     // reads `den` and each slot's `acc`.  It was `1 + 6 per_row`; the two must
-    // move together (`layer::ao_component`, `devwfill::ao_component_dev`,
+    // move together (`layer::ao_component`, `dev_witness_gen::ao_component_dev`,
     // `gkrlink`'s `c0`).
     // stream TT (E11), log row 73: the magnitude form's layout is `2 + 10 pr`,
     // but it never reaches here -- `ao_component` fills it on the host on both
@@ -824,9 +824,9 @@ pub fn binding_mode() -> u32 {
 /// primitive as every other component's and therefore the same field element the
 /// host's serial fold produces.
 ///
-/// `in_nat` and `out_nat` are the arrays `b65_residual_stream_fill.cu` already leaves on the
+/// `in_nat` and `out_nat` are the arrays `b65_residual_stream_witness_gen.cu` already leaves on the
 /// card, in coset row order. Before this stream they were copied back across
-/// the link for the host to fold, which is the whole of `gen/residual_stream_fill_d2h`.
+/// the link for the host to fold, which is the whole of `gen/residual_stream_witness_gen_d2h`.
 ///
 /// The caller owns the order: `specs` is `Binding::specs` as the AIR reads it, and
 /// the columns come back four per binding in that order, which is exactly what

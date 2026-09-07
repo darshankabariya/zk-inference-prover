@@ -213,7 +213,7 @@ pub fn m4b_mode(name: &str) -> u32 {
 /// only in a copy-pasted env string, which is how `ZK_DEVICE_ACCUMULATORS`, `ZK_DEVICE_PREPROCESSED`
 /// and `ZK_GENERATED_LOGUP` came to sit dark for four streams (M's Record (1)):
 /// b-port's one measured rejection dropped `ACC` and `PRE` alongside the
-/// actually-broken `WFILL`, and the reduced string then propagated verbatim
+/// actually-broken `WITNESS_GEN`, and the reduced string then propagated verbatim
 /// through four drivers.
 ///
 /// Two kinds of value are deliberately absent. Mirror modes (`=2`, both paths
@@ -225,9 +225,9 @@ pub fn m4b_mode(name: &str) -> u32 {
 #[cfg(feature = "cuda")]
 fn m4b_default(name: &str) -> u32 {
     match name {
-        // The component fills, the witness fills, the shared tables, the pinned
+        // The component witness generations, the shared tables, the pinned
         // staging pool, the preprocessed columns, the accumulators and the
-        // residual stream's fill: all on.
+        // residual stream's witness generation: all on.
         "ZK_DEVICE_WITNESS_GEN_DEQUANT"
         | "ZK_DEVICE_WITNESS_GEN"
         | "ZK_DEVICE_TABLES"
@@ -316,13 +316,13 @@ pub fn modes_json() -> Value {
     }
     // `ZK_DEVICE_WITNESS_GEN_KEY_TILE` is the one mode whose fallback is another mode
     // rather than the table, so it is asked for through its own reader. This
-    // is the switch's global value; which fill a *particular* key tile takes also
-    // depends on its layout (`devwfill::key_tile_fill_mode`).
-    put("ZK_DEVICE_WITNESS_GEN_KEY_TILE", crate::devwfill::key_tile_mode());
+    // is the switch's global value; which witness generation a *particular* key tile takes also
+    // depends on its layout (`dev_witness_gen::key_tile_witness_gen_mode`).
+    put("ZK_DEVICE_WITNESS_GEN_KEY_TILE", crate::dev_witness_gen::key_tile_mode());
     // `ZK_DEVICE_WITNESS_GEN_DIAGONAL_BLOCK` has not gated and defaults off, but a run that
     // sets it must still name it here, or its JSON claims a configuration it
     // did not run.
-    put("ZK_DEVICE_WITNESS_GEN_DIAGONAL_BLOCK", crate::devwfill::diagonal_block_mode());
+    put("ZK_DEVICE_WITNESS_GEN_DIAGONAL_BLOCK", crate::dev_witness_gen::diagonal_block_mode());
     // The plain on/off switches resolve the same way and belong in the same
     // object. All of them default on and all of them predate this stream.
     for name in ["ZK_PARALLEL_GATHER", "ZK_COMMIT_BY_REFERENCE", "ZK_PARALLEL_SCAN",

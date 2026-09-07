@@ -1,13 +1,13 @@
 // B7a milestone 4 (section 3 row 1): the shared tables' own columns.
 #include "fields.cuh"
 #include "utils.cuh"
-#include "b65_table_fill.cuh"
+#include "b65_table_witness_gen.cuh"
 
 #define B65T_BLOCK 256u
 
 // ---------------------------------------------------------------- the permutation --
 
-// `common.rs`'s `m4_perm`, verbatim from `b65_fill.cu` and `b65_wfill.cu`: the
+// `common.rs`'s `m4_perm`, verbatim from `b65_dequant_witness_gen.cu` and `b65_witness_gen.cu`: the
 // closed form of `bit_reverse_coset_to_circle_domain_order`. It is an
 // involution, so the thread that owns committed row `i` reads coset row `f(i)`
 // -- and the committed row holding coset row `d` is `f(d)`, which is what the
@@ -82,10 +82,10 @@ __global__ void b65t_tables(const unsigned *__restrict__ expmap,
         y_col[i] = (m31)expmap[pat];
     }
 
-    // `base_mults[0]`: the exp table's multiplicities. Every key tile's fill
+    // `base_mults[0]`: the exp table's multiplicities. Every key tile's witness generation
     // scatter-added into a counter of its own (21.1) and the host's array was
     // their sum; the sum happens here instead, and nothing comes back. A null
-    // column is "no key tile filled on the device", so there is no counter to sum
+    // column is "no key tile built on the device", so there is no counter to sum
     // and the host keeps this one.
     if (m_col != nullptr) {
         const unsigned d = b65t_row(cfg, i, jp, B65T_COL_M);
@@ -103,7 +103,7 @@ __global__ void b65t_tables(const unsigned *__restrict__ expmap,
 
 // The rows where the witness's own table disagrees with the closed form. One
 // entry for rung 3's corrupted-table probe and none otherwise, and it is the
-// whole of section 5 rule 8 for this fill.
+// whole of section 5 rule 8 for this witness generation.
 __global__ void b65t_patch(const unsigned *__restrict__ idx,
                            const unsigned *__restrict__ val,
                            const unsigned n, m31 *__restrict__ y_col,
@@ -115,7 +115,7 @@ __global__ void b65t_patch(const unsigned *__restrict__ idx,
     y_col[b65t_perm(idx[t], cfg.log_rows)] = (m31)val[t];
 }
 
-extern "C" void b65_fill_tables(const unsigned *expmap,
+extern "C" void b65_witness_gen_tables(const unsigned *expmap,
                                 const unsigned *const *counters,
                                 const unsigned *patch_idx, const unsigned *patch_val,
                                 unsigned n_patch,
