@@ -1980,6 +1980,13 @@ fn compose_probes_cmd(args: &[String]) {
     let (hj, ok) = compose_once(&l, &params, &Default::default(), None);
     assert!(ok, "honest composed proof rejected");
     let honest_root = hj["pre_root"].as_str().unwrap().to_string();
+    // The preprocessed trace is two trees, so a control that moves a
+    // preprocessed value moves whichever of the two carries its column: the
+    // shape tree for a table, a selector or a rotation angle, the model tree
+    // for a weight or a weight scale.  Both honest roots are held, and the
+    // probe pins both, or a control aimed at the model tree is compared with
+    // nothing and is accepted.
+    let honest_model_root = hj["model_root"].as_str().unwrap().to_string();
     let honest_v = hj["verdict"].clone();
     let mut out = vec![json!({"probe": "honest", "result": hj.clone()})];
     // Stream NN: which verdict fields a control actually turned off.  "The
@@ -2018,9 +2025,10 @@ fn compose_probes_cmd(args: &[String]) {
     // honest statement declares) panics and takes every probe after it with it.
     // With no `--probe` the list is what it always was.
     let only = arg_strs(args, "--probe", &[]);
+    let selected = |name: &str| only.is_empty() || only.iter().any(|w| name.contains(w.as_str()));
     let mut probe = |name: &str, l2: &layer::Layer, t: &compose::ProverTamper,
                      expect: &str| -> bool {
-        if !only.is_empty() && !only.iter().any(|w| name.contains(w.as_str())) {
+        if !selected(name) {
             out.push(json!({"probe": name, "skipped": "not selected by --probe"}));
             return false;
         }
@@ -2036,15 +2044,20 @@ fn compose_probes_cmd(args: &[String]) {
         let claims_b = serde_json::to_vec(&out2.claims).unwrap();
         let mut fixed = out2.fixed.clone();
         fixed.pre_root = honest_root.clone();
+        // both preprocessed roots come from the honest run: `model_root` left
+        // as the tamper's own is a declaration of what the tamper committed,
+        // and `model_root_ok` would compare the bent tree with itself.
+        fixed.model_root = honest_model_root.clone();
         let fixed_b = serde_json::to_vec(&fixed).unwrap();
-        let (verdict, root_differs) = match &out2.proof {
+        let (verdict, root_differs, model_root_differs) = match &out2.proof {
             Some(pf) => {
                 let proof_b = serde_json::to_vec(pf).unwrap();
                 let v = compose::verify_composed(&fixed_b, &claims_b, &proof_b);
                 let rd = format!("{:?}", pf.commitments[0]) != honest_root;
-                (Some(v), rd)
+                let md = format!("{:?}", pf.commitments[1]) != honest_model_root;
+                (Some(v), rd, md)
             }
-            None => (None, false),
+            None => (None, false, false),
         };
         let accepted = verdict.as_ref().map(|v| v.accepts()).unwrap_or(false);
         let flipped = verdict.as_ref()
@@ -2062,6 +2075,7 @@ fn compose_probes_cmd(args: &[String]) {
             "sv_binding": out2.family_cells.get("sv_binding"),
             "prove_error": out2.prove_error,
             "root_differs_from_honest": root_differs,
+            "model_root_differs_from_honest": model_root_differs,
             "verdict": verdict.as_ref().map(|v| serde_json::to_value(v).unwrap()),
         }));
         accepted
@@ -2244,11 +2258,13 @@ fn compose_probes_cmd(args: &[String]) {
             // now, so every constraint still holds and the *root* is what
             // moves -- a different kind of rejection from every probe above,
             // and the one that says `w` is the model's and not the prover's.
+            // The weight is a model column, so the root that moves is the
+            // model tree's and `model_root_ok` is the field that goes false.
             let wtag = g.components[g.norm_scales[0]].tag.clone();
             assert!(!probe(&format!("norm_scale {wtag}: one norm-weight cell"), &l,
                            &compose::ProverTamper { residual_stream_w: Some(4321),
                                                     ..Default::default() },
-                           "the pinned preprocessed root"),
+                           "the pinned model root"),
                     "a bent norm weight accepted");
             // the dequant output bindings: the wiring family's copy of `o_out` (and
             // of `d_out`) is changed, the component's own add is recomputed from it,
@@ -2699,14 +2715,20 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
         let seam_live = compose::Plan::new(&params).residual_stream
                 .as_ref().is_some_and(|g| !g.head_norm)
             && l.mats.iter().any(|m| m.name == "o" && m.n_in == l.ao.nh * l.ao.hd);
-        let jo_tok = probe("attnout: a whole token's jo moved by one", &l,
+        let jo_name = "attnout: a whole token's jo moved by one";
+        let jo_tok = probe(jo_name, &l,
                            &compose::ProverTamper { ao_jo_tok: Some(1),
                                                     ..Default::default() },
                            if seam_live { "the o seam, `ao_q` against the Freivalds check's qX" }
                            else { "nothing -- this chunk has no consumer for it" });
-        assert_eq!(!jo_tok, seam_live,
-                   "a whole token's jo must reject exactly when the o seam is live: \
-                    seam_live={seam_live}, accepted={jo_tok}");
+        // this is the one control whose pass is an acceptance on some shapes, so
+        // it reads the probe's own answer rather than a rejection; a `--probe`
+        // that leaves it out returns the same `false` a rejection does, and the
+        // assert has to know the difference or a filtered run fails on a control
+        // it never ran.
+        assert!(!selected(jo_name) || !jo_tok == seam_live,
+                "a whole token's jo must reject exactly when the o seam is live: \
+                 seam_live={seam_live}, accepted={jo_tok}");
     }
 
     // 8. a tampered claim in the serialized statement: the replayed transcript

@@ -1271,8 +1271,9 @@ impl ResidualStreamPlan {
         // token's `a` rows is compared against that one reduction row, they
         // cannot carry different `r`s either.  `G` is the geometric sum over
         // the `a` rows and is the verifier's own arithmetic (`ResidualStreamEq::scale`).
-        // The norm weight moved to `Src::Pre`, i.e. into tree 0 under
-        // `pre_root`, because it is the model's and not the prover's.
+        // The norm weight moved to `Src::Pre` because it is the model's and not
+        // the prover's; its `PreNeeds` is `Model`, so it is committed in tree 1
+        // under `model_root` and not in the shape tree.
         let mut norm_scales = vec![];
         {
             let rows1 = 1usize << lr1;
@@ -3995,9 +3996,10 @@ pub struct ProverTamper {
     pub rq: Option<(usize, crate::requant::RqTamper)>,
     /// Stream II, control 3: bend one cell of a norm scale's *preprocessed*
     /// weight block.  The component recomputes `h` from the bent weight, so every
-    /// constraint holds and the tree-0 root is what moves -- `root_ok` against
-    /// the statement's `pre_root` is the rejection, and it is a different kind
-    /// of rejection from every other control here.
+    /// constraint holds and a committed root is what moves -- and the weight is
+    /// the model's, so the column is in tree 1 and `model_root_ok` against the
+    /// statement's `model_root` is the rejection, a different kind of rejection
+    /// from every other control here.
     pub residual_stream_w: Option<usize>,
     /// Stream NN: bend one cell of a rotation's *preprocessed* angle block.
     /// The products are recomputed from the bent `cos`, so every constraint in
@@ -4524,8 +4526,9 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             });
             // stream II's control 3: one norm-weight cell bent on the prover
             // side.  It is preprocessed, so the constraint set stays satisfied
-            // and the *root* moves -- `root_ok` against the statement's
-            // `pre_root` is what rejects it, and the record says so.
+            // and the *root* moves -- the weight is a model column, so the root
+            // that moves is the model tree's and `model_root_ok` against the
+            // statement's `model_root` is what rejects it.
             if let Some(x) = tamper.residual_stream_w.filter(|_| k == 0) {
                 let at = x % wblk.len();
                 wblk[at] ^= 1;
@@ -4752,7 +4755,8 @@ different rotation", inv.len(), 2 * hd * p.s);
                 // component stays satisfiable with the products recomputed around
                 // it, so `root_ok` against the statement's `pre_root` is the
                 // only thing that can reject -- the same shape stream II's
-                // norm-weight control has.
+                // norm-weight control has, one tree over: the angle is the
+                // verifier's own to rebuild and stays in the shape tree.
                 if let Some(x) = tamper.rope_w.filter(|_| rr.name == "q") {
                     let at = x % pre.len();
                     let was = pre[at];
