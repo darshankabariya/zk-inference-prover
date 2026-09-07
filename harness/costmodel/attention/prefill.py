@@ -11,7 +11,7 @@ that is half the rectangle.
 Measured: a prompt-processing pass at `C = S` on the 8B shape, one layer, on the
 SIMD reference (`b9/out/prefill_s*.json`) -- the naive layout, because it is the
 only one built.  Modelled: the two-region split (unmasked bulk + triangular tail)
-a mask-aware layout would use, and what the corner costs in each.
+a mask-aware layout would use, and what the diagonal block costs in each.
 
 Every "per token" below is per *model* token, i.e. the measured one-layer chunk
 times L; the runs prove one layer.
@@ -133,13 +133,13 @@ for s in missing:
 # the box's 128 GiB cap, at composition-commit; DD's re-run on a 150 GiB
 # container is the S=2048 row above.
 
-# --- the corner, in both layouts ---------------------------------------------
+# --- the diagonal block, in both layouts --------------------------------------
 # The split: tokens in blocks of B.  For block i the keys below it are a full
 # rectangle (no mask), the keys inside it are a B x B diagonal block proven whole
-# (the corner), and the keys above it are never committed.
+# (the diagonal block), and the keys above it are never committed.
 #     bulk = G (S^2/2 - S B/2)/S^2      tail = G S B / S^2      -> G (1/2 + B/2S)
 print()
-print("the causal corner, per (head, key, token), naive against the two-region split")
+print("the diagonal block, per (head, key, token), naive against the two-region split")
 print(f"  split: tokens in blocks of B = {GRID_TARGET} (the grid's own tiling granularity);")
 print("  keys below a block are a mask-free rectangle, keys inside it are a B x B block")
 print("  proven whole, keys above it are never committed.")
@@ -171,7 +171,7 @@ if marg:
 # --- the finding --------------------------------------------------------------
 big = by_s[HEADLINE_S]
 print()
-print("**The corner is a correctness gap, not a cost gap, at these S.**")
+print("**The diagonal block is a correctness gap, not a cost gap, at these S.**")
 print(f"  At C = S = {big['s']} the grid is {big['bands'] / big['fresh'] * 100:.1f}% of the chunk, so halving it saves")
 print(f"  {(1 - (0.5 + GRID_TARGET / (2 * big['s']))) * big['bands'] / big['fresh'] * 100:.1f}%.  A prefill chunk is dominated by the per-token matmul work, not by")
 print("  attention: the grid grows as S^2 and everything else as S, so the grid only")
@@ -241,12 +241,12 @@ def band_fresh(s, c, rows_region=True):
     return band_base(s, c, rows_region) + band_inter(s, c, rows_region)
 
 
-def bands_of(s, c, corner):
-    """A composed chunk's bands: the prefix bands, plus an S x S corner that
+def bands_of(s, c, diagonal_block):
+    """A composed chunk's bands: the prefix bands, plus an S x S diagonal block that
     carries no per-token region (one max and one denominator per token, not per
-    band -- `attn_trace.rs`'s `with_rows = !a.corner`)."""
-    return (band_base(s, c) + (band_base(s, s, False) if corner else 0),
-            band_inter(s, c) + (band_inter(s, s, False) if corner else 0))
+    band -- `attn_trace.rs`'s `with_rows = !a.diagonal_block`)."""
+    return (band_base(s, c) + (band_base(s, s, False) if diagonal_block else 0),
+            band_inter(s, c) + (band_inter(s, s, False) if diagonal_block else 0))
 
 
 gamma, delta = 2 * NH, 2 * NH_HD + NH_HD + 4 * NH
@@ -283,15 +283,15 @@ CHECKS += [(f"seq5 8B L{L:<2d} S=512 C={c:<5d}", SEQ5 / f"seq_c{c}_L{L}.json", 5
 print(f"  {'artifact':25s} {'base predicted':>15} {'base measured':>15} "
       f"{'inter predicted':>16} {'inter measured':>15}")
 band_checks = []
-for name, path, s_, c_, corner in CHECKS:
+for name, path, s_, c_, diagonal_block in CHECKS:
     if path is None or not path.exists() or path.stat().st_size == 0:
         print(f"  {name:25s} {'-- artifact absent or empty, check skipped':>47}")
         continue
     fc = json.loads(path.read_text())["result"]["point"]["family_cells"]
-    pb, pi = bands_of(s_, c_, corner)
+    pb, pi = bands_of(s_, c_, diagonal_block)
     gb = fc["bands"]
     gi = fc.get("interaction_by_family", {}).get("bands", {}).get("cells")
-    band_checks.append(dict(artifact=str(path), s=s_, c=c_, corner=corner, base_pred=pb,
+    band_checks.append(dict(artifact=str(path), s=s_, c=c_, diagonal_block=diagonal_block, base_pred=pb,
                             base_got=gb, inter_pred=pi, inter_got=gi,
                             ok=pb == gb and (gi is None or pi == gi)))
     print(f"  {name:25s} {pb:>15,} {gb:>15,}{'' if pb == gb else ' MISMATCH'} "
@@ -342,7 +342,7 @@ print(f"  the band family in FRESH cells is {BAND_SC / NH:.3f} per (head, key, t
       f"{ALPHA_CM:.2f} in the")
 print("  cost model and 5.898 for a composed chunk's context slope; the base-only "
       f"{gamma / NH:.3f} is")
-print("  the figure comparable to B10's corner 2.750.  NOTE that the `grid share` column at")
+print("  the figure comparable to B10's diagonal block 2.750.  NOTE that the `grid share` column at")
 print(f"  the top of this probe divides a BASE count by a FRESH one: fresh against fresh the")
 print(f"  band family is {band_fresh(HEADLINE_S, HEADLINE_S) / by_s[HEADLINE_S]['fresh'] * 100:.1f}% "
       f"of the S={HEADLINE_S} chunk, not "
@@ -492,7 +492,7 @@ print("  already reports, and it is reached iff the decode target is.")
 
 print()
 print("the verdict, in one paragraph.")
-print("The corner's price is settled and it is small: at C = S the attention grid is")
+print("The diagonal block's price is settled and it is small: at C = S the attention grid is")
 print(f"{big['bands'] / big['fresh'] * 100:.1f}% of a prefill chunk, so the two-region split -- bulk rectangle plus a")
 print(f"B x B diagonal block, {0.5 + GRID_TARGET / (2 * big['s']):.3f} of the naive rectangle at S = {big['s']} -- is worth")
 print(f"{(1 - (0.5 + GRID_TARGET / (2 * big['s']))) * big['bands'] / big['fresh'] * 100:.1f}% of the chunk.  The mask is a **soundness and completeness** gap (no AIR")

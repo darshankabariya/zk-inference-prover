@@ -208,7 +208,7 @@ pub struct Layer {
     /// Stream AA (E11): how many bands one head band group's unchecked prefix is
     /// tiled into.  1 everywhere before this stream and without `--kv-boundary`;
     /// `C / S` with it, which is what makes a consumer's sub-band the same
-    /// `Shape` as the producer's corner; 0 on block 0 of a sequence, which has
+    /// `Shape` as the producer's diagonal block; 0 on block 0 of a sequence, which has
     /// no unchecked prefix and so no prefix band.  `params_of` reads it back to
     /// recover the chunk's real context and its head band list.
     pub nsub: usize,
@@ -878,10 +878,10 @@ impl Layer {
         } else {
             cfg.clone()
         };
-        // B10 step 3: a dump extracted with `--corner` carries the causal corner
+        // B10 step 3: a dump extracted with `--diagonal-block` carries the diagonal block
         // beside the prefix rectangle, and it rides as one more band per prefix
         // band -- same `insts`, same head offset, `C = S`.
-        let has_corner = man["corner"].as_bool().unwrap_or(false);
+        let has_diagonal_block = man["diagonal_block"].as_bool().unwrap_or(false);
         // Stream W: the layer's attention columns, read and widened once for
         // every band that will gather out of them.  Each of the six bands used
         // to open these files for itself -- `qq.i16` and `mm.i32` six times, a
@@ -892,13 +892,13 @@ impl Layer {
         // one image instead of over three copies of it.
         // Open item 1: block 0 of a sequence has no unchecked prefix, so `c == 0`,
         // `kk.i16` is empty and there is no prefix half to read and no prefix
-        // band to build -- the corner is the group's only band and carries its
-        // per-token region (`compose.rs`'s `rows_band`, `Powers::as_solo_corner`).
-        assert!(c > 0 || has_corner,
-                "a c = 0 dump is block 0: it is the solo corner and needs a `--corner` dump");
+        // band to build -- the diagonal block is the group's only band and carries its
+        // per-token region (`compose.rs`'s `rows_band`, `Powers::as_solo_diagonal_block`).
+        assert!(c > 0 || has_diagonal_block,
+                "a c = 0 dump is block 0: it is the diagonal block and needs a `--diagonal-block` dump");
         let raw = {
             let _s = witread::scope(Site::Bands);
-            AttnRaw::read(dir, &man, c > 0, has_corner)?
+            AttnRaw::read(dir, &man, c > 0, has_diagonal_block)?
         };
         let mut bands = vec![];
         let mut head_offsets = vec![];
@@ -908,9 +908,9 @@ impl Layer {
         // is loaded as `c / s` sub-bands of exactly `S` keys each rather than as
         // one rectangle, because that is what makes a consumer's sub-band `b`
         // the same `Shape` -- and so the same `LayoutKey`, and so a column of
-        // the same height -- as the producer's corner.  `Attn::load_from` reads
+        // the same height -- as the producer's diagonal block.  `Attn::load_from` reads
         // the same bytes with a key offset; nothing about the dump changes.
-        assert!(!cfg.tile || cfg.corner, "`--kv-boundary` needs a `--corner` dump");
+        assert!(!cfg.tile || cfg.diagonal_block, "`--kv-boundary` needs a `--diagonal-block` dump");
         assert!(!cfg.tile || c % s == 0,
                 "`--kv-boundary` tiles the prefix in blocks of S: C={c} is not a multiple of S={s}");
         let nsub = if c == 0 { 0 } else if cfg.tile { c / s } else { 1 };
@@ -929,7 +929,7 @@ impl Layer {
                 off += insts;
             }
         }
-        if has_corner {
+        if has_diagonal_block {
             let mut off = 0usize;
             {
                 let _s = witread::scope(Site::Bands);
@@ -948,12 +948,12 @@ impl Layer {
             // half, because the key whose shift is zero may be in either
             //
             // Stream AA: with the prefix tiled, "the pair" is a head band
-            // group -- `nsub` sub-bands and the corner -- and the total is over
+            // group -- `nsub` sub-bands and the diagonal block -- and the total is over
             // all of them.  The region lives on the group's *first* sub-band,
             // which is `plan.rows_band`'s choice on the other side of the wall.
             let n_pre = band_sizes.len() * nsub;
             // the band that carries group `g`'s region: its first prefix
-            // sub-band, or -- block 0, no prefix at all -- its solo corner.
+            // sub-band, or -- block 0, no prefix at all -- its diagonal block.
             // `g * nsub` alone is band 0 for every group when `nsub == 0`, and
             // that read as "the extractor and the AIR disagree about the mask
             // on 16351 of 16384 rows" (open item 1) when every row agreed.
@@ -1110,7 +1110,7 @@ impl Layer {
 
         drop(mats_scope);
 
-        // the attnout region proves what the bands prove -- which with the corner
+        // the attnout region proves what the bands prove -- which with the diagonal block
         // is two bands per head, so a head's totals accumulate
         let (mut acc, mut den) = (vec![0i64; nh * s * hd], vec![0i64; nh * s]);
         {
@@ -1252,10 +1252,10 @@ impl Layer {
         } else {
             cfg.clone()
         };
-        let has_corner = man["corner"].as_bool().unwrap_or(false);
-        assert!(c > 0 || has_corner,
-                "a c = 0 dump is block 0: it is the solo corner and needs a `--corner` dump");
-        assert!(!cfg.tile || cfg.corner, "`--kv-boundary` needs a `--corner` dump");
+        let has_diagonal_block = man["diagonal_block"].as_bool().unwrap_or(false);
+        assert!(c > 0 || has_diagonal_block,
+                "a c = 0 dump is block 0: it is the diagonal block and needs a `--diagonal-block` dump");
+        assert!(!cfg.tile || cfg.diagonal_block, "`--kv-boundary` needs a `--diagonal-block` dump");
         assert!(!cfg.tile || c % s == 0,
                 "`--kv-boundary` tiles the prefix in blocks of S: C={c} is not a multiple of S={s}");
         let q_bits = man["qk_bits"][0].as_u64().unwrap_or(8) as u32;
@@ -1286,14 +1286,14 @@ impl Layer {
             }
             off += insts;
         }
-        if has_corner {
+        if has_diagonal_block {
             let mut off = 0usize;
             for insts in band_sizes {
                 let sh = Shape { s, c: s, hd, insts: *insts };
                 bands.push(Attn::weights_only(
                     sh, variant, q_bits, k_bits, cfg.nmax, cfg.log_table,
                     fracs_at(off, *insts), master, true,
-                    format!("model-only [{nh}x{s}x{s}, heads {off}..+{insts}, causal corner]")));
+                    format!("model-only [{nh}x{s}x{s}, heads {off}..+{insts}, diagonal block]")));
                 head_offsets.push(off);
                 sizes.push(*insts);
                 off += insts;
@@ -1475,8 +1475,8 @@ impl Layer {
         if hd % 2 != 0 {
             return off("hd is odd");
         }
-        if !self.bands.iter().any(|b| b.corner) {
-            return off("no corner band");
+        if !self.bands.iter().any(|b| b.diagonal_block) {
+            return off("no diagonal block band");
         }
         let width = |n: &str| self.mats.iter().find(|m| m.name == n).map(|m| m.n_out);
         let (nq, nk, nv) = match (width("q"), width("k"), width("v")) {
@@ -1628,7 +1628,7 @@ exponent(s) small, so B1's clamp fires");
             quant(&vdeq, nv, &jv_kv, 127)
         };
         // stream NN (NN-2): `which == 3` is the *prefix* band's own copy of Q --
-        // the grid above is untouched, so the corner keeps the honest queries
+        // the grid above is untouched, so the diagonal block keeps the honest queries
         // and only the prefix's copy moves.  `rebuild_bands` applies it inside
         // both of its passes, so the group's joint row maximum, its master
         // exponent and the prefix's whole attention follow the bent query and
@@ -1655,7 +1655,7 @@ exponent(s) small, so B1's clamp fires");
 
     /// Stream NN: rebuild every band from Q, K and V on the query-head grid.
     ///
-    /// The corner's keys *are* this block's tokens, so its K and V are what the
+    /// The diagonal block's keys *are* this block's tokens, so its K and V are what the
     /// layer's own `k` and `v` matmuls produced; a prefix band's keys are the
     /// cache and keep the ones they had, because this chunk did not produce
     /// them (they are bound across blocks by root equality instead -- stream
@@ -1666,7 +1666,7 @@ exponent(s) small, so B1's clamp fires");
     /// Stream NN-3: a tiled prefix (`--kv-boundary`, `nsub > 1`) is rebuilt too.
     /// Its sub-bands are `nsub` windows of one pair's prefix, so each keeps its
     /// own slice of the cache and takes the new queries, the group's master
-    /// exponent is the joint maximum over every sub-band **and** the corner, and
+    /// exponent is the joint maximum over every sub-band **and** the diagonal block, and
     /// the pair's total denominator -- which the group's per-token region
     /// commits on its first sub-band -- is the sum of all of their `zz`.  Before
     /// this the function asserted `nsub <= 1` and the rotation simply turned
@@ -1674,20 +1674,20 @@ exponent(s) small, so B1's clamp fires");
     ///
     /// `pre_q_bend` is stream NN-2's control: one cell of the **first group's
     /// prefix band's own** copy of Q, moved before that band's attention is
-    /// built, so the corner keeps the honest queries and the chunk is still an
+    /// built, so the diagonal block keeps the honest queries and the chunk is still an
     /// honest attention over the cache -- and the only thing that can see it is
     /// `nn_q_ok`, the equality between the two halves' Q folds.
     pub fn rebuild_bands(&mut self, qq: &[i32], kk: &[i32], vv: &[i32],
                          pre_q_bend: Option<usize>) {
         let (nh, hd, s) = (self.ao.nh, self.ao.hd, self.ao.s);
         let nsub = self.nsub.max(1);
-        let n_pre = self.bands.iter().filter(|b| !b.corner).count();
+        let n_pre = self.bands.iter().filter(|b| !b.diagonal_block).count();
         let groups = self.bands.len() - n_pre;
-        assert!(groups > 0, "the q/k/v rewiring needs the causal corner");
+        assert!(groups > 0, "the q/k/v rewiring needs the diagonal block");
         assert!(n_pre == 0 || n_pre == groups * nsub,
                 "{nsub} prefix sub-bands per group, or none: {n_pre} prefix bands, \
 {groups} groups");
-        // the bands of one group, prefix sub-bands first and the corner last --
+        // the bands of one group, prefix sub-bands first and the diagonal block last --
         // the order `Layer::synthetic` lays them out in
         let gidx = |g: usize| -> Vec<usize> {
             let pre = if n_pre == 0 { 0 } else { nsub };
@@ -1710,7 +1710,7 @@ exponent(s) small, so B1's clamp fires");
                 eprintln!("layer: prefix-band Q bend asked for on a chunk with no prefix \
 band -- nothing bent, and this control measures nothing");
             } else {
-                eprintln!("layer: prefix band (group 0) Q cell {at} bent, the corner's \
+                eprintln!("layer: prefix band (group 0) Q cell {at} bent, the diagonal block's \
 unmoved (a rejection is the pass)");
             }
         }
@@ -1738,14 +1738,14 @@ unmoved (a rejection is the pass)");
                 let a = &self.bands[b];
                 let sh = a.shape;
                 let off = self.head_offsets[b];
-                let q = take_q(qq, off, sh.insts, sh.s, !a.corner && g == 0 && n == 0);
-                let (k, v) = if a.corner {
+                let q = take_q(qq, off, sh.insts, sh.s, !a.diagonal_block && g == 0 && n == 0);
+                let (k, v) = if a.diagonal_block {
                     (take(kk, off, sh.insts, sh.c), take(vv, off, sh.insts, sh.c))
                 } else {
                     (a.kk.clone(), a.vv.clone())
                 };
                 row.push(Attn::from_qkv(sh, a.variant, q, k, v, a.q_bits, a.k_bits, a.nmax,
-                                        a.log_table, None, None, a.source.clone(), a.corner,
+                                        a.log_table, None, None, a.source.clone(), a.diagonal_block,
                                         None));
             }
             probe.push(row);
@@ -1754,7 +1754,7 @@ unmoved (a rejection is the pass)");
         let d_bits = probe.iter().flatten().map(|b| b.d_bits()).max().unwrap() + 1;
         let log_table = d_bits.clamp(4, 22);
         // pass 2: the joint row maximum per group -- over every sub-band and the
-        // corner -- then all of them under it
+        // diagonal block -- then all of them under it
         for g in 0..groups {
             let idx = gidx(g);
             let mm: Vec<i64> = probe[g].iter().skip(1)
@@ -1765,23 +1765,23 @@ unmoved (a rejection is the pass)");
                 let a = &self.bands[b];
                 let sh = a.shape;
                 let off = self.head_offsets[b];
-                let q = take_q(qq, off, sh.insts, sh.s, !a.corner && g == 0 && n == 0);
-                let (k, v) = if a.corner {
+                let q = take_q(qq, off, sh.insts, sh.s, !a.diagonal_block && g == 0 && n == 0);
+                let (k, v) = if a.diagonal_block {
                     (take(kk, off, sh.insts, sh.c), take(vv, off, sh.insts, sh.c))
                 } else {
                     (a.kk.clone(), a.vv.clone())
                 };
                 let (variant, qb, kb, nmax, src) =
                     (a.variant, a.q_bits, a.k_bits, a.nmax, a.source.clone());
-                let corner = a.corner;
+                let diagonal_block = a.diagonal_block;
                 self.bands[b] = Attn::from_qkv(sh, variant, q, k, v, qb, kb, nmax, log_table,
                                                Some(vec![frac; sh.insts]), Some(frac), src,
-                                               corner, Some(mm.clone()));
+                                               diagonal_block, Some(mm.clone()));
             }
             // the group's denominator: the pair's total, which every sub-band's
             // `zz` is a partial sum of.  It lives on the band that carries the
             // per-token region -- the first sub-band when there is a prefix, and
-            // the corner itself when there is none.
+            // the diagonal block itself when there is none.
             let total: Vec<i64> = idx.iter().skip(1)
                 .fold(self.bands[idx[0]].zz.clone(), |acc, b| {
                     acc.iter().zip(&self.bands[*b].zz).map(|(x, y)| x + y).collect()
@@ -1911,7 +1911,7 @@ unmoved (a rejection is the pass)");
         // stream, which is what a chain probe needs; that generator is the
         // follow-on this stream's record names, and until it exists a chain is
         // proved on a real dump.
-        assert!(!cfg.tile || cfg.corner, "`--kv-boundary` needs `--corner`");
+        assert!(!cfg.tile || cfg.diagonal_block, "`--kv-boundary` needs `--diagonal-block`");
         assert!(!cfg.tile || c % s == 0,
                 "`--kv-boundary` tiles the prefix in blocks of S: C={c} is not a multiple of S={s}");
         let s_nsub = if cfg.tile { c / s } else { 1 };
@@ -1921,19 +1921,19 @@ unmoved (a rejection is the pass)");
         let mut probe = vec![];
         let mut head_offsets = vec![];
         let mut off = 0usize;
-        // B10 step 3: with the causal corner, a band is a *pair* -- the prefix
-        // rectangle and the corner over the same heads, sharing the queries and one
+        // B10 step 3: with the diagonal block, a band is a *pair* -- the prefix
+        // rectangle and the diagonal block over the same heads, sharing the queries and one
         // row maximum.  Both halves' shifts go into the same master exponent, so
         // both are probed.
-        let mut probe_corner = vec![];
+        let mut probe_diagonal_block = vec![];
         for insts in band_sizes {
             let sh = Shape { s, c, hd, insts: *insts };
-            if cfg.corner {
+            if cfg.diagonal_block {
                 let (p, cc) = Attn::synthetic_pair(sh, variant, cfg.q_bits, cfg.k_bits,
                                                    cfg.nmax, cfg.log_table,
                                                    seed ^ (off as u64 + 1), None);
                 probe.push(p);
-                probe_corner.push(cc);
+                probe_diagonal_block.push(cc);
             } else {
                 probe.push(Attn::synthetic(sh, variant, cfg.q_bits, cfg.k_bits, cfg.nmax,
                                            cfg.log_table, seed ^ (off as u64 + 1)));
@@ -1945,24 +1945,24 @@ unmoved (a rejection is the pass)");
             }
             off += insts;
         }
-        if cfg.corner {
+        if cfg.diagonal_block {
             let mut off = 0usize;
             for insts in band_sizes {
                 head_offsets.push(off);
                 off += insts;
             }
         }
-        probe.extend(probe_corner);
+        probe.extend(probe_diagonal_block);
         let frac = probe.iter().map(|b| b.frac).fold(f64::MIN, f64::max).ceil();
         let d_bits = probe.iter().map(|b| b.d_bits()).max().unwrap() + 1;
         let log_table = if cfg.log_table > 0 { cfg.log_table } else { d_bits.clamp(4, 22) };
         let mut bands = vec![];
-        let mut corner_bands = vec![];
+        let mut diagonal_block_bands = vec![];
         let mut sizes = vec![];
         let mut off = 0usize;
         for insts in band_sizes.iter() {
             let sh = Shape { s, c, hd, insts: *insts };
-            if cfg.corner {
+            if cfg.diagonal_block {
                 // the same seeds the probe used, so the master exponent it derived
                 // is an upper bound on the data these bands actually carry
                 let (p, cc) = Attn::synthetic_pair(sh, variant, cfg.q_bits, cfg.k_bits,
@@ -1985,7 +1985,7 @@ unmoved (a rejection is the pass)");
                 } else {
                     bands.push(p);
                 }
-                corner_bands.push(cc);
+                diagonal_block_bands.push(cc);
             } else {
                 bands.push(Attn::synthetic_shared(sh, variant, cfg.q_bits, cfg.k_bits, cfg.nmax,
                                                   log_table, seed ^ (off as u64 + 1),
@@ -1996,9 +1996,9 @@ unmoved (a rejection is the pass)");
             }
             off += insts;
         }
-        if cfg.corner {
+        if cfg.diagonal_block {
             sizes.extend(band_sizes.iter().copied());
-            bands.extend(corner_bands);
+            bands.extend(diagonal_block_bands);
         }
         let band_sizes_all = sizes;
         let mut mats = vec![];
@@ -2081,7 +2081,7 @@ unmoved (a rejection is the pass)");
             }
         }
         // attnout from the bands, with scales that keep the quotient inside int8
-        // B10 step 3: `+=`, not `=`.  With the corner riding as a second set of
+        // B10 step 3: `+=`, not `=`.  With the diagonal block riding as a second set of
         // bands over the same heads, a head's denominator and A.V output are the
         // sum of its two halves -- which is what the attention output *is*.
         let (mut acc, mut den) = (vec![0i64; nh * s * hd], vec![0i64; nh * s]);
@@ -2155,7 +2155,7 @@ impl Layer {
 
     /// Stream NN (NN-2), the prefix band's control.  The same layer with **one**
     /// cell of the first group's *prefix* band's own copy of Q moved, and that
-    /// band's whole attention rebuilt around it -- the corner's queries are
+    /// band's whole attention rebuilt around it -- the diagonal block's queries are
     /// untouched, so the chunk proves an honest attention over the cache with
     /// queries the `q` matmul did not produce, and the only thing that can see
     /// it is `nn_q_ok`.
@@ -2821,7 +2821,7 @@ impl Layer {
     pub fn rebuild_ao(&mut self) {
         let (nh, s, hd) = (self.ao.nh, self.ao.s, self.ao.hd);
         // zero first, then accumulate: a head's totals are the sum over every band
-        // that covers it, which with B10 step 3's corner is two of them
+        // that covers it, which with B10 step 3's diagonal block is two of them
         self.ao.den.iter_mut().for_each(|v| *v = 0);
         self.ao.acc.iter_mut().for_each(|v| *v = 0);
         for (bi, b) in self.bands.iter().enumerate() {
@@ -2842,20 +2842,20 @@ impl Layer {
     /// causal mask removes.
     ///
     /// The mask is preprocessed, so the only shape the attack can take is to
-    /// *claim* a denominator and an output that count a masked key: the corner
+    /// *claim* a denominator and an output that count a masked key: the diagonal block
     /// band's numerator gets a legal table output, and `Z`, `A.V` and the attnout
     /// witness are rebuilt from it.  The AIR reads neither -- its numerator fold
-    /// and its exp lookup drop the slot -- so the corner's `sn` no longer joins
+    /// and its exp lookup drop the slot -- so the diagonal block's `sn` no longer joins
     /// the prefix's to make the denominator the per-token region claims.
-    pub fn unmask_corner(&mut self, i: usize) {
-        let n_pre = self.bands.iter().filter(|b| !b.corner).count();
-        let ci = self.bands.iter().position(|b| b.corner).expect("no corner band");
+    pub fn unmask_diagonal_block(&mut self, i: usize) {
+        let n_pre = self.bands.iter().filter(|b| !b.diagonal_block).count();
+        let ci = self.bands.iter().position(|b| b.diagonal_block).expect("no diagonal block band");
         let nmax = self.bands[ci].nmax as i64;
         let sh = self.bands[ci].shape;
         let masked: Vec<usize> = (0..sh.insts * sh.s * sh.c)
             .filter(|g| !self.bands[ci].visible(*g))
             .collect();
-        assert!(!masked.is_empty(), "the corner band has no masked entries");
+        assert!(!masked.is_empty(), "the diagonal block band has no masked entries");
         let g = masked[i % masked.len()];
         self.bands[ci].num[g] = nmax;
         // rebuild that band's denominator and A.V output from the changed numerator
@@ -2983,7 +2983,7 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bool,
     // builds both and asserts every cell equal before either is used.
     //
     // Stream Z: the fold has no device fill; its region takes the host path
-    // whatever the switch says (the corner bands' pattern), and
+    // whatever the switch says (the diagonal block bands' pattern), and
     // `devpre::note_host_fill` is told in `generate`.
     let m4c = if spec.variant == DeqVariant::Fold {
         0
@@ -4793,7 +4793,7 @@ pub fn freivalds_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: 
     //
     // Stream Z: the device fill packs activations as int8 and bumps the 8-bit
     // table in its kernel, so a wide group takes the host fill whatever the
-    // switch says -- the corner bands' pattern, and `devpre::note_host_fill`
+    // switch says -- the diagonal block bands' pattern, and `devpre::note_host_fill`
     // is told in `generate`.
     let m4d = if act_bits == 8 { crate::util::m4b_mode("B7_M4_WFILL") } else { 0 };
     assert!(m4d == 0 || corrupt_qx.is_none(),

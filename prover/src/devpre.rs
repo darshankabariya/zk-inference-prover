@@ -198,7 +198,7 @@ pub fn premut() -> (u32, u32) {
 /// B11 stream M: does some fill in this chunk bump a *host* multiplicity
 /// counter, for a reason no switch states?
 ///
-/// One band can be on the host while the switch says device -- a corner band,
+/// One band can be on the host while the switch says device -- a diagonal block band,
 /// which fills on the host whatever `B7_M4_WFILL_BAND` says because the device
 /// fill has no notion of its layout. `fills_dev` has to know, and it is asked
 /// from inside the fills themselves (`merge_counters` is read by
@@ -234,10 +234,10 @@ pub fn fills_dev() -> bool {
     // `B7_M4_WFILL=1 B7_M4_WFILL_BAND=0` would claim the counters are on the
     // device while three bands' worth of bumps sit on the host.
     //
-    // B11 stream M: the switches are not the whole answer. A corner band is on
+    // B11 stream M: the switches are not the whole answer. A diagonal block band is on
     // the host with every switch at 1, so `B7_M4_PRE=1` on a sequence chunk
     // used to build the nine multiplicity columns on the card from the device
-    // counters alone and drop the corner bands' chan and key bumps -- accepted
+    // counters alone and drop the diagonal block bands' chan and key bumps -- accepted
     // by every other check and rejected by `sums_cancel`. Stream L had already
     // met this for the tenth counter, `m_exp`, and fixed it there alone
     // (`devwfill::exp_mult_on_host`); this is the same predicate asked of all
@@ -524,13 +524,13 @@ impl DevPreBand {
     pub fn key(&self) -> &Uint32Vec {
         &self.flags[1]
     }
-    /// B11 stream N: absent on a corner band, which has no per-token region.
+    /// B11 stream N: absent on a diagonal block band, which has no per-token region.
     /// Every caller is already inside a `with_rows` arm, so reaching this on a
-    /// corner is a bug in the caller and says so rather than indexing past the
+    /// diagonal block is a bug in the caller and says so rather than indexing past the
     /// end.
     pub fn row(&self) -> &Uint32Vec {
         assert_eq!(self.flags.len(), 3,
-                   "a corner band has no per-token flags: this caller is outside a \
+                   "a diagonal block band has no per-token flags: this caller is outside a \
                     `with_rows` arm");
         &self.flags[2]
     }
@@ -566,17 +566,17 @@ pub fn band_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> DevP
     let tokg = FGridA { log_rows: l.log_row, rows: rrows as u32, groups: 1, chunks: 1,
                         lead: 0, descending: 0 };
     // B11 stream N, lever 2 (b): `SHAPE_TOK` was carried unconditionally, and a
-    // corner band has no rows for it. `commit_pre` has always skipped those
-    // three selector columns on a corner (`attn_trace.rs:258`), so a corner
+    // diagonal block band has no rows for it. `commit_pre` has always skipped those
+    // three selector columns on a diagonal block (`attn_trace.rs:258`), so a diagonal block
     // band's device selectors have to skip them too or the two disagree by
     // three columns. The *flags* are cut with them: nothing segments a region
     // that does not exist.
     // Stream CC (E11): a ninth key selector, `act`, when the grid leaves inert
     // lead rows -- the AIR's numerator-fold guard.  `commit_pre` appends it to
-    // the end of the grid's block and a device band is never a corner band, so
+    // the end of the grid's block and a device band is never a diagonal block band, so
     // on this side it is slot 8 of the key group and the two lists still line up
     // column for column (`check_run` is what says so).
-    let n_key = 8 + usize::from(crate::attn_air::act_id(0, a.corner, l.key.g.lead)
+    let n_key = 8 + usize::from(crate::attn_air::act_id(0, a.diagonal_block, l.key.g.lead)
                                 .is_some());
     let shapes: &[(u32, FGridA, u32, u32, usize, u32)] = if with_rows {
         &[

@@ -1134,7 +1134,7 @@ mod tests {
                 eps: crate::bf16::from_f64(1e-5),
                 inv_d: crate::bf16::from_f64(1.0 / 64.0),
             }),
-            corner: false, gkr_bands: false, gkr_dequant: false, gkr_residual_stream: false,
+            diagonal_block: false, gkr_bands: false, gkr_dequant: false, gkr_residual_stream: false,
             gkr_freivalds: false, gkr_attnout: false, layer_boundary: false, kv_boundary: false,
             logits_claim: false, prove_argmax: false, prove_argmax_lax: false,
             embed_vocab: if embed { 300 } else { 0 },

@@ -28,7 +28,7 @@ use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::attn_air::{
     ChanEval, ExpRel, ExpTableEval, KeyEval, Offsets, OutEval, Powers, RangeRel, RangeTableEval,
-    RowEval, band_id, id, msk_id, tbl_range, CHAN_SEL, CORNER_SEL, KEY_SEL, OUT_SEL, ROW_SEL,
+    RowEval, band_id, id, msk_id, tbl_range, CHAN_SEL, DIAGONAL_BLOCK_SEL, KEY_SEL, OUT_SEL, ROW_SEL,
     TBL_EXP_X, TBL_EXP_Y,
 };
 use crate::common::{Proven, Session, Sums, twiddles};
@@ -188,14 +188,14 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
     let ridx = |b: u32| widths.iter().position(|w| *w == b).unwrap();
     let mut ids = vec![];
     ids.extend(CHAN_SEL.iter().map(|n| band_id(0, n)));
-    if a.corner {
-        ids.extend(CORNER_SEL.iter().map(|n| band_id(0, n)));
+    if a.diagonal_block {
+        ids.extend(DIAGONAL_BLOCK_SEL.iter().map(|n| band_id(0, n)));
         ids.extend((0..l.key.q).map(|i| msk_id(0, i)));
     } else {
         ids.extend(KEY_SEL.iter().map(|n| band_id(0, n)));
     }
     // Stream CC (E11): the inert-lead-row selector, in `commit_pre`'s order.
-    ids.extend(crate::attn_air::act_id(0, a.corner, l.key.g.lead));
+    ids.extend(crate::attn_air::act_id(0, a.diagonal_block, l.key.g.lead));
     ids.extend(OUT_SEL.iter().map(|n| band_id(0, n)));
     ids.extend(ROW_SEL.iter().map(|n| band_id(0, n)));
     ids.push(id(TBL_EXP_X));
@@ -228,7 +228,7 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
                       Variant::IntSplit(b) => Some(rels[ridx(b)].clone()),
                       _ => None,
                   },
-                  range_check: cfg.range_check, gkr: false, corner: a.corner,
+                  range_check: cfg.range_check, gkr: false, diagonal_block: a.diagonal_block,
                   boundary_v: vec![] },
         next_use(),
     );

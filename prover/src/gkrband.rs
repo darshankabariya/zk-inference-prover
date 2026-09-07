@@ -37,7 +37,7 @@
 //! and a 2-look one -- which pads nothing and costs only instance bookkeeping.
 //!
 //! *The numerators come in two kinds.* A unit look stores no numerators at all
-//! (`Layer::LogUpSingles`); a corner grid's exp looks carry `1 - mask` and
+//! (`Layer::LogUpSingles`); a diagonal block grid's exp looks carry `1 - mask` and
 //! live in `Layer::LogUpGeneric` instances. A region therefore contributes up
 //! to two groups of instances, and the split is by numerator kind first,
 //! binary decomposition second.
@@ -230,7 +230,7 @@ where
 #[derive(Default)]
 pub struct Collect {
     /// the region whose lookups are arriving; the caller sets it before each
-    /// region's interaction pass, because a corner band reaches
+    /// region's interaction pass, because a diagonal block band reaches
     /// `interaction_phase` with no `BandAir` to carry its index
     pub reg: crate::gkrlink::Reg,
     pub sites: Vec<Site>,
@@ -1384,7 +1384,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             use stwo::prover::backend::cuda::lookups::gkr::prof;
             let t0 = Instant::now();
             // B11 stream T: a fed instance is already device-resident in MLE
-            // layout and crosses nothing; only a host-built one -- a corner
+            // layout and crosses nothing; only a host-built one -- a diagonal block
             // band, whose fill stays on the host -- is uploaded. The two lists
             // interleave back into instance order, which is the transcript's.
             let mut hs = c.layers.iter();
@@ -1437,7 +1437,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             // B11 stream V, lever 1: the fed instances' input layers are freed
             // as their first halving is produced and re-fed in the last round,
             // which is the only round that reads them. The uploaded instances
-            // -- a host-filled corner band's -- have no feed behind them, so
+            // -- a host-filled diagonal block band's -- have no feed behind them, so
             // `Refeed::droppable` says no and they are held as stream Q held
             // them. `B11_GKR_REFEED=0` puts every input layer back for the
             // whole run: the same binary, the before against the after.
@@ -1756,7 +1756,7 @@ pub fn cmd(args: &[String]) {
     collect.reg = crate::gkrlink::Reg::Band(0);
     let t0 = Instant::now();
     let inter = crate::attn_trace::interaction_phase(
-        &a, &l, &cfg, &pow, &rel_exp, &rels, &com, &widths, true, !a.corner,
+        &a, &l, &cfg, &pow, &rel_exp, &rels, &com, &widths, true, !a.diagonal_block,
         None, Some(&mut collect), None);
     let committed_secs = t0.elapsed().as_secs_f64();
 
@@ -1827,7 +1827,7 @@ pub fn cmd(args: &[String]) {
         .collect();
 
     crate::util::emit("gkr_selftest", serde_json::json!({
-        "shape": sh.label(), "corner": a.corner, "variant": a.variant.name(),
+        "shape": sh.label(), "diagonal_block": a.diagonal_block, "variant": a.variant.name(),
         "scores_per_row": l.key.q, "keys_per_row": l.chan.pk, "rw": l.rw,
         "sites": per_site,
         "instances": insts,
@@ -1887,7 +1887,7 @@ fn tamper(proof: &mut GkrBatchProof) -> String {
 /// side rather than a rejected proof on the verifying side.
 pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
     let mut out = vec![];
-    for (b, corner) in plan.corner.iter().enumerate() {
+    for (b, diagonal_block) in plan.diagonal_block.iter().enumerate() {
         let l = &plan.lays[b];
         let (lc, lk) = (&l.chan, &l.key);
         let cfg = &plan.cfg;
@@ -1903,10 +1903,10 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
         }
 
         // ---- the grid region: one exp lookup per score slot, then the
-        // variant's remainder checks, then the V range checks. On a corner band
+        // variant's remainder checks, then the V range checks. On a diagonal block band
         // the exp lookups carry `1 - mask` and are the only non-unit lookups in
         // the whole set.
-        let mut unit = vec![!*corner; lk.q];
+        let mut unit = vec![!*diagonal_block; lk.q];
         if let AttnVariant::IntSplit(_) = plan.attn_variant {
             unit.extend(vec![true; lk.q]);
         }
@@ -1920,8 +1920,8 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
         // one per head band *group* -- one row maximum and one denominator per
         // token, not per key block -- so it lives on the group's first band and
         // every other band of the group rides on it. With `--kv-boundary` off that
-        // is `!corner`, which is what this read used to say; with it on, a
-        // group is `c/s` prefix sub-bands plus a corner and only the first
+        // is `!diagonal_block`, which is what this read used to say; with it on, a
+        // group is `c/s` prefix sub-bands plus a diagonal block and only the first
         // sub-band carries the region. `plan.rows_band` is the plan's own
         // answer and `attn_trace::interaction_phase`'s `with_rows` argument is
         // fed from it, so this is the derivation the collector actually saw.

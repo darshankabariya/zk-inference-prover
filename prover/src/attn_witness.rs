@@ -43,7 +43,7 @@ fn read<T: Copy + Send>(path: &str, width: usize, site: Site,
 }
 
 /// One half of a layer's attention witness: the keys, the values and torch's
-/// own numerators, over either the cache's context or the causal corner.
+/// own numerators, over either the cache's context or the diagonal block.
 pub struct Half {
     pub kk16: Vec<i16>,
     pub vv8: Vec<u8>,
@@ -60,7 +60,7 @@ pub struct Half {
 
 impl Half {
     /// The three files of one half, read and widened once.  `tag` is the
-    /// suffix the corner's copies carry (`kkc.i16` against `kk.i16`).
+    /// suffix the diagonal block's copies carry (`kkc.i16` against `kk.i16`).
     fn read(dir: &str, k: &str, v: &str, n: &str, slim_num: bool) -> Result<Self, String> {
         Ok(Self {
             kk16: read(&format!("{dir}/{k}"), 2, Site::DecodeI16,
@@ -77,7 +77,7 @@ impl Half {
 /// Stream W: one layer's attention columns, read and widened **once**.
 ///
 /// A layer's six bands -- three over the cache's context, three over the causal
-/// corner -- each called `Attn::load`, and each of them opened `qq.i16`, its
+/// diagonal block -- each called `Attn::load`, and each of them opened `qq.i16`, its
 /// own half's `kk`, `vv` and `num`, and `mm.i32` for itself before gathering
 /// its slice out of them.  At the sequence's sizes that made a chunk read
 /// **1,502 MB where 740 MB exists**, with all 268 MB of `num.i32` read three
@@ -92,11 +92,11 @@ impl Half {
 /// every array `Attn::build` receives is element-for-element the array it
 /// received before.
 pub struct LayerRaw {
-    /// The queries.  Both halves of a band read the same `qq.i16` -- the corner
+    /// The queries.  Both halves of a band read the same `qq.i16` -- the diagonal block
     /// is the same tokens attending to a different set of keys -- so this was
     /// read six times a layer.
     pub qq16: Vec<i16>,
-    /// The joint row maximum, on a `--corner` dump.  Read by both halves of
+    /// The joint row maximum, on a `--diagonal-block` dump.  Read by both halves of
     /// every band, for the same reason.
     pub mm32: Option<Vec<i32>>,
     pub pre: Option<Half>,
@@ -105,32 +105,32 @@ pub struct LayerRaw {
 
 impl LayerRaw {
     /// Read what the bands this layer will build actually want.  A dump with no
-    /// corner has no second half and no `mm.i32`; a single band asked for on
+    /// diagonal block has no second half and no `mm.i32`; a single band asked for on
     /// its own (`Attn::get`'s probe path) reads its own half and no other, so
     /// that path reads exactly the bytes it read before this existed.
-    pub fn read(dir: &str, man: &serde_json::Value, prefix: bool, corner: bool)
+    pub fn read(dir: &str, man: &serde_json::Value, prefix: bool, diagonal_block: bool)
                 -> Result<Self, String> {
-        let has_corner = man["corner"].as_bool().unwrap_or(false);
+        let has_diagonal_block = man["diagonal_block"].as_bool().unwrap_or(false);
         let slim_num = man["slim_num"].as_bool().unwrap_or(false);
         Ok(Self {
             qq16: read(&format!("{dir}/qq.i16"), 2, Site::DecodeI16,
                        |b| i16::from_le_bytes([b[0], b[1]]))?,
-            mm32: has_corner
+            mm32: has_diagonal_block
                 .then(|| read(&format!("{dir}/mm.i32"), 4, Site::DecodeI32,
                               |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])))
                 .transpose()?,
             pre: prefix.then(|| Half::read(dir, "kk.i16", "vv.i8", "num.i32", slim_num))
                 .transpose()?,
-            cor: corner.then(|| Half::read(dir, "kkc.i16", "vvc.i8", "numc.i32", slim_num))
+            cor: diagonal_block.then(|| Half::read(dir, "kkc.i16", "vvc.i8", "numc.i32", slim_num))
                 .transpose()?,
         })
     }
 
-    fn half(&self, corner: bool) -> Result<&Half, String> {
-        let h = if corner { &self.cor } else { &self.pre };
+    fn half(&self, diagonal_block: bool) -> Result<&Half, String> {
+        let h = if diagonal_block { &self.cor } else { &self.pre };
         h.as_ref().ok_or_else(|| {
             format!("the layer image holds no {} half",
-                    if corner { "corner" } else { "prefix" })
+                    if diagonal_block { "diagonal block" } else { "prefix" })
         })
     }
 }
@@ -221,7 +221,7 @@ pub enum Corrupt {
     /// B10 step 3: one *future* key given a legal numerator, so the token attends
     /// to a key the causal mask removes.  The denominator and the A.V output are
     /// rebuilt from it; the AIR reads neither, so `sn` and `av` stop matching the
-    /// `az` and `out` this witness claims.  The corner's own probe.
+    /// `az` and `out` this witness claims.  The diagonal block's own probe.
     Unmask(usize),
 }
 
@@ -241,12 +241,12 @@ pub struct Src {
     /// (`zk-prover` = B6.5's mixed layout, `b10` = the bf16 chain on all seven).  Empty
     /// means "whatever the witness says", which is what a real dump carries.
     pub layout: String,
-    /// B10 step 3: build the band as the causal corner (`C == S`, key `c` is
+    /// B10 step 3: build the band as the diagonal block (`C == S`, key `c` is
     /// decoded token `c`) rather than as the prefix rectangle.
-    pub corner: bool,
+    pub diagonal_block: bool,
     /// Stream AA (E11), from `--kv-boundary`: load the unchecked prefix as `C / S`
     /// bands of `S` keys each instead of one rectangle of `C`.  Implies
-    /// `corner`.  See `Attn::load_from`'s `key_off`.
+    /// `diagonal_block`.  See `Attn::load_from`'s `key_off`.
     pub tile: bool,
 }
 
@@ -290,14 +290,14 @@ pub struct Attn {
     pub off_table: usize,
     /// numerators that disagree with the dumped (torch) ones, if there are any
     pub torch_mismatch: Option<usize>,
-    /// B10 step 3: this band is the *causal corner* -- key `c` is the decoded
+    /// B10 step 3: this band is the *diagonal block* -- key `c` is the decoded
     /// stream's token `c`, so token `t` attends to it iff `c <= t`.  The masked
     /// half still commits its score (Freivalds is over the whole rectangle) and
     /// nothing else: no numerator, no denominator term, no table row.
-    pub corner: bool,
+    pub diagonal_block: bool,
     /// B10 step 3: the denominator the *per-token region* commits, when it is not
-    /// this band's own `zz`.  With the corner there is one per-token region for
-    /// the pair and it carries the total `Z_prefix + Z_corner` -- which is the
+    /// this band's own `zz`.  With the diagonal block there is one per-token region for
+    /// the pair and it carries the total `Z_prefix + Z_diagonal_block` -- which is the
     /// only quantity the `Z >= nmax` lower bound holds for, since the key whose
     /// shift is zero may be in either half.
     pub zz_total: Option<Vec<i64>>,
@@ -366,9 +366,9 @@ impl Attn {
         self.delta.iter().all(|d| *d == 1)
     }
     /// Did the token of grid entry `g` attend to its key?  Always, unless this band
-    /// is the causal corner, where the key axis *is* the decoded token axis.
+    /// is the diagonal block, where the key axis *is* the decoded token axis.
     pub fn visible(&self, g: usize) -> bool {
-        !self.corner || {
+        !self.diagonal_block || {
             let (s, c) = (self.shape.s, self.shape.c);
             g % c <= (g / c) % s
         }
@@ -380,7 +380,7 @@ impl Attn {
     }
     /// Entries the mask removes, over the whole band.
     pub fn masked(&self) -> usize {
-        if self.corner { self.shape.insts * self.shape.s * (self.shape.s - 1) / 2 } else { 0 }
+        if self.diagonal_block { self.shape.insts * self.shape.s * (self.shape.s - 1) / 2 } else { 0 }
     }
 }
 
@@ -414,10 +414,10 @@ impl Attn {
     /// what makes a layer's bands disagree.
     #[allow(clippy::too_many_arguments)]
     pub fn load(dir: &str, head: usize, sh: Shape, variant: Variant, nmax: u32,
-                log_table: u32, master: Option<f64>, corner: bool) -> Result<Self, String> {
+                log_table: u32, master: Option<f64>, diagonal_block: bool) -> Result<Self, String> {
         let man: serde_json::Value = witread::read_json(&format!("{dir}/manifest.json"))?;
-        let raw = LayerRaw::read(dir, &man, !corner, corner)?;
-        Self::load_from(&raw, &man, head, sh, variant, nmax, log_table, master, corner, 0)
+        let raw = LayerRaw::read(dir, &man, !diagonal_block, diagonal_block)?;
+        Self::load_from(&raw, &man, head, sh, variant, nmax, log_table, master, diagonal_block, 0)
     }
 
     /// The same band, out of a layer image its caller already holds.
@@ -430,7 +430,7 @@ impl Attn {
     /// over arrays with the same contents.
     ///
     /// Stream AA (E11): `key_off` is where this band's keys start inside the
-    /// dump's context.  Zero everywhere before this stream and on every corner
+    /// dump's context.  Zero everywhere before this stream and on every diagonal block
     /// band; with `--kv-boundary` the unchecked prefix is loaded as `C / S` bands of
     /// `S` keys each and `key_off` is `k * S`.  It is a window into the same
     /// bytes -- no format change, no re-extraction, and the derived values are
@@ -438,7 +438,7 @@ impl Attn {
     #[allow(clippy::too_many_arguments)]
     pub fn load_from(raw: &LayerRaw, man: &serde_json::Value, head: usize, sh: Shape,
                      variant: Variant, nmax: u32, log_table: u32, master: Option<f64>,
-                     corner: bool, key_off: usize) -> Result<Self, String> {
+                     diagonal_block: bool, key_off: usize) -> Result<Self, String> {
         let g = |k: &str| man[k].as_u64().ok_or(format!("manifest: missing {k}"));
         let (nh, s0, c0, hd0) = (g("heads")? as usize, g("s")? as usize,
                                  g("c")? as usize, g("hd")? as usize);
@@ -457,22 +457,22 @@ impl Attn {
                 .collect()
         });
         let hh = |i: usize| (head + i) % nh;
-        // B10 step 3: a dump extracted with `--corner` carries the decoded stream's
+        // B10 step 3: a dump extracted with `--diagonal-block` carries the decoded stream's
         // own keys and values beside the cache's, and one row maximum for the pair.
-        // The corner band reads `kkc`/`vvc` and `numc`; both bands read `mm`,
-        // because with a corner the maximum is no longer the max over either
+        // The diagonal block band reads `kkc`/`vvc` and `numc`; both bands read `mm`,
+        // because with a diagonal block the maximum is no longer the max over either
         // half's keys and recomputing it per band would give two different ones.
-        let has_corner = man["corner"].as_bool().unwrap_or(false);
-        if corner && !has_corner {
-            return Err("the dump was not extracted with --corner".to_string());
+        let has_diagonal_block = man["diagonal_block"].as_bool().unwrap_or(false);
+        if diagonal_block && !has_diagonal_block {
+            return Err("the dump was not extracted with --diagonal-block".to_string());
         }
-        let c0 = if corner { s0 } else { c0 };
-        if corner && sh.c != s0 {
-            return Err(format!("the corner is square: S={s0}, asked for C={}", sh.c));
+        let c0 = if diagonal_block { s0 } else { c0 };
+        if diagonal_block && sh.c != s0 {
+            return Err(format!("the diagonal block is square: S={s0}, asked for C={}", sh.c));
         }
         let qq16 = &raw.qq16;
-        let Half { kk16, vv8, num32 } = raw.half(corner)?;
-        let mm_in: Option<Vec<i64>> = if has_corner {
+        let Half { kk16, vv8, num32 } = raw.half(diagonal_block)?;
+        let mm_in: Option<Vec<i64>> = if has_diagonal_block {
             let mm32 = raw.mm32.as_ref().ok_or("the layer image holds no `mm.i32`")?;
             let _s = witread::scope(Site::DecodeGather);
             Some((0..sh.insts * sh.s)
@@ -536,25 +536,25 @@ impl Attn {
                        fracs, master,
                        format!("B1 layer witness [{nh}x{s0}x{c0}, heads {head}..+{}{}{}]",
                                sh.insts, if tiled { ", tiled" } else { "" },
-                               if corner { ", causal corner" } else { "" }),
-                       None, corner, mm_in))
+                               if diagonal_block { ", diagonal block" } else { "" }),
+                       None, diagonal_block, mm_in))
     }
 
     /// A synthetic band whose exp table is pinned to a given master exponent and
     /// row count, so several bands can share one table (the composed selftest).
     #[allow(clippy::too_many_arguments)]
     pub fn synthetic_shared(sh: Shape, variant: Variant, q_bits: u32, k_bits: u32, nmax: u32,
-                            log_table: u32, seed: u64, frac: f64, corner: bool) -> Self {
+                            log_table: u32, seed: u64, frac: f64, diagonal_block: bool) -> Self {
         let h = Self::synthetic(sh, variant, q_bits, k_bits, nmax, log_table, seed);
-        let src = if corner { format!("{} [causal corner]", h.source) } else { h.source };
+        let src = if diagonal_block { format!("{} [diagonal block]", h.source) } else { h.source };
         Self::build(sh, variant, h.qq, h.kk, h.vv, None, q_bits, k_bits, nmax, log_table,
-                    Some(vec![frac; sh.insts]), None, src, None, corner, None)
+                    Some(vec![frac; sh.insts]), None, src, None, diagonal_block, None)
     }
 
-    /// A prefix band and its causal corner, built as one object.
+    /// A prefix band and its diagonal block, built as one object.
     ///
     /// Two things are not optional and neither is visible from inside a single
-    /// band.  They share the **queries** -- the corner is the same tokens
+    /// band.  They share the **queries** -- the diagonal block is the same tokens
     /// attending to a different set of keys, so `qQ` is the same matrix -- and
     /// they share one **row maximum**, taken over the keys of both halves.  A
     /// per-band maximum would put the two halves' numerators on two different
@@ -566,7 +566,7 @@ impl Attn {
         let csh = Shape { c: sh.s, ..sh };
         let p0 = Self::synthetic(sh, variant, q_bits, k_bits, nmax, log_table, seed);
         let c0 = Self::synthetic(csh, variant, q_bits, k_bits, nmax, log_table, seed ^ 0x5c1);
-        // the corner's own keys and values, against the prefix band's queries
+        // the diagonal block's own keys and values, against the prefix band's queries
         let c0 = Self::build(csh, variant, p0.qq.clone(), c0.kk, c0.vv, None, q_bits, k_bits,
                              nmax, log_table, None, None, c0.source, None, true, None);
         let mm: Vec<i64> = p0.mm.iter().zip(&c0.mm).map(|(a, b)| *a.max(b)).collect();
@@ -593,17 +593,17 @@ impl Attn {
     pub fn from_qkv(sh: Shape, variant: Variant, qq: Vec<i32>, kk: Vec<i32>, vv: Vec<i32>,
                     q_bits: u32, k_bits: u32, nmax: u32, log_table: u32,
                     frac_in: Option<Vec<f64>>, master: Option<f64>, source: String,
-                    corner: bool, mm_in: Option<Vec<i64>>) -> Self {
+                    diagonal_block: bool, mm_in: Option<Vec<i64>>) -> Self {
         Self::build(sh, variant, qq, kk, vv, None, q_bits, k_bits, nmax, log_table,
-                    frac_in, master, source, None, corner, mm_in)
+                    frac_in, master, source, None, diagonal_block, mm_in)
     }
 
-    /// The same Q, K and V read as the causal corner: the row maximum, the table's
+    /// The same Q, K and V read as the diagonal block: the row maximum, the table's
     /// exponent, the numerators, the denominator and the A.V outputs are all
     /// re-derived over the visible half.  `frac` is re-derived too rather than
-    /// carried over -- the corner's largest shift is not the rectangle's.
-    pub fn into_corner(self) -> Self {
-        let src = format!("{} [causal corner]", self.source);
+    /// carried over -- the diagonal block's largest shift is not the rectangle's.
+    pub fn into_diagonal_block(self) -> Self {
+        let src = format!("{} [diagonal block]", self.source);
         Self::build(self.shape, self.variant, self.qq, self.kk, self.vv, None, self.q_bits,
                     self.k_bits, self.nmax, self.log_table, None, None, src, None, true, None)
     }
@@ -612,24 +612,24 @@ impl Attn {
     pub fn corrupted(cfg: &Src, sh: Shape, variant: Variant, bad: Corrupt) -> Self {
         let h = Self::get(cfg, sh, variant);
         Self::build(sh, variant, h.qq, h.kk, h.vv, None, h.q_bits, h.k_bits, h.nmax,
-                    h.log_table, Some(h.frac_per_inst), None, h.source, Some(bad), h.corner,
+                    h.log_table, Some(h.frac_per_inst), None, h.source, Some(bad), h.diagonal_block,
                     Some(h.mm.clone()))
     }
 
     pub fn get(cfg: &Src, sh: Shape, variant: Variant) -> Self {
-        // A real dump already carries the corner (and, crucially, the *joint* row
+        // A real dump already carries the diagonal block (and, crucially, the *joint* row
         // maximum both halves shift by), so `load` builds it directly.  Only the
         // synthetic path has a rectangle to re-read as one.
         if let Some(d) = &cfg.dir {
             match Self::load(d, cfg.head, sh, variant, cfg.nmax, cfg.log_table, None,
-                             cfg.corner) {
+                             cfg.diagonal_block) {
                 Ok(a) => return a,
                 Err(e) => eprintln!("  (no real attention witness: {e})"),
             }
         }
         let a = Self::synthetic(sh, variant, cfg.q_bits, cfg.k_bits, cfg.nmax, cfg.log_table,
                                 cfg.seed);
-        if cfg.corner { a.into_corner() } else { a }
+        if cfg.diagonal_block { a.into_diagonal_block() } else { a }
     }
 
     /// Stream AA (E11): this band restricted to the key window `[c0, c0 + len)`.
@@ -637,7 +637,7 @@ impl Attn {
     /// The window's derived values -- the scores, the shift, the numerators, the
     /// denominator, the A.V output -- are *recomputed from the window* by the
     /// same `build` the whole band came out of, against the parent's row
-    /// maximum.  That is the same construction the causal corner already uses
+    /// maximum.  That is the same construction the diagonal block already uses
     /// (`mm_in`), and it is what makes a partial band's `zz` the partial sum the
     /// group's total is assembled from.
     ///
@@ -647,7 +647,7 @@ impl Attn {
     /// gather and a slice.
     pub fn key_slice(&self, c0: usize, len: usize) -> Self {
         let sh = self.shape;
-        assert!(!self.corner, "the causal corner is not a prefix window");
+        assert!(!self.diagonal_block, "the diagonal block is not a prefix window");
         assert!(c0 + len <= sh.c, "key window {c0}..{} runs past C={}", c0 + len, sh.c);
         let out = Shape { c: len, ..sh };
         let gather = |src: &[i32]| -> Vec<i32> {
@@ -670,17 +670,17 @@ impl Attn {
              mut vv: Vec<i32>, torch_num: Option<Vec<i64>>, q_bits: u32, k_bits: u32,
              nmax: u32, log_table: u32, frac_in: Option<Vec<f64>>,
              master: Option<f64>, source: String,
-             bad: Option<Corrupt>, corner: bool, mm_in: Option<Vec<i64>>) -> Self {
+             bad: Option<Corrupt>, diagonal_block: bool, mm_in: Option<Vec<i64>>) -> Self {
         // the grid's token axis has to tile exactly (layout.rs), so this holds on
         // *every* path, not only the pack subcommand's (B6 review carry-forward)
         assert!(sh.insts.is_power_of_two(), "insts must be a power of two, got {}", sh.insts);
         let (ni, ns, nc, nhd) = (sh.insts, sh.s, sh.c, sh.hd);
-        assert!(!corner || nc == ns, "the causal corner is square: S={ns} C={nc}");
-        // token `t` of a grid entry attends to key `c` unless this is the corner and
+        assert!(!diagonal_block || nc == ns, "the diagonal block is square: S={ns} C={nc}");
+        // token `t` of a grid entry attends to key `c` unless this is the diagonal block and
         // `c` is in its future.  Everything derived from a numerator -- the row
         // maximum the shift is taken against, the exponent the table is sized by,
         // the denominator, the A.V output -- is over the visible half alone.
-        let vis = |i: usize| !corner || i % nc <= (i / nc) % ns;
+        let vis = |i: usize| !diagonal_block || i % nc <= (i / nc) % ns;
         // exact integer scores, one (instance, token) row at a time
         //
         // Stream W: the allocation is timed apart from the loop that fills it.
@@ -715,9 +715,9 @@ impl Attn {
         });
         drop(scores);
         // The row maximum is a property of the *token*, not of the band: with the
-        // causal corner the token's keys are split over two bands and one maximum
+        // diagonal block the token's keys are split over two bands and one maximum
         // has to serve both, or their numerators are on two different scales and
-        // `Z_prefix + Z_corner` is not a softmax denominator.  `mm_in` is how the
+        // `Z_prefix + Z_diagonal_block` is not a softmax denominator.  `mm_in` is how the
         // caller hands the joint one down; alone, a band takes its own.
         let maxima = witread::scope(Site::Maxima);
         let mut mm: Vec<i64> = match mm_in {
@@ -728,7 +728,7 @@ impl Attn {
             None => (0..ni * ns)
                 .into_par_iter()
                 .map(|ti| {
-                    let vk = if corner { ti % ns + 1 } else { nc };
+                    let vk = if diagonal_block { ti % ns + 1 } else { nc };
                     *sc[ti * nc..ti * nc + vk].iter().max().unwrap()
                 })
                 .collect(),
@@ -847,7 +847,7 @@ impl Attn {
                     // a masked entry has no numerator and is not a table row: its
                     // shift is taken against a maximum over keys it is not one
                     // of, so it can be negative, and `off_table` must not count it
-                    if corner && c > t {
+                    if diagonal_block && c > t {
                         continue;
                     }
                     let i = ti * nc + c;
@@ -945,7 +945,7 @@ impl Attn {
                 "frac_per_inst not integer-separated: {frac_per_inst:?}");
         Self { shape: sh, variant, qq, kk, vv, sc, mm, dd, xx, num, zz, out, table,
                log_table, nmax, frac, frac_per_inst, delta, q_bits, k_bits, source,
-               off_table, torch_mismatch, corner, zz_total: None }
+               off_table, torch_mismatch, diagonal_block, zz_total: None }
     }
 
     /// The largest |A.V accumulator| the *committed* denominators allow, against
@@ -1053,9 +1053,9 @@ impl Attn {
     #[allow(clippy::too_many_arguments)]
     pub fn weights_only(sh: Shape, variant: Variant, q_bits: u32, k_bits: u32, nmax: u32,
                         log_table: u32, fracs: Vec<f64>, master: Option<f64>,
-                        corner: bool, source: String) -> Self {
+                        diagonal_block: bool, source: String) -> Self {
         assert!(sh.insts.is_power_of_two(), "insts must be a power of two, got {}", sh.insts);
-        assert!(!corner || sh.c == sh.s, "the causal corner is square");
+        assert!(!diagonal_block || sh.c == sh.s, "the diagonal block is square");
         assert!(log_table > 0 || matches!(variant, Variant::Bf16x),
                 "the model-only load needs a pinned table size: the dump's \
                  `master_table_bits`, or `--table-bits N` on the line");
@@ -1111,7 +1111,7 @@ impl Attn {
             source,
             off_table: 0,
             torch_mismatch: None,
-            corner,
+            diagonal_block,
             zz_total: None,
         }
     }

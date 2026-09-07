@@ -107,7 +107,7 @@ REF8B_SOURCE = "experiments/b10/out/seq5/seq_c{4096,16384}_L16.json (result.poin
 
 
 def bands_per_chunk(nh, hd, s, c, base_slope=2.0):
-    """`cm.band_cells` + corner, with the ONE coefficient caveat 1 disputes exposed.
+    """`cm.band_cells` + diagonal block, with the ONE coefficient caveat 1 disputes exposed.
 
     `base_slope` is the band family's committed BASE cells per (head, key, token)
     -- the `2 * nh * s * c` score-and-numerator term of `cm.band_cells`, i.e. the
@@ -156,10 +156,10 @@ def anchors():
             ratio=p["total"] / m, source=get(key)["source"], grade=get(key)["grade"],
             card=get(key)["card"])
     # Qwen2.5-0.5B: B6.5's composed layer, a DIFFERENT statement -- no
-    # residual-stream family, no corner band, and q/k/v/o on the pow2 dequant
+    # residual-stream family, no diagonal block band, and q/k/v/o on the pow2 dequant
     # rung while gate/up/down are on the chain.  Evaluated the same way, as a weak anchor.
     L, d, nh, nkv, hd, dff, vocab = cm.QWEN
-    r = cm.cells_per_token(cm.QWEN, 1024, B, seq=S, head=False, corner=False)
+    r = cm.cells_per_token(cm.QWEN, 1024, B, seq=S, head=False, diagonal_block=False)
     mixed = L * (((nh + 2 * nkv) * hd + d) * cm.HEAD_DEQUANT_PER_ACC
                  + (2 * dff + d) * cm.LAYER_DEQUANT_PER_ACC)
     tot = (r["total"] - r["limbs"] + mixed) * S / L
@@ -168,7 +168,7 @@ def anchors():
         scale="Qwen2.5-0.5B", ctx=1024, predicted=tot, measured=meas,
         ratio=tot / meas, source="experiments/b65/out/compose_host.json "
         "(result.point.cells.fresh)", grade="measured", card="none (host, macOS)",
-        note="weak anchor: no residual-stream family, no corner band, mixed dequant rungs, "
+        note="weak anchor: no residual-stream family, no diagonal block band, mixed dequant rungs, "
              "and a prover generation older than the seq5 statement")
     return out
 
@@ -233,7 +233,7 @@ BRACKET = dict(
     invalidation=(
         "The comparison is void, not failed, if the run does not reproduce the "
         "registered configuration: spec `b10-final` (round even, all seven "
-        "matmuls on the `chain` dequant rung), S=512, corner band ON, "
+        "matmuls on the `chain` dequant rung), S=512, diagonal block band ON, "
         "grid_target 64 / chan_target 128 / rw 16, k_bits 11 / q_bits 12, "
         "bounds on, and a REAL extracted witness (not `B7_SYNTH_DIMS`). "
         "A void run is re-run, never re-bracketed."),
@@ -257,7 +257,7 @@ def selfcheck():
         assert int(bb) == mb, (ctx, bb, mb)
         assert int(round(bi)) == mi, (ctx, bi, mi)
         # and the local reimplementation must equal cost_model's own band_fresh
-        bf, _ = cm.band_fresh(nh, hd, S, ctx, corner=True)
+        bf, _ = cm.band_fresh(nh, hd, S, ctx, diagonal_block=True)
         assert abs(bf - (bb + bi)) < 1e-6, (ctx, bf, bb + bi)
         out.append(dict(ctx=ctx, bands_base=mb, bands_interaction=mi, exact=True,
                         saturated=sat))

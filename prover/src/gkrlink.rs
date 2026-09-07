@@ -292,7 +292,7 @@ pub enum RCol {
     Key(usize),
     /// the per-token region's `i`-th trace mask (`ms`, `zs`, `los`, `los2`)
     Row(usize),
-    /// the corner's `i`-th causal-mask column, preprocessed tree
+    /// the diagonal block's `i`-th causal-mask column, preprocessed tree
     Msk(usize),
     /// B11 stream U: a dequant region's `i`-th trace mask. The index is
     /// `dequant::Map`'s column index, which *is* the mask index -- the map
@@ -343,7 +343,7 @@ pub enum RCol {
 /// `(region, column)` pair's coefficient in one height's affine combination.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Reg {
-    /// band `b`, in `Plan::corner`'s order (the prefix bands, then the corners)
+    /// band `b`, in `Plan::diagonal_block`'s order (the prefix bands, then the diagonal blocks)
     Band(usize),
     /// dequant region `m`, in the plan's matmul order
     Deq(usize),
@@ -422,7 +422,7 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
     let p = &plan.p;
     let cfg = &plan.cfg;
     let mut out = vec![];
-    for (b, corner) in plan.corner.iter().enumerate() {
+    for (b, diagonal_block) in plan.diagonal_block.iter().enumerate() {
         let l = &plan.lays[b];
         let (lc, lk) = (&l.chan, &l.key);
 
@@ -463,7 +463,7 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
                 terms: vec![(key, eal[0]), (RCol::Key(lk.q + i), eal[1])],
                 k: -ez,
             };
-            let num = corner.then(|| Affine {
+            let num = diagonal_block.then(|| Affine {
                 terms: vec![(RCol::Msk(i), -SecureField::one())],
                 k: SecureField::one(),
             });
@@ -495,11 +495,11 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
         // fold into weights on the committed `zs` and `los` columns, which is
         // memo section 4's first consequence.
         //
-        // Gated on `plan.rows_band[b]` and not on `!corner` for the reason
+        // Gated on `plan.rows_band[b]` and not on `!diagonal_block` for the reason
         // `gkrband::sites_of` gives at the same site: the region belongs to the
         // head band group, and with `--kv-boundary` a group has `c/s` prefix
         // sub-bands of which only the first carries it. `rows_band` is
-        // `!corner` with the flag off.
+        // `!diagonal_block` with the flag off.
         if plan.rows_band[b] {
             let with_max = plan.attn_variant != AttnVariant::Bf16x;
             let ms = if with_max { l.rw } else { 0 };
@@ -1391,7 +1391,7 @@ fn coords_to_evals(h: u32, c: SecureColumnByCoords<SimdBackend>) -> Vec<Eval> {
 /// Where one referenced column of the fold lives.
 ///
 /// B11 stream T: under a device fill a band's committed base columns have no
-/// host mirror, so the fold has to reach them where they are. A corner band is
+/// host mirror, so the fold has to reach them where they are. A diagonal block band is
 /// always host-filled and the causal-mask columns are always host-built, so a
 /// single height can mix the two -- which costs nothing, because field addition
 /// is exact and associative and the two partial folds add up to the same column
@@ -1587,7 +1587,7 @@ pub struct TieHeight {
 
 pub struct LinkTie {
     pub heights: Vec<TieHeight>,
-    /// preprocessed columns the bindings read (the corner masks), globally indexed
+    /// preprocessed columns the bindings read (the diagonal block masks), globally indexed
     pub pre_idx: Vec<usize>,
 }
 

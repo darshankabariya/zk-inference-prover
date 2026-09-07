@@ -29,7 +29,7 @@ selects which blocks are written; its default, `last`, is exactly the pre-DD
 behaviour, byte for byte, and is what the bit-for-bit control checks.
 
     uv run python b65/extract.py --tokens 4608 --chunk 512 --layers 0,1 \\
-        --blocks all --corner --slim --share out/w/shared --out out/w/witness
+        --blocks all --diagonal-block --slim --share out/w/shared --out out/w/witness
 """
 import argparse
 import hashlib
@@ -267,10 +267,10 @@ if __name__ == "__main__":
     p.add_argument("--head", action="store_true",
                    help="also dump B10 step 4's `lm_head` chunk (the accumulators, the "
                         "quantized weights, the logits' order keys and the emitted tokens)")
-    p.add_argument("--corner", action="store_true",
-                   help="also dump B10 step 3's causal corner (the S decoded tokens "
+    p.add_argument("--diagonal-block", action="store_true",
+                   help="also dump B10 step 3's diagonal block (the S decoded tokens "
                         "against each other): one joint row maximum, the total "
-                        "denominator, and the corner's own keys and values")
+                        "denominator, and the diagonal block's own keys and values")
     a = p.parse_args()
     SLIM = a.slim
     SLIM_NUM = a.slim_num
@@ -377,7 +377,7 @@ if __name__ == "__main__":
             nh, S, C = sc_all.shape
             hd = m.hd
             # The block's rectangle: key c is visible to query t iff c <= (C - S) + t,
-            # so the C - S prefix is fully visible and the S x S corner is the only
+            # so the C - S prefix is fully visible and the S x S diagonal block is the only
             # masked part.  Stream DD: `P` is the *block index* times `S` -- block 3
             # of a 512-token sweep has a 1,536-key prefix -- so the pre-DD
             # power-of-two assertion was a restriction to the last block of a
@@ -386,14 +386,14 @@ if __name__ == "__main__":
             P = C - S
             assert P >= 0 and P % S == 0, \
                 f"prefix {P} must be a whole number of {S}-token blocks"
-            assert P or a.corner, \
-                "block 0 has no prefix at all: it is corner-only and needs --corner"
+            assert P or a.diagonal_block, \
+                "block 0 has no prefix at all: it is diagonal-block-only and needs --diagonal-block"
             sc = sc_all[:, :, :P].contiguous()
-            # B10 step 3: the causal corner.  Key k of it *is* decoded token k, so token
+            # B10 step 3: the diagonal block.  Key k of it *is* decoded token k, so token
             # t attends to it exactly when `k <= t`; `vis[t, k]` is that mask, and it is
             # a function of the position alone, which is why the AIR can preprocess it.
-            scc = sc_all[:, :, P:].contiguous() if a.corner else None
-            vis = (torch.arange(S).unsqueeze(0) <= torch.arange(S).unsqueeze(1)) if a.corner \
+            scc = sc_all[:, :, P:].contiguous() if a.diagonal_block else None
+            vis = (torch.arange(S).unsqueeze(0) <= torch.arange(S).unsqueeze(1)) if a.diagonal_block \
                 else None
 
             # ONE row maximum for the pair.  `m_t` is a property of the token, not of a
@@ -401,13 +401,13 @@ if __name__ == "__main__":
             # against every key of the row, and the two halves' numerators would
             # otherwise be on two different scales (B10 rule / README 6.2).
             # `amax` has no identity on an empty axis, so block 0's maximum comes
-            # from the corner alone.  Everything downstream of `mm` is written
+            # from the diagonal block alone.  Everything downstream of `mm` is written
             # against a zero-width prefix without further help: `dd`, `num` and
-            # `xx` are empty, `zz` is the corner's sum, and the A.V einsum over a
+            # `xx` are empty, `zz` is the diagonal block's sum, and the A.V einsum over a
             # zero-length key axis is the zero it should be.
             mm = (sc.amax(-1) if P else
                   torch.full((nh, S), torch.iinfo(torch.int64).min, dtype=torch.int64))
-            if a.corner:
+            if a.diagonal_block:
                 mm = torch.maximum(mm, scc.masked_fill(~vis, torch.iinfo(torch.int64).min)
                                    .amax(-1))
             sqk = m.rec.cols[f"L{L}.sqk"].double()
@@ -422,7 +422,7 @@ if __name__ == "__main__":
             dd = mm.unsqueeze(-1) - sc
             xx, num = numer(dd)
             zz = num.sum(-1)
-            if a.corner:
+            if a.diagonal_block:
                 # the true shift, which the AIR commits for *every* slot -- Freivalds is
                 # over the whole rectangle -- and which is negative wherever a masked
                 # key outscores the maximum the token was shifted by
@@ -441,7 +441,7 @@ if __name__ == "__main__":
             write("xx.u16", xx.contiguous().view(torch.int16).numpy().view(np.uint16), digests)
             write("mm.i32", mm.numpy().astype(np.int32), digests)
             write("zz.i32", zz.numpy().astype(np.int32), digests)
-            if a.corner:
+            if a.diagonal_block:
                 write("kkc.i16", m.rec.cols[f"L{L}.kk"][:, P:].numpy().astype(np.int16), digests)
                 write("vvc.i8", m.rec.cols[f"L{L}.vv"][:, P:].numpy().astype(np.int8), digests)
                 write("scc.i32", scc.numpy().astype(np.int32), digests)
@@ -452,7 +452,7 @@ if __name__ == "__main__":
 
             # ---- the attention-output fold's scales ---------------------------------
             # The composed attnout region proves the *rectangle* sub-computation (the
-            # same statement the bands prove; the causal corner stays outside every AIR
+            # same statement the bands prove; the diagonal block stays outside every AIR
             # in the project, B9's job), so its accumulators and denominators are the
             # recomputed `out`/`zz` above.  The V scales are the forward pass's,
             # power-of-two per (head, channel).
@@ -507,7 +507,7 @@ if __name__ == "__main__":
 
             # B9 step 1b: so must the *output* scale be the rectangle's.  Taking `s_o`
             # from the forward pass -- which attended to the prefix *and* the causal
-            # corner -- calibrates it on a different quantity: the corner's numerators
+            # diagonal block -- calibrates it on a different quantity: the diagonal block's numerators
             # enlarge `Z` more than they enlarge `A.V` on some rows, so dropping them
             # makes `A.V s_v / Z` *larger* than the scale was cut for, the quotient
             # leaves the fold's 2^`ao_q_bits` (q, nz) table, its LogUp sum does not
@@ -519,8 +519,8 @@ if __name__ == "__main__":
             # the two are comparable; nothing else in the dump moves.
             out_rect = torch.einsum("hsc,hcd->hsd", num.double(),
                                     m.rec.cols[f"L{L}.vv"][:, :P].double())
-            if a.corner:
-                # with the corner proved, the AIR's attention output is the forward
+            if a.diagonal_block:
+                # with the diagonal block proved, the AIR's attention output is the forward
                 # pass's: both halves, causally masked
                 out_rect = out_rect + torch.einsum("hsc,hcd->hsd", numc.double(),
                                                    m.rec.cols[f"L{L}.vv"][:, P:].double())
@@ -601,12 +601,12 @@ if __name__ == "__main__":
             # is the one rounding.  The AIR will prove exactly
             # `round_hafz(acc s_x s_w / s_v)`, so that quantity is recomputed here from
             # the dumped arrays alone and byte-compared against the recorder's own
-            # `vvc` (the S decoded tokens' values are the corner's) -- the identity
+            # `vvc` (the S decoded tokens' values are the diagonal block's) -- the identity
             # gate's witness half, checked at extraction and not hours later.  The
             # no-clamp precondition rides along: a clamped site has no honest witness.
             fold_stats = {}
             if "v" in spec.delay_matmuls:
-                assert a.corner, "the v fold's identity check reads the corner's vvc"
+                assert a.diagonal_block, "the v fold's identity check reads the diagonal block's vvc"
                 accv = m.rec.cols[f"L{L}.v/acc"].double()               # (S, nkv*hd)
                 linv = m.layers[L]["v"]
                 # the fold's statement is `round_hafz(acc s_x s_w / s_v)` and nothing
@@ -822,29 +822,29 @@ if __name__ == "__main__":
             frac = (-torch.log2(sqk)).reshape(nh, -1)
             fpi = frac[:, 0].tolist()
             # B10 step 3: the master table is sized by the largest shift the prover
-            # *looks up*, so the corner's visible half counts and its masked half does
+            # *looks up*, so the diagonal block's visible half counts and its masked half does
             # not -- a masked shift is taken against a maximum over keys it is not one
             # of, can be negative, and is never a table row.
             d_max = int(dd.max()) if dd.numel() else 0
-            corner_stats = {}
-            if a.corner:
+            diagonal_block_stats = {}
+            if a.diagonal_block:
                 dvis = ddc[vis.expand_as(ddc)]
                 d_max = max(d_max, int(dvis.max()))
-                corner_stats = dict(
+                diagonal_block_stats = dict(
                     keys=int(S),
                     masked_frac=float((~vis).double().mean()),
                     d_max_visible=int(dvis.max()), d_min_visible=int(dvis.min()),
                     d_min_masked=int(ddc[~vis.expand_as(ddc)].min()),
                     numerator_zero_frac=float((numc[vis.expand_as(numc)] == 0).double().mean()),
-                    z_corner_max=int(numc.sum(-1).max()),
-                    z_corner_min=int(numc.sum(-1).min()),
+                    z_diagonal_block_max=int(numc.sum(-1).max()),
+                    z_diagonal_block_min=int(numc.sum(-1).min()),
                     # which half the row maximum came from, per token: the reason
                     # `Z >= nmax` is a statement about the total and not about a band
                     # 2026-09-01: block 0 has no prefix, so `sc` is
                     # (nh, S, 0) and `amax(-1)` raises "Expected reduction dim
                     # -1 to have non-zero size".  With no prefix keys every row
-                    # maximum comes from the corner, which is what `nh * S` says.
-                    max_from_corner=(
+                    # maximum comes from the diagonal block, which is what `nh * S` says.
+                    max_from_diagonal_block=(
                         int((scc.masked_fill(~vis, torch.iinfo(torch.int64).min)
                              .amax(-1) > sc.amax(-1)).sum()) if P else int(nh * S)),
                     rows=int(nh * S))
@@ -867,10 +867,10 @@ if __name__ == "__main__":
                 seq_tokens=int(len(ids)), chunk=int(a.chunk),
                 slim_num=bool(SLIM_NUM), shared=bool(a.share),
                 num_bits=spec.num_bits, model=MODEL,
-                corner=bool(a.corner), corner_stats=corner_stats,
+                diagonal_block=bool(a.diagonal_block), diagonal_block_stats=diagonal_block_stats,
                 d_max=d_max, d_bits=bits_for(d_max),
                 d_fits_16bit=bool(d_max < (1 << 16)),
-                z_max=int(zz.max()), z_worst_case=int(nmax * (P + S if a.corner else P)),
+                z_max=int(zz.max()), z_worst_case=int(nmax * (P + S if a.diagonal_block else P)),
                 numerator_zero_frac=(float((num == 0).double().mean()) if num.numel()
                                      else 0.0),
                 frac_per_head=fpi,

@@ -569,15 +569,15 @@ __global__ void b65w_band_grid(const int *__restrict__ dd,
                     have = true;
                     // B11 stream N, lever 2: `Attn::visible`, which is
                     // `g % c <= (g / c) % s` and here is just `c <= t`. On the
-                    // causal corner a slot whose key runs past its token is
+                    // diagonal block a slot whose key runs past its token is
                     // masked, and a masked slot is not a lookup at all -- the
                     // AIR reads it at multiplicity zero -- so it bumps nothing
                     // and cannot be off-table. This is the *only* thing the
                     // mask changes for the fill: the committed value below is
-                    // `col_idx(g)` either way, which is why a corner band's
+                    // `col_idx(g)` either way, which is why a diagonal block band's
                     // columns matched cell for cell before this line existed
                     // and only its counters did not.
-                    vis = (cfg.corner == 0u) || (cfg.mutate == B65W_MUT_NOMASK)
+                    vis = (cfg.diagonal_block == 0u) || (cfg.mutate == B65W_MUT_NOMASK)
                           || (c <= t);
                 }
             }

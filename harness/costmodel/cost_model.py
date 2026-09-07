@@ -551,7 +551,7 @@ def band_cells(nh, hd, s, c, grid_target=GRID_TARGET, chan_target=CHAN_TARGET,
     width `hd`.  Returns (base, interaction, saturated).
 
     `rows_region=False` drops the per-token max/denominator region, which is what
-    a corner band does (`attn_trace.rs`, `with_rows = !a.corner`): the corner
+    a diagonal block band does (`attn_trace.rs`, `with_rows = !a.diagonal_block`): the diagonal block
     shares the prefix band's one max and one denominator per token.
 
     **`hd` here is the ATTENTION head width and `nh` the number of ATTENTION
@@ -582,11 +582,11 @@ def band_cells(nh, hd, s, c, grid_target=GRID_TARGET, chan_target=CHAN_TARGET,
     return base, inter, saturated
 
 
-def band_fresh(nh, hd, s, c, corner=True, **kw):
+def band_fresh(nh, hd, s, c, diagonal_block=True, **kw):
     """The whole band family of one composed layer chunk: the prefix bands over
-    `c` keys, plus an S x S corner that carries no per-token region."""
+    `c` keys, plus an S x S diagonal block that carries no per-token region."""
     b, i, sat = band_cells(nh, hd, s, c, **kw)
-    if corner:
+    if diagonal_block:
         b2, i2, s2 = band_cells(nh, hd, s, s, rows_region=False, **kw)
         b, i, sat = b + b2, i + i2, sat or s2
     return b + i, sat
@@ -677,7 +677,7 @@ def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True):
 def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
                     head_dequant=None, experts=1, topk=1, seq_batch=1,
                     head=True, attn_accs_per_layer=None,
-                    attn_params_per_layer=None, corner=True):
+                    attn_params_per_layer=None, diagonal_block=True):
     """Committed (fresh) cells per decoded token.
 
     `batch` is the **LogUp lookup-batch size** -- how many lookups share one
@@ -738,7 +738,7 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
         attn = alpha * L * nh * ctx
         band_saturated = False
     else:
-        per_layer, band_saturated = band_fresh(nh, hd, seq or 1, ctx, corner=corner)
+        per_layer, band_saturated = band_fresh(nh, hd, seq or 1, ctx, diagonal_block=diagonal_block)
         attn = L * per_layer / (seq or 1)
     n_lookups = L * (2 * dff_active + 2 * (2 * d + 1)) + vocab
     logup = n_lookups * LOGUP_MARGINAL[batch]

@@ -94,7 +94,7 @@ pub enum Site {
     /// the head-cycling, S-and-C-tiling copies that put a dump's heads into a
     /// band's layout
     DecodeGather,
-    /// rule 21: both corner halves' denominators against the dump's `zz.i32`
+    /// rule 21: both diagonal block halves' denominators against the dump's `zz.i32`
     CheckRule21,
     /// every band reads the same master exp table, asserted by comparing them
     CheckTableEq,

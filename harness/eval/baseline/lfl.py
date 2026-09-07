@@ -135,7 +135,7 @@ def check(run, *, context, batch_size, purpose):
                    if no_reference else ref["context"],
                    MATCH if ok else MISMATCH, "neutral" if ok else "invalid",
                    "C is the committed KV prefix (prover `--ctx`); the S=512 decoded "
-                   "positions attend over it plus the causal corner, so the unproved "
+                   "positions attend over it plus the diagonal block, so the unproved "
                    "run prompts with exactly C tokens and decodes 512 more."))
 
     # 5. generated tokens

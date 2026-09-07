@@ -314,7 +314,7 @@ def geom_report():
     print()
     print("  the mirror against every artifact that records `band_leads`, including")
     print("  B10's seq5 chunks -- the real 8B witness at C != S, three prefix bands plus")
-    print("  three corner bands at C = S, which is the only check of the C != S arm:")
+    print("  three diagonal block bands at C = S, which is the only check of the C != S arm:")
     ok = bad = 0
     checks = [(tag, s, r) for tag, _ in SETS for s, r in sorted(load_all()[tag].items())]
     seq5 = OUT / "seq5"
@@ -325,7 +325,7 @@ def geom_report():
                 checks.append((f"seq5 L{lay}", r["s"], r))
     for tag, s, r in checks:
         pred = leads(r["s"], r["c"])
-        if len(r["band_leads"]) == 2 * len(pred):        # a corner rides at C = S
+        if len(r["band_leads"]) == 2 * len(pred):        # a diagonal block rides at C = S
             pred = pred + leads(r["s"], r["s"])
         good = pred == r["band_leads"]
         ok, bad = ok + good, bad + (not good)

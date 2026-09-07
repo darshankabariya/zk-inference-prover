@@ -44,7 +44,7 @@ use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::attn_air::{
     ChanEval, ExpRel, ExpTableEval, KeyEval, Offsets, Powers, RangeRel, RowEval, band_id, id,
-    msk_id, powers, tbl_range, CHAN_SEL, CORNER_SEL, KEY_SEL, ROW_SEL, TBL_EXP_X, TBL_EXP_Y,
+    msk_id, powers, tbl_range, CHAN_SEL, DIAGONAL_BLOCK_SEL, KEY_SEL, ROW_SEL, TBL_EXP_X, TBL_EXP_Y,
 };
 use crate::attn_trace::{self, Cfg, Committed, Layouts, table_col};
 use crate::attn_witness::Variant as AttnVariant;
@@ -272,10 +272,10 @@ pub struct Params {
     /// B10 step 2.  Absent on a witness `extract.py --residual-stream` did not write.
     #[serde(default)]
     pub residual_stream: Option<ResidualStreamParams>,
-    /// B10 step 3: the causal corner rides as a second set of bands over the same
+    /// B10 step 3: the diagonal block rides as a second set of bands over the same
     /// heads, `C = S`, masked.  Absent on a witness extracted without it.
     #[serde(default)]
-    pub corner: bool,
+    pub diagonal_block: bool,
     /// B11 stream Q: prove the attention bands' lookups with LogUp-GKR instead
     /// of committing their running-sum columns. A flag and not an env mode,
     /// because it changes the proof: the GKR backend has its own digests by design.
@@ -312,9 +312,9 @@ pub struct Params {
     /// `(L, b)` proved" is checkable from serialized bytes by root equality --
     /// the token axis's version of what `bounds` does for the layer axis.
     ///
-    /// It implies `corner`, and it *tiles the unchecked prefix into sub-bands of
+    /// It implies `diagonal_block`, and it *tiles the unchecked prefix into sub-bands of
     /// exactly `S` keys* (layout design A), because a V column's height is a
-    /// function of the chunk's own `C` and a producer's corner V column and a
+    /// function of the chunk's own `C` and a producer's diagonal block V column and a
     /// consumer's untiled prefix V column can therefore never be equal.  So the
     /// flag changes the band decomposition, not only the tree count.  Skipped
     /// when false, so every statement written without it is byte identical to
@@ -531,7 +531,7 @@ pub struct Claims {
     /// Stream NN: per quantize region, the bf16 side it consumed and the
     /// integer side it produced.  `nn_in` is compared against the rotation's
     /// `Out(0)` (for q and k) or against `deq_out` (for v); `nn_out` against the
-    /// sum of the corner bands' own claims over their committed columns.
+    /// sum of the diagonal block bands' own claims over their committed columns.
     #[serde(default)]
     pub nn_in: Vec<[u32; 4]>,
     #[serde(default)]
@@ -540,8 +540,8 @@ pub struct Claims {
     #[serde(default)]
     pub band_qkv: Vec<[[u32; 4]; 3]>,
     /// Stream NN (NN-2): per band of `Plan::nn_qbands`, that **prefix** band's
-    /// own Q claim.  Its counterparty is its group's corner, not a quantize
-    /// region: `nn_q_ok` says the two folds agree, and the corner's is already
+    /// own Q claim.  Its counterparty is its group's diagonal block, not a quantize
+    /// region: `nn_q_ok` says the two folds agree, and the diagonal block's is already
     /// bound to the rotated query, so the prefix's is too.
     #[serde(default)]
     pub band_q: Vec<[u32; 4]>,
@@ -694,7 +694,7 @@ impl Claims {
         v.extend(self.nn_in.iter().map(|x| unqm(*x)));
         v.extend(self.nn_out.iter().map(|x| unqm(*x)));
         v.extend(self.band_qkv.iter().flatten().map(|x| unqm(*x)));
-        // stream NN (NN-2), after the corner's three so no claim before it moves
+        // stream NN (NN-2), after the diagonal block's three so no claim before it moves
         v.extend(self.band_q.iter().map(|x| unqm(*x)));
         v
     }
@@ -749,7 +749,7 @@ fn q_binding_w(w: SecureField, lam: SecureField, qp: &QuantPlan, nh: usize,
     }
 }
 
-/// Stream NN: the corner bands' own committed Q, K and V, gathered onto the
+/// Stream NN: the diagonal block bands' own committed Q, K and V, gathered onto the
 /// `(token, query head, channel)` grid the quantize regions are read against.
 /// A reference for the record, not an input to any constraint.
 fn nn_band_cols(plan: &Plan, layer: &Layer) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
@@ -832,14 +832,14 @@ fn nn_band_bindings(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
 }
 
 /// Stream NN (NN-2): a **prefix** band's Q claim, under the same canonical
-/// weights the corner's takes.
+/// weights the diagonal block's takes.
 ///
 /// The two bands of a group hold the same `S` queries over the same heads, so
 /// the weight of the cell at (query head `hq`, channel `ch`, token `t`) is the
 /// same `w^(N - 1 - (t nh hd + hq hd + ch))` on both -- only the *layout* that
 /// scatters those cells over rows differs, and that is exactly what `pq` and
 /// `chunks` carry.  Equality of the two folds is therefore "the same queries",
-/// with no positional assumption beyond the one the corner's own binding already
+/// with no positional assumption beyond the one the diagonal block's own binding already
 /// makes.
 fn nn_band_qtie(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
                 -> Option<crate::attn_air::BandTie> {
@@ -890,7 +890,7 @@ fn output_claim_w(w: SecureField, lam: SecureField, tokens: usize, n_out: usize,
 /// Stream SS: a folded `v`'s output side, on the **band grid**.
 ///
 /// The fold publishes an integer, and the only thing in the statement that holds
-/// that integer is the corner bands' own V column -- so the weights are
+/// that integer is the diagonal block bands' own V column -- so the weights are
 /// `rope::QTie::w_out`'s, not a producer-grid Horner's: the canonical position is
 /// `p = t nh hd + h hd + ch` over the *query* heads, and grouped-query attention
 /// is inside the weight (`r_sum` folds the `rep` copies one kv channel has).  A
@@ -1119,7 +1119,7 @@ pub struct OutputBinding {
     /// into the band's V column with no rotation between.  An index into
     /// `Plan::quants`.
     pub quant: Option<usize>,
-    /// Stream SS: the counterparty is the corner bands' own V fold -- a folded
+    /// Stream SS: the counterparty is the diagonal block bands' own V fold -- a folded
     /// `v`, whose dequant output already *is* the integer the band commits, so
     /// there is no quantize region between the two and the claim is compared
     /// against `sum_b band_qkv[b][2]` directly.  Set by `Plan::new`, which is
@@ -1551,9 +1551,9 @@ pub struct Plan {
     pub lays: Vec<Layouts>,
     pub cfg: Cfg,
     pub head_offsets: Vec<usize>,
-    /// per band: is it the causal corner?  The prefix bands come first, then one
-    /// corner band per prefix band with the same `insts` and the same head offset.
-    pub corner: Vec<bool>,
+    /// per band: is it the diagonal block?  The prefix bands come first, then one
+    /// diagonal block band per prefix band with the same `insts` and the same head offset.
+    pub diagonal_block: Vec<bool>,
     pub specs: Vec<Spec>,
     pub mat_lays: Vec<MatLayout>,
     pub ao_lay: AoLayout,
@@ -1575,15 +1575,15 @@ pub struct Plan {
     /// one only pins `nz = [q != 0]`.  Zero when there are no regions.
     pub q_nz_bits: u32,
     /// Stream NN: the bands that publish a K/Q/V claim over their own committed
-    /// columns.  Exactly the **corner** bands: their keys are this block's own
+    /// columns.  Exactly the **diagonal block** bands: their keys are this block's own
     /// tokens, which are the ones this chunk's `k` and `v` matmuls produced,
     /// while a prefix band's keys are the cache and are bound across blocks by
-    /// root equality instead.  The corner also carries the queries, which every
+    /// root equality instead.  The diagonal block also carries the queries, which every
     /// band of a group shares.
     pub nn_bands: Vec<usize>,
     /// Stream NN (NN-2): the bands that publish a Q claim **alone** -- every
     /// prefix band of the same chunk, in band order.  Their counterparty is
-    /// their group's corner (`nn_q_ok`), which closes the asymmetry NN-1 left:
+    /// their group's diagonal block (`nn_q_ok`), which closes the asymmetry NN-1 left:
     /// before this, a prover could attend to the cache with queries the `q`
     /// matmul did not produce while attending to this block's own keys with
     /// queries it did.  Empty on a chunk without `Params::rope`.
@@ -1604,15 +1604,15 @@ pub struct Plan {
     pub kv: Vec<crate::boundary::KvSide>,
     /// Stream AA, per band: which head band group it belongs to.  Without
     /// `kv_boundary` this is the band's own index modulo the prefix count, which is
-    /// exactly the prefix/corner pairing `verify_composed` used to spell as
+    /// exactly the prefix/diagonal block pairing `verify_composed` used to spell as
     /// `b - n_pre`; with it, a group is one prefix *sub-band per key block* plus
-    /// the chunk's own corner.
+    /// the chunk's own diagonal block.
     pub group: Vec<usize>,
     /// Stream AA, per band: does it carry the group's per-token region (the row
     /// maxima and the denominator)?  There is one such region per head band
     /// group -- one row maximum and one denominator per *token*, not per key
     /// block -- so with the prefix tiled it is the group's first sub-band's, and
-    /// every other band of the group rides on it exactly as a corner band
+    /// every other band of the group rides on it exactly as a diagonal block band
     /// always has.
     pub rows_band: Vec<bool>,
     /// Stream BB: the embedding gadget's two row counts and its block width, or
@@ -1637,18 +1637,18 @@ impl Plan {
         };
         // Stream AA (E11), layout design A: with `--kv-boundary` the unchecked
         // prefix is tiled into `c / s` sub-bands of exactly `S` keys each -- the
-        // shape the corner band already has -- instead of one rectangle of `c`
+        // shape the diagonal block band already has -- instead of one rectangle of `c`
         // keys.  The tiling is not an optimisation, it is the precondition for
         // pointwise K/V binding: `LayoutKey` puts one row group per
         // `(instance, key)`, so a V column's *height* is a function of the
-        // chunk's own `c`, and a producer's corner V column and a consumer's
+        // chunk's own `c`, and a producer's diagonal block V column and a consumer's
         // untiled prefix V column are different heights and can never be equal.
         // Tiled at `S`, a consumer's sub-band `b` is the same `Shape` -- and so
         // the same `Grid`, `LayoutChan` and `LayoutKey` -- as the producer's
-        // corner, and the two column lists coincide by construction rather than
+        // diagonal block, and the two column lists coincide by construction rather than
         // by argument.  See `briefs/aa-kvbind.md`.
-        assert!(!p.kv_boundary || p.corner,
-                "`--kv-boundary` tiles the prefix beside the chunk's own block; it needs `--corner`");
+        assert!(!p.kv_boundary || p.diagonal_block,
+                "`--kv-boundary` tiles the prefix beside the chunk's own block; it needs `--diagonal-block`");
         assert!(!p.kv_boundary || p.c % p.s == 0,
                 "`--kv-boundary` tiles the prefix in blocks of S: C={} is not a multiple of S={}",
                 p.c, p.s);
@@ -1659,10 +1659,10 @@ impl Plan {
         // this the `else` arm built one anyway and `Grid::new` divided by
         // `groups = c * insts = 0`.  With `nsub == 0` the loop below builds no
         // prefix band and `rows_band.push(nsub == 0)` hands the group's one
-        // per-token region to the solo corner, which is where it belongs.
+        // per-token region to the diagonal block, which is where it belongs.
         let nsub = if p.c == 0 { 0 } else if p.kv_boundary { p.c / p.s } else { 1 };
-        assert!(p.c > 0 || p.corner,
-                "a c = 0 chunk is block 0: it is the solo corner and needs `--corner`");
+        assert!(p.c > 0 || p.diagonal_block,
+                "a c = 0 chunk is block 0: it is the diagonal block and needs `--diagonal-block`");
         let sub_c = if p.kv_boundary { p.s } else { p.c };
         let mut head_offsets = vec![];
         let mut off = 0;
@@ -1680,17 +1680,17 @@ impl Plan {
             off += insts;
         }
         assert_eq!(off, p.nh, "bands must cover every head");
-        let mut corner = vec![false; shapes.len()];
-        if p.corner {
+        let mut diagonal_block = vec![false; shapes.len()];
+        if p.diagonal_block {
             let mut off = 0;
             for (g, insts) in p.bands.iter().enumerate() {
                 head_offsets.push(off);
                 off += insts;
                 shapes.push(Shape { s: p.s, c: p.s, hd: p.hd, insts: *insts });
-                corner.push(true);
+                diagonal_block.push(true);
                 group.push(g);
                 // block 0 of a sequence has no unchecked prefix at all, so its
-                // solo corner is the group's only band and carries the region
+                // diagonal block is the group's only band and carries the region
                 rows_band.push(nsub == 0);
             }
         }
@@ -1708,13 +1708,13 @@ impl Plan {
         assert!(!p.gkr_attnout || p.gkr_bands,
                 "`--gkr-attnout` extends the bands' GKR backend; it needs `--gkr-bands`");
         // Stream AA left `--kv-boundary` and `--gkr-bands` asserted apart, because
-        // the bands' GKR backend gated the per-token region on `plan.corner` in two
+        // the bands' GKR backend gated the per-token region on `plan.diagonal_block` in two
         // places of its own while the composed path had already moved to
-        // `plan.rows_band`.  What pairing by `corner` assumed is "every band
-        // that is not the corner carries the group's per-token region", and
+        // `plan.rows_band`.  What pairing by `diagonal_block` assumed is "every band
+        // that is not the diagonal block carries the group's per-token region", and
         // design A breaks exactly that: a group is now `c/s` prefix sub-bands
-        // plus a corner, and the region lives on the *first* sub-band only.
-        // Both derivations now read `plan.rows_band[b]`, which is `!corner[b]`
+        // plus a diagonal block, and the region lives on the *first* sub-band only.
+        // Both derivations now read `plan.rows_band[b]`, which is `!diagonal_block[b]`
         // whenever the flag is off, so the two flags compose and the backend's
         // flag-off digests do not move.  See `briefs/aa-kvbind.md`, item 4.
         let lays: Vec<Layouts> = shapes.iter().map(|sh| Layouts::choose(sh, &cfg)).collect();
@@ -1930,8 +1930,8 @@ impl Plan {
         // registered whether or not a *seam* asked for it.
         let mut quants = vec![];
         if let (Some(g), Some(rp)) = (residual_stream.as_ref(), p.rope.as_ref()) {
-            assert!(p.corner,
-                    "the q/k/v bindings read the corner band's own columns; --rope needs --corner");
+            assert!(p.diagonal_block,
+                    "the q/k/v bindings read the diagonal block band's own columns; --rope needs --diagonal-block");
             assert!(p.nh % rp.nkv == 0, "nh={} is not a multiple of nkv={}", p.nh, rp.nkv);
             assert_eq!(rp.inv(p.hd).len(), p.hd / 2, "inv_freq must be hd/2 long");
             for (i, (name, heads, bits)) in
@@ -1983,7 +1983,7 @@ impl Plan {
             let kb: Vec<crate::boundary::KvBand> = (0..shapes.len())
                 .map(|b| crate::boundary::KvBand {
                     group: group[b],
-                    corner: corner[b],
+                    diagonal_block: diagonal_block[b],
                     pk: lays[b].chan.pk,
                     pv: lays[b].key.pv,
                     chan_rows: lays[b].chan.g.rows,
@@ -2004,21 +2004,21 @@ impl Plan {
             assert!(p.embed_per_row > 0, "`--embed` needs a channel-block target");
             crate::embed::EmbLayout::choose(g.t.d, p.s, p.embed_vocab, p.embed_per_row)
         });
-        // stream NN: the corner bands publish the K/Q/V claims
+        // stream NN: the diagonal block bands publish the K/Q/V claims
         let nn_bands: Vec<usize> = if quants.is_empty() {
             vec![]
         } else {
-            (0..shapes.len()).filter(|b| corner[*b]).collect()
+            (0..shapes.len()).filter(|b| diagonal_block[*b]).collect()
         };
         // stream NN (NN-2): every prefix band publishes its own Q, against its
-        // group's corner.  A group with no corner publishes nothing -- there is
-        // nothing to compare against -- and `--corner` is already required by
+        // group's diagonal block.  A group with no diagonal block publishes nothing -- there is
+        // nothing to compare against -- and `--diagonal-block` is already required by
         // the quantize regions, so that case does not arise on a rope chunk.
         let nn_qbands: Vec<usize> = if quants.is_empty() {
             vec![]
         } else {
             (0..shapes.len())
-                .filter(|b| !corner[*b] && corner.iter().enumerate()
+                .filter(|b| !diagonal_block[*b] && diagonal_block.iter().enumerate()
                         .any(|(c, is)| *is && group[c] == group[*b]))
                 .collect()
         };
@@ -2062,7 +2062,7 @@ impl Plan {
             w
         };
         let q_nz_bits = q_tabs.last().copied().unwrap_or(0);
-        Self { p: p.clone(), attn_variant, round, shapes, lays, cfg, head_offsets, corner, specs,
+        Self { p: p.clone(), attn_variant, round, shapes, lays, cfg, head_offsets, diagonal_block, specs,
                mat_lays, ao_lay, freivalds, rqs, rq_vars, quants, q_tabs, q_nz_bits,
                nn_bands, nn_qbands,
                widths, log_norm,
@@ -2079,24 +2079,24 @@ impl Plan {
     }
 
     /// Tree 0's column ids, in exactly the order the prover commits them.
-    /// One band's challenge powers.  The corner bands run their key Horner in
-    /// `r_corner`, an independent challenge, and borrow the prefix's `r^C` and
+    /// One band's challenge powers.  The diagonal block bands run their key Horner in
+    /// `r_diagonal_block`, an independent challenge, and borrow the prefix's `r^C` and
     /// `mu` for the claims that are summed with -- or compared against -- the
-    /// prefix's (attn_air's `as_corner`).  Prover and verifier both come here.
+    /// prefix's (attn_air's `as_diagonal_block`).  Prover and verifier both come here.
     pub fn powers(&self, b: usize, r: SecureField, s: SecureField, rv: SecureField,
-                  r_corner: SecureField) -> Powers {
+                  r_diagonal_block: SecureField) -> Powers {
         let l = &self.lays[b];
         let sh = &self.shapes[b];
-        if self.corner[b] {
+        if self.diagonal_block[b] {
             let l0 = &self.lays[0];
             let pre0 = Powers::new(r, s, rv, &self.shapes[0], &l0.chan, &l0.key, &l0.out, l0.rw);
-            let cp = Powers::new(r_corner, s, rv, sh, &l.chan, &l.key, &l.out, l.rw);
-            // A corner that carries the region is block 0's solo corner and
+            let cp = Powers::new(r_diagonal_block, s, rv, sh, &l.chan, &l.key, &l.out, l.rw);
+            // A diagonal block that carries the region is block 0's, a solo one, and
             // needs its own `mu`; a paired one rides on the prefix band's.
             if self.rows_band[b] {
-                cp.as_solo_corner(pre0.r_c, sh.c)
+                cp.as_solo_diagonal_block(pre0.r_c, sh.c)
             } else {
-                cp.as_corner(pre0.r_c, sh.c)
+                cp.as_diagonal_block(pre0.r_c, sh.c)
             }
         } else {
             Powers::new(r, s, rv, sh, &l.chan, &l.key, &l.out, l.rw)
@@ -2118,7 +2118,7 @@ impl Plan {
     /// global one, and it keeps `KEY_SEL` and CC's frozen per-slot content.
     ///
     /// Block 0 (open item 1) has `c = 0` and no prefix band: its only band is
-    /// the solo corner, whose key Horner walks `S` keys, so the weight is `r^S`
+    /// the diagonal block, whose key Horner walks `S` keys, so the weight is `r^S`
     /// with the flag off too.  `r^0 = 1` here left the attention output region
     /// and the verifier's fold on a different weight from the band's own
     /// `Powers::r_c`, and `den_link_ok` was the one verdict field that failed.
@@ -2127,8 +2127,8 @@ impl Plan {
     }
 
     /// How many secure felts the transcript draws after the relations, and where
-    /// the corner's key challenge sits.  It goes *last* so a proof without the
-    /// corner draws exactly what it drew before.
+    /// the diagonal block's key challenge sits.  It goes *last* so a proof without the
+    /// diagonal block draws exactly what it drew before.
     /// Stream E: the binding challenge pair is drawn for the wiring family *or* for
     /// a head-key claim on its own, since a head dump has no wiring columns.
     pub fn has_bindings(&self) -> bool {
@@ -2143,9 +2143,9 @@ impl Plan {
             .flatten()
     }
     pub fn n_challenges(&self) -> usize {
-        3 + if self.has_bindings() { 2 } else { 0 } + if self.p.corner { 1 } else { 0 }
+        3 + if self.has_bindings() { 2 } else { 0 } + if self.p.diagonal_block { 1 } else { 0 }
     }
-    pub fn corner_challenge_at(&self) -> usize {
+    pub fn diagonal_block_challenge_at(&self) -> usize {
         3 + if self.has_bindings() { 2 } else { 0 }
     }
 
@@ -2236,12 +2236,12 @@ impl Plan {
                 put(band_id(b, n), "band/sel", lc.g.log_rows, PreNeeds::Params,
                     PreVaries::Block);
             }
-            if self.corner[b] {
-                for n in CORNER_SEL {
+            if self.diagonal_block[b] {
+                for n in DIAGONAL_BLOCK_SEL {
                     // the eighth is `dinv`, the per-instance master-table scale:
                     // a model constant off the dump's `frac_per_head`, and the
                     // one column of a band that is not a function of the shape
-                    let (fam, needs) = if n == CORNER_SEL[7] {
+                    let (fam, needs) = if n == DIAGONAL_BLOCK_SEL[7] {
                         // stream PP: `dinv` is `2^-(F - frac_i)`, a function of
                         // the manifest's `frac_per_head` and of no weight -- so
                         // it is public and stays in the shape tree.  It is the
@@ -2268,7 +2268,7 @@ impl Plan {
                     put(band_id(b, n), fam, lk.g.log_rows, needs, PreVaries::Block);
                 }
             }
-            if let Some(a) = crate::attn_air::act_id(b, self.corner[b], lk.g.lead) {
+            if let Some(a) = crate::attn_air::act_id(b, self.diagonal_block[b], lk.g.lead) {
                 put(a, "band/sel", lk.g.log_rows, PreNeeds::Params, PreVaries::Block);
             }
             if self.rows_band[b] {
@@ -2598,17 +2598,17 @@ impl Plan {
         let mut ids = vec![];
         for b in 0..self.shapes.len() {
             ids.extend(CHAN_SEL.iter().map(|n| band_id(b, n)));
-            if self.corner[b] {
-                // the corner's own selector set, then one causal-mask column per
+            if self.diagonal_block[b] {
+                // the diagonal block's own selector set, then one causal-mask column per
                 // token slot -- the order `commit_pre` writes them in
-                ids.extend(CORNER_SEL.iter().map(|n| band_id(b, n)));
+                ids.extend(DIAGONAL_BLOCK_SEL.iter().map(|n| band_id(b, n)));
                 ids.extend((0..self.lays[b].key.q).map(|i| msk_id(b, i)));
             } else {
                 ids.extend(KEY_SEL.iter().map(|n| band_id(b, n)));
             }
             // Stream CC (E11): the inert-lead-row selector closes the grid's
             // block, and exists only when the grid leaves such rows.
-            ids.extend(crate::attn_air::act_id(b, self.corner[b],
+            ids.extend(crate::attn_air::act_id(b, self.diagonal_block[b],
                                                self.lays[b].key.g.lead));
             // Stream AA: the predicate is "does this band carry the per-token
             // region", not "is it a prefix band".  With `--kv-boundary` off the two
@@ -2739,7 +2739,7 @@ impl Plan {
 
     /// The number of components that carry lookups, in `use_sums` order.
     pub fn n_use(&self) -> usize {
-        // chan + grid + per-token per prefix band; a corner band has no per-token
+        // chan + grid + per-token per prefix band; a diagonal block band has no per-token
         // region (the pair shares the prefix band's), so it contributes two.
         // B11 stream S, lever 1: on the GKR backend the bands' sums are proved by
         // the GKR and never enter `use_sums`.
@@ -2748,7 +2748,7 @@ impl Plan {
         } else {
             // stream AA: three sums for a band that carries the per-token
             // region, two for one that rides on its group's -- with `--kv-boundary`
-            // off, `rows_band` is `!corner` and this is the sum it always was
+            // off, `rows_band` is `!diagonal_block` and this is the sum it always was
             self.rows_band.iter().map(|r| if *r { 3 } else { 2 }).sum::<usize>()
         })
             + 1
@@ -2851,7 +2851,7 @@ pub struct BuiltComponents {
     pub rq_tabs: Vec<FrameworkComponent<TableEval>>,
     pub pows: Vec<Powers>,
     /// per band, in `chans`/`keys` order: does it have a per-token region?  A
-    /// corner band does not (B10 step 3), so `rows` is shorter than `chans` and
+    /// diagonal block band does not (B10 step 3), so `rows` is shorter than `chans` and
     /// the component order has to be walked, not indexed.
     pub has_rows: Vec<bool>,
 }
@@ -3177,14 +3177,14 @@ fn inter_mark(
 /// verify paths call `build_components_linked` with the derived heights.
 #[allow(clippy::too_many_arguments)]
 pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField,
-                        rv: SecureField, r_corner: SecureField, w_residual_stream: SecureField,
+                        rv: SecureField, r_diagonal_block: SecureField, w_residual_stream: SecureField,
                         lam_residual_stream: SecureField, claims: &Claims) -> BuiltComponents {
-    build_components_linked(plan, rels, r, s, rv, r_corner, w_residual_stream, lam_residual_stream, claims, None)
+    build_components_linked(plan, rels, r, s, rv, r_diagonal_block, w_residual_stream, lam_residual_stream, claims, None)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField,
-                        rv: SecureField, r_corner: SecureField, w_residual_stream: SecureField,
+                        rv: SecureField, r_diagonal_block: SecureField, w_residual_stream: SecureField,
                         lam_residual_stream: SecureField, claims: &Claims,
                         link: Option<&[crate::gkrlink::HeightLink]>) -> BuiltComponents {
     let p = &plan.p;
@@ -3205,11 +3205,11 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     let (mut chans, mut keys, mut rows, mut pows) = (vec![], vec![], vec![], vec![]);
     for (b, _sh) in plan.shapes.iter().enumerate() {
         let l = &plan.lays[b];
-        let pow = plan.powers(b, r, s, rv, r_corner);
+        let pow = plan.powers(b, r, s, rv, r_diagonal_block);
         let bc = claims.bands[b];
-        // stream NN: the corner bands' own K, Q and V claims
+        // stream NN: the diagonal block bands' own K, Q and V claims
         let nn = nn_band_bindings(plan, b, w_residual_stream, claims);
-        // stream NN (NN-2): a prefix band's Q claim, against its group's corner
+        // stream NN (NN-2): a prefix band's Q claim, against its group's diagonal block
         let nn_q = nn_band_qtie(plan, b, w_residual_stream, claims);
         // B11 stream S, lever 1: on the GKR backend a band component carries no
         // LogUp, so there is no claimed sum to hand it and none to consume.
@@ -3234,13 +3234,13 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                           AttnVariant::IntSplit(k) => Some(rels.range(k).clone()),
                           _ => None,
                       },
-                      range_check: true, gkr: p.gkr_bands, corner: plan.corner[b],
+                      range_check: true, gkr: p.gkr_bands, diagonal_block: plan.diagonal_block[b],
                       boundary_v: crate::boundary::kv_boundaries_of(&plan.kv, b, l.key.pv),
                       v_bind: nn.as_ref().map(|(_, _, v)| v.clone()) },
             if p.gkr_bands { SecureField::zero() } else { next_use(claims) },
         ));
         // stream AA: "carries the per-token region", which with `--kv-boundary` off
-        // is `!corner[b]` on the same bands
+        // is `!diagonal_block[b]` on the same bands
         if plan.rows_band[b] {
             rows.push(FrameworkComponent::<RowEval>::new(
                 alloc,
@@ -3621,7 +3621,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     RCol::Msk(i) => {
                         let want = crate::attn_air::msk_id(band, *i).id;
                         let g = pre_ids_all.iter().position(|x| x.id == want)
-                            .expect("a corner mask the preprocessed trees do not carry");
+                            .expect("a diagonal block mask the preprocessed trees do not carry");
                         pre_idx.push(g);
                         pre_loc(g)
                     }
@@ -4117,7 +4117,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     let plan = Plan::new(params);
     let p = &plan.p;
     // stream AA: with the prefix tiled, `band_sizes` is no longer `p.bands`
-    // followed by the corners -- it is one entry per *band*, which is what the
+    // followed by the diagonal blocks -- it is one entry per *band*, which is what the
     // plan's shapes are.  Comparing against those is the same check untiled and
     // the right one tiled.
     assert_eq!(layer.bands.len(), plan.shapes.len(), "layer bands disagree with the plan");
@@ -4160,7 +4160,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // fill that bumps one of those counters and is *not* on the card, for a
     // reason no switch states. There are two:
     //
-    //  * a **corner band**, which fills on the host whatever
+    //  * a **diagonal block band**, which fills on the host whatever
     //    `B7_M4_WFILL_BAND` says because the device fill has no notion of its
     //    layout (`devwfill::band_fill_mode`, the one place that decision
     //    lives);
@@ -4208,11 +4208,11 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         // B7a milestone 4 (section 3 row 1): 48 columns of ACTIVE / NOFIRST /
         // LAST / ISTART, which `b65_acc.cu` has computed since 24.1 -- at the
         // wrong time. Mode 1 never builds them here; 2 builds them and asserts
-        // every cell against the kernel's below.  A corner band always builds
+        // every cell against the kernel's below.  A diagonal block band always builds
         // and keeps its `pre`: the interaction phase reads the causal-mask
         // columns back (the exp lookup's multiplicity is `1 - msk`), and its
         // fill is host-side, so devpre never owns its selectors.
-        let pre = if crate::devpre::mode() == 1 && !a.corner {
+        let pre = if crate::devpre::mode() == 1 && !a.diagonal_block {
             vec![]
         } else {
             attn_trace::commit_pre(a, l, false, plan.rows_band[b])
@@ -4244,15 +4244,15 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         .iter()
         .enumerate()
         .map(|(b, a)| {
-            // B11 stream N, lever 2 (b): a corner band gets its flags too, once
+            // B11 stream N, lever 2 (b): a diagonal block band gets its flags too, once
             // its fill is on the card -- the accumulators segment on them and
             // `interaction_phase` asserts they are there. Its *columns* are a
-            // separate question: `commit_pre` still builds a corner's selectors
+            // separate question: `commit_pre` still builds a diagonal block's selectors
             // on the host below, because the interaction phase reads the
             // causal-mask columns back, so `want_cols` stays false for it.
-            let corner_dev = a.corner && band_dev[b].is_some();
-            ((!a.corner && (pre_mode >= 1 || band_dev[b].is_some())) || corner_dev)
-                .then(|| crate::devpre::band_dev(a, &plan.lays[b], pre_mode >= 1 && !a.corner,
+            let diagonal_block_dev = a.diagonal_block && band_dev[b].is_some();
+            ((!a.diagonal_block && (pre_mode >= 1 || band_dev[b].is_some())) || diagonal_block_dev)
+                .then(|| crate::devpre::band_dev(a, &plan.lays[b], pre_mode >= 1 && !a.diagonal_block,
                                                  plan.rows_band[b]))
         })
         .collect();
@@ -4954,21 +4954,21 @@ different rotation", inv.len(), 2 * hd * p.s);
     // ran on the device (21.1). With the bands on the host it stays a host
     // column and a 4a upload -- the honest accounting, not a special case.
     //
-    // B11 stream L: and only where *every* band's are. A corner band fills on
-    // the host, so on a corner-bearing witness the bumps are split and the
+    // B11 stream L: and only where *every* band's are. A diagonal block band fills on
+    // the host, so on a diagonal-block-bearing witness the bumps are split and the
     // device half alone is not the column -- see `devwfill::exp_mult_on_host`,
     // which is the same predicate `commit_base_dev` was given, asked here of the
-    // whole layer. With a corner present the device bands merged their counters
+    // whole layer. With a diagonal block present the device bands merged their counters
     // into `tables.m_exp`, so the host column is complete and the counter list
     // is dropped rather than summed into a column nothing commits.
-    // B11 stream N, lever 2: this asked "is there a corner band?" because a
-    // corner band's fill was always on the host. Now it asks the question it
+    // B11 stream N, lever 2: this asked "is there a diagonal block band?" because a
+    // diagonal block band's fill was always on the host. Now it asks the question it
     // always meant -- "is any band's fill on the host?" -- which is
     // `devwfill::exp_mult_on_host`'s twin read over the whole layer, and the
     // two have to move together or `sums_cancel` rejects with everything else
     // green.
-    let host_corner = layer.bands.iter().any(|b| crate::devwfill::band_fill_mode(b) != 1);
-    let dev_counters: Vec<&stwo::stwo_cuda::base_field_vec::Uint32Vec> = if host_corner {
+    let host_diagonal_block = layer.bands.iter().any(|b| crate::devwfill::band_fill_mode(b) != 1);
+    let dev_counters: Vec<&stwo::stwo_cuda::base_field_vec::Uint32Vec> = if host_diagonal_block {
         vec![]
     } else {
         band_dev.iter().filter_map(|b| b.as_ref().map(|d| &d.m_exp)).collect()
@@ -5055,11 +5055,11 @@ different rotation", inv.len(), 2 * hd * p.s);
         pre_counters[ri(p.ao_acc_lo_bits)].push(&d.m_acc_lo);
         pre_counters[ri(p.ao_acc_hi_bits)].push(&d.m_acc_hi);
         for (b, a) in layer.bands.iter().enumerate() {
-            // A corner band is host-built (the static fill kernels do not know
+            // A diagonal block band is host-built (the static fill kernels do not know
             // its layout), so its bumps sit in the host multiplicity arrays and
             // reach the table through the patch rows -- no device counter to sum.
             let Some(d) = band_dev[b].as_ref() else {
-                assert!(a.corner || !plan.rows_band[b],
+                assert!(a.diagonal_block || !plan.rows_band[b],
                         "B7_M4_WFILL=1 but a band that carries the per-token region is \
                          host-built");
                 continue;
@@ -5542,7 +5542,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     } else {
         (SecureField::zero(), SecureField::zero())
     };
-    let r_corner = if p.corner { ch[plan.corner_challenge_at()] } else { SecureField::zero() };
+    let r_diagonal_block = if p.diagonal_block { ch[plan.diagonal_block_challenge_at()] } else { SecureField::zero() };
 
     // B7a milestone 4 (section 3 row 1): the evals every family's interaction
     // lowers, built by `build_components` -- the verifier's own route, and the
@@ -5553,7 +5553,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // values, so the shape a component lowers to here is the shape `genemit`
     // compiled from the same design point.
     let m4e_t = std::time::Instant::now();
-    let m4e_air = build_components(&plan, &rels, r, s, rv, r_corner, w_residual_stream, lam_residual_stream,
+    let m4e_air = build_components(&plan, &rels, r, s, rv, r_diagonal_block, w_residual_stream, lam_residual_stream,
                                    &crate::exprprobe::claims_for(&plan, 0x0b65_4b05));
     crate::util::m4_add("int/air", m4e_t.elapsed().as_secs_f64());
 
@@ -5654,25 +5654,25 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let mut row_i = 0usize;
     for (b, a) in layer.bands.iter().enumerate() {
         let l = &plan.lays[b];
-        let pow = plan.powers(b, r, s, rv, r_corner);
-        // `build_components` gives a corner band no row component, and a corner
+        let pow = plan.powers(b, r, s, rv, r_diagonal_block);
+        // `build_components` gives a diagonal block band no row component, and a diagonal block
         // band's fractions never take the device route -- so it gets no BandAir,
         // and the row index counts prefix bands only.
         //
-        // Open item 1 (E11, 2026-09-02): block 0's solo corner carries the
-        // region and so has a row component, but it is still a corner -- its
+        // Open item 1 (E11, 2026-09-02): block 0's solo diagonal block carries the
+        // region and so has a row component, but it is still a diagonal block -- its
         // `KeyEval` reads the causal mask (tree 0, `msk_id`) for the exp
         // lookups' multiplicities, which the device fraction route never
         // supplies (`devfrac::band_cols` hands the bands `Cols::Unread`, 19.2's
         // measurement over prefix bands).  It takes the host route like every
-        // other corner; the row index still advances past its row component.
+        // other diagonal block; the row index still advances past its row component.
         let air = plan.rows_band[b]
             .then(|| {
                 let ri = row_i;
                 row_i += 1;
                 ri
             })
-            .filter(|_| !a.corner)
+            .filter(|_| !a.diagonal_block)
             .map(|ri| crate::devfrac::BandAir {
                 tag: b,
                 chan: &m4e_air.chans[b].eval,
@@ -5688,7 +5688,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         if let Some(g) = gkr.as_mut() {
             g.reg = crate::gkrlink::Reg::Band(b);
         }
-        // stream NN: the corner bands' own K, Q and V claims.  The weights are
+        // stream NN: the diagonal block bands' own K, Q and V claims.  The weights are
         // the verifier's own; the claims are what this pass computes, so the
         // builder is handed a blank statement and its `claimed` fields are
         // unused here.
@@ -5707,7 +5707,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                                                gkr.as_deref_mut(), nn_bind.as_ref());
         crate::util::m4_add("int/bands_build", t_ib.elapsed().as_secs_f64());
         inter_all.extend(it.cols);
-        inter_mark(&format!("band{b}{}", if a.corner { " (corner)" } else { "" }),
+        inter_mark(&format!("band{b}{}", if a.diagonal_block { " (diagonal block)" } else { "" }),
                    &inter_all, &mut inter_seen, &mut inter_split);
         claims.bands.push([qm(it.claimed_chan), qm(it.claimed_hs), qm(it.claimed_av),
                            qm(it.claimed_sn), qm(it.claimed_am), qm(it.claimed_az)]);
@@ -5838,11 +5838,11 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         let alpha = sess.draw_felts(1)[0];
         let mut hl = crate::gkrlink::link_params(&plan, &rels, &pr.insts, &pr.artifact, alpha)
             .expect("the prover's own GKR artifact fails the link derivation");
-        let msk0 = crate::attn_air::CHAN_SEL.len() + crate::attn_air::CORNER_SEL.len();
+        let msk0 = crate::attn_air::CHAN_SEL.len() + crate::attn_air::DIAGONAL_BLOCK_SEL.len();
         // B11 stream T: a band whose fill left its columns on the device has no
         // host mirror to fold, so the fold reaches them where they are. The
         // causal-mask columns are preprocessed and always host-built, and a
-        // corner band is always host-filled, so one height can mix the two.
+        // diagonal block band is always host-filled, so one height can mix the two.
         let src_of = |reg: crate::gkrlink::Reg, c: &crate::gkrlink::RCol| {
             use crate::gkrlink::{RCol, Reg, Src};
             // B11 stream U, lever 3: the same resolution for the second family.
@@ -6686,7 +6686,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // to the same buffers -- `device::take_all` clones a borrowed device column
     // on the device, so the side sees the bytes tree 1 saw and nothing crosses
     // the bus.  A host-filled band (the reference backend, `B7_M4_WFILL_BAND=0`,
-    // every corner band) hands its host columns over exactly as before.  The
+    // every diagonal block band) hands its host columns over exactly as before.  The
     // one reader that needs the cells on the host is the tamper probe, which
     // bumps one cell of one column: that side comes down (`AnyCol::download`)
     // and commits through the host path, so `boundary::kv_cols` is unchanged.
@@ -6733,7 +6733,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
 
     // ---- components, prove ----------------------------------------------------
     let m4_t = std::time::Instant::now();
-    let built = build_components_linked(&plan, &rels, r, s, rv, r_corner, w_residual_stream, lam_residual_stream,
+    let built = build_components_linked(&plan, &rels, r, s, rv, r_diagonal_block, w_residual_stream, lam_residual_stream,
                                         &claims, link_hl.as_deref());
     crate::util::m4_add("wall/build_components", m4_t.elapsed().as_secs_f64());
     // Stream EE (open item 21): `--fp-out FILE` writes the fingerprint set this
@@ -6915,7 +6915,7 @@ pub struct Verdict {
     /// value the matmul's dequant published).
     pub nn_in_ok: Vec<bool>,
     /// and per region: "the integers this region produced are the columns the
-    /// bands committed" -- the sum of the corner bands' own claims, which is
+    /// bands committed" -- the sum of the diagonal block bands' own claims, which is
     /// what closes `witness-slack.md` section 1e inside one chunk.
     pub nn_out_ok: Vec<bool>,
     /// Stream NN: the statement's `pos0` is the block coordinate `Fixed::block`
@@ -6925,7 +6925,7 @@ pub struct Verdict {
     /// puts it at another.  True when the statement declares no block.
     pub nn_pos_ok: bool,
     /// Stream NN (NN-2), per prefix band of `Plan::nn_qbands`: "this band's own
-    /// Q column is its group's corner's".  The corner's Q is bound to the
+    /// Q column is its group's diagonal block's".  The diagonal block's Q is bound to the
     /// rotated query (`nn_out_ok`), so this carries the binding to the band that
     /// attends to the cache -- which NN-1 left untied, and asymmetrically so.
     pub nn_q_ok: Vec<bool>,
@@ -7081,7 +7081,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     } else {
         (SecureField::zero(), SecureField::zero())
     };
-    let r_corner = if plan.p.corner { f[plan.corner_challenge_at()] } else { SecureField::zero() };
+    let r_diagonal_block = if plan.p.diagonal_block { f[plan.diagonal_block_challenge_at()] } else { SecureField::zero() };
     // B11 stream Q: on the GKR backend the bands' fractional sums are proved here,
     // between the relation challenges the fractions depend on and the
     // interaction tree's own commit -- the position the prover occupies. The
@@ -7140,7 +7140,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     ch.mix_felts(&claims.flat());
 
     // ---- components from the parsed statement ----------------------------------
-    let built = build_components_linked(&plan, &rels, r, s, rv, r_corner, w_residual_stream, lam_residual_stream,
+    let built = build_components_linked(&plan, &rels, r, s, rv, r_diagonal_block, w_residual_stream, lam_residual_stream,
                                         &claims, link_hl.as_deref());
     let components = built.components();
     // the AIR's own column sizes must agree with the committed ones
@@ -7167,14 +7167,14 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let mut qk_ok = vec![];
     let mut av_sum = SecureField::zero();
     let mut az_sum = SecureField::zero();
-    // B10 step 3: the corner bands come after the prefix bands, one for one.  A
-    // corner band has no per-token region of its own -- there is one row maximum
+    // B10 step 3: the diagonal block bands come after the prefix bands, one for one.  A
+    // diagonal block band has no per-token region of its own -- there is one row maximum
     // and one denominator per *token*, and both live on the prefix band -- so its
     // Q.K^T identity is read against the prefix band's `am`, and its numerator sum
     // is added to the prefix band's before the denominator identity is checked.
-    // Stream AA: the corner's `b - n_pre` pairing generalises to "which head
+    // Stream AA: the diagonal block's `b - n_pre` pairing generalises to "which head
     // band group is this band in", because with `--kv-boundary` a group is one
-    // prefix sub-band *per key block* plus the chunk's own corner, not a pair.
+    // prefix sub-band *per key block* plus the chunk's own diagonal block, not a pair.
     // `plan.group` and `plan.rows_band` are that generalisation and with the
     // flag off they name exactly the bands the two lines below named.
     let row_of: Vec<usize> = (0..plan.p.bands.len())
@@ -7267,7 +7267,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
                         claims.deq_out.get(k).copied() == claims.nn_in.get(qi).copied()),
                     // stream SS: a *folded* `v` has no quantize region either --
                     // the fold is the quantize -- so the published output is the
-                    // int8 cell itself and the counterparty is the corner bands'
+                    // int8 cell itself and the counterparty is the diagonal block bands'
                     // own V fold, the sum `nn_out_ok` compares the other two
                     // against.  Under the same weights, so the equality says the
                     // bands attended over the very integers this region rounded.
@@ -7448,7 +7448,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // claims alone.
     //
     // The output side: the integers the quantize produced are the columns the
-    // *bands* committed -- and the counterparty is a **sum** over the corner
+    // *bands* committed -- and the counterparty is a **sum** over the diagonal block
     // bands, because a chunk's heads are split across bands and each covers a
     // disjoint slice of them.  Grouped-query attention is inside the weights,
     // not inside this sum: a producer value carries the sum of the `rep`
@@ -7485,17 +7485,17 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         _ => true,
     };
     let nn_open = plan.residual_stream.as_ref().is_some_and(|g| !g.head_norm) && plan.quants.is_empty();
-    // Stream NN (NN-2): the prefix band's own Q against its group's corner.
+    // Stream NN (NN-2): the prefix band's own Q against its group's diagonal block.
     // Both folds run over the same (query head, channel, token) set under the
     // same canonical weights -- only the layout that scatters those cells over
-    // rows differs -- so equality is "the same queries", and the corner's side
+    // rows differs -- so equality is "the same queries", and the diagonal block's side
     // is already the rotated query by `nn_out_ok`.  The difference of the two
     // folds is a polynomial in `w_residual_stream` whose coefficients were fixed before
     // `w_residual_stream` was drawn, which is the argument every binding in this family rests
     // on.
     let nn_q_ok: Vec<bool> = plan.nn_qbands.iter().enumerate().map(|(k, b)| {
-        let corner = plan.nn_bands.iter().position(|c| plan.group[*c] == plan.group[*b]);
-        match corner {
+        let diagonal_block = plan.nn_bands.iter().position(|c| plan.group[*c] == plan.group[*b]);
+        match diagonal_block {
             Some(ci) => claims.band_q.get(k).copied().map(unqm)
                 == claims.band_qkv.get(ci).map(|c| unqm(c[1])),
             None => false,
@@ -7745,9 +7745,9 @@ impl Plan {
             put(14, Absent, if head { head_only() } else { Some("no attention".into()) });
         } else if !self.kv.is_empty() {
             put(14, Bound, None);
-        } else if !p.corner {
+        } else if !p.diagonal_block {
             put(14, Unbound, Some("the chunk has no diagonal block (not extracted with \
-                                   --corner), so its own keys and values are not in the \
+                                   --diagonal-block), so its own keys and values are not in the \
                                    statement and no K/V boundary can be committed".into()));
         } else {
             put(14, Unbound, Some("the K/V boundary trees are off \
@@ -7827,11 +7827,11 @@ mod tests {
     #[test]
     fn the_pinned_wired_shape_reports_its_two_desk_holes() {
         use EdgeState::*;
-        // `residual_stream_corner` of prover/README.md, with both boundaries on: 64-wide
+        // `residual_stream_diagonal_block` of prover/README.md, with both boundaries on: 64-wide
         // matmuls under three heads of 32, so the rotation cannot tile (edge 3)
         // and the `o` matmul does not read the attention output's width (edge 5)
         let plan = plan_of(argv(&["--bands", "2,1", "--nout", "64", "--residual-stream-a", "32",
-                                   "--kmax", "16", "--synth-residual-stream", "--corner"]));
+                                   "--kmax", "16", "--synth-residual-stream", "--diagonal-block"]));
         let want = vec![
             (1, Bound), (2, Bound), (3, Unbound), (4, Bound), (5, Unbound), (6, Bound),
             (7, Bound), (8, Bound), (9, Bound), (10, Bound), (11, Bound), (12, Bound),
@@ -7853,7 +7853,7 @@ mod tests {
         // rotation tiles, and the `o` matmul reads the attention output
         let plan = plan_of(argv(&["--bands", "2,2", "--nin", "128", "--nout", "128",
                                    "--residual-stream-a", "32", "--kmax", "16", "--synth-residual-stream",
-                                   "--corner"]));
+                                   "--diagonal-block"]));
         let got = states(&plan, Some(3));
         for (n, st) in &got[..14] {
             assert_eq!(*st, Bound, "edge {n}: {:?}", plan.binding(Some(3))[*n as usize - 1]);
@@ -7866,16 +7866,16 @@ mod tests {
     fn the_skips_are_reported_as_unbound_not_absent() {
         use EdgeState::*;
         let plan = plan_of(argv(&["--bands", "2,1", "--nout", "64", "--residual-stream-a", "32",
-                                  "--kmax", "16", "--synth-residual-stream", "--corner",
+                                  "--kmax", "16", "--synth-residual-stream", "--diagonal-block",
                                   "--unsound-skip-layer-boundary",
                                   "--unsound-skip-kv-boundary"]));
         let got = states(&plan, None);
         assert_eq!(got[12], (13, Unbound));
         assert_eq!(got[13], (14, Unbound));
         // no residual-stream family at all: every seam and add is the prover's
-        // word, while the K/V boundary (on by default on a corner chunk) and the
+        // word, while the K/V boundary (on by default on a diagonal block chunk) and the
         // attention and Freivalds components stand
-        let bare = plan_of(argv(&["--bands", "2,1", "--corner",
+        let bare = plan_of(argv(&["--bands", "2,1", "--diagonal-block",
                                    "--unsound-skip-residual-stream"]));
         let got = states(&bare, None);
         for n in [1u8, 2, 3, 5, 6, 7, 8, 9, 10, 11, 13] {
@@ -7895,13 +7895,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "--unsound-skip-residual-stream")]
     fn a_chunk_without_the_family_is_refused_unless_the_family_is_skipped() {
-        plan_of(argv(&["--bands", "2,1", "--corner"]));
+        plan_of(argv(&["--bands", "2,1", "--diagonal-block"]));
     }
 
     #[test]
     #[should_panic(expected = "not a skip")]
     fn an_unknown_skip_is_an_error() {
-        plan_of(argv(&["--bands", "2,1", "--corner", "--unsound-skip-everything"]));
+        plan_of(argv(&["--bands", "2,1", "--diagonal-block", "--unsound-skip-everything"]));
     }
 
     #[test]
@@ -7911,7 +7911,7 @@ mod tests {
         // skipped to prove it at all, and the table says what that costs
         let plan = plan_of(argv(&["--bands", "2,1", "--nout", "64", "--residual-stream-a", "32",
                                   "--kmax", "16", "--synth-head", "--synth-vocab", "256",
-                                  "--corner", "--unsound-skip-argmax"]));
+                                  "--diagonal-block", "--unsound-skip-argmax"]));
         let got = states(&plan, Some(32));
         assert_eq!(got[0], (1, Bound));
         assert_eq!(got[1], (2, Bound));

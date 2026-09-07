@@ -2412,7 +2412,7 @@ fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
     // Stream OO: the bisect switch. `B7_KERNEL_SKIP` is a comma-separated list
     // of `cuda_eval_name`s whose constraint kernel declines to the CPU on this
     // run, exactly as an absent kernel does -- the same announced fallback the
-    // store has taken for the residual stream and corner shapes since stream B. It is a
+    // store has taken for the residual stream and diagonal block shapes since stream B. It is a
     // diagnostic and not a configuration: the CPU path evaluates the same AIR,
     // so a run that sets it must reproduce the run that does not, and the
     // family whose name makes an otherwise-rejected chunk prove is the family
@@ -2426,7 +2426,7 @@ fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
     }
     let shape = match crate::cudakernels::shape_of(name, fp) {
         Some(s) => s,
-        // B10 step 5 (stream B): the residual stream and the corner-witness shapes lower
+        // B10 step 5 (stream B): the residual stream and the diagonal-block witness shapes lower
         // to kernels ptxas cannot compile in reasonable time (52 min and
         // counting on one), so `B7_KERNEL_FALLBACK=1` lets a component with no
         // generated kernel run on the fork's scalar CPU fallback -- the same
@@ -2510,7 +2510,7 @@ fn fill_binding_claims(plan: &crate::compose::Plan, claims: &mut crate::compose:
     // state stream II's were in -- `nn_in`/`nn_out` are read per quantize
     // region, `band_qkv` per rotated band and `band_q` per prefix band, all
     // through `.get(..)`, and an unfilled one folds `x - 0` out of
-    // `b65_quant_eval` and of the corner and prefix `b65_chan_eval`s. Found by
+    // `b65_quant_eval` and of the diagonal block and prefix `b65_chan_eval`s. Found by
     // this stream's own guard on its first contact with someone else's work.
     claims.nn_in = plan.quants.iter().map(|_| felt()).collect();
     claims.nn_out = plan.quants.iter().map(|_| felt()).collect();
@@ -2614,7 +2614,7 @@ pub fn emit_cmd(args: &[String]) {
             go!(b.chans[i], format!("chan_band{i}"));
             go!(b.keys[i], format!("key_band{i}"));
         }
-        // a corner band has no row component (B10 step 3): `rows` is shorter
+        // a diagonal block band has no row component (B10 step 3): `rows` is shorter
         // than `chans`, so it is walked on its own
         for i in 0..b.rows.len() {
             go!(b.rows[i], format!("row_band{i}"));
@@ -3527,7 +3527,7 @@ pub fn gen_emit_cmd(args: &[String]) {
             go!(b.chans[i], format!("chan_band{i}"));
             go!(b.keys[i], format!("key_band{i}"));
         }
-        // a corner band has no row component (B10 step 3): `rows` is shorter
+        // a diagonal block band has no row component (B10 step 3): `rows` is shorter
         // than `chans`, so it is walked on its own
         for i in 0..b.rows.len() {
             go!(b.rows[i], format!("row_band{i}"));

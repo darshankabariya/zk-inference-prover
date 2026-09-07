@@ -31,7 +31,7 @@ the statement.
 Two block-axis facts the writer enforces rather than leaves to the runner:
 
 * **Block 0 has no prefix.**  `c = 0` makes `Grid::new(groups = c * insts, ..)`
-  divide by zero (`layout.rs:117`), so a corner-only chunk does not compose
+  divide by zero (`layout.rs:117`), so a diagonal-block-only chunk does not compose
   today -- that configuration is stream CC's.  Block 0 is therefore skipped
   unless `--with-block-0` is passed, and the plan says so in a comment.
 * **The head goes on the last block only.**  A prompt block emits no token.
@@ -52,7 +52,7 @@ head line, and `--l0-dir` points the layer-0 lines at another dump set (a
 layer-0 re-extract with `--embed`).  The E11 plan at C=4096 is
 
     python -m harness.witness.plan --dir D --blocks 9 --with-block-0 --head H \
-        --layer-flags='--round even --corner' --head-flags='--ao-rem-bits 23'
+        --layer-flags='--round even --diagonal-block' --head-flags='--ao-rem-bits 23'
 
 (the `=` form, because the value starts with a dash), and a line's flags are
 part of its emit key, so the emit set grows by the lines whose flags make a
@@ -73,7 +73,7 @@ after the flag is read and which no manifest and no flag names.
 `--head-per-block` says the head dump for block `b` is `<--head>_B<b>` rather
 than `--head` itself: a head dump carries its own `base_pos`, so the two seam
 blocks a `--verify --prompt` grid needs (stream KK) are two dumps, written by
-one `extract.py --blocks 7,8 --head --corner` pass (stream OO).
+one `extract.py --blocks 7,8 --head --diagonal-block` pass (stream OO).
 """
 
 import argparse
@@ -151,7 +151,7 @@ def main():
     ap.add_argument("--with-block-0", action="store_true",
                     help="include block 0's layer chunks. It has c = 0 and does not compose "
                          "today (layout.rs:117 divides by c * insts); stream CC owns the "
-                         "corner-only configuration.")
+                         "diagonal-block-only configuration.")
     ap.add_argument("--head-every-block", action="store_true",
                     help="an lm_head chunk after every block, not only the last one")
     # ---- stream KK (E11): which blocks need a head chunk, and why ------------
@@ -168,17 +168,17 @@ def main():
                     help="also write the distinct emit shapes, one representative plan line "
                          "each, for `emitset` to walk instead of the plan")
     # ---- stream EE (E11): what every line carries besides its own shape ------
-    # The E11 grid wants `--round even --corner` on every layer line (the
+    # The E11 grid wants `--round even --diagonal-block` on every layer line (the
     # boundaries and the embedding gadget are on by default wherever the dump
     # lets them be) and the head pinned where seq6 ran it.  They go on the LINE,
     # not the shared command line, because `boundary-grid` reads a chunk's flags
-    # back off its statement and the head must not inherit `--corner`.  A line's
+    # back off its statement and the head must not inherit `--diagonal-block`.  A line's
     # flags are part of its emit key, and so is what the dump lets the defaults
     # turn on: a layer-0 line whose dump carries the embedding rows is a
     # different kernel shape from a layer-1 line at the same (c, table bits).
     ap.add_argument("--layer-flags", default="",
                     help="appended to every layer line, e.g. "
-                         "'--round even --corner' (E11)")
+                         "'--round even --diagonal-block' (E11)")
     ap.add_argument("--l0-flags", default="",
                     help="appended to every layer-0 line after --layer-flags, e.g. "
                          "(E11 needs none: the embedding gadget is on by default on a "
@@ -211,7 +211,7 @@ def main():
                          "table off the witness and which no manifest names.")
     ap.add_argument("--head-per-block", action="store_true",
                     help="the head dump for block b is <--head>_B<b>, not --head itself "
-                         "(one `extract.py --blocks 7,8 --head --corner` pass writes both)")
+                         "(one `extract.py --blocks 7,8 --head --diagonal-block` pass writes both)")
     ap.add_argument("--table-bits-map", default="",
                     help="a JSON {\"<layer>\": bits, ...} (and optionally \"head\") giving "
                          "each layer's stated master table width, instead of the shape "
@@ -275,7 +275,7 @@ def main():
             pre, wpre = "", f"{a.dir}/witness_L"
         else:
             if b == 0 and not a.with_block_0:
-                lines.append("# block 0 skipped: c = 0 is the corner-only chunk (stream CC); "
+                lines.append("# block 0 skipped: c = 0 is the diagonal-block-only chunk (stream CC); "
                              "pass --with-block-0 once it composes")
                 continue
             rows = read_rows(f"{a.dir}/shapes_B{b}.json")

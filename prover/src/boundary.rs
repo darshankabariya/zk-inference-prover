@@ -613,8 +613,8 @@ pub fn chain_of(
             let ok = p.0.hd == p.1.hd
                 && p.0.nh == p.1.nh
                 && p.0.bands == p.1.bands
-                && p.0.corner
-                && p.1.corner
+                && p.0.diagonal_block
+                && p.1.diagonal_block
                 && p.0.variant == p.1.variant
                 && p.0.q_bits == p.1.q_bits
                 && p.0.k_bits == p.1.k_bits
@@ -1810,11 +1810,11 @@ pub fn grid_cmd(args: &[String]) {
 // what makes it unavoidable.
 //
 // Why one pair per head band group rather than one global pair: the bands run
-// all prefix bands first and then all corner bands (CC's frozen order), so a
+// all prefix bands first and then all diagonal block bands (CC's frozen order), so a
 // producer's global out tree would read
-// `[g0 sub..][g1 sub..][g2 sub..][g0 corner][g1 corner][g2 corner]` while the
+// `[g0 sub..][g1 sub..][g2 sub..][g0 diagonal_block][g1 diagonal_block][g2 diagonal_block]` while the
 // consumer's global in tree reads `[g0 sub..][g1 sub..][g2 sub..]` with each
-// group's last sub-band inline.  Per-group pairs put each group's corner
+// group's last sub-band inline.  Per-group pairs put each group's diagonal block
 // immediately after its own sub-bands on both sides, and the two column lists
 // coincide without moving CC's band order.
 
@@ -1836,7 +1836,7 @@ pub struct KvBand {
     pub group: usize,
     /// the group's own block (`c = S` over the chunk's own decoded tokens)
     /// rather than one of its unchecked-prefix sub-bands
-    pub corner: bool,
+    pub diagonal_block: bool,
     pub pk: usize,
     pub pv: usize,
     pub chan_rows: usize,
@@ -1878,7 +1878,7 @@ pub fn kv_sides(first_tree: usize, bands: &[KvBand]) -> Vec<KvSide> {
             let idx: Vec<usize> = bands
                 .iter()
                 .enumerate()
-                .filter(|(_, b)| b.group == g && (out || !b.corner))
+                .filter(|(_, b)| b.group == g && (out || !b.diagonal_block))
                 .map(|(i, _)| i)
                 .collect();
             if idx.is_empty() {
@@ -2034,7 +2034,7 @@ mod tests {
             nh: 3,
             bands: vec![2, 1],
             variant: "intexp".into(),
-            corner: kv,
+            diagonal_block: kv,
             layer_boundary: true,
             kv_boundary: kv,
             residual_stream: Some(ResidualStreamParams { d: 64, a: 4, ..Default::default() }),
@@ -2077,7 +2077,7 @@ mod tests {
     fn head_fixed(c: usize, s: usize) -> Fixed {
         let mut f = fixed(c, s, false);
         f.params.prove_argmax = true;
-        f.params.corner = false;
+        f.params.diagonal_block = false;
         f.params.residual_stream =
             Some(ResidualStreamParams { d: 64, a: 4, head_norm: true, ..Default::default() });
         f.sizes = vec![vec![4]; FIRST_TREE + residual_stream_sides(&f.params)];

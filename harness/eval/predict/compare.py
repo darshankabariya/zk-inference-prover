@@ -49,7 +49,7 @@ def load_run(path):
         interaction_by_family={f: ibf[f]["cells"] for f in ibf},
         params=dict(log_table=pa["log_table"], ao_rem_bits=pa["ao_rem_bits"],
                     ao_q_bits=pa["ao_q_bits"], bands=pa["bands"], nh=pa["nh"], hd=pa["hd"],
-                    s=pa["s"], c=pa["c"], corner=pa.get("corner", False), layer_boundary=pa.get("layer_boundary", False),
+                    s=pa["s"], c=pa["c"], diagonal_block=pa.get("diagonal_block", False), layer_boundary=pa.get("layer_boundary", False),
                     grid_target=pa["grid_target"], chan_target=pa["chan_target"], rw=pa["rw"],
                     k_bits=pa["k_bits"], q_bits=pa["q_bits"], nmax=pa["nmax"],
                     kmax=pa["kmax"], round=pa["round"], variant=pa["variant"],
@@ -136,7 +136,7 @@ def main():
                         or m["tokens"] != 512:
                     problems.append(f"L{k}: mat {m}")
         p = r["params"]
-        cfg_ok = (p["s"] == 512 and p["c"] == a.ctx and p["hd"] == 128 and p["corner"]
+        cfg_ok = (p["s"] == 512 and p["c"] == a.ctx and p["hd"] == 128 and p["diagonal_block"]
                   and p["layer_boundary"] and p["grid_target"] == 64 and p["chan_target"] == 128
                   and p["rw"] == 16 and p["k_bits"] == 11 and p["q_bits"] == 12
                   and p["round"] == "even" and p["nmax"] == 511)

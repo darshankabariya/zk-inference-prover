@@ -234,13 +234,13 @@ pub fn commit_pre(a: &Attn, l: &Layouts, with_out: bool, with_rows: bool)
             _ => M31::one(),
         })
         .collect()));
-    if a.corner {
+    if a.diagonal_block {
         // `iend`: the row where the key Horner crosses *between* instances, which
         // is the one that completes an instance's **highest** local key -- keys
         // descend, so that is the first key of the instance and the accumulator
         // holds only later instances when it is reached.  On it the multiplier is
-        // `kappa` instead of `r'`, and the corner's per-instance weight becomes the
-        // prefix's `r^C` (attn_air's CORNER_SEL).  On the instance's *lowest* key
+        // `kappa` instead of `r'`, and the diagonal block's per-instance weight becomes the
+        // prefix's `r^C` (attn_air's DIAGONAL_BLOCK_SEL).  On the instance's *lowest* key
         // the jump would also multiply that instance's own later keys, which is
         // `rho r'^-S` off per key.
         // `j > 0`, like every other selector here: at row 0 the `[-1, 0]` mask
@@ -257,11 +257,11 @@ pub fn commit_pre(a: &Attn, l: &Layouts, with_out: bool, with_rows: bool)
     }
     // Stream CC (E11): the inert-lead-row selector, last of the grid's block and
     // committed only when the grid has such rows.  Placed after the mask columns
-    // so `msk0` -- `CHAN_SEL.len() + CORNER_SEL.len()`, in two other files -- is
+    // so `msk0` -- `CHAN_SEL.len() + DIAGONAL_BLOCK_SEL.len()`, in two other files -- is
     // the index it always was.  On a prefix band there are no mask columns, so it
     // lands at slot 8 of the key group, which is where `devpre`'s `b65p_sel`
     // writes it.
-    if crate::attn_air::act_id(0, a.corner, lk.g.lead).is_some() {
+    if crate::attn_air::act_id(0, a.diagonal_block, lk.g.lead).is_some() {
         // Stream JJ (E11), `witness-slack.md` section 7 item 7: `KeyEval` reads
         // the numerator fold's visibility as `act - msk[i]` rather than
         // `act * (1 - msk[i])` to keep the factor degree 1, and that is the same
@@ -292,7 +292,7 @@ pub fn commit_pre(a: &Attn, l: &Layouts, with_out: bool, with_rows: bool)
         pre.push(sel(lo.g.log_rows, &|j| j + 1 == lo.g.rows));
     }
 
-    // B10 step 3: a corner band has no per-token region.  There is one row maximum
+    // B10 step 3: a diagonal block band has no per-token region.  There is one row maximum
     // and one denominator per *token*, not per band, so the pair shares the prefix
     // band's -- which is also the only column the `Z >= nmax` bound can sit on.
     if with_rows {
@@ -504,7 +504,7 @@ pub fn commit_base(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     }
 
     // per-token region: maxima, denominators, and the denominator's low limb.
-    // The denominator it commits is `zz_row()`: the pair's total where a corner
+    // The denominator it commits is `zz_row()`: the pair's total where a diagonal block
     // rides with this band, this band's own otherwise.
     at.push(base.len());
     if with_rows {
@@ -554,18 +554,18 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
                        mult_exp: &mut [u32], mult_r: &mut [Vec<u32>],
                        off_table: &mut usize, with_out: bool, with_rows: bool)
                        -> (Vec<Eval>, Vec<usize>, Option<crate::devwfill::DevBand>) {
-    // `with_rows` postdates this milestone: it is `!a.corner`, and it says
+    // `with_rows` postdates this milestone: it is `!a.diagonal_block`, and it says
     // whether this band commits the per-token region (the row maxima, the
-    // denominator and its low limb).  A *corner* band does not -- there is one
-    // maximum and one denominator per token, not per band, so the corner rides
+    // denominator and its low limb).  A *diagonal block* band does not -- there is one
+    // maximum and one denominator per token, not per band, so the diagonal block rides
     // on the prefix band's -- and `commit_base_dev` has no notion of any of
-    // this: `devwfill.rs` mentions neither `with_rows` nor `corner`.  A device
+    // this: `devwfill.rs` mentions neither `with_rows` nor `diagonal_block`.  A device
     // fill that always built the per-token region would commit columns the AIR
-    // does not expect on a corner band.
+    // does not expect on a diagonal block band.
     //
-    // So corner bands take the host path, whatever the switch says.  That is
+    // So diagonal block bands take the host path, whatever the switch says.  That is
     // correct by construction rather than by a guess at the kernel, and it
-    // costs the device fill only the S x S corner -- the cells are in the
+    // costs the device fill only the S x S diagonal block -- the cells are in the
     // C - S prefix band, which still fills on the device.  Teaching the fill
     // the distinction is its own piece of work; until then this cannot be
     // silently wrong.
@@ -574,33 +574,33 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     // (`B7_M4_WFILL_BAND`, defaulting to `B7_M4_WFILL`), because the band fill
     // and the Freivalds fill are not in the same state -- see `devwfill::band_mode`.
     //
-    // B11 stream M: and the corner override above is now that function's twin,
+    // B11 stream M: and the diagonal block override above is now that function's twin,
     // `devwfill::band_fill_mode`, because `devpre::fills_dev` has to reach the
     // same answer before any fill has run.
-    // Stream AA: `with_rows` used to *be* `!a.corner`, because the only band
-    // that rode on another's per-token region was the causal corner.  With
+    // Stream AA: `with_rows` used to *be* `!a.diagonal_block`, because the only band
+    // that rode on another's per-token region was the diagonal block.  With
     // `--kv-boundary` the unchecked prefix is tiled into sub-bands of `S` keys and
     // the group's one region lives on its first sub-band, so a band with
-    // `corner == false` and `with_rows == false` is now a legal and ordinary
+    // `diagonal_block == false` and `with_rows == false` is now a legal and ordinary
     // thing.  The implication that survives is the one that matters here, and
-    // it is asserted instead: a corner never carries the region.
-    // Open item 1 / CC deliverable 4: a *solo* corner (block 0, whose group has
+    // it is asserted instead: a diagonal block never carries the region.
+    // Open item 1 / CC deliverable 4: a *solo* diagonal block (block 0, whose group has
     // no prefix band at all) does carry the region, so the old implication
-    // "a corner never carries the region" is no longer true.  What survives is
+    // "a diagonal block never carries the region" is no longer true.  What survives is
     // that a band carrying the region is its group's first band, and `Plan`
     // establishes that by construction -- `rows_band` is `k == 0` for a prefix
-    // sub-band and `nsub == 0` for a corner.
-    debug_assert!(!(a.corner && with_rows) || a.shape.c == a.shape.s,
-                  "only a solo corner (c == S) may be a corner that carries the region");
+    // sub-band and `nsub == 0` for a diagonal block.
+    debug_assert!(!(a.diagonal_block && with_rows) || a.shape.c == a.shape.s,
+                  "only a diagonal block (c == S) may carry the region");
     // ... and the device fill still has no notion of any of this
-    // (`devwfill.rs` mentions neither `with_rows` nor `corner`), so a band that
+    // (`devwfill.rs` mentions neither `with_rows` nor `diagonal_block`), so a band that
     // does not carry the region takes the host path whatever the switch says --
-    // which for a corner band is the answer `band_fill_mode` already gives.
+    // which for a diagonal block band is the answer `band_fill_mode` already gives.
     let m4d = if with_rows { crate::devwfill::band_fill_mode(a) } else { 0 };
     if m4d == 1 {
         // B7a milestone 4 (section 3 row 1): with the tables' columns on the
         // device the exp counter has no host reader left, so it stays there --
-        // unless a corner band rides with this one, in which case it does have
+        // unless a diagonal block band rides with this one, in which case it does have
         // one. See `devwfill::exp_mult_on_host`; `compose.rs` decides which
         // column is committed from the same predicate, and the two must agree.
         let dev = crate::devwfill::commit_base_dev(a, l, cfg, widths, mult_exp, mult_r,
@@ -712,9 +712,9 @@ pub struct Interaction {
 /// Stream NN: the band-side Horner claims this band publishes over its own
 /// committed K, Q and V columns.
 ///
-/// A **corner** band of a chunk that carries the quantize regions publishes all
+/// A **diagonal block** band of a chunk that carries the quantize regions publishes all
 /// three; a **prefix** band of the same chunk publishes `q` alone (NN-2), whose
-/// counterparty is its group's corner rather than a quantize region.  `Q` is
+/// counterparty is its group's diagonal block rather than a quantize region.  `Q` is
 /// therefore never optional and `K`/`V` always are.
 pub struct NnBind<'a> {
     pub k: Option<&'a crate::attn_air::BandTie>,
@@ -838,7 +838,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     // appended after the region's three so the AIR's mask order is the tree's.
     let mut claimed_nn: Vec<SecureField> = vec![];
     if let Some(b) = nn {
-        // K first where the band publishes one (the corner), then Q, which
+        // K first where the band publishes one (the diagonal block), then Q, which
         // every bound band publishes -- the order `ChanEval::evaluate` reads
         // the two masks in.
         let sides: Vec<(&crate::attn_air::BandTie, usize)> = b.k.map(|k| (k, 0usize))
@@ -898,7 +898,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         if let Some(g) = gkr.as_deref_mut() {
             // B11 stream T: where this band's fill left its columns on the
             // device there is no host column to read, so the feed computes the
-            // same fractions there instead. A host-filled band -- a corner --
+            // same fractions there instead. A host-filled band -- a diagonal block --
             // takes the host builder, unchanged.
             crate::gkrband::feed_site(g, air, 0, lc.g.log_rows, &looks, &com.at,
                                       &com.base, &com.pre, exp, ranges);
@@ -944,14 +944,14 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             nofirst = chunk + 1 < lk.g.chunks;
             last = chunk == 0;
             istart = j > 0 && key_istart(lk, sh.c, j);
-            iend = a.corner && j > 0 && last && c + 1 == sh.c;
+            iend = a.diagonal_block && j > 0 && last && c + 1 == sh.c;
             for i in 0..lk.q {
                 let t = chunk * lk.q + i;
                 if t < sh.s {
                     let g = (inst * sh.s + t) * sh.c + c;
                     // the score fold keeps every slot; the numerator fold drops the
                     // masked ones, exactly as the AIR's `1 - msk` factor does.  An
-                    // honest corner witness has `num = 0` there anyway -- the mask
+                    // honest diagonal block witness has `num = 0` there anyway -- the mask
                     // is written out here so the two agree by construction and not
                     // by coincidence (B10 rule 21).
                     sf += pow.sg_pow[i] * SecureField::from(m31_of(a.score_col(g)));
@@ -1005,7 +1005,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         };
         sn[j] = if j > 0 {
             // the denominator's per-instance weight is the *prefix's* `r^C` on both
-            // grids, because `sn_prefix + sn_corner` is what `az` is read against
+            // grids, because `sn_prefix + sn_diagonal_block` is what `az` is read against
             sn[j - 1] * if istart { pow.sn_c } else { SecureField::one() }
         } else {
             SecureField::zero()
@@ -1051,7 +1051,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         }
     };
     // ---- stream NN: the band's own V claim ---------------------------------
-    // Corner bands only: a prefix band's values are the cache, bound across
+    // Diagonal block bands only: a prefix band's values are the cache, bound across
     // blocks by root equality (stream AA/EE), and it publishes Q alone.
     if let Some(t) = nn.and_then(|b| b.v) {
         let rows = lk.g.rows;
@@ -1092,11 +1092,11 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         let b = com.at[1];
         let n_aux = if a.variant == Variant::IntExp { 0 } else { lk.q };
         let mut looks = vec![];
-        // where the corner's mask columns sit in `pre` (commit_pre's order)
-        let msk0 = crate::attn_air::CHAN_SEL.len() + crate::attn_air::CORNER_SEL.len();
+        // where the diagonal block's mask columns sit in `pre` (commit_pre's order)
+        let msk0 = crate::attn_air::CHAN_SEL.len() + crate::attn_air::DIAGONAL_BLOCK_SEL.len();
         for i in 0..lk.q {
             let key = if a.variant == Variant::Bf16x { b + 2 * lk.q + i } else { b + i };
-            looks.push(if a.corner {
+            looks.push(if a.diagonal_block {
                 Look::ExpVis(key, b + lk.q + i, msk0 + i)
             } else {
                 Look::Exp(key, b + lk.q + i)
@@ -1115,7 +1115,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         if let Some(g) = gkr.as_deref_mut() {
             // B11 stream T: where this band's fill left its columns on the
             // device there is no host column to read, so the feed computes the
-            // same fractions there instead. A host-filled band -- a corner --
+            // same fractions there instead. A host-filled band -- a diagonal block --
             // takes the host builder, unchanged.
             crate::gkrband::feed_site(g, air, 1, lk.g.log_rows, &looks, &com.at,
                                       &com.base, &com.pre, exp, ranges);
@@ -1173,7 +1173,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     }
 
     // ---- per-token region --------------------------------------------------
-    // Absent on a corner band: the pair has one per-token region, the prefix
+    // Absent on a diagonal block band: the pair has one per-token region, the prefix
     // band's, and it carries the row maximum both halves shift by and the total
     // denominator both halves sum to.
     let rrows = if with_rows { 1usize << l.log_row } else { 0 };
@@ -1198,7 +1198,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         az[j] = if j > 0 { az[j - 1] * step } else { SecureField::zero() } + zf;
     }
     let (claimed_am, claimed_az) = if !with_rows {
-        // A corner band has no per-token region, so there is nothing to build
+        // A diagonal block band has no per-token region, so there is nothing to build
         // on either side of the device link.
         (SecureField::zero(), SecureField::zero())
     } else {
@@ -1254,7 +1254,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         if let Some(g) = gkr.as_deref_mut() {
             // B11 stream T: where this band's fill left its columns on the
             // device there is no host column to read, so the feed computes the
-            // same fractions there instead. A host-filled band -- a corner --
+            // same fractions there instead. A host-filled band -- a diagonal block --
             // takes the host builder, unchanged.
             crate::gkrband::feed_site(g, air, 3, l.log_row, &looks, &com.at,
                                       &all, &com.pre, exp, ranges);
@@ -1295,13 +1295,13 @@ pub fn table_sides(a: &Attn, widths: &[u32], exp: &ExpRel, ranges: &[RangeRel],
 /// Index of the exp table's first preprocessed column.
 pub fn pre_exp_x(a: &Attn, l: &Layouts) -> usize {
     crate::attn_air::CHAN_SEL.len()
-        + if a.corner {
-            crate::attn_air::CORNER_SEL.len() + l.key.q
+        + if a.diagonal_block {
+            crate::attn_air::DIAGONAL_BLOCK_SEL.len() + l.key.q
         } else {
             crate::attn_air::KEY_SEL.len()
         }
         // stream CC (E11): the inert-lead-row selector, when the grid has one
-        + usize::from(crate::attn_air::act_id(0, a.corner, l.key.g.lead).is_some())
+        + usize::from(crate::attn_air::act_id(0, a.diagonal_block, l.key.g.lead).is_some())
         + crate::attn_air::OUT_SEL.len()
         + crate::attn_air::ROW_SEL.len()
 }
@@ -1350,12 +1350,12 @@ pub fn cells(a: &Attn, l: &Layouts, cfg: &Cfg) -> Cells {
     let n_split = if matches!(a.variant, Variant::IntSplit(_)) { lk.q } else { 0 };
     let range_tbl: usize = widths.iter().map(|w| 1usize << w).sum();
 
-    let key_sel = if a.corner {
-        crate::attn_air::CORNER_SEL.len() + lk.q       // + one mask column per slot
+    let key_sel = if a.diagonal_block {
+        crate::attn_air::DIAGONAL_BLOCK_SEL.len() + lk.q       // + one mask column per slot
     } else {
         crate::attn_air::KEY_SEL.len()
     // stream CC (E11): + the inert-lead-row selector, when the grid has one
-    } + usize::from(crate::attn_air::act_id(0, a.corner, lk.g.lead).is_some());
+    } + usize::from(crate::attn_air::act_id(0, a.diagonal_block, lk.g.lead).is_some());
     let pre = crate::attn_air::CHAN_SEL.len() * lc.g.rows
         + key_sel * lk.g.rows
         + crate::attn_air::OUT_SEL.len() * lo.g.rows

@@ -327,7 +327,7 @@ def measured_8b(h200):
 
 
 def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
-                with_head=True, corner=True):
+                with_head=True, diagonal_block=True):
     """The whole per-token budget for a shape, summed group by group: the cost
     model's `cells_per_token` plus B10 step 2's residual stream, with the model-level terms
     (the head's accumulators, its lookups, the token binding, the final norm) charged
@@ -341,7 +341,7 @@ def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
             cfg, 0 if grp["linear"] else ctx, batch, seq, alpha=alpha,
             experts=grp["experts"], topk=grp["topk"], seq_batch=seq_batch, head=head,
             attn_accs_per_layer=grp.get("attn_accs_per_layer"),
-            attn_params_per_layer=grp.get("attn_params_per_layer"), corner=corner)
+            attn_params_per_layer=grp.get("attn_params_per_layer"), diagonal_block=diagonal_block)
         out["saturated"] = out.get("saturated", False) or bool(c["band_saturated"])
         gl = cm.residual_stream_cells(cfg, "tree", topk=grp["topk"], final_norm=head)
         out["total"] += c["total"] + gl["net"]
@@ -419,7 +419,7 @@ def _band_family_check(nh, hd):
         b, _, _ = cm.band_cells(nh, hd, pr["s"], pr["c"],
                                 grid_target=pr["grid_target"], chan_target=pr["chan_target"],
                                 rw=pr["rw"])
-        if pr.get("corner"):
+        if pr.get("diagonal_block"):
             b2, _, _ = cm.band_cells(nh, hd, pr["s"], pr["s"], rows_region=False,
                                      grid_target=pr["grid_target"],
                                      chan_target=pr["chan_target"], rw=pr["rw"])

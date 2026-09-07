@@ -142,9 +142,9 @@ pub struct FBandCfg {
     pub z_lo_bits: u32,
     pub z_hi_bits: u32,
     pub z_min: i64,
-    /// B11 stream N, lever 2: the causal corner's mask, which the grid kernel
+    /// B11 stream N, lever 2: the diagonal block's mask, which the grid kernel
     /// needs for the exp multiplicity and for nothing else.
-    pub corner: u32,
+    pub diagonal_block: u32,
     pub mutate: u32,
 }
 
@@ -271,9 +271,9 @@ pub fn wfill_mut(fam: Fam) -> u32 {
         "descend" => 4,
         "inst" => 5,
         "aoref" => 6,
-        // B11 stream N, lever 2: the two ways a corner band's fill could be
+        // B11 stream N, lever 2: the two ways a diagonal block band's fill could be
         // wrong that no earlier control reaches. `nomask` is the kernel's (a
-        // masked slot bumping the exp table); `notok` is this side's (a corner
+        // masked slot bumping the exp table); `notok` is this side's (a diagonal block
         // band building the per-token region it does not own).
         "nomask" => 7,
         "notok" => 8,
@@ -284,7 +284,7 @@ pub fn wfill_mut(fam: Fam) -> u32 {
 /// B11 stream L: the band fill's own switch, defaulting to `B7_M4_WFILL`.
 ///
 /// `B7_M4_WFILL` turns on three device generation paths at once -- the Freivalds check
-/// regions, the attnout, and every non-corner band. Stream L measured them
+/// regions, the attnout, and every non-diagonal block band. Stream L measured them
 /// apart on the sequence's own witness and they are not in the same state: the
 /// Freivalds check and attnout fills reproduce the host cell for cell, while the band fill
 /// disagrees with the host on the grid region and the proof is then rejected
@@ -302,33 +302,33 @@ pub fn band_mode() -> u32 {
 
 /// B11 stream M: which fill *this* band takes, switch and layout together.
 ///
-/// A corner band commits no per-token region and `commit_base_dev` has no
+/// A diagonal block band commits no per-token region and `commit_base_dev` has no
 /// notion of that layout, so it fills on the host whatever the switch says
 /// (`attn_trace::commit_base_any`). That override used to live inline at the
-/// one place that picked the path, and the consequence -- that a corner-bearing
+/// one place that picked the path, and the consequence -- that a diagonal-block-bearing
 /// witness therefore leaves multiplicity bumps on the host -- had to be
 /// rediscovered by whoever else needed it. `devpre::fills_dev` needs it, so the
 /// decision lives here now and both callers read the same function: this one
 /// picks the path, and `compose::generate` asks it of every band before the
 /// first fill runs.
 pub fn band_fill_mode(a: &Attn) -> u32 {
-    if a.corner { corner_mode() } else { band_mode() }
+    if a.diagonal_block { diagonal_block_mode() } else { band_mode() }
 }
 
-/// `B7_M4_WFILL_CORNER`: the corner bands' own fill switch, defaulting **off**.
+/// `B7_M4_WFILL_DIAGONAL_BLOCK`: the diagonal block bands' own fill switch, defaulting **off**.
 ///
-/// B11 stream N, lever 2. Until this stream a corner band filled on the host
+/// B11 stream N, lever 2. Until this stream a diagonal block band filled on the host
 /// whatever any switch said, because `commit_base_dev` had no notion of a
 /// layout with no per-token region and would have committed columns the AIR
 /// does not expect. It has that notion now (`commit_base_dev` takes
 /// `with_rows`, `devpre::band_dev` with it), but a path is born off and
 /// graduates on its gate: this is the switch that opens it, and the mirror
-/// runs under `B7_M4_WFILL_CORNER=2` on a corner-bearing witness.
+/// runs under `B7_M4_WFILL_DIAGONAL_BLOCK=2` on a diagonal-block-bearing witness.
 ///
 /// It falls back to `band_mode` only once it has gated -- until then, not even
-/// `B7_M4_WFILL=1` reaches the corner.
-pub fn corner_mode() -> u32 {
-    std::env::var("B7_M4_WFILL_CORNER")
+/// `B7_M4_WFILL=1` reaches the diagonal block.
+pub fn diagonal_block_mode() -> u32 {
+    std::env::var("B7_M4_WFILL_DIAGONAL_BLOCK")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0)
@@ -338,35 +338,35 @@ pub fn corner_mode() -> u32 {
 ///
 /// `B7_M4_TABDEV=1` builds `m_exp` on the card, by summing the per-band exp
 /// counters `commit_base_dev` left there. That is right exactly when *every*
-/// band's bumps are on the card -- and a corner band always fills on the host,
+/// band's bumps are on the card -- and a diagonal block band always fills on the host,
 /// because it commits no per-token region and the device fill has no notion of
-/// its layout. So on a corner-bearing witness the bumps are split across the
+/// its layout. So on a diagonal-block-bearing witness the bumps are split across the
 /// two sides and neither half alone is the column.
 ///
 /// Only the two uniform states were ever run. All bands on the host is the
 /// sequence as stream K left it; all bands on the device is a rectangle, which
-/// has no corner. The sequence's own chunks are the mixed state, and taking the
-/// device half alone there silently loses the corner bands' exp lookups -- a
+/// has no diagonal block. The sequence's own chunks are the mixed state, and taking the
+/// device half alone there silently loses the diagonal block bands' exp lookups -- a
 /// LogUp sum that does not cancel, with every other check passing.
 ///
-/// `a.zz_total` is the local signal that a corner rides with this band: it is
+/// `a.zz_total` is the local signal that a diagonal block rides with this band: it is
 /// set on the prefix half of a pair and on nothing else (`layer.rs:352`). When
 /// it is, the device band merges its counters into the host array as it does for
 /// every other table, and the host column is the one committed. `compose.rs`
-/// asks `layer.bands.iter().any(|b| b.corner)`, which is the same question
+/// asks `layer.bands.iter().any(|b| b.diagonal_block)`, which is the same question
 /// about the same layer, and the two answers have to agree or the column and
 /// its counters come from different places.
 pub fn exp_mult_on_host(a: &Attn) -> bool {
-    // B11 stream N, lever 2: `a.zz_total.is_some()` says a corner band rides
+    // B11 stream N, lever 2: `a.zz_total.is_some()` says a diagonal block band rides
     // with this one, and the reason that forced this band's counter back to the
-    // host was that the corner's own bumps were made *there*. Once the corner
+    // host was that the diagonal block's own bumps were made *there*. Once the diagonal block
     // fills on the card that reason is gone and both halves are device
-    // counters, so the condition gains the corner's mode.
+    // counters, so the condition gains the diagonal block's mode.
     //
-    // This predicate and `compose::generate`'s `host_corner` are twins and must
+    // This predicate and `compose::generate`'s `host_diagonal_block` are twins and must
     // say the same thing. Drift between them is not loud where it happens: the
     // proof is rejected later by `sums_cancel` with every other check green.
-    crate::devtab::mode() != 1 || (a.zz_total.is_some() && corner_mode() != 1)
+    crate::devtab::mode() != 1 || (a.zz_total.is_some() && diagonal_block_mode() != 1)
 }
 
 // --------------------------------------------------------------- the uploads --
@@ -516,7 +516,7 @@ fn band_dump(a: &Attn, with_out: bool) {
     let j = serde_json::json!({
         "s": sh.s, "c": sh.c, "hd": sh.hd, "insts": sh.insts,
         "log_table": a.log_table, "table_len": a.table.len(),
-        "nmax": a.nmax, "corner": a.corner, "with_out": with_out,
+        "nmax": a.nmax, "diagonal_block": a.diagonal_block, "with_out": with_out,
         "variant": format!("{:?}", a.variant),
         "off_table": a.off_table,
         "delta": a.delta,
@@ -968,15 +968,15 @@ pub struct DevBand {
 /// what the scatter-add already handles.
 /// One band's committed base columns, filled on the device.
 ///
-/// B11 stream N, lever 2 (a): `with_rows` is `!a.corner`, and it says whether
+/// B11 stream N, lever 2 (a): `with_rows` is `!a.diagonal_block`, and it says whether
 /// this band commits the **per-token region** -- the row maxima, the
-/// denominator and its low limb. A corner band does not: there is one maximum
-/// and one denominator per *token*, not per band, so the corner rides on the
-/// prefix band's. That distinction was the whole of why a corner band could
+/// denominator and its low limb. A diagonal block band does not: there is one maximum
+/// and one denominator per *token*, not per band, so the diagonal block rides on the
+/// prefix band's. That distinction was the whole of why a diagonal block band could
 /// not fill on the card. The fill had no notion of it and would have committed
 /// a per-token region the AIR does not expect there, so `commit_base_any` sent
-/// every corner to the host whatever the switch said; now the fill knows, and
-/// `devwfill::corner_mode` is what opens the path.
+/// every diagonal block to the host whatever the switch said; now the fill knows, and
+/// `devwfill::diagonal_block_mode` is what opens the path.
 pub fn commit_base_dev(
     a: &Attn,
     l: &Layouts,
@@ -1010,8 +1010,8 @@ pub fn commit_base_dev(
     band_dump(a, with_out);
 
     // B11 stream N, lever 2: `notok` is this lever's own negative control -- a
-    // corner band that builds the per-token region anyway, which is precisely
-    // what `commit_base_any` used to send every corner to the host to avoid.
+    // diagonal block band that builds the per-token region anyway, which is precisely
+    // what `commit_base_any` used to send every diagonal block to the host to avoid.
     // It has to be decided here, before the uploads, because the two arrays
     // that region reads are skipped with it.
     let with_rows = with_rows || wfill_mut(Fam::Band) == 8;
@@ -1038,19 +1038,19 @@ pub fn commit_base_dev(
     // B11 stream L: `zz_row()`, not `zz`.
     //
     // This is the whole of what b-port called the prefix bands' fill kernels
-    // "predating the corner's key discipline", and it is on this side of the
-    // link rather than in the kernel. When a corner band rides with this one the
+    // "predating the diagonal block's key discipline", and it is on this side of the
+    // link rather than in the kernel. When a diagonal block band rides with this one the
     // per-token region belongs to the *pair*, and the denominator it commits is
     // the pair's total -- `Z >= nmax` holds of the sum and of neither half,
     // because the key whose shift is zero may be in either (`layer.rs:352`).
     // `commit_base` has always read `a.zz_row()` for it; `commit_base_dev`
-    // uploaded `a.zz`, so on any corner-bearing witness the device built a
-    // denominator missing the corner's keys -- 48 of 352 columns wrong on a
+    // uploaded `a.zz`, so on any diagonal-block-bearing witness the device built a
+    // denominator missing the diagonal block's keys -- 48 of 352 columns wrong on a
     // C=4K chunk (the 3 x rw per-token columns; the 16 maxima were right), and
     // `off_table` bumps the host never makes, hence the rejection. Rectangles
-    // have no corner, `zz_row()` is `zz` there, and that is why stream G's
+    // have no diagonal block, `zz_row()` is `zz` there, and that is why stream G's
     // switch matrix and stream F's whole loop saw nothing.
-    // B11 stream N: both of these feed the per-token region alone, so a corner
+    // B11 stream N: both of these feed the per-token region alone, so a diagonal block
     // band uploads neither.
     let d_zz = with_rows.then(|| band_up("band/zz", || pack_i64(a.zz_row())));
     // only the bf16x variant reads these two, and only it pays for them
@@ -1090,7 +1090,7 @@ pub fn commit_base_dev(
         z_lo_bits: cfg.z_lo_bits,
         z_hi_bits: cfg.z_hi_bits,
         z_min: cfg.z_min as i64,
-        corner: u32::from(a.corner),
+        diagonal_block: u32::from(a.diagonal_block),
         mutate: wfill_mut(Fam::Band),
     };
 
@@ -1175,7 +1175,7 @@ pub fn commit_base_dev(
     }
 
     // ---- the per-token region ----------------------------------------------
-    // B11 stream N, lever 2 (a): absent on a corner band. `at` still gains both
+    // B11 stream N, lever 2 (a): absent on a diagonal block band. `at` still gains both
     // ends of it, so `at[3] == at[4]` there and every index after the outputs
     // keeps its meaning -- the host's `commit_base` pushes the same empty span
     // for the same reason.
@@ -1203,7 +1203,7 @@ pub fn commit_base_dev(
         (m_lo, m_hi)
     } else {
         // The two `z` range counters this region would have bumped, at their
-        // real width and all zero. A corner band makes no `z` lookups at all,
+        // real width and all zero. A diagonal block band makes no `z` lookups at all,
         // but `b65_pre_fill` sums one counter *per band* into each range
         // table's multiplicity column and asserts every one of them is the
         // table's width -- so the shape has to be there even when the content
@@ -1231,7 +1231,7 @@ pub fn commit_base_dev(
         if let Variant::IntSplit(k) = a.variant {
             add_into(&mut mult_r[ridx(k)], &m_aux.to_vec());
         }
-        // B11 stream N: a corner band has no per-token region, so it made no
+        // B11 stream N: a diagonal block band has no per-token region, so it made no
         // `z` range bumps to merge.
         if with_rows {
             add_into(&mut mult_r[ridx(cfg.z_lo_bits)], &m_lo.to_vec());

@@ -151,16 +151,16 @@ pub fn src_of(args: &[String]) -> Src {
         // mixed layout for a synthetic one.  `--layout b10` is the chain on all
         // seven, which is the shape the emit chain has to generate for B10.
         layout: arg_strs(args, "--layout", &[""])[0].clone(),
-        // B10 step 3: prove the band as the causal corner instead of the prefix
+        // B10 step 3: prove the band as the diagonal block instead of the prefix
         // rectangle.  `--ctx` must equal `--s`; the mask is `key <= token`.
-        corner: args.iter().any(|a| a == "--corner"),
+        diagonal_block: args.iter().any(|a| a == "--diagonal-block"),
         // Stream AA (E11): `--kv-boundary` also tiles the unchecked prefix into
         // blocks of S keys, which is a witness-side decision as much as a plan
         // one -- see `briefs/aa-kvbind.md`.
-        // On by default wherever the chunk has its own block (`--corner`): a
+        // On by default wherever the chunk has its own block (`--diagonal-block`): a
         // chunk without one has no keys of its own to commit, and `params_of`
         // refuses it unless the K/V boundary is skipped.
-        tile: args.iter().any(|a| a == "--corner") && !skip(args, "kv-boundary"),
+        tile: args.iter().any(|a| a == "--diagonal-block") && !skip(args, "kv-boundary"),
     }
 }
 
@@ -468,8 +468,8 @@ fn attn_probes_cmd(args: &[String]) {
         ("shift below the maximum in one instance", Corrupt::LowMax(3)),
         ("corrupted denominator in one instance", Corrupt::Denominator(7, 1)),
     ];
-    if src.corner {
-        // the corner's own control: a token that attends to a future key
+    if src.diagonal_block {
+        // the diagonal block's own control: a token that attends to a future key
         cases.push(("attends to one future key", Corrupt::Unmask(11)));
         cases.push(("attends to a second future key", Corrupt::Unmask(4242)));
     }
@@ -778,7 +778,7 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
                  statement's `log_table` instead");
         // Under `--weights-only` **every** loader knob comes off the statement,
         // not off the command line: the variant, the prefix band list, whether
-        // the dump is read with its corner and whether the prefix is tiled, the
+        // the dump is read with its diagonal block and whether the prefix is tiled, the
         // master table's size and `nmax`.  A verifier holds `Fixed`, not the
         // plan line that produced it -- and a chunk proved with `--tight-table`
         // carries a `log_table` that neither the manifest nor any flag names.
@@ -794,11 +794,11 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
                 serde_json::from_value(v.get("params").cloned().unwrap_or(v))
                     .unwrap_or_else(|e| panic!("--params {f}: not a statement's params: {e}"));
             eprintln!("expect-root: model-only load from the statement \
-(variant={} bands={:?} corner={} kv_boundary={} log_table={} nmax={})",
-                      p.variant, p.bands, p.corner, p.kv_boundary, p.log_table, p.nmax);
+(variant={} bands={:?} diagonal_block={} kv_boundary={} log_table={} nmax={})",
+                      p.variant, p.bands, p.diagonal_block, p.kv_boundary, p.log_table, p.nmax);
             (attn_witness::Variant::parse(&p.variant), p.variant.clone(), p.bands.clone(),
              attn_witness::Src { log_table: p.log_table, nmax: p.nmax,
-                                 corner: p.corner, tile: p.kv_boundary, ..src.clone() })
+                                 diagonal_block: p.diagonal_block, tile: p.kv_boundary, ..src.clone() })
         } else {
             (variant, vname, bands, src.clone())
         };
@@ -956,11 +956,11 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
     let b0 = &l.bands[0];
     let kmax = l.mats.iter().map(|m| m.kmax_blind()).max().unwrap()
         .min(bf16::KMAX_SOUND);
-    // B10 step 3: `bands` names the *prefix* bands only.  The corner rides as one
+    // B10 step 3: `bands` names the *prefix* bands only.  The diagonal block rides as one
     // more band per prefix band, with the same `insts` and head offset, and the
     // plan rebuilds them from the flag rather than from the list.
-    let n_pre = l.bands.iter().filter(|b| !b.corner).count();
-    let corner = l.bands.len() > n_pre;
+    let n_pre = l.bands.iter().filter(|b| !b.diagonal_block).count();
+    let diagonal_block = l.bands.len() > n_pre;
 
     // The sound defaults.  Each gadget is on wherever the witness can state
     // it; a witness that cannot is refused, and only the named skip gets past
@@ -976,12 +976,12 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
              be proved; extract it with --residual-stream, or pass --unsound-skip-residual-stream to \
              prove the unbound statement");
     let layer_boundary = family && !skip("layer-boundary");
-    assert!(corner || head || skip("kv-boundary"),
+    assert!(diagonal_block || head || skip("kv-boundary"),
             "compose: this chunk has no diagonal block (extracted or built without \
-             --corner), so its own keys and values are not in the statement and the K/V \
-             boundary cannot be committed; pass --corner, or --unsound-skip-kv-boundary \
+             --diagonal-block), so its own keys and values are not in the statement and the K/V \
+             boundary cannot be committed; pass --diagonal-block, or --unsound-skip-kv-boundary \
              to prove the unbound statement");
-    let kv_boundary = corner && !head && !skip("kv-boundary");
+    let kv_boundary = diagonal_block && !head && !skip("kv-boundary");
     assert!(!has_head_mat || l.head_keys.is_some() || skip("argmax"),
             "compose: the head chunk carries no key_head.u16, so the emitted token cannot \
              be bound to the logits; pass --unsound-skip-argmax to prove the head without \
@@ -998,7 +998,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
     // times `nsub` and the head band list takes every `nsub`-th entry.  Both are
     // the identity when `nsub == 1`, which is every run without the flag.
     // Block 0 (open item 1) has no prefix band at all: `nsub == 0`, `c == 0`,
-    // and the head band list is the corner bands', one per group.
+    // and the head band list is the diagonal block bands', one per group.
     let (c, bands) = if l.nsub == 0 {
         (0, l.band_sizes[n_pre..].to_vec())
     } else {
@@ -1099,7 +1099,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
     compose::Params {
         s: l.ao.s, c, hd: l.ao.hd, nh: l.ao.nh,
         bands,
-        corner,
+        diagonal_block,
         // Stream E: the head's order-key claim.  Not under `--no-glue`'s gate,
         // because a head dump has no wiring columns to switch off.
         // the argmax implies the logits claim: it is the counterparty
@@ -2119,13 +2119,13 @@ fn compose_probes_cmd(args: &[String]) {
     drop(l2);
 
     // 5b. B10 step 3: a token that attends to a key the causal mask removes.  The
-    //     corner's `sn` and the prefix's `sn` are what the per-token region's `az`
+    //     diagonal block's `sn` and the prefix's `sn` are what the per-token region's `az`
     //     is read against, and the AIR's fold drops the masked slot, so the two no
     //     longer add up to the denominator the witness claims.
-    if l.bands.iter().any(|b| b.corner) {
+    if l.bands.iter().any(|b| b.diagonal_block) {
         for (k, i) in [(0usize, 11usize), (1, 4242)] {
             let mut l2 = layer_clone(&l);
-            l2.unmask_corner(i);
+            l2.unmask_diagonal_block(i);
             let name: &'static str = if k == 0 {
                 "attends to one future key"
             } else {
@@ -2475,7 +2475,7 @@ synthetic generator (Layer::synth_residual_stream_band_bent); on a dump the band
                         "a band column the layer's matmuls did not produce accepted");
             }
             // stream NN (NN-2): and the prefix band's own copy of Q, whose
-            // counterparty is its group's corner rather than a quantize region.
+            // counterparty is its group's diagonal block rather than a quantize region.
             // The bend moves one prefix cell and the band's whole attention is
             // rebuilt around it, so the chunk is an honest attention over the
             // cache with queries the `q` matmul did not produce -- and only
@@ -2487,14 +2487,14 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
                 let mut lp = layer_of(args).0;
                 if lp.residual_stream.is_none() {
                     eprintln!("  prefix Q: SKIP -- no synthetic wiring family here");
-                } else if lp.bands.iter().all(|b| b.corner) {
+                } else if lp.bands.iter().all(|b| b.diagonal_block) {
                     eprintln!("  prefix Q: SKIP -- this shape has no prefix band");
                 } else {
                     lp.synth_residual_stream_prefix_q_bent(seed, ga, round, 41);
-                    assert!(!probe("prefix band Q: one query the corner does not carry", &lp,
+                    assert!(!probe("prefix band Q: one query the diagonal block does not carry", &lp,
                                    &Default::default(),
-                                   "the binding prefix.Q == corner.Q, per band group"),
-                            "a prefix band's queries that are not the corner's accepted");
+                                   "the binding prefix.Q == diagonal_block.Q, per band group"),
+                            "a prefix band's queries that are not the diagonal block's accepted");
                 }
             }
         }
@@ -2769,7 +2769,7 @@ fn attn_clone(a: &attn_witness::Attn) -> attn_witness::Attn {
         table: a.table.clone(), log_table: a.log_table, nmax: a.nmax, frac: a.frac,
         frac_per_inst: a.frac_per_inst.clone(), delta: a.delta.clone(),
         q_bits: a.q_bits, k_bits: a.k_bits, source: a.source.clone(),
-        off_table: a.off_table, torch_mismatch: a.torch_mismatch, corner: a.corner,
+        off_table: a.off_table, torch_mismatch: a.torch_mismatch, diagonal_block: a.diagonal_block,
         zz_total: a.zz_total.clone(),
     }
 }

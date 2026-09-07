@@ -120,9 +120,9 @@ impl Grid {
         }
         // Open item 1: a `c = 0` band (block 0 has no prefix) reaches here with
         // `groups = c * insts = 0`, slips past the guard above and divides by
-        // zero.  Block 0 is a solo corner and must never build a prefix band at
+        // zero.  Block 0 is a solo diagonal block and must never build a prefix band at
         // all; this says so rather than panicking in arithmetic.
-        assert!(groups > 0, "a c = 0 band has no key grid: block 0 is the solo                              corner and builds no prefix band (open item 1)");
+        assert!(groups > 0, "a c = 0 band has no key grid: block 0 is the solo                              diagonal block and builds no prefix band (open item 1)");
         let chunks = (rows / groups).min(cap.max(1));
         Some(Self { log_rows, rows, groups, chunks, lead: rows - groups * chunks, descending })
     }

@@ -156,7 +156,7 @@ def band_fresh(m, S, C):
 def cells_decode_item(m, n_prompt, n_gen, fixed=None):
     """One proof of one item under the v1 decode-only statement: n_gen decoded
     positions (1 for a multiple-choice item) over an UNCHECKED band of n_prompt
-    keys, plus the corner in which those positions attend to each other.  The
+    keys, plus the diagonal block in which those positions attend to each other.  The
     per-chunk shared tables are paid once per layer, per item."""
     Sn = max(n_gen, 1)
     f = m["fixed"] if fixed is None else fixed

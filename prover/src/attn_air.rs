@@ -90,15 +90,15 @@ pub const CHAN_SEL: [&str; 5] =
 pub const KEY_SEL: [&str; 8] =
     ["b6_k_nofirst", "b6_k_last", "b6_k_notzero", "b6_k_end", "b6_k_m1", "b6_k_m2",
      "b6_k_istart", "b6_k_dinv"];
-/// The *corner* grid's preprocessed columns (B10 step 3).  The same eight the
+/// The *diagonal block* grid's preprocessed columns (B10 step 3).  The same eight the
 /// prefix grid reads -- under their own ids, because the two regions are two
 /// components with two tilings -- plus `iend`, the row that completes an
-/// instance's key block.  The corner's key Horner runs in an independent
+/// instance's key block.  The diagonal block's key Horner runs in an independent
 /// challenge `r'`, so its natural per-instance weight is `r'^S`; the identity it
 /// is read against carries `am`, whose weight is the *prefix's* `r^C`.  `iend` is
 /// where the one converts to the other, at one preprocessed column and no fresh
 /// cell.
-pub const CORNER_SEL: [&str; 9] =
+pub const DIAGONAL_BLOCK_SEL: [&str; 9] =
     ["b6_x_nofirst", "b6_x_last", "b6_x_notzero", "b6_x_end", "b6_x_m1", "b6_x_m2",
      "b6_x_istart", "b6_x_dinv", "b6_x_iend"];
 /// Stream CC (E11): the grid's **inert lead row** selector -- 1 where
@@ -118,17 +118,17 @@ pub const CORNER_SEL: [&str; 9] =
 /// so the numerator fold is the one place the AIR has to be told the row is not
 /// there.
 pub const KEY_ACT: &str = "b6_k_act";
-pub const CORNER_ACT: &str = "b6_x_act";
+pub const DIAGONAL_BLOCK_ACT: &str = "b6_x_act";
 /// The `act` column's id for a band, `None` when the grid tiles exactly and the
 /// column is not committed at all.  One function, so `commit_pre`, `pre_ids`,
 /// `attn_run` and the AIR cannot disagree about whether it is there.
-pub fn act_id(tag: usize, corner: bool, lead: usize) -> Option<PreProcessedColumnId> {
-    (lead > 0).then(|| band_id(tag, if corner { CORNER_ACT } else { KEY_ACT }))
+pub fn act_id(tag: usize, diagonal_block: bool, lead: usize) -> Option<PreProcessedColumnId> {
+    (lead > 0).then(|| band_id(tag, if diagonal_block { DIAGONAL_BLOCK_ACT } else { KEY_ACT }))
 }
-/// The corner's causal mask, one preprocessed column per token slot of a row:
+/// The diagonal block's causal mask, one preprocessed column per token slot of a row:
 /// 1 where the key is in the decoded stream's future of that token.  A slot's
 /// token is a function of the row *and* the column, so the mask cannot be one
-/// column; what makes it affordable is that it lives on the corner's rows alone
+/// column; what makes it affordable is that it lives on the diagonal block's rows alone
 /// (`S` keys, not `C`), which is 4.2 M preprocessed cells a band at 8B.
 pub fn msk_id(tag: usize, i: usize) -> PreProcessedColumnId {
     id(format!("b6_x_msk{i}_band{tag}"))
@@ -178,10 +178,10 @@ pub struct Powers {
     pub mu: SecureField,
     /// the per-instance weight of the *denominator* sum `sn`.  `sn` is a plain sum
     /// over keys with an explicit multiplier, so the constant is a free choice --
-    /// and it has to be the same one on both grids, because `sn_prefix + sn_corner`
+    /// and it has to be the same one on both grids, because `sn_prefix + sn_diagonal_block`
     /// is what `az` is read against.  `r^C` of the prefix; equal to `r_c` there.
     pub sn_c: SecureField,
-    /// the corner's instance-boundary multiplier `r^C r'^{-(S-1)}`, which turns the
+    /// the diagonal block's instance-boundary multiplier `r^C r'^{-(S-1)}`, which turns the
     /// key Horner's natural `r'^S` per instance into the prefix's `r^C`.  Unused by
     /// the prefix grid, where the two already agree.
     pub kappa: SecureField,
@@ -218,45 +218,45 @@ impl Powers {
                sn_c: r_c, kappa: r }
     }
 
-    /// The corner grid's powers: built on the corner's own shape (`c = S`) and its
+    /// The diagonal block grid's powers: built on the diagonal block's own shape (`c = S`) and its
     /// own key challenge `r'`, then told the two constants it shares with the
     /// prefix -- the denominator's per-instance weight and the per-instance
     /// weight of the channel region.
     ///
     /// `mu` is deliberately *not* among them: it is read only by `RowEval`'s
-    /// step and the per-token trace loop, and a corner band has neither -- the
+    /// step and the per-token trace loop, and a diagonal block band has neither -- the
     /// pair's one per-token region is the prefix band's (B10 step 3), and the
     /// row maximum both halves shift by is *its* `am`, checked against the
-    /// corner's Q.K^T by `verify_composed`'s claim equality.  (An earlier
+    /// diagonal block's Q.K^T by `verify_composed`'s claim equality.  (An earlier
     /// version overrode `self.mu` here with a docstring claiming that override
     /// carried the shared-maximum identity; the override was dead code and the
     /// identity lives in the claim equality -- B10 review, stream B.)
-    pub fn as_corner(mut self, prefix_r_c: SecureField, s_keys: usize) -> Self {
+    pub fn as_diagonal_block(mut self, prefix_r_c: SecureField, s_keys: usize) -> Self {
         let (_, rp_span) = powers(self.r, s_keys - 1);
         self.sn_c = prefix_r_c;
         self.kappa = prefix_r_c * rp_span.inverse();
         // and the channel region's own per-instance weight: `chan` is the side the
-        // corner's Q.K^T identity is read against, and the other two terms of that
+        // diagonal block's Q.K^T identity is read against, and the other two terms of that
         // identity -- `am` (the prefix's per-token region) and `hs` (via `kappa`)
         // -- both carry `r^C`.  Its natural `r'^S` would be a third weight.
         self.r_c = prefix_r_c;
         self
     }
 
-    /// The **solo** corner's powers: block 0 of a sequence has no unchecked
-    /// prefix, so its corner is its head band group's only band and it carries
+    /// The **solo** diagonal block's powers: block 0 of a sequence has no unchecked
+    /// prefix, so its diagonal block is its head band group's only band and it carries
     /// the per-token region itself (CC deliverable 4, option A).
     ///
-    /// That is `as_corner` plus one thing.  `as_corner` deliberately drops `mu`
-    /// because a *paired* corner has no per-token region and rides on the
-    /// prefix band's; a solo corner has one and needs its own.  `Powers::new`
+    /// That is `as_diagonal_block` plus one thing.  `as_diagonal_block` deliberately drops `mu`
+    /// because a *paired* diagonal block has no per-token region and rides on the
+    /// prefix band's; a solo one has one and needs its own.  `Powers::new`
     /// already built `mu = r_c s^{-(S-rw)}` from **this** grid's `r_c`
-    /// (`r_corner^S`), so the `s` factor is recoverable as `mu / r_c` without
+    /// (`r_diagonal_block^S`), so the `s` factor is recoverable as `mu / r_c` without
     /// re-deriving `s` or `rw`, and rebasing it onto the borrowed global `r^C`
     /// gives the region the same instance weight every other region carries.
-    pub fn as_solo_corner(self, prefix_r_c: SecureField, s_keys: usize) -> Self {
+    pub fn as_solo_diagonal_block(self, prefix_r_c: SecureField, s_keys: usize) -> Self {
         let s_span_inv = self.mu * self.r_c.inverse();
-        let mut p = self.as_corner(prefix_r_c, s_keys);
+        let mut p = self.as_diagonal_block(prefix_r_c, s_keys);
         p.mu = prefix_r_c * s_span_inv;
         p
     }
@@ -357,7 +357,7 @@ pub struct ChanEval {
     /// byte-for-byte the old ones.
     pub boundary_k: Vec<crate::boundary::KvBoundary>,
     /// Stream NN: this band's own K and Q claims, in that order.  `Some` only on
-    /// a **corner** band of a chunk that carries the RoPE regions -- the corner's
+    /// a **diagonal block** band of a chunk that carries the RoPE regions -- the diagonal block's
     /// keys are this block's own tokens, which are the ones the layer's `k`
     /// matmul produced; a prefix band's keys are the cache and are bound across
     /// blocks by root equality instead (stream AA/EE).  `None` everywhere else,
@@ -366,9 +366,9 @@ pub struct ChanEval {
     pub qk_bind: Option<(BandTie, BandTie)>,
     /// Stream NN (NN-2): this band's own Q claim alone, on a **prefix** band.
     ///
-    /// A band group is a prefix band and a corner over the same heads and the
+    /// A band group is a prefix band and a diagonal block over the same heads and the
     /// same `S` queries, and each commits its own `Q` column.  NN-1 bound the
-    /// corner's and left the prefix's untied, so a prover could attend to the
+    /// diagonal block's and left the prefix's untied, so a prover could attend to the
     /// cache with queries the `q` matmul did not produce while attending to
     /// this block's own keys with queries it did.  This is the other half: the
     /// same fold under the same canonical weights, and one equality per group
@@ -472,8 +472,8 @@ impl FrameworkEval for ChanEval {
         }
 
         // ---- stream NN (NN-2): the prefix band's Q claim ----------------------
-        // The same fold as the corner's `qt` above, on this band's own layout.
-        // The corner is not on this arm and the prefix is not on that one, so
+        // The same fold as the diagonal block's `qt` above, on this band's own layout.
+        // The diagonal block is not on this arm and the prefix is not on that one, so
         // no band reads both and the mask order is the trace's.
         if let Some(t) = &self.q_bind {
             let [h_prev, h] =
@@ -527,21 +527,21 @@ pub struct KeyEval {
     /// B11 stream S, lever 1: the region's lookups are proved by the batched
     /// GKR instead of committed running-sum columns (see `ChanEval::gkr`).
     pub gkr: bool,
-    /// B10 step 3: this is the *causal corner*, the S x S grid of the decoded
+    /// B10 step 3: this is the *diagonal block*, the S x S grid of the decoded
     /// tokens against each other.  It reads its own selectors, one causal-mask
     /// column per token slot, and the instance-boundary multiplier `kappa`.  Its
     /// masked slots stay in the score fold -- Freivalds is over the whole
     /// rectangle and a masked entry is an honest score -- and leave the numerator
     /// fold and the exp lookup, which is what "the token did not attend to it"
     /// means in the AIR.
-    pub corner: bool,
+    pub diagonal_block: bool,
     /// Stream AA: the K/V boundary trees this band's committed **values** are
     /// copied into -- the V half of `ChanEval::boundary_k`, same sides, same
     /// order, so that one tree holds `[band's K][band's V]` per band in
     /// component-registration order.
     pub boundary_v: Vec<crate::boundary::KvBoundary>,
     /// Stream NN: this band's own V claim, the counterpart of `ChanEval::qk_bind`.
-    /// `Some` only on a corner band of a chunk that carries the quantize regions.
+    /// `Some` only on a diagonal block band of a chunk that carries the quantize regions.
     pub v_bind: Option<BandTie>,
 }
 
@@ -563,7 +563,7 @@ impl FrameworkEval for KeyEval {
         self.lay.g.log_rows + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let names: &[&str] = if self.corner { &CORNER_SEL } else { &KEY_SEL };
+        let names: &[&str] = if self.diagonal_block { &DIAGONAL_BLOCK_SEL } else { &KEY_SEL };
         let sel: Vec<E::F> =
             names.iter().map(|n| eval.get_preprocessed_column(band_id(self.tag, n))).collect();
         let (nofirst, last, notzero, end, m1, m2, istart) = (sel[0].clone(), sel[1].clone(),
@@ -575,12 +575,12 @@ impl FrameworkEval for KeyEval {
         // on a grid that tiles exactly, which is every shape proved before E11,
         // so the lowered constraint there is character for character the one it
         // was.
-        let act: E::F = match act_id(self.tag, self.corner, self.lay.g.lead) {
+        let act: E::F = match act_id(self.tag, self.diagonal_block, self.lay.g.lead) {
             Some(c) => eval.get_preprocessed_column(c),
             None => E::F::one(),
         };
         // the causal mask, one column per token slot; empty on the prefix grid
-        let msk: Vec<E::F> = (0..if self.corner { self.lay.q } else { 0 })
+        let msk: Vec<E::F> = (0..if self.diagonal_block { self.lay.q } else { 0 })
             .map(|i| eval.get_preprocessed_column(msk_id(self.tag, i)))
             .collect();
         let vis = |i: usize| -> E::F {
@@ -684,12 +684,12 @@ impl FrameworkEval for KeyEval {
         sn_mult += istart * self.pow.sn_c;
         eval.add_constraint(sn.clone() - sn_prev * sn_mult - zn.clone() * last);
         // r^c on each completed key (keys are laid out in descending order).  On the
-        // corner, the row that closes an instance's key block takes `kappa` instead,
+        // diagonal block, the row that closes an instance's key block takes `kappa` instead,
         // which is `r^C r'^{-(S-1)}`: the block's own weights stay geometric in `r'`
         // and the instance stride becomes the prefix's.
         let mut mult: E::EF = E::EF::from(m1);
         mult += m2.clone() * self.pow.r;
-        if self.corner {
+        if self.diagonal_block {
             mult += sel[8].clone() * (self.pow.kappa - self.pow.r);
         }
         eval.add_constraint(hs.clone() - hs_prev * mult - zs * self.key_end(&sel));
