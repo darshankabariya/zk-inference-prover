@@ -120,7 +120,7 @@ def cell_model():
         key_tile_fresh(S, C)  = 140*S*C + 24,960*C + 12,688*S
 
     The key tile half is stream DD's exact closed form
-    (`attention_grid.key_tile_model_fresh_coeffs`) -- structural, not fitted, and
+    (`attention_grid.fresh_cell_coeffs`) -- structural, not fitted, and
     reproduced to the cell on eight artifacts including composed 8B chunks at
     C != S.  It REPLACES the retired `326 M + 1.37 M*S + 72.1*S^2` fit, whose
     S^2 coefficient (72.083) ran +12.6% against the true 64 because it charged
@@ -135,7 +135,7 @@ def cell_model():
     residual is the composed chunk's own small C-growth outside the family.
     """
     S = v("spec.decoded_tokens")
-    sc, bc, bs = v("attention_grid.key_tile_model_fresh_coeffs")
+    sc, bc, bs = v("attention_grid.fresh_cell_coeffs")
     fixed_b9, per_token = v("design.prefill_chunk_remainder")
     return dict(
         L=32, S=S, sc=sc, bc=bc, bs=bs,
@@ -282,7 +282,7 @@ def main():
           f"{m['per_layer_c16384']:,.0f}   {held / m['per_layer_c16384'] - 1:+.4%}")
     print(f"   key tile alpha_fresh {m['sc'] / 32:.3f} + its C-term aliased at S=512 "
           f"{m['bc'] / (32 * m['S']):.4f} = "
-          f"{v('attention_grid.composed_slope_explained_by_key_tile_model'):.4f}")
+          f"{v('attention_grid.composed_slope_explained'):.4f}")
     print(f"   against the frozen composed slope "
           f"{v('attention_grid.composed_chunk_fresh_slope')} -- so 5.898 is NOT a per-entry price")
     print()

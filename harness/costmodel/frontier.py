@@ -71,10 +71,10 @@ KEYS = dict(
     # composite slope: a single cells-per-(head, key, token) number is a per-entry
     # cost and a per-key cost collapsed together by the accident that the
     # calibration point has S=512, and it is valid only at that S.
-    key_tile_fresh_coeffs="attention_grid.key_tile_model_fresh_coeffs",
-    key_tile_base_coeffs="attention_grid.key_tile_model_base_coeffs",
-    key_tile_alpha_fresh="attention_grid.key_tile_model_alpha_fresh",
-    key_tile_alpha_base="attention_grid.key_tile_model_alpha_base",
+    key_tile_fresh_coeffs="attention_grid.fresh_cell_coeffs",
+    key_tile_base_coeffs="attention_grid.base_cell_coeffs",
+    key_tile_alpha_fresh="attention_grid.alpha_fresh",
+    key_tile_alpha_base="attention_grid.alpha_base",
     # the superseded single slopes, kept only so the table can show what they cost
     alpha_e1="attention_grid.e1_composed_solve",
     alpha_w0_32layers="attention_grid.composed_chunk_fresh_slope_32layers",
@@ -1121,11 +1121,11 @@ def main(argv=None):
     print(f"  {'fresh':<10} {cal['coeffs_fresh'][0]:>10} {cal['coeffs_fresh'][1]:>12} "
           f"{cal['coeffs_fresh'][2]:>12}   derived symbolically here")
     print(f"  {'':<10} {cal['frozen_fresh'][0]:>10} {cal['frozen_fresh'][1]:>12} "
-          f"{cal['frozen_fresh'][2]:>12}   attention_grid.key_tile_model_fresh_coeffs")
+          f"{cal['frozen_fresh'][2]:>12}   attention_grid.fresh_cell_coeffs")
     print(f"  {'base':<10} {cal['coeffs_base'][0]:>10} {cal['coeffs_base'][1]:>12} "
           f"{cal['coeffs_base'][2]:>12}   derived symbolically here")
     print(f"  {'':<10} {cal['frozen_base'][0]:>10} {cal['frozen_base'][1]:>12} "
-          f"{cal['frozen_base'][2]:>12}   attention_grid.key_tile_model_base_coeffs")
+          f"{cal['frozen_base'][2]:>12}   attention_grid.base_cell_coeffs")
     n_exact = sum(1 for r in cal["family"] if r[3] == r[4])
     print(f"  and `family_cells.key_tiles` reproduced EXACTLY, to the cell, on "
           f"{n_exact}/{len(cal['family'])} artifacts")

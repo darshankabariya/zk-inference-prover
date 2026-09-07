@@ -87,7 +87,7 @@ REF8B_SOURCE = "experiments/b10/out/seq5/seq_c{4096,16384}_L16.json (result.poin
 #
 #   key tiles   the attention key tile family.  A CLOSED FORM read off the layout
 #           (`prover/src/attn_trace.rs` x `layout.rs`), not a fit -- see
-#           `attention_grid.key_tile_model_{base,fresh}_coeffs`.  It reproduces the
+#           `attention_grid.{base,fresh}_cell_coeffs`.  It reproduces the
 #           measured `family_cells.key_tiles` of all 32 seq5 layer chunks EXACTLY,
 #           at both contexts.  So the E4 claim on this half is exact, not
 #           bracketed.
