@@ -24,13 +24,13 @@
 //    numerator with a different *legal* table output, and a kernel that
 //    recomputed it from the table would silently repair the probe and turn a
 //    rung-3 rejection into an acceptance.
-#ifndef ZK_WITNESS_GEN_CUH
-#define ZK_WITNESS_GEN_CUH
+#ifndef ZK_ATTENTION_FREIVALDS_WITNESS_GEN_CUH
+#define ZK_ATTENTION_FREIVALDS_WITNESS_GEN_CUH
 #include "fields.cuh"
 
 #define ZK_WITNESS_GEN_NONE 0xffffffffu
 
-// The negative controls (`ZK_MUT_WITNESS_GEN`). Each is a way one of these three
+// The negative controls (`ZK_MUT_WITNESS_GEN_ATTENTION_FREIVALDS`). Each is a way one of these three
 // witness generations could plausibly be wrong, and 19.6's caution is the reason `inst` is on
 // the list: a control that cannot fire on the shape under test is a finding and
 // not a pass, and the key tile's instance split is invisible on a one-instance

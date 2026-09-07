@@ -84,7 +84,7 @@
 // `src1` of a stage-2 lane that has only one factor.
 #define ZK_ACC_ONE 0xffffffffu
 
-// `Grid`, as `zk_witness_gen.cuh` spells it.
+// `Grid`, as `zk_attention_freivalds_witness_gen.cuh` spells it.
 struct ZkAccGrid {
     unsigned log_rows;
     unsigned rows;
@@ -112,7 +112,7 @@ __device__ __forceinline__ unsigned zk_acc_perm(unsigned i, unsigned log_n) {
     return __brev(c) >> (32u - log_n);
 }
 
-// `Grid::row`, as `zk_witness_gen.cu` has it.
+// `Grid::row`, as `zk_attention_freivalds_witness_gen.cu` has it.
 __device__ __forceinline__ bool zk_acc_grid_row(const ZkAccGrid &g, unsigned j,
                                               unsigned *grp, unsigned *chunk) {
     if (j < g.lead) {

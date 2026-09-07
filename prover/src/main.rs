@@ -23,7 +23,7 @@ mod devtab;
 mod precache;
 mod scalars;
 mod devacc;
-mod dev_witness_gen;
+mod dev_attention_freivalds_witness_gen;
 mod dev_residual_stream_witness_gen;
 mod gkr_key_tile;
 mod gkrlink;

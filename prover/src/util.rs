@@ -229,7 +229,7 @@ fn m4b_default(name: &str) -> u32 {
         // staging pool, the preprocessed columns, the accumulators and the
         // residual stream's witness generation: all on.
         "ZK_DEVICE_WITNESS_GEN_DEQUANT"
-        | "ZK_DEVICE_WITNESS_GEN"
+        | "ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS"
         | "ZK_DEVICE_TABLES"
         | "ZK_DEVICE_STAGING_POOL"
         | "ZK_DEVICE_PREPROCESSED"
@@ -300,7 +300,7 @@ pub fn modes_json() -> Value {
     };
     for name in [
         "ZK_DEVICE_WITNESS_GEN_DEQUANT",
-        "ZK_DEVICE_WITNESS_GEN",
+        "ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS",
         "ZK_DEVICE_TABLES",
         "ZK_DEVICE_STAGING_POOL",
         "ZK_DEVICE_PREPROCESSED",
@@ -317,12 +317,12 @@ pub fn modes_json() -> Value {
     // `ZK_DEVICE_WITNESS_GEN_KEY_TILE` is the one mode whose fallback is another mode
     // rather than the table, so it is asked for through its own reader. This
     // is the switch's global value; which witness generation a *particular* key tile takes also
-    // depends on its layout (`dev_witness_gen::key_tile_witness_gen_mode`).
-    put("ZK_DEVICE_WITNESS_GEN_KEY_TILE", crate::dev_witness_gen::key_tile_mode());
+    // depends on its layout (`dev_attention_freivalds_witness_gen::key_tile_witness_gen_mode`).
+    put("ZK_DEVICE_WITNESS_GEN_KEY_TILE", crate::dev_attention_freivalds_witness_gen::key_tile_mode());
     // `ZK_DEVICE_WITNESS_GEN_DIAGONAL_BLOCK` has not gated and defaults off, but a run that
     // sets it must still name it here, or its JSON claims a configuration it
     // did not run.
-    put("ZK_DEVICE_WITNESS_GEN_DIAGONAL_BLOCK", crate::dev_witness_gen::diagonal_block_mode());
+    put("ZK_DEVICE_WITNESS_GEN_DIAGONAL_BLOCK", crate::dev_attention_freivalds_witness_gen::diagonal_block_mode());
     // The plain on/off switches resolve the same way and belong in the same
     // object. All of them default on and all of them predate this stream.
     for name in ["ZK_PARALLEL_GATHER", "ZK_COMMIT_BY_REFERENCE", "ZK_PARALLEL_SCAN",

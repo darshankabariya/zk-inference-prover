@@ -231,7 +231,7 @@ pub fn witness_gen_dev() -> bool {
     // B11 stream L: the key tile witness generation has its own switch now, and a host-built key tile
     // bumps the host multiplicity arrays. So "every witness generation that bumps a counter
     // ran on the device" has to read the key tile gate too -- otherwise
-    // `ZK_DEVICE_WITNESS_GEN=1 ZK_DEVICE_WITNESS_GEN_KEY_TILE=0` would claim the counters are on the
+    // `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS=1 ZK_DEVICE_WITNESS_GEN_KEY_TILE=0` would claim the counters are on the
     // device while three key tiles' worth of bumps sit on the host.
     //
     // B11 stream M: the switches are not the whole answer. A diagonal block key tile is on
@@ -240,11 +240,11 @@ pub fn witness_gen_dev() -> bool {
     // counters alone and drop the diagonal block key tiles' chan and key bumps -- accepted
     // by every other check and rejected by `sums_cancel`. Stream L had already
     // met this for the tenth counter, `m_exp`, and fixed it there alone
-    // (`dev_witness_gen::exp_mult_on_host`); this is the same predicate asked of all
+    // (`dev_attention_freivalds_witness_gen::exp_mult_on_host`); this is the same predicate asked of all
     // ten.
     crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_DEQUANT") == 1
-        && crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN") == 1
-        && crate::dev_witness_gen::key_tile_mode() == 1
+        && crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS") == 1
+        && crate::dev_attention_freivalds_witness_gen::key_tile_mode() == 1
         && !host_witness_gen()
 }
 

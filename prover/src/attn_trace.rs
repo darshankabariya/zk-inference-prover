@@ -553,13 +553,13 @@ pub fn commit_base(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
 pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
                        mult_exp: &mut [u32], mult_r: &mut [Vec<u32>],
                        off_table: &mut usize, with_out: bool, with_rows: bool)
-                       -> (Vec<Eval>, Vec<usize>, Option<crate::dev_witness_gen::DevKeyTile>) {
+                       -> (Vec<Eval>, Vec<usize>, Option<crate::dev_attention_freivalds_witness_gen::DevKeyTile>) {
     // `with_rows` postdates this milestone: it is `!a.diagonal_block`, and it says
     // whether this key tile commits the per-token component (the row maxima, the
     // denominator and its low limb).  A *diagonal block* key tile does not -- there is one
     // maximum and one denominator per token, not per key tile, so the diagonal block rides
     // on the prefix key tile's -- and `commit_base_dev` has no notion of any of
-    // this: `dev_witness_gen.rs` mentions neither `with_rows` nor `diagonal_block`.  A device
+    // this: `dev_attention_freivalds_witness_gen.rs` mentions neither `with_rows` nor `diagonal_block`.  A device
     // witness generation that always built the per-token component would commit columns the AIR
     // does not expect on a diagonal block key tile.
     //
@@ -571,11 +571,11 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     // silently wrong.
     //
     // B11 stream L: the switch read here is the key tile witness generation's own
-    // (`ZK_DEVICE_WITNESS_GEN_KEY_TILE`, defaulting to `ZK_DEVICE_WITNESS_GEN`), because the key tile witness generation
-    // and the Freivalds witness generation are not in the same state -- see `dev_witness_gen::key_tile_mode`.
+    // (`ZK_DEVICE_WITNESS_GEN_KEY_TILE`, defaulting to `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS`), because the key tile witness generation
+    // and the Freivalds witness generation are not in the same state -- see `dev_attention_freivalds_witness_gen::key_tile_mode`.
     //
     // B11 stream M: and the diagonal block override above is now that function's twin,
-    // `dev_witness_gen::key_tile_witness_gen_mode`, because `devpre::witness_gen_dev` has to reach the
+    // `dev_attention_freivalds_witness_gen::key_tile_witness_gen_mode`, because `devpre::witness_gen_dev` has to reach the
     // same answer before any witness generation has run.
     // Stream AA: `with_rows` used to *be* `!a.diagonal_block`, because the only key tile
     // that rode on another's per-token component was the diagonal block.  With
@@ -593,19 +593,19 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     debug_assert!(!(a.diagonal_block && with_rows) || a.shape.c == a.shape.s,
                   "only a diagonal block (c == S) may carry the component");
     // ... and the device witness generation still has no notion of any of this
-    // (`dev_witness_gen.rs` mentions neither `with_rows` nor `diagonal_block`), so a key tile that
+    // (`dev_attention_freivalds_witness_gen.rs` mentions neither `with_rows` nor `diagonal_block`), so a key tile that
     // does not carry the component takes the host path whatever the switch says --
     // which for a diagonal block key tile is the answer `key_tile_witness_gen_mode` already gives.
-    let m4d = if with_rows { crate::dev_witness_gen::key_tile_witness_gen_mode(a) } else { 0 };
+    let m4d = if with_rows { crate::dev_attention_freivalds_witness_gen::key_tile_witness_gen_mode(a) } else { 0 };
     if m4d == 1 {
         // B7a milestone 4 (section 3 row 1): with the tables' columns on the
         // device the exp counter has no host reader left, so it stays there --
         // unless a diagonal block key tile rides with this one, in which case it does have
-        // one. See `dev_witness_gen::exp_mult_on_host`; `compose.rs` decides which
+        // one. See `dev_attention_freivalds_witness_gen::exp_mult_on_host`; `compose.rs` decides which
         // column is committed from the same predicate, and the two must agree.
-        let dev = crate::dev_witness_gen::commit_base_dev(a, l, cfg, widths, mult_exp, mult_r,
+        let dev = crate::dev_attention_freivalds_witness_gen::commit_base_dev(a, l, cfg, widths, mult_exp, mult_r,
                                                    off_table, with_out,
-                                                   crate::dev_witness_gen::exp_mult_on_host(a),
+                                                   crate::dev_attention_freivalds_witness_gen::exp_mult_on_host(a),
                                                    with_rows);
         let at = dev.at.clone();
         return (vec![], at, Some(dev));
@@ -624,7 +624,7 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     let after_exp = mult_exp.to_vec();
     let after_r: Vec<Vec<u32>> = mult_r.to_vec();
     let after_off = *off_table;
-    let dev = crate::dev_witness_gen::commit_base_dev(a, l, cfg, widths, mult_exp, mult_r,
+    let dev = crate::dev_attention_freivalds_witness_gen::commit_base_dev(a, l, cfg, widths, mult_exp, mult_r,
                                                off_table, with_out, true, with_rows);
     let label = format!("key tile {} 2^{}", a.shape.label(), l.key.g.log_rows);
     // B11 stream L: the component offsets, printed before the comparison rather
@@ -643,15 +643,15 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
         if with_out { l.out.q } else { 0 },
         (if a.variant != Variant::Bf16x { l.rw } else { 0 }) + 3 * l.rw
     );
-    crate::dev_witness_gen::check_cols(&format!("{label} base"), &base, &dev.base);
+    crate::dev_attention_freivalds_witness_gen::check_cols(&format!("{label} base"), &base, &dev.base);
     assert_eq!(at, dev.at, "{label}: the component offsets differ");
     let delta = |x: &[u32], y: &[u32]| -> Vec<u32> {
         x.iter().zip(y).map(|(p, q)| p - q).collect()
     };
-    crate::dev_witness_gen::check_delta(&format!("{label} m_exp"), &before_exp, &after_exp,
+    crate::dev_attention_freivalds_witness_gen::check_delta(&format!("{label} m_exp"), &before_exp, &after_exp,
                                  &delta(mult_exp, &after_exp));
     for (t, w) in widths.iter().enumerate() {
-        crate::dev_witness_gen::check_delta(&format!("{label} m_r[{w}]"), &before_r[t], &after_r[t],
+        crate::dev_attention_freivalds_witness_gen::check_delta(&format!("{label} m_r[{w}]"), &before_r[t], &after_r[t],
                                      &delta(&mult_r[t], &after_r[t]));
     }
     assert_eq!(*off_table - after_off, after_off - before_off,

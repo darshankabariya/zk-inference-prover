@@ -2,7 +2,7 @@
 // device.
 #include "fields.cuh"
 #include "utils.cuh"
-#include "zk_witness_gen.cuh"
+#include "zk_attention_freivalds_witness_gen.cuh"
 
 #define ZK_WITNESS_BLOCK 128u
 // Slots per block in the y direction, as `ZK_DEQUANT_WITNESS_GEN_SLOT_TILE` is for the

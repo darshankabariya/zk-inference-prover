@@ -54,7 +54,7 @@ add_library(
         zk_dequant_witness_gen.cu
         # end B7a m4c
         # B7a m4d: the Freivalds check, attnout and key tile witness generation kernels
-        zk_witness_gen.cu
+        zk_attention_freivalds_witness_gen.cu
         zk_residual_stream_witness_gen.cu
         # end B7a m4d
         # B7a m4f: the shared tables' witness-generation kernel

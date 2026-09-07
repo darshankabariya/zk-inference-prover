@@ -121,7 +121,7 @@ pub struct KeyTileAir<'a> {
     pub chan: &'a crate::attn_air::ChanEval,
     pub key: &'a crate::attn_air::KeyEval,
     pub row: &'a crate::attn_air::RowEval,
-    pub dev: Option<&'a crate::dev_witness_gen::DevKeyTile>,
+    pub dev: Option<&'a crate::dev_attention_freivalds_witness_gen::DevKeyTile>,
     /// B7a milestone 4 (section 3 row 1): this key tile's selector columns and the
     /// flags they came from. `Some` whenever `dev` is, because the accumulators
     /// read the flags.

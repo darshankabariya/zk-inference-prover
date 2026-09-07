@@ -4064,7 +4064,7 @@ pub struct Gen {
     pub plan: Plan,
     pub tables: Tables,
     pub key_tile_committed: Vec<Committed>,
-    pub key_tile_dev: Vec<Option<crate::dev_witness_gen::DevKeyTile>>,
+    pub key_tile_dev: Vec<Option<crate::dev_attention_freivalds_witness_gen::DevKeyTile>>,
     pub key_tile_pre: Vec<Option<crate::devpre::DevPreKeyTile>>,
     pub aor: crate::layer::AoComponent,
     pub mat_components: Vec<crate::layer::MatComponent>,
@@ -4150,7 +4150,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // B7a milestone 4 (section 3 row 1): the key tile columns, when they are on the
     // device. Parallel to `key_tile_committed` because `Committed` belongs to the
     // standalone path too and has no business knowing about a backend.
-    let mut key_tile_dev: Vec<Option<crate::dev_witness_gen::DevKeyTile>> = vec![];
+    let mut key_tile_dev: Vec<Option<crate::dev_attention_freivalds_witness_gen::DevKeyTile>> = vec![];
     let m4_t = std::time::Instant::now();
     // B11 stream M: before the first witness generation, because the witness generations read the answer.
     //
@@ -4162,7 +4162,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     //
     //  * a **diagonal block key tile**, which generates its witness on the host whatever
     //    `ZK_DEVICE_WITNESS_GEN_KEY_TILE` says because the device witness generation has no notion of its
-    //    layout (`dev_witness_gen::key_tile_witness_gen_mode`, the one place that decision
+    //    layout (`dev_attention_freivalds_witness_gen::key_tile_witness_gen_mode`, the one place that decision
     //    lives);
     //  * the **argmax component**, which has no device witness generation at all and whose range
     //    lookups go on the layer's 16-bit table -- the block below takes
@@ -4173,7 +4173,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // the kernel sums the device counters and the host half is simply dropped,
     // and the proof is rejected by `sums_cancel` with every other check green.
     crate::devpre::note_host_witness_gen(
-        layer.key_tiles.iter().any(|a| crate::dev_witness_gen::key_tile_witness_gen_mode(a) != 1)
+        layer.key_tiles.iter().any(|a| crate::dev_attention_freivalds_witness_gen::key_tile_witness_gen_mode(a) != 1)
             // stream AA: a key tile that does not carry the per-token component witness generations
             // on the host too (`commit_base_any`), and `key_tile_witness_gen_mode` has no
             // way to know that -- it is told the `Attn`, not the plan
@@ -4190,7 +4190,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // sets its own mode to 0 because the device witness generation has no `corrupt`
             // path -- so its counters are the host's and the shared
             // multiplicity columns have to be as well.  Without this the
-            // defaults cuda regime stops at "ZK_DEVICE_WITNESS_GEN=1 but the attnout is
+            // defaults cuda regime stops at "ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS=1 but the attnout is
             // host-built" and no attnout control can be run on the card.
             || tamper.ao_clamp.is_some() || tamper.ao_den.is_some()
             || tamper.ao_jo.is_some() || tamper.ao_num.is_some()
@@ -4956,7 +4956,7 @@ different rotation", inv.len(), 2 * hd * p.s);
     //
     // B11 stream L: and only where *every* key tile's are. A diagonal block key tile witness generations on
     // the host, so on a diagonal-block-bearing witness the bumps are split and the
-    // device half alone is not the column -- see `dev_witness_gen::exp_mult_on_host`,
+    // device half alone is not the column -- see `dev_attention_freivalds_witness_gen::exp_mult_on_host`,
     // which is the same predicate `commit_base_dev` was given, asked here of the
     // whole layer. With a diagonal block present the device key tiles merged their counters
     // into `tables.m_exp`, so the host column is complete and the counter list
@@ -4964,10 +4964,10 @@ different rotation", inv.len(), 2 * hd * p.s);
     // B11 stream N, lever 2: this asked "is there a diagonal block key tile?" because a
     // diagonal block key tile's witness generation was always on the host. Now it asks the question it
     // always meant -- "is any key tile's generate its witness on the host?" -- which is
-    // `dev_witness_gen::exp_mult_on_host`'s twin read over the whole layer, and the
+    // `dev_attention_freivalds_witness_gen::exp_mult_on_host`'s twin read over the whole layer, and the
     // two have to move together or `sums_cancel` rejects with everything else
     // green.
-    let host_diagonal_block = layer.key_tiles.iter().any(|b| crate::dev_witness_gen::key_tile_witness_gen_mode(b) != 1);
+    let host_diagonal_block = layer.key_tiles.iter().any(|b| crate::dev_attention_freivalds_witness_gen::key_tile_witness_gen_mode(b) != 1);
     let dev_counters: Vec<&stwo::stwo_cuda::base_field_vec::Uint32Vec> = if host_diagonal_block {
         vec![]
     } else {
@@ -5039,10 +5039,10 @@ different rotation", inv.len(), 2 * hd * p.s);
             pre_counters[r8].push(&d.m_r8);
         }
         for r in &freivalds_components {
-            let d = r.dev.as_ref().expect("ZK_DEVICE_WITNESS_GEN=1 but a Freivalds group is host-built");
+            let d = r.dev.as_ref().expect("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS=1 but a Freivalds group is host-built");
             pre_counters[r8].push(&d.m_r8);
         }
-        let d = aor.dev.as_ref().expect("ZK_DEVICE_WITNESS_GEN=1 but the attnout is host-built");
+        let d = aor.dev.as_ref().expect("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS=1 but the attnout is host-built");
         pre_counters[3].push(&d.m_qnz);
         pre_counters[ri(p.ao_rem_bits)].push(&d.m_rem);
         // stream JJ (E11): the accumulator window's two limb tables.  Every
@@ -5060,7 +5060,7 @@ different rotation", inv.len(), 2 * hd * p.s);
             // reach the table through the patch rows -- no device counter to sum.
             let Some(d) = key_tile_dev[b].as_ref() else {
                 assert!(a.diagonal_block || !plan.rows_key_tile[b],
-                        "ZK_DEVICE_WITNESS_GEN=1 but a key_tile that carries the per-token component is \
+                        "ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS=1 but a key_tile that carries the per-token component is \
                          host-built");
                 continue;
             };

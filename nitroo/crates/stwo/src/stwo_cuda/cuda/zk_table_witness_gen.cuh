@@ -25,7 +25,7 @@
 #define ZK_TABLE_WITNESS_GEN_CUH
 #include "fields.cuh"
 
-// `Variant`, as `zk_witness_gen.cuh` numbers it.
+// `Variant`, as `zk_attention_freivalds_witness_gen.cuh` numbers it.
 #define ZK_TABLE_VAR_BF16X 0u
 #define ZK_TABLE_VAR_INTEXP 1u
 #define ZK_TABLE_VAR_INTSPLIT 2u

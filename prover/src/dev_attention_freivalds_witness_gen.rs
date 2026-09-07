@@ -1,6 +1,19 @@
 //! B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and key tile witness generations, on the
 //! device.
 //!
+//! Three modules generate witnesses on the device, one per group of components,
+//! each behind its own three-value switch (0 host, 1 device, 2 both and compare;
+//! every default is 1 on the CUDA backend and the switches exist for controls):
+//!
+//! | module | components | switch |
+//! |---|---|---|
+//! | this one | the Freivalds checks of the weight matmuls, the attention output, the key tiles | `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS` (the key tiles also under `ZK_DEVICE_WITNESS_GEN_KEY_TILE`) |
+//! | `dev_dequant_witness_gen` | the dequantization components | `ZK_DEVICE_WITNESS_GEN_DEQUANT` |
+//! | `dev_residual_stream_witness_gen` | the residual stream | `ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM` |
+//!
+//! The negative-test switches that corrupt a generated witness are the same
+//! three names under `ZK_MUT_WITNESS_GEN_*`.
+//!
 //! 20.6's row 1, and 20.1's design three more times. What it moves, per family:
 //!
 //! | | host today | here |
@@ -24,7 +37,7 @@
 //! silently repair `Corrupt::Numerator`, turning a rung-3 rejection into an
 //! acceptance. So `num` is uploaded, narrowed to u16 and checked.
 //!
-//! `ZK_DEVICE_WITNESS_GEN` says which path runs, on the same three-value pattern
+//! `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS` says which path runs, on the same three-value pattern
 //! `ZK_DEVICE_WITNESS_GEN_DEQUANT` uses: 0 the host witness generations, 1 the device witness generations, 2 both with every
 //! cell asserted equal.
 
@@ -39,7 +52,7 @@ use crate::layer::{AoLayout, AttnOut, FreivaldsLayout, Layer, Tables};
 
 // ---------------------------------------------------------------- the FFI shapes --
 
-/// Mirrors `ZkGrid` in `zk_witness_gen.cuh`, field for field.
+/// Mirrors `ZkGrid` in `zk_attention_freivalds_witness_gen.cuh`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FGrid {
@@ -240,17 +253,17 @@ impl Fam {
     }
 }
 
-/// `ZK_MUT_WITNESS_GEN`: one deliberate defect in the device witness generations, so mode 2's
+/// `ZK_MUT_WITNESS_GEN_ATTENTION_FREIVALDS`: one deliberate defect in the device witness generations, so mode 2's
 /// check has negative controls. The names are the kernel's.
 ///
 /// **The `:family` suffix matters, and 19.6 is why.** The key tiles are checked
 /// before the attnout and the Freivalds checks, so an unscoped mutation always panics at
 /// the *key tiles* and the run says nothing about whether the other two families'
-/// checks would have caught the same defect. `ZK_MUT_WITNESS_GEN=chan:freivalds` aims it
+/// checks would have caught the same defect. `ZK_MUT_WITNESS_GEN_ATTENTION_FREIVALDS=chan:freivalds` aims it
 /// at one family, so each check is shown to bite on its own rather than
 /// inheriting the key tiles' evidence.
 pub fn witness_gen_mut(fam: Fam) -> u32 {
-    let raw = std::env::var("ZK_MUT_WITNESS_GEN").ok();
+    let raw = std::env::var("ZK_MUT_WITNESS_GEN_ATTENTION_FREIVALDS").ok();
     let raw = raw.as_deref().unwrap_or("");
     let (name, want) = match raw.split_once(':') {
         Some((n, f)) => (n, Some(f)),
@@ -258,7 +271,7 @@ pub fn witness_gen_mut(fam: Fam) -> u32 {
     };
     if let Some(f) = want {
         assert!(["freivalds", "ao", "key_tile"].contains(&f),
-                "unknown ZK_MUT_WITNESS_GEN family {f:?}");
+                "unknown ZK_MUT_WITNESS_GEN_ATTENTION_FREIVALDS family {f:?}");
         if f != fam.name() {
             return 0;
         }
@@ -277,26 +290,26 @@ pub fn witness_gen_mut(fam: Fam) -> u32 {
         // key tile building the per-token component it does not own).
         "nomask" => 7,
         "notok" => 8,
-        other => panic!("unknown ZK_MUT_WITNESS_GEN {other:?}"),
+        other => panic!("unknown ZK_MUT_WITNESS_GEN_ATTENTION_FREIVALDS {other:?}"),
     }
 }
 
-/// B11 stream L: the key tile witness generation's own switch, defaulting to `ZK_DEVICE_WITNESS_GEN`.
+/// B11 stream L: the key tile witness generation's own switch, defaulting to `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS`.
 ///
-/// `ZK_DEVICE_WITNESS_GEN` turns on three device generation paths at once -- the Freivalds check
+/// `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS` turns on three device generation paths at once -- the Freivalds check
 /// components, the attnout, and every non-diagonal block key tile. Stream L measured them
 /// apart on the sequence's own witness and they are not in the same state: the
 /// Freivalds check and attnout witness generations reproduce the host cell for cell, while the key tile witness generation
 /// disagrees with the host on the grid component and the proof is then rejected
 /// (`off_table` bumps that the host never makes). One switch cannot express
 /// that, so the key tile gate becomes its own three-value variable which falls back
-/// to `ZK_DEVICE_WITNESS_GEN` when it is not set. `ZK_DEVICE_WITNESS_GEN=1 ZK_DEVICE_WITNESS_GEN_KEY_TILE=0` is
+/// to `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS` when it is not set. `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS=1 ZK_DEVICE_WITNESS_GEN_KEY_TILE=0` is
 /// the configuration that takes the Freivalds checks' win and leaves the key tiles on the host
 /// until the witness generation is fixed.
 pub fn key_tile_mode() -> u32 {
     match std::env::var("ZK_DEVICE_WITNESS_GEN_KEY_TILE") {
         Ok(v) => v.parse().unwrap_or(0),
-        Err(_) => crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN"),
+        Err(_) => crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS"),
     }
 }
 
@@ -326,7 +339,7 @@ pub fn key_tile_witness_gen_mode(a: &Attn) -> u32 {
 /// runs under `ZK_DEVICE_WITNESS_GEN_DIAGONAL_BLOCK=2` on a diagonal-block-bearing witness.
 ///
 /// It falls back to `key_tile_mode` only once it has gated -- until then, not even
-/// `ZK_DEVICE_WITNESS_GEN=1` reaches the diagonal block.
+/// `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS=1` reaches the diagonal block.
 pub fn diagonal_block_mode() -> u32 {
     std::env::var("ZK_DEVICE_WITNESS_GEN_DIAGONAL_BLOCK")
         .ok()
@@ -804,7 +817,7 @@ pub struct DevAo {
     pub m_acc_hi: Uint32Vec,
     pub ref_bad: usize,
     pub q_out: Vec<i64>,
-    /// the f64 reference's own answer per (coset row, slot), for `ZK_DEVICE_WITNESS_GEN=2`
+    /// the f64 reference's own answer per (coset row, slot), for `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS=2`
     pub want: Option<Vec<u32>>,
 }
 
@@ -976,7 +989,7 @@ pub struct DevKeyTile {
 /// not generate its witness on the card. The witness generation had no notion of it and would have committed
 /// a per-token component the AIR does not expect there, so `commit_base_any` sent
 /// every diagonal block to the host whatever the switch said; now the witness generation knows, and
-/// `dev_witness_gen::diagonal_block_mode` is what opens the path.
+/// `dev_attention_freivalds_witness_gen::diagonal_block_mode` is what opens the path.
 pub fn commit_base_dev(
     a: &Attn,
     l: &Layouts,

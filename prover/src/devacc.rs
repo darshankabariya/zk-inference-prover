@@ -486,7 +486,7 @@ pub fn place(tag: &str, got: DevAccCols, host: Option<(Vec<Eval>, Vec<SecureFiel
 /// point of checking here rather than against a proof digest is that the panic
 /// says which column and which cell.
 pub fn check(tag: &str, host: &[Eval], want: &[SecureField], got: &DevAccCols) {
-    crate::dev_witness_gen::check_cols(tag, host, &got.cols);
+    crate::dev_attention_freivalds_witness_gen::check_cols(tag, host, &got.cols);
     assert_eq!(want.len(), got.claims.len(), "{tag}: claim count");
     for (i, (a, b)) in want.iter().zip(&got.claims).enumerate() {
         assert_eq!(a, b, "{tag}: claim {i} differs: host {a:?}, device {b:?}");
@@ -662,7 +662,7 @@ pub fn tok(base: &[BaseFieldVec], at: &[usize], log_row: u32, rw: usize, a: &Att
 /// `v`, then `us[m]` and `accs[m]` per matmul, in the order the host commits
 /// them. The activations are the committed side and the weights the
 /// preprocessed one, both already on the device from 21's Freivalds witness generation.
-pub fn freivalds(dev: &crate::dev_witness_gen::DevFreivalds, lay: &crate::layer::FreivaldsLayout,
+pub fn freivalds(dev: &crate::dev_attention_freivalds_witness_gen::DevFreivalds, lay: &crate::layer::FreivaldsLayout,
                 n_mats: usize, rv: SecureField, s_ch: SecureField) -> DevAccCols {
     let t = std::time::Instant::now();
     let mutate = accmut(Comp::Freivalds);
@@ -754,7 +754,7 @@ pub fn deq(dev: &crate::dev_dequant_witness_gen::DevDequantWitnessGen, lay: &cra
 /// `a = 0` at every row comes out of the scan holding itself, so stage 2 reads
 /// it exactly like a scanned one and there is no second kind of source.
 #[allow(clippy::too_many_arguments)]
-pub fn ao(dev: &crate::dev_witness_gen::DevAo, lay: &crate::layer::AoLayout, nh: usize,
+pub fn ao(dev: &crate::dev_attention_freivalds_witness_gen::DevAo, lay: &crate::layer::AoLayout, nh: usize,
           s: usize, rv: SecureField, s_ch: SecureField, mu_out: SecureField,
           mu_den: SecureField) -> DevAccCols {
     let t = std::time::Instant::now();
@@ -763,7 +763,7 @@ pub fn ao(dev: &crate::dev_witness_gen::DevAo, lay: &crate::layer::AoLayout, nh:
     // stream JJ (E11): the base layout is `2 + 9 per_row` -- `den`, `joff`,
     // then `acc, sg, qm, nz2, denp, d, num, pj, alo` per slot -- and this fold
     // reads `den` and each slot's `acc`.  It was `1 + 6 per_row`; the two must
-    // move together (`layer::ao_component`, `dev_witness_gen::ao_component_dev`,
+    // move together (`layer::ao_component`, `dev_attention_freivalds_witness_gen::ao_component_dev`,
     // `gkrlink`'s `c0`).
     // stream TT (E11), log row 73: the magnitude form's layout is `2 + 10 pr`,
     // but it never reaches here -- `ao_component` fills it on the host on both

@@ -4062,11 +4062,11 @@ fn mat_logup(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
 
 pub struct AoComponent {
     pub lay: AoLayout,
-    /// as `FreivaldsComponent`'s: the mirror under `ZK_DEVICE_WITNESS_GEN=1`
+    /// as `FreivaldsComponent`'s: the mirror under `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS=1`
     pub pre: Vec<Eval>,
     pub base: Vec<Eval>,
     /// B7a milestone 4 (section 3 row 1): the same columns, born on the device.
-    pub dev: Option<crate::dev_witness_gen::DevAo>,
+    pub dev: Option<crate::dev_attention_freivalds_witness_gen::DevAo>,
     pub ref_bad: usize,
     /// the committed int8 outputs, for cross-checks
     pub q_out: Vec<i64>,
@@ -4151,7 +4151,7 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
                  || acc_mag || denp2 {
         0
     } else {
-        crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN")
+        crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS")
     };
     assert!(m4d == 0 || corrupt.is_none(),
             "attnout: the device witness generation has no `corrupt` path");
@@ -4242,19 +4242,19 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
         j
     });
     if m4d == 1 {
-        let dev = crate::dev_witness_gen::ao_component_dev(ao, &lay, q_bits, rem_bits, acc_bits,
+        let dev = crate::dev_attention_freivalds_witness_gen::ao_component_dev(ao, &lay, q_bits, rem_bits, acc_bits,
                                                  jv_min, jo_max, tables, false);
         let (ref_bad, q_out) = (dev.ref_bad, dev.q_out.clone());
         return AoComponent { lay, pre: vec![], base: vec![], dev: Some(dev), ref_bad, q_out,
                           n: ao.nh * ao.s * ao.hd, rem_bits, q_bits,
                           acc_lo_bits, acc_hi_bits, acc_mag, denp2 };
     }
-    // `ZK_DEVICE_WITNESS_GEN=2` builds this component twice -- host here, device below --
+    // `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS=2` builds this component twice -- host here, device below --
     // and the device call bumps the same counters a second time, so every
     // counter this witness generation touches has to be snapshotted before, compared as a
     // delta, and restored after.  Stream JJ (E11) added three: the two
     // accumulator limb tables and `m_epow` (whose bumps are a host loop on
-    // *both* sides, `dev_witness_gen::ao_component_dev`).  A counter left out of this
+    // *both* sides, `dev_attention_freivalds_witness_gen::ao_component_dev`).  A counter left out of this
     // tuple is counted twice and the honest proof is then rejected with
     // `sums_cancel: false` -- which is what it did on the H200's reference
     // chunk, and what no desk shape shows, because the desk never runs mode 2.
@@ -4465,23 +4465,23 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
     if m4d == 2 {
         let after = m4d_snap(tables);
         let before = m4d_before.unwrap();
-        let dev = crate::dev_witness_gen::ao_component_dev(ao, &lay, q_bits, rem_bits, acc_bits,
+        let dev = crate::dev_attention_freivalds_witness_gen::ao_component_dev(ao, &lay, q_bits, rem_bits, acc_bits,
                                                  jv_min, jo_max, tables, true);
-        crate::dev_witness_gen::check_cols("attnout base", &base, &dev.base);
-        crate::dev_witness_gen::check_cols("attnout pre", &pre, &dev.pre);
+        crate::dev_attention_freivalds_witness_gen::check_cols("attnout base", &base, &dev.base);
+        crate::dev_attention_freivalds_witness_gen::check_cols("attnout pre", &pre, &dev.pre);
         let ri = tables.ridx(rem_bits);
         let (rlo, rhi) = (tables.ridx(acc_lo_bits), tables.ridx(acc_hi_bits));
-        crate::dev_witness_gen::check_delta("attnout m_qnz", &before.0, &after.0,
+        crate::dev_attention_freivalds_witness_gen::check_delta("attnout m_qnz", &before.0, &after.0,
                                      &sub_slice(&tables.m_qnz, &after.0));
-        crate::dev_witness_gen::check_delta("attnout m_rem", &before.1, &after.1,
+        crate::dev_attention_freivalds_witness_gen::check_delta("attnout m_rem", &before.1, &after.1,
                                      &sub_slice(&tables.m_r[ri], &after.1));
         // stream JJ (E11): the accumulator window's two limbs, and the `EPOW`
         // window, whose column is a host loop on both sides
-        crate::dev_witness_gen::check_delta("attnout m_acc_lo", &before.2, &after.2,
+        crate::dev_attention_freivalds_witness_gen::check_delta("attnout m_acc_lo", &before.2, &after.2,
                                      &sub_slice(&tables.m_r[rlo], &after.2));
-        crate::dev_witness_gen::check_delta("attnout m_acc_hi", &before.3, &after.3,
+        crate::dev_attention_freivalds_witness_gen::check_delta("attnout m_acc_hi", &before.3, &after.3,
                                      &sub_slice(&tables.m_r[rhi], &after.3));
-        crate::dev_witness_gen::check_delta("attnout m_epow", &before.4, &after.4,
+        crate::dev_attention_freivalds_witness_gen::check_delta("attnout m_epow", &before.4, &after.4,
                                      &sub_slice(&tables.m_epow, &after.4));
         assert_eq!(tables.off_table - after.5, after.5 - before.5,
                    "attnout: off-table bumps differ");
@@ -4746,14 +4746,14 @@ pub struct FreivaldsComponent {
     /// Stream Z: the activation cells' range width (8, or 12 for the widened
     /// attention output's group).  The offset is `2^(act_bits - 1)`.
     pub act_bits: u32,
-    /// Under `ZK_DEVICE_WITNESS_GEN=1` these are the *mirror* -- the device columns, back
+    /// Under `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS=1` these are the *mirror* -- the device columns, back
     /// on the host, because `freivalds_interaction` still reads them there. The
     /// commitment takes `dev`, so they never go back up.
     pub pre: Vec<Eval>,
     pub base: Vec<Eval>,
     pub n_weights: usize,
     /// B7a milestone 4 (section 3 row 1): the same columns, born on the device.
-    pub dev: Option<crate::dev_witness_gen::DevFreivalds>,
+    pub dev: Option<crate::dev_attention_freivalds_witness_gen::DevFreivalds>,
 }
 
 impl FreivaldsComponent {
@@ -4795,11 +4795,11 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
     // table in its kernel, so a wide group takes the host witness generation whatever the
     // switch says -- the diagonal block key tiles' pattern, and `devpre::note_host_witness_gen`
     // is told in `generate`.
-    let m4d = if act_bits == 8 { crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN") } else { 0 };
+    let m4d = if act_bits == 8 { crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS") } else { 0 };
     assert!(m4d == 0 || corrupt_qx.is_none(),
             "{name}: the device Freivalds witness generation has no `corrupt_qx` path");
     if m4d == 1 {
-        let dev = crate::dev_witness_gen::freivalds_component_dev(layer, mat_idx, &lay, tables);
+        let dev = crate::dev_attention_freivalds_witness_gen::freivalds_component_dev(layer, mat_idx, &lay, tables);
         // B7a milestone 4 (section 3 row 1): no mirror. `freivalds_interaction` reads
         // the device columns now, and nothing else reads a device component's host
         // columns -- `base_cells` counts them off `dev`.
@@ -4871,11 +4871,11 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
         // the check with teeth, before any column has changed hands
         let after = m4d_snap(tables);
         let before = m4d_before.unwrap();
-        let dev = crate::dev_witness_gen::freivalds_component_dev(layer, mat_idx, &lay, tables);
-        crate::dev_witness_gen::check_cols(&format!("freivalds {name} base"), &base, &dev.base);
-        crate::dev_witness_gen::check_cols(&format!("freivalds {name} pre"), &pre, &dev.pre);
+        let dev = crate::dev_attention_freivalds_witness_gen::freivalds_component_dev(layer, mat_idx, &lay, tables);
+        crate::dev_attention_freivalds_witness_gen::check_cols(&format!("freivalds {name} base"), &base, &dev.base);
+        crate::dev_attention_freivalds_witness_gen::check_cols(&format!("freivalds {name} pre"), &pre, &dev.pre);
         let r8 = tables.ridx(8);
-        crate::dev_witness_gen::check_delta(&format!("freivalds {name} m_r8"), &before.0, &after.0,
+        crate::dev_attention_freivalds_witness_gen::check_delta(&format!("freivalds {name} m_r8"), &before.0, &after.0,
                                      &sub_slice(&tables.m_r[r8], &after.0));
         assert_eq!(tables.off_table - after.1, after.1 - before.1,
                    "freivalds {name}: off-table bumps differ");
