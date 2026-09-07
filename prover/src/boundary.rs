@@ -1224,11 +1224,17 @@ pub fn grid_cmd(args: &[String]) {
         }
         let block = tagged_block.or(fixed.block).unwrap_or(unchecked_block);
         let is_head = fixed.params.prove_argmax;
+        // The row keeps the three answers to which block this chunk sits on
+        // apart: `block_tagged` is the plan's tag, `block_unchecked` what the
+        // statement says of itself, `block_from_prefix` what the statement's
+        // own `c` and `s` imply.  A reader of the grid trusts `block`, the
+        // cell the chunk was placed on; a disagreement between the three is
+        // already a line in `failures`.
         chunk_rows.push(json!({
             "tag": tag,
             "block": block,
             "block_tagged": tagged_block,
-            "block_unchecked": unchecked_block,
+            "block_from_prefix": unchecked_block,
             "block_tag_ok": block == unchecked_block,
             "layer": layer,
             "layer_unchecked": fixed.layer,
