@@ -5,16 +5,43 @@ description = "Witness generation, quality evaluation and the cost model for the
 requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.5.2",
-    "torch>=2.13.0",
     "transformers>=5.15.0",
 ]
 
+# torch comes from one of two indexes.  The `cpu` group is the default, so
+# `uv sync` is the CPU build everywhere: CI, the container, the selftest.  A
+# CUDA host selects the other build with `--no-group cpu --group cuda`; the
+# two groups conflict, so exactly one torch is ever installed.
+[dependency-groups]
+cpu = ["torch>=2.13.0"]
+cuda = ["torch>=2.13.0; sys_platform == 'linux'"]
+
+[tool.uv]
+default-groups = ["cpu"]
+# The CUDA build's own dependencies (the cuda-* and nvidia-* runtime wheels) are
+# on PyPI at versions the CPU index does not carry, so an index that has no
+# compatible version falls through to the next one.  Every index below is a
+# PyTorch index or PyPI; the CPU resolution is unaffected, it matches on the
+# first index as before.
+index-strategy = "unsafe-first-match"
+conflicts = [[{ group = "cpu" }, { group = "cuda" }]]
+
 [tool.uv.sources]
-torch = { index = "pytorch-cpu" }
+torch = [
+    { index = "pytorch-cpu", group = "cpu" },
+    { index = "pytorch-cu129", group = "cuda" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+
+# CUDA 12.9 wheels, the toolkit the recorded digests were built with.  Only
+# torch is taken from here, never anything else.
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
 
 [build-system]
 requires = ["setuptools>=75"]

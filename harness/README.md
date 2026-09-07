@@ -16,6 +16,21 @@ Scripts that read measured numbers take `--constants PATH` (a zk-results
 Nothing measured lives in this repository. `witness/text.txt` is the fixed
 evaluation corpus (Pride and Prejudice, Project Gutenberg #1342).
 
+## torch on a GPU host
+
+`uv sync` installs the CPU build of torch. That is the default everywhere: the
+container, CI and the selftest. A host with a CUDA 12.9 driver installs the
+CUDA build instead, from a second index:
+
+    uv sync --frozen --no-group cpu --group cuda
+    uv run --no-group cpu --group cuda python -m harness.witness.extract ...
+
+The two groups conflict, so exactly one build of torch is installed at a time,
+and every `uv run` that must reach the card repeats the two flags: without them
+uv syncs the environment back to the CPU build. `ZK_DEVICE=cuda` needs the CUDA
+build; on the CPU build torch raises `Torch not compiled with CUDA enabled`.
+The lockfile pins both builds, so neither `uv sync` resolves anything.
+
 ## The vLLM baseline's environment
 
 `eval/baseline` measures the unproved decode baseline in two backends. The `hf`
