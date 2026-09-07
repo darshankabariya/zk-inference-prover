@@ -1,4 +1,6 @@
 /target/
+# written beside the sources by a push that carries no .git; read by prover/build.rs
+/.source-commit
 nitroo/target/
 nitroo/crates/*/target/
 harness/.venv/

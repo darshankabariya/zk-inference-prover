@@ -1246,6 +1246,9 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
         _ => (None, 0, json!({"prove_error": out.prove_error})),
     };
     let accepts = verdict.as_ref().map(|v| v.accepts()).unwrap_or(false);
+    if !proof_sha256.is_empty() {
+        crate::util::prov_note_proof(&proof_sha256, Value::Null);
+    }
     let j = json!({
         "accepts": accepts,
         "verdict": verify_json,

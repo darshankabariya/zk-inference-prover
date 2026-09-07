@@ -404,22 +404,39 @@ pub fn mem_total_bytes() -> u64 {
 /// constant names its card and until this no artifact recorded it -- the two
 /// boxes were separable only by host RAM and witness path.  Asked once per
 /// process; `emit` runs per chunk in the loop.
-fn gpu_name() -> Option<String> {
-    static GPU: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    GPU.get_or_init(|| {
-        let out = std::process::Command::new("nvidia-smi")
-            .args(["--query-gpu=name,memory.total", "--format=csv,noheader"])
-            .output()
-            .ok()?;
-        let s = String::from_utf8_lossy(&out.stdout);
-        let first = s.lines().next()?.trim();
-        (!first.is_empty()).then(|| first.to_string())
+/// What `nvidia-smi` reports, asked once: the first device's name and memory,
+/// the driver version, and the CUDA version the driver supports.  `None` for
+/// each when there is no `nvidia-smi` or it answers nothing, which is the
+/// case on a machine without a device.
+fn nvidia_smi() -> &'static (Option<String>, Option<String>, Option<String>) {
+    static SMI: std::sync::OnceLock<(Option<String>, Option<String>, Option<String>)> =
+        std::sync::OnceLock::new();
+    SMI.get_or_init(|| {
+        let query = |fields: &str| -> Option<String> {
+            let out = std::process::Command::new("nvidia-smi")
+                .args([&format!("--query-gpu={fields}"), "--format=csv,noheader"])
+                .output()
+                .ok()?;
+            let s = String::from_utf8_lossy(&out.stdout);
+            let first = s.lines().next()?.trim();
+            (!first.is_empty()).then(|| first.to_string())
+        };
+        let gpu = query("name,memory.total");
+        let driver = query("driver_version");
+        // the CUDA version is only in the banner: `... CUDA Version: 12.9 ...`
+        let cuda = std::process::Command::new("nvidia-smi").output().ok().and_then(|out| {
+            let s = String::from_utf8_lossy(&out.stdout);
+            let at = s.find("CUDA Version:")?;
+            let rest = s[at + "CUDA Version:".len()..].trim_start();
+            let v: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+            (!v.is_empty()).then_some(v)
+        });
+        (gpu, driver, cuda)
     })
-    .clone()
 }
 
-fn hostname() -> Option<String> {
-    std::fs::read_to_string("/etc/hostname").ok().map(|s| s.trim().to_string())
+fn gpu_name() -> Option<String> {
+    nvidia_smi().0.clone()
 }
 
 pub fn env_json() -> Value {
@@ -430,7 +447,102 @@ pub fn env_json() -> Value {
         "os": std::env::consts::OS,
         "simd_n_lanes": stwo::prover::backend::simd::m31::N_LANES,
         "gpu": gpu_name(),
-        "host": hostname(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Provenance: what a JSON document says about the run that produced it.  The
+// block is assembled by `emit` from what the run noted along the way: every
+// proof digest (`prov_note_proof`) with its binding table, and every
+// `--unsound-skip-*` flag on the command line.  Nothing here enters a
+// statement, a transcript or a proof, so the digest is unaffected.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct Prov {
+    digests: Vec<String>,
+    bindings: Vec<Value>,
+}
+
+fn prov() -> &'static std::sync::Mutex<Prov> {
+    static P: std::sync::OnceLock<std::sync::Mutex<Prov>> = std::sync::OnceLock::new();
+    P.get_or_init(|| std::sync::Mutex::new(Prov::default()))
+}
+
+/// One proof was produced: its digest and its binding table (`Value::Null`
+/// until the plan reports one).  A chunk loop calls this once per chunk.
+pub fn prov_note_proof(digest: &str, binding: Value) {
+    let mut p = prov().lock().unwrap();
+    p.digests.push(digest.to_string());
+    p.bindings.push(binding);
+}
+
+/// The `--unsound-skip-<name>` flags on the command line, as their names.
+pub fn unsound_skips() -> Vec<String> {
+    std::env::args()
+        .filter_map(|a| a.strip_prefix("--unsound-skip-").map(|s| s.to_string()))
+        .collect()
+}
+
+/// The binding tables of every proof this run made, folded into one: an edge
+/// is `unbound` if any proof left it unbound, else `bound` if any proof bound
+/// it, else `absent`.  `Null` when no proof reported a table.
+fn fold_bindings(tables: &[Value]) -> Value {
+    let tables: Vec<&Value> = tables.iter().filter(|t| !t.is_null()).collect();
+    if tables.is_empty() {
+        return Value::Null;
+    }
+    let mut edges: Vec<Value> = vec![];
+    if let Some(first) = tables[0]["edges"].as_array() {
+        for (i, e0) in first.iter().enumerate() {
+            let states: Vec<&str> = tables.iter()
+                .filter_map(|t| t["edges"].get(i).and_then(|e| e["state"].as_str()))
+                .collect();
+            let state = if states.contains(&"unbound") {
+                "unbound"
+            } else if states.contains(&"bound") {
+                "bound"
+            } else {
+                "absent"
+            };
+            let why = tables.iter()
+                .filter_map(|t| t["edges"].get(i))
+                .find(|e| e["state"] == "unbound")
+                .map(|e| e["why"].clone())
+                .unwrap_or(Value::Null);
+            edges.push(json!({"n": e0["n"], "edge": e0["edge"], "state": state, "why": why}));
+        }
+    }
+    let unbound: Vec<Value> = edges.iter().filter(|e| e["state"] == "unbound")
+        .map(|e| e["n"].clone()).collect();
+    json!({"proofs": tables.len(), "edges": edges, "all_bound": unbound.is_empty(),
+           "unbound": unbound})
+}
+
+pub fn provenance_json() -> Value {
+    let p = prov().lock().unwrap();
+    let mut args = std::env::args();
+    let binary = args.next().and_then(|a| {
+        std::path::Path::new(&a).file_name().map(|f| f.to_string_lossy().into_owned())
+    });
+    let (_, driver, cuda) = nvidia_smi();
+    json!({
+        "commit": env!("ZK_SOURCE_COMMIT"),
+        "dirty": match env!("ZK_SOURCE_DIRTY") {
+            "true" => json!(true),
+            "false" => json!(false),
+            _ => Value::Null,
+        },
+        "binary": binary,
+        "args": args.collect::<Vec<String>>(),
+        "backend": if cfg!(feature = "cuda") { "cuda" } else { "simd" },
+        "gpu": gpu_name(),
+        "driver_version": driver,
+        "cuda_version": cuda,
+        "proof_sha256": if p.digests.len() == 1 { json!(p.digests[0]) } else { Value::Null },
+        "proof_sha256s": if p.digests.len() > 1 { json!(p.digests) } else { Value::Null },
+        "unsound_skips": unsound_skips(),
+        "binding": fold_bindings(&p.bindings),
     })
 }
 
@@ -440,6 +552,7 @@ pub fn emit(name: &str, body: Value) {
         "env": env_json(),
         "modes": modes_json(),
         "security": config_json(),
+        "provenance": provenance_json(),
         "result": body,
     });
     println!("{}", serde_json::to_string_pretty(&out).unwrap());

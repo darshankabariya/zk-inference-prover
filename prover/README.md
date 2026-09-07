@@ -76,8 +76,15 @@ no current commit.
 
 Every run prints one JSON document: `env` (threads, memory, GPU as the machine
 reports it), `modes` (every device switch with its value and whether the
-environment set it), `security` (the FRI parameters and the hash), and
-`result`. A recorded number must be read together with these blocks; the
-environment string alone does not name a configuration. A `provenance` block
-(commit, command line, driver, digest, skips in effect, binding table) is the
-next addition.
+environment set it), `security` (the FRI parameters and the hash),
+`provenance`, and `result`. A recorded number must be read together with these
+blocks; the environment string alone does not name a configuration.
+
+`provenance` says what produced the document: the source `commit` and whether
+the tree was `dirty` (both from `build.rs`; `unknown` when the build had no
+git and no `.source-commit` file), the `binary` name and its `args`, the
+`backend`, the `gpu`, the `driver_version` and the `cuda_version` the driver
+reports, the `proof_sha256` (one proof) or `proof_sha256s` (a chunk loop),
+the `unsound_skips` in effect, and the `binding` table folded over every proof
+the run made. None of it enters a statement or a proof, so the digest does not
+depend on it.
