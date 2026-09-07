@@ -100,9 +100,9 @@ fn m4_perm_selfcheck() {
 pub fn eval_of(log_size: u32, mut vals: Vec<M31>) -> Eval {
     assert_eq!(vals.len(), 1 << log_size);
     // B7a milestone 4 (18.3): the shuffle and the repack as one parallel
-    // out-of-place gather straight into the packed lanes. `B7_M4_PAREVAL=0`
+    // out-of-place gather straight into the packed lanes. `ZK_PARALLEL_GATHER=0`
     // restores the serial in-place pair below.
-    if crate::util::m4_switch("B7_M4_PAREVAL")
+    if crate::util::m4_switch("ZK_PARALLEL_GATHER")
         && log_size >= LOG_N_LANES.max(crate::util::m4_parmin())
     {
         m4_perm_selfcheck();
@@ -200,7 +200,7 @@ impl<'a> Session<'a> {
         // B7a milestone 3: keep the interpolated coefficients, which is what
         // routes OODS through the fork's batched `batch_eval_at_point` instead
         // of one barycentric kernel launch per (column, point). See
-        // gpu/m3_patch.py; B7_M3_COEFFS=0 restores the old path.
+        // gpu/m3_patch.py; ZK_STORE_COEFFICIENTS=0 restores the old path.
         let mut cs = CommitmentSchemeProver::<PcsB, Blake2sM31MerkleChannel>::new(config, tw);
         if crate::util::m3_store_coeffs() {
             cs.set_store_polynomials_coefficients();

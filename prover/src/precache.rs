@@ -11,9 +11,9 @@
 //!
 //! The key is `chunks::key_of`: the layer's source and the params, which is
 //! what determines every cell of the tree in this binary. The check is the
-//! root: under `B7_M5_PRECACHE=2` every chunk commits the tree itself and its
+//! root: under `ZK_PREPROCESSED_TREE_CACHE=2` every chunk commits the tree itself and its
 //! root is asserted equal to the cached one, which is a cell-for-cell
-//! comparison by construction. Mode 1 takes the clone. `B7_M5_PREMUT=stalekey`
+//! comparison by construction. Mode 1 takes the clone. `ZK_MUT_PREPROCESSED_TREE_CACHE=stalekey`
 //! is the control: every layer maps to one key, so a loop over two different
 //! layers must fail the root check (rule 5).
 
@@ -63,14 +63,14 @@ fn cache() -> &'static Mutex<HashMap<u64, Entry>> {
 }
 
 pub fn mode() -> u32 {
-    crate::util::m4b_mode("B7_M5_PRECACHE")
+    crate::util::m4b_mode("ZK_PREPROCESSED_TREE_CACHE")
 }
 
 fn key(k: Option<u64>) -> Option<u64> {
-    match std::env::var("B7_M5_PREMUT").as_deref() {
+    match std::env::var("ZK_MUT_PREPROCESSED_TREE_CACHE").as_deref() {
         Ok("stalekey") => k.map(|_| 0),
         Ok("none") | Err(_) => k,
-        Ok(other) => panic!("B7_M5_PREMUT={other}: unknown mutation"),
+        Ok(other) => panic!("ZK_MUT_PREPROCESSED_TREE_CACHE={other}: unknown mutation"),
     }
 }
 
@@ -121,9 +121,9 @@ pub fn forget(k: u64) -> bool {
     gone
 }
 
-/// Whether `B7_M5_PREMUT` is asking for something other than the honest key.
+/// Whether `ZK_MUT_PREPROCESSED_TREE_CACHE` is asking for something other than the honest key.
 fn mutating() -> bool {
-    matches!(std::env::var("B7_M5_PREMUT").as_deref(), Ok(v) if v != "none")
+    matches!(std::env::var("ZK_MUT_PREPROCESSED_TREE_CACHE").as_deref(), Ok(v) if v != "none")
 }
 
 // B7b: the view of a cached tree. The default is a full clone -- correct on

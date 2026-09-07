@@ -63,7 +63,7 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
             .collect();
 
         // B11 stream K, diagnostic twin of the cuda impl's: see there.
-        if std::env::var("B7_EXT_DEBUG").is_ok() {
+        if std::env::var("ZK_EXTENSION_DEBUG").is_ok() {
             let max_evals = component_polys
                 .iter()
                 .flatten()
@@ -347,7 +347,7 @@ impl<E: FrameworkEval + Sync> ComponentProver<CudaBackend> for FrameworkComponen
         // B11 stream K, diagnostic: name the component and its column sizes
         // before the extension, which asserts when a column is committed on a
         // domain larger than the component's evaluation domain.
-        if std::env::var("B7_EXT_DEBUG").is_ok() {
+        if std::env::var("ZK_EXTENSION_DEBUG").is_ok() {
             let max_evals = component_polys
                 .iter()
                 .flatten()

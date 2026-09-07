@@ -79,7 +79,7 @@ pub fn note_witness(bytes: u64, secs: f64) {
 /// pins physical pages for as long as they are held and is far too expensive
 /// to do per array, which is why the pool is a pool and not an allocation.
 ///
-/// `B7_M4_POOL=1` turns it on; with it off every caller takes exactly the
+/// `ZK_DEVICE_STAGING_POOL=1` turns it on; with it off every caller takes exactly the
 /// pageable path it took before, so the default is still the proven one.
 #[cfg(feature = "cuda")]
 mod pinned {
@@ -123,13 +123,13 @@ mod pinned {
     static PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
     pub fn enabled() -> bool {
-        crate::util::m4b_mode("B7_M4_POOL") != 0
+        crate::util::m4b_mode("ZK_DEVICE_STAGING_POOL") != 0
     }
 
-    /// `B7_M4_POOLMUT=1`: the pool's deliberate defect, aimed at the staged
+    /// `ZK_MUT_STAGING_POOL=1`: the pool's deliberate defect, aimed at the staged
     /// bytes themselves. Off unless set, and it never runs in a timed loop.
     pub fn mutate() -> bool {
-        crate::util::m4b_mode("B7_M4_POOLMUT") != 0
+        crate::util::m4b_mode("ZK_MUT_STAGING_POOL") != 0
     }
 
     pub fn peak_bytes() -> usize {
@@ -178,7 +178,7 @@ staying on the pageable path",
         // only reference to it.
         let slice = unsafe { std::slice::from_raw_parts_mut(b.ptr, words) };
         pack(slice);
-        // B11 stream L: `B7_M4_POOLMUT=1` is the pool's deliberate defect.
+        // B11 stream L: `ZK_MUT_STAGING_POOL=1` is the pool's deliberate defect.
         //
         // A staging pool is a new place for a witness array to be wrong, and a
         // control that has never fired is not a control (B7A section 5 rule 5).
@@ -317,7 +317,7 @@ mod marks {
     static T0: OnceLock<Instant> = OnceLock::new();
 
     // B12 stream GG, the C=16K half: under `compose-chunks --plan` the marks of
-    // two chunks interleave on one stderr, and under `B7_M5_PIPE=1` they
+    // two chunks interleave on one stderr, and under `ZK_PIPELINE=1` they
     // interleave in time as well -- chunk k+1's `after_fill` lands between
     // chunk k's `commit_inter` and its `prove_values`. The tag is the plan
     // line's `--ser-tag`, set per thread the way `m4_set_chunk` is, so a mark

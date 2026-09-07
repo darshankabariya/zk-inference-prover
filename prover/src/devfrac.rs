@@ -18,7 +18,7 @@
 //!   per witness, that no column the IR loads is one of them. That is what lets
 //!   a key tile's interaction run without its preprocessed columns being uploaded
 //!   -- which would put back exactly the 4a bytes this row removes.
-//! * **which builder ran.** `B7_M4_LOGUPIR` keeps 19.3's meaning for every
+//! * **which builder ran.** `ZK_GENERATED_LOGUP` keeps 19.3's meaning for every
 //!   family: 0 the hand-written builder, 1 the IR on the host, 2 both asserted
 //!   equal, 3 the generated kernel, 4 the kernel against the hand-written one.
 //! * **where the columns end up.** A component whose fill left its columns on the
@@ -56,7 +56,7 @@ pub fn cols_of<'a>(host: &'a [Eval], dev: Option<&'a [BaseFieldVec]>) -> Cols<'a
 }
 
 /// A shared table's slice of the two flat lists: on the device when
-/// `B7_M4_TABDEV` uploaded them there, on the host otherwise. An empty `dev` is
+/// `ZK_DEVICE_TABLES` uploaded them there, on the host otherwise. An empty `dev` is
 /// the switch being off, which is also the state the mode-4 check runs in.
 pub fn tab_cols<'a>(
     host: &'a [Eval],
@@ -162,17 +162,17 @@ pub fn key_tile_cols(
     }
 }
 
-/// The fraction IR for one component, with `B7_M4_LOGUPMUT` applied if it is
+/// The fraction IR for one component, with `ZK_MUT_LOGUP` applied if it is
 /// set and aimed at this family.
 ///
 /// The suffix is section 5 rule 5. Unaimed, a defect in the lowering always
 /// panics at whichever family is lowered first -- `chan key_tile0` -- and the run
 /// then says nothing at all about whether the other families' checks would
-/// have caught it. `B7_M4_LOGUPMUT=relbyname:chan` is the case 19.6 asked for
+/// have caught it. `ZK_MUT_LOGUP=relbyname:chan` is the case 19.6 asked for
 /// by name: the defect is inert on a family with one instance per relation
 /// name, so `dequant` was the wrong family to run it against.
 pub fn ir_of<E: FrameworkEval>(eval: &E, log_rows: u32) -> Ir {
-    let spec = std::env::var("B7_M4_LOGUPMUT").ok();
+    let spec = std::env::var("ZK_MUT_LOGUP").ok();
     let mutate = match spec.as_deref() {
         None => crate::cudagen::Mutate::None,
         Some(spec) => {
@@ -210,7 +210,7 @@ fn shape_of(family: &str, ir: &Ir) -> usize {
 /// B11 stream M: a *host-filled* component has a hand-written builder to fall back
 /// to, so a fingerprint the installed store does not carry can decline the
 /// kernel instead of ending the proof -- announced per component, never
-/// silent, on the same `B7_KERNEL_FALLBACK` switch the constraint side has used
+/// silent, on the same `ZK_KERNEL_FALLBACK` switch the constraint side has used
 /// for the residual stream and diagonal block shapes since stream B (`cudagen.rs`). This is the
 /// route the `lit` caveat needs: a lowering whose scalars fold differently from
 /// the emitted one produces a fingerprint nothing compiled, and the residual stream's bindings
@@ -267,7 +267,7 @@ pub fn frac_cols<E: FrameworkEval>(
     host: impl FnOnce() -> (Vec<Eval>, SecureField),
 ) -> (Vec<AnyCol<'static>>, SecureField) {
     let on_dev = base.is_dev() || pre.is_dev();
-    let mode = crate::util::m4b_mode("B7_M4_LOGUPIR");
+    let mode = crate::util::m4b_mode("ZK_GENERATED_LOGUP");
     if !on_dev && mode == 0 {
         let (cols, sum) = host();
         return (crate::device::host_cols(cols), sum);
@@ -292,14 +292,14 @@ pub fn frac_cols<E: FrameworkEval>(
 
     // ---- the generated kernel ---------------------------------------------
     // B11 stream M: with host columns in hand a missing fingerprint can decline
-    // instead of aborting, on `B7_KERNEL_FALLBACK`. On the device there is
+    // instead of aborting, on `ZK_KERNEL_FALLBACK`. On the device there is
     // nothing to decline *to*, so the demand stands.
     let shape = if on_dev {
         shape_of(family, &ir)
     } else {
         match shape_opt(family, &ir) {
             Some(s) => s,
-            None if crate::util::m4_switch("B7_KERNEL_FALLBACK") => {
+            None if crate::util::m4_switch("ZK_KERNEL_FALLBACK") => {
                 eprintln!(
                     "kernel fallback: {tag}: {family} fraction fingerprint {:#010x} \
                      ({} lookups) builds on the host",

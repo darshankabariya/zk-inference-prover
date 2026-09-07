@@ -28,7 +28,7 @@
 //! not a check mode: it is what makes the device column equal to the host's
 //! table by construction rather than by assumption, on any witness.
 //!
-//! `B7_M4_TABDEV` says which path runs, on the same three-value pattern the
+//! `ZK_DEVICE_TABLES` says which path runs, on the same three-value pattern the
 //! other fills use: 0 the host builds all 34 shared-table columns, 1 these
 //! three are the device's and never the host's, 2 both with every cell
 //! asserted equal.
@@ -72,16 +72,16 @@ unsafe extern "C" {
 
 // ------------------------------------------------------------------ the switch --
 
-/// `B7_M4_TABDEV`: 0 the host, 1 the device, 2 both with every cell asserted.
+/// `ZK_DEVICE_TABLES`: 0 the host, 1 the device, 2 both with every cell asserted.
 pub fn mode() -> u32 {
-    crate::util::m4b_mode("B7_M4_TABDEV")
+    crate::util::m4b_mode("ZK_DEVICE_TABLES")
 }
 
-/// `B7_M4_TABMUT`, `name` or `name:column`. Unaimed, every defect shows at `x`,
+/// `ZK_MUT_TABLES`, `name` or `name:column`. Unaimed, every defect shows at `x`,
 /// which is compared first, and the run says nothing about `y` or `m_exp`
 /// (section 5 rule 5) -- so the suffix names the column the defect is aimed at.
 pub fn tabmut() -> (u32, u32) {
-    let raw = std::env::var("B7_M4_TABMUT").unwrap_or_default();
+    let raw = std::env::var("ZK_MUT_TABLES").unwrap_or_default();
     let (name, col) = match raw.split_once(':') {
         Some((n, c)) => (n.to_string(), c.to_string()),
         None => (raw, String::new()),
@@ -93,14 +93,14 @@ pub fn tabmut() -> (u32, u32) {
         "bf16trunc" => 3,
         "nopatch" => 4,
         "onecounter" => 5,
-        other => panic!("unknown B7_M4_TABMUT {other:?}"),
+        other => panic!("unknown ZK_MUT_TABLES {other:?}"),
     };
     let c = match col.as_str() {
         "" | "all" => 3,
         "x" => 0,
         "y" => 1,
         "m" | "m_exp" => 2,
-        other => panic!("unknown B7_M4_TABMUT column {other:?}"),
+        other => panic!("unknown ZK_MUT_TABLES column {other:?}"),
     };
     (m, c)
 }
@@ -112,7 +112,7 @@ pub fn tabmut() -> (u32, u32) {
 /// rather than a wrong proof.
 pub fn htab(v: &[Option<Eval>], i: usize) -> &Eval {
     v[i].as_ref().unwrap_or_else(|| {
-        panic!("shared-table column {i} is the device's; run with B7_M4_TABDEV=0 or 2")
+        panic!("shared-table column {i} is the device's; run with ZK_DEVICE_TABLES=0 or 2")
     })
 }
 

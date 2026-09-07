@@ -174,7 +174,7 @@ def h100_card():
         peak_mib=max(c.get("mem_after_prove", 0) for c in ch) / 2 ** 20,
         peak_chunk_cells=max(c["cells"]["fresh"] for c in ch),
         source=rel(H100_LOOP))},
-        note="32 layer chunks, no head, pipelined (`B7_M5_PIPE=1`).  `loop_secs` "
+        note="32 layer chunks, no head, pipelined (`ZK_PIPELINE=1`).  `loop_secs` "
              "is W0's FOURTH boundary and is not `whole wall`: it counts the "
              "witness read and the layer build, which `whole wall` has never "
              "counted, and it hides the prove behind the next chunk's generation. "
@@ -678,7 +678,7 @@ def freivalds_height(mc, shape, grp):
 # ------------------------------------- what LDE-only residency changes (HH) --
 # Stream HH (`briefs/hh-ldeonly.md`) kept every committed column on the trace
 # domain at 4 B per cell and rebuilt its blown-up evaluations in each of the four
-# phases that read them, behind `B7_M3_LDEONLY`.  The proof does not move.  Its
+# phases that read them, behind `ZK_LDE_ONLY`.  The proof does not move.  Its
 # gate-1 runs are GG's two shapes again -- the same L16 (h=23) and L0 (h=25)
 # chunks on the same H100 -- with the switch off (A1, A3) and on (A2, A4), and
 # A1/A3 reproduce GG's R1/R3 peaks to the byte, so the same two-point solve that
@@ -1628,7 +1628,7 @@ def main(argv=None):
         wall = ldeonly_wall(lo)
         print("\n(7c) the same question again, with stream HH's LDE-only residency")
         print(f"  read from {a['source']} and {b['source']}")
-        print("  (H100, 8B, C=4096, S=512, `B7_M3_LDEONLY=1`, the proof byte-identical "
+        print("  (H100, 8B, C=4096, S=512, `ZK_LDE_ONLY=1`, the proof byte-identical "
               "to the off runs).")
         print("  Every committed column is kept on the trace domain and its blown-up")
         print("  evaluations are rebuilt in each phase that reads them, so the 12 B "

@@ -68,7 +68,7 @@
 // `[128, 256)` scaled by `2^a` has biased exponent `a + EXP_BIAS` (`bf16.rs`).
 #define B65P_EXP_BIAS 134u
 
-// The negative controls (`B7_M4_PREMUT`), each a way this design could
+// The negative controls (`ZK_MUT_PREPROCESSED`), each a way this design could
 // plausibly be wrong. Section 5 rule 5: each takes a `:target` suffix, because
 // unaimed every one of them shows at the first column compared and the run then
 // says nothing about the other seven targets.

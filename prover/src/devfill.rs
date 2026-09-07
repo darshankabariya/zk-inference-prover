@@ -16,9 +16,9 @@
 //! describe is below `2^30`, asserted below), the per-token and per-channel
 //! scales, and the two shared tables, which are cached across components.
 //!
-//! `B7_M4_FILL` says which path runs, on the same three-value pattern
-//! `B7_M4_LOGUPIR` uses: 0 the host fill, 1 the device fill, 2 both with every
-//! cell asserted equal. `B7_M4_REFBAD=0` turns off the f64 cross-check inside
+//! `ZK_DEVICE_WITNESS_GEN_DEQUANT` says which path runs, on the same three-value pattern
+//! `ZK_GENERATED_LOGUP` uses: 0 the host fill, 1 the device fill, 2 both with every
+//! cell asserted equal. `ZK_KERNEL_REFERENCE_CHECK=0` turns off the f64 cross-check inside
 //! the kernel.
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -64,17 +64,17 @@ pub struct FillCfg {
     pub mutate: u32,
 }
 
-/// `B7_M4_FILLMUT`: one deliberate defect in the device fill, so mode 2's
+/// `ZK_MUT_WITNESS_GEN_DEQUANT`: one deliberate defect in the device fill, so mode 2's
 /// check has negative controls. The names are the kernel's.
 fn fill_mut() -> u32 {
-    match std::env::var("B7_M4_FILLMUT").ok().as_deref() {
+    match std::env::var("ZK_MUT_WITNESS_GEN_DEQUANT").ok().as_deref() {
         None | Some("") | Some("none") => 0,
         Some("noperm") => 1,
         Some("chan") => 2,
         Some("nobump") => 3,
         Some("ref32") => 4,
         Some("refaway") => 5,
-        Some(other) => panic!("unknown B7_M4_FILLMUT {other:?}"),
+        Some(other) => panic!("unknown ZK_MUT_WITNESS_GEN_DEQUANT {other:?}"),
     }
 }
 
@@ -166,7 +166,7 @@ pub struct DevFill {
     pub base: Vec<BaseFieldVec>,
     /// B7a milestone 4 (section 3 row 1): the four multiplicity counters this
     /// fill scatter-added into, left where it left them. `b65_pre_fill` sums
-    /// one per component into the column, so with `B7_M4_PRE=1` the download and
+    /// one per component into the column, so with `ZK_DEVICE_PREPROCESSED=1` the download and
     /// the parallel merge below never happen -- 23.1's `m_exp`, four more times.
     pub m_norm: Uint32Vec,
     pub m_frac: Uint32Vec,
@@ -174,7 +174,7 @@ pub struct DevFill {
     pub m_r8: Uint32Vec,
     pub ref_bad: usize,
     /// the f64 cross-check's own result per (coset row, slot), for
-    /// `B7_M4_FILL=2`; `None` on the prover's path
+    /// `ZK_DEVICE_WITNESS_GEN_DEQUANT=2`; `None` on the prover's path
     pub want: Option<Vec<u32>>,
 }
 
@@ -213,7 +213,7 @@ pub fn mat_component_dev(
     // this stays exactly the count `b65_fill_dequant` has always been handed.
     let n_pre = chan_w * lay.per_row + 5;
     let do_ref = spec.round == crate::bf16::Round::Even
-        && crate::util::m4_switch("B7_M4_REFBAD");
+        && crate::util::m4_switch("ZK_KERNEL_REFERENCE_CHECK");
 
     // `norm_at` bounds `k` by the *table's* kmax and `normalise` by the
     // spec's; the kernel carries one number, so the two have to be the one

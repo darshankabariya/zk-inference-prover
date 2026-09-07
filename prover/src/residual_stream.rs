@@ -1330,7 +1330,7 @@ pub struct ResidualStreamComponent {
     pub in_nat: Vec<Vec<(i64, i64)>>,
     pub out_nat: Vec<Vec<(i64, i64)>>,
     /// B11 stream M: the component's columns when the fill left them on the card,
-    /// under `B7_M4_RESIDUAL_STREAM_FILL=1`. `pre` and `base` are then empty and this is where
+    /// under `ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM=1`. `pre` and `base` are then empty and this is where
     /// the columns are. The three arrays above are *not* on the card: the bindings
     /// and the boundary sides read them by row, they are a fifth of the
     /// columns' bytes, and bringing them back is what lets the whole binding half
@@ -1802,7 +1802,7 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
                     ref_n += 1;
                     if f.outs[base + k] == w.ref_out[oi][j * o.len() + k] {
                         ref_ok += 1;
-                    } else if std::env::var("B10_RESIDUAL_STREAM_DEBUG").is_ok() && ref_n - ref_ok < 8 {
+                    } else if std::env::var("ZK_RESIDUAL_STREAM_DEBUG").is_ok() && ref_n - ref_ok < 8 {
                         eprintln!("  {tag} ref mismatch row {j} out {oi}.{k}: got {:#06x} \
                                    want {:#06x}", f.outs[base + k], w.ref_out[oi][j * o.len() + k]);
                     }
@@ -2141,7 +2141,7 @@ pub fn residual_stream_interaction(r: &ResidualStreamComponent, rels: &ResidualS
     // B11 stream M: the router, with the hand-written builder as the closure it
     // compares against at modes 2 and 4 and falls back to at mode 0. The
     // component's columns are the host's today -- `gen/residual_stream` has no device path --
-    // so this is `Cols::Host` and the opt-in `B7_M4_LOGUPIR` decides. When
+    // so this is `Cols::Host` and the opt-in `ZK_GENERATED_LOGUP` decides. When
     // `gen/residual_stream` puts them on the card the same call takes the kernel
     // unconditionally, which is how the two levers compose.
     // B11 stream V, lever 3: under `--gkr-residual-stream` the component's fractions were
@@ -2520,7 +2520,7 @@ pub fn run(w: &ResidualStreamWitness, prog: &Prog, round: Round, kmax: u32,
     };
     let ch = sess.draw_felts(2);
     let (w_ch, lam) = (ch[0], ch[1]);
-    let notie = std::env::var("B10_RESIDUAL_STREAM_NOTIE").is_ok();
+    let notie = std::env::var("ZK_RESIDUAL_STREAM_NO_BINDING").is_ok();
     let specs = plain_bindings(prog, component.log_rows, w_ch);
     let tie0 = Binding { lam, specs: specs.clone() };
     // B11 stream M: the eval the LogUp half lowers, built before the claims

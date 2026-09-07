@@ -24,8 +24,8 @@
 //! silently repair `Corrupt::Numerator`, turning a rung-3 rejection into an
 //! acceptance. So `num` is uploaded, narrowed to u16 and checked.
 //!
-//! `B7_M4_WFILL` says which path runs, on the same three-value pattern
-//! `B7_M4_FILL` uses: 0 the host fills, 1 the device fills, 2 both with every
+//! `ZK_DEVICE_WITNESS_GEN` says which path runs, on the same three-value pattern
+//! `ZK_DEVICE_WITNESS_GEN_DEQUANT` uses: 0 the host fills, 1 the device fills, 2 both with every
 //! cell asserted equal.
 
 use rayon::prelude::*;
@@ -240,17 +240,17 @@ impl Fam {
     }
 }
 
-/// `B7_M4_WFILLMUT`: one deliberate defect in the device fills, so mode 2's
+/// `ZK_MUT_WITNESS_GEN`: one deliberate defect in the device fills, so mode 2's
 /// check has negative controls. The names are the kernel's.
 ///
 /// **The `:family` suffix matters, and 19.6 is why.** The key tiles are checked
 /// before the attnout and the Freivalds checks, so an unscoped mutation always panics at
 /// the *key tiles* and the run says nothing about whether the other two families'
-/// checks would have caught the same defect. `B7_M4_WFILLMUT=chan:freivalds` aims it
+/// checks would have caught the same defect. `ZK_MUT_WITNESS_GEN=chan:freivalds` aims it
 /// at one family, so each check is shown to bite on its own rather than
 /// inheriting the key tiles' evidence.
 pub fn wfill_mut(fam: Fam) -> u32 {
-    let raw = std::env::var("B7_M4_WFILLMUT").ok();
+    let raw = std::env::var("ZK_MUT_WITNESS_GEN").ok();
     let raw = raw.as_deref().unwrap_or("");
     let (name, want) = match raw.split_once(':') {
         Some((n, f)) => (n, Some(f)),
@@ -258,7 +258,7 @@ pub fn wfill_mut(fam: Fam) -> u32 {
     };
     if let Some(f) = want {
         assert!(["freivalds", "ao", "key_tile"].contains(&f),
-                "unknown B7_M4_WFILLMUT family {f:?}");
+                "unknown ZK_MUT_WITNESS_GEN family {f:?}");
         if f != fam.name() {
             return 0;
         }
@@ -277,26 +277,26 @@ pub fn wfill_mut(fam: Fam) -> u32 {
         // key tile building the per-token component it does not own).
         "nomask" => 7,
         "notok" => 8,
-        other => panic!("unknown B7_M4_WFILLMUT {other:?}"),
+        other => panic!("unknown ZK_MUT_WITNESS_GEN {other:?}"),
     }
 }
 
-/// B11 stream L: the key tile fill's own switch, defaulting to `B7_M4_WFILL`.
+/// B11 stream L: the key tile fill's own switch, defaulting to `ZK_DEVICE_WITNESS_GEN`.
 ///
-/// `B7_M4_WFILL` turns on three device generation paths at once -- the Freivalds check
+/// `ZK_DEVICE_WITNESS_GEN` turns on three device generation paths at once -- the Freivalds check
 /// components, the attnout, and every non-diagonal block key tile. Stream L measured them
 /// apart on the sequence's own witness and they are not in the same state: the
 /// Freivalds check and attnout fills reproduce the host cell for cell, while the key tile fill
 /// disagrees with the host on the grid component and the proof is then rejected
 /// (`off_table` bumps that the host never makes). One switch cannot express
 /// that, so the key tile gate becomes its own three-value variable which falls back
-/// to `B7_M4_WFILL` when it is not set. `B7_M4_WFILL=1 B7_M4_WFILL_KEY_TILE=0` is
+/// to `ZK_DEVICE_WITNESS_GEN` when it is not set. `ZK_DEVICE_WITNESS_GEN=1 ZK_DEVICE_WITNESS_GEN_KEY_TILE=0` is
 /// the configuration that takes the Freivalds checks' win and leaves the key tiles on the host
 /// until the fill is fixed.
 pub fn key_tile_mode() -> u32 {
-    match std::env::var("B7_M4_WFILL_KEY_TILE") {
+    match std::env::var("ZK_DEVICE_WITNESS_GEN_KEY_TILE") {
         Ok(v) => v.parse().unwrap_or(0),
-        Err(_) => crate::util::m4b_mode("B7_M4_WFILL"),
+        Err(_) => crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN"),
     }
 }
 
@@ -315,7 +315,7 @@ pub fn key_tile_fill_mode(a: &Attn) -> u32 {
     if a.diagonal_block { diagonal_block_mode() } else { key_tile_mode() }
 }
 
-/// `B7_M4_WFILL_DIAGONAL_BLOCK`: the diagonal block key tiles' own fill switch, defaulting **off**.
+/// `ZK_DEVICE_WITNESS_GEN_DIAGONAL_BLOCK`: the diagonal block key tiles' own fill switch, defaulting **off**.
 ///
 /// B11 stream N, lever 2. Until this stream a diagonal block key tile filled on the host
 /// whatever any switch said, because `commit_base_dev` had no notion of a
@@ -323,12 +323,12 @@ pub fn key_tile_fill_mode(a: &Attn) -> u32 {
 /// does not expect. It has that notion now (`commit_base_dev` takes
 /// `with_rows`, `devpre::key_tile_dev` with it), but a path is born off and
 /// graduates on its gate: this is the switch that opens it, and the mirror
-/// runs under `B7_M4_WFILL_DIAGONAL_BLOCK=2` on a diagonal-block-bearing witness.
+/// runs under `ZK_DEVICE_WITNESS_GEN_DIAGONAL_BLOCK=2` on a diagonal-block-bearing witness.
 ///
 /// It falls back to `key_tile_mode` only once it has gated -- until then, not even
-/// `B7_M4_WFILL=1` reaches the diagonal block.
+/// `ZK_DEVICE_WITNESS_GEN=1` reaches the diagonal block.
 pub fn diagonal_block_mode() -> u32 {
-    std::env::var("B7_M4_WFILL_DIAGONAL_BLOCK")
+    std::env::var("ZK_DEVICE_WITNESS_GEN_DIAGONAL_BLOCK")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0)
@@ -336,7 +336,7 @@ pub fn diagonal_block_mode() -> u32 {
 
 /// B11 stream L: must the exp table's multiplicity column be the host's?
 ///
-/// `B7_M4_TABDEV=1` builds `m_exp` on the card, by summing the per-key-tile exp
+/// `ZK_DEVICE_TABLES=1` builds `m_exp` on the card, by summing the per-key-tile exp
 /// counters `commit_base_dev` left there. That is right exactly when *every*
 /// key tile's bumps are on the card -- and a diagonal block key tile always fills on the host,
 /// because it commits no per-token component and the device fill has no notion of
@@ -487,7 +487,7 @@ fn raw<T>(v: &[T]) -> &[u8] {
 
 /// B11 stream F: this key tile's witness arrays, raw, for the standalone probe.
 ///
-/// `B7_F_KEY_TILE_DUMP=DIR` writes one subdirectory per key tile -- the arrays
+/// `ZK_KEY_TILE_DUMP=DIR` writes one subdirectory per key tile -- the arrays
 /// `commit_base_dev` uploads, plus the exp table and a shape JSON -- so
 /// `experiments/b11/probe/key_tile_up.cu` can price a device-side generation path
 /// against the *real* values and not only against the right sizes: it
@@ -495,7 +495,7 @@ fn raw<T>(v: &[T]) -> &[u8] {
 /// what is here. Off unless the variable is set (~2.4 GB for a 16-instance
 /// key tile at C=16K), and it never runs in a timed loop.
 fn key_tile_dump(a: &Attn, with_out: bool) {
-    let Ok(dir) = std::env::var("B7_F_KEY_TILE_DUMP") else { return };
+    let Ok(dir) = std::env::var("ZK_KEY_TILE_DUMP") else { return };
     let b = KEY_TILE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let d = std::path::Path::new(&dir).join(format!("key_tile{b}"));
     std::fs::create_dir_all(&d).expect("key_tile_dump directory");
@@ -804,7 +804,7 @@ pub struct DevAo {
     pub m_acc_hi: Uint32Vec,
     pub ref_bad: usize,
     pub q_out: Vec<i64>,
-    /// the f64 reference's own answer per (coset row, slot), for `B7_M4_WFILL=2`
+    /// the f64 reference's own answer per (coset row, slot), for `ZK_DEVICE_WITNESS_GEN=2`
     pub want: Option<Vec<u32>>,
 }
 
@@ -946,7 +946,7 @@ pub struct DevKeyTile {
     pub at: Vec<usize>,
     /// B7a milestone 4 (section 3 row 1): this key tile's exp-table counter, left
     /// where the scatter-add put it. `b65_table_fill` sums one per key tile into
-    /// the `m_exp` column, so with `B7_M4_TABDEV=1` the 33.5 MB download and
+    /// the `m_exp` column, so with `ZK_DEVICE_TABLES=1` the 33.5 MB download and
     /// the parallel merge below never happen.
     pub m_exp: Uint32Vec,
     /// B7a milestone 4 (section 3 row 1): the five range counters this key tile's
@@ -1252,7 +1252,7 @@ pub fn commit_base_dev(
 /// Not a sample: a fill that is wrong on one cell of one column is wrong, and
 /// the point of checking here rather than against a proof digest is that the
 /// panic says where.
-/// B11 stream L: `B7_M4_WFILL_DIFF=1` turns the first-mismatch panic into a
+/// B11 stream L: `ZK_DEVICE_WITNESS_GEN_DIFF=1` turns the first-mismatch panic into a
 /// survey.
 ///
 /// The default is right for a control -- a fill that is wrong anywhere is
@@ -1263,7 +1263,7 @@ pub fn commit_base_dev(
 /// printed before the panic, so one run answers that instead of one bisect per
 /// column.
 fn diff_survey() -> bool {
-    crate::util::m4b_mode("B7_M4_WFILL_DIFF") != 0
+    crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_DIFF") != 0
 }
 
 pub fn check_cols(what: &str, host: &[Eval], got: &[BaseFieldVec]) {

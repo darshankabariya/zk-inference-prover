@@ -30,7 +30,7 @@
 
 #define B65_WFILL_NONE 0xffffffffu
 
-// The negative controls (`B7_M4_WFILLMUT`). Each is a way one of these three
+// The negative controls (`ZK_MUT_WITNESS_GEN`). Each is a way one of these three
 // fills could plausibly be wrong, and 19.6's caution is the reason `inst` is on
 // the list: a control that cannot fire on the shape under test is a finding and
 // not a pass, and the key tile's instance split is invisible on a one-instance

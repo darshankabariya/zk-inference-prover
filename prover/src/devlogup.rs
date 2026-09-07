@@ -22,7 +22,7 @@
 //!
 //! Every one of those is exact field arithmetic, so the device columns equal
 //! the host columns cell for cell or something is wrong -- which is what
-//! `B7_M4_LOGUPIR=3` checks, and what the proof digest checks after it.
+//! `ZK_GENERATED_LOGUP=3` checks, and what the proof digest checks after it.
 
 use std::ffi::{c_char, CString};
 
@@ -209,7 +209,7 @@ pub fn logup_cols_dev_ptrs(
 }
 
 /// The same, brought back to the host so it can be compared with the
-/// hand-written builder cell for cell (`B7_M4_LOGUPIR=3`).
+/// hand-written builder cell for cell (`ZK_GENERATED_LOGUP=3`).
 ///
 /// The download is the check's, not the prover's: nothing on the milestone's
 /// own path moves a generated column back across the link.

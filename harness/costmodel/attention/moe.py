@@ -25,7 +25,7 @@ HERE = pathlib.Path(__file__).parent
 # `--artifacts DIR`: the `moe_s*.json` probe outputs; `moe.json` is written beside them.
 OUT = inputs.artifacts_dir()
 
-# the 8B FFN, as `B7_SYNTH_DIMS` gives it to the runs
+# the 8B FFN, as `ZK_SYNTHETIC_DIMS` gives it to the runs
 D, DFF = 4096, 14336
 FFN_PARAMS = 2 * D * DFF + DFF * D          # gate, up, down
 S, TOPK = 512, 2

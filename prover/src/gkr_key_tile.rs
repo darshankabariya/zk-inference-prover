@@ -366,12 +366,12 @@ impl Collect {
 /// `at` is the committed side's component split; the device's own copy has to
 /// agree with it, because the base columns the kernel reads are named by it.
 #[allow(clippy::too_many_arguments)]
-/// `B11_FEEDCHECK=1`: run the feed beside the host builder and compare. Opt-in,
-/// spelled the way `B11_LINKCHECK` is -- `util::m4_switch` reads "on unless set
+/// `ZK_GKR_FEED_CHECK=1`: run the feed beside the host builder and compare. Opt-in,
+/// spelled the way `ZK_LINK_CHECK` is -- `util::m4_switch` reads "on unless set
 /// to 0", which is the wrong default for a probe that costs an upload and a
 /// full cell-for-cell comparison.
 fn feedcheck_on() -> bool {
-    std::env::var("B11_FEEDCHECK").map(|v| v == "1").unwrap_or(false)
+    std::env::var("ZK_GKR_FEED_CHECK").map(|v| v == "1").unwrap_or(false)
 }
 
 /// The key tiles' numerator kinds, in look order.
@@ -401,10 +401,10 @@ pub fn feed_site(
 ) {
     let dev = air.and_then(|a| a.dev);
     let Some(d) = dev else {
-        // `B11_FEEDCHECK=1` with the key tile on the host: run the feed anyway over
+        // `ZK_GKR_FEED_CHECK=1` with the key tile on the host: run the feed anyway over
         // an *uploaded* copy of the same committed columns and compare every
         // cell against the host builder, then throw the fed layers away. The
-        // upload is the check's, exactly as `B7_M4_LOGUPIR=3` pays one; nothing
+        // upload is the check's, exactly as `ZK_GENERATED_LOGUP=3` pays one; nothing
         // on the prover's path moves, so this can run in the regime that has
         // host columns to compare against -- which the fed regime, by
         // definition, does not.
@@ -452,7 +452,7 @@ pub fn feed_site(
             }
             _ => panic!("key tile component {which} has no eval"),
         }
-        // `B11_FEEDCHECK=1`: the same check `B7_M4_LOGUPIR=2` is for the paired
+        // `ZK_GKR_FEED_CHECK=1`: the same check `ZK_GENERATED_LOGUP=2` is for the paired
         // kernel -- every cell of every instance against the host builder, which
         // needs host columns and so only runs in a regime that has them.
         if feedcheck_on() && host_span(at, which, cols) {
@@ -474,7 +474,7 @@ pub fn feed_site(
 /// kernel store already carries this fingerprint: under the flag the evaluator
 /// emits no lookups at all and its IR would be empty. One definition of the
 /// fraction, three readers: this, `mat_logup`'s hand-written builder (the one
-/// `B7_M4_LOGUPIR=2` compares against) and `gkrlink::deq_looks`.
+/// `ZK_GENERATED_LOGUP=2` compares against) and `gkrlink::deq_looks`.
 pub fn deq_site(
     c: &mut Collect,
     reg: usize,
@@ -484,7 +484,7 @@ pub fn deq_site(
     fam_site(c, FamSite {
         reg: crate::gkrlink::Comp::Deq(reg),
         tag: format!("deq{reg}"),
-        mut_env: "B11_DEQMUT",
+        mut_env: "ZK_MUT_DEQUANT",
         mut_key: reg,
         log_rows: r.lay.log_rows,
         unit: crate::dequant::look_units(&r.spec),
@@ -525,7 +525,7 @@ pub fn residual_stream_site(
     fam_site(c, FamSite {
         reg: crate::gkrlink::Comp::ResidualStream(reg),
         tag: format!("residual_stream/{}", r.tag),
-        mut_env: "B11_RESIDUAL_STREAM_MUT",
+        mut_env: "ZK_MUT_RESIDUAL_STREAM",
         mut_key: reg,
         log_rows,
         unit: units,
@@ -546,7 +546,7 @@ pub fn freivalds_site(
     fam_site(c, FamSite {
         reg: crate::gkrlink::Comp::Freivalds(reg),
         tag: format!("freivalds/{}", r.name),
-        mut_env: "B11_FREIVALDSMUT",
+        mut_env: "ZK_MUT_FREIVALDS",
         mut_key: reg,
         log_rows: r.lay.g.log_rows,
         unit: vec![true; r.lay.pq],
@@ -568,7 +568,7 @@ pub fn ao_site(
     fam_site(c, FamSite {
         reg: crate::gkrlink::Comp::Ao,
         tag: "attnout".to_string(),
-        mut_env: "B11_AOMUT",
+        mut_env: "ZK_MUT_ATTNOUT",
         mut_key: 0,
         log_rows: r.lay.log_rows,
         unit: vec![true; 7 * r.lay.per_row],
@@ -618,7 +618,7 @@ pub struct FamSite<'a> {
 /// kernel store already carries these fingerprints: under the flag the
 /// evaluator emits no lookups at all and its IR would be empty. One definition
 /// of the fraction, three readers: this, the family's hand-written builder (the
-/// one `B7_M4_LOGUPIR=2` compares against) and `gkrlink`'s affine forms.
+/// one `ZK_GENERATED_LOGUP=2` compares against) and `gkrlink`'s affine forms.
 pub fn fam_site<E: FrameworkEval>(c: &mut Collect, s: FamSite<'_>, eval: &E) {
     let (reg, log_rows) = (s.reg, s.log_rows);
     let tag = &s.tag;
@@ -684,10 +684,10 @@ pub fn fam_site<E: FrameworkEval>(c: &mut Collect, s: FamSite<'_>, eval: &E) {
         None => (&s.pre[..prefix(s.pre.len())], s.base),
     };
     let mut flat = deq_fracs(&ir, log_rows, hpre, hbase);
-    // `B11_FEEDCHECK=1`: the feed over an uploaded copy of the very columns the
+    // `ZK_GKR_FEED_CHECK=1`: the feed over an uploaded copy of the very columns the
     // host builder just read, cell for cell against it, then thrown away. Stream
     // T's control for the key tiles, on the family that joins them; the upload is
-    // the check's, exactly as `B7_M4_LOGUPIR=3` pays one.
+    // the check's, exactly as `ZK_GENERATED_LOGUP=3` pays one.
     #[cfg(feature = "cuda")]
     if feedcheck_on() {
         use stwo::stwo_cuda::base_field_vec::BaseFieldVec;
@@ -1031,7 +1031,7 @@ mod feedimpl {
             self.feed_secs += t0.elapsed().as_secs_f64();
         }
 
-        /// `B11_FEEDCHECK=1` on a host-filled key tile: the feed over an uploaded
+        /// `ZK_GKR_FEED_CHECK=1` on a host-filled key tile: the feed over an uploaded
         /// copy of this site's committed columns, against the host builder,
         /// cell for cell. The fed layers are the check's and are dropped.
         #[allow(clippy::too_many_arguments)]
@@ -1075,7 +1075,7 @@ mod feedimpl {
             scratch.check_fed(0, looks, cols, pre, exp, ranges);
         }
 
-        /// `B11_FEEDCHECK=1`: every fed instance from `first` on, cell for cell
+        /// `ZK_GKR_FEED_CHECK=1`: every fed instance from `first` on, cell for cell
         /// against the host builder reading the same committed columns.
         pub fn check_fed(
             &self,
@@ -1271,11 +1271,11 @@ pub mod dev {
         // the pre-grow alone was 12.4 GiB, and it turned a 1.6 GiB saving into a
         // 10.6 GiB regression. The wall is the same either way (2.050 s against
         // 2.068 s) and at C=4096 the peak is unmoved (33,109 MiB both ways).
-        // `B11_GKR_POOL=<n>` puts stream R's budget back at factor n.
+        // `ZK_GKR_POOL_FACTOR=<n>` puts stream R's budget back at factor n.
         //
         // The *kernel* half of prewarm below is untouched: that is the module
         // load, which is what R's pass 4 actually measured at -59%.
-        let factor: usize = std::env::var("B11_GKR_POOL")
+        let factor: usize = std::env::var("ZK_GKR_POOL_FACTOR")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
@@ -1360,7 +1360,7 @@ pub mod dev {
 /// Prove everything a `Collect` gathered, in one batched GKR.
 ///
 /// On the cuda build the sumcheck runs on the device -- that is the backend this
-/// build exists to measure -- unless `B11_GKR_HOST=1` pins it to the host simd
+/// build exists to measure -- unless `ZK_GKR_HOST=1` pins it to the host simd
 /// backend for an on-box comparison. The proof bytes are the same either way,
 /// which is the port's digest gate.
 pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
@@ -1374,9 +1374,9 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
     #[cfg(feature = "cuda")]
     let (proof, artifact, backend, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases,
          refeeds) = {
-        if std::env::var("B11_GKR_HOST").map(|v| v != "0").unwrap_or(false) {
+        if std::env::var("ZK_GKR_HOST").map(|v| v != "0").unwrap_or(false) {
             assert_eq!(n_fed, 0,
-                       "`B11_GKR_HOST=1` proves on the host, which needs every input                         layer there, and the device feed built {n_fed} of them");
+                       "`ZK_GKR_HOST=1` proves on the host, which needs every input                         layer there, and the device feed built {n_fed} of them");
             let t1 = Instant::now();
             let (proof, artifact) = prove_batch(channel, c.layers);
             (proof, artifact, "host simd", 0.0, 0.0, 0.0, t1.elapsed().as_secs_f64(), None, 0)
@@ -1439,9 +1439,9 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             // which is the only round that reads them. The uploaded instances
             // -- a host-filled diagonal block key tile's -- have no feed behind them, so
             // `Refeed::droppable` says no and they are held as stream Q held
-            // them. `B11_GKR_REFEED=0` puts every input layer back for the
+            // them. `ZK_GKR_REFEED=0` puts every input layer back for the
             // whole run: the same binary, the before against the after.
-            let refeed = crate::util::m4_switch("B11_GKR_REFEED")
+            let refeed = crate::util::m4_switch("ZK_GKR_REFEED")
                 .then(|| feedimpl::Refeed::new(&c.feeds, n_instances));
             let (proof, artifact) = stwo::prover::lookups::gkr_prover::prove_batch_refeed(
                 channel,
@@ -1534,10 +1534,10 @@ pub struct Cost {
     pub prewarm_secs: f64,
     /// serialising the proof
     pub assembly_secs: f64,
-    /// the device sumcheck's phase split, when `B11_GKR_PROF=1`
+    /// the device sumcheck's phase split, when `ZK_GKR_PROFILE=1`
     pub phases: Option<Vec<(&'static str, f64, u64)>>,
     /// B11 stream V, lever 1: how many feed launches the last round asked for,
-    /// one per fed site. Zero under `B11_GKR_REFEED=0` and on the host backend.
+    /// one per fed site. Zero under `ZK_GKR_REFEED=0` and on the host backend.
     pub refeeds: usize,
     /// everything the backend costs where the committed path costs its LogUp build:
     /// the input layers plus `prove_batch`

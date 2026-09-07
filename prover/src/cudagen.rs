@@ -2237,10 +2237,10 @@ inline const void *b65_scalars(const B65Blob *b) {
 // pointer-array and scalar copies, and the kernel itself -- so waiting only
 // stops the host from queueing the next component while this one runs. 16.5
 // measured that as 85 ms of device idle across 32 components. Default off;
-// B7_M3_LAUNCHSYNC=1 restores it.
+// ZK_LAUNCH_SYNC=1 restores it.
 inline bool b65_launch_sync() {
     static const bool on = [] {
-        const char *v = getenv("B7_M3_LAUNCHSYNC");
+        const char *v = getenv("ZK_LAUNCH_SYNC");
         return v != nullptr && v[0] != '0';
     }();
     return on;
@@ -2409,7 +2409,7 @@ fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
     // B7b (README 26): by shape, with this proof's scalars replayed.
     let ir = lowered_ir(eval);
     let fp = ir.fingerprint();
-    // Stream OO: the bisect switch. `B7_KERNEL_SKIP` is a comma-separated list
+    // Stream OO: the bisect switch. `ZK_KERNEL_SKIP` is a comma-separated list
     // of `cuda_eval_name`s whose constraint kernel declines to the CPU on this
     // run, exactly as an absent kernel does -- the same announced fallback the
     // store has taken for the residual stream and diagonal block shapes since stream B. It is a
@@ -2417,10 +2417,10 @@ fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
     // so a run that sets it must reproduce the run that does not, and the
     // family whose name makes an otherwise-rejected chunk prove is the family
     // whose generated kernel disagrees with the AIR.
-    if let Ok(skip) = std::env::var("B7_KERNEL_SKIP") {
+    if let Ok(skip) = std::env::var("ZK_KERNEL_SKIP") {
         if skip.split(',').any(|s| s.trim() == name) {
             eprintln!("kernel fallback: {name} fingerprint {fp:#010x} \
-                       ({} instructions) evaluates on the CPU (B7_KERNEL_SKIP)", ir.ops.len());
+                       ({} instructions) evaluates on the CPU (ZK_KERNEL_SKIP)", ir.ops.len());
             return None;
         }
     }
@@ -2428,10 +2428,10 @@ fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
         Some(s) => s,
         // B10 step 5 (stream B): the residual stream and the diagonal-block witness shapes lower
         // to kernels ptxas cannot compile in reasonable time (52 min and
-        // counting on one), so `B7_KERNEL_FALLBACK=1` lets a component with no
+        // counting on one), so `ZK_KERNEL_FALLBACK=1` lets a component with no
         // generated kernel run on the fork's scalar CPU fallback -- the same
         // bytes, announced per component, never silent.
-        None if crate::util::m4_switch("B7_KERNEL_FALLBACK") => {
+        None if crate::util::m4_switch("ZK_KERNEL_FALLBACK") => {
             eprintln!("kernel fallback: {name} fingerprint {fp:#010x} \
                        ({} instructions) evaluates on the CPU", ir.ops.len());
             return None;

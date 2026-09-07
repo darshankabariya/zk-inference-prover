@@ -1185,7 +1185,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
             }
         }),
         // Stream H: the boundary commitment, off unless asked for either way --
-        // by the flag on the command line or by `B10_BOUNDS` in the environment.
+        // by the flag on the command line or by `ZK_LAYER_BOUNDARY` in the environment.
         // Off is what makes the recorded digest the bit-for-bit line.
         // On by default wherever the family is; `--unsound-skip-layer-boundary`
         // turns the trees off, and off is skipped in the serialization.

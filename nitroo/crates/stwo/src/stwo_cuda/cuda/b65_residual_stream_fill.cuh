@@ -50,7 +50,7 @@
 #define B65_RESIDUAL_STREAM_UMIN 260
 #define B65_RESIDUAL_STREAM_EXP_BIAS 134
 
-// The negative controls (`B7_M4_RESIDUAL_STREAM_FILLMUT`). Each is a way this fill could
+// The negative controls (`ZK_MUT_WITNESS_GEN_RESIDUAL_STREAM`). Each is a way this fill could
 // plausibly be wrong and mode 2 must catch. Section 5 rule 5: a control that
 // cannot fire on the shape under test is a finding, not a pass, so `nomul` is
 // on the list even though the sequence's four components are all `Add` -- it fires

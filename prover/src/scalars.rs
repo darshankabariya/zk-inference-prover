@@ -32,9 +32,9 @@
 //! value dependence, so a hit is an IR the caller would have lowered. Two evals
 //! with the same name, sizes and structure hash lower to the same ops.
 //!
-//! `B7_M5_IRCACHE`: 0 off (the default, the proven path), 1 on, 2 on with every
+//! `ZK_LOWERING_CACHE`: 0 off (the default, the proven path), 1 on, 2 on with every
 //! hit checked against the full lowering -- ops, widths, constraints, fractions,
-//! scalars and refs, slot for slot. `B7_M5_IRMUT` (`shift` / `stale`, with an
+//! scalars and refs, slot for slot. `ZK_MUT_LOWERING_CACHE` (`shift` / `stale`, with an
 //! optional `:family`) are the negative controls, section 5 rule 5.
 
 use std::cell::RefCell;
@@ -500,13 +500,13 @@ fn cache() -> &'static Mutex<HashMap<Key, Entry>> {
 }
 
 pub fn mode() -> u32 {
-    crate::util::m4b_mode("B7_M5_IRCACHE")
+    crate::util::m4b_mode("ZK_LOWERING_CACHE")
 }
 
-/// `B7_M5_IRMUT`, aimed (rule 5): `shift` replays every slot's provenance one
+/// `ZK_MUT_LOWERING_CACHE`, aimed (rule 5): `shift` replays every slot's provenance one
 /// slot over; `stale` replays nothing and keeps the fill-time scalars.
 fn mutation(family: &str) -> &'static str {
-    let Ok(spec) = std::env::var("B7_M5_IRMUT") else { return "none" };
+    let Ok(spec) = std::env::var("ZK_MUT_LOWERING_CACHE") else { return "none" };
     let (name, fam) = match spec.split_once(':') {
         Some((n, f)) => (n.to_string(), Some(f.to_string())),
         None => (spec.clone(), None),
@@ -522,7 +522,7 @@ fn mutation(family: &str) -> &'static str {
         "shift" => "shift",
         "stale" => "stale",
         "none" => "none",
-        other => panic!("B7_M5_IRMUT={other}: unknown mutation"),
+        other => panic!("ZK_MUT_LOWERING_CACHE={other}: unknown mutation"),
     }
 }
 
@@ -610,7 +610,7 @@ fn same(a: &Ir, b: &Ir, family: &str) {
 ///
 /// `lower` is the full lowering, run on a miss, on every call with the cache
 /// off, and on every hit under mode 2 as the reference the replay is checked
-/// against. A `B7_M4_LOGUPMUT` run bypasses the cache: the mutation changes the
+/// against. A `ZK_MUT_LOGUP` run bypasses the cache: the mutation changes the
 /// IR, and the cache would otherwise hide it (section 5 rule 10).
 pub fn cached_ir<E: FrameworkEval>(
     eval: &E,
@@ -620,7 +620,7 @@ pub fn cached_ir<E: FrameworkEval>(
     lower: impl FnOnce() -> Ir,
 ) -> Ir {
     let mode = mode();
-    if mode == 0 || std::env::var("B7_M4_LOGUPMUT").is_ok() {
+    if mode == 0 || std::env::var("ZK_MUT_LOGUP").is_ok() {
         return lower();
     }
     let family = eval.cuda_eval_name();

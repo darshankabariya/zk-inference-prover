@@ -44,13 +44,13 @@ impl MerkleOps<Blake2sMerkleHasher> for CudaBackend {
 
 /// B7a milestone 3: which M31 reduction the Merkle commit uses.
 ///
-/// `B7_M3_MERKLE=0` the original host round trip, `=2` the standalone
+/// `ZK_DEVICE_MERKLE=0` the original host round trip, `=2` the standalone
 /// `reduce_hashes_to_m31` kernel, anything else (the default) the reduction
 /// fused into the commit kernel itself. All three produce the same layer, so
 /// the ablation is a run and not a rebuild.
 fn b7a_m3_merkle_mode() -> u8 {
     static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| match std::env::var("B7_M3_MERKLE").as_deref() {
+    *MODE.get_or_init(|| match std::env::var("ZK_DEVICE_MERKLE").as_deref() {
         Ok("0") => 0,
         Ok("2") => 2,
         _ => 1,

@@ -4,7 +4,7 @@
 ///
 /// The card's peak under the GKR flags is sampled from outside the process by
 /// `nvidia-smi`, which says how high the pool's reservation went but nothing
-/// about when or why. `B11_MEMMARK=<path>` makes every call here append one
+/// about when or why. `ZK_MEMORY_TIMELINE=<path>` makes every call here append one
 /// `<epoch seconds> <name>` line to that file, on the same wall clock the
 /// sampler stamps its samples with, so a reporter can say which phase owned the
 /// card at the peak instead of modelling it. The switch off -- the default --
@@ -21,7 +21,7 @@ pub mod memmark {
     fn sink() -> Option<&'static Mutex<std::fs::File>> {
         static S: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
         S.get_or_init(|| {
-            let p = std::env::var("B11_MEMMARK").ok()?;
+            let p = std::env::var("ZK_MEMORY_TIMELINE").ok()?;
             std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -40,7 +40,7 @@ pub mod memmark {
     /// One mark, stamped with the wall clock the sampler uses.
     ///
     /// The device's work is queued, so a mark says when the *host* reached a
-    /// boundary. Run the timeline with `B11_GKR_PROF=1`, which synchronises the
+    /// boundary. Run the timeline with `ZK_GKR_PROFILE=1`, which synchronises the
     /// device around every sumcheck phase, and the two agree to within one
     /// launch.
     pub fn mark(name: &str) {
@@ -70,7 +70,7 @@ pub mod memmark {
 /// this file that runs once for every *instance* a round touches.
 ///
 /// The accumulators are process-wide and the timers are host-side: on
-/// `B11_GKR_PROF=1` the backend synchronises around its own phases, so by the
+/// `ZK_GKR_PROFILE=1` the backend synchronises around its own phases, so by the
 /// time control is back here the device is quiet and a wall-clock scope
 /// measures what it says it measures. `sumcheck` is the whole
 /// `sumcheck::prove_batch` call and therefore *contains* the backend's round
@@ -106,7 +106,7 @@ pub mod roundprof {
 
     pub fn on() -> bool {
         static ON: OnceLock<bool> = OnceLock::new();
-        *ON.get_or_init(|| std::env::var("B11_GKR_PROF").map(|v| v != "0").unwrap_or(false))
+        *ON.get_or_init(|| std::env::var("ZK_GKR_PROFILE").map(|v| v != "0").unwrap_or(false))
     }
 
     pub struct Scope {

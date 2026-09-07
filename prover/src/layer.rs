@@ -1563,22 +1563,22 @@ impl Layer {
                 })
                 .collect()
         };
-        // Stream NN-3: `B7_NN_CLAMP=n` calibrates every scale `n` exponents
+        // Stream NN-3: `ZK_QUANTIZE_SCALE_SHIFT=n` calibrates every scale `n` exponents
         // *below* the smallest one that fits, so a synthetic layer clamps where
         // B1 does and the desk can prove a chunk that carries the clamp.  A
         // witness-construction switch like `--synth-residual-stream`: at 0 -- the default,
         // and every recorded digest -- nothing here moves.
-        let shift = std::env::var("B7_NN_CLAMP").ok()
+        let shift = std::env::var("ZK_QUANTIZE_SCALE_SHIFT").ok()
             .and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
         if shift != 0 {
-            eprintln!("layer: B7_NN_CLAMP={shift} -- the q/k/v scales are {shift} \
+            eprintln!("layer: ZK_QUANTIZE_SCALE_SHIFT={shift} -- the q/k/v scales are {shift} \
 exponent(s) small, so B1's clamp fires");
         }
         let down = |v: Vec<i32>| -> Vec<i32> { v.into_iter().map(|x| x - shift as i32).collect() };
         let jq = down(scale(&qrot, nq, qmax_q));
         let jk_kv = down(scale(&krot, nk, qmax_k));
         // stream SS: the fold's `s_v` is the witness's own `jv2` and is not
-        // calibrated off a bf16 column, so `B7_NN_CLAMP` does not move it --
+        // calibrated off a bf16 column, so `ZK_QUANTIZE_SCALE_SHIFT` does not move it --
         // the clamp a folded site takes is the fold's own `qc = min(qm, 127)`.
         let jv_kv = if v_fold {
             self.mats[vmi].jv2.clone()
@@ -2006,9 +2006,9 @@ unmoved (a rejection is the pass)");
         let mut group_qx: std::collections::HashMap<&str, Vec<i32>> = Default::default();
         for (name, var) in mat_variants(&cfg.layout) {
             let (ni, no) = if name == "down" { (n_out, n_in) } else { (n_in, n_out) };
-            // B7b (README 26): `B7_SYNTH_DIMS=q:3584x3584,k:3584x512,...` sets a
+            // B7b (README 26): `ZK_SYNTHETIC_DIMS=q:3584x3584,k:3584x512,...` sets a
             // matmul's (n_in, n_out) by name; unnamed matmuls keep the defaults.
-            let (ni, no) = std::env::var("B7_SYNTH_DIMS")
+            let (ni, no) = std::env::var("ZK_SYNTHETIC_DIMS")
                 .ok()
                 .and_then(|spec| {
                     spec.split(',').find_map(|e| {
@@ -2941,7 +2941,7 @@ pub struct MatComponent {
     pub ref_bad: usize,
     pub n: usize,
     /// B7a milestone 4 (19.6): the same columns, born on the device. `Some`
-    /// only under `B7_M4_FILL=1`, where `pre` and `base` are empty and this is
+    /// only under `ZK_DEVICE_WITNESS_GEN_DEQUANT=1`, where `pre` and `base` are empty and this is
     /// the component.
     pub dev: Option<crate::devfill::DevFill>,
 }
@@ -2988,7 +2988,7 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
     let m4c = if spec.variant == DeqVariant::Fold {
         0
     } else {
-        crate::util::m4b_mode("B7_M4_FILL")
+        crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_DEQUANT")
     };
     let m4c_want = m4c == 2;
     if m4c == 1 {
@@ -3023,7 +3023,7 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
         rw: Vec<((u32, i64), u32)>,
         ref_bad: usize,
         /// B7a milestone 4 (19.6): the f64 cross-check's own bf16 answer per
-        /// (row, slot), so `B7_M4_FILL=2` can compare the one part of the fill
+        /// (row, slot), so `ZK_DEVICE_WITNESS_GEN_DEQUANT=2` can compare the one part of the fill
         /// that is not integer arithmetic cell for cell instead of comparing
         /// two counts that are both zero on an honest witness.
         want: Vec<u16>,
@@ -3195,7 +3195,7 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
 
     let base: Vec<Eval> = cols.into_iter().map(|c| eval_of(lay.log_rows, c)).collect();
     if m4c_want {
-        // `B7_M4_FILL=2`: the check with teeth, and it runs before any column
+        // `ZK_DEVICE_WITNESS_GEN_DEQUANT=2`: the check with teeth, and it runs before any column
         // has changed hands. Every committed and preprocessed cell, the four
         // multiplicity tables, `off_table`, `ref_bad` and -- because it is the
         // only non-integer arithmetic in the fill -- the f64 cross-check's own
@@ -3223,7 +3223,7 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
     MatComponent { lay, spec, map, pre, base, ref_bad, n, dev: None }
 }
 
-/// `B7_M4_FILL=2`: the device fill against the host fill, everything at once.
+/// `ZK_DEVICE_WITNESS_GEN_DEQUANT=2`: the device fill against the host fill, everything at once.
 ///
 /// Not a sample: a fill that is wrong on one slot of one row is wrong, and the
 /// point of checking here rather than against a proof digest is that a
@@ -3597,7 +3597,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
     let rows = 1usize << lay.log_rows;
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, lay.per_row);
     // B7a milestone 4 (section 3 row 1): `z` and `h` where the component's own
-    // accumulator columns are. `B7_M4_ACC=2` runs both and asserts every cell.
+    // accumulator columns are. `ZK_DEVICE_ACCUMULATORS=2` runs both and asserts every cell.
     let m4g = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
     let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
     // B11 stream M: the component's real height, kept before `rows` is shadowed to
@@ -3605,7 +3605,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
     // side, which is a third accumulator over the *witness* rather than over
     // this component's columns and so has nothing to do with where the fill went.
     // Suppressing it with the other two left `u[rows - 1]` indexing an empty
-    // vector -- reachable only on an o-side matmul with `B7_M4_ACC` on, which
+    // vector -- reachable only on an o-side matmul with `ZK_DEVICE_ACCUMULATORS` on, which
     // is `lm_head` and only `lm_head`, and `ACC` had never been on.
     let n_rows = rows;
     let rows = if m4g_host { rows } else { 0 };
@@ -3634,7 +3634,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
     // The lead prefix keeps this exact: `inner` is zero on every lead row, so
     // the scan's extra `s_ch` steps there multiply zero — but only when the
     // lead is chunk-aligned, so the guard falls back to the serial loop if not.
-    if crate::util::m4_switch("B7_M4_SCAN") && lay.chunks > 0 && rows % lay.chunks == 0
+    if crate::util::m4_switch("ZK_PARALLEL_SCAN") && lay.chunks > 0 && rows % lay.chunks == 0
         && lay.lead % lay.chunks == 0 {
         z.par_chunks_mut(lay.chunks).enumerate().for_each(|(c, zc)| {
             let base = c * lay.chunks;
@@ -3699,7 +3699,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
     // LogUp columns -- the order the AIR reads them in.
     let claimed_out = out.map(|o| {
         // `n_rows`, not `rows`: this accumulator is the witness's, and it runs
-        // whatever `B7_M4_ACC` did to the other two.
+        // whatever `ZK_DEVICE_ACCUMULATORS` did to the other two.
         let mut u = vec![SecureField::zero(); n_rows];
         for j in 0..n_rows {
             let mut f = SecureField::zero();
@@ -3810,7 +3810,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
 /// The eval is rebuilt here rather than borrowed from `build_components`,
 /// which does not exist yet at generation time. Only `yside.claimed_h` is
 /// unavailable, and it enters constraints alone -- never a lookup -- so a
-/// placeholder is correct. `B7_M4_LOGUPIR=2` is what says the two agree.
+/// placeholder is correct. `ZK_GENERATED_LOGUP=2` is what says the two agree.
 /// The evaluator whose fraction IR *is* this component's lookups.
 ///
 /// B11 stream U, lever 3: the GKR backend needs the same evaluator, so it is built
@@ -3843,7 +3843,7 @@ pub fn deq_logup_eval(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureFi
         }),
         // the output side carries no lookups, so it cannot change this eval's
         // LogUp IR -- leaving it off here keeps the lowering identical whether
-        // the binding is on or not, which is what `B7_M4_LOGUPIR=2` compares
+        // the binding is on or not, which is what `ZK_GENERATED_LOGUP=2` compares
         output_claim: None,
         sside: None,
         gkr: false,
@@ -3855,7 +3855,7 @@ fn mat_logup_ir(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
                 -> (Vec<crate::device::AnyCol<'static>>, SecureField) {
     use stwo::prover::backend::simd::m31::PackedM31;
     let eval = deq_logup_eval(m, r, rv, s_ch, rels);
-    // `B7_M4_LOGUPMUT` picks one of 2b's deliberate defects, so mode 2 has a
+    // `ZK_MUT_LOGUP` picks one of 2b's deliberate defects, so mode 2 has a
     // negative control. B7a milestone 4 (section 3 row 1): one place reads it
     // for every family, and it takes a `:family` suffix -- unaimed, a defect
     // panics at whichever family is lowered first and says nothing about the
@@ -3933,7 +3933,7 @@ fn mat_logup(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
     let m4b = if r.spec.variant == DeqVariant::Fold {
         0
     } else {
-        crate::util::m4b_mode("B7_M4_LOGUPIR")
+        crate::util::m4b_mode("ZK_GENERATED_LOGUP")
     };
     let from_ir = (m4b > 0).then(|| mat_logup_ir(m, r, rv, s_ch, rels, m4b >= 3));
     // 2 checks the interpreter against the hand-written builder, 4 the kernel.
@@ -4040,7 +4040,7 @@ fn mat_logup(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
     let (n_pairs, fpair) = crate::plogup::paired(looks.len(), fr);
     let host = crate::plogup::build(r.lay.log_rows, n_pairs, fpair);
     if let Some((cols, sum)) = from_ir {
-        // `B7_M4_LOGUPIR=2`: the check. Every column, every cell, and the
+        // `ZK_GENERATED_LOGUP=2`: the check. Every column, every cell, and the
         // claimed sum -- not a sample, because a lowering that is wrong on one
         // lookup of one row is wrong.
         use stwo::prover::backend::Column as _;
@@ -4062,7 +4062,7 @@ fn mat_logup(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
 
 pub struct AoComponent {
     pub lay: AoLayout,
-    /// as `FreivaldsComponent`'s: the mirror under `B7_M4_WFILL=1`
+    /// as `FreivaldsComponent`'s: the mirror under `ZK_DEVICE_WITNESS_GEN=1`
     pub pre: Vec<Eval>,
     pub base: Vec<Eval>,
     /// B7a milestone 4 (section 3 row 1): the same columns, born on the device.
@@ -4151,7 +4151,7 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
                  || acc_mag || denp2 {
         0
     } else {
-        crate::util::m4b_mode("B7_M4_WFILL")
+        crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN")
     };
     assert!(m4d == 0 || corrupt.is_none(),
             "attnout: the device fill has no `corrupt` path");
@@ -4249,7 +4249,7 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
                           n: ao.nh * ao.s * ao.hd, rem_bits, q_bits,
                           acc_lo_bits, acc_hi_bits, acc_mag, denp2 };
     }
-    // `B7_M4_WFILL=2` builds this component twice -- host here, device below --
+    // `ZK_DEVICE_WITNESS_GEN=2` builds this component twice -- host here, device below --
     // and the device call bumps the same counters a second time, so every
     // counter this fill touches has to be snapshotted before, compared as a
     // delta, and restored after.  Stream JJ (E11) added three: the two
@@ -4746,7 +4746,7 @@ pub struct FreivaldsComponent {
     /// Stream Z: the activation cells' range width (8, or 12 for the widened
     /// attention output's group).  The offset is `2^(act_bits - 1)`.
     pub act_bits: u32,
-    /// Under `B7_M4_WFILL=1` these are the *mirror* -- the device columns, back
+    /// Under `ZK_DEVICE_WITNESS_GEN=1` these are the *mirror* -- the device columns, back
     /// on the host, because `freivalds_interaction` still reads them there. The
     /// commitment takes `dev`, so they never go back up.
     pub pre: Vec<Eval>,
@@ -4795,7 +4795,7 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
     // table in its kernel, so a wide group takes the host fill whatever the
     // switch says -- the diagonal block key tiles' pattern, and `devpre::note_host_fill`
     // is told in `generate`.
-    let m4d = if act_bits == 8 { crate::util::m4b_mode("B7_M4_WFILL") } else { 0 };
+    let m4d = if act_bits == 8 { crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN") } else { 0 };
     assert!(m4d == 0 || corrupt_qx.is_none(),
             "{name}: the device Freivalds fill has no `corrupt_qx` path");
     if m4d == 1 {

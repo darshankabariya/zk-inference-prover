@@ -21,7 +21,7 @@
 //! keeps no per-row state and reads its operands back out of cells it wrote.
 //! `Prog::src_cols` is that resolution, and it already existed for the AIR.
 //!
-//! `B7_M4_RESIDUAL_STREAM_FILL` says which path runs, on the three-value pattern every fill in
+//! `ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM` says which path runs, on the three-value pattern every fill in
 //! this series uses: 0 the host, 1 the device, 2 both with every cell, every
 //! multiplicity delta, `off_table`, `bad_exp` and both natural-value arrays
 //! asserted equal.
@@ -120,9 +120,9 @@ unsafe extern "C" {
 
 // ------------------------------------------------------------------ the switches --
 
-/// `B7_M4_RESIDUAL_STREAM_FILL`: 0 the host, 1 the device, 2 both with every cell asserted.
+/// `ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM`: 0 the host, 1 the device, 2 both with every cell asserted.
 pub fn mode() -> u32 {
-    crate::util::m4b_mode("B7_M4_RESIDUAL_STREAM_FILL")
+    crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM")
 }
 
 /// Whether anything on the host will read the two natural arrays.
@@ -155,10 +155,10 @@ pub fn binding_host() -> bool {
     true
 }
 
-/// `B7_M4_RESIDUAL_STREAM_FILLMUT`: one deliberate defect in the device fill, so mode 2's
+/// `ZK_MUT_WITNESS_GEN_RESIDUAL_STREAM`: one deliberate defect in the device fill, so mode 2's
 /// check has negative controls. The names are the kernel's.
 fn residual_stream_fill_mut() -> u32 {
-    match std::env::var("B7_M4_RESIDUAL_STREAM_FILLMUT").ok().as_deref() {
+    match std::env::var("ZK_MUT_WITNESS_GEN_RESIDUAL_STREAM").ok().as_deref() {
         None | Some("") | Some("none") => 0,
         Some("noperm") => 1,
         Some("anchor") => 2,
@@ -167,7 +167,7 @@ fn residual_stream_fill_mut() -> u32 {
         Some("clamp") => 5,
         Some("nomul") => 6,
         Some("offby") => 7,
-        Some(other) => panic!("unknown B7_M4_RESIDUAL_STREAM_FILLMUT {other:?}"),
+        Some(other) => panic!("unknown ZK_MUT_WITNESS_GEN_RESIDUAL_STREAM {other:?}"),
     }
 }
 
@@ -282,7 +282,7 @@ pub struct DevResidualStream {
     pub bad_exp: usize,
     /// `(sm, ef)` per leaf and per output, in row order, regrouped the way
     /// `ResidualStreamComponent` holds them. **Empty when the bindings fold on the device**
-    /// (`B7_M4_RESIDUAL_STREAM_BIND=1`): nothing on the host reads them then, and bringing them
+    /// (`ZK_DEVICE_RESIDUAL_STREAM_BINDING=1`): nothing on the host reads them then, and bringing them
     /// back is all `gen/residual_stream_fill_d2h` ever was.
     pub in_nat: Vec<Vec<(i64, i64)>>,
     pub out_nat: Vec<Vec<(i64, i64)>>,
@@ -461,7 +461,7 @@ pub fn residual_stream_component_dev(w: &ResidualStreamWitness, prog: &Prog, rou
     // the host is going to fold them.
     //
     // They exist for one reader -- `residual_stream::residual_stream_interaction`'s Horner bindings --
-    // and under `B7_M4_RESIDUAL_STREAM_BIND=1` that fold happens on the card, out of the very
+    // and under `ZK_DEVICE_RESIDUAL_STREAM_BINDING=1` that fold happens on the card, out of the very
     // arrays this would copy. So the download and the regrouping below are
     // skipped and `in_nat` / `out_nat` stay empty; the device arrays are kept
     // alive in `DevResidualStream` instead, which is what `devacc::residual_stream_bind` reads.
@@ -562,7 +562,7 @@ fn up_struct<T: Copy>(v: &[T]) -> Uint32Vec {
     up_u32(raw)
 }
 
-/// `B7_M4_RESIDUAL_STREAM_FILL=2`: the device fill against the host's, everything at once.
+/// `ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM=2`: the device fill against the host's, everything at once.
 ///
 /// Not a sample. A fill that is wrong on one cell of one row is wrong, and the
 /// point of checking here rather than against a digest is that a mismatch names

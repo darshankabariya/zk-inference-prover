@@ -22,7 +22,7 @@
 // f64 cross-check of the table path against a single IEEE rounding. It is
 // deterministic on both sides -- `exp2`/`ldexp` of an integer is exact, bf16
 // rounding is bit manipulation, and the products are plain `double` multiplies
-// with no add to contract into an FMA -- so it ports, and `B7_M4_FILL=2`
+// with no add to contract into an FMA -- so it ports, and `ZK_DEVICE_WITNESS_GEN_DEQUANT=2`
 // compares the f64 result cell for cell rather than comparing the counts,
 // which on an honest witness are both zero and would agree vacuously.
 #ifndef B65_FILL_CUH
@@ -37,7 +37,7 @@ struct B65FillCfg {
     unsigned variant;  // 0 = pow2, 1 = chain
     unsigned sticky;   // Round::needs_sticky()
     unsigned kmax;
-    unsigned do_ref;   // run the f64 cross-check (Round::Even and B7_M4_REFBAD)
+    unsigned do_ref;   // run the f64 cross-check (Round::Even and ZK_KERNEL_REFERENCE_CHECK)
     unsigned tokens;
     unsigned n_out;
     unsigned per_row;
@@ -55,12 +55,12 @@ struct B65FillCfg {
     unsigned n_frac;
     unsigned n_mul;
     unsigned n_r8;     // rows in the 8-bit range table
-    unsigned mutate;   // B7_M4_FILLMUT: a deliberate defect, for the controls
+    unsigned mutate;   // ZK_MUT_WITNESS_GEN_DEQUANT: a deliberate defect, for the controls
 };
 
 #define B65_FILL_NONE 0xffffffffu
 
-// The negative controls (`B7_M4_FILLMUT`). A check is only worth reporting if
+// The negative controls (`ZK_MUT_WITNESS_GEN_DEQUANT`). A check is only worth reporting if
 // it fails when the fill is wrong in the ways this design could plausibly be
 // wrong, and each of these is one of them: the permutation forgotten, a slot
 // misaddressed, a multiplicity dropped, and two ways of getting the f64

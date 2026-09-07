@@ -19,7 +19,7 @@
 //!   per-round synchronisation is protocol-inherent: the only way to remove it
 //!   is to batch *across instances of a round*, which lives above this trait.
 //!
-//! When `B11_GKR_PROF=1` each phase synchronises around its calls and feeds a
+//! When `ZK_GKR_PROFILE=1` each phase synchronises around its calls and feeds a
 //! process-wide accumulator (`prof::snapshot`), so a profiled run splits the
 //! sumcheck into eq evals / layer halvings / round sums / variable fixes. The
 //! un-profiled path never synchronises beyond the copies it cannot avoid.
@@ -308,9 +308,9 @@ impl GkrOps for CudaBackend {
                 .map(|(h, &claim)| Self::sum_as_poly_in_first_variable(h, claim))
                 .collect()
         };
-        // `B11_GKR_FUSE=0` pins the round back to the per-instance loop, so the
+        // `ZK_GKR_FUSE=0` pins the round back to the per-instance loop, so the
         // fused and unfused arms can be measured on one build and one chunk.
-        if std::env::var("B11_GKR_FUSE").map(|v| v == "0").unwrap_or(false) {
+        if std::env::var("ZK_GKR_FUSE").map(|v| v == "0").unwrap_or(false) {
             return fallback();
         }
         let Some(first) = hs.first() else { return vec![] };
@@ -424,7 +424,7 @@ impl GkrOps for CudaBackend {
         challenge: SecureField,
     ) -> Vec<Layer<Self>> {
         let _t = prof::scope(prof::FIX);
-        let unfused = std::env::var("B11_GKR_FUSE").map(|v| v == "0").unwrap_or(false);
+        let unfused = std::env::var("ZK_GKR_FUSE").map(|v| v == "0").unwrap_or(false);
         if unfused || layers.len() < 2 {
             return layers.into_iter().map(|l| l.fix_first_variable(challenge)).collect();
         }
@@ -498,7 +498,7 @@ impl GkrOps for CudaBackend {
     }
 }
 
-/// The device sumcheck's phase accounting, on `B11_GKR_PROF=1`.
+/// The device sumcheck's phase accounting, on `ZK_GKR_PROFILE=1`.
 ///
 /// Each phase synchronises the device around its calls so wall time can be
 /// attributed to it; the switch off, nothing here runs and nothing
@@ -529,14 +529,14 @@ pub mod prof {
 
     pub fn on() -> bool {
         static ON: OnceLock<bool> = OnceLock::new();
-        *ON.get_or_init(|| std::env::var("B11_GKR_PROF").map(|v| v != "0").unwrap_or(false))
+        *ON.get_or_init(|| std::env::var("ZK_GKR_PROFILE").map(|v| v != "0").unwrap_or(false))
     }
 
-    /// `B11_GKR_PROF=2`: additionally print every call, for hunting a cost
+    /// `ZK_GKR_PROFILE=2`: additionally print every call, for hunting a cost
     /// that an aggregate hides.
     fn verbose() -> bool {
         static V: OnceLock<bool> = OnceLock::new();
-        *V.get_or_init(|| std::env::var("B11_GKR_PROF").map(|v| v == "2").unwrap_or(false))
+        *V.get_or_init(|| std::env::var("ZK_GKR_PROFILE").map(|v| v == "2").unwrap_or(false))
     }
 
     pub struct Scope {

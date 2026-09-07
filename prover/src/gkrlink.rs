@@ -562,7 +562,7 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
 /// builder look for look and column for column -- that builder is the ground
 /// truth for the *order*, because `plogup::paired` batches in it and the
 /// generated kernel lowers `DequantEval::evaluate` in it, so all three agree or
-/// `B7_M4_LOGUPIR=2` fails. Every value a dequant lookup reads is a committed
+/// `ZK_GENERATED_LOGUP=2` fails. Every value a dequant lookup reads is a committed
 /// trace mask, one preprocessed column, or the constant zero, so every
 /// denominator is affine in committed columns exactly as memo section 4 needs;
 /// the `mul` lookups' numerator is the committed `nz`, which is affine too.
@@ -683,7 +683,7 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
 /// B11 stream V, lever 3. This mirrors `residual_stream::residual_stream_interaction`'s `fr` closure
 /// look for look and column for column -- that closure is the ground truth for
 /// the *order*, because `plogup::paired` batches in it and the generated kernel
-/// lowers `ResidualStreamEval::evaluate` in it, so all three agree or `B7_M4_LOGUPIR=2`
+/// lowers `ResidualStreamEval::evaluate` in it, so all three agree or `ZK_GENERATED_LOGUP=2`
 /// fails. Every value a residual-stream lookup reads is one of the component's own committed
 /// trace masks or the constant zero -- `usize::MAX` is the `+0` operand, which
 /// contributes no term at all -- so every denominator is affine in committed
@@ -697,7 +697,7 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
 /// carried weighted combinations since stream S.
 ///
 /// `gkrlink::ir_looks` derives the same forms from the fraction IR, and
-/// `B11_GKR_AFFINE=1` compares the two. This one is what both the prover and
+/// `ZK_GKR_AFFINITY=1` compares the two. This one is what both the prover and
 /// the *verifier* run, because it needs the plan and the drawn relations and
 /// nothing else -- the verifier has no evaluator to lower.
 pub fn residual_stream_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
@@ -1122,7 +1122,7 @@ pub fn ir_looks<F: Fn(usize, usize) -> RCol>(
         .map(|(i, r)| {
             let (num, den) = r.unwrap_or_else(|e| panic!(
                 "{tag}: look {i} cannot be linked -- {e}. The affinity check \
-                 (`B11_GKR_AFFINE=1`) is what this family's backend was built on."));
+                 (`ZK_GKR_AFFINITY=1`) is what this family's backend was built on."));
             LinkLook {
                 num: (!(num.is_const() && num.k == one)).then(|| conv(&num)),
                 den: conv(&den),
@@ -1702,7 +1702,7 @@ pub fn link_for(plan: &crate::compose::Plan, seed: u64) -> Vec<HeightLink> {
 }
 
 /// The eq-weighted total of the folded coefficient column -- what the honest
-/// claim equals. The `B11_LINKMUT` control bends one weight and then makes its
+/// claim equals. The `ZK_MUT_LINK` control bends one weight and then makes its
 /// own columns self-consistent with this total, so everything the prover can
 /// check still holds and only the verifier's side of the link can reject.
 pub fn eq_total(hl: &HeightLink, coeff: &SecureColumn) -> SecureField {
@@ -1715,12 +1715,12 @@ pub fn eq_total(hl: &HeightLink, coeff: &SecureColumn) -> SecureField {
     acc.to_array().iter().fold(SecureField::zero(), |a, b| a + *b)
 }
 
-/// `B11_LINKCHECK=1`: evaluate the height's constraints pointwise on the CPU
+/// `ZK_LINK_CHECK=1`: evaluate the height's constraints pointwise on the CPU
 /// and name the first violated relation. A development probe for the composed
 /// run -- the constraints here are the same expressions `LinkEval` hands the
 /// framework, walked in coset order over the committed values.
 pub fn check_height_cols(hl: &HeightLink, cols: &[Eval]) {
-    if std::env::var("B11_LINKCHECK").map(|v| v != "1").unwrap_or(true) {
+    if std::env::var("ZK_LINK_CHECK").map(|v| v != "1").unwrap_or(true) {
         return;
     }
     let h = hl.h;
@@ -1784,12 +1784,12 @@ pub fn check_height_cols(hl: &HeightLink, cols: &[Eval]) {
 ///
 /// On the cuda backend the whole chain runs on the card and the sixteen columns per
 /// height reach the commitment device-resident, the way the key tiles' fraction
-/// columns already do. `B11_LINKDEV=0` puts the build back on the host: that is
+/// columns already do. `ZK_DEVICE_LINK=0` puts the build back on the host: that is
 /// the control the stream's own Δ is measured against, the same shape as T's
-/// `B11_GKR_FUSE=0`.
+/// `ZK_GKR_FUSE=0`.
 #[cfg(feature = "cuda")]
 pub fn dev_link() -> bool {
-    std::env::var("B11_LINKDEV").map(|v| v != "0").unwrap_or(true)
+    std::env::var("ZK_DEVICE_LINK").map(|v| v != "0").unwrap_or(true)
 }
 
 /// One height's sixteen committed columns, built wherever the prover can build
@@ -1814,7 +1814,7 @@ pub fn height_cols<'a, F: Fn(Comp, &RCol) -> Src<'a>>(
 }
 
 /// The eq-weighted total of one height's folded coefficient column, taken
-/// wherever the fold ran. This is what `B11_LINKMUT` re-derives its claim from,
+/// wherever the fold ran. This is what `ZK_MUT_LINK` re-derives its claim from,
 /// so it has to exist on both paths or the control would only be armed on one.
 pub fn fold_total<'a, F: Fn(Comp, &RCol) -> Src<'a>>(
     hl: &HeightLink,
@@ -1912,7 +1912,7 @@ pub mod dev {
 
     /// `coeff * eq - shift` into `out`, and the unshifted products' total.
     /// A `None` output asks for the total alone, which is what the
-    /// `B11_LINKMUT` control needs of a bent column.
+    /// `ZK_MUT_LINK` control needs of a bent column.
     fn terms_of(coeff: &SecureFieldVec, eq: &SecureFieldVec, shift: SecureField,
                 out: Option<&SecureFieldVec>, n_rows: usize) -> SecureField {
         let n_blocks = n_rows.div_ceil(256).clamp(1, 1024);
@@ -2011,14 +2011,14 @@ pub mod dev {
         out
     }
 
-    /// `B11_LINKCOLCHECK=1`: the card's sixteen columns against the host
-    /// builder's, cell for cell -- stream T's `B11_FEEDCHECK` for this lever.
+    /// `ZK_LINK_COLUMN_CHECK=1`: the card's sixteen columns against the host
+    /// builder's, cell for cell -- stream T's `ZK_GKR_FEED_CHECK` for this lever.
     /// It pays a download and a second, host build of the same height, so it is
     /// a control and never a measurement.
     pub fn col_check<'a, F: Fn(Comp, &RCol) -> Src<'a>>(
         hl: &HeightLink, src_of: &F, cols: &[AnyCol<'static>],
     ) {
-        if std::env::var("B11_LINKCOLCHECK").map(|v| v != "1").unwrap_or(true) {
+        if std::env::var("ZK_LINK_COLUMN_CHECK").map(|v| v != "1").unwrap_or(true) {
             return;
         }
         let want = build_height_cols(hl, fold_coeff(hl, src_of));

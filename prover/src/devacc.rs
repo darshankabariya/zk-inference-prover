@@ -53,7 +53,7 @@
 //! sum is the one the AIR wants and `nomask` is a real divergence from it. Run it
 //! at a shape with `key_tile_leads.key > 0` or it says nothing.
 //!
-//! `B7_M4_ACC` says which path runs, on the three-value pattern every fill in
+//! `ZK_DEVICE_ACCUMULATORS` says which path runs, on the three-value pattern every fill in
 //! this series uses: 0 the host builds them, 1 the device does and they are
 //! never on the host, 2 both with every cell asserted equal. Mode 2 is a check
 //! with teeth even with every fill on the device, because the host side reads
@@ -236,9 +236,9 @@ const ONE_SRC: u32 = u32::MAX;
 
 // ------------------------------------------------------------------ the switches --
 
-/// `B7_M4_ACC`: 0 the host, 1 the device, 2 both with every cell asserted.
+/// `ZK_DEVICE_ACCUMULATORS`: 0 the host, 1 the device, 2 both with every cell asserted.
 pub fn mode() -> u32 {
-    crate::util::m4b_mode("B7_M4_ACC")
+    crate::util::m4b_mode("ZK_DEVICE_ACCUMULATORS")
 }
 
 /// Which component an accumulator belongs to, so a control can be aimed at one.
@@ -269,21 +269,21 @@ impl Comp {
     }
 }
 
-/// `B7_M4_ACCMUT`, `name` or `name:component`.
+/// `ZK_MUT_ACCUMULATORS`, `name` or `name:component`.
 ///
 /// **The suffix is section 5 rule 5, again.** The key tiles are built first and the
 /// channel component first of all, so an unaimed defect always panics at `chan
 /// key_tile0` and the run says nothing about whether the grid, the per-token block,
 /// the Freivalds checks, the dequant or the attnout would have caught the same thing.
 pub fn accmut(reg: Comp) -> u32 {
-    let raw = std::env::var("B7_M4_ACCMUT").unwrap_or_default();
+    let raw = std::env::var("ZK_MUT_ACCUMULATORS").unwrap_or_default();
     let (name, want) = match raw.split_once(':') {
         Some((n, r)) => (n.to_string(), Some(r.to_string())),
         None => (raw, None),
     };
     if let Some(r) = want.as_deref() {
         assert!(["chan", "grid", "tok", "freivalds", "deq", "ao", "residual_stream_bind"].contains(&r),
-                "unknown B7_M4_ACCMUT component {r:?}");
+                "unknown ZK_MUT_ACCUMULATORS component {r:?}");
         if r != reg.name() {
             return 0;
         }
@@ -303,7 +303,7 @@ pub fn accmut(reg: Comp) -> u32 {
         "notiestep" => 10,
         "notiew" => 11,
         "notielam" => 12,
-        other => panic!("unknown B7_M4_ACCMUT {other:?}"),
+        other => panic!("unknown ZK_MUT_ACCUMULATORS {other:?}"),
     }
 }
 
@@ -807,13 +807,13 @@ pub fn ao(dev: &crate::devwfill::DevAo, lay: &crate::layer::AoLayout, nh: usize,
 
 // ============================================================== the residual-stream bindings ==
 
-/// `B7_M4_RESIDUAL_STREAM_BIND`: 0 the host, 1 the device, 2 both with every cell asserted.
+/// `ZK_DEVICE_RESIDUAL_STREAM_BINDING`: 0 the host, 1 the device, 2 both with every cell asserted.
 ///
 /// B11 stream N. Born off, like every path before it: this switch joins the
 /// default table in `util::m4b_default` in the same commit that lands its
 /// digest gate, and not before.
 pub fn binding_mode() -> u32 {
-    crate::util::m4b_mode("B7_M4_RESIDUAL_STREAM_BIND")
+    crate::util::m4b_mode("ZK_DEVICE_RESIDUAL_STREAM_BINDING")
 }
 
 /// One residual-stream component's Horner bindings, on their way into the tree.

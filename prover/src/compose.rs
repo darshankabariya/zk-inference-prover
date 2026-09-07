@@ -4161,14 +4161,14 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // reason no switch states. There are two:
     //
     //  * a **diagonal block key tile**, which fills on the host whatever
-    //    `B7_M4_WFILL_KEY_TILE` says because the device fill has no notion of its
+    //    `ZK_DEVICE_WITNESS_GEN_KEY_TILE` says because the device fill has no notion of its
     //    layout (`devwfill::key_tile_fill_mode`, the one place that decision
     //    lives);
     //  * the **argmax component**, which has no device fill at all and whose range
     //    lookups go on the layer's 16-bit table -- the block below takes
     //    `tables.m_r[ri]` and bumps it on the host.
     //
-    // Both were silent before this stream because `B7_M4_PRE` had never been
+    // Both were silent before this stream because `ZK_DEVICE_PREPROCESSED` had never been
     // on: with the columns host-built the split does not matter. With it on,
     // the kernel sums the device counters and the host half is simply dropped,
     // and the proof is rejected by `sums_cancel` with every other check green.
@@ -4190,7 +4190,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // sets its own mode to 0 because the device fill has no `corrupt`
             // path -- so its counters are the host's and the shared
             // multiplicity columns have to be as well.  Without this the
-            // defaults cuda regime stops at "B7_M4_WFILL=1 but the attnout is
+            // defaults cuda regime stops at "ZK_DEVICE_WITNESS_GEN=1 but the attnout is
             // host-built" and no attnout control can be run on the card.
             || tamper.ao_clamp.is_some() || tamper.ao_den.is_some()
             || tamper.ao_jo.is_some() || tamper.ao_num.is_some()
@@ -4238,7 +4238,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // `m_exp`, so there is no configuration where this row's half of it is on
     // the device and 23's is not.
     assert!(pre_mode == 0 || crate::devtab::mode() >= 1,
-            "B7_M4_PRE needs B7_M4_TABDEV: the shared tables are one list");
+            "ZK_DEVICE_PREPROCESSED needs ZK_DEVICE_TABLES: the shared tables are one list");
     let key_tile_pre: Vec<Option<crate::devpre::DevPreKeyTile>> = layer
         .key_tiles
         .iter()
@@ -4914,7 +4914,7 @@ different rotation", inv.len(), 2 * hd * p.s);
     }
 
     // B7a milestone 4 (section 3 row 1): `x`, `y` and `m_exp`, 2^23 rows each
-    // and 0.101 GB of the 0.166 GB 4a had left. `B7_M4_TABDEV=1` means the host
+    // and 0.101 GB of the 0.166 GB 4a had left. `ZK_DEVICE_TABLES=1` means the host
     // never builds them; 2 builds them here as well and asserts every cell
     // against the kernel's, which is how they are checked.
     let tab_mode = crate::devtab::mode();
@@ -5032,17 +5032,17 @@ different rotation", inv.len(), 2 * hd * p.s);
         let ri = |w: u32| 4 + plan.widths.iter().position(|x| *x == w).unwrap();
         let r8 = ri(8);
         for r in &mat_components {
-            let d = r.dev.as_ref().expect("B7_M4_FILL=1 but a dequant component is host-built");
+            let d = r.dev.as_ref().expect("ZK_DEVICE_WITNESS_GEN_DEQUANT=1 but a dequant component is host-built");
             pre_counters[0].push(&d.m_norm);
             pre_counters[1].push(&d.m_frac);
             pre_counters[2].push(&d.m_mul);
             pre_counters[r8].push(&d.m_r8);
         }
         for r in &freivalds_components {
-            let d = r.dev.as_ref().expect("B7_M4_WFILL=1 but a Freivalds group is host-built");
+            let d = r.dev.as_ref().expect("ZK_DEVICE_WITNESS_GEN=1 but a Freivalds group is host-built");
             pre_counters[r8].push(&d.m_r8);
         }
-        let d = aor.dev.as_ref().expect("B7_M4_WFILL=1 but the attnout is host-built");
+        let d = aor.dev.as_ref().expect("ZK_DEVICE_WITNESS_GEN=1 but the attnout is host-built");
         pre_counters[3].push(&d.m_qnz);
         pre_counters[ri(p.ao_rem_bits)].push(&d.m_rem);
         // stream JJ (E11): the accumulator window's two limb tables.  Every
@@ -5060,7 +5060,7 @@ different rotation", inv.len(), 2 * hd * p.s);
             // reach the table through the patch rows -- no device counter to sum.
             let Some(d) = key_tile_dev[b].as_ref() else {
                 assert!(a.diagonal_block || !plan.rows_key_tile[b],
-                        "B7_M4_WFILL=1 but a key_tile that carries the per-token component is \
+                        "ZK_DEVICE_WITNESS_GEN=1 but a key_tile that carries the per-token component is \
                          host-built");
                 continue;
             };
@@ -5190,7 +5190,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
     }
     for r in &mat_components {
-        // B7a milestone 4 (19.6): under `B7_M4_FILL=1` this component's columns
+        // B7a milestone 4 (19.6): under `ZK_DEVICE_WITNESS_GEN_DEQUANT=1` this component's columns
         // are already on the device, in committed order, and this is where
         // they join the tree without an upload.
         match &r.dev {
@@ -5220,7 +5220,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     // The residual-stream components' columns follow the Freivalds checks, as they did when the lists
     // were built by value. B11 stream M: and they are on the card under
-    // `B7_M4_RESIDUAL_STREAM_FILL=1`, where the fill left them.
+    // `ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM=1`, where the fill left them.
     for r in &residual_stream_components {
         match &r.dev {
             Some(d) => {
@@ -5371,13 +5371,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let mut sess = Session::new(&tw);
     crate::util::m4_add("wall/session_new", m4_t.elapsed().as_secs_f64());
     // B7a milestone 4 (18.5): the trees take the columns by reference.
-    // `B7_M4_NOCLONE=0` commits from a clone of both lists instead, which is
+    // `ZK_COMMIT_BY_REFERENCE=0` commits from a clone of both lists instead, which is
     // the cost this change removes.
     let m4_pre_cells: usize = pre_all.iter().map(|c| c.size()).sum();
-    let m4_refs = crate::util::m4_switch("B7_M4_NOCLONE");
+    let m4_refs = crate::util::m4_switch("ZK_COMMIT_BY_REFERENCE");
     let m4_t = std::time::Instant::now();
     // B7b (README 26): tree 0 from the cache when this layer and shape have
-    // committed it before (`B7_M5_PRECACHE=1`); otherwise committed here and,
+    // committed it before (`ZK_PREPROCESSED_TREE_CACHE=1`); otherwise committed here and,
     // with the cache on, kept -- or, in mode 2, checked against what is kept.
     // Stream PP (E11): the one flat preprocessed list splits into the two
     // committed trees -- the shape tree, which the verifier rebuilds from the
@@ -5569,7 +5569,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // list, derived rather than written down, and a family that fails here gets
     // a named stop in the record and no backend.
     //
-    // `B11_GKR_AFFINE=1` only. It lowers a dozen evaluators and proves nothing,
+    // `ZK_GKR_AFFINITY=1` only. It lowers a dozen evaluators and proves nothing,
     // so it never runs under a wall number.
     // B11 stream X: the table components' names and heights in the order
     // `m4e_air.tables` holds them -- norm, frac, mul, qnz, then one per range
@@ -5586,7 +5586,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     .chain(plan.widths.iter().map(|w| (format!("table/range{w}"), *w)))
     .chain(std::iter::once(("table/epow".to_string(), plan.log_epow())))
     .collect();
-    let affinity: Vec<crate::gkrlink::Affinity> = if crate::util::m4_switch_off("B11_GKR_AFFINE") {
+    let affinity: Vec<crate::gkrlink::Affinity> = if crate::util::m4_switch_off("ZK_GKR_AFFINITY") {
         vec![]
     } else {
         let m4a_t = std::time::Instant::now();
@@ -5756,7 +5756,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // The evaluator is the component's own with the ablation undone. Stream U
     // rebuilt dequant's from the plan; cloning the built one and clearing `gkr`
     // is the same lowering by construction rather than by inspection, which is
-    // the property `B7_M4_LOGUPIR=2` exists to check for the committed half.
+    // the property `ZK_GENERATED_LOGUP=2` exists to check for the committed half.
     if p.gkr_residual_stream {
         let g = gkr.as_mut().expect("--gkr-residual-stream needs --gkr-key-tiles");
         let m4_t = std::time::Instant::now();
@@ -5810,11 +5810,11 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     });
     if let Some(pr) = gkr_proved.as_ref() {
         let mut b = serde_json::to_vec(&pr.proof).expect("the GKR proof serialises");
-        // B11 stream Q, the backend's own control: `B11_GKRMUT=<index>` flips one
+        // B11 stream Q, the backend's own control: `ZK_MUT_GKR=<index>` flips one
         // digit of the serialised GKR bundle. Everything else about the chunk
         // stays honest, so the only thing that can catch it is the sumcheck
         // itself -- which is the point. Off, the bundle is untouched.
-        if let Ok(spec) = std::env::var("B11_GKRMUT") {
+        if let Ok(spec) = std::env::var("ZK_MUT_GKR") {
             let at: usize = spec.parse().unwrap_or(0);
             let digits: Vec<usize> = (0..b.len())
                 .filter(|i| b[*i].is_ascii_digit() && b[*i] != b'0')
@@ -5912,12 +5912,12 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 _ => panic!("a dequant column named on a key tile"),
             }
         };
-        // B11 stream S, the link's own control: `B11_LINKMUT=<k>` bends one
+        // B11 stream S, the link's own control: `ZK_MUT_LINK=<k>` bends one
         // folded weight and re-derives the claim from the bent column, so the
         // prover's every self-check passes and the proof is *self-consistent*
         // -- the only thing that can reject it is the verifier deriving the
         // honest fold from the GKR artifact. Off, nothing is touched.
-        if let Ok(spec) = std::env::var("B11_LINKMUT") {
+        if let Ok(spec) = std::env::var("ZK_MUT_LINK") {
             // B11 stream U, lever 3: `<k>` bends height `k`'s first folded
             // weight, as stream S wrote it; `<k>:deq` bends the first weight on
             // that height that belongs to a *dequant* component instead. The
@@ -5988,7 +5988,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // B11 stream U, lever 1: the fold and the five column builds are one
         // call now, because on the cuda backend they are one chain that stays on
         // the card -- the coefficient column is no longer downloaded for the
-        // host loops to read. `B11_LINKDEV=0` is the host control.
+        // host loops to read. `ZK_DEVICE_LINK=0` is the host control.
         for l in &hl {
             inter_all.extend(crate::gkrlink::height_cols(l, &src_of));
         }
@@ -6158,7 +6158,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // The two table families go the same route as the other six: their
         // eval, lowered, run where their columns are. `pre_tables` and
         // `base_mults` are the owned host columns and `tab_pre` / `tab_mult`
-        // their device copies when `B7_M4_TABDEV` uploaded them; the closure is
+        // their device copies when `ZK_DEVICE_TABLES` uploaded them; the closure is
         // the hand-written host builder the device result is checked against.
         use crate::devtab::{htab, tab_cols as tc};
         let (c, sum) = crate::devfrac::frac_cols(
@@ -6627,7 +6627,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         "tables": table_components,
         "link_heights": crate::gkrlink::link_heights(&plan),
         // B11 stream V, lever 2: the affinity verdict per component, or an empty
-        // list when `B11_GKR_AFFINE` did not ask for it.
+        // list when `ZK_GKR_AFFINITY` did not ask for it.
         "affinity": affinity,
         // B11 stream Q: what the GKR backend proved and what it cost, or null with
         // the flag off. Reported beside `interaction_by_family` because the two
@@ -6679,13 +6679,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // construction and not by a second copy of `attn_trace`'s index map.
     //
     // Open item 18: the columns are wherever the key tile's fill left them.  Under
-    // the CUDA default `B7_M4_WFILL_KEY_TILE=1` a key tile's committed columns are on
+    // the CUDA default `ZK_DEVICE_WITNESS_GEN_KEY_TILE=1` a key tile's committed columns are on
     // the card (`key_tile_dev[b].base`, `commit_base_dev`) and `com.base` is empty;
     // tree 1 committed them from there as `AnyCol::Dev` references (the
     // `base_all` loop above), and a boundary side takes the same references
     // to the same buffers -- `device::take_all` clones a borrowed device column
     // on the device, so the side sees the bytes tree 1 saw and nothing crosses
-    // the bus.  A host-filled key tile (the reference backend, `B7_M4_WFILL_KEY_TILE=0`,
+    // the bus.  A host-filled key tile (the reference backend, `ZK_DEVICE_WITNESS_GEN_KEY_TILE=0`,
     // every diagonal block key tile) hands its host columns over exactly as before.  The
     // one reader that needs the cells on the host is the tamper probe, which
     // bumps one cell of one column: that side comes down (`AnyCol::download`)
@@ -6762,7 +6762,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let n_columns = [sizes[0].len() + sizes[1].len(), sizes[2].len(), n_inter];
     // B7a milestone 3: the lowering, off the prove loop's critical path.
     #[cfg(feature = "cuda")]
-    if crate::util::m3_switch("B7_M3_PREWARM") {
+    if crate::util::m3_switch("ZK_PREWARM") {
         built.prewarm_blobs();
     }
     let provers = built.provers();

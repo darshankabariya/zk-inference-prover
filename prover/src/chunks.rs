@@ -12,7 +12,7 @@
 //! or several, `--witnesses a,b,c` (real) or `--seeds 7,8,9` (synthetic), so a
 //! loop can be made of chunks that share a shape and nothing else.
 //!
-//! `B7_M5_PIPE=1` is section 4's pipelining: a second thread generates chunk
+//! `ZK_PIPELINE=1` is section 4's pipelining: a second thread generates chunk
 //! k+1 while this one proves chunk k, one chunk ahead and no more (two chunks'
 //! device memory is the price, 26.4). The serial and the overlapped wall are
 //! both reported; the overlapped one is `loop_secs / N`, because a chunk's own
@@ -475,7 +475,7 @@ pub fn chunks_cmd(args: &[String]) {
     // than per chunk, and without this the work would be timed by nothing.
     let snap_setup = crate::witread::snapshot();
     let tamper = ProverTamper::default();
-    let pipe = crate::util::m4b_mode("B7_M5_PIPE") == 1;
+    let pipe = crate::util::m4b_mode("ZK_PIPELINE") == 1;
     let ser_dir = arg_str(args, "--ser-dir");
 
     let src = match arg_str(args, "--plan") {
@@ -824,7 +824,7 @@ pub fn chunks_cmd(args: &[String]) {
         "blob": crate::cudagen::blob_report(),
         // B12 stream GG: every mark the loop took, in the order they were
         // taken, each tagged with the chunk whose thread took it. Under
-        // `B7_M5_PIPE=1` two chunks' marks interleave and the tag is the only
+        // `ZK_PIPELINE=1` two chunks' marks interleave and the tag is the only
         // thing that separates them.
         "mem_marks": crate::device::mem_marks_json(),
     });

@@ -1,6 +1,6 @@
 """B7a milestone 2b step 3: install the generated constraint kernels into the fork.
 
-Reads `$B7_GEN/manifest.json` (written by `zk-prover cudaemit`) and applies three
+Reads `$ZK_KERNEL_STORE/manifest.json` (written by `zk-prover cudaemit`) and applies three
 asserted, idempotent edits to the fork's CUDA tree:
 
   1. copy the generated `evaluate_b65_*.cu` / `.cuh` and `b65_ops.cuh` into

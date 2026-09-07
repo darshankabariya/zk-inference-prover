@@ -33,7 +33,7 @@ pub fn m3_switch(name: &str) -> bool {
 }
 
 pub fn m3_store_coeffs() -> bool {
-    m3_switch("B7_M3_COEFFS")
+    m3_switch("ZK_STORE_COEFFICIENTS")
 }
 
 /// B12 stream HH: keep every committed column's coefficients and drop its
@@ -45,12 +45,12 @@ pub fn m3_store_coeffs() -> bool {
 /// dropped extension can be rebuilt from, and a run that proved anyway would be
 /// reading a configuration it did not have.
 pub fn m3_lde_only() -> bool {
-    let on = std::env::var("B7_M3_LDEONLY")
+    let on = std::env::var("ZK_LDE_ONLY")
         .map(|v| v != "0")
         .unwrap_or(false);
     assert!(
         !on || m3_store_coeffs(),
-        "B7_M3_LDEONLY=1 needs B7_M3_COEFFS on: the coefficients are the only \
+        "ZK_LDE_ONLY=1 needs ZK_STORE_COEFFICIENTS on: the coefficients are the only \
          thing the dropped evaluations can be rebuilt from"
     );
     on
@@ -104,7 +104,7 @@ pub fn m4_add(name: &'static str, secs: f64) {
     // stamps its *end* on the memory timeline. `m4_add` already runs once per
     // phase and never per row, and it already carries the names the wall report
     // uses, so the timeline needs no second set of boundaries -- a phase's
-    // bracket is this mark and the one before it. Off (no `B11_MEMMARK`) this
+    // bracket is this mark and the one before it. Off (no `ZK_MEMORY_TIMELINE`) this
     // is one `OnceLock` read and no allocation.
     if stwo::prover::lookups::gkr_prover::memmark::on() {
         stwo::prover::lookups::gkr_prover::memmark::mark(&format!("{name} {secs:.6}"));
@@ -172,13 +172,13 @@ pub fn m4_touch_device() {
     );
 }
 
-/// The smallest column the parallel gather is used for, `B7_M4_PARMIN`.
+/// The smallest column the parallel gather is used for, `ZK_PARALLEL_GATHER_MIN`.
 ///
 /// Default 16, swept in 18.4: below 2^16 rows rayon's per-column cost exceeds
 /// what the gather saves, and at the design point 2,641 of the 4,612 columns
 /// are that small. `=0` is every column, which is what 18.3 measured.
 pub fn m4_parmin() -> u32 {
-    std::env::var("B7_M4_PARMIN").ok().and_then(|v| v.parse().ok()).unwrap_or(16)
+    std::env::var("ZK_PARALLEL_GATHER_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(16)
 }
 
 /// Milestone 4's switches, read once. `=0` turns one off; the default is on.
@@ -210,8 +210,8 @@ pub fn m4b_mode(name: &str) -> u32 {
 /// the three sequences before it, with all 66 proof digests byte-identical
 /// back to stream I's, so on this build the proven value *is* the device
 /// value and the default table should say so. Before this the values lived
-/// only in a copy-pasted env string, which is how `B7_M4_ACC`, `B7_M4_PRE`
-/// and `B7_M4_LOGUPIR` came to sit dark for four streams (M's Record (1)):
+/// only in a copy-pasted env string, which is how `ZK_DEVICE_ACCUMULATORS`, `ZK_DEVICE_PREPROCESSED`
+/// and `ZK_GENERATED_LOGUP` came to sit dark for four streams (M's Record (1)):
 /// b-port's one measured rejection dropped `ACC` and `PRE` alongside the
 /// actually-broken `WFILL`, and the reduced string then propagated verbatim
 /// through four drivers.
@@ -228,18 +228,18 @@ fn m4b_default(name: &str) -> u32 {
         // The component fills, the witness fills, the shared tables, the pinned
         // staging pool, the preprocessed columns, the accumulators and the
         // residual stream's fill: all on.
-        "B7_M4_FILL"
-        | "B7_M4_WFILL"
-        | "B7_M4_TABDEV"
-        | "B7_M4_POOL"
-        | "B7_M4_PRE"
-        | "B7_M4_ACC"
-        | "B7_M4_RESIDUAL_STREAM_FILL"
+        "ZK_DEVICE_WITNESS_GEN_DEQUANT"
+        | "ZK_DEVICE_WITNESS_GEN"
+        | "ZK_DEVICE_TABLES"
+        | "ZK_DEVICE_STAGING_POOL"
+        | "ZK_DEVICE_PREPROCESSED"
+        | "ZK_DEVICE_ACCUMULATORS"
+        | "ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM"
         // B11 stream N, lever 3: the residual stream's Horner bindings. Graduated here in the
         // commit that landed its gate -- the mode-2 mirror clean on all four
         // residual-stream components (40 columns, 401,408 cells, 10 claims), three aimed
         // controls each shown to bite, and the gate chunk's digest unmoved.
-        | "B7_M4_RESIDUAL_STREAM_BIND" => 1,
+        | "ZK_DEVICE_RESIDUAL_STREAM_BINDING" => 1,
         // The two milestone-5 caches. They are in seq4's family env like
         // everything above, and they are what makes the table *seq4's* env
         // rather than its device subset: the lowering cache (`scalars.rs`) and
@@ -248,7 +248,7 @@ fn m4b_default(name: &str) -> u32 {
         // mirror that says so -- but leaving them off here would have made a
         // run with an empty env a *different configuration* from seq4, and a
         // slower one, which is the precise failure this table exists to stop.
-        "B7_M5_IRCACHE" | "B7_M5_PRECACHE" => 1,
+        "ZK_LOWERING_CACHE" | "ZK_PREPROCESSED_TREE_CACHE" => 1,
         // B11 stream O, lever 3: the chunk loop generates chunk k+1 while it
         // proves chunk k. Graduated here in the commit that lands its gate,
         // which is the seq6 A/B at *both* contexts -- 33 chunks
@@ -263,10 +263,10 @@ fn m4b_default(name: &str) -> u32 {
         // together. The reference backend is untouched -- `m4b_default` is
         // all-zero without the `cuda` feature -- so the digest comparison
         // still has something to be a comparison against.
-        "B7_M5_PIPE" => 1,
+        "ZK_PIPELINE" => 1,
         // The generated fraction builders. `3` keeps 19.3's meaning: the
         // generated builder runs and is checked against the hand-written one.
-        "B7_M4_LOGUPIR" => 3,
+        "ZK_GENERATED_LOGUP" => 3,
         _ => 0,
     }
 }
@@ -291,7 +291,7 @@ pub fn modes_json() -> Value {
     let mut modes = serde_json::Map::new();
     let mut put = |name: &str, value: u32| {
         modes.insert(
-            name.trim_start_matches("B7_").to_string(),
+            name.trim_start_matches("ZK_").to_string(),
             json!({
                 "value": value,
                 "source": if std::env::var(name).is_ok() { "env" } else { "default" },
@@ -299,38 +299,39 @@ pub fn modes_json() -> Value {
         );
     };
     for name in [
-        "B7_M4_FILL",
-        "B7_M4_WFILL",
-        "B7_M4_TABDEV",
-        "B7_M4_POOL",
-        "B7_M4_PRE",
-        "B7_M4_ACC",
-        "B7_M4_RESIDUAL_STREAM_FILL",
-        "B7_M4_RESIDUAL_STREAM_BIND",
-        "B7_M4_LOGUPIR",
-        "B7_M5_PIPE",
-        "B7_M5_PRECACHE",
-        "B7_M5_IRCACHE",
+        "ZK_DEVICE_WITNESS_GEN_DEQUANT",
+        "ZK_DEVICE_WITNESS_GEN",
+        "ZK_DEVICE_TABLES",
+        "ZK_DEVICE_STAGING_POOL",
+        "ZK_DEVICE_PREPROCESSED",
+        "ZK_DEVICE_ACCUMULATORS",
+        "ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM",
+        "ZK_DEVICE_RESIDUAL_STREAM_BINDING",
+        "ZK_GENERATED_LOGUP",
+        "ZK_PIPELINE",
+        "ZK_PREPROCESSED_TREE_CACHE",
+        "ZK_LOWERING_CACHE",
     ] {
         put(name, m4b_mode(name));
     }
-    // `B7_M4_WFILL_KEY_TILE` is the one mode whose fallback is another mode
+    // `ZK_DEVICE_WITNESS_GEN_KEY_TILE` is the one mode whose fallback is another mode
     // rather than the table, so it is asked for through its own reader. This
     // is the switch's global value; which fill a *particular* key tile takes also
     // depends on its layout (`devwfill::key_tile_fill_mode`).
-    put("B7_M4_WFILL_KEY_TILE", crate::devwfill::key_tile_mode());
-    // `B7_M4_WFILL_DIAGONAL_BLOCK` has not gated and defaults off, but a run that
+    put("ZK_DEVICE_WITNESS_GEN_KEY_TILE", crate::devwfill::key_tile_mode());
+    // `ZK_DEVICE_WITNESS_GEN_DIAGONAL_BLOCK` has not gated and defaults off, but a run that
     // sets it must still name it here, or its JSON claims a configuration it
     // did not run.
-    put("B7_M4_WFILL_DIAGONAL_BLOCK", crate::devwfill::diagonal_block_mode());
+    put("ZK_DEVICE_WITNESS_GEN_DIAGONAL_BLOCK", crate::devwfill::diagonal_block_mode());
     // The plain on/off switches resolve the same way and belong in the same
     // object. All of them default on and all of them predate this stream.
-    for name in ["B7_M4_PAREVAL", "B7_M4_NOCLONE", "B7_M4_SCAN", "B7_M4_REFBAD"] {
+    for name in ["ZK_PARALLEL_GATHER", "ZK_COMMIT_BY_REFERENCE", "ZK_PARALLEL_SCAN",
+                 "ZK_KERNEL_REFERENCE_CHECK"] {
         put(name, u32::from(m4_switch(name)));
     }
     // B12 stream HH: an opt-in switch, off unless the env asks for it, so every
     // run JSON says which residency regime it ran under.
-    put("B7_M3_LDEONLY", u32::from(m3_lde_only()));
+    put("ZK_LDE_ONLY", u32::from(m3_lde_only()));
     Value::Object(modes)
 }
 
@@ -347,13 +348,13 @@ pub fn config_json() -> Value {
         "hash": "Blake2s (Blake2sM31MerkleChannel)",
         // B7a milestone 3: which of the three changes this run had on.
         "m3": {
-            "store_coeffs": m3_switch("B7_M3_COEFFS"),
-            "device_merkle_reduce": m3_switch("B7_M3_MERKLE"),
-            "fri_gather": m3_switch("B7_M3_FRIGATHER"),
-            "prewarm": m3_switch("B7_M3_PREWARM"),
+            "store_coeffs": m3_switch("ZK_STORE_COEFFICIENTS"),
+            "device_merkle_reduce": m3_switch("ZK_DEVICE_MERKLE"),
+            "fri_gather": m3_switch("ZK_FRI_GATHER"),
+            "prewarm": m3_switch("ZK_PREWARM"),
             "lde_only": m3_lde_only(),
-            "merkle_mode": std::env::var("B7_M3_MERKLE").unwrap_or_else(|_| "1".into()),
-            "launch_sync": std::env::var("B7_M3_LAUNCHSYNC").is_ok()
+            "merkle_mode": std::env::var("ZK_DEVICE_MERKLE").unwrap_or_else(|_| "1".into()),
+            "launch_sync": std::env::var("ZK_LAUNCH_SYNC").is_ok()
         },
     })
 }

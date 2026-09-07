@@ -235,7 +235,7 @@ BRACKET = dict(
         "registered configuration: spec `b10-final` (round even, all seven "
         "matmuls on the `chain` dequant rung), S=512, diagonal block key tile ON, "
         "grid_target 64 / chan_target 128 / rw 16, k_bits 11 / q_bits 12, "
-        "bounds on, and a REAL extracted witness (not `B7_SYNTH_DIMS`). "
+        "bounds on, and a REAL extracted witness (not `ZK_SYNTHETIC_DIMS`). "
         "A void run is re-run, never re-bracketed."),
 )
 

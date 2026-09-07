@@ -51,7 +51,7 @@
 #define B65_ACC_CUH
 #include "fields.cuh"
 
-// The negative controls (`B7_M4_ACCMUT`), each a way this design could
+// The negative controls (`ZK_MUT_ACCUMULATORS`), each a way this design could
 // plausibly be wrong. Section 5 rule 5: each takes a `:component` suffix, because
 // unaimed every one of them panics at `chan key_tile0`, which is checked first.
 #define B65A_MUT_NONE 0u

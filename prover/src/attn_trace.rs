@@ -571,7 +571,7 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     // silently wrong.
     //
     // B11 stream L: the switch read here is the key tile fill's own
-    // (`B7_M4_WFILL_KEY_TILE`, defaulting to `B7_M4_WFILL`), because the key tile fill
+    // (`ZK_DEVICE_WITNESS_GEN_KEY_TILE`, defaulting to `ZK_DEVICE_WITNESS_GEN`), because the key tile fill
     // and the Freivalds fill are not in the same state -- see `devwfill::key_tile_mode`.
     //
     // B11 stream M: and the diagonal block override above is now that function's twin,
@@ -746,7 +746,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
 
     // B7a milestone 4 (section 3 row 1): the accumulators, wherever they are.
     // The kernels read this component's *own committed columns*, so the device
-    // route exists exactly when the fill left them there -- and `B7_M4_ACC=2`
+    // route exists exactly when the fill left them there -- and `ZK_DEVICE_ACCUMULATORS=2`
     // runs both, which is a check on the whole witness -> fill -> column ->
     // accumulator chain, because the host side reads the witness instead.
     let m4g = air.and_then(|x| x.dev).filter(|_| crate::devacc::mode() >= 1);
@@ -833,7 +833,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         }
     };
     // ---- stream NN: the key tile's own K and Q claims --------------------------
-    // Built on the host whatever `B7_M4_ACC` says: the values are the witness's
+    // Built on the host whatever `ZK_DEVICE_ACCUMULATORS` says: the values are the witness's
     // `kk` and `qq`, which the host holds either way, and the two columns are
     // appended after the component's three so the AIR's mask order is the tree's.
     let mut claimed_nn: Vec<SecureField> = vec![];
@@ -916,17 +916,17 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     // Stream CC (E11): the host backend's aimed corruption for the inert-lead-row
     // guard, the twin of `b65_acc.cu`'s `nomask:grid` on the backend that has no
     // card.  See the inert-row branch of `grid_inner` below.  Off unless
-    // `B12_GRIDMUT=padnf`.
+    // `ZK_MUT_GRID=padnf`.
     //
     // This replaces `B65_PAD_NF=1`, which was the same branch pointing the other
     // way: before the AIR carried `act` it made a padded shape *accept*, and it
     // is recorded that way in `briefs/cc-maskgrid.md` and in
     // `notes/design-notes.md`.  It now makes a padded shape *reject*, so it does
     // not keep the old name.
-    let pad_nf = match std::env::var("B12_GRIDMUT").as_deref() {
+    let pad_nf = match std::env::var("ZK_MUT_GRID").as_deref() {
         Ok("padnf") => true,
         Ok("") | Err(_) => false,
-        Ok(other) => panic!("unknown B12_GRIDMUT {other:?}"),
+        Ok(other) => panic!("unknown ZK_MUT_GRID {other:?}"),
     };
     let n = if m4g_host { lk.g.rows } else { 0 };
     let (mut zs, mut hs) = (vec![SecureField::zero(); n], vec![SecureField::zero(); n]);

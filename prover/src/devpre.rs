@@ -42,7 +42,7 @@
 //! by construction on any witness rather than by argument on this one. And note
 //! which way the asymmetry runs: a host closed form that is *wrong* only ever
 //! uploads rows that did not need uploading, where a kernel closed form that is
-//! wrong is caught cell for cell by `B7_M4_PRE=2`.
+//! wrong is caught cell for cell by `ZK_DEVICE_PREPROCESSED=2`.
 //!
 //! **The selectors are the flags `b65_acc.cu` already computes.** Since 24.1
 //! every accumulator kernel has derived ACTIVE / NOFIRST / LAST / ISTART per
@@ -55,7 +55,7 @@
 //! rather than recompute it. The AIR's selectors and the accumulator's
 //! segmentation are now one array instead of two transcriptions that agree.
 //!
-//! `B7_M4_PRE` says which path runs, on the three-value pattern every fill in
+//! `ZK_DEVICE_PREPROCESSED` says which path runs, on the three-value pattern every fill in
 //! this series uses: 0 the host builds all 79, 1 the device does and they are
 //! never on the host, 2 both with every cell asserted equal.
 
@@ -148,16 +148,16 @@ const SHAPE_TOK: u32 = 2;
 
 // ------------------------------------------------------------------ the switch --
 
-/// `B7_M4_PRE`: 0 the host, 1 the device, 2 both with every cell asserted.
+/// `ZK_DEVICE_PREPROCESSED`: 0 the host, 1 the device, 2 both with every cell asserted.
 pub fn mode() -> u32 {
-    crate::util::m4b_mode("B7_M4_PRE")
+    crate::util::m4b_mode("ZK_DEVICE_PREPROCESSED")
 }
 
-/// `B7_M4_PREMUT`, `name` or `name:target`. Unaimed, every defect shows at the
+/// `ZK_MUT_PREPROCESSED`, `name` or `name:target`. Unaimed, every defect shows at the
 /// first column compared and the run then says nothing about the other seven
 /// targets (section 5 rule 5), so the suffix names the family it is aimed at.
 pub fn premut() -> (u32, u32) {
-    let raw = std::env::var("B7_M4_PREMUT").unwrap_or_default();
+    let raw = std::env::var("ZK_MUT_PREPROCESSED").unwrap_or_default();
     let (name, tgt) = match raw.split_once(':') {
         Some((n, t)) => (n.to_string(), t.to_string()),
         None => (raw, String::new()),
@@ -178,7 +178,7 @@ pub fn premut() -> (u32, u32) {
         "noinv" => 12,
         "noident" => 13,
         "nopatch" => 14,
-        other => panic!("unknown B7_M4_PREMUT {other:?}"),
+        other => panic!("unknown ZK_MUT_PREPROCESSED {other:?}"),
     };
     let t = match tgt.as_str() {
         "" | "all" => AT_ALL,
@@ -190,7 +190,7 @@ pub fn premut() -> (u32, u32) {
         "chan" => AT_CHAN,
         "key" => AT_KEY,
         "row" => AT_ROW,
-        other => panic!("unknown B7_M4_PREMUT target {other:?}"),
+        other => panic!("unknown ZK_MUT_PREPROCESSED target {other:?}"),
     };
     (m, t)
 }
@@ -199,7 +199,7 @@ pub fn premut() -> (u32, u32) {
 /// counter, for a reason no switch states?
 ///
 /// One key tile can be on the host while the switch says device -- a diagonal block key tile,
-/// which fills on the host whatever `B7_M4_WFILL_KEY_TILE` says because the device
+/// which fills on the host whatever `ZK_DEVICE_WITNESS_GEN_KEY_TILE` says because the device
 /// fill has no notion of its layout. `fills_dev` has to know, and it is asked
 /// from inside the fills themselves (`merge_counters` is read by
 /// `mat_component_dev`, `freivalds_component_dev` and `commit_base_dev`), none of which
@@ -231,19 +231,19 @@ pub fn fills_dev() -> bool {
     // B11 stream L: the key tile fill has its own switch now, and a host-built key tile
     // bumps the host multiplicity arrays. So "every fill that bumps a counter
     // ran on the device" has to read the key tile gate too -- otherwise
-    // `B7_M4_WFILL=1 B7_M4_WFILL_KEY_TILE=0` would claim the counters are on the
+    // `ZK_DEVICE_WITNESS_GEN=1 ZK_DEVICE_WITNESS_GEN_KEY_TILE=0` would claim the counters are on the
     // device while three key tiles' worth of bumps sit on the host.
     //
     // B11 stream M: the switches are not the whole answer. A diagonal block key tile is on
-    // the host with every switch at 1, so `B7_M4_PRE=1` on a sequence chunk
+    // the host with every switch at 1, so `ZK_DEVICE_PREPROCESSED=1` on a sequence chunk
     // used to build the nine multiplicity columns on the card from the device
     // counters alone and drop the diagonal block key tiles' chan and key bumps -- accepted
     // by every other check and rejected by `sums_cancel`. Stream L had already
     // met this for the tenth counter, `m_exp`, and fixed it there alone
     // (`devwfill::exp_mult_on_host`); this is the same predicate asked of all
     // ten.
-    crate::util::m4b_mode("B7_M4_FILL") == 1
-        && crate::util::m4b_mode("B7_M4_WFILL") == 1
+    crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_DEQUANT") == 1
+        && crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN") == 1
         && crate::devwfill::key_tile_mode() == 1
         && !host_fill()
 }

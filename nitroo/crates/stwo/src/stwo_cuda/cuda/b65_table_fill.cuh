@@ -30,7 +30,7 @@
 #define B65T_VAR_INTEXP 1u
 #define B65T_VAR_INTSPLIT 2u
 
-// The negative controls (`B7_M4_TABMUT`), each a way this design could
+// The negative controls (`ZK_MUT_TABLES`), each a way this design could
 // plausibly be wrong. `nopatch` is the one aimed at rule 8, and it is vacuous
 // on an honest witness by construction -- which is a finding to write down and
 // not a pass (20.2's `ref32` wearing another hat), so it is run against the
