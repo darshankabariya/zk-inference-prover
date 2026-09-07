@@ -2965,7 +2965,7 @@ impl MatRegion {
 /// integer and whose counterparty is the bands' own V (`dequant::OKind::Int`).
 /// It changes nothing but which rows the `oin`/`obd` step selectors mark, so no
 /// preprocessed column is added and no other region moves.
-pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool,
+pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bool,
                   ohead: Option<usize>,
                   fold_bend: (Option<usize>, Option<usize>)) -> MatRegion {
     assert!(spec.sound(), "unsound spec for {}", m.name);
@@ -2992,11 +2992,11 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool,
     };
     let m4c_want = m4c == 2;
     if m4c == 1 {
-        // B11 stream M: `oside` is the region's, not `with_want`'s. The two
+        // B11 stream M: `output_claim` is the region's, not `with_want`'s. The two
         // parameters sit next to each other and the o-side one was missing
         // entirely, so the head's device fill built 506 preprocessed columns
         // where the host builds 510.
-        let dev = crate::devfill::mat_region_dev(m, &spec, &lay, &map, tables, false, oside);
+        let dev = crate::devfill::mat_region_dev(m, &spec, &lay, &map, tables, false, output_claim);
         let ref_bad = dev.ref_bad;
         return MatRegion { lay, spec, map, pre: vec![], base: vec![], ref_bad, n,
                            dev: Some(dev) };
@@ -3161,7 +3161,7 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool,
     pre.push(sel(&|j| j > 0 && !last(j)));              // m1
     pre.push(sel(&|j| j > 0 && last(j)));               // m2
     pre.push(sel(&|j| j + 1 == rows));                  // end
-    if oside {
+    if output_claim {
         // stream E: the output side's row step.  `oin` is an ordinary step from
         // one chunk to the next inside a token; `obd` is the jump at a token
         // boundary, which is the row that *begins* a token -- the other end from
@@ -3208,7 +3208,7 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, oside: bool,
             want_host[start * lay.per_row..start * lay.per_row + w.len()]
                 .copy_from_slice(w);
         }
-        let dev = crate::devfill::mat_region_dev(m, &spec, &lay, &map, tables, true, oside);
+        let dev = crate::devfill::mat_region_dev(m, &spec, &lay, &map, tables, true, output_claim);
         check_fill_dev(m, &lay, &base, &pre, ref_bad, &want_host, &dev, tables,
                        &before, &after);
         // the device's own bumps are the check's, not the proof's: put the
@@ -3563,7 +3563,7 @@ pub struct MatInteraction {
 /// The weights an output-side Horner claim runs on, as the composition derives
 /// them from the binding challenge.  Same numbers on both sides of the binding: the
 /// consumer's own claim is built from `w_glue` too.
-pub struct OSideW {
+pub struct OutputClaimW {
     pub w: Vec<SecureField>,
     pub lam: SecureField,
     pub k_in: SecureField,
@@ -3590,7 +3590,7 @@ pub struct OSideW {
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
-                       rels: &crate::compose::Rels, out: Option<&OSideW>, gkr: bool,
+                       rels: &crate::compose::Rels, out: Option<&OutputClaimW>, gkr: bool,
                        sc: Option<(SecureField, SecureField)>)
                        -> MatInteraction {
     let lay = r.lay;
@@ -3844,7 +3844,7 @@ pub fn deq_logup_eval(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField
         // the output side carries no lookups, so it cannot change this eval's
         // LogUp IR -- leaving it off here keeps the lowering identical whether
         // the binding is on or not, which is what `B7_M4_LOGUPIR=2` compares
-        oside: None,
+        output_claim: None,
         sside: None,
         gkr: false,
     }

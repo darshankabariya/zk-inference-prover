@@ -185,10 +185,10 @@ pub struct DevFill {
 /// arithmetic the host's block-local `HashMap`s do and in an order that cannot
 /// matter, because counting is commutative.
 ///
-/// `oside` is the plan's `has_oside` for this matmul, and it is the whole of
+/// `output_claim` is the plan's `has_output_claim` for this matmul, and it is the whole of
 /// stream M's head fix. The kernel's preprocessed list is the per-channel
 /// scale columns and five selectors; a region that publishes an output-side
-/// claim commits three more (`layer.rs`, the `if oside` block), and until this
+/// claim commits three more (`layer.rs`, the `if output_claim` block), and until this
 /// parameter existed the device fill was never told. It sized `n_pre` three
 /// columns short -- 506 against the host's 509 on `lm_head`, the sequence's
 /// only o-side matmul -- and every later component's preprocessed indices
@@ -203,7 +203,7 @@ pub fn mat_region_dev(
     map: &Map,
     tables: &mut Tables,
     with_want: bool,
-    oside: bool,
+    output_claim: bool,
 ) -> DevFill {
     let rows = 1usize << lay.log_rows;
     let f = map.f;
@@ -350,13 +350,13 @@ pub fn mat_region_dev(
     crate::util::m4_add("gen/deq_dev_kernel", kernel_secs);
 
     // ---- stream M: the o-side trio, in the host's order --------------------
-    // `layer.rs`'s `if oside` block, cell for cell. `oin` is an ordinary step
+    // `layer.rs`'s `if output_claim` block, cell for cell. `oin` is an ordinary step
     // from one chunk to the next inside a token, `obd` the jump at the row
     // that begins a token, and the third says the row is live at all. Each is
     // a function of `j` and the layout, so none of them needs the witness and
     // none of them belongs in the kernel.
     let mut pre = pre;
-    if oside {
+    if output_claim {
         let t_o = std::time::Instant::now();
         let first = |j: usize| {
             matches!(lay.at_opt(m.tokens, j), Some((_, b)) if b + 1 == lay.chunks)
@@ -371,7 +371,7 @@ pub fn mat_region_dev(
         pre.push(sel(&|j| j > 0 && lay.at_opt(m.tokens, j).is_some() && !first(j)));
         pre.push(sel(&|j| j > 0 && first(j)));
         pre.push(sel(&|j| lay.at_opt(m.tokens, j).is_some()));
-        crate::util::m4_add("gen/deq_dev_oside", t_o.elapsed().as_secs_f64());
+        crate::util::m4_add("gen/deq_dev_output_claim", t_o.elapsed().as_secs_f64());
     }
 
     // the counters, back to the host: a few hundred kB, and 4a forbids H2D of

@@ -702,7 +702,7 @@ impl Claims {
 /// Stream II: one requantize seam's Horner weights.  The region tiles by
 /// `MatLayout` -- row `j` is `(token, chunk)` with both descending, slot `sl`
 /// holding channel `chunk * per_row + sl` -- which is the dequant's own map, so
-/// these are `oside_w`'s constants: within a row the weight falls by `tokens`
+/// these are `output_claim_w`'s constants: within a row the weight falls by `tokens`
 /// per slot, and the row step takes `k_in` inside a token and `k_bd` at its
 /// boundary.  Multiplying the accumulated steps out from row `(t, b)` to the
 /// last row gives `w^(N - 1 - c*tokens - t)` per value, which is the canonical
@@ -871,12 +871,12 @@ fn wpow(w: SecureField, e: i128) -> SecureField {
 /// challenge -- the consumer builds its claim from the same `w`, which is what
 /// makes the two comparable.  The value at channel `c` of token `t` carries
 /// `w^(N - 1 - (c tokens + t))`; that splits into a per-slot weight and a row
-/// step of two constants, derived in `dequant::OSide`.
-fn oside_w(w: SecureField, lam: SecureField, tokens: usize, n_out: usize,
-           per_row: usize, kind: crate::dequant::OKind) -> crate::layer::OSideW {
+/// step of two constants, derived in `dequant::OutputClaim`.
+fn output_claim_w(w: SecureField, lam: SecureField, tokens: usize, n_out: usize,
+           per_row: usize, kind: crate::dequant::OKind) -> crate::layer::OutputClaimW {
     let n = (tokens * n_out) as i128;
     let (tok, pr, no) = (tokens as i128, per_row as i128, n_out as i128);
-    crate::layer::OSideW {
+    crate::layer::OutputClaimW {
         w: (0..per_row).map(|s| wpow(w, n - 1 - s as i128 * tok)).collect(),
         lam,
         k_in: wpow(w, -(pr * tok)),
@@ -903,12 +903,12 @@ fn oside_w(w: SecureField, lam: SecureField, tokens: usize, n_out: usize,
 /// token boundary is such a row too, so no third constant is wanted.  It needs
 /// `per_row` to divide `hd` -- asserted by the caller, and true of every layout
 /// `MatLayout::choose` picks beside `rope::q_layout`'s.
-fn oside_w_band(w: SecureField, lam: SecureField, tokens: usize, nh: usize, hd: usize,
-                rep: usize, per_row: usize) -> crate::layer::OSideW {
+fn output_claim_w_band(w: SecureField, lam: SecureField, tokens: usize, nh: usize, hd: usize,
+                rep: usize, per_row: usize) -> crate::layer::OutputClaimW {
     let n = (tokens * nh * hd) as i128;
     let (pr, hdi, repi) = (per_row as i128, hd as i128, rep as i128);
     let r_sum = (0..repi).fold(SecureField::zero(), |a, k| a + wpow(w, -(k * hdi)));
-    crate::layer::OSideW {
+    crate::layer::OutputClaimW {
         w: (0..per_row).map(|s| r_sum * wpow(w, n - 1 - s as i128)).collect(),
         lam,
         k_in: wpow(w, -pr),
@@ -927,12 +927,12 @@ fn oside_w_band(w: SecureField, lam: SecureField, tokens: usize, nh: usize, hd: 
 /// counterparty before this stream: the rotation's rows are `hd` consecutive
 /// channels of one head, which is a run of `hd` consecutive *token-major*
 /// positions and a scattered set of channel-major ones.  `o`, `gate`, `up`,
-/// `down` and `lm_head` keep `oside_w`.
-fn oside_w_tok(w: SecureField, lam: SecureField, tokens: usize, n_out: usize,
-               per_row: usize, kind: crate::dequant::OKind) -> crate::layer::OSideW {
+/// `down` and `lm_head` keep `output_claim_w`.
+fn output_claim_w_tok(w: SecureField, lam: SecureField, tokens: usize, n_out: usize,
+               per_row: usize, kind: crate::dequant::OKind) -> crate::layer::OutputClaimW {
     let n = (tokens * n_out) as i128;
     let step = wpow(w, -(per_row as i128));
-    crate::layer::OSideW {
+    crate::layer::OutputClaimW {
         w: (0..per_row).map(|s| wpow(w, n - 1 - s as i128)).collect(),
         lam,
         k_in: step,
@@ -1248,10 +1248,10 @@ impl GluePlan {
         // publish a claim with no counterparty (see `OutputBinding`).  The list ends
         // up in `MAT_NAMES` order because `claims.deq_out` is pushed in matmul
         // order and the verifier reads the two side by side.
-        let mut oside_at: Vec<(&'static str, Option<(usize, usize)>)> = vec![];
+        let mut output_claim_at: Vec<(&'static str, Option<(usize, usize)>)> = vec![];
         for (ri, name) in [(0usize, "o"), (2usize, "down")] {
             regions[ri].bindings.push((BindingKind::In(1), stream.clone(), 1));
-            oside_at.push((name, Some((ri, regions[ri].bindings.len() - 1))));
+            output_claim_at.push((name, Some((ri, regions[ri].bindings.len() - 1))));
         }
         // ---- stream E: the two norm tails ------------------------------------
         //
@@ -1339,8 +1339,8 @@ impl GluePlan {
             // stream JJ: the gate/up seam.  `Prog::pairs` puts the unary on
             // group 0, so `In(0)` is the silu's operand -- `gate` -- and `In(1)`
             // is `up`.
-            oside_at.push(("gate", Some((i, 0))));
-            oside_at.push(("up", Some((i, 1))));
+            output_claim_at.push(("gate", Some((i, 0))));
+            output_claim_at.push(("up", Some((i, 1))));
             tff = Some(t2);
         }
         // ---- stream NN: the rotation ------------------------------------------
@@ -1356,7 +1356,7 @@ impl GluePlan {
         // and not the channel-major one every earlier binding uses.  That is the
         // whole reason a single row step serves here: a (token, head) row's
         // leaves are `hd` consecutive positions, so a region's rows walk the
-        // stream in order and the Horner is the flat one.  `oside_w_tok` puts
+        // stream in order and the Horner is the flat one.  `output_claim_w_tok` puts
         // the q/k/v dequant regions' own output claims on the same convention,
         // which is free -- those three claims had no counterparty before this
         // stream and nothing else reads them.
@@ -1398,7 +1398,7 @@ impl GluePlan {
                 eqs.push(GlueEq::plain((mul, 1), (add, 0)));
                 // and the multiplies' committed leaves are the matmul's own
                 // dequant output, which is what shrinks `deq_out_open`
-                oside_at.push((name, Some((mul, 0))));
+                output_claim_at.push((name, Some((mul, 0))));
                 let _ = n_all;
                 ropes.push(RopeRegions { name, mat: mi, heads, hd, tokens: m.tokens,
                                          mul, add });
@@ -1406,17 +1406,17 @@ impl GluePlan {
             // v is not rotated: its dequant output goes straight into the
             // quantize gadget, whose input claim `verify_composed` compares
             // against `deq_out` directly (`OutputBinding::quant`).
-            oside_at.push(("v", None));
+            output_claim_at.push(("v", None));
         } else {
             // stream JJ: q, k and v publish without a counterparty, then the list
             // is put in matmul order -- the order `claims.deq_out` arrives in
             for n in ["q", "k", "v"] {
-                oside_at.push((n, None));
+                output_claim_at.push((n, None));
             }
         }
         let output_bindings: Vec<OutputBinding> = crate::layer::MAT_NAMES
             .iter()
-            .filter_map(|n| oside_at.iter().find(|(m, _)| m == n))
+            .filter_map(|n| output_claim_at.iter().find(|(m, _)| m == n))
             .map(|(name, at)| OutputBinding {
                 name,
                 at: *at,
@@ -1877,7 +1877,7 @@ impl Plan {
         // Stream II: the three requantize seams.  Each names the region whose
         // `Out(0)` it consumes, so the producer index comes from the plan and is
         // never counted by hand; the layout is the dequant's own `MatLayout`
-        // map, which is what makes `oside_w`'s weights apply unchanged.
+        // map, which is what makes `output_claim_w`'s weights apply unchanged.
         let mut rqs = vec![];
         let mut rq_vars: Vec<crate::requant::SVariant> = vec![];
         if let Some(g) = glue.as_ref() {
@@ -1946,7 +1946,7 @@ impl Plan {
                 // no bf16 stream for `rope::QuantEval` to round and nothing for
                 // it to prove.  The dequant region publishes the integer
                 // instead, and the bands' own V is what reads it
-                // (`Plan::oside_band`).
+                // (`Plan::output_claim_band`).
                 if name == "v" && specs[mi].variant == DeqVariant::Fold {
                     continue;
                 }
@@ -2037,7 +2037,7 @@ impl Plan {
         // are in the statement (`nn_bands`, i.e. the rotation is on), the
         // rotation says how many query heads a kv head is replicated into, and
         // the region's rows sit inside one kv head so that the step is the two
-        // constants `oside_w_band` derives.  Without them the fold still
+        // constants `output_claim_w_band` derives.  Without them the fold still
         // publishes its integer and the verdict names it open.
         if let (Some(g), true) = (glue.as_mut(), p.rope.is_some()) {
             if let Some(mi) = p.mats.iter().position(|m| m.name == "v") {
@@ -2151,7 +2151,7 @@ impl Plan {
     /// Stream E: does this matmul's dequant region publish an output-side claim?
     /// Both sides ask the plan, so the preprocessed list, the region, the AIR and
     /// the verifier cannot disagree about it.
-    pub fn has_oside(&self, name: &str) -> bool {
+    pub fn has_output_claim(&self, name: &str) -> bool {
         self.glue.as_ref().is_some_and(|g| g.output_bindings.iter().any(|t| t.name == name))
             || (self.p.head_key && name == "lm_head")
     }
@@ -2162,19 +2162,19 @@ impl Plan {
     /// `q`, `k` and `v` take the token-major one exactly when the rotation is
     /// in the statement -- without it their claims have no counterparty and
     /// keep the weights every recorded digest was taken with.
-    pub fn oside_tok(&self, name: &str) -> bool {
+    pub fn output_claim_tok(&self, name: &str) -> bool {
         self.glue.as_ref().is_some_and(|g| !g.ropes.is_empty())
             && matches!(name, "q" | "k" | "v")
     }
-    pub fn oside_of(&self, w: SecureField, lam: SecureField, name: &str, tokens: usize,
-                    n_out: usize, per_row: usize) -> crate::layer::OSideW {
-        if self.oside_band(name) {
+    pub fn output_claim_of(&self, w: SecureField, lam: SecureField, name: &str, tokens: usize,
+                    n_out: usize, per_row: usize) -> crate::layer::OutputClaimW {
+        if self.output_claim_band(name) {
             let (nh, hd) = (self.p.nh, self.p.hd);
             let nkv = self.p.rope.as_ref().map(|r| r.nkv).unwrap_or(nh);
-            return oside_w_band(w, lam, tokens, nh, hd, nh / nkv, per_row);
+            return output_claim_w_band(w, lam, tokens, nh, hd, nh / nkv, per_row);
         }
-        let f = if self.oside_tok(name) { oside_w_tok } else { oside_w };
-        f(w, lam, tokens, n_out, per_row, self.oside_kind(name))
+        let f = if self.output_claim_tok(name) { output_claim_w_tok } else { output_claim_w };
+        f(w, lam, tokens, n_out, per_row, self.output_claim_kind(name))
     }
 
     /// Stream SS: is this matmul's dequant the delayed requantize?  The fold is
@@ -2190,12 +2190,12 @@ impl Plan {
     /// the band weights fit?  When the answer is no, a folded `v` still publishes
     /// its integer, on the producer grid, with nothing to read it against
     /// (`deq_out_open`).
-    pub fn oside_band(&self, name: &str) -> bool {
+    pub fn output_claim_band(&self, name: &str) -> bool {
         self.glue.as_ref()
             .is_some_and(|g| g.output_bindings.iter().any(|t| t.name == name && t.band))
     }
 
-    pub fn oside_kind(&self, name: &str) -> crate::dequant::OKind {
+    pub fn output_claim_kind(&self, name: &str) -> crate::dequant::OKind {
         if name == "lm_head" {
             crate::dequant::OKind::Key
         } else if self.is_fold(name) {
@@ -2302,7 +2302,7 @@ impl Plan {
                 put(deq_sel(&m.name, n), "dequant/sel", lay.log_rows, PreNeeds::Params,
                     PreVaries::Layer);
             }
-            if self.has_oside(&m.name) {
+            if self.has_output_claim(&m.name) {
                 for n in crate::dequant::DEQ_OSEL {
                     put(deq_sel(&m.name, n), "dequant/sel", lay.log_rows,
                         PreNeeds::Params, PreVaries::Layer);
@@ -2639,7 +2639,7 @@ impl Plan {
                 }
             }
             ids.extend(DEQ_SEL.iter().map(|n| deq_sel(&m.name, n)));
-            if self.has_oside(&m.name) {
+            if self.has_output_claim(&m.name) {
                 ids.extend(crate::dequant::DEQ_OSEL.iter().map(|n| deq_sel(&m.name, n)));
             }
         }
@@ -3329,9 +3329,9 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 // claims arrive in the same order the plan lists the bindings, which
                 // is mat order -- `o` before `down` -- and the assert below is
                 // what says so rather than trusting it.
-                oside: plan.has_oside(&m.name).then(|| {
-                    let kind = plan.oside_kind(&m.name);
-                    let ow = plan.oside_of(w_glue, lam_glue, &m.name, m.tokens, m.n_out,
+                output_claim: plan.has_output_claim(&m.name).then(|| {
+                    let kind = plan.output_claim_kind(&m.name);
+                    let ow = plan.output_claim_of(w_glue, lam_glue, &m.name, m.tokens, m.n_out,
                                            plan.mat_lays[mi].per_row);
                     let claimed = if m.name == "lm_head" {
                         claims.head_key.first().copied()
@@ -3342,7 +3342,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                             .position(|t| t.name == m.name)
                             .and_then(|k| claims.deq_out.get(k).copied())
                     };
-                    crate::dequant::OSide {
+                    crate::dequant::OutputClaim {
                         w: ow.w,
                         lam: ow.lam,
                         k_in: ow.k_in,
@@ -4273,8 +4273,8 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     let m4_t = std::time::Instant::now();
     let mut mat_regions = vec![];
     for (mi, (m, sp)) in layer.mats.iter().zip(&plan.specs).enumerate() {
-        let r = mat_region(m, sp, &mut tables, plan.has_oside(&m.name),
-                           plan.oside_band(&m.name)
+        let r = mat_region(m, sp, &mut tables, plan.has_output_claim(&m.name),
+                           plan.output_claim_band(&m.name)
                                .then(|| plan.p.hd / plan.mat_lays[mi].per_row),
                            (tamper.fold_qm, tamper.fold_dent));
         mat_regions.push(r);
@@ -6005,8 +6005,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // stream E: the output side rides on the wiring family's binding challenge,
         // so it exists exactly when that family does and the plan says this
         // matmul publishes one
-        let ow = plan.has_oside(&m.name).then(|| {
-            plan.oside_of(w_glue, lam_glue, &m.name, m.tokens, m.n_out, reg.lay.per_row)
+        let ow = plan.has_output_claim(&m.name).then(|| {
+            plan.output_claim_of(w_glue, lam_glue, &m.name, m.tokens, m.n_out, reg.lay.per_row)
         });
         // stream II (E11): the x-side scale's fold, on the matmuls a seam feeds.
         //
@@ -6054,7 +6054,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             (layer.mats.iter().position(|m| m.name == "lm_head"), layer.head_keys.as_ref())
         {
             let (m, lay) = (&layer.mats[mi], plan.mat_lays[mi]);
-            let ow = oside_w(w_glue, lam_glue, m.tokens, m.n_out, lay.per_row,
+            let ow = output_claim_w(w_glue, lam_glue, m.tokens, m.n_out, lay.per_row,
                              crate::dequant::OKind::Key);
             let rows = 1usize << lay.log_rows;
             let mut u = SecureField::zero();

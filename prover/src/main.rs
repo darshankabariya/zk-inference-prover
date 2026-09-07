@@ -2461,7 +2461,7 @@ synthetic generator (Layer::synth_glue_band_bent); on a dump the bands are B1's"
                 // that side, so the falsified field is the dequant output binding
                 // and not `nn_out_ok` -- the fold publishes the int8 cell
                 // itself and the bands' V is what reads it
-                let binding = if which == 2 && rplan.oside_band("v") {
+                let binding = if which == 2 && rplan.output_claim_band("v") {
                     "the binding deq_out[v] == the sum of the bands' own V claims"
                 } else {
                     "the binding nn_out == the sum of the bands' own claims"

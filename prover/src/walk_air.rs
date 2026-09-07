@@ -69,7 +69,7 @@ pub const EPOW_COLS: [&str; 3] = ["b65_epow_e", "b65_epow_n", "b65_epow_p"];
 /// The walk's grid runs `(input channel, token chunk)` down the rows with the
 /// tokens in the slots, so the row step takes two values -- `m_in` inside one
 /// channel's chunks and `m_bd` at a channel boundary -- which is the shape
-/// `dequant::OSide` already runs at.  Both selectors it needs are ones this
+/// `dequant::OutputClaim` already runs at.  Both selectors it needs are ones this
 /// region already commits: `nofirst` is `[chunk + 1 < chunks]`, which is true
 /// only away from a channel's first row, and `notzero` is `[j > 0]`, so
 /// `notzero - nofirst` is exactly "this row begins a channel and is not row 0".

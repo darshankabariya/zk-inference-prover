@@ -509,7 +509,7 @@ pub enum OKind {
 /// attention.  A token boundary is a head start, so one pair of constants
 /// serves both.
 #[derive(Clone)]
-pub struct OSide {
+pub struct OutputClaim {
     /// the within-row weight per slot
     pub w: Vec<SecureField>,
     pub lam: SecureField,
@@ -563,7 +563,7 @@ pub struct DequantEval {
     /// the composed proof's claimed side; `None` for the standalone gadget
     pub yside: Option<YSide>,
     /// stream E: the output-side claim, when this region publishes one
-    pub oside: Option<OSide>,
+    pub output_claim: Option<OutputClaim>,
     /// stream II (E11): the x-side scale's claim, when a requantize seam feeds
     /// this matmul
     pub sside: Option<SSide>,
@@ -882,7 +882,7 @@ impl FrameworkEval for DequantEval {
         }
         // stream E: the output side.  One accumulator, a two-valued row step,
         // and the same `end` the claimed side closes on.
-        if let Some(o) = &self.oside {
+        if let Some(o) = &self.output_claim {
             assert_eq!(outs.len(), sp.per_row, "the output side needs every slot's result");
             let oin = eval.get_preprocessed_column(deq_sel(&self.tag, DEQ_OSEL[0]));
             let obd = eval.get_preprocessed_column(deq_sel(&self.tag, DEQ_OSEL[1]));
@@ -1781,7 +1781,7 @@ pub fn run(w: &Witness, sp: &Spec, tamper: Option<Tamper>) -> Outcome {
             mul: mul_rel.clone(),
             qnz: qnz_rel.clone(),
             rels: rels.clone(),
-            yside: None, oside: None, sside: None,
+            yside: None, output_claim: None, sside: None,
             // the standalone dequant probe has no GKR arm to hand its lookups to
             gkr: false,
         },
