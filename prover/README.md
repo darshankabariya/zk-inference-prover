@@ -73,9 +73,17 @@ binding table says); four heads over 128-wide matmuls bind every layer edge.
 
 | shape | flags after `$SYN` | digest (first 16 hex) | unbound edges | recorded |
 |---|---|---|---|---|
-| `sound` | `--bands 2,1 $RESIDUAL_STREAM --corner` | `82085896a8408f36` | 3, 5 | SIMD backend, 2026-09-07; pinned in `tests/` |
+| `sound` | `--bands 2,1 $RESIDUAL_STREAM --corner` | `82085896a8408f36` | 3, 5 | both backends, 2026-09-07; pinned in `tests/` |
 | `sound_gkrfive` | `--bands 2,1 $RESIDUAL_STREAM --corner GKR5` | `6bee5972d6f616aa` | 3, 5 | same |
 | `sound_aligned` | `--bands 2,2 --nin 128 --nout 128 --residual-stream-a 32 --kmax 16 --synth-residual-stream --corner` | `9c3cdebd97a7d57b` | none | same |
+
+Reading these three on the CUDA backend took one fix in the kernel emitter. A
+generated LogUp kernel used to ask for exactly as many preprocessed columns as
+the evaluator it was emitted from carries, and the evaluator the prover lowers
+for these lookups leaves off two accumulator sides whose selectors no lookup
+reads, so the two counts differ and the proof stopped before the first kernel
+ran. The kernel now asks that every column it reads was supplied, which is what
+its fingerprint pins; no digest moved.
 
 **The unbound configuration.** The same shapes with the skips set reproduce the
 digests recorded on 2026-09-06, before the sound defaults; `RS`, `LB` and `KV`
