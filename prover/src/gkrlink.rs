@@ -313,7 +313,7 @@ pub enum RCol {
     /// builder index `r.base` by what `Prog` returns.
     Glue(usize),
     /// Stream OO (E11): a glue region's preprocessed value `i`, half `k` --
-    /// the `(sm, ef)` pair of a `Src::Pre` operand. Stream II's norm tails read
+    /// the `(sm, ef)` pair of a `Src::Pre` operand. Stream II's norm scales read
     /// the model's norm weight, which is the statement's and so lives in tree 0
     /// under `pre_root`; the pair sits at `Prog::pre_at(i, k)` in the region's
     /// own `pre` list and is named by `glue::glue_pre_col(tag, i, k)`. The only

@@ -492,9 +492,9 @@ impl Prog {
         p
     }
 
-    /// The RMSNorm tail, `h = (x * r) * w`, one row per `(residue, token)` block
+    /// The RMSNorm scale, `h = (x * r) * w`, one row per `(residue, token)` block
     /// of the stream -- the same tiling the reduction's first level uses, so the
-    /// tail's group 0 and the reduction's group 0 are the same values in the
+    /// norm scale's group 0 and the reduction's group 0 are the same values in the
     /// same order and one Horner claim compares them.
     ///
     /// Group 1 is the row's single `r`: "broadcast down a row" is literally one
@@ -506,9 +506,9 @@ impl Prog {
     ///
     /// The two multiplies chain through `Src::Slot`, so `x * r` never leaves the
     /// row and only `h` is bound onwards.
-    /// The RMSNorm tail, `h = (x * r) * w`, one row per `(residue, token)` block
+    /// The RMSNorm scale, `h = (x * r) * w`, one row per `(residue, token)` block
     /// of the stream -- the same tiling the reduction's first level uses, so the
-    /// tail's group 0 and the reduction's group 0 are the same values in the
+    /// norm scale's group 0 and the reduction's group 0 are the same values in the
     /// same order and one Horner claim compares them.
     ///
     /// Stream II changed both of the other two operands.  Group 1 is no longer
@@ -523,7 +523,7 @@ impl Prog {
     ///
     /// The two multiplies chain through `Src::Slot`, so `x * r` never leaves the
     /// row and only `h` is bound onwards.
-    pub fn norm_tail(n: usize, un_r: UnKind) -> Self {
+    pub fn norm_scale(n: usize, un_r: UnKind) -> Self {
         let groups = vec![Group { n, un: UnKind::None },
                           Group { n: 1, un: un_r }];
         let mut slots: Vec<(Src, Src)> = (0..n)
@@ -747,7 +747,7 @@ impl FrameworkEval for GlueEval {
         // the two selectors and then the `Src::Pre` pairs. Stream II read the
         // pairs first, which made no difference while `n_pre` was zero
         // everywhere and made the generated fraction builder read the `nofirst`
-        // selector as a norm-weight mantissa on every chunk with a norm tail.
+        // selector as a norm-weight mantissa on every chunk with a norm scale.
         // The selectors are read whether or not this region carries a binding: the
         // region commits them either way, so a conditional read would leave the
         // supplied column list two longer than the IR's.
@@ -1282,7 +1282,7 @@ pub enum Tamper {
     /// binding `nt.In(1) == G gnb.Out(0)` can catch it.
     Ms(usize),
     /// Stream II: one row's committed sum of squares replaced by the *next
-    /// row's*.  Rows of one norm-tail region step through tokens at a fixed
+    /// row's*.  Rows of one norm-scale region step through tokens at a fixed
     /// residue, so this gives two rows of one token two different `r`s, out of
     /// values that are each some token's honest reduction.  Again only the binding
     /// can catch it -- and this is the one the record's "one `r` per token"

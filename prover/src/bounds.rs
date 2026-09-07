@@ -834,7 +834,7 @@ pub fn cmd(args: &[String]) {
     //    * while the residual stream is a free committed input, the chunk stays
     //      internally consistent and proves, and only the pair check catches the
     //      move -- the case the feature was built for;
-    //    * once the norm tails and the dequant output bindings are in (stream E),
+    //    * once the norm scales and the dequant output bindings are in (stream E),
     //      the stream is pinned forward into the matmul inputs, so a one-bit
     //      change to it is caught *inside* the chunk and the proof is rejected.
     //

@@ -219,7 +219,7 @@ pub struct Layer {
     /// `extract.py --glue`.  Every one is a `(tokens x d)` bf16 *pattern* column
     /// of B1's own residual stream; `xmid` and `xout` are what the glue's two
     /// adds have to reproduce, and the two norm weights and the two scalars are
-    /// what the reduction's tail consumes.
+    /// what the reduction's norm scale consumes.
     pub glue: Option<GlueCols>,
     /// stream E: B1's own `key_head.u16`, the order keys the head's rows compare.
     /// `None` unless the dump was written with `--head`.  It is a reference, not
@@ -409,16 +409,16 @@ pub struct GlueCols {
     pub d_out: Vec<u16>,
     pub xout: Vec<u16>,
     /// `n1_out` and `n2_out`: each norm's `r = rsqrt(mean of squares + eps)`,
-    /// one value per token.  The tails multiply the stream by it, so a row of
-    /// the tail region reads it once and every channel of that row shares it.
+    /// one value per token.  The norm scales multiply the stream by it, so a row of
+    /// the norm scale region reads it once and every channel of that row shares it.
     pub r1: Vec<u16>,
     pub r2: Vec<u16>,
     pub w1: Vec<u16>,
     pub w2: Vec<u16>,
-    /// B1's own norm outputs, which are what the tails have to reproduce:
+    /// B1's own norm outputs, which are what the norm scales have to reproduce:
     /// `x_q` is norm1's (q, k and v all read the same column, and the dump's
     /// digests say so) and `x_gate` is norm2's.  `None` on a dump that did not
-    /// write them, in which case the tail region runs without its reference.
+    /// write them, in which case the norm scale region runs without its reference.
     pub h1: Option<Vec<u16>>,
     pub h2: Option<Vec<u16>>,
     /// The SwiGLU's B1 columns, over `dff`: the gate matmul's dequantized
@@ -466,7 +466,7 @@ impl GlueCols {
             Ok(v[..tokens * d].to_vec())
         };
         let dff = g["dff"].as_u64().unwrap_or(0) as usize;
-        // A column the tails and the SwiGLU only *check* against is optional:
+        // A column the norm scales and the SwiGLU only *check* against is optional:
         // an older dump that does not carry it costs the reference, not the
         // region, and the record says which of the two happened.
         let opt = |n: &str, w: usize| -> Option<Vec<u16>> {
@@ -637,7 +637,7 @@ impl GlueCols {
 
 impl GlueCols {
     /// Stream II: the wiring family on a synthetic layer, so the desk can run
-    /// the whole composed statement -- bindings, norm tails, SwiGLU and all -- at a
+    /// the whole composed statement -- bindings, norm scales, SwiGLU and all -- at a
     /// shape that proves in seconds and without a dump.  Only the columns the
     /// regions *consume* are built: `xmid`, `xout` and the five reference
     /// columns are what the regions compute, and a synthetic layer has no B1 to
@@ -2193,7 +2193,7 @@ impl Layer {
 
     /// Stream II (E11): the *head* chunk's family on a synthetic layer -- an
     /// `lm_head` matmul of `vocab` columns whose committed input is the final
-    /// norm's output, so the desk can run the head's norm tail and its
+    /// norm's output, so the desk can run the head's norm scale and its
     /// requantize seam without a dump.  The layer's own seven matmuls keep
     /// their untied inputs, exactly as a head chunk's do.
     pub fn synth_head(&mut self, seed: u64, a: usize, round: bf16::Round, vocab: usize) {
@@ -2242,8 +2242,8 @@ impl Layer {
         let tff = Tiling::new(tokens, dff, a);
 
         // `h = (x r) w` for one norm, through the same three programs the
-        // regions carry: the squares' two levels, then the tail.
-        let tail = |stream: &[u16], wcol: &[u16], t: &Tiling| -> Vec<u16> {
+        // regions carry: the squares' two levels, then the norm scale.
+        let norm_scale = |stream: &[u16], wcol: &[u16], t: &Tiling| -> Vec<u16> {
             let laid = t.lay(stream);
             let roots = reference(&[laid.clone()], &[], t.rows1(),
                                   &Prog::tree(t.nreal, t.b, UnKind::Square), round);
@@ -2259,7 +2259,7 @@ impl Layer {
                 }
             }
             let out = reference(&[laid, msblk], &wblk, t.rows1(),
-                                &Prog::norm_tail(t.nreal, un_r), round);
+                                &Prog::norm_scale(t.nreal, un_r), round);
             t.unlay(&out[0])
         };
 
@@ -2313,7 +2313,7 @@ impl Layer {
         };
 
 
-        let h1 = tail(&gc.xin, &gc.w1, &t1);
+        let h1 = norm_scale(&gc.xin, &gc.w1, &t1);
         // NN-2: the head chunk's own early return is BELOW, after the `o` seam
         // is wired, which is where it has always been.  Stream NN moved it up
         // here so that the q/k/v wiring and the rotation could run before the
@@ -2412,7 +2412,7 @@ impl Layer {
         let resid = reference(&[t1.lay(&gc.xin), t1.lay(&gc.o_out)], &[], t1.rows1(),
                               &Prog::norm_resid(t1.nreal, t1.b), round);
         let xmid = t1.unlay(&resid[1]);
-        let h2 = tail(&xmid, &gc.w2, &t1);
+        let h2 = norm_scale(&xmid, &gc.w2, &t1);
         wire(self, &["gate", "up"], &h2, d);
 
         // the SwiGLU reads the gate and up regions' *dequantized* outputs, so

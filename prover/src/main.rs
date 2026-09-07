@@ -129,7 +129,7 @@ pub fn check_skips(args: &[String]) {
         }
     }
     for old in ["--bounds", "--kv-bind", "--embed", "--head-argmax", "--head-key",
-                "--norm-tails", "--swiglu", "--deq-bindings", "--no-glue"] {
+                "--norm-tails", "--swiglu", "--deq-ties", "--no-glue"] {
         if flag(args, old) {
             eprintln!("compose: {old} is retired -- what it switched is decided by default now, \
                        and an --unsound-skip-<name> flag is the only way off it");
@@ -2157,7 +2157,7 @@ fn compose_probes_cmd(args: &[String]) {
     if l.glue.is_some() {
         // stream II: the head chunk's family has one reduction and no add, so
         // there is no second region's copy of the stream to break -- that probe
-        // is the layer's, and the head chunk's equivalent is the tail's own
+        // is the layer's, and the head chunk's equivalent is the norm scale's own
         // copy, which probe 12 below runs on whichever family this chunk has.
         if !l.glue.as_ref().is_some_and(|g| g.head) {
             assert!(!probe("glue: gn2's copy of the residual stream", &l,
@@ -2191,45 +2191,45 @@ fn compose_probes_cmd(args: &[String]) {
         if let Some(g) = gplan.glue.as_ref() {
             // `Tamper::Stream` counts leaves across every group of the row and
             // fires only inside group 0, so the index has to be derived from the
-            // layout rather than picked: a tail row is `[nreal x, 1 ms]` since
+            // layout rather than picked: a norm scale row is `[nreal x, 1 ms]` since
             // stream II moved the weight into tree 0, and anything at or past
             // `nreal` corrupts nothing at all.
             let in0 = g.t.nreal / 2;
             // stream JJ: how far into the SwiGLU region's value list `up` starts
             let swiglu_n = g.tff.map(|t| t.tokens * t.d).unwrap_or(0);
-            for (k, i) in g.tails.iter().copied().enumerate() {
+            for (k, i) in g.norm_scales.iter().copied().enumerate() {
                 // stream II: the region's own tag, so a head chunk's single
-                // tail is named `ntf` and the layer's two keep the names the
+                // norm scale is named `ntf` and the layer's two keep the names the
                 // record already carries
                 let n = g.regions[i].tag.clone();
                 let _ = k;
-                // the binding is the whole point of the tail: its copy of the
+                // the binding is the whole point of the norm scale: its copy of the
                 // stream is changed and the region stays internally consistent,
                 // so only `nt.In(0) == gn.In(0)` can catch it
-                assert!(!probe(&format!("tail {n}: its own copy of the stream"), &l,
+                assert!(!probe(&format!("norm_scale {n}: its own copy of the stream"), &l,
                                &compose::ProverTamper {
                                    glue: Some((i, glue::Tamper::Stream(in0))),
                                    ..Default::default() },
                                &format!("the binding {n}.In(0) == its reduction's In(0)")),
-                        "a tail reading a different stream accepted");
-                assert!(!probe(&format!("tail {n}: one multiply's result"), &l,
+                        "a norm_scale reading a different stream accepted");
+                assert!(!probe(&format!("norm_scale {n}: one multiply's result"), &l,
                                &compose::ProverTamper {
                                    glue: Some((i, glue::Tamper::Result(97))),
                                    ..Default::default() },
                                "the multiply's output constraint"),
-                        "a corrupted tail result accepted");
-                // stream II's three controls on the norm tail.  The first two
+                        "a corrupted norm_scale result accepted");
+                // stream II's three controls on the norm scale.  The first two
                 // change what `r` is without breaking anything inside the
                 // region: the `NormR` lookup still finds a row and the two
                 // multiplies still hold, so the only thing that can reject is
                 // the binding to the reduction's published sum of squares.
-                assert!(!probe(&format!("tail {n}: a wrong r on one row"), &l,
+                assert!(!probe(&format!("norm_scale {n}: a wrong r on one row"), &l,
                                &compose::ProverTamper {
                                    glue: Some((i, glue::Tamper::Ms(37))),
                                    ..Default::default() },
                                &format!("the binding {n}.In(1) == G the reduction's Out(0)")),
-                        "a tail with a wrong r accepted");
-                assert!(!probe(&format!("tail {n}: two rows of one token, two rs"), &l,
+                        "a norm_scale with a wrong r accepted");
+                assert!(!probe(&format!("norm_scale {n}: two rows of one token, two rs"), &l,
                                &compose::ProverTamper {
                                    glue: Some((i, glue::Tamper::MsRow(37))),
                                    ..Default::default() },
@@ -2240,8 +2240,8 @@ fn compose_probes_cmd(args: &[String]) {
             // now, so every constraint still holds and the *root* is what
             // moves -- a different kind of rejection from every probe above,
             // and the one that says `w` is the model's and not the prover's.
-            let wtag = g.regions[g.tails[0]].tag.clone();
-            assert!(!probe(&format!("tail {wtag}: one norm-weight cell"), &l,
+            let wtag = g.regions[g.norm_scales[0]].tag.clone();
+            assert!(!probe(&format!("norm_scale {wtag}: one norm-weight cell"), &l,
                            &compose::ProverTamper { glue_w: Some(4321),
                                                     ..Default::default() },
                            "the pinned preprocessed root"),
@@ -2867,11 +2867,11 @@ fn glue_cmd(args: &[String]) {
         ("unary+add", Prog::tree(leaves, leaves, UnKind::Square), 11),
         ("mul", Prog::pairs(per_row, Kind::Mul, UnKind::None, UnKind::None), 13),
         ("swiglu", Prog::pairs(per_row, Kind::Mul, UnKind::Silu, UnKind::None), 17),
-        // Stream II: the norm tail as it is composed -- the reduction's answer
+        // Stream II: the norm scale as it is composed -- the reduction's answer
         // through `UnKind::NormR` and a preprocessed weight.  Here it runs on
         // synthetic values, which is the isolation the composed rung has not
         // got: a failure in this case is the region, never the wiring.
-        ("normtail", Prog::norm_tail(per_row, UnKind::NormR {
+        ("normscale", Prog::norm_scale(per_row, UnKind::NormR {
             inv_d: bf16::from_f64(1.0 / per_row as f64), eps: bf16::from_f64(1e-5) }), 19),
     ];
     for (name, prog, seed) in &cases {

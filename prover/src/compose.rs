@@ -411,7 +411,7 @@ pub struct GlueParams {
     /// with the wiring family at all -- and says so rather than proving less.
     pub dff: usize,
     /// Stream II: the model's two RMSNorm constants, as bf16 patterns.  They are
-    /// in the *statement* because the norm tail's `r` is now a table lookup
+    /// in the *statement* because the norm scale's `r` is now a table lookup
     /// whose table bakes them in (`UnKind::NormR`), and a table is only as
     /// pinned as the parameters the verifier builds it from.
     pub eps: u16,
@@ -422,7 +422,7 @@ pub struct GlueParams {
     pub bind_matmul_outputs: bool,
     /// Stream II (E11), stream KK's finding: this chunk is the `lm_head` chunk,
     /// so its wiring family is the *final* RMSNorm and nothing else -- one
-    /// reduction pair and one tail, whose input is the last layer's committed
+    /// reduction pair and one norm scale, whose input is the last layer's committed
     /// residual and whose output the head requantizes.  Skipped in the
     /// serialization, so a layer chunk's statement is byte identical to one
     /// from a crate that never had the mode.
@@ -974,7 +974,7 @@ pub struct QuantPlan {
 /// integers a walk group multiplies, and the region that proves one is the
 /// requantize of the other.
 ///
-/// There are three: `norm1`'s tail feeds the q/k/v group, `norm2`'s feeds
+/// There are three: `norm1`'s norm scale feeds the q/k/v group, `norm2`'s feeds
 /// gate/up, and the SwiGLU's product feeds `down`.  The fourth matmul input,
 /// `o`'s, has no region here because `AttnOutEval` **is** its requantize -- it
 /// commits `qm` and `sg` and pins them by the exact-rounding identity -- so
@@ -1027,14 +1027,14 @@ pub struct GlueRegionPlan {
 /// on the same row, so the residual stream is committed once and read by both;
 /// the three equalities are `gn1.roots == gn1b.in`, `gn1.xmid == gn2.in` and
 /// `gn2.roots == gn2b.in`.  What is left open is named in the record: the two
-/// norms' tails (`* r`, `* w`), the SwiGLU, and the bindings from `o`'s and `down`'s
+/// norms' norm scales (`* r`, `* w`), the SwiGLU, and the bindings from `o`'s and `down`'s
 /// dequant regions into `o_out` and `d_out`.
 /// One equality the verifier checks between two regions' Horner claims.
 ///
 /// Stream II added `scale`, because one of the new bindings compares sequences of
-/// different *lengths*: the norm tail carries one committed sum of squares per
+/// different *lengths*: the norm scale carries one committed sum of squares per
 /// `(residue, token)` row and the reduction publishes one per token, so the
-/// tail's claim is the reduction's multiplied by `sum_res w^(...)`.  The factor
+/// norm scale's claim is the reduction's multiplied by `sum_res w^(...)`.  The factor
 /// is a function of the plan and the drawn challenge alone, so it is still one
 /// equality between two claims and not a second mechanism; empty means one.
 #[derive(Clone, Debug)]
@@ -1069,9 +1069,9 @@ pub struct GluePlan {
     /// the layer's committed residual-stream input and output claims
     pub stream_in: (usize, usize),
     pub stream_out: (usize, usize),
-    /// stream E: the region index of each norm's tail, and of the SwiGLU, so the
+    /// stream E: the region index of each norm's scale, and of the SwiGLU, so the
     /// accounting can name their cells apart from the reduction's
-    pub tails: Vec<usize>,
+    pub norm_scales: Vec<usize>,
     pub swiglu: Option<usize>,
     /// stream E: `((region, binding), name)` per dequant output binding -- the wiring
     /// side's claim over `o_out` and over `d_out`, and the matmul whose region
@@ -1139,7 +1139,7 @@ impl GluePlan {
     /// norm and no SwiGLU.  What is left is exactly the three statements the
     /// layer's own norms make, with the same table and the same weights:
     /// `gnf.Out(0) == gnfb.In(0)` (one reduction over two levels),
-    /// `ntf.In(0) == gnf.In(0)` (the tail scaled the values the reduction
+    /// `ntf.In(0) == gnf.In(0)` (the norm scale scaled the values the reduction
     /// squared) and `ntf.In(1) == G gnfb.Out(0)` (`r` is that reduction's own
     /// `rsqrt` answer, one per token across all `a` of its rows).
     ///
@@ -1165,7 +1165,7 @@ impl GluePlan {
         let un_r = UnKind::NormR { inv_d: gp.inv_d, eps: gp.eps };
         let l1 = Prog::tree(nreal, t.b, UnKind::Square);
         let l2 = Prog::tree(a, a, UnKind::None);
-        let tail = Prog::norm_tail(nreal, un_r);
+        let norm_scale = Prog::norm_scale(nreal, un_r);
         let mut uns = l1.un_kinds();
         if !uns.contains(&un_r) {
             uns.push(un_r);
@@ -1180,7 +1180,7 @@ impl GluePlan {
             GlueRegionPlan { tag: "gnfb".into(), prog: l2, log_rows: lr2,
                              bindings: vec![(BindingKind::In(0), l2_in, 1),
                                         (BindingKind::Out(0), one.clone(), 1)] },
-            GlueRegionPlan { tag: "ntf".into(), prog: tail, log_rows: lr1,
+            GlueRegionPlan { tag: "ntf".into(), prog: norm_scale, log_rows: lr1,
                              bindings: vec![(BindingKind::In(0), stream.clone(), 1),
                                         (BindingKind::In(1), one, 1),
                                         (BindingKind::Out(0), stream, 1)] },
@@ -1189,7 +1189,7 @@ impl GluePlan {
                        GlueEq::plain((2, 0), (0, 0)),
                        GlueEq { a: (2, 1), b: (1, 1), scale: g_scale }];
         Self { t, tff: None, regions, eqs, uns, stream_in: (0, 0), stream_out: (2, 2),
-               tails: vec![2], swiglu: None, output_bindings: vec![], head_norm: true,
+               norm_scales: vec![2], swiglu: None, output_bindings: vec![], head_norm: true,
                ropes: vec![] }
     }
 
@@ -1253,11 +1253,11 @@ impl GluePlan {
             regions[ri].bindings.push((BindingKind::In(1), stream.clone(), 1));
             output_claim_at.push((name, Some((ri, regions[ri].bindings.len() - 1))));
         }
-        // ---- stream E: the two norm tails ------------------------------------
+        // ---- stream E: the two norm scales ------------------------------------
         //
-        // A tail's group 0 is the same block of the residual stream the
+        // A norm scale's group 0 is the same block of the residual stream the
         // reduction's own group 0 is, in the same order and under the same
-        // weights, so the binding `nt.In(0) == gn.In(0)` says the tail scaled the
+        // weights, so the binding `nt.In(0) == gn.In(0)` says the norm scale scaled the
         // very values the reduction squared -- which is the half of "the norm
         // computed its own output" a committed column cannot fake.  `Out(0)` is
         // published for the requantize region that will read it.
@@ -1272,19 +1272,19 @@ impl GluePlan {
         // the `a` rows and is the verifier's own arithmetic (`GlueEq::scale`).
         // The norm weight moved to `Src::Pre`, i.e. into tree 0 under
         // `pre_root`, because it is the model's and not the prover's.
-        let mut tails = vec![];
+        let mut norm_scales = vec![];
         {
             let rows1 = 1usize << lr1;
             let rows2 = 1usize << lr2;
             assert_eq!(rows1, a * tok,
-                       "the norm tail's binding needs the level-1 region to tile exactly");
+                       "the norm scale's binding needs the level-1 region to tile exactly");
             assert_eq!(rows2, tok,
-                       "the norm tail's binding needs the level-2 region to tile exactly");
+                       "the norm scale's binding needs the level-2 region to tile exactly");
             let un_r = UnKind::NormR { inv_d: gp.inv_d, eps: gp.eps };
             if !uns.contains(&un_r) {
                 uns.push(un_r);
             }
-            let tail = Prog::norm_tail(nreal, un_r);
+            let norm_scale = Prog::norm_scale(nreal, un_r);
             let one_pos = vec![0u128];
             // sum_{res} w^(rows1 - rows2 - res * tokens)
             let g_scale: Vec<i128> =
@@ -1293,7 +1293,7 @@ impl GluePlan {
                 let i = regions.len();
                 regions.push(GlueRegionPlan {
                     tag: tag.into(),
-                    prog: tail.clone(),
+                    prog: norm_scale.clone(),
                     log_rows: lr1,
                     bindings: vec![(BindingKind::In(0), stream.clone(), 1),
                                (BindingKind::In(1), one_pos.clone(), 1),
@@ -1301,7 +1301,7 @@ impl GluePlan {
                 });
                 eqs.push(GlueEq::plain((i, 0), (gn, 0)));
                 eqs.push(GlueEq { a: (i, 1), b: (gnb, 1), scale: g_scale.clone() });
-                tails.push(i);
+                norm_scales.push(i);
             }
         }
         // ---- stream E: the SwiGLU product -----------------------------------
@@ -1434,7 +1434,7 @@ impl GluePlan {
             uns,
             stream_in: (0, 0),
             stream_out: (2, 2),
-            tails,
+            norm_scales,
             swiglu,
             output_bindings,
             head_norm: false,
@@ -1882,15 +1882,15 @@ impl Plan {
         let mut rq_vars: Vec<crate::requant::SVariant> = vec![];
         if let Some(g) = glue.as_ref() {
             // stream II: on the head chunk the only producer is the final
-            // norm's tail and the only consumer is the head's own walk, so the
+            // norm's scale and the only consumer is the head's own walk, so the
             // seam list is one entry and the layer's three are absent -- there
             // is no layer here to have produced them.
             let seams: Vec<(&str, (usize, usize), usize)> = if g.head_norm {
-                vec![("head", (g.tails[0], 2), g.t.d)]
+                vec![("head", (g.norm_scales[0], 2), g.t.d)]
             } else {
                 vec![
-                    ("qkv", (g.tails[0], 2), g.t.d),
-                    ("gateup", (g.tails[1], 2), g.t.d),
+                    ("qkv", (g.norm_scales[0], 2), g.t.d),
+                    ("gateup", (g.norm_scales[1], 2), g.t.d),
                     ("down", (g.swiglu.expect("the SwiGLU region is unconditional"), 2),
                      g.tff.expect("the SwiGLU's tiling").d),
                 ]
@@ -3969,7 +3969,7 @@ pub struct ProverTamper {
     /// Each leaves the region internally consistent and aims at one of its two
     /// bindings, or at the scale lookup.
     pub rq: Option<(usize, crate::requant::RqTamper)>,
-    /// Stream II, control 3: bend one cell of a norm tail's *preprocessed*
+    /// Stream II, control 3: bend one cell of a norm scale's *preprocessed*
     /// weight block.  The region recomputes `h` from the bent weight, so every
     /// constraint holds and the tree-0 root is what moves -- `root_ok` against
     /// the statement's `pre_root` is the rejection, and it is a different kind
@@ -4368,12 +4368,12 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         let t = gp.t;
         let rows1 = t.rows1();
         let mut mismatch = vec![];
-        // what the two reduction regions read as their stream, kept so a tail
+        // what the two reduction regions read as their stream, kept so a norm scale
         // region reads the identical block -- the binding compares those, and B1's
         // own column is the separate check
-        let mut tail_in: Vec<Vec<u16>> = vec![];
+        let mut norm_scale_in: Vec<Vec<u16>> = vec![];
         // stream II: and each norm's own sum of squares, one per token, which is
-        // what the tail's group 1 commits and `UnKind::NormR` turns into `r`
+        // what the norm scale's group 1 commits and `UnKind::NormR` turns into `r`
         let mut ms_out: Vec<Vec<u16>> = vec![];
         // stream 0: xin + o_out into xmid, and the squares' first levels;
         // stream 1: xmid + d_out into xout, and norm2's
@@ -4408,7 +4408,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                     addv[vi % n] ^= 1;
                 }
             }
-            tail_in.push(stream.clone());
+            norm_scale_in.push(stream.clone());
             let leaves = if gp.head_norm {
                 vec![stream.clone()]
             } else {
@@ -4424,7 +4424,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // what the region computed is what the next one reads: that is what
             // the binding says, and it is checked against B1's own column here.
             // The head chunk's level 1 has no add, so there is no second output
-            // group and nothing to compare -- its own reference is the tail's.
+            // group and nothing to compare -- its own reference is the norm scale's.
             let got = if gp.head_norm { vec![] } else { t.unlay(&r1.outs[1]) };
             // streams JJ and II: a synthetic layer carries no B1 column to be
             // right about, and an absent reference is reported as absent
@@ -4444,7 +4444,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             let w2 = crate::glue::GlueWitness::new(
                 t.tokens, vec![l2], &prog2, plan.round,
                 format!("the level-1 roots [{} x {}]", t.tokens, t.a));
-            // stream II: the tail reads this norm's own sum of squares, one per
+            // stream II: the norm scale reads this norm's own sum of squares, one per
             // token -- `r` is its `UnKind::NormR` image and nothing else
             let tam2 = tamper.glue.filter(|(ri, _)| *ri == i1 + 1).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
@@ -4458,7 +4458,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             glue_regions.push(r2);
         }
         // ---- stream E: h = (x * r) * w, once per norm -------------------------
-        for (k, i) in gp.tails.iter().copied().enumerate() {
+        for (k, i) in gp.norm_scales.iter().copied().enumerate() {
             let (rcol, wcol, want, wname, rname) = if gp.head_norm {
                 (&gc.r1, &gc.w1, &gc.h1, "h_head", "r_head")
             } else if k == 0 {
@@ -4498,13 +4498,13 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             }
             crate::util::m4_add("gen/glue_wblk", t_wb.elapsed().as_secs_f64());
             let w = crate::glue::GlueWitness::with_pre(
-                rows1, vec![tail_in[k].clone(), msblk], wblk, &prog, plan.round,
-                format!("B1 norm{} tail [{} x {}]", k + 1, t.tokens, t.d));
+                rows1, vec![norm_scale_in[k].clone(), msblk], wblk, &prog, plan.round,
+                format!("B1 norm{} scale [{} x {}]", k + 1, t.tokens, t.d));
             let tam = tamper.glue.filter(|(ri, _)| *ri == i).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
             let r = crate::glue::glue_region(&w, &prog, plan.round, &tag, &mut gt, tam);
             crate::util::m4_add("gen/glue_region", t_gr.elapsed().as_secs_f64());
-            // the tail's output is the q/k/v (resp. gate/up) matmuls' own bf16
+            // the norm scale's output is the q/k/v (resp. gate/up) matmuls' own bf16
             // input column, so B1 has already written down what it must be
             let t_b1 = std::time::Instant::now();
             if let Some(wv) = want {
@@ -4521,7 +4521,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                                      "note": "the dump does not carry this column"}));
             }
             // stream II: and the derived `r` itself, against B1's own
-            // `n1_out`/`n2_out`.  The tail no longer commits `r`, so this is the
+            // `n1_out`/`n2_out`.  The norm scale no longer commits `r`, so this is the
             // one number that says the `NormR` table reproduces the model: a
             // dump whose norm reduction is B1's fp32 accumulation rather than
             // its balanced tree (`reduce = "fp32"`) will differ here, and the
@@ -7220,7 +7220,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
                 .iter()
                 .map(|e| {
                     // stream II: `a == factor * b`, the factor being the plan's
-                    // own geometric sum over the tail's `a` rows per token.
+                    // own geometric sum over the norm scale's `a` rows per token.
                     // With no factor this is the equality it always was.
                     unqm(claims.stream_bindings[e.a.0][e.a.1])
                         == e.factor(w_glue) * unqm(claims.stream_bindings[e.b.0][e.b.1])

@@ -312,10 +312,10 @@ if __name__ == "__main__":
         # prefix -- `m.head = Linear(..., "lm_head", ...)` -- so its recorder keys
         # are bare.
         keep |= {"lm_head/acc", "lm_head/qx", "lm_head/s_x"}
-        # Stream II (E11): the head chunk's own norm tail.  `lm_head` consumes
+        # Stream II (E11): the head chunk's own norm scale.  `lm_head` consumes
         # the int8 activation of `rmsnorm(x, final_norm)`, and no dump carried
         # either operand, so the final RMSNorm was proved by nobody (stream KK).
-        # The tail needs the last layer's committed residual (its input), the
+        # The norm scale needs the last layer's committed residual (its input), the
         # model's final-norm weight (preprocessed, tree 0) and B1's own rsqrt
         # lookup and head input as the two references the region reproduces.
         keep |= {f"L{m.L - 1}.x", "final_norm.rsqrt/in", "final_norm.rsqrt/out",
@@ -711,7 +711,7 @@ if __name__ == "__main__":
                 tokh = lg.float().argmax(-1).numpy().astype(np.int64)
                 write("tok_head.i32", tokh.astype(np.int32), digests)
 
-                # ---- stream II (E11): the head chunk's norm tail ------------
+                # ---- stream II (E11): the head chunk's norm scale ------------
                 # Five bf16 pattern columns and two bf16 scalars, which is what
                 # a chunk needs to prove `h = (x rsqrt(ms inv_d + eps)) w` for
                 # the *final* norm exactly as a layer proves it for norm1 and
@@ -755,7 +755,7 @@ if __name__ == "__main__":
                 )
                 head = dict(
                     vocab=int(lin.n_out), d_in=int(lin.n_in), tokens=int(hacc.shape[0]),
-                    # stream II: what the head chunk's norm tail is built from.
+                    # stream II: what the head chunk's norm scale is built from.
                     # `eps` and `inv_d` are bf16 patterns of the model, because
                     # a table is only as pinned as the parameters the verifier
                     # builds it from, and `reduce` says whether the AIR's
