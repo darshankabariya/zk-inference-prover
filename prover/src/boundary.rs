@@ -226,7 +226,7 @@ pub fn report(sides: &[Side]) -> Value {
 ///   -- two different token sets' residual streams, related by nothing, equal
 ///   only by collision.
 ///
-/// So the H200 gate's step 5 FAIL (`kv_roots_equal` true, all three groups
+/// So the gate's step 5 FAIL (`kv_roots_equal` true, all three groups
 /// equal, `roots_equal` false --
 /// `experiments/b12/e11/out/h200/aa5_chain.json`) is a true report of a defect
 /// in the predicate, not only of a gate asking the wrong question.
@@ -2211,7 +2211,7 @@ mod tests {
     fn token_edge_does_not_chain_when_one_group_moves() {
         let (a, b) = (fixed(512, 512, true), fixed(1024, 512, true));
         let (ra, mut rb) = roots(&a, &b, true, false);
-        // group 0's in tree: the shape of the H200 probe on one bit of `vvc.i8`
+        // group 0's in tree: the shape of the recorded probe on one bit of `vvc.i8`
         let ti = kv_layout(&b.params).unwrap().in_tree(0).unwrap();
         rb[ti] = "moved".into();
         let v = chain_of(&a, &ra, &b, &rb);
@@ -2408,7 +2408,7 @@ mod tests {
     fn the_merged_predicate_failed_on_the_data_on_a_token_edge() {
         // `roots_equal` compares two different token blocks' residual
         // boundaries.  Nothing relates them, so the honest root table has them
-        // unequal -- which is what the H200 measured.
+        // unequal -- which is what the recorded run measured.
         let (a, b) = (fixed(512, 512, true), fixed(1024, 512, true));
         let (ra, rb) = roots(&a, &b, true, false);
         let v = chain_of(&a, &ra, &b, &rb);

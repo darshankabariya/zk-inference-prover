@@ -2911,10 +2911,10 @@ impl BuiltComponents {
         // *is* prewarmed overwrites the stale entry at its address before
         // anything dispatches it, so it is safe by construction; a component
         // that is dispatched but never prewarmed can only ever *read* an entry
-        // some other family wrote in an earlier chunk. Measured on the H100 at
-        // C=4096 over the 32-chunk pipelined loop, that happened twice in nine
-        // runs, and both times in exactly one of the five families missing
-        // here: `evaluate_b65_residual_stream_eval: scalar count` and
+        // some other family wrote in an earlier chunk. Measured at C=4096 over
+        // the 32-chunk pipelined loop, that happened twice in nine runs, and
+        // both times in exactly one of the five families missing here:
+        // `evaluate_b65_residual_stream_eval: scalar count` and
         // `evaluate_b65_residual_stream_table_eval: shape id out of range`. Both are the
         // generated dispatch's own checks, so the failure is fail-stop and
         // cannot reach a digest -- which is why every completed run has always
@@ -5048,7 +5048,7 @@ different rotation", inv.len(), 2 * hd * p.s);
         // stream JJ (E11): the accumulator window's two limb tables.  Every
         // shared table a device fill bumps must hand its counter over here, or
         // `tables_dev` has nothing to sum for it and stops -- which is what the
-        // `ao_acc_hi_bits` table did on the H200's reference chunk ("shared
+        // `ao_acc_hi_bits` table did on the reference chunk ("shared
         // table 4 has no device counter to sum"), the defaults cuda regime
         // being the only place that asks.  `EPOW` is deliberately not here: its
         // column is a host loop on both backends, so it has no device counter.
@@ -5659,7 +5659,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // band's fractions never take the device route -- so it gets no BandAir,
         // and the row index counts prefix bands only.
         //
-        // Open item 1 (E11, H200 2026-09-02): block 0's solo corner carries the
+        // Open item 1 (E11, 2026-09-02): block 0's solo corner carries the
         // region and so has a row component, but it is still a corner -- its
         // `KeyEval` reads the causal mask (tree 0, `msk_id`) for the exp
         // lookups' multiplicities, which the device fraction route never

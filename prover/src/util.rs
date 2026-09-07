@@ -251,7 +251,7 @@ fn m4b_default(name: &str) -> u32 {
         "B7_M5_IRCACHE" | "B7_M5_PRECACHE" => 1,
         // B11 stream O, lever 3: the chunk loop generates chunk k+1 while it
         // proves chunk k. Graduated here in the commit that lands its gate,
-        // which is the seq6 A/B on the H200 at *both* contexts -- 33 chunks
+        // which is the seq6 A/B at *both* contexts -- 33 chunks
         // each, the head included, all 66 digests byte-identical to seq5's and
         // both chains 31/31 from the loop's own serialized bytes, with the
         // pipelined arm winning at both (`loop_secs` 117.27 -> 71.58 s at
@@ -399,11 +399,11 @@ pub fn mem_total_bytes() -> u64 {
         .unwrap_or(0)
 }
 
-/// The card this process can see, as `nvidia-smi` names it (`"NVIDIA H200 NVL,
-/// 143771 MiB"`), or null where there is none.  Open item 9: every timing
-/// constant names its card and until this no artifact recorded it -- the two
-/// boxes were separable only by host RAM and witness path.  Asked once per
-/// process; `emit` runs per chunk in the loop.
+/// The card this process can see, as `nvidia-smi` names it (its model name and
+/// total memory, `"<name>, <total> MiB"`), or null where there is none.  Open
+/// item 9: every timing constant names its card and until this no artifact
+/// recorded it -- the two boxes were separable only by host RAM and witness
+/// path.  Asked once per process; `emit` runs per chunk in the loop.
 /// What `nvidia-smi` reports, asked once: the first device's name and memory,
 /// the driver version, and the CUDA version the driver supports.  `None` for
 /// each when there is no `nvidia-smi` or it answers nothing, which is the
