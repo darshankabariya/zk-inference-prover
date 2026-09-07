@@ -3172,21 +3172,34 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch, s
     let nc: Vec<String> =
         shapes.iter().map(|(_, i)| format!("{}u", i.fracs.len().div_ceil(2))).collect();
     let nl: Vec<String> = shapes.iter().map(|(_, i)| format!("{}u", i.fracs.len())).collect();
-    // B7a milestone 4 (section 3 row 1): a shape's column count is checked only
-    // for a tree the kernel actually *loads* from. `Ir::fingerprint` is the
-    // signature of the computation and a named-but-unread column is not part
-    // of it -- the three `qkv`/`o`/`gateup` walk regions lower to one shape and
-    // declare 412, 140 and 276 preprocessed weight columns, none of which the
-    // fractions read. `~0u` is "this shape reads no column of this tree", and
-    // the caller-side `devfrac::assert_supplied` is what checks the rest.
-    let reads = |ir: &Ir, t: usize| {
-        ir.ops.iter().any(|o| matches!(*o, Op::Load { tree, .. } if tree == t))
+    // B7a milestone 4 (section 3 row 1): what a shape states about a tree is
+    // how many columns of it the kernel indexes, and the check is that at
+    // least that many were supplied. `Ir::fingerprint` is the signature of the
+    // computation: it pins every load by tree and by column number, so a
+    // kernel handed the same columns in the same order reads the same cells.
+    // What it does not pin is how many columns the component around that
+    // computation names, and two components that share a shape may name
+    // different totals -- the three `qkv`/`o`/`gateup` walk regions lower to
+    // one shape and carry 412, 140 and 276 preprocessed weight columns, none
+    // of which the fractions read, and a dequant region's fraction evaluator
+    // leaves off the output and scale sides, whose selectors it carries but
+    // never reads. An equality here read that difference as a stale library
+    // and ended the proof. The caller-side `devfrac::assert_supplied` is what
+    // checks the rest.
+    let needs = |ir: &Ir, t: usize| {
+        let n = ir
+            .ops
+            .iter()
+            .filter_map(|o| match *o {
+                Op::Load { tree, col, .. } if tree == t => Some(col + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        format!("{n}u")
     };
-    let count = |ir: &Ir, t: usize| {
-        if reads(ir, t) { format!("{}u", ir.cols[t]) } else { "~0u".to_string() }
-    };
-    let n0: Vec<String> = shapes.iter().map(|(_, i)| count(i, 0)).collect();
-    let n1: Vec<String> = shapes.iter().map(|(_, i)| count(i, 1)).collect();
+    let n0: Vec<String> = shapes.iter().map(|(_, i)| needs(i, 0)).collect();
+    let n1: Vec<String> = shapes.iter().map(|(_, i)| needs(i, 1)).collect();
     cu += &format!(
         "static const unsigned {fname}_n_shapes = {n_shapes}u;\n\
          static const unsigned {fname}_fp[{n_shapes}] = {{{}}};\n\
@@ -3216,9 +3229,9 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch, s
          \x20   b65_check(fingerprint == {fname}_fp[shape], \"{fname}: fingerprint\");\n\
          \x20   b65_check(n_sc == {fname}_nsc[shape], \"{fname}: scalar count\");\n\
          \x20   b65_check(n_cols == {fname}_ncols[shape], \"{fname}: column count\");\n\
-         \x20   b65_check({fname}_npre[shape] == ~0u || n_pre == {fname}_npre[shape],\n\
+         \x20   b65_check(n_pre >= {fname}_npre[shape],\n\
          \x20       \"{fname}: preprocessed column count\");\n\
-         \x20   b65_check({fname}_nbase[shape] == ~0u || n_base == {fname}_nbase[shape],\n\
+         \x20   b65_check(n_base >= {fname}_nbase[shape],\n\
          \x20       \"{fname}: base column count\");\n\
          \x20   m31 **d_t0 = n_pre ? clone_to_device<m31*>(pre_cols, n_pre) : nullptr;\n\
          \x20   m31 **d_t1 = n_base ? clone_to_device<m31*>(base_cols, n_base) : nullptr;\n\
@@ -3283,9 +3296,9 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch, s
          \x20   b65_check(fingerprint == {fname}_fp[shape], \"{fname}_feed: fingerprint\");\n\
          \x20   b65_check(n_sc == {fname}_nsc[shape], \"{fname}_feed: scalar count\");\n\
          \x20   b65_check(n_looks == {fname}_nlooks[shape], \"{fname}_feed: look count\");\n\
-         \x20   b65_check({fname}_npre[shape] == ~0u || n_pre == {fname}_npre[shape],\n\
+         \x20   b65_check(n_pre >= {fname}_npre[shape],\n\
          \x20       \"{fname}_feed: preprocessed column count\");\n\
-         \x20   b65_check({fname}_nbase[shape] == ~0u || n_base == {fname}_nbase[shape],\n\
+         \x20   b65_check(n_base >= {fname}_nbase[shape],\n\
          \x20       \"{fname}_feed: base column count\");\n\
          \x20   m31 **d_t0 = n_pre ? clone_to_device<m31*>(pre_cols, n_pre) : nullptr;\n\
          \x20   m31 **d_t1 = n_base ? clone_to_device<m31*>(base_cols, n_base) : nullptr;\n\
