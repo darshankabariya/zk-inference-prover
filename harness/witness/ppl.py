@@ -15,8 +15,9 @@ import time
 import numpy as np
 import torch
 
-from .common import (B5_SPECS, B6_SPECS, B65_SPECS, B8_SPECS, MODEL, OUT, SPECS, chunks,
-                    setup, tokens)
+from .. import provenance
+from .common import (B5_SPECS, B6_SPECS, B65_SPECS, B8_SPECS, DEVICE, MODEL, OUT, SPECS,
+                    TEXT, THREADS, chunks, setup, tokens)
 from .model import Model
 from .quant import INT8_MAX, bf16_ceil, qscale
 
@@ -108,6 +109,29 @@ def run(name, n_chunks, save=True):
                 tokens=cnt, chunks=n_chunks, seconds=round(time.time() - t0, 1))
 
 
+def load():
+    """The rows of `ppl.json`; an empty map when there is no file yet."""
+    return provenance.rows(json.load(open(RESULTS))) if os.path.exists(RESULTS) else {}
+
+
+def save(rows, written, n_chunks):
+    """`ppl.json`, with the provenance block of the invocation that wrote it.
+
+    The file accumulates one row per quantization variant across invocations,
+    so the block names the variants this process measured as well as every
+    variant now in the file; everything else in it -- the commit, the model and
+    its revision, the device, the corpus -- is pinned by the caller and the
+    same for all of them.
+    """
+    doc = {"provenance": provenance.block(
+               model=MODEL, device=DEVICE, threads=THREADS,
+               module="harness.witness.ppl",
+               specs_written=list(written), specs_in_file=sorted(rows),
+               chunks=n_chunks, corpus=provenance.digest(TEXT)),
+           "result": rows}
+    json.dump(doc, open(RESULTS, "w"), indent=1)
+
+
 def paired(a, b):
     """ppl(b)/ppl(a) - 1 with its paired standard error, from the per-token NLLs."""
     x = np.load(os.path.join(OUT, "nll", f"{a}.npy")).astype(np.float64)
@@ -118,7 +142,7 @@ def paired(a, b):
 
 
 def markdown(only=None):
-    r = json.load(open(RESULTS))
+    r = load()
     base, att = r["fp32"]["ppl"], r["dynamic-int8"]["ppl"]
     keys = [s for s in SPECS if s in r and (only is None or s in only)]
     print("| spec | ppl | vs fp32 | vs dynamic-int8 |")
@@ -131,7 +155,7 @@ def markdown(only=None):
 
 
 def report():
-    r = json.load(open(RESULTS))
+    r = load()
     base = r["fp32"]["ppl"]
     print(f"{'spec':<12} {'ppl':>9} {'vs fp32':>9}  tokens  spec")
     for k, v in r.items():
@@ -177,7 +201,7 @@ if __name__ == "__main__":
         else:
             report()
         raise SystemExit
-    done = json.load(open(RESULTS)) if os.path.exists(RESULTS) else {}
+    done = load()
     pool = (B5_SPECS if a.b5 else
             (B6_SPECS if a.b6 else
              (B65_SPECS if a.b65 else (B8_SPECS if a.b8 else list(SPECS)))))
@@ -186,7 +210,7 @@ if __name__ == "__main__":
         print(f"== {name}: {SPECS[name].asdict()}", flush=True)
         out = run(name, a.chunks, save=not a.no_save)
         if not a.no_save:
-            all_r = json.load(open(RESULTS)) if os.path.exists(RESULTS) else {}
+            all_r = load()
             all_r[name] = out
-            json.dump(all_r, open(RESULTS, "w"), indent=1)
+            save(all_r, [name], a.chunks)
         print(f"   ppl = {out['ppl']:.4f}  ({out['seconds']}s)", flush=True)

@@ -22,6 +22,7 @@ import random
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+from harness import provenance
 from harness.eval import tasks as T
 
 # `ZK_TASKS_OUT` holds this session's `tasks/` + `tasks.json`, `ZK_TASKS_REF` the
@@ -97,8 +98,8 @@ def mcnemar(a, b, docs):
 
 def main():
     docs = {t: T.LOADERS[t]() for t in T.LOADERS}
-    e5t = json.load(open(os.path.join(E5T, "tasks.json")))
-    b8 = json.load(open(os.path.join(B8, "tasks.json")))
+    e5t = provenance.rows(json.load(open(os.path.join(E5T, "tasks.json"))))
+    b8 = provenance.rows(json.load(open(os.path.join(B8, "tasks.json"))))
 
     print("== 1. the environment control: this session's rows against the recorded ones\n")
     print(f"{'spec / task':<26} {'recorded':>10} {'E5t (H200)':>12}  items identical")

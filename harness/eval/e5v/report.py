@@ -18,6 +18,7 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+from harness import provenance
 from harness.eval import tasks as T
 from harness.eval.e5t.report import ifeval_items, mcnemar, rows, se_acc
 
@@ -53,8 +54,8 @@ def ok_map(d, task, spec):
 
 def main():
     docs = {t: T.LOADERS[t]() for t in T.LOADERS}
-    e5v = json.load(open(os.path.join(E5V, "tasks.json")))
-    e5t = json.load(open(os.path.join(E5T, "tasks.json")))
+    e5v = provenance.rows(json.load(open(os.path.join(E5V, "tasks.json"))))
+    e5t = provenance.rows(json.load(open(os.path.join(E5T, "tasks.json"))))
 
     print("== 1. the environment control: this session's `fp32` against E5t's\n")
     print(f"{'task':<22} {'E5t (H200)':>11} {'E5v (H200)':>11}  items identical   file sha256")
@@ -137,7 +138,7 @@ def main():
           " mean gen | ppl vs fp32 |")
     print("|---|---|---|---|---|---|---|---|---|")
     # both from stream Z's recorded rows, which this session's gate reproduces
-    p32 = json.load(open(os.path.join(E5V, "ref", "ppl.json")))
+    p32 = provenance.rows(json.load(open(os.path.join(E5V, "ref", "ppl.json"))))
     ppl = {"fp32": None}
     for s in ("b10-final", SPEC):
         ppl[s] = (p32[s]["ppl"] / p32["fp32"]["ppl"] - 1) * 100

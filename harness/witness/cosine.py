@@ -30,7 +30,9 @@ import time
 import numpy as np
 import torch
 
-from .common import CHUNK, MODEL, OUT, SPECS, chunks, setup, tokens
+from .. import provenance
+from .common import (CHUNK, DEVICE, MODEL, OUT, SPECS, TEXT, THREADS, chunks,
+                    setup, tokens)
 from .model import Cache, Model
 from .ppl import attention_scales, calibration_scales
 
@@ -88,6 +90,11 @@ if __name__ == "__main__":
     out = run(a.spec, a.chunks)
     print(f"   cosine({a.spec}, fp32) = {out['cosine_mean']:.6f} +/- {out['cosine_se']:.6f}  "
           f"(min {out['cosine_min']:.6f})")
-    res = json.load(open(RESULTS)) if os.path.exists(RESULTS) else {}
+    res = provenance.rows(json.load(open(RESULTS))) if os.path.exists(RESULTS) else {}
     res[a.spec] = out
-    json.dump(res, open(RESULTS, "w"), indent=1)
+    json.dump({"provenance": provenance.block(
+                   model=MODEL, device=DEVICE, threads=THREADS,
+                   module="harness.witness.cosine",
+                   specs_written=[a.spec], specs_in_file=sorted(res),
+                   chunks=a.chunks, corpus=provenance.digest(TEXT)),
+               "result": res}, open(RESULTS, "w"), indent=1)

@@ -28,7 +28,8 @@ import time
 import torch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-from harness.witness.common import MODEL, OUT, SPECS, setup
+from harness import provenance
+from harness.witness.common import DEVICE, MODEL, OUT, SPECS, THREADS, setup
 from harness.witness.model import Cache, Model
 from harness.witness.ppl import attention_scales, calibration_scales
 
@@ -307,7 +308,12 @@ def score():
     for tasks in res.values():
         for r in tasks.values():
             r.pop("preds", None)
-    json.dump(res, open(RESULTS, "w"), indent=1, sort_keys=True)
+    json.dump({"provenance": provenance.block(
+                   model=MODEL, device=DEVICE, threads=THREADS,
+                   module="harness.eval.tasks",
+                   specs_in_file=sorted(res),
+                   datasets=[provenance.digest(f) for f in (GPQA, MMLU, IFEVAL)]),
+               "result": res}, open(RESULTS, "w"), indent=1, sort_keys=True)
     return res
 
 
