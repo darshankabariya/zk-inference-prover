@@ -3,9 +3,10 @@
 The generated device kernels and how they get into the CUDA backend. Without
 this step the CUDA backend is correct but evaluates constraints on the CPU.
 
-1. `zk-prover cudaemit` and `zk-prover genemit` (the SIMD binary) write the constraint and
-   witness-generation kernels for one segment shape into a store directory,
-   once per distinct shape in a plan.
+1. `zk-prover cudaemit --out STORE` and `zk-prover genemit --out STORE` (the
+   SIMD binary) write the constraint and witness-generation kernels for one
+   segment shape into the store directory, once per distinct shape in a plan.
+   `--out` is required: neither command has a default store.
 2. `m2b_kernels.py --fork ../nitroo --gen STORE` copies the constraint kernels
    into the vendored fork's CUDA tree and adds them to its source list and
    dispatch; `m4b_kernels.py --fork ../nitroo --gen STORE` does the same for the

@@ -2523,7 +2523,7 @@ fn fill_binding_claims(plan: &crate::compose::Plan, claims: &mut crate::compose:
 pub fn emit_cmd(args: &[String]) {
     let (source, params) = crate::plan_params(args);
     let plan = crate::compose::Plan::new(&params);
-    let out = crate::arg_str(args, "--out").unwrap_or_else(|| "/root/b7/gen".to_string());
+    let out = crate::arg_str(args, "--out").expect("cudaemit needs --out DIR");
     let launch = Launch {
         block: crate::arg_scalar(args, "--block", 256u32),
         min_blocks: crate::arg_scalar(args, "--min-blocks", 2u32),
@@ -3414,7 +3414,7 @@ pub fn gen_emit_cmd(args: &[String]) {
     }
     let params = params;
     let plan = crate::compose::Plan::new(&params);
-    let out = crate::arg_str(args, "--out").unwrap_or_else(|| "/root/b7/gen".to_string());
+    let out = crate::arg_str(args, "--out").expect("genemit needs --out DIR");
     let want: Vec<String> =
         crate::arg_strs(args, "--families", &["b65_dequant_eval"]);
     let launch = Launch {
