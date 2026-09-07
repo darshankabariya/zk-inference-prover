@@ -104,21 +104,56 @@ stand for `--unsound-skip-residual-stream`, `--unsound-skip-layer-boundary` and
 | `residual_stream_bounds` | `--bands 2,1 $RESIDUAL_STREAM --diagonal-block KV` | `775b1972badf31e4` | same |
 | `residual_stream_gkrfive` | `--bands 2,1 $RESIDUAL_STREAM --diagonal-block LB KV GKR5` | `d1aff3e6580569a4` | same |
 
-**The full-size reference.** The 8B dump below was extracted without its own
-block and predates the embedding rows, so under the defaults it is proved with
-`--unsound-skip-kv-boundary`; the sound reference digests of the paper's
-segments are recorded by `zk-results` with the runs that produce them.
+**The full-size reference.** One Llama-3.1-8B layer-16 segment, `S = 512`
+output positions against a `C = 16384` key prefix, from a dump
+`harness.witness.extract` writes under the fixed quantization configuration
+`b10-final`:
 
-| proof | command | digest (first 16 hex) | recorded |
+```sh
+uv run --no-group cpu --group cuda python -m harness.witness.extract \
+    --tokens 16896 --chunk 512 --layer 16 --spec b10-final \
+    --residual-stream --diagonal-block --out <dir>
+RAYON_NUM_THREADS=16 zk-prover compose --round even --numbits 9 --z-hi-bits 7 \
+    --variants intexp --table-bits 25 --bands 16,8,8 --diagonal-block $GKR5 \
+    --witness <dir>
+```
+
+| proof | digest (first 16 hex) | recorded |
+|---|---|---|
+| Llama-3.1-8B layer 16, `S = 512`, `C = 16384` | `25741d12f315aae7` | both backends, 2026-09-07; no skip in effect, every edge bound, no kernel fallback; `zk-results` run `2026-09-07-reference-digest-h100` |
+
+The dump carries its own diagonal block and the residual-stream columns, so
+every binding gadget the defaults switch on is stated on it and the proof
+needs no skip flag. Two flags on the prover side are not free choices.
+`--round even` is the dump's own mode: `b10-final` rounds a half to even and
+the dump's `dequant_round` says so, the prover does not read that field, and a
+command naming the other mode builds tables whose keys this witness's values
+miss, so the honest proof is rejected. The five GKR reductions are on because
+without them this segment's interaction tree is 93,184 columns wide, and the
+vendored library's out-of-domain sampling puts the polynomial count in a
+thread block grid's y dimension, which a device caps at 65,535: the CUDA
+backend stops in `eval_at_point.cu` with an invalid configuration argument.
+With them the interaction tree is 5,600 columns.
+
+**The reference's unbound predecessor.** The dump below was extracted without
+its own diagonal block and predates the embedding rows, so under the defaults
+it proves only with the K/V boundary skipped and its digest is an unbound one.
+No host holds that dump now, so it reproduces nowhere; the row is kept as the
+record of what that configuration gave.
+
+| proof | command after `zk-prover compose` | digest (first 16 hex) | recorded |
 |---|---|---|---|
-| Llama-3.1-8B layer 16, `S = 512`, `C = 16384` | `RAYON_NUM_THREADS=16 zk-prover compose --round away --numbits 9 --z-hi-bits 7 --variants intexp --table-bits 25 --bands 16,8,8 --unsound-skip-kv-boundary --witness <dir>` | `42fceb1f3a8643cd` | both backends, 2026-09-06, before the sound defaults; the skip reproduces it |
+| Llama-3.1-8B layer 16, `S = 512`, `C = 16384` | `--round away --numbits 9 --z-hi-bits 7 --variants intexp --table-bits 25 --bands 16,8,8 --unsound-skip-kv-boundary --witness <dir>` | `42fceb1f3a8643cd` | both backends, 2026-09-06, before the sound defaults |
 
-The 8B witness is one layer's dump written by `harness.witness.extract` under
-the `b10-final` quantization configuration; `zk-results` records which run
-produced it. The synthetic cases need nothing but the binary and take seconds
-each. Older values of the 8B digest (`6c3fb61524dee2ec` before the binding
-work, `616d6a80ca9c003f` before the tree split) are history and reproduce on
-no current commit.
+That command names `--round away` while `b10-final` rounds a half to even, so
+either the dump was written under an earlier quantization configuration or the
+row's command and its dump never matched. Nothing on any host can settle it,
+and no page here should read the row as an extraction recipe.
+
+The synthetic cases need nothing but the binary and take seconds each. Older
+values of the 8B digest (`6c3fb61524dee2ec` before the binding work,
+`616d6a80ca9c003f` before the tree split) are history and reproduce on no
+current commit.
 
 ## Configuration in the JSON
 
