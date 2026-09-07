@@ -19,16 +19,16 @@ so the delta to upstream stays readable in `git log -- nitroo/`:
    host round-trip, and FRI decommitment reads batched through
    `batch_at_multi`. All in `crates/stwo`.
 3. **The pre-emit stand-in's missing feed dispatcher** (2026-09-01):
-   `gen_b65_feed_dispatch`, declared in `cuda/gen_b65_dispatch.cuh` and defined
+   `gen_b65_feed_dispatch`, prototyped in `cuda/gen_b65_dispatch.cuh` and defined
    as an aborting fallthrough in `cuda/gen_b65_dispatch.cu`, matching what the
-   generator emits for zero families. An earlier change added that symbol to the
+   generator emits for zero kernel groups. An earlier change added that symbol to the
    emitter and to `../prover/src/gkrband.rs` but not to the stand-in, so from
    that change until this commit the CUDA backend did **not link** on any tree with no
    installed kernel store. Digest-neutral by construction: the only call path
-   reaches a family with no kernel, which already aborted. Gated on the
-   two synthetic reference digests `34e30fa70297e2a9` and `37421c358a7a0f21`
-   on both backends (`../prover/README.md`); the 8B regression was not run for
-   this change.
+   reaches a kernel group with no kernel, which already aborted. Gated on the
+   two synthetic reference digests of that day on both backends (both are
+   history now; `../prover/README.md` lists the current pins); the 8B
+   regression was not run for this change.
 
 The patch scripts themselves are retired; their docstrings survive in the two
 commit messages' file diffs and in git history.

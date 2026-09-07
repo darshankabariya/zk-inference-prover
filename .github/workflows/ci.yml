@@ -45,4 +45,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: banned words in durable prose
-        run: python3 tools/words.py README.md GLOSSARY.md docs/
+        run: python3 tools/words.py README.md GLOSSARY.md docs/ prover/README.md prover/kernels/README.md harness/README.md nitroo/README.md
