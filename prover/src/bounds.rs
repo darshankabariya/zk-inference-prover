@@ -70,13 +70,6 @@ pub const PACK: i64 = 512;
 /// precede them.
 pub const FIRST_TREE: usize = 4;
 
-/// Whether the feature is on for this run. Off by default, deliberately: with
-/// the flag off not one committed cell moves, which is what lets the recorded
-/// digest stand as the bit-for-bit line.
-pub fn enabled() -> bool {
-    std::env::var("B10_BOUNDS").map(|v| v != "0").unwrap_or(false)
-}
-
 /// One side of a chunk's boundary: which tree it is committed in, which glue
 /// region carries it, which of that region's value sequences it is, and the
 /// shape that follows.

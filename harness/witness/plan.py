@@ -52,7 +52,7 @@ head line, and `--l0-dir` points the layer-0 lines at another dump set (a
 layer-0 re-extract with `--embed`).  The E11 plan at C=4096 is
 
     python -m harness.witness.plan --dir D --blocks 9 --with-block-0 --head H \
-        --layer-flags='--round even --corner --kv-bind' --head-flags='--ao-rem-bits 23'
+        --layer-flags='--round even --corner' --head-flags='--ao-rem-bits 23'
 
 (the `=` form, because the value starts with a dash), and a line's flags are
 part of its emit key, so the emit set grows by the lines whose flags make a
@@ -99,7 +99,7 @@ def want_layers(spec, rows):
 
 
 def layer_line(tb, wdir, tag, extra=""):
-    return f"--table-bits {tb} --bounds{extra} --witness {wdir} --ser-tag {tag}"
+    return f"--table-bits {tb}{extra} --witness {wdir} --ser-tag {tag}"
 
 
 def head_line(hdir, htb, tag="head", extra="", layer=None, block=None):
@@ -112,7 +112,7 @@ def head_line(hdir, htb, tag="head", extra="", layer=None, block=None):
     `bounds-grid` places the chunk by the statement rather than by the tag --
     which is what lets the head take a cell at all.
 
-    **Stream UU (E11): `--bounds`.**  The head chunk commits the residual its
+    **Stream UU (E11): the residual boundary.**  The head chunk commits the residual its
     final norm consumed as tree 3, exactly as a layer chunk commits its
     `stream_in`, so the last layer's out root and the head's in root are
     compared by the pair check like every other layer link.  It commits no tree
@@ -126,7 +126,7 @@ def head_line(hdir, htb, tag="head", extra="", layer=None, block=None):
         coord += f" --layer {layer}"
     if block is not None:
         coord += f" --block {block}"
-    return (f"--table-bits {htb} --bounds --head-argmax --deq-per-row 501{extra}{coord} "
+    return (f"--table-bits {htb} --deq-per-row 501{extra}{coord} "
             f"--witness {hdir} --ser-tag {tag}")
 
 
@@ -168,19 +168,21 @@ def main():
                     help="also write the distinct emit shapes, one representative plan line "
                          "each, for `emitset` to walk instead of the plan")
     # ---- stream EE (E11): what every line carries besides its own shape ------
-    # The E11 grid wants AA's flags on every layer line (`--round even --corner
-    # --kv-bind --bounds`), BB's `--embed` on the layer-0 lines, and the head
-    # pinned where seq6 ran it.  They go on the LINE, not the shared command
-    # line, because `bounds-grid` reads a chunk's flags back off its statement
-    # and the head must not inherit `--kv-bind`.  A line's flags are part of its
-    # emit key: an `--embed` layer-0 line is a different kernel shape from a
-    # layer-1 line at the same (c, table bits).
+    # The E11 grid wants `--round even --corner` on every layer line (the
+    # boundaries and the embedding gadget are on by default wherever the dump
+    # lets them be) and the head pinned where seq6 ran it.  They go on the LINE,
+    # not the shared command line, because `bounds-grid` reads a chunk's flags
+    # back off its statement and the head must not inherit `--corner`.  A line's
+    # flags are part of its emit key, and so is what the dump lets the defaults
+    # turn on: a layer-0 line whose dump carries the embedding rows is a
+    # different kernel shape from a layer-1 line at the same (c, table bits).
     ap.add_argument("--layer-flags", default="",
                     help="appended to every layer line, e.g. "
-                         "'--round even --corner --kv-bind' (E11)")
+                         "'--round even --corner' (E11)")
     ap.add_argument("--l0-flags", default="",
                     help="appended to every layer-0 line after --layer-flags, e.g. "
-                         "'--embed' (E11, stream BB)")
+                         "(E11 needs none: the embedding gadget is on by default on a "
+                         "layer-0 dump that carries embed.u16 and tok_in.i32)")
     ap.add_argument("--l0-dir", default="",
                     help="take the layer-0 witnesses from this directory instead of --dir "
                          "(a layer-0 re-extract with --embed next to the full dump set)")

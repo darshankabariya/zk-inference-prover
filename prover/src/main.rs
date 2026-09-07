@@ -93,6 +93,50 @@ pub fn flag(args: &[String], key: &str) -> bool {
     args.iter().any(|a| a == key)
 }
 
+/// The soundness switches.  Every binding gadget is on by default wherever the
+/// witness lets it be stated, and a witness that cannot state one is refused;
+/// `--unsound-skip-<name>` turns one off, loudly: the name lands in
+/// `provenance.unsound_skips` and the binding table marks the edge unbound.
+///
+/// - `residual-stream`: prove a chunk without its residual-stream family (the
+///   norms, the residual adds, the requantize seams), or one whose dump has no
+///   such columns;
+/// - `layer-boundary`: commit no boundary trees over the residual stream;
+/// - `kv-boundary`: commit no boundary trees over the keys and values, or
+///   prove a chunk that has no diagonal block to commit them from;
+/// - `argmax`: prove a head chunk without tying the emitted token to the
+///   logits, or one whose dump has no `key_head.u16`;
+/// - `embedding`: prove a layer-0 chunk without tying its residual stream to
+///   the embedding rows of its ids, or one whose dump lacks them.
+pub const UNSOUND_SKIPS: [&str; 5] =
+    ["residual-stream", "layer-boundary", "kv-boundary", "argmax", "embedding"];
+
+pub fn skip(args: &[String], name: &str) -> bool {
+    debug_assert!(UNSOUND_SKIPS.contains(&name), "not a skip: {name}");
+    flag(args, &format!("--unsound-skip-{name}"))
+}
+
+/// An unknown skip name is an error: a typo must not prove a bound statement
+/// where an unbound one was meant, or the other way round.  The flags the
+/// skips replaced are reported once so an old driver line does not pass in
+/// silence.
+pub fn check_skips(args: &[String]) {
+    for a in args {
+        if let Some(n) = a.strip_prefix("--unsound-skip-") {
+            assert!(UNSOUND_SKIPS.contains(&n),
+                    "{a}: not a skip; the skips are --unsound-skip-{}",
+                    UNSOUND_SKIPS.join(", --unsound-skip-"));
+        }
+    }
+    for old in ["--bounds", "--kv-bind", "--embed", "--head-argmax", "--head-key",
+                "--norm-tails", "--swiglu", "--deq-ties", "--no-glue"] {
+        if flag(args, old) {
+            eprintln!("compose: {old} is retired -- what it switched is decided by default now, \
+                       and an --unsound-skip-<name> flag is the only way off it");
+        }
+    }
+}
+
 pub fn src_of(args: &[String]) -> Src {
     Src {
         dir: arg_str(args, "--witness"),
@@ -113,7 +157,10 @@ pub fn src_of(args: &[String]) -> Src {
         // Stream AA (E11): `--kv-bind` also tiles the declared prefix into
         // blocks of S keys, which is a witness-side decision as much as a plan
         // one -- see `briefs/aa-kvbind.md`.
-        tile: args.iter().any(|a| a == "--kv-bind"),
+        // On by default wherever the chunk has its own block (`--corner`): a
+        // chunk without one has no keys of its own to commit, and `params_of`
+        // refuses it unless the K/V boundary is skipped.
+        tile: args.iter().any(|a| a == "--corner") && !skip(args, "kv-boundary"),
     }
 }
 
@@ -912,7 +959,40 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
     // more band per prefix band, with the same `insts` and head offset, and the
     // plan rebuilds them from the flag rather than from the list.
     let n_pre = l.bands.iter().filter(|b| !b.corner).count();
-    // Stream AA (E11): with `--kv-bind` the declared prefix is `l.nsub` bands of
+    let corner = l.bands.len() > n_pre;
+
+    // The sound defaults.  Each gadget is on wherever the witness can state
+    // it; a witness that cannot is refused, and only the named skip gets past
+    // the refusal.  See `UNSOUND_SKIPS`.
+    check_skips(args);
+    let skip = |name: &str| skip(args, name);
+    let head = l.glue.as_ref().is_some_and(|g| g.head);
+    let has_head_mat = l.mats.iter().any(|m| m.name == "lm_head");
+    let family = l.glue.is_some() && !skip("residual-stream");
+    assert!(l.glue.is_some() || skip("residual-stream"),
+            "compose: this witness carries no residual-stream columns (the norms, the \
+             residual adds and the requantize seams), so nothing between two matmuls would \
+             be proved; extract it with --glue, or pass --unsound-skip-residual-stream to \
+             prove the unbound statement");
+    let layer_boundary = family && !skip("layer-boundary");
+    assert!(corner || head || skip("kv-boundary"),
+            "compose: this chunk has no diagonal block (extracted or built without \
+             --corner), so its own keys and values are not in the statement and the K/V \
+             boundary cannot be committed; pass --corner, or --unsound-skip-kv-boundary \
+             to prove the unbound statement");
+    let kv_boundary = corner && !head && !skip("kv-boundary");
+    assert!(!has_head_mat || l.head_keys.is_some() || skip("argmax"),
+            "compose: the head chunk carries no key_head.u16, so the emitted token cannot \
+             be tied to the logits; pass --unsound-skip-argmax to prove the head without \
+             the argmax");
+    let argmax = has_head_mat && l.head_keys.is_some() && !skip("argmax");
+    let has_embed = family && l.embed_tab.is_some() && l.tok_in.is_some();
+    assert!(l.layer != Some(0) || has_embed || skip("embedding"),
+            "compose: a layer-0 chunk without embed.u16 and tok_in.i32 (extract it with \
+             --embed), so the residual stream it consumes cannot be tied to the embedding \
+             rows of its ids; pass --unsound-skip-embedding to prove the unbound statement");
+    let embed = has_embed && !skip("embedding");
+    // Stream AA (E11): with the K/V boundary the declared prefix is `l.nsub` bands of
     // `S` keys per head band group, so the chunk's context is the sub-band's
     // times `nsub` and the head band list takes every `nsub`-th entry.  Both are
     // the identity when `nsub == 1`, which is every run without the flag.
@@ -1018,12 +1098,13 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
     compose::Params {
         s: l.ao.s, c, hd: l.ao.hd, nh: l.ao.nh,
         bands,
-        corner: l.bands.len() > n_pre,
+        corner,
         // Stream E: the head's order-key claim.  Not under `--no-glue`'s gate,
         // because a head dump has no wiring columns to switch off.
         // `--head-argmax` implies the key claim: it is the counterparty
-        head_key: flag(args, "--head-key") || flag(args, "--head-argmax"),
-        head_argmax: flag(args, "--head-argmax"),
+        // -- and the head publishes it exactly when the argmax reads it.
+        head_key: argmax,
+        head_argmax: argmax,
         head_argmax_lax: flag(args, "--head-argmax-lax"),
         variant: vname.to_string(),
         log_table: b0.log_table,
@@ -1083,22 +1164,19 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // and `--swiglu` the `silu(gate) * up` product.  Off, the composition is
         // the pre-change one cell for cell, which is what the bit-for-bit control
         // checks.
-        glue: l.glue.as_ref().filter(|_| !flag(args, "--no-glue")).map(|g| {
+        // The family is carried whenever the witness has it, unless
+        // `--unsound-skip-residual-stream` drops it.
+        glue: l.glue.as_ref().filter(|_| family).map(|g| {
             compose::GlueParams {
                 d: g.d,
                 a: arg_scalar(args, "--glue-a", 32usize),
-                // carried only when the region that needs it is on, so that
-                // with both flags off the serialized statement is not merely
-                // equivalent to the pre-change crate's but identical to it
-                // Stream II: the two additive regions are unconditional now, so
-                // `dff` is always carried and `--norm-tails` / `--swiglu` are
-                // accepted and ignored -- the drivers still pass them.
+                // Stream II: the two additive regions are unconditional, so
+                // `dff` is always carried.
                 dff: g.dff,
                 eps: g.eps,
                 inv_d: g.inv_d,
                 // Stream JJ (E11): the dequant output ties are unconditional
-                // too.  `--deq-ties` is accepted and ignored so drivers that
-                // pass it keep working.
+                // too; the field stays in the statement's serialization.
                 deq_ties: true,
                 // stream II: which family this chunk carries is the witness's
                 // to say, not the command line's
@@ -1108,12 +1186,16 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // Stream H: the boundary commitment, off unless asked for either way --
         // by the flag on the command line or by `B10_BOUNDS` in the environment.
         // Off is what makes the recorded digest the bit-for-bit line.
-        bounds: flag(args, "--bounds") || bounds::enabled(),
+        // On by default wherever the family is; `--unsound-skip-layer-boundary`
+        // turns the trees off, and off is skipped in the serialization.
+        bounds: layer_boundary,
         // Stream AA (E11): the K/V boundary trees, and the prefix tiling they
         // need.  Opt-in and skipped in the serialization, so a statement
         // written without it is byte identical to one from a crate that never
         // had the feature.
-        kv_bind: flag(args, "--kv-bind"),
+        // On by default wherever the chunk has its own block;
+        // `--unsound-skip-kv-boundary` turns the trees off.
+        kv_bind: kv_boundary,
         // B11 stream Q: opt in to the LogUp-GKR arm for the bands. A flag and
         // not an env mode, because it changes the proof.
         gkr_bands: flag(args, "--gkr-bands"),
@@ -1126,12 +1208,9 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // dump's `embed.u16` / `tok_in.i32`; it panics on a dump without them
         // rather than standing anything in.  Zero -- absent from the serialized
         // statement -- everywhere else.
-        embed_vocab: if flag(args, "--embed") {
-            let g = l.glue.as_ref()
-                .expect("--embed needs a witness extracted with --glue");
-            let tab = l.embed_tab.as_ref()
-                .expect("--embed needs embed.u16 in the dump");
-            assert!(l.tok_in.is_some(), "--embed needs tok_in.i32 in the dump");
+        embed_vocab: if embed {
+            let g = l.glue.as_ref().expect("the embedding gadget ties into the family");
+            let tab = l.embed_tab.as_ref().expect("the embedding gadget needs embed.u16");
             assert_eq!(tab.len() % g.d, 0,
                        "embed.u16 holds {} values, which is not a multiple of d = {}",
                        tab.len(), g.d);
@@ -1139,7 +1218,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         } else {
             0
         },
-        embed_per_row: if flag(args, "--embed") {
+        embed_per_row: if embed {
             arg_scalar(args, "--embed-per-row", 256usize)
         } else {
             0

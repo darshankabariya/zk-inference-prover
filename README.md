@@ -13,7 +13,7 @@ that produced every run.
 | `prover/` | the prover crate, binary `b65`; `prover/README.md` lists the recorded proof digests; `prover/kernels/` installs generated device kernels into the CUDA backend |
 | `nitroo/` | the vendored Circle STARK library the prover builds on; its `README.md` names the upstream commit and each local change |
 | `harness/` | one uv package: `witness/` (deterministic quantized forward pass, greedy continuation, witness extraction, shape table, plan file), `eval/` (perplexity, task suite, the unproved baseline), `costmodel/` |
-| `docs/statement.md` | what the proof binds, generated from the prover's binding report (written once that report exists) |
+| `docs/statement.md` | what the proof binds, edge by edge, and which `--unsound-skip-<name>` flag unbinds each |
 | `docs/decisions/` | prover design decisions, one dated file each, never edited after merge |
 | `GLOSSARY.md` | the identifiers kept despite not being standard |
 | `Dockerfile` | both backends from a clean image |
@@ -64,6 +64,16 @@ both backends before it merges. A change that alters the proof records the new
 digests in `prover/README.md` in the same pull request. `cargo test` runs the
 synthetic cases; the full-size reference needs a witness and a GPU host, which
 `zk-results` provides.
+
+## Soundness switches
+
+Every binding gadget is on by default wherever the witness lets it be stated,
+and a witness that cannot state one is refused. `--unsound-skip-<name>` turns
+one off, loudly: the name is listed in the JSON's `provenance.unsound_skips`
+and the binding table (`provenance.binding`, and `binding` on every proof)
+marks the edge unbound. The names are `residual-stream`, `layer-boundary`,
+`kv-boundary`, `argmax` and `embedding`; `docs/statement.md` says what each
+one gives up. A run with a skip in effect is a control, never a result.
 
 ## The harness
 

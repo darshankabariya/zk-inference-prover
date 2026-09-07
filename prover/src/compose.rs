@@ -7817,8 +7817,7 @@ mod tests {
         // matmuls under three heads of 32, so the rotation cannot tile (edge 3)
         // and the `o` matmul does not read the attention output's width (edge 5)
         let plan = plan_of(argv(&["--bands", "2,1", "--nout", "64", "--glue-a", "32",
-                                   "--kmax", "16", "--synth-glue", "--corner", "--bounds",
-                                   "--kv-bind"]));
+                                   "--kmax", "16", "--synth-glue", "--corner"]));
         let want = vec![
             (1, Bound), (2, Bound), (3, Unbound), (4, Bound), (5, Unbound), (6, Bound),
             (7, Bound), (8, Bound), (9, Bound), (10, Bound), (11, Bound), (12, Bound),
@@ -7840,7 +7839,7 @@ mod tests {
         // rotation tiles, and the `o` matmul reads the attention output
         let plan = plan_of(argv(&["--bands", "2,2", "--nin", "128", "--nout", "128",
                                    "--glue-a", "32", "--kmax", "16", "--synth-glue",
-                                   "--corner", "--bounds", "--kv-bind"]));
+                                   "--corner"]));
         let got = states(&plan, Some(3));
         for (n, st) in &got[..14] {
             assert_eq!(*st, Bound, "edge {n}: {:?}", plan.binding(Some(3))[*n as usize - 1]);
@@ -7850,29 +7849,55 @@ mod tests {
     }
 
     #[test]
-    fn the_boundaries_off_are_reported_as_unbound_not_absent() {
+    fn the_skips_are_reported_as_unbound_not_absent() {
         use EdgeState::*;
         let plan = plan_of(argv(&["--bands", "2,1", "--nout", "64", "--glue-a", "32",
-                                   "--kmax", "16", "--synth-glue", "--corner"]));
+                                   "--kmax", "16", "--synth-glue", "--corner",
+                                   "--unsound-skip-layer-boundary",
+                                   "--unsound-skip-kv-boundary"]));
         let got = states(&plan, None);
         assert_eq!(got[12], (13, Unbound));
         assert_eq!(got[13], (14, Unbound));
-        // no wiring family at all: every seam and add is the prover's word
-        let bare = plan_of(argv(&["--bands", "2,1", "--corner"]));
+        // no residual-stream family at all: every seam and add is the prover's
+        // word, while the K/V boundary (on by default on a corner chunk) and the
+        // attention and Freivalds components stand
+        let bare = plan_of(argv(&["--bands", "2,1", "--corner",
+                                   "--unsound-skip-residual-stream"]));
         let got = states(&bare, None);
-        for n in [1u8, 2, 3, 5, 6, 7, 8, 9, 10, 11, 13, 14] {
+        for n in [1u8, 2, 3, 5, 6, 7, 8, 9, 10, 11, 13] {
             assert_eq!(got[n as usize - 1], (n, Unbound), "edge {n}");
         }
         assert_eq!(got[3], (4, Bound));
         assert_eq!(got[11], (12, Bound));
+        assert_eq!(got[13], (14, Bound));
     }
 
     #[test]
-    fn the_head_chunk_reports_its_norm_its_in_side_and_the_argmax() {
+    #[should_panic(expected = "--unsound-skip-kv-boundary")]
+    fn a_chunk_without_its_own_block_is_refused_unless_the_kv_boundary_is_skipped() {
+        plan_of(argv(&["--bands", "2,1", "--unsound-skip-residual-stream"]));
+    }
+
+    #[test]
+    #[should_panic(expected = "--unsound-skip-residual-stream")]
+    fn a_chunk_without_the_family_is_refused_unless_the_family_is_skipped() {
+        plan_of(argv(&["--bands", "2,1", "--corner"]));
+    }
+
+    #[test]
+    #[should_panic(expected = "not a skip")]
+    fn an_unknown_skip_is_an_error() {
+        plan_of(argv(&["--bands", "2,1", "--corner", "--unsound-skip-everything"]));
+    }
+
+    #[test]
+    fn the_head_chunk_reports_its_norm_its_in_side_and_the_skipped_argmax() {
         use EdgeState::*;
+        // a synthetic head has no `key_head.u16`, so the argmax has to be
+        // skipped to prove it at all, and the table says what that costs
         let plan = plan_of(argv(&["--bands", "2,1", "--nout", "64", "--glue-a", "32",
                                    "--kmax", "16", "--synth-head", "--synth-vocab", "256",
-                                   "--corner", "--bounds", "--head-argmax"]));
+                                   "--corner", "--unsound-skip-argmax"]));
         let got = states(&plan, Some(32));
         assert_eq!(got[0], (1, Bound));
         assert_eq!(got[1], (2, Bound));
@@ -7882,7 +7907,7 @@ mod tests {
         assert_eq!(got[11], (12, Bound));
         assert_eq!(got[12], (13, Bound));
         assert_eq!(got[14], (15, Absent));
-        assert_eq!(got[15], (16, Bound));
+        assert_eq!(got[15], (16, Unbound));
     }
 
     /// Stream QQ, at the NN merge (log row 66): the guard itself, gated.
