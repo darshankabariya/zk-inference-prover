@@ -354,7 +354,7 @@ class Model:
                  device=None):
         from transformers import AutoModelForCausalLM
 
-        device = device or os.environ.get("B1_DEVICE", "cpu")
+        device = device or os.environ.get("ZK_DEVICE", "cpu")
         # the checkpoint is bf16, so loading it as bf16 and widening one tensor at a
         # time in Linear is value-identical to loading fp32 and halves peak RAM
         hf = AutoModelForCausalLM.from_pretrained(path, dtype=torch.bfloat16)

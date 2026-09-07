@@ -260,9 +260,9 @@ class MockBackend:
         self.device = device
         self.model_id = model_id
         # a toy cost model; the constants are arbitrary and labelled as such
-        self.s_per_token = float(os.environ.get("E2_MOCK_S_PER_TOKEN", "0.002"))
-        self.s_per_key = float(os.environ.get("E2_MOCK_S_PER_KEY", "1e-7"))
-        self.kv_budget_tokens = int(os.environ.get("E2_MOCK_KV_BUDGET", "200000"))
+        self.s_per_token = float(os.environ.get("ZK_BASELINE_MOCK_S_PER_TOKEN", "0.002"))
+        self.s_per_key = float(os.environ.get("ZK_BASELINE_MOCK_S_PER_KEY", "1e-7"))
+        self.kv_budget_tokens = int(os.environ.get("ZK_BASELINE_MOCK_KV_BUDGET", "200000"))
 
     def sync(self):
         pass

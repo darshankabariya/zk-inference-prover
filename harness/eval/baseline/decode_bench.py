@@ -42,7 +42,7 @@ from . import lfl
 HERE = Path(__file__).resolve().parent
 
 SCHEMA = "e2h/decode-throughput/2"
-OUT = Path(os.environ.get("E2_OUT", "out"))
+OUT = Path(os.environ.get("ZK_BASELINE_OUT", "out"))
 
 # What the unproved seconds contain, written into every run so the ratio can be
 # audited without re-running anything.  The proved side's four boundaries live in
@@ -235,10 +235,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--backend", default="hf", choices=sorted(B.BACKENDS))
-    p.add_argument("--model", default=os.environ.get("B1_MODEL", "unsloth/Llama-3.1-8B-Instruct"))
-    p.add_argument("--revision", default=os.environ.get("E2_REVISION", "main"))
+    p.add_argument("--model", default=os.environ.get("ZK_MODEL", "unsloth/Llama-3.1-8B-Instruct"))
+    p.add_argument("--revision", default=os.environ.get("ZK_MODEL_REVISION", "main"))
     p.add_argument("--dtype", default="bfloat16")
-    p.add_argument("--device", default=os.environ.get("B1_DEVICE", "cuda"))
+    p.add_argument("--device", default=os.environ.get("ZK_DEVICE", "cuda"))
     p.add_argument("--attn", default=None, help="attn_implementation for the hf backend")
     p.add_argument("--context", type=int, action="append",
                    help="committed KV prefix C; repeatable. default 4096 and 16384")

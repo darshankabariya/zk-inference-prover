@@ -24,11 +24,11 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 from harness.eval import tasks as T
 
-# `E5T_OUT` holds this session's `tasks/` + `tasks.json`, `E5T_REF` the
+# `ZK_TASKS_OUT` holds this session's `tasks/` + `tasks.json`, `ZK_TASKS_REF` the
 # recorded ones (B8's H100 rows).  Defaults are the committed repo layout; the
 # box overrides them, since the box tree carries only this session's artifacts.
-E5T = os.environ.get("E5T_OUT", os.path.join(HERE, os.pardir, "out", "e5t"))
-B8 = os.environ.get("E5T_REF", os.path.join(HERE, os.pardir, "out"))
+E5T = os.environ.get("ZK_TASKS_OUT", os.path.join(HERE, os.pardir, "out", "e5t"))
+B8 = os.environ.get("ZK_TASKS_REF", os.path.join(HERE, os.pardir, "out"))
 
 
 def rows(d, task, spec):

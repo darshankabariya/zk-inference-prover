@@ -1,6 +1,6 @@
 """Stream E5v: the task suite under `y-delay-vw12`, read against its controls.
 
-    cd experiments && E5V_OUT=... E5V_REF=... python3 b8/e5v/report.py
+    cd experiments && ZK_TASKS_OUT=... ZK_TASKS_REF=... python3 b8/e5v/report.py
 
 `b8/e5t/report.py` with the spec under test changed and one comparison added.
 It answers the same three questions E5t's did -- does this session's `fp32`
@@ -9,7 +9,7 @@ each spec-vs-control difference, and where does a one-point aggregate hide by
 domain -- plus the exact IFEval generated-token sum, which `tasks.json` carries
 only as a rounded mean.
 
-`E5V_OUT` is this session's `B1_OUT` (`b8/out/e5v`), `E5V_REF` E5t's committed
+`ZK_TASKS_OUT` is this session's `ZK_OUT` (`b8/out/e5v`), `ZK_TASKS_REF` E5t's committed
 rows (`b8/out/e5t`), which were scored on this box on these items.
 """
 import hashlib
@@ -21,8 +21,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 from harness.eval import tasks as T
 from harness.eval.e5t.report import ifeval_items, mcnemar, rows, se_acc
 
-E5V = os.environ.get("E5V_OUT", os.path.join(HERE, os.pardir, "out", "e5v"))
-E5T = os.environ.get("E5V_REF", os.path.join(HERE, os.pardir, "out", "e5t"))
+E5V = os.environ.get("ZK_TASKS_OUT", os.path.join(HERE, os.pardir, "out", "e5v"))
+E5T = os.environ.get("ZK_TASKS_REF", os.path.join(HERE, os.pardir, "out", "e5t"))
 SPEC = "y-delay-vw12"
 
 

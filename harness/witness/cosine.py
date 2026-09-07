@@ -35,7 +35,7 @@ from .model import Cache, Model
 from .ppl import attention_scales, calibration_scales
 
 RESULTS = os.path.join(OUT, "cosine.json")
-SUBBATCH = int(os.environ.get("B1_COSINE_SUBBATCH", 64))
+SUBBATCH = int(os.environ.get("ZK_COSINE_SUBBATCH", 64))
 
 
 def rss_mb():

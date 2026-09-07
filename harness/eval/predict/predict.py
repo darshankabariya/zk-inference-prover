@@ -36,7 +36,7 @@ B = cm.BATCH                # the LogUp lookup-batch size the model charges (2)
 # --------------------------------------------------------------------------
 # The target shapes.  Chosen for one reason: `experiments/b1/model.py` runs
 # them with no new architecture (an explicit Qwen2 forward pass, the same code
-# B8 pointed at Llama-3.1-8B through `B1_MODEL`), and `hd` is a power of two,
+# B8 pointed at Llama-3.1-8B through `ZK_MODEL`), and `hd` is a power of two,
 # which the model asserts.  Gemma needs E5a's embedding normalizer, QK-norm and
 # dual-theta local/global attention first, so it is not an E4 candidate.
 #

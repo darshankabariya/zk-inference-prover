@@ -11,11 +11,11 @@ from .model import Spec
 HERE = os.path.dirname(os.path.abspath(__file__))
 # B8 points the same code at an 8B model on a GPU: the model, the output
 # directory and the device come from the environment, with B1's defaults.
-MODEL = os.environ.get("B1_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
-OUT = os.environ.get("B1_OUT", os.path.join(HERE, "out"))
-DEVICE = os.environ.get("B1_DEVICE", "cpu")
+MODEL = os.environ.get("ZK_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+OUT = os.environ.get("ZK_OUT", os.path.join(HERE, "out"))
+DEVICE = os.environ.get("ZK_DEVICE", "cpu")
 TEXT = os.path.join(HERE, "text.txt")
-THREADS = int(os.environ.get("B1_THREADS", 4))
+THREADS = int(os.environ.get("ZK_THREADS", 4))
 CHUNK = 512
 
 # The three specs B1 has to compare, plus probes that isolate one choice each.

@@ -32,7 +32,7 @@ from harness.witness.common import MODEL, OUT, SPECS, setup
 from harness.witness.model import Cache, Model
 from harness.witness.ppl import attention_scales, calibration_scales
 
-DATA = os.environ.get("B8_DATA", os.path.join(HERE, "data"))
+DATA = os.environ.get("ZK_EVAL_DATA", os.path.join(HERE, "data"))
 TASKS = os.path.join(OUT, "tasks")
 RESULTS = os.path.join(OUT, "tasks.json")
 GPQA = os.path.join(DATA, "gpqa_jingze/data/test-00000-of-00001.parquet")

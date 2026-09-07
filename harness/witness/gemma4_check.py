@@ -41,13 +41,13 @@ from .common import SPECS
 from .model import Model, proportional_inv_freq
 
 torch.manual_seed(0)
-torch.set_num_threads(int(os.environ.get("B1_THREADS", 4)))
+torch.set_num_threads(int(os.environ.get("ZK_THREADS", 4)))
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.environ.get("B1_OUT", os.path.join(HERE, "out"))
+OUT = os.environ.get("ZK_OUT", os.path.join(HERE, "out"))
 # the published 31B config, fetched by E5a; `google/gemma-4-31B` is apache-2.0
 # and ungated, and only the config is needed here -- never the weights
-CFG31 = os.environ.get("B1_GEMMA4_CONFIG", os.path.join(
+CFG31 = os.environ.get("ZK_GEMMA4_CONFIG", os.path.join(
     os.path.expanduser("~"), ".cache", "huggingface", "hub",
     "models--google--gemma-4-31B", "blobs",
     "b469f1aca87e14dab2fcf32d071d3c58043357b7"))

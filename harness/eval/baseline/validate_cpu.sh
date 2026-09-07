@@ -9,12 +9,12 @@
 # The coordinating machine is ~11.9 GB / 4 cores with several agents on it and
 # has been OOM-killed by exactly this kind of job.  So the default is DELIBERATELY
 # small: two tiny models, short contexts, and a mock backend for everything that
-# only scale would otherwise exercise.  `E2_VALIDATE=heavy` runs the old
+# only scale would otherwise exercise.  `ZK_BASELINE_VALIDATE=heavy` runs the old
 # Qwen-0.5B-at-C=4096 path instead; it wants a machine with room.
 set -e
 cd "$(dirname "$0")/../.."
 CONSTANTS=${1:?path to a zk-results constants.json}
-OUT=${E2_VALIDATE_OUT:-validate-out}
+OUT=${ZK_BASELINE_VALIDATE_OUT:-validate-out}
 mkdir -p "$OUT"
 export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-2}
@@ -29,21 +29,21 @@ $BENCH --probe
 
 # 2. the real HF path, on models small enough to be safe here.  distilgpt2 runs
 #    the canonical 512-token count; Qwen exercises a second tokenizer family.
-E2_OUT=$OUT $BENCH --backend hf --model distilgpt2 \
+ZK_BASELINE_OUT=$OUT $BENCH --backend hf --model distilgpt2 \
   --revision main --dtype float32 --device cpu --tag distilgpt2 \
   --context 256 --new-tokens 32 --batch 1 --batch 2 --reps 2 --warmup 1
-E2_OUT=$OUT $BENCH --backend hf --model distilgpt2 \
+ZK_BASELINE_OUT=$OUT $BENCH --backend hf --model distilgpt2 \
   --revision main --dtype float32 --device cpu --tag distilgpt2 \
   --context 256 --new-tokens 512 --batch 1 --reps 1 --warmup 1
-E2_OUT=$OUT $BENCH --backend hf --model Qwen/Qwen2.5-0.5B-Instruct \
+ZK_BASELINE_OUT=$OUT $BENCH --backend hf --model Qwen/Qwen2.5-0.5B-Instruct \
   --revision main --dtype float32 --device cpu --tag qwen05b \
   --context 1024 --new-tokens 64 --batch 1 --reps 1 --warmup 1
 
-if [ "$E2_VALIDATE" = "heavy" ]; then
-  E2_OUT=$OUT $BENCH --backend hf --model Qwen/Qwen2.5-0.5B-Instruct \
+if [ "$ZK_BASELINE_VALIDATE" = "heavy" ]; then
+  ZK_BASELINE_OUT=$OUT $BENCH --backend hf --model Qwen/Qwen2.5-0.5B-Instruct \
     --revision main --dtype float32 --device cpu --tag qwen05b \
     --context 4096 --new-tokens 512 --batch 1 --reps 2 --warmup 1
-  E2_OUT=$OUT $BENCH --backend hf --model Qwen/Qwen2.5-0.5B-Instruct \
+  ZK_BASELINE_OUT=$OUT $BENCH --backend hf --model Qwen/Qwen2.5-0.5B-Instruct \
     --revision main --dtype float32 --device cpu --tag qwen05b \
     --context 16384 --new-tokens 512 --batch 1 --reps 1 --warmup 0
 fi
@@ -52,14 +52,14 @@ fi
 #    both real contexts, the batch sweep and its OOM stop, both counting
 #    conventions, the whole ladder -- on the SYNTHETIC backend.  These artifacts
 #    live in $OUT/mock/ and the ladder drops them by default; see step 5.
-E2_OUT=$OUT/mock $BENCH --backend mock --model MOCK/none \
+ZK_BASELINE_OUT=$OUT/mock $BENCH --backend mock --model MOCK/none \
   --device cpu --dtype bfloat16 --tag mock --new-tokens 512 \
   --context 4096 --context 16384 --batch 1 --reps 2 --warmup 1
-E2_OUT=$OUT/mock $BENCH --backend mock --model MOCK/none \
+ZK_BASELINE_OUT=$OUT/mock $BENCH --backend mock --model MOCK/none \
   --device cpu --dtype bfloat16 --tag mock --new-tokens 512 --context 4096 \
   --batch 2 --batch 4 --batch 8 --batch 16 --batch 32 --batch 64 --batch 128 \
   --reps 1 --warmup 0
-E2_OUT=$OUT/mock $BENCH --backend mock --model MOCK/none \
+ZK_BASELINE_OUT=$OUT/mock $BENCH --backend mock --model MOCK/none \
   --device cpu --dtype bfloat16 --tag mock --new-tokens 512 --context 16384 \
   --batch 2 --batch 4 --batch 8 --batch 16 --batch 32 --reps 1 --warmup 0
 

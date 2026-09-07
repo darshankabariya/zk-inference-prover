@@ -26,9 +26,9 @@ P = (1 << 31) - 1          # M31
 M31_MAX = (P - 1) // 2     # largest |v| a single field element carries signed
 # B1's default.  A model with local attention needs a slice longer than its
 # sliding window before test 3 exercises the window at all -- Gemma-3-270M's is
-# 512, so `B1_SELFTEST_TOKENS=640` is the run that actually checks the two mask
+# 512, so `ZK_SELFTEST_TOKENS=640` is the run that actually checks the two mask
 # kinds against HuggingFace (briefs/e5a-gemma.md).
-N_TOK = int(os.environ.get("B1_SELFTEST_TOKENS", 128))
+N_TOK = int(os.environ.get("ZK_SELFTEST_TOKENS", 128))
 results = {}
 
 
