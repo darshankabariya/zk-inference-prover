@@ -43,7 +43,8 @@ def load_run(path):
                    interaction=p["cells"]["interaction"],
                    preprocessed=p["cells"]["preprocessed"]),
         columns=p["columns"],
-        family_cells=dict(bands=fc["bands"], dequant=fc["dequant"], glue=fc["glue"],
+        family_cells=dict(bands=fc["bands"], dequant=fc["dequant"],
+                          residual_stream=fc["residual_stream"],
                           attnout=fc["attnout"], interaction=fc["interaction"]),
         interaction_by_family={f: ibf[f]["cells"] for f in ibf},
         params=dict(log_table=pa["log_table"], ao_rem_bits=pa["ao_rem_bits"],
@@ -53,9 +54,9 @@ def load_run(path):
                     k_bits=pa["k_bits"], q_bits=pa["q_bits"], nmax=pa["nmax"],
                     kmax=pa["kmax"], round=pa["round"], variant=pa["variant"],
                     z_hi_bits=pa["z_hi_bits"], z_lo_bits=pa["z_lo_bits"],
-                    glue=pa.get("glue"), mats=pa["mats"]),
+                    residual_stream=pa.get("residual_stream"), mats=pa["mats"]),
         off_table=p.get("off_table"), ref_mismatch=p.get("ref_mismatch"),
-        glue_ties_ok=p.get("glue_ties_ok"),
+        residual_stream_ties_ok=p.get("residual_stream_ties_ok"),
         peak_rss_bytes=p.get("peak_rss_bytes"),
         proof_sha256=p["proof_sha256"], proof_bytes=p["proof_bytes"],
         proof_ser_bytes=p["proof_ser_bytes"],
@@ -145,8 +146,8 @@ def main():
             problems.append(f"L{k}: off_table {r['off_table']}")
         if r["ref_mismatch"]:
             problems.append(f"L{k}: ref_mismatch {r['ref_mismatch']}")
-        if r["glue_ties_ok"] is False:
-            problems.append(f"L{k}: glue_ties_ok false")
+        if r["residual_stream_ties_ok"] is False:
+            problems.append(f"L{k}: residual_stream_ties_ok false")
 
     # ---- (a) the bands integers, exact ------------------------------------
     bands_rows = []
@@ -212,7 +213,7 @@ def main():
             # identical to the cell on all 32 chunks)
             family_spread={f: dict(min=min(r["family_cells"][f] for r in runs),
                                    max=max(r["family_cells"][f] for r in runs))
-                           for f in ("bands", "dequant", "glue", "attnout", "interaction")},
+                           for f in ("bands", "dequant", "residual_stream", "attnout", "interaction")},
             interaction_spread={f: dict(min=min(r["interaction_by_family"][f] for r in runs),
                                         max=max(r["interaction_by_family"][f] for r in runs))
                                 for f in runs[0]["interaction_by_family"]},

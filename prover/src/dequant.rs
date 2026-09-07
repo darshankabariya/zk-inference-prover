@@ -467,7 +467,7 @@ pub struct YSide {
 }
 
 /// Stream E: the output side.  One Horner claim over this region's *bf16
-/// outputs*, written in the glue's `(sm, ef)` language, so that a consumer's own
+/// outputs*, written in the residual stream's `(sm, ef)` language, so that a consumer's own
 /// claim over the same values can be compared with it -- which is what stops the
 /// dequant's output being a column some other region commits a second time.
 ///
@@ -482,7 +482,7 @@ pub struct YSide {
 /// What an output side accumulates.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum OKind {
-    /// the glue's `(sm, ef)` pair, `sm + lam ef` -- the language the wiring
+    /// the residual stream's `(sm, ef)` pair, `sm + lam ef` -- the language the wiring
     /// family's own claims are in, so the residual-stream bindings compare with it
     Pair,
     /// the argmax's order key, `0x8000 + mag - sg(2 mag + 1)` with
@@ -540,7 +540,7 @@ pub struct SSide {
 /// row step, the token-boundary step, and whether the row is active at all.
 ///
 /// The third is not redundant.  An inert lead row commits zeros, and while the
-/// glue's encoding of `+0` is the pair `(0, 0)` and so contributes nothing, the
+/// residual stream's encoding of `+0` is the pair `(0, 0)` and so contributes nothing, the
 /// *order key* of `+0` is `0x8000` -- a padded row would otherwise fold junk
 /// into the claim, and the consumer would have to agree about padding it cannot
 /// see.  Gating the row's whole contribution keeps the claim a statement about
@@ -893,7 +893,7 @@ impl FrameworkEval for DequantEval {
             for (i, (sg, nz, m7, eo)) in outs.iter().enumerate() {
                 match o.kind {
                     OKind::Pair => {
-                        // the glue's encoding: a signed significand carrying the
+                        // the residual stream's encoding: a signed significand carrying the
                         // implicit 128, and the biased exponent.  `nz` makes a
                         // zero result the pair `(0, 0)`, which is what `canon`
                         // gives it on the other side, and the region's own

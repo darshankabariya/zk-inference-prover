@@ -403,7 +403,7 @@ impl FrameworkEval for ChanEval {
             (sel[0].clone(), sel[1].clone(), sel[2].clone(), sel[3].clone(), sel[4].clone());
         let ks: Vec<E::F> = (0..self.lay.pk).map(|_| eval.next_trace_mask()).collect();
         // ---- the K half of the K/V boundary (stream AA) ----------------------
-        // The exact analogue of the glue boundary at `glue.rs`'s `leaf_in`, and
+        // The exact analogue of the residual-stream boundary at `residual_stream.rs`'s `leaf_in`, and
         // simpler: a key is a single integer, so there is no `PACK` and the
         // constraint is a bare equality, one cell per value.  Being an equality
         // and not a lookup is what lets these trees be committed *after* the

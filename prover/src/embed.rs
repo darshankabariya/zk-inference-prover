@@ -244,7 +244,7 @@ impl<F: Clone, EF: RelationEFTraitBound<F>> Relation<F, EF> for EmbRel {
 /// The stream binding's weights, in the wiring family's own convention: the value
 /// at canonical stream position `q = c * tokens + t` weighs `w^(N - 1 - q)` with
 /// `N = d * tokens`, and a value is `sm + lam ef`.  That is exactly what
-/// `GluePlan`'s `stream_in` binding accumulates over `gn1`'s group 0, so the two
+/// `ResidualStreamPlan`'s `stream_in` binding accumulates over `gn1`'s group 0, so the two
 /// claims are comparable by equality and nothing else has to be arranged.
 #[derive(Clone, Debug)]
 pub struct ETie {
@@ -461,7 +461,7 @@ impl EWitness {
         use rand::{Rng, SeedableRng};
         let mut rng = SmallRng::seed_from_u64(seed);
         // exponents in [1, 0xfe] and a full significand: exactly the domain
-        // `glue::split` maps to a nonzero `(sm, ef)`, plus the zero pattern
+        // `residual_stream::split` maps to a nonzero `(sm, ef)`, plus the zero pattern
         let mut pat = || -> u16 {
             if rng.random::<f64>() < 0.02 {
                 0
@@ -485,7 +485,7 @@ impl EWitness {
     /// Stream KK, `notes/witness-slack.md` §1a: the witness the open statement
     /// admitted.  Position `at` commits an id in `[vocab, vpad)` -- outside the
     /// vocabulary, inside the table -- and an all-zero stream row, which is the
-    /// row `glue::split(0)` gives and the row the padded table entry held.
+    /// row `residual_stream::split(0)` gives and the row the padded table entry held.
     /// Every other position is honest.
     ///
     /// This is not a corruption: every constraint the region carries holds on
@@ -519,8 +519,8 @@ impl EWitness {
         if xin.len() != tokens * d {
             return Err(format!("stream input: {} values, want {tokens} x {d}", xin.len()));
         }
-        let tab: Vec<u16> = tab.into_iter().map(crate::glue::canon).collect();
-        let xin: Vec<u16> = xin.into_iter().map(crate::glue::canon).collect();
+        let tab: Vec<u16> = tab.into_iter().map(crate::residual_stream::canon).collect();
+        let xin: Vec<u16> = xin.into_iter().map(crate::residual_stream::canon).collect();
         for t in 0..tokens {
             let v = tok[t] as usize;
             if v >= vocab {
@@ -625,7 +625,7 @@ pub fn region(w: &EWitness, lay: EmbLayout, m_ef: &mut [u32], bad: Option<Tamper
         cols[0][j] = m31_u32(tok[t]);
         ids[j] = tok[t];
         for sl in 0..pe {
-            let (sm, ef) = crate::glue::split(xin[t * d + cb * pe + sl]);
+            let (sm, ef) = crate::residual_stream::split(xin[t * d + cb * pe + sl]);
             cols[1 + 2 * sl][j] = m31_of(sm);
             cols[2 + 2 * sl][j] = m31_u32(ef);
             vals[j * pe + sl] = (sm, ef as i64);
@@ -665,7 +665,7 @@ pub fn region(w: &EWitness, lay: EmbLayout, m_ef: &mut [u32], bad: Option<Tamper
             continue;
         }
         for sl in 0..pe {
-            let (sm, ef) = crate::glue::split(tab[v * d + cb * pe + sl]);
+            let (sm, ef) = crate::residual_stream::split(tab[v * d + cb * pe + sl]);
             tcols[2 + sl][n] = m31_of(PACK * sm + ef as i64);
         }
     }
@@ -869,7 +869,7 @@ pub fn run(w: &EWitness, target: usize, bad: Option<Tamper>) -> (Outcome, EmbLay
         let mut acc = SecureField::zero();
         for t in 0..w.tokens {
             for c in 0..w.d {
-                let (sm, ef) = crate::glue::split(w.xin[t * w.d + c]);
+                let (sm, ef) = crate::residual_stream::split(w.xin[t * w.d + c]);
                 acc += (SecureField::from(m31_of(sm))
                         + SecureField::from(m31_u32(ef)) * binding.lam)
                     * wpow(ch[0], n - 1 - (c as i128 * tok + t as i128));
@@ -953,21 +953,21 @@ mod tests {
     /// claim this module publishes is the *same function of the same values*
     /// the wiring family's `stream_in` binding is.
     ///
-    /// The glue side is recomputed here from `GluePlan`'s own definition --
+    /// The residual-stream side is recomputed here from `ResidualStreamPlan`'s own definition --
     /// weights `w^(a tokens (nreal - 1 - j))` per leaf, a row step of `w`, over
     /// `Tiling`'s natural row order (row `r*tokens + t`, leaf `j` is channel
     /// `r + j a`) -- and compared against `binding_cols`.  Equality is what makes
     /// `verify_composed`'s one-line comparison meaningful; if the conventions
     /// ever drift, this fails here rather than on a card.
-    fn glue_stream_claim(xin: &[u16], d: usize, tokens: usize, a: usize,
-                         w: SecureField, lam: SecureField) -> SecureField {
+    fn residual_stream_claim(xin: &[u16], d: usize, tokens: usize, a: usize,
+                             w: SecureField, lam: SecureField) -> SecureField {
         let nreal = d / a;
         let mut h = SecureField::zero();
         for m in 0..tokens * a {
             let (r, t) = (m / tokens, m % tokens);
             let mut f = SecureField::zero();
             for j in 0..nreal {
-                let (sm, ef) = crate::glue::split(xin[t * d + r + j * a]);
+                let (sm, ef) = crate::residual_stream::split(xin[t * d + r + j * a]);
                 f += (SecureField::from(m31_of(sm)) + SecureField::from(m31_u32(ef)) * lam)
                     * wpow(w, (a * tokens * (nreal - 1 - j)) as i128);
             }
@@ -994,7 +994,7 @@ mod tests {
                 [m31_u32(3), m31_u32(5), m31_u32(19), m31_u32(23)]);
             let t = binding_w(ch, lam, d, tokens, &lay);
             let (_, got, _) = binding_cols(&r, &t);
-            let want = glue_stream_claim(&w.xin, d, tokens, a, ch, lam);
+            let want = residual_stream_claim(&w.xin, d, tokens, a, ch, lam);
             assert_eq!(got, want, "d={d} tokens={tokens} a={a} target={target}");
         }
     }
@@ -1125,7 +1125,7 @@ mod tests {
             // before these two fields existed carries.
             ao_acc_mag: false, ao_denp2: false,
             fold_rem_bits: 0, fold_alpha: 0, walk_p: 136,
-            glue: Some(crate::compose::GlueParams {
+            residual_stream: Some(crate::compose::ResidualStreamParams {
                 // stream II: the two additive regions are unconditional, so this
                 // fixture carries a real `dff` and the model's two norm
                 // constants.  A mechanical update, not a change of what the
@@ -1134,7 +1134,7 @@ mod tests {
                 eps: crate::bf16::from_f64(1e-5),
                 inv_d: crate::bf16::from_f64(1.0 / 64.0),
             }),
-            corner: false, gkr_bands: false, gkr_dequant: false, gkr_glue: false,
+            corner: false, gkr_bands: false, gkr_dequant: false, gkr_residual_stream: false,
             gkr_walks: false, gkr_attnout: false, layer_boundary: false, kv_boundary: false,
             logits_claim: false, prove_argmax: false, prove_argmax_lax: false,
             embed_vocab: if embed { 300 } else { 0 },
@@ -1178,7 +1178,7 @@ mod tests {
             let mut ch = stwo::core::channel::Blake2sM31Channel::default();
             Channel::mix_u64(&mut ch, 0xBB_0001);
             let rels = crate::compose::Rels::draw(
-                &mut ch, &plan.widths, plan.glue.as_ref().map(|g| g.uns.as_slice()),
+                &mut ch, &plan.widths, plan.residual_stream.as_ref().map(|g| g.uns.as_slice()),
                 plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
                                           plan.q_tabs.len());
             let f = Channel::draw_secure_felts(&mut ch, 6);

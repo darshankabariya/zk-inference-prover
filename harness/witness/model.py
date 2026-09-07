@@ -913,7 +913,7 @@ class Model:
                 else:
                     x = self.gemma_layer(i, l, x, cache, rot[t], masks[t])
                 continue
-            # B10 step 2: the glue's witness is the residual stream at the three
+            # B10 step 2: the residual-stream witness is the stream at the three
             # points the two adds join, plus each add's second operand.  Nothing
             # numeric moves -- these are recordings of values the forward pass
             # already forms (`rec` is None outside an extract).

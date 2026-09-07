@@ -104,7 +104,7 @@ pub fn rq_log_rows(v: SVariant) -> u32 {
     crate::common::log_rows_for(rq_table(v).len(), 1)
 }
 /// The two tables' contents, padded by repeating the last real row -- stream
-/// II's `glue_table_cols` rule, for the same reason.
+/// II's `residual_stream_table_cols` rule, for the same reason.
 pub fn rq_tab_cols(v: SVariant) -> Vec<Eval> {
     let rows = rq_table(v);
     let lr = crate::common::log_rows_for(rows.len(), 1);
@@ -1088,7 +1088,7 @@ pub fn requant_ref(x: &[u16], tokens: usize, n: usize, v: SVariant)
         // its magnitudes: bf16 magnitude order is pattern order
         let mut pm = 0u32;
         for i in 0..n {
-            let (sm, ef) = crate::glue::split(crate::glue::canon(x[t * n + i]));
+            let (sm, ef) = crate::residual_stream::split(crate::residual_stream::canon(x[t * n + i]));
             let m7 = if sm == 0 { 0 } else { sm.unsigned_abs() as u32 - 128 };
             pm = pm.max(ef * 128 + m7);
         }
@@ -1108,7 +1108,7 @@ pub fn requant_ref(x: &[u16], tokens: usize, n: usize, v: SVariant)
             SVariant::Bf16 => (sx[t].1 as i64 - 1) * 128 + sx[t].0 as i64,
         };
         for i in 0..n {
-            let (sm, ef) = crate::glue::split(crate::glue::canon(x[t * n + i]));
+            let (sm, ef) = crate::residual_stream::split(crate::residual_stream::canon(x[t * n + i]));
             let m7 = if sm == 0 { 0 } else { sm.unsigned_abs() as u32 - 128 };
             let pat = (ef * 128 + m7) as i64;
             if pat < path {
@@ -1239,7 +1239,7 @@ pub fn rq_region(tag: &str, x: &[u16], qx: &[i32], jx: &[i64], sx: &[(u32, u32)]
     // the committed values, per element: the producer's pair, bent if a probe
     // aims here, and the magnitude pattern the max argument compares
     let bend = |i: usize| -> u16 {
-        let p = crate::glue::canon(x[i]);
+        let p = crate::residual_stream::canon(x[i]);
         match tamper {
             // to another legal pattern, so `VAL`, `RQV` and the division table
             // all still find a row and only the binding can reject
@@ -1248,7 +1248,7 @@ pub fn rq_region(tag: &str, x: &[u16], qx: &[i32], jx: &[i64], sx: &[(u32, u32)]
         }
     };
     let pat_of = |i: usize| -> (i64, u32, u32, u32, u32) {
-        let (sm, ef) = crate::glue::split(bend(i));
+        let (sm, ef) = crate::residual_stream::split(bend(i));
         let m7 = if sm == 0 { 0 } else { sm.unsigned_abs() as u32 - 128 };
         let sg = u32::from(sm < 0);
         (sm, ef, m7, sg, ef * 128 + m7)

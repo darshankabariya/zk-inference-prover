@@ -329,11 +329,11 @@ def measured_8b(h200):
 def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
                 with_head=True, corner=True):
     """The whole per-token budget for a shape, summed group by group: the cost
-    model's `cells_per_token` plus B10 step 2's glue, with the model-level terms
+    model's `cells_per_token` plus B10 step 2's residual stream, with the model-level terms
     (the head's accumulators, its lookups, the token binding, the final norm) charged
     to exactly one group."""
     batch = cm.BATCH if batch is None else batch
-    out = dict(total=0.0, preprocessed=0.0, glue=0.0, parts={})
+    out = dict(total=0.0, preprocessed=0.0, residual_stream=0.0, parts={})
     for i, grp in enumerate(shape["groups"]):
         cfg = cfg_of(shape, grp)
         head = with_head and (i == 0)
@@ -343,10 +343,10 @@ def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
             attn_accs_per_layer=grp.get("attn_accs_per_layer"),
             attn_params_per_layer=grp.get("attn_params_per_layer"), corner=corner)
         out["saturated"] = out.get("saturated", False) or bool(c["band_saturated"])
-        gl = cm.glue_cells(cfg, "tree", topk=grp["topk"], final_norm=head)
+        gl = cm.residual_stream_cells(cfg, "tree", topk=grp["topk"], final_norm=head)
         out["total"] += c["total"] + gl["net"]
         out["preprocessed"] += c["preprocessed"]
-        out["glue"] += gl["net"]
+        out["residual_stream"] += gl["net"]
         for k, v in c.items():
             if isinstance(v, (int, float)) and k not in ("dequant_per_acc", "head_per_acc",
                                                          "tokens_per_proof"):
@@ -952,7 +952,7 @@ def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
         c = model_cells(shape, ctx, seq=seq, seq_batch=seq_batch, alpha=alpha,
                         batch=batch)
         entry = dict(cells_per_token=c["total"], preprocessed_per_token=c["preprocessed"],
-                     glue_per_token=c["glue"], parts=c["parts"], chunks=n_chunks,
+                     residual_stream_per_token=c["residual_stream"], parts=c["parts"], chunks=n_chunks,
                      cards={})
         # proof bytes, two ways, because they disagree and neither is measured at
         # frontier scale (see the record)

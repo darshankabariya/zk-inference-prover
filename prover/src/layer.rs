@@ -216,11 +216,11 @@ pub struct Layer {
     pub ao: AttnOut,
     pub source: String,
     /// B10 step 2: the wiring columns, present only on a witness extracted with
-    /// `extract.py --glue`.  Every one is a `(tokens x d)` bf16 *pattern* column
-    /// of B1's own residual stream; `xmid` and `xout` are what the glue's two
+    /// `extract.py --residual-stream`.  Every one is a `(tokens x d)` bf16 *pattern* column
+    /// of B1's own residual stream; `xmid` and `xout` are what the residual stream's two
     /// adds have to reproduce, and the two norm weights and the two scalars are
     /// what the reduction's norm scale consumes.
-    pub glue: Option<GlueCols>,
+    pub residual_stream: Option<ResidualStreamCols>,
     /// stream E: B1's own `key_head.u16`, the order keys the head's rows compare.
     /// `None` unless the dump was written with `--head`.  It is a reference, not
     /// an input: the proof derives its keys from the head's dequant output, and
@@ -381,7 +381,7 @@ impl Layer {
                 h.update(b.to_le_bytes());
             }
         }
-        if let Some(g) = &self.glue {
+        if let Some(g) = &self.residual_stream {
             for w in [&g.w1, &g.w2] {
                 h.update((w.len() as u64).to_le_bytes());
                 for x in w {
@@ -399,7 +399,7 @@ impl Layer {
     }
 }
 
-pub struct GlueCols {
+pub struct ResidualStreamCols {
     pub d: usize,
     pub dff: usize,
     pub tokens: usize,
@@ -448,12 +448,12 @@ fn read_u16(path: &str) -> Result<Vec<u16>, String> {
     Ok(raw.par_chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect())
 }
 
-impl GlueCols {
-    /// The seven columns `extract.py --glue` writes, plus `eps` and `1/d` from
-    /// the manifest.  Absent `glue` in the manifest the layer simply has none and
+impl ResidualStreamCols {
+    /// The seven columns `extract.py --residual-stream` writes, plus `eps` and `1/d` from
+    /// the manifest.  Absent `residual_stream` in the manifest the layer simply has none and
     /// the composition runs as it did before.
     pub fn load(dir: &str, man: &serde_json::Value, tokens: usize) -> Result<Option<Self>, String> {
-        let g = &man["glue"];
+        let g = &man["residual_stream"];
         let Some(d) = g["d"].as_u64().map(|v| v as usize) else {
             return Ok(None);
         };
@@ -505,8 +505,8 @@ impl GlueCols {
             silu_in: opt("silu_in", dff),
             silu_out: opt("silu_out", dff),
             x_down: opt("x_down", dff),
-            eps: g["eps"].as_u64().ok_or("manifest: glue.eps")? as u16,
-            inv_d: g["inv_d"].as_u64().ok_or("manifest: glue.inv_d")? as u16,
+            eps: g["eps"].as_u64().ok_or("manifest: residual_stream.eps")? as u16,
+            inv_d: g["inv_d"].as_u64().ok_or("manifest: residual_stream.inv_d")? as u16,
             reduce: g["reduce"].as_str().unwrap_or("").to_string(),
             head: false,
         }))
@@ -566,7 +566,7 @@ impl GlueCols {
     /// residual stream, so it is allocated at its shape and left zero.
     pub fn load_weights(dir: &str, man: &serde_json::Value, tokens: usize)
                         -> Result<Option<Self>, String> {
-        let g = &man["glue"];
+        let g = &man["residual_stream"];
         let Some(d) = g["d"].as_u64().map(|v| v as usize) else {
             return Ok(None);
         };
@@ -589,15 +589,15 @@ impl GlueCols {
             silu_in: None,
             silu_out: None,
             x_down: None,
-            eps: g["eps"].as_u64().ok_or("manifest: glue.eps")? as u16,
-            inv_d: g["inv_d"].as_u64().ok_or("manifest: glue.inv_d")? as u16,
+            eps: g["eps"].as_u64().ok_or("manifest: residual_stream.eps")? as u16,
+            inv_d: g["inv_d"].as_u64().ok_or("manifest: residual_stream.inv_d")? as u16,
             reduce: g["reduce"].as_str().unwrap_or("").to_string(),
             head: false,
         }))
     }
 
     /// The head chunk's final norm, model half: `w_head.u16` and the two
-    /// constants.  `GlueCols::load_weights`' counterpart.
+    /// constants.  `ResidualStreamCols::load_weights`' counterpart.
     pub fn load_head_weights(dir: &str, man: &serde_json::Value, tokens: usize)
                              -> Result<Option<Self>, String> {
         let h = &man["head"];
@@ -635,7 +635,7 @@ impl GlueCols {
     }
 }
 
-impl GlueCols {
+impl ResidualStreamCols {
     /// Stream II: the wiring family on a synthetic layer, so the desk can run
     /// the whole composed statement -- bindings, norm scales, SwiGLU and all -- at a
     /// shape that proves in seconds and without a dump.  Only the columns the
@@ -656,7 +656,7 @@ impl GlueCols {
                 .map(|_| {
                     let e: i32 = rng.random_range(-spread..spread);
                     let m: f64 = rng.random_range(-2.0f64..2.0);
-                    crate::glue::canon(bf16::from_f64(m * (e as f64).exp2()))
+                    crate::residual_stream::canon(bf16::from_f64(m * (e as f64).exp2()))
                 })
                 .collect()
         };
@@ -1154,13 +1154,13 @@ impl Layer {
                 .collect();
         }
         // Stream II (E11): the wiring family is the layer's when the dump
-        // carries `glue`, and the *head* chunk's final norm when it does not
+        // carries `residual_stream`, and the *head* chunk's final norm when it does not
         // but carries `head.final_norm`.  No flag: which family a chunk can
         // prove is a property of the columns the extractor wrote, and a dump
         // written before either simply has none, as before.
-        let glue = match GlueCols::load(dir, &man, s)? {
+        let residual_stream = match ResidualStreamCols::load(dir, &man, s)? {
             Some(g) => Some(g),
-            None => GlueCols::load_head(dir, &man, s)?,
+            None => ResidualStreamCols::load_head(dir, &man, s)?,
         };
         // stream E: B1's key column, when the dump carries a head.  Read as
         // patterns; the comparison happens on the claim, not value by value.
@@ -1189,7 +1189,7 @@ impl Layer {
             mats,
             ao: AttnOut { nh, s, hd, acc, den, jo, jv },
             source: format!("B6.5 layer witness [{dir}]"),
-            glue,
+            residual_stream,
             head_keys,
             head_tok,
             attn_out_bits,
@@ -1395,9 +1395,9 @@ impl Layer {
                 }
             }
         }
-        let mut glue = match GlueCols::load_weights(dir, &man, s)? {
+        let mut residual_stream = match ResidualStreamCols::load_weights(dir, &man, s)? {
             Some(g) => Some(g),
-            None => GlueCols::load_head_weights(dir, &man, s)?,
+            None => ResidualStreamCols::load_head_weights(dir, &man, s)?,
         };
         let vocab = man["head"]["vocab"].as_u64().map(|v| v as usize);
         // `.ok()`, because a layer that is not layer 0 has no embedding table
@@ -1412,7 +1412,7 @@ impl Layer {
         // a layer-0 chunk the two stand-ins have to agree with each other.  The
         // ids stand in as zero, so the residual stream stands in as row 0 --
         // which is model data, read from `embed.u16` and from nothing else.
-        if let (Some(g), Some(e)) = (glue.as_mut(), embed_tab.as_ref()) {
+        if let (Some(g), Some(e)) = (residual_stream.as_mut(), embed_tab.as_ref()) {
             if e.len() >= g.d && g.xin.len() == s * g.d {
                 for t in 0..s {
                     g.xin[t * g.d..(t + 1) * g.d].copy_from_slice(&e[..g.d]);
@@ -1427,7 +1427,7 @@ impl Layer {
             mats,
             ao: AttnOut { nh, s, hd, acc, den, jo: vec![0i32; s], jv },
             source: format!("B6.5 model-only witness [{dir}]"),
-            glue,
+            residual_stream,
             // stream E's order key is a *committed* column and carries an
             // argmax claim, so the stand-in has to have a unique maximum per
             // row or the head chunk's argmax region has no answer to give.
@@ -1462,7 +1462,7 @@ impl Layer {
     /// own claim against the quantize region's output.  `(which of q/k/v, cell)`.
     pub fn rope_from_mats(&mut self, round: bf16::Round, bend: Option<(usize, usize)>)
                           -> Option<RopeCols> {
-        use crate::glue::{Prog, UnKind, reference};
+        use crate::residual_stream::{Prog, UnKind, reference};
         let (nh, hd, tokens) = (self.ao.nh, self.ao.hd, self.ao.s);
         // stream NN-3: a tiled prefix (`--kv-boundary`) is rebuilt like any other
         // now, so `nsub` is no longer a reason to leave the family off
@@ -1491,7 +1491,7 @@ impl Layer {
         // NN-2: and the regions have to *tile* the shape, not only fit its
         // widths.  A rotation region's rows are `tokens * heads` and a quantize
         // region's are `q_layout`'s, and both must be an exact power of two --
-        // `GluePlan::new` and `q_layout` assert it.  Stream II's synthetic gate
+        // `ResidualStreamPlan::new` and `q_layout` assert it.  Stream II's synthetic gate
         // shape is `nh = nkv = 3` at `hd = 32`, so `nq = nk = nv = 96` passes
         // the width test above and `tokens * nh = 96` fails the tiling one:
         // before this the family turned on where nobody meant it to and the run
@@ -1566,7 +1566,7 @@ impl Layer {
         // Stream NN-3: `B7_NN_CLAMP=n` calibrates every scale `n` exponents
         // *below* the smallest one that fits, so a synthetic layer clamps where
         // B1 does and the desk can prove a chunk that carries the clamp.  A
-        // witness-construction switch like `--synth-glue`: at 0 -- the default,
+        // witness-construction switch like `--synth-residual-stream`: at 0 -- the default,
         // and every recorded digest -- nothing here moves.
         let shift = std::env::var("B7_NN_CLAMP").ok()
             .and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
@@ -2115,7 +2115,7 @@ unmoved (a rejection is the pass)");
         }
         Self { bands, band_sizes: band_sizes_all, head_offsets, nsub: s_nsub, mats,
                ao: AttnOut { nh, s, hd, acc, den, jo, jv },
-               source: format!("synthetic layer (seed={seed})"), glue: None,
+               source: format!("synthetic layer (seed={seed})"), residual_stream: None,
                head_keys: None, head_tok: None, attn_out_bits: 8,
                embed_tab: None, tok_in: None, layer: None, block: None, rope: None }
     }
@@ -2132,14 +2132,14 @@ impl Layer {
     /// an honest proof needs `qX` to actually be the requantize of the
     /// producer's output under the token's own scale, or the seam's own scale
     /// lookup goes off-table before any binding is reached.  So this runs the
-    /// wiring family's own reference forward -- `glue::reference` on the very
+    /// wiring family's own reference forward -- `residual_stream::reference` on the very
     /// programs the regions prove, so the two cannot disagree -- and rebuilds
     /// each group's input, scale and accumulator from it.
     ///
     /// `o`'s input is deliberately left alone: `AttnOutEval` is that matmul's
     /// requantize and its claim is stream JJ's, so there is nothing here for a
     /// consistent witness to satisfy yet.
-    pub fn synth_glue(&mut self, seed: u64, a: usize, round: bf16::Round) {
+    pub fn synth_residual_stream(&mut self, seed: u64, a: usize, round: bf16::Round) {
         self.synth_family(seed, a, round, 0, None, None);
     }
 
@@ -2148,8 +2148,8 @@ impl Layer {
     /// attention over the bent K (or Q, or V), the matmuls are untouched, and
     /// the only thing that can see it is that band's claim against the
     /// quantize region's output.  `which` picks Q, K or V.
-    pub fn synth_glue_band_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
-                                which: usize, idx: usize) {
+    pub fn synth_residual_stream_band_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
+                                           which: usize, idx: usize) {
         self.synth_family(seed, a, round, 0, None, Some((which, idx)));
     }
 
@@ -2159,8 +2159,8 @@ impl Layer {
     /// untouched, so the chunk proves an honest attention over the cache with
     /// queries the `q` matmul did not produce, and the only thing that can see
     /// it is `nn_q_ok`.
-    pub fn synth_glue_prefix_q_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
-                                    idx: usize) {
+    pub fn synth_residual_stream_prefix_q_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
+                                               idx: usize) {
         self.synth_family(seed, a, round, 0, None, Some((3, idx)));
     }
 
@@ -2174,8 +2174,8 @@ impl Layer {
     ///
     /// Returns `None` when this shape's `o` walk is not `nh * hd` wide, which
     /// is the shape on which the seam is not statable at all.
-    pub fn synth_glue_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
-                           idx: usize) -> Option<usize> {
+    pub fn synth_residual_stream_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
+                                      idx: usize) -> Option<usize> {
         let oi = self.mats.iter().position(|m| m.name == "o")?;
         if self.mats[oi].n_in != self.ao.nh * self.ao.hd {
             return None;
@@ -2186,7 +2186,7 @@ impl Layer {
         // must not change it: `--synth-head` already pushed the `lm_head` matmul
         // and set `head`, so pass a nonzero vocabulary to keep the head branch.
         // `synth_family` reads only the sign of it.
-        let vocab = usize::from(self.glue.as_ref().is_some_and(|g| g.head));
+        let vocab = usize::from(self.residual_stream.as_ref().is_some_and(|g| g.head));
         self.synth_family(seed, a, round, vocab, Some(at), None);
         Some(at)
     }
@@ -2224,17 +2224,17 @@ impl Layer {
 
     fn synth_family(&mut self, seed: u64, a: usize, round: bf16::Round, head_vocab: usize,
                     o_bend: Option<usize>, rope_bend: Option<(usize, usize)>) {
-        use crate::glue::{Kind, Prog, Tiling, UnKind, canon, reference};
+        use crate::residual_stream::{Kind, Prog, Tiling, UnKind, canon, reference};
         let head = head_vocab > 0;
         let tokens = self.ao.s;
         let d = self.mats.iter().find(|m| m.name == "q")
-            .expect("--synth-glue needs a q matmul").n_in;
+            .expect("--synth-residual-stream needs a q matmul").n_in;
         let dff = self.mats.iter().find(|m| m.name == "gate")
-            .expect("--synth-glue needs a gate matmul").n_out;
+            .expect("--synth-residual-stream needs a gate matmul").n_out;
         let gc = if head {
-            GlueCols::synthetic_head(tokens, d, seed ^ 0x9e37_79b9)
+            ResidualStreamCols::synthetic_head(tokens, d, seed ^ 0x9e37_79b9)
         } else {
-            GlueCols::synthetic(tokens, d, dff, seed ^ 0x9e37_79b9)
+            ResidualStreamCols::synthetic(tokens, d, dff, seed ^ 0x9e37_79b9)
         };
         let (eps, inv_d) = (gc.eps, gc.inv_d);
         let un_r = UnKind::NormR { inv_d, eps };
@@ -2304,7 +2304,7 @@ impl Layer {
         };
         let out_col = |me: &Self, name: &str, w: usize| -> Vec<u16> {
             let mi = me.mats.iter().position(|m| m.name == name)
-                .unwrap_or_else(|| panic!("--synth-glue needs the {name} matmul"));
+                .unwrap_or_else(|| panic!("--synth-residual-stream needs the {name} matmul"));
             let sp = sp(&me.mats[mi]);
             (0..tokens)
                 .flat_map(|t| (0..w).map(move |c| (t, c)))
@@ -2330,7 +2330,7 @@ impl Layer {
         // could prove carried a positionwise q/k/v binding
         // (`briefs/jj-layerwire-out.md` section 11.4 item 2).  Here the layer's
         // own `q`/`k`/`v` dequant outputs are rotated and quantized -- through
-        // `glue::reference` on the very programs the regions prove, so the two
+        // `residual_stream::reference` on the very programs the regions prove, so the two
         // cannot disagree -- and the bands are rebuilt from the result.
         //
         // Wired exactly when the widths line up, the way `o` is: `q` must be
@@ -2354,7 +2354,7 @@ impl Layer {
         // as unstatable rather than passing quietly.
         let o_wired = {
             let oi = self.mats.iter().position(|m| m.name == "o")
-                .expect("--synth-glue needs the o matmul");
+                .expect("--synth-residual-stream needs the o matmul");
             let ok = self.mats[oi].n_in == self.ao.nh * self.ao.hd
                 && self.mats[oi].tokens == self.ao.s;
             if ok {
@@ -2401,7 +2401,7 @@ impl Layer {
         // NN (NN-2).
         if head {
             wire(self, &["lm_head"], &h1, d);
-            self.glue = Some(gc);
+            self.residual_stream = Some(gc);
             return;
         }
         // Stream JJ's dequant output bindings: `o_out` is the `o` region's own
@@ -2436,7 +2436,7 @@ impl Layer {
         // and the second output binding, after `down`'s accumulator is final
         gc.d_out = out_col(self, "down", d);
 
-        self.glue = Some(gc);
+        self.residual_stream = Some(gc);
     }
 }
 
@@ -3287,7 +3287,7 @@ multiplicity tables and the f64 cross-check all match",
 
 /// B1's own answer for one dequantized accumulator: the `Round::Even` reference
 /// `fill_mat_row` cross-checks its committed columns against.  It lives here as
-/// one function so that a consumer of a matmul's bf16 output -- the glue's
+/// one function so that a consumer of a matmul's bf16 output -- the residual stream's
 /// SwiGLU reads the `gate` and `up` regions' -- reads exactly the value the
 /// dequant region proves, rather than a second implementation of the rung.
 pub fn deq_ref(m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
@@ -3562,7 +3562,7 @@ pub struct MatInteraction {
 
 /// The weights an output-side Horner claim runs on, as the composition derives
 /// them from the binding challenge.  Same numbers on both sides of the binding: the
-/// consumer's own claim is built from `w_glue` too.
+/// consumer's own claim is built from `w_residual_stream` too.
 pub struct OutputClaimW {
     pub w: Vec<SecureField>,
     pub lam: SecureField,
@@ -3712,10 +3712,10 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
                         f += SecureField::from(m31_of(fold_out(m, t, c))) * o.w[s];
                         continue;
                     }
-                    let pat = crate::glue::canon(deq_ref(m, &r.spec, t, c));
+                    let pat = crate::residual_stream::canon(deq_ref(m, &r.spec, t, c));
                     f += match o.kind {
                         crate::dequant::OKind::Pair => {
-                            let (sm, ef) = crate::glue::split(pat);
+                            let (sm, ef) = crate::residual_stream::split(pat);
                             (SecureField::from(m31_of(sm))
                              + SecureField::from(m31_u32(ef)) * o.lam) * o.w[s]
                         }

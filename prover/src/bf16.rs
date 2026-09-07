@@ -191,7 +191,7 @@ pub fn from_f64(x: f64) -> u16 {
     pattern(sign, (e + 127) as u32, m7 as u32)
 }
 
-/// `from_f64` in a chosen rounding mode -- the reference every glue gadget is
+/// `from_f64` in a chosen rounding mode -- the reference every residual-stream gadget is
 /// checked against, since B10 step 2's adds and multiplies have to round the way
 /// the mode the shared `NORM` table was built in rounds.
 pub fn from_f64_round(x: f64, round: Round) -> u16 {

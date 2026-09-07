@@ -10,7 +10,7 @@
 //! the seam between the layer's matmuls and its attention was a hole
 //! (`notes/witness-slack.md` section 1e, `briefs/jj-layerwire-out.md` section 3).
 //!
-//! The rotation is bf16 arithmetic and is proved by two glue `Prog`s per side
+//! The rotation is bf16 arithmetic and is proved by two residual stream `Prog`s per side
 //! (`Prog::rope_mul`, `Prog::rope_add`), with `cos` and the sign-folded `sin` as
 //! `Src::Pre` operands -- preprocessed, and therefore a **function of the block
 //! index**, because `rope(pos)` reads the token's absolute position
@@ -58,8 +58,8 @@ pub fn rope_at(inv: &[f64], hd: usize, pos: usize) -> (Vec<u16>, Vec<u16>) {
     let mut sin = vec![0u16; hd];
     for j in 0..hd {
         let ang = pos as f64 * inv[j % h];
-        cos[j] = crate::glue::canon(bf16::from_f32(ang.cos() as f32));
-        sin[j] = crate::glue::canon(bf16::from_f32(ang.sin() as f32));
+        cos[j] = crate::residual_stream::canon(bf16::from_f32(ang.cos() as f32));
+        sin[j] = crate::residual_stream::canon(bf16::from_f32(ang.sin() as f32));
     }
     (cos, sin)
 }
@@ -67,13 +67,14 @@ pub fn rope_at(inv: &[f64], hd: usize, pos: usize) -> (Vec<u16>, Vec<u16>) {
 /// The sign folded into the table: `rotate` builds `r = cat([-t[h:], t[:h]])`
 /// and multiplies it by `sin`, so channel `j < h` reads `-t[j + h] sin[j]` and
 /// channel `j >= h` reads `+t[j - h] sin[j]`.  Negating the *table* leaves the
-/// program a pure permutation of committed leaves, which is what a glue `Prog`
+/// program a pure permutation of committed leaves, which is what a residual stream `Prog`
 /// can express with `Src::Leaf` alone.
 pub fn sgn_sin(sin: &[u16], hd: usize) -> Vec<u16> {
     let h = hd / 2;
     (0..hd)
         .map(|j| {
-            if j < h { crate::glue::canon(sin[j] ^ 0x8000) } else { crate::glue::canon(sin[j]) }
+            if j < h { crate::residual_stream::canon(sin[j] ^ 0x8000) }
+            else { crate::residual_stream::canon(sin[j]) }
         })
         .collect()
 }
@@ -88,13 +89,13 @@ pub fn sgn_sin(sin: &[u16], hd: usize) -> Vec<u16> {
 /// rows measured nothing -- which is the shape `drop-big` had at layer 0 and the
 /// reason this exists rather than a bare `^ 1`.
 pub fn bend_pat(p: u16) -> u16 {
-    let p = crate::glue::canon(p);
-    let q = crate::glue::canon(p ^ 1);
-    if crate::glue::split(q) != crate::glue::split(p) {
+    let p = crate::residual_stream::canon(p);
+    let q = crate::residual_stream::canon(p ^ 1);
+    if crate::residual_stream::split(q) != crate::residual_stream::split(p) {
         q
     } else {
         // 1.0, which no zero and no subnormal can be mistaken for
-        crate::glue::join(128, 127)
+        crate::residual_stream::join(128, 127)
     }
 }
 
@@ -592,7 +593,7 @@ pub fn q_region(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, tokens: 
     // same quotient; this scans forward from the asked-for site for one that
     // does, and says so rather than silently taking a coupled site.
     let quot = |pat: u16, j: i64| -> Option<u32> {
-        let (sm, ef) = crate::glue::split(crate::glue::canon(pat));
+        let (sm, ef) = crate::residual_stream::split(crate::residual_stream::canon(pat));
         let m7 = if sm == 0 { 0 } else { sm.unsigned_abs() as u32 - 128 };
         let path = (j + 126) * 128;
         if (ef as i64 * 128 + m7 as i64) < path {
@@ -605,7 +606,7 @@ pub fn q_region(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, tokens: 
             let n_all = tokens * n;
             let start = t % n_all;
             let hit = (0..n_all).map(|d| (start + d) % n_all).find(|i| {
-                let (p, c) = (crate::glue::canon(x[*i]), *i % n);
+                let (p, c) = (crate::residual_stream::canon(x[*i]), *i % n);
                 let b = bend_pat(p);
                 b != p && quot(b, je[c]).is_some() && quot(b, je[c]) == quot(p, je[c])
             });
@@ -618,7 +619,7 @@ the probe would move the output too");
         _ => None,
     };
     let bend = |i: usize| -> u16 {
-        let p = crate::glue::canon(x[i]);
+        let p = crate::residual_stream::canon(x[i]);
         if bend_at == Some(i) { bend_pat(p) } else { p }
     };
 
@@ -631,7 +632,7 @@ the probe would move the output too");
         for sl in 0..pr {
             let c = b * pr + sl;
             let gi = t * n + c;
-            let (sm, ef) = crate::glue::split(bend(gi));
+            let (sm, ef) = crate::residual_stream::split(bend(gi));
             let m7 = if sm == 0 { 0 } else { sm.unsigned_abs() as u32 - 128 };
             let sg = u32::from(sm < 0);
             let pat = ef as i64 * 128 + m7 as i64;
@@ -858,7 +859,7 @@ pub fn q_tiles(n: usize, hd: usize, tokens: usize) -> bool {
 /// it.  Used by the synthetic witness generator to build the bands' own columns
 /// and by the desk's B1 check.
 pub fn quant_ref(pat: u16, j: i64, qmax: i64) -> i64 {
-    let (sm, ef) = crate::glue::split(crate::glue::canon(pat));
+    let (sm, ef) = crate::residual_stream::split(crate::residual_stream::canon(pat));
     if sm == 0 {
         return 0;
     }
@@ -877,7 +878,7 @@ pub fn pow2_scale(col: &[u16], qmax: i64) -> i64 {
     let m = col
         .iter()
         .map(|p| {
-            let (sm, ef) = crate::glue::split(crate::glue::canon(*p));
+            let (sm, ef) = crate::residual_stream::split(crate::residual_stream::canon(*p));
             if sm == 0 { 0.0 } else { sm.unsigned_abs() as f64 * ((ef as i64 - 134) as f64).exp2() }
         })
         .fold(0.0f64, f64::max);

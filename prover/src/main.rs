@@ -24,7 +24,7 @@ mod precache;
 mod scalars;
 mod devacc;
 mod devwfill;
-mod devgfill;
+mod dev_residual_stream_fill;
 mod gkrband;
 mod gkrlink;
 mod gencudakernels;
@@ -32,7 +32,7 @@ mod cudakernels;
 mod exprprobe;
 mod dequant;
 mod embed;
-mod glue;
+mod residual_stream;
 mod layer;
 mod layout;
 mod plogup;
@@ -578,7 +578,8 @@ fn embed_cmd(args: &[String]) {
                 a.push(dir.clone());
                 layer_of(&a)
             };
-            let g = l.glue.as_ref().expect("embed needs a witness extracted with --glue");
+            let g = l.residual_stream.as_ref()
+                .expect("embed needs a witness extracted with --residual-stream");
             let tab = l.embed_tab.as_ref().expect("embed needs embed.u16 in the dump");
             let tok = l.tok_in.as_ref().expect("embed needs tok_in.i32 in the dump");
             let vocab = tab.len() / g.d;
@@ -739,8 +740,8 @@ fn embed_probes_cmd(args: &[String]) {
 ///
 /// A `--witness` that does not load is fatal (exit 2), never a fallback.  It
 /// used to print one stderr line and prove a synthetic layer instead, and a
-/// synthetic layer has `glue: None`, so a gate pointed at a dump the box did
-/// not hold came back `rc=0` with the whole glue battery skipped -- a pass that
+/// synthetic layer has `residual_stream: None`, so a gate pointed at a dump the box did
+/// not hold came back `rc=0` with the whole residual-stream battery skipped -- a pass that
 /// measured nothing (open item 17).
 /// Stream KK: the chunk's unchecked coordinate, `--layer N` / `--block N` over
 /// the manifest's own.
@@ -846,21 +847,21 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     // width, so this widens only the table domain and the o walk.
     l.attn_out_bits = arg_scalar(args, "--synth-ao-bits", l.attn_out_bits);
     // Stream II: the wiring family on a synthetic layer.  A witness-construction
-    // switch and not a statement one -- without it a synthetic layer has no glue
-    // columns and composes exactly as it always did, which is what keeps every
-    // other stream's recorded synthetic digest where it is.
-    if flag(args, "--synth-glue") {
+    // switch and not a statement one -- without it a synthetic layer has no
+    // residual-stream columns and composes exactly as it always did, which is
+    // what keeps every other stream's recorded synthetic digest where it is.
+    if flag(args, "--synth-residual-stream") {
         let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
-        l.synth_glue(src.seed, arg_scalar(args, "--glue-a", 32usize), round);
+        l.synth_residual_stream(src.seed, arg_scalar(args, "--residual-stream-a", 32usize), round);
     }
     // Stream II (E11): the head chunk on a synthetic layer -- an `lm_head`
     // matmul whose committed input is the final norm's output, and the wiring
     // family that proves it.  A witness-construction switch like
-    // `--synth-glue`: without it a synthetic layer has no `lm_head` and no
+    // `--synth-residual-stream`: without it a synthetic layer has no `lm_head` and no
     // family, and composes exactly as it always did.
     if flag(args, "--synth-head") {
         let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
-        l.synth_head(src.seed, arg_scalar(args, "--glue-a", 32usize), round,
+        l.synth_head(src.seed, arg_scalar(args, "--residual-stream-a", 32usize), round,
                      arg_scalar(args, "--synth-vocab", 256usize));
     }
     tighten_of(&mut l, args);
@@ -966,13 +967,13 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
     // the refusal.  See `UNSOUND_SKIPS`.
     check_skips(args);
     let skip = |name: &str| skip(args, name);
-    let head = l.glue.as_ref().is_some_and(|g| g.head);
+    let head = l.residual_stream.as_ref().is_some_and(|g| g.head);
     let has_head_mat = l.mats.iter().any(|m| m.name == "lm_head");
-    let family = l.glue.is_some() && !skip("residual-stream");
-    assert!(l.glue.is_some() || skip("residual-stream"),
+    let family = l.residual_stream.is_some() && !skip("residual-stream");
+    assert!(l.residual_stream.is_some() || skip("residual-stream"),
             "compose: this witness carries no residual-stream columns (the norms, the \
              residual adds and the requantize seams), so nothing between two matmuls would \
-             be proved; extract it with --glue, or pass --unsound-skip-residual-stream to \
+             be proved; extract it with --residual-stream, or pass --unsound-skip-residual-stream to \
              prove the unbound statement");
     let layer_boundary = family && !skip("layer-boundary");
     assert!(corner || head || skip("kv-boundary"),
@@ -1156,9 +1157,9 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
             None => 0,
         },
         walk_p: arg_scalar(args, "--p", 136usize),
-        // B10 step 2: the wiring family rides on a witness `extract.py --glue`
+        // B10 step 2: the wiring family rides on a witness `extract.py --residual-stream`
         // wrote, and on nothing else -- a dump without those columns composes
-        // exactly as it did before.  `--glue-a` is how many rows one token's
+        // exactly as it did before.  `--residual-stream-a` is how many rows one token's
         // stream takes at the reduction's first level; it has to divide `d`.
         // Stream E's two regions are opt-in: `--norm-tails` wires `h = (x r) w`
         // and `--swiglu` the `silu(gate) * up` product.  Off, the composition is
@@ -1166,10 +1167,10 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // checks.
         // The family is carried whenever the witness has it, unless
         // `--unsound-skip-residual-stream` drops it.
-        glue: l.glue.as_ref().filter(|_| family).map(|g| {
-            compose::GlueParams {
+        residual_stream: l.residual_stream.as_ref().filter(|_| family).map(|g| {
+            compose::ResidualStreamParams {
                 d: g.d,
-                a: arg_scalar(args, "--glue-a", 32usize),
+                a: arg_scalar(args, "--residual-stream-a", 32usize),
                 // Stream II: the two additive regions are unconditional, so
                 // `dff` is always carried.
                 dff: g.dff,
@@ -1200,7 +1201,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // not an env mode, because it changes the proof.
         gkr_bands: flag(args, "--gkr-bands"),
         gkr_dequant: flag(args, "--gkr-dequant"),
-        gkr_glue: flag(args, "--gkr-glue"),
+        gkr_residual_stream: flag(args, "--gkr-residual-stream"),
         gkr_walks: flag(args, "--gkr-walks"),
         gkr_attnout: flag(args, "--gkr-attnout"),
         // Stream BB (E11): the embedding gadget.  `--embed` needs the wiring
@@ -1209,7 +1210,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // rather than standing anything in.  Zero -- absent from the serialized
         // statement -- everywhere else.
         embed_vocab: if embed {
-            let g = l.glue.as_ref().expect("the embedding gadget bindings into the family");
+            let g = l.residual_stream.as_ref().expect("the embedding gadget bindings into the family");
             let tab = l.embed_tab.as_ref().expect("the embedding gadget needs embed.u16");
             assert_eq!(tab.len() % g.d, 0,
                        "embed.u16 holds {} values, which is not a multiple of d = {}",
@@ -1226,9 +1227,9 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // Stream NN: the rotation and the q/k/v quantize, present exactly when
         // the witness carries what they need.  Not a flag: on a real dump the
         // columns are there or they are not, and on a synthetic layer
-        // `--synth-glue` builds them exactly when the widths line up.  The
+        // `--synth-residual-stream` builds them exactly when the widths line up.  The
         // wiring family is a precondition -- the input side bindings into it.
-        rope: l.glue.as_ref().filter(|g| !g.head).and(l.rope.as_ref()).map(|r| {
+        rope: l.residual_stream.as_ref().filter(|g| !g.head).and(l.rope.as_ref()).map(|r| {
             compose::RopeParams {
                 nkv: r.nkv,
                 pos0: r.pos0,
@@ -2030,8 +2031,8 @@ fn compose_probes_cmd(args: &[String]) {
         // a tamper that changed nothing proved the honest witness, and calling
         // that "accepted" is how `drop-big` at layer 0 read as a soundness gap
         // (its aimed slot's operands shared an exponent); it is a broken probe
-        assert_ne!(out2.glue_tamper_fired, Some(0),
-                   "probe {name}: the glue tamper did not fire, so nothing was measured");
+        assert_ne!(out2.residual_stream_tamper_fired, Some(0),
+                   "probe {name}: the residual-stream tamper did not fire, so nothing was measured");
         let claims_b = serde_json::to_vec(&out2.claims).unwrap();
         let mut fixed = out2.fixed.clone();
         fixed.pre_root = honest_root.clone();
@@ -2053,7 +2054,7 @@ fn compose_probes_cmd(args: &[String]) {
             "probe": name, "expect_reject_by": expect,
             "accepted": accepted,
             "falsified": flipped,
-            "tamper_fired": out2.glue_tamper_fired,
+            "tamper_fired": out2.residual_stream_tamper_fired,
             // Stream NN-3: the `s_v` binding is an equality between two tree-0
             // column families, so no verdict field can carry it -- a verifier
             // holds it through `pre_root`.  The probe record carries the
@@ -2153,34 +2154,37 @@ fn compose_probes_cmd(args: &[String]) {
     //    copy of the residual stream is changed and everything *inside* that
     //    region stays consistent, so only the equality between two regions'
     //    claims can catch it.  The other two are the add's own argument, run
-    //    here rather than only in `glue-probes`, on the real layer's columns.
-    if l.glue.is_some() {
+    //    here rather than only in `residual-stream-probes`, on the real layer's columns.
+    if l.residual_stream.is_some() {
         // stream II: the head chunk's family has one reduction and no add, so
         // there is no second region's copy of the stream to break -- that probe
         // is the layer's, and the head chunk's equivalent is the norm scale's own
         // copy, which probe 12 below runs on whichever family this chunk has.
-        if !l.glue.as_ref().is_some_and(|g| g.head) {
-            assert!(!probe("glue: gn2's copy of the residual stream", &l,
-                           &compose::ProverTamper { glue_stream: Some((2, 4321)),
+        if !l.residual_stream.as_ref().is_some_and(|g| g.head) {
+            assert!(!probe("residual stream: gn2's copy of the residual stream", &l,
+                           &compose::ProverTamper { residual_stream_copy: Some((2, 4321)),
                                                     ..Default::default() },
                            "the binding gn1.xmid == gn2.in"),
                     "a broken residual thread accepted");
         }
-        assert!(!probe("glue: one add's result, one step up", &l,
+        assert!(!probe("residual stream: one add's result, one step up", &l,
                        &compose::ProverTamper {
-                           glue: Some((0, glue::Tamper::Result(97))), ..Default::default() },
+                           residual_stream: Some((0, residual_stream::Tamper::Result(97))),
+                           ..Default::default() },
                        "the add's output constraint"),
-                "a corrupted glue result accepted");
-        assert!(!probe("glue: the anchor at the smaller exponent", &l,
+                "a corrupted residual-stream result accepted");
+        assert!(!probe("residual stream: the anchor at the smaller exponent", &l,
                        &compose::ProverTamper {
-                           glue: Some((0, glue::Tamper::DropBig(1234))), ..Default::default() },
+                           residual_stream: Some((0, residual_stream::Tamper::DropBig(1234))),
+                           ..Default::default() },
                        "the POW lookup (the dropped operand is the smaller one)"),
                 "drop-big accepted");
-        assert!(!probe("glue: a leaf that is not a bf16 value", &l,
+        assert!(!probe("residual stream: a leaf that is not a bf16 value", &l,
                        &compose::ProverTamper {
-                           glue: Some((1, glue::Tamper::NotBf16(55))), ..Default::default() },
+                           residual_stream: Some((1, residual_stream::Tamper::NotBf16(55))),
+                           ..Default::default() },
                        "the VAL lookup"),
-                "an illegal glue leaf accepted");
+                "an illegal residual-stream leaf accepted");
     }
 
     // 12-15. stream E's regions, on whichever of them this invocation built.
@@ -2188,7 +2192,7 @@ fn compose_probes_cmd(args: &[String]) {
     //    later region cannot silently shift what these probes point at.
     {
         let gplan = compose::Plan::new(&params);
-        if let Some(g) = gplan.glue.as_ref() {
+        if let Some(g) = gplan.residual_stream.as_ref() {
             // `Tamper::Stream` counts leaves across every group of the row and
             // fires only inside group 0, so the index has to be derived from the
             // layout rather than picked: a norm scale row is `[nreal x, 1 ms]` since
@@ -2208,13 +2212,13 @@ fn compose_probes_cmd(args: &[String]) {
                 // so only `nt.In(0) == gn.In(0)` can catch it
                 assert!(!probe(&format!("norm_scale {n}: its own copy of the stream"), &l,
                                &compose::ProverTamper {
-                                   glue: Some((i, glue::Tamper::Stream(in0))),
+                                   residual_stream: Some((i, residual_stream::Tamper::Stream(in0))),
                                    ..Default::default() },
                                &format!("the binding {n}.In(0) == its reduction's In(0)")),
                         "a norm_scale reading a different stream accepted");
                 assert!(!probe(&format!("norm_scale {n}: one multiply's result"), &l,
                                &compose::ProverTamper {
-                                   glue: Some((i, glue::Tamper::Result(97))),
+                                   residual_stream: Some((i, residual_stream::Tamper::Result(97))),
                                    ..Default::default() },
                                "the multiply's output constraint"),
                         "a corrupted norm_scale result accepted");
@@ -2225,13 +2229,13 @@ fn compose_probes_cmd(args: &[String]) {
                 // the binding to the reduction's published sum of squares.
                 assert!(!probe(&format!("norm_scale {n}: a wrong r on one row"), &l,
                                &compose::ProverTamper {
-                                   glue: Some((i, glue::Tamper::Ms(37))),
+                                   residual_stream: Some((i, residual_stream::Tamper::Ms(37))),
                                    ..Default::default() },
                                &format!("the binding {n}.In(1) == G the reduction's Out(0)")),
                         "a norm_scale with a wrong r accepted");
                 assert!(!probe(&format!("norm_scale {n}: two rows of one token, two rs"), &l,
                                &compose::ProverTamper {
-                                   glue: Some((i, glue::Tamper::MsRow(37))),
+                                   residual_stream: Some((i, residual_stream::Tamper::MsRow(37))),
                                    ..Default::default() },
                                &format!("the binding {n}.In(1) == G the reduction's Out(0)")),
                         "a token whose rows disagree about r accepted");
@@ -2242,7 +2246,7 @@ fn compose_probes_cmd(args: &[String]) {
             // and the one that says `w` is the model's and not the prover's.
             let wtag = g.regions[g.norm_scales[0]].tag.clone();
             assert!(!probe(&format!("norm_scale {wtag}: one norm-weight cell"), &l,
-                           &compose::ProverTamper { glue_w: Some(4321),
+                           &compose::ProverTamper { residual_stream_w: Some(4321),
                                                     ..Default::default() },
                            "the pinned preprocessed root"),
                     "a bent norm weight accepted");
@@ -2262,20 +2266,20 @@ fn compose_probes_cmd(args: &[String]) {
                 let _ = ti;
                 assert!(!probe(&format!("deq binding: the wiring copy of {name}'s output"), &l,
                                &compose::ProverTamper {
-                                   glue_add: Some((ri, vi)), ..Default::default() },
+                                   residual_stream_add: Some((ri, vi)), ..Default::default() },
                                &format!("the binding {name}_out == the {name} region's output")),
                         "a corrupted dequant output copy accepted");
             }
             if let Some(i) = g.swiglu {
                 assert!(!probe("swiglu: the product, one step up", &l,
                                &compose::ProverTamper {
-                                   glue: Some((i, glue::Tamper::Result(4097))),
+                                   residual_stream: Some((i, residual_stream::Tamper::Result(4097))),
                                    ..Default::default() },
                                "the multiply's output constraint"),
                         "a corrupted swiglu product accepted");
                 assert!(!probe("swiglu: a leaf that is not a bf16 value", &l,
                                &compose::ProverTamper {
-                                   glue: Some((i, glue::Tamper::NotBf16(1234))),
+                                   residual_stream: Some((i, residual_stream::Tamper::NotBf16(1234))),
                                    ..Default::default() },
                                "the UN / VAL lookup"),
                         "an illegal swiglu leaf accepted");
@@ -2357,9 +2361,9 @@ fn compose_probes_cmd(args: &[String]) {
         if let Some(wi) = rplan.walks.iter().position(|w| w.name == "o") {
             let mut lb = layer_of(args).0;
             let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
-            let bent = lb.glue.is_some().then(|| {
-                lb.synth_glue_bent(src_of(args).seed, arg_scalar(args, "--glue-a", 32usize),
-                                   round, 41)
+            let bent = lb.residual_stream.is_some().then(|| {
+                lb.synth_residual_stream_bent(src_of(args).seed, arg_scalar(args, "--residual-stream-a", 32usize),
+                                              round, 41)
             }).flatten();
             match bent {
                 Some(at) => {
@@ -2388,9 +2392,9 @@ statable here"),
         //   the quantize's table     one scale exponent           root_ok
         //   the division table       one quotient                 sums_cancel
         if !rplan.quants.is_empty() {
-            let g = rplan.glue.as_ref().expect("the quantize regions need the wiring family");
+            let g = rplan.residual_stream.as_ref().expect("the quantize regions need the wiring family");
             let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
-            let (seed, ga) = (src_of(args).seed, arg_scalar(args, "--glue-a", 32usize));
+            let (seed, ga) = (src_of(args).seed, arg_scalar(args, "--residual-stream-a", 32usize));
             // the input side of each rotation: one copy of the matmul's dequant
             // output bent, the whole rotation and the quantize recomputed from
             // it, so every constraint in three regions still holds and only the
@@ -2398,7 +2402,7 @@ statable here"),
             for rr in &g.ropes {
                 assert!(!probe(&format!("rope {}: one dequant output copy", rr.name), &l,
                                &compose::ProverTamper {
-                                   glue_add: Some((rr.mul, 4321)), ..Default::default() },
+                                   residual_stream_add: Some((rr.mul, 4321)), ..Default::default() },
                                &format!("the binding deq_out[{}] == rp{}m.In(0)", rr.name, rr.name)),
                         "a rotation of values the matmul did not write accepted");
             }
@@ -2448,15 +2452,15 @@ statable here"),
                 // measure nothing about this chunk
                 if arg_str(args, "--witness").is_some() {
                     eprintln!("  band {name}: SKIP -- the consumer-side control needs the \
-synthetic generator (Layer::synth_glue_band_bent); on a dump the bands are B1's");
+synthetic generator (Layer::synth_residual_stream_band_bent); on a dump the bands are B1's");
                     continue;
                 }
                 let mut lb = layer_of(args).0;
-                if lb.glue.is_none() {
+                if lb.residual_stream.is_none() {
                     eprintln!("  band {name}: SKIP -- no synthetic wiring family here");
                     continue;
                 }
-                lb.synth_glue_band_bent(seed, ga, round, which, 41);
+                lb.synth_residual_stream_band_bent(seed, ga, round, which, 41);
                 // stream SS: with a folded `v` there is no quantize region on
                 // that side, so the falsified field is the dequant output binding
                 // and not `nn_out_ok` -- the fold publishes the int8 cell
@@ -2478,15 +2482,15 @@ synthetic generator (Layer::synth_glue_band_bent); on a dump the bands are B1's"
             // `nn_q_ok` can see that.
             if arg_str(args, "--witness").is_some() {
                 eprintln!("  prefix Q: SKIP -- the consumer-side control needs the \
-synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B1's");
+synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the bands are B1's");
             } else {
                 let mut lp = layer_of(args).0;
-                if lp.glue.is_none() {
+                if lp.residual_stream.is_none() {
                     eprintln!("  prefix Q: SKIP -- no synthetic wiring family here");
                 } else if lp.bands.iter().all(|b| b.corner) {
                     eprintln!("  prefix Q: SKIP -- this shape has no prefix band");
                 } else {
-                    lp.synth_glue_prefix_q_bent(seed, ga, round, 41);
+                    lp.synth_residual_stream_prefix_q_bent(seed, ga, round, 41);
                     assert!(!probe("prefix band Q: one query the corner does not carry", &lp,
                                    &Default::default(),
                                    "the binding prefix.Q == corner.Q, per band group"),
@@ -2510,7 +2514,7 @@ synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B
     }
 
     // 11c. Stream UU (E11): one cell of a *residual* boundary tree moved alone,
-    //     the glue region it is bound to left exactly as it was.  Stream H's
+    //     the residual-stream region it is bound to left exactly as it was.  Stream H's
     //     `bounds` probe made this assertion for the pair of sides a layer
     //     chunk carries, but only on real witness dirs; here it runs on every
     //     shape the probe command is given, which is what puts the head chunk's
@@ -2520,11 +2524,11 @@ synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B
     //     which is the whole statement that the root is bound to the proof and
     //     not merely appended to it.
     if params.layer_boundary {
-        let n_glue = compose::Plan::new(&params).layer_sides.len();
-        assert!(n_glue > 0,
+        let n_residual_stream = compose::Plan::new(&params).layer_sides.len();
+        assert!(n_residual_stream > 0,
                 "the layer boundary produced no residual side: the chunk has no residual-stream components");
-        for k in 0..n_glue {
-            assert!(!probe(&format!("residual boundary side {k}, its glue region untouched"),
+        for k in 0..n_residual_stream {
+            assert!(!probe(&format!("residual boundary side {k}, its residual-stream region untouched"),
                            &l,
                            &compose::ProverTamper { layer_boundary: Some((k, 4321)),
                                                     ..Default::default() },
@@ -2687,7 +2691,7 @@ synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B
         // whose attention output nothing downstream reads has nothing to
         // compare it against.  Both cases are run, and the assert is the
         // chunk's own shape rather than a constant.
-        let seam_live = compose::Plan::new(&params).glue.is_some()
+        let seam_live = compose::Plan::new(&params).residual_stream.is_some()
             && l.mats.iter().any(|m| m.name == "o" && m.n_in == l.ao.nh * l.ao.hd);
         let jo_tok = probe("attnout: a whole token's jo moved by one", &l,
                            &compose::ProverTamper { ao_jo_tok: Some(1),
@@ -2734,7 +2738,7 @@ fn layer_clone(l: &layer::Layer) -> layer::Layer {
         }).collect(),
         ao: layer::AttnOut { nh: l.ao.nh, s: l.ao.s, hd: l.ao.hd, acc: l.ao.acc.clone(),
                              den: l.ao.den.clone(), jo: l.ao.jo.clone(), jv: l.ao.jv.clone() },
-        glue: l.glue.as_ref().map(|g| layer::GlueCols {
+        residual_stream: l.residual_stream.as_ref().map(|g| layer::ResidualStreamCols {
             d: g.d, dff: g.dff, tokens: g.tokens,
             xin: g.xin.clone(), o_out: g.o_out.clone(), xmid: g.xmid.clone(),
             d_out: g.d_out.clone(), xout: g.xout.clone(),
@@ -2835,11 +2839,11 @@ fn requant_probes_cmd(args: &[String]) {
     emit("requant_probes", json!({"variant": v.name(), "probes": out}));
 }
 
-// ------------------------------------------------------------- B10 glue ----
+// ------------------------------------------------------------- B10 residual stream ----
 // The wiring between the composed layer's regions (B6.5 open gap 1), priced per
 // gadget and checked against B1's own committed columns where there is one.
-fn glue_cmd(args: &[String]) {
-    use glue::{GlueWitness, Kind, Prog, Tiling, UnKind};
+fn residual_stream_cmd(args: &[String]) {
+    use residual_stream::{ResidualStreamWitness, Kind, Prog, Tiling, UnKind};
     let dir = arg_str(args, "--witness");
     let kmax: u32 = arg_scalar(args, "--kmax", 18u32);
     let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
@@ -2847,16 +2851,16 @@ fn glue_cmd(args: &[String]) {
     let per_row: usize = arg_scalar(args, "--per-row", 16usize);
     let rows: usize = arg_scalar(args, "--rows", 4096usize);
     let tokens: usize = arg_scalar(args, "--tokens", 512usize);
-    let a: usize = arg_scalar(args, "--glue-a", 32usize);
+    let a: usize = arg_scalar(args, "--residual-stream-a", 32usize);
     let mut points = vec![];
 
-    let check = |o: &glue::Outcome, what: &str| {
+    let check = |o: &residual_stream::Outcome, what: &str| {
         if !o.accepts() {
             eprintln!("  {what}: stark={} sums={} off={} binding={} err={:?}", o.proven.stark_ok,
                       o.sums.cancels(), o.off_table, o.binding_ok, o.proven.prove_error);
         }
-        assert!(o.accepts(), "honest glue proof rejected ({what})");
-        assert_eq!(o.ref_n - o.ref_ok, 0, "glue disagrees with its own reference ({what})");
+        assert!(o.accepts(), "honest residual-stream proof rejected ({what})");
+        assert_eq!(o.ref_n - o.ref_ok, 0, "residual stream disagrees with its own reference ({what})");
         assert_eq!(o.bad_exp, 0, "{what}: {} results leave bf16's normal range", o.bad_exp);
     };
 
@@ -2875,8 +2879,8 @@ fn glue_cmd(args: &[String]) {
             inv_d: bf16::from_f64(1.0 / per_row as f64), eps: bf16::from_f64(1e-5) }), 19),
     ];
     for (name, prog, seed) in &cases {
-        let w = GlueWitness::synthetic(rows, prog, round, *seed);
-        let o = glue::run(&w, prog, round, kmax, None);
+        let w = ResidualStreamWitness::synthetic(rows, prog, round, *seed);
+        let o = residual_stream::run(&w, prog, round, kmax, None);
         check(&o, name);
         points.push(o.json(&w.source, name));
     }
@@ -2890,10 +2894,10 @@ fn glue_cmd(args: &[String]) {
         let man: Value = serde_json::from_str(
             &std::fs::read_to_string(format!("{d}/manifest.json")).expect("manifest"))
             .expect("manifest json");
-        let dm = man["glue"]["d"].as_u64().expect("manifest: glue.d -- extract with --glue")
-            as usize;
+        let dm = man["residual_stream"]["d"].as_u64()
+            .expect("manifest: residual_stream.d -- extract with --residual-stream") as usize;
         let rd = |n: &str| -> Vec<u16> {
-            glue::read_u16(d, n).unwrap_or_else(|e| panic!("{e}"))
+            residual_stream::read_u16(d, n).unwrap_or_else(|e| panic!("{e}"))
         };
         let t = Tiling::new(tokens, dm, a);
         let l1 = Prog::norm_resid(t.nreal, t.b);
@@ -2902,18 +2906,18 @@ fn glue_cmd(args: &[String]) {
         for (k, (add, want, wname)) in
             [("o_out", "xmid", "n1"), ("d_out", "xout", "n2")].iter().enumerate()
         {
-            let w1 = GlueWitness::new(t.rows1(), vec![stream.clone(), t.lay(&rd(add))],
-                                      &l1, round, format!("B1 {add} [{tokens} x {dm}]"));
-            let o1 = glue::run(&w1, &l1, round, kmax, None);
+            let w1 = ResidualStreamWitness::new(t.rows1(), vec![stream.clone(), t.lay(&rd(add))],
+                                                &l1, round, format!("B1 {add} [{tokens} x {dm}]"));
+            let o1 = residual_stream::run(&w1, &l1, round, kmax, None);
             check(&o1, wname);
             let mut j = o1.json(&w1.source, &format!("norm{}+resid{}", k + 1, k + 1));
             // the region's own outputs, value by value, against B1's column
-            let mut tab = glue::GlueTables::new(kmax, round, &l1.un_kinds());
-            let r1 = glue::glue_region(&w1, &l1, round, "r", &mut tab, None);
+            let mut tab = residual_stream::ResidualStreamTables::new(kmax, round, &l1.un_kinds());
+            let r1 = residual_stream::residual_stream_region(&w1, &l1, round, "r", &mut tab, None);
             let got = t.unlay(&r1.outs[1]);
             let wv = rd(want);
             let bad = (0..tokens * dm)
-                .filter(|i| glue::canon(got[*i]) != glue::canon(wv[*i]))
+                .filter(|i| residual_stream::canon(got[*i]) != residual_stream::canon(wv[*i]))
                 .count();
             let neg0 = wv[..tokens * dm].iter().filter(|q| **q == 0x8000).count();
             j["b1_values_checked"] = json!(tokens * dm);
@@ -2923,14 +2927,14 @@ fn glue_cmd(args: &[String]) {
             points.push(j);
             b1.push(json!({"column": want, "values": tokens * dm, "mismatch": bad}));
 
-            let w2 = GlueWitness::new(tokens, vec![t.roots_to_l2(&r1.outs[0])], &l2, round,
-                                      format!("the level-1 roots [{tokens} x {}]", t.a));
-            let o2 = glue::run(&w2, &l2, round, kmax, None);
+            let w2 = ResidualStreamWitness::new(tokens, vec![t.roots_to_l2(&r1.outs[0])], &l2, round,
+                                                format!("the level-1 roots [{tokens} x {}]", t.a));
+            let o2 = residual_stream::run(&w2, &l2, round, kmax, None);
             check(&o2, &format!("{wname} level 2"));
             points.push(o2.json(&w2.source, &format!("norm{}-l2", k + 1)));
-            let mut tab2 = glue::GlueTables::new(kmax, round, &[]);
-            let r2 = glue::glue_region(&w2, &l2, round, "r", &mut tab2, None);
-            drift.push(glue::norm_drift(d, dm, tokens, round, wname, Some(&r2.outs[0]))
+            let mut tab2 = residual_stream::ResidualStreamTables::new(kmax, round, &[]);
+            let r2 = residual_stream::residual_stream_region(&w2, &l2, round, "r", &mut tab2, None);
+            drift.push(residual_stream::norm_drift(d, dm, tokens, round, wname, Some(&r2.outs[0]))
                        .expect("norm drift"));
             stream = t.lay(&got);
         }
@@ -2947,14 +2951,14 @@ fn glue_cmd(args: &[String]) {
         "add": pick("add"), "mul": pick("mul"), "unary": 4.0, "value": 2.0,
         "note": "add and mul measured on a power-of-two tiled region, each output range-checked against VAL; unary is its two output columns plus the lookup's 2 cells; a committed bf16 value is 2 cells",
     });
-    emit("glue", json!({"points": points, "primitives": prim,
-                        "tables": glue::check_tables(round, 20000),
-                        "dmax": glue::DMAX, "against_b1": b1,
-                        "norm_reduction_drift": drift}));
+    emit("residual_stream", json!({"points": points, "primitives": prim,
+                                   "tables": residual_stream::check_tables(round, 20000),
+                                   "dmax": residual_stream::DMAX, "against_b1": b1,
+                                   "norm_reduction_drift": drift}));
 }
 
-fn glue_probes_cmd(args: &[String]) {
-    use glue::{GlueWitness, Kind, Prog, Tamper, UnKind};
+fn residual_stream_probes_cmd(args: &[String]) {
+    use residual_stream::{ResidualStreamWitness, Kind, Prog, Tamper, UnKind};
     let kmax: u32 = arg_scalar(args, "--kmax", 18u32);
     let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
     let rows: usize = arg_scalar(args, "--rows", 256usize);
@@ -2966,8 +2970,8 @@ fn glue_probes_cmd(args: &[String]) {
         ("norm + resid", Prog::norm_resid(8, 8), 19),
     ];
     for (label, prog, seed) in cases {
-        let w = GlueWitness::synthetic(rows, &prog, round, seed);
-        let honest = glue::run(&w, &prog, round, kmax, None);
+        let w = ResidualStreamWitness::synthetic(rows, &prog, round, seed);
+        let honest = residual_stream::run(&w, &prog, round, kmax, None);
         if !honest.accepts() {
             eprintln!("  {label}: stark={} sums={} off={} binding={} refbad={} err={:?}",
                       honest.proven.stark_ok, honest.sums.cancels(), honest.off_table,
@@ -2985,8 +2989,8 @@ fn glue_probes_cmd(args: &[String]) {
                  Tamper::DropBig(9), Tamper::Sign(11), Tamper::NotBf16(5)]
         };
         for t in tampers {
-            eprintln!("glue probe {label}: {}", t.name());
-            let o = glue::run(&w, &prog, round, kmax, Some(t));
+            eprintln!("residual-stream probe {label}: {}", t.name());
+            let o = residual_stream::run(&w, &prog, round, kmax, Some(t));
             assert!(o.fired > 0, "{label}: {} did not fire, so nothing was measured", t.name());
             assert!(!o.accepts(), "{label}: {} must be rejected", t.name());
             out.push(json!({"region": label, "probe": t.name(),
@@ -2999,7 +3003,7 @@ fn glue_probes_cmd(args: &[String]) {
                             "prove_error": o.proven.prove_error}));
         }
     }
-    emit("glue_probes", json!({"probes": out, "dmax": glue::DMAX}));
+    emit("residual_stream_probes", json!({"probes": out, "dmax": residual_stream::DMAX}));
 }
 
 // ---------------------------------------------------------------- selftest ----
@@ -3152,11 +3156,11 @@ fn main() {
         "argmax-probes" => argmax_probes_cmd(&args),
         "embed" => embed_cmd(&args),
         "embed-probes" => embed_probes_cmd(&args),
-        "glue" => glue_cmd(&args),
+        "residual-stream" => residual_stream_cmd(&args),
         "boundary" => boundary::cmd(&args),
         "boundary-chain" => boundary::chain_cmd(&args),
         "boundary-grid" => boundary::grid_cmd(&args),
-        "glue-probes" => glue_probes_cmd(&args),
+        "residual-stream-probes" => residual_stream_probes_cmd(&args),
         "selftest" => selftest(&args),
         "fpcompare" => fpcompare_cmd(&args),
         "gkr" => gkrband::cmd(&args),
@@ -3164,7 +3168,7 @@ fn main() {
             eprintln!("unknown subcommand {other:?}; \
                        expected tables|dequant|width|kmax|probes|pack|attn-probes|exprprobe|cudacheck|cudaemit|logupcheck|genemit|\
                        argmax|argmax-probes|embed|embed-probes|\
-                       compose|pre-split|expect-root|model-roots|compose-probes|boundary-chain|boundary-grid|psweep|requant|requant-probes|glue|glue-probes|selftest");
+                       compose|pre-split|expect-root|model-roots|compose-probes|boundary-chain|boundary-grid|psweep|requant|requant-probes|residual-stream|residual-stream-probes|selftest");
             std::process::exit(2);
         }
     }

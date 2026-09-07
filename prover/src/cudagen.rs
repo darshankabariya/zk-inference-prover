@@ -1452,7 +1452,7 @@ pub fn cmd(args: &[String]) {
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_2B02);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                          plan.glue.as_ref().map(|g| g.uns.as_slice()),
+                                          plan.residual_stream.as_ref().map(|g| g.uns.as_slice()),
                                           plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
                                           plan.q_tabs.len());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
@@ -1490,15 +1490,15 @@ pub fn cmd(args: &[String]) {
             go!(format!("table{i}"), &b.tables[i]);
         }
         // Stream OO: the list has to be every *dispatched* component, and until
-        // here it was eight families of thirteen -- the glue, the glue's
+        // here it was eight families of thirteen -- the residual stream, the residual stream's
         // tables, the argmax, the embedding gadget's two and stream II's
         // requantize seams and their tables were dispatched to a generated
         // kernel and never once checked against `CpuDomainEvaluator`. That is
         // the only thing in the tree that compares a lowering against the AIR
         // it claims to be, and it is a desk check: `prewarm_blobs` and
         // `fp_rows` have carried the full list for two streams.
-        for i in 0..b.glue.len() {
-            go!(format!("glue{i}"), &b.glue[i]);
+        for i in 0..b.residual_stream.len() {
+            go!(format!("residual_stream{i}"), &b.residual_stream[i]);
         }
         for i in 0..b.gtables.len() {
             go!(format!("g_table{i}"), &b.gtables[i]);
@@ -1827,7 +1827,7 @@ fn off_name(off: isize) -> String {
 
 // -------------------------------------------------- the split (B11 stream K) ----
 //
-// The glue's constraint kernels (~10,400 instructions) and the head's dequant
+// The residual stream's constraint kernels (~10,400 instructions) and the head's dequant
 // (54,847) are past what ptxas will compile in reasonable time. The body is a
 // straight-line SSA list followed by a plain weighted sum of the constraints
 // against `random_coeff_powers`, and the quotient write-back already has an
@@ -2412,7 +2412,7 @@ fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
     // Stream OO: the bisect switch. `B7_KERNEL_SKIP` is a comma-separated list
     // of `cuda_eval_name`s whose constraint kernel declines to the CPU on this
     // run, exactly as an absent kernel does -- the same announced fallback the
-    // store has taken for the glue and corner shapes since stream B. It is a
+    // store has taken for the residual stream and corner shapes since stream B. It is a
     // diagnostic and not a configuration: the CPU path evaluates the same AIR,
     // so a run that sets it must reproduce the run that does not, and the
     // family whose name makes an otherwise-rejected chunk prove is the family
@@ -2426,7 +2426,7 @@ fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
     }
     let shape = match crate::cudakernels::shape_of(name, fp) {
         Some(s) => s,
-        // B10 step 5 (stream B): the glue and the corner-witness shapes lower
+        // B10 step 5 (stream B): the residual stream and the corner-witness shapes lower
         // to kernels ptxas cannot compile in reasonable time (52 min and
         // counting on one), so `B7_KERNEL_FALLBACK=1` lets a component with no
         // generated kernel run on the fork's scalar CPU fallback -- the same
@@ -2454,7 +2454,7 @@ fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
 /// design point is lowered for emit. `claims_for` leaves the four binding vectors
 /// empty and the builders read the gaps as zero -- and a zero-valued scalar
 /// slot is exactly what `lit` folds away, so the emitted IR was missing the
-/// claimed side every real proof carries: the glue lowered to ~10,400
+/// claimed side every real proof carries: the residual stream lowered to ~10,400
 /// instructions at emit and 29,304 at prove, and no binding-bearing kernel could
 /// ever match at prove time. The values are otherwise irrelevant -- the blob
 /// replays the real ones -- so distinct nonzero placeholders, sized exactly
@@ -2474,7 +2474,7 @@ fn fill_binding_claims(plan: &crate::compose::Plan, claims: &mut crate::compose:
         }
         a
     };
-    if let Some(g) = plan.glue.as_ref() {
+    if let Some(g) = plan.residual_stream.as_ref() {
         claims.stream_bindings =
             g.regions.iter().map(|r| r.bindings.iter().map(|_| felt()).collect()).collect();
         claims.deq_out = g.output_bindings.iter().map(|_| felt()).collect();
@@ -2536,7 +2536,7 @@ pub fn emit_cmd(args: &[String]) {
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_2B03);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                          plan.glue.as_ref().map(|g| g.uns.as_slice()),
+                                          plan.residual_stream.as_ref().map(|g| g.uns.as_slice()),
                                           plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
                                           plan.q_tabs.len());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
@@ -2626,8 +2626,8 @@ pub fn emit_cmd(args: &[String]) {
         for i in 0..b.mats.len() {
             go!(b.mats[i], format!("dequant{i}"));
         }
-        for i in 0..b.glue.len() {
-            go!(b.glue[i], format!("glue{i}"));
+        for i in 0..b.residual_stream.len() {
+            go!(b.residual_stream[i], format!("residual_stream{i}"));
         }
         for i in 0..b.gtables.len() {
             go!(b.gtables[i], format!("gtable{i}"));
@@ -2996,7 +2996,7 @@ pub fn logup_cmd(args: &[String]) {
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_4B04);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                          plan.glue.as_ref().map(|g| g.uns.as_slice()),
+                                          plan.residual_stream.as_ref().map(|g| g.uns.as_slice()),
                                           plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
                                           plan.q_tabs.len());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
@@ -3386,7 +3386,7 @@ pub fn gen_emit_cmd(args: &[String]) {
     // up is a flag-off one.  Lowering the ablated form here produced an empty
     // IR and `emit_frac_family` asserts on it (open item 3).  Undo the ablation
     // for the lowering: these are the shapes the feed will ask for.
-    if params.gkr_bands || params.gkr_dequant || params.gkr_glue
+    if params.gkr_bands || params.gkr_dequant || params.gkr_residual_stream
         || params.gkr_walks || params.gkr_attnout
     {
         eprintln!(
@@ -3395,7 +3395,7 @@ pub fn gen_emit_cmd(args: &[String]) {
         );
         params.gkr_bands = false;
         params.gkr_dequant = false;
-        params.gkr_glue = false;
+        params.gkr_residual_stream = false;
         params.gkr_walks = false;
         params.gkr_attnout = false;
     }
@@ -3416,7 +3416,7 @@ pub fn gen_emit_cmd(args: &[String]) {
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_4B05);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                          plan.glue.as_ref().map(|g| g.uns.as_slice()),
+                                          plan.residual_stream.as_ref().map(|g| g.uns.as_slice()),
                                           plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
                                           plan.q_tabs.len());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
@@ -3526,8 +3526,8 @@ pub fn gen_emit_cmd(args: &[String]) {
         for i in 0..b.mats.len() {
             go!(b.mats[i], format!("dequant{i}"));
         }
-        for i in 0..b.glue.len() {
-            go!(b.glue[i], format!("glue{i}"));
+        for i in 0..b.residual_stream.len() {
+            go!(b.residual_stream[i], format!("residual_stream{i}"));
         }
         for i in 0..b.gtables.len() {
             go!(b.gtables[i], format!("gtable{i}"));

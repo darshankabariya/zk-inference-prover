@@ -36,7 +36,7 @@ refused with a message naming the skip that gets past the refusal:
 
 | `--unsound-skip-<name>` | what it gives up | when a witness forces it |
 |---|---|---|
-| `residual-stream` | the residual-stream components: edges 1 to 3 and 5 to 11 of the binding table | a dump extracted without `--glue`, or a bare synthetic segment |
+| `residual-stream` | the residual-stream components: edges 1 to 3 and 5 to 11 of the binding table | a dump extracted without `--residual-stream`, or a bare synthetic segment |
 | `layer-boundary` | the residual-stream boundary trees (edge 13) | never |
 | `kv-boundary` | the K/V boundary trees (edge 14) | a segment without its own block (`--corner`) |
 | `argmax` | the head's argmax (edge 16) | a head dump without `key_head.u16`, or a synthetic head |
@@ -57,13 +57,13 @@ trees (a shape tree whose root the verifier derives from the public parameters,
 and a model tree whose root is compared with the published model commitment).
 
 The synthetic shapes share one base command and differ in the flags after it.
-`GLUE` builds the residual-stream components on the synthetic segment and `GKR5`
-stands for the five flags
-`--gkr-bands --gkr-dequant --gkr-glue --gkr-walks --gkr-attnout`.
+`RESIDUAL_STREAM` builds the residual-stream components on the synthetic
+segment and `GKR5` stands for the five flags
+`--gkr-bands --gkr-dequant --gkr-residual-stream --gkr-walks --gkr-attnout`.
 
 ```sh
 SYN="--round away --variants intsplit6 --table-bits 16 --s 32 --ctx 128 --hd 32"
-GLUE="--nout 64 --glue-a 32 --kmax 16 --synth-glue"
+RESIDUAL_STREAM="--nout 64 --residual-stream-a 32 --kmax 16 --synth-residual-stream"
 zk-prover compose $SYN <flags>
 ```
 
@@ -73,9 +73,9 @@ binding table says); four heads over 128-wide matmuls bind every layer edge.
 
 | shape | flags after `$SYN` | digest (first 16 hex) | unbound edges | recorded |
 |---|---|---|---|---|
-| `sound` | `--bands 2,1 $GLUE --corner` | `82085896a8408f36` | 3, 5 | SIMD backend, 2026-09-07; pinned in `tests/` |
-| `sound_gkrfive` | `--bands 2,1 $GLUE --corner GKR5` | `6bee5972d6f616aa` | 3, 5 | same |
-| `sound_aligned` | `--bands 2,2 --nin 128 --nout 128 --glue-a 32 --kmax 16 --synth-glue --corner` | `9c3cdebd97a7d57b` | none | same |
+| `sound` | `--bands 2,1 $RESIDUAL_STREAM --corner` | `82085896a8408f36` | 3, 5 | SIMD backend, 2026-09-07; pinned in `tests/` |
+| `sound_gkrfive` | `--bands 2,1 $RESIDUAL_STREAM --corner GKR5` | `6bee5972d6f616aa` | 3, 5 | same |
+| `sound_aligned` | `--bands 2,2 --nin 128 --nout 128 --residual-stream-a 32 --kmax 16 --synth-residual-stream --corner` | `9c3cdebd97a7d57b` | none | same |
 
 **The unbound configuration.** The same shapes with the skips set reproduce the
 digests recorded on 2026-09-06, before the sound defaults; `RS`, `LB` and `KV`
@@ -91,10 +91,10 @@ stand for `--unsound-skip-residual-stream`, `--unsound-skip-layer-boundary` and
 | `gkrfive` | `--bands 2,1 --corner RS KV GKR5` | `5d7aa189c702c2a5` | same |
 | `kv_gkrbands` | `--bands 2,1 --corner RS --gkr-bands` | `b857c0b7a978642f` | same |
 | `kv_gkrfive` | `--bands 2,1 --corner RS GKR5` | `a379fa16dc2b0e98` | same |
-| `glue_corner` | `--bands 2,1 $GLUE --corner LB KV` | `5a4a05ea6274e7c6` | same |
-| `glue_kv` | `--bands 2,1 $GLUE --corner LB` | `94c32161ecbbef84` | same |
-| `glue_bounds` | `--bands 2,1 $GLUE --corner KV` | `775b1972badf31e4` | same |
-| `glue_gkrfive` | `--bands 2,1 $GLUE --corner LB KV GKR5` | `d1aff3e6580569a4` | same |
+| `residual_stream_corner` | `--bands 2,1 $RESIDUAL_STREAM --corner LB KV` | `5a4a05ea6274e7c6` | same |
+| `residual_stream_kv` | `--bands 2,1 $RESIDUAL_STREAM --corner LB` | `94c32161ecbbef84` | same |
+| `residual_stream_bounds` | `--bands 2,1 $RESIDUAL_STREAM --corner KV` | `775b1972badf31e4` | same |
+| `residual_stream_gkrfive` | `--bands 2,1 $RESIDUAL_STREAM --corner LB KV GKR5` | `d1aff3e6580569a4` | same |
 
 **The full-size reference.** The 8B dump below was extracted without its own
 block and predates the embedding rows, so under the defaults it is proved with

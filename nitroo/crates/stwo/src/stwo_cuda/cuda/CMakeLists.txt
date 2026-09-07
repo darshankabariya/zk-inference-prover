@@ -55,7 +55,7 @@ add_library(
         # end B7a m4c
         # B7a m4d: the walk, attnout and band fill kernels
         b65_wfill.cu
-        b65_gfill.cu
+        b65_residual_stream_fill.cu
         # end B7a m4d
         # B7a m4f: the shared tables' fill kernel
         b65_table_fill.cu

@@ -51,7 +51,7 @@ Without `--witness` the prover builds a small synthetic layer segment and
 proves it. This is the shape check CI pins:
 
 ```sh
-./target/release/zk-prover compose --round away --variants intsplit6 --table-bits 16 --s 32 --ctx 128 --hd 32 --bands 2,1 --nout 64 --glue-a 32 --kmax 16 --synth-glue --corner
+./target/release/zk-prover compose --round away --variants intsplit6 --table-bits 16 --s 32 --ctx 128 --hd 32 --bands 2,1 --nout 64 --residual-stream-a 32 --kmax 16 --synth-residual-stream --corner
 ```
 
 The JSON on stdout carries `result.point.accepts` and `result.point.proof_sha256`.

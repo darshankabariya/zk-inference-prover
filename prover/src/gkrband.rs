@@ -97,7 +97,7 @@ impl Site {
             crate::gkrlink::Reg::Band(b) =>
                 format!("band{b}/{}", ["chan", "key", "out", "row"][self.which]),
             crate::gkrlink::Reg::Deq(m) => format!("deq{m}"),
-            crate::gkrlink::Reg::Glue(g) => format!("glue{g}"),
+            crate::gkrlink::Reg::ResidualStream(g) => format!("residual_stream{g}"),
             crate::gkrlink::Reg::Walk(w) => format!("walk{w}"),
             crate::gkrlink::Reg::Ao => "attnout".to_string(),
         }
@@ -495,36 +495,37 @@ pub fn deq_site(
     }, eval);
 }
 
-/// B11 stream V, lever 3: one glue region's lookups, wherever its columns are.
+/// B11 stream V, lever 3: one residual-stream region's lookups, wherever its columns are.
 ///
-/// `glue_interaction` stops building running-sum columns under `--gkr-glue` and
-/// `compose` calls this in the collection pass instead. Every glue look is unit
+/// `residual_stream_interaction` stops building running-sum columns under `--gkr-residual-stream` and
+/// `compose` calls this in the collection pass instead. Every residual-stream look is unit
 /// -- the numerator is the literal one at all six kinds -- so every instance is
 /// `Layer::LogUpSingles`, and the unit list is asserted against the fraction
-/// IR's own numerators rather than assumed: `gkrlink::glue_look_count` is what
+/// IR's own numerators rather than assumed: `gkrlink::residual_stream_look_count` is what
 /// the *verifier* derives, `ir_units` is what the fractions are, and the two
 /// disagreeing is a stop before a proof rather than after one.
-pub fn glue_site(
+pub fn residual_stream_site(
     c: &mut Collect,
     reg: usize,
-    eval: &crate::glue::GlueEval,
-    r: &crate::glue::GlueRegion,
+    eval: &crate::residual_stream::ResidualStreamEval,
+    r: &crate::residual_stream::ResidualStreamRegion,
 ) {
     let log_rows = r.log_rows;
     let ir = crate::scalars::cached_ir(eval, log_rows, log_rows, true, || {
         crate::devfrac::ir_of(eval, log_rows)
     });
-    let want = crate::gkrlink::glue_look_count(&r.prog);
+    let want = crate::gkrlink::residual_stream_look_count(&r.prog);
     let units = crate::gkrlink::ir_units(&ir);
     assert_eq!(units.len(), want,
-               "glue/{}: the fraction IR has {} lookups, the plan's program {want}",
+               "residual_stream/{}: the fraction IR has {} lookups, the plan's program {want}",
                r.tag, units.len());
     assert!(units.iter().all(|u| *u),
-            "glue/{}: a lookup's numerator is not the constant one, so the site's              instance split is not the one `sites_of` derives", r.tag);
+            "residual_stream/{}: a lookup's numerator is not the constant one, so the \
+             site's instance split is not the one `sites_of` derives", r.tag);
     fam_site(c, FamSite {
-        reg: crate::gkrlink::Reg::Glue(reg),
-        tag: format!("glue/{}", r.tag),
-        mut_env: "B11_GLUEMUT",
+        reg: crate::gkrlink::Reg::ResidualStream(reg),
+        tag: format!("residual_stream/{}", r.tag),
+        mut_env: "B11_RESIDUAL_STREAM_MUT",
         mut_key: reg,
         log_rows,
         unit: units,
@@ -1672,14 +1673,14 @@ pub fn mix_shape(channel: &mut impl Channel, sites: &[Site]) {
         // families' region indices are unrelated and a transcript that could
         // not tell `band0/chan` from `deq0` would be mixing the same felt for
         // two different shapes.
-        // B11 stream V, lever 3: the glue family takes the next code, 2. Bands
+        // B11 stream V, lever 3: the residual-stream family takes the next code, 2. Bands
         // stay 0 and dequant 1, so a bands-only or bands+dequant statement
         // mixes exactly the felts stream U's did -- which is what the four
         // bands and two dequant wall digests gate.
         let (fam, reg) = match s.reg {
             crate::gkrlink::Reg::Band(b) => (0u32, b as u32),
             crate::gkrlink::Reg::Deq(m) => (1u32, m as u32),
-            crate::gkrlink::Reg::Glue(g) => (2u32, g as u32),
+            crate::gkrlink::Reg::ResidualStream(g) => (2u32, g as u32),
             crate::gkrlink::Reg::Walk(w) => (3u32, w as u32),
             crate::gkrlink::Reg::Ao => (4u32, 0u32),
         };
@@ -1947,18 +1948,18 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
             });
         }
     }
-    // ---- B11 stream V, lever 3: the glue family, after dequant -- memo
+    // ---- B11 stream V, lever 3: the residual-stream family, after dequant -- memo
     // section 8's order, which is the order the interaction pass collects in.
-    // Every glue look is unit, and the count comes from the region's program,
-    // which is what the verifier has; `glue_site` asserts the fractions agree.
-    if plan.p.gkr_glue {
-        if let Some(gp) = plan.glue.as_ref() {
+    // Every residual-stream look is unit, and the count comes from the region's program,
+    // which is what the verifier has; `residual_stream_site` asserts the fractions agree.
+    if plan.p.gkr_residual_stream {
+        if let Some(gp) = plan.residual_stream.as_ref() {
             for (g, r) in gp.regions.iter().enumerate() {
                 out.push(Site {
-                    reg: crate::gkrlink::Reg::Glue(g),
+                    reg: crate::gkrlink::Reg::ResidualStream(g),
                     which: 0,
                     log_rows: r.log_rows,
-                    unit: vec![true; crate::gkrlink::glue_look_count(&r.prog)],
+                    unit: vec![true; crate::gkrlink::residual_stream_look_count(&r.prog)],
                 });
             }
         }

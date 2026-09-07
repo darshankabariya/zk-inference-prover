@@ -5,7 +5,7 @@
 //! does and which part of the note it is.
 //!
 //! The layer statement already runs from a committed residual-stream input to a
-//! committed residual-stream output — the glue plan's `stream_in` and
+//! committed residual-stream output — the residual-stream plan's `stream_in` and
 //! `stream_out` Horner claims. Those claims cannot chain, because the challenge
 //! they are taken under is drawn inside the proof that carries them, so two
 //! chunks weigh their boundaries differently. Worse, the repair that suggests
@@ -50,8 +50,8 @@ use stwo::core::fields::m31::M31;
 use stwo::prover::backend::Column;
 
 use crate::common::{Eval, eval_of};
-use crate::compose::{Fixed, GluePlan};
-use crate::glue::{GlueRegion, BindingKind};
+use crate::compose::{Fixed, ResidualStreamPlan};
+use crate::residual_stream::{ResidualStreamRegion, BindingKind};
 
 /// The multiplier that folds a value's `(sm, ef)` pair into one cell.
 ///
@@ -70,9 +70,9 @@ pub const PACK: i64 = 512;
 /// precede them.
 pub const FIRST_TREE: usize = 4;
 
-/// One side of a chunk's boundary: which tree it is committed in, which glue
-/// region carries it, which of that region's value sequences it is, and the
-/// shape that follows.
+/// One side of a chunk's boundary: which tree it is committed in, which
+/// residual-stream region carries it, which of that region's value sequences
+/// it is, and the shape that follows.
 #[derive(Clone, Copy, Debug)]
 pub struct Boundary {
     pub tree: usize,
@@ -90,7 +90,7 @@ pub struct Side {
     pub log_rows: u32,
 }
 
-/// The two sides, read off the glue plan. `stream_in` and `stream_out` already
+/// The two sides, read off the residual-stream plan. `stream_in` and `stream_out` already
 /// name the two bindings that are the layer's boundary, so this is only turning that
 /// naming into a tree assignment — the input side first, so tree 3 is always the
 /// input and tree 4 always the output, in every chunk of every shape.
@@ -103,7 +103,7 @@ pub struct Side {
 /// whose root nothing ever compares, at the price of one more `nreal` x
 /// `2^log_rows` tree per head chunk.  One side, and the head chunk is therefore
 /// structurally never the producer of a residual edge.
-pub fn sides(gp: &GluePlan) -> Vec<Side> {
+pub fn sides(gp: &ResidualStreamPlan) -> Vec<Side> {
     let mut want = vec![gp.stream_in];
     if !gp.head_norm {
         want.push(gp.stream_out);
@@ -129,10 +129,10 @@ pub fn sides(gp: &GluePlan) -> Vec<Side> {
 /// One side's committed columns: `n` columns of `2^log_rows` rows, column `j`
 /// holding the packed value at slot `j` of each row.
 ///
-/// The values come from `GlueRegion::binding_vals`, which is the same sequence in
+/// The values come from `ResidualStreamRegion::binding_vals`, which is the same sequence in
 /// the same natural row order that the Horner binding accumulates — so the boundary
 /// tree and the binding are two views of one thing, and the layout question reduces
-/// to the one the glue family already answered. `gn1`'s input binding and `gn2`'s
+/// to the one the residual-stream family already answered. `gn1`'s input binding and `gn2`'s
 /// output binding carry the same weight vector, which is exactly the statement that
 /// they place canonical stream position `q` at the same `(row, slot)`; that is
 /// why one chunk's output tree and the next chunk's input tree are comparable
@@ -141,7 +141,7 @@ pub fn sides(gp: &GluePlan) -> Vec<Side> {
 /// `tamper` flips one cell, by flat index over `(row, slot)`. It exists for the
 /// probe that has to show the binding bites: a boundary column that disagrees with
 /// the region must take its own chunk's proof down.
-pub fn cols(region: &GlueRegion, side: &Side, tamper: Option<usize>) -> Vec<Eval> {
+pub fn cols(region: &ResidualStreamRegion, side: &Side, tamper: Option<usize>) -> Vec<Eval> {
     let vals = region.binding_vals(side.bound.kind);
     let w = region.binding_width(side.bound.kind);
     assert_eq!(w, side.bound.n, "the boundary's width disagrees with its plan");
@@ -152,7 +152,7 @@ pub fn cols(region: &GlueRegion, side: &Side, tamper: Option<usize>) -> Vec<Eval
             let mut v: Vec<M31> = (0..rows)
                 .map(|m| {
                     let (sm, ef) = vals[m * w + j];
-                    crate::glue::m31_of(sm * PACK + ef)
+                    crate::residual_stream::m31_of(sm * PACK + ef)
                 })
                 .collect();
             if let Some(t) = tamper {
@@ -409,7 +409,7 @@ impl ChainVerdict {
 /// Arithmetic on `Fixed.params`, deliberately: the pair check never builds a
 /// plan, never opens a commitment and never touches a witness, so it cannot be
 /// made to panic by a malformed statement the way `Plan::new` can.  The layout
-/// it derives is the one `Plan::new` builds -- stream H's two glue sides first,
+/// it derives is the one `Plan::new` builds -- stream H's two residual-stream sides first,
 /// then, per head band group, the out side and (unless the chunk is block 0,
 /// which has no unchecked prefix) the in side.
 #[derive(Clone, Copy, Debug)]
@@ -431,14 +431,14 @@ impl KvLayout {
     }
 }
 
-/// How many glue boundary sides a statement's parameters imply: stream H's two
+/// How many residual-stream boundary sides a statement's parameters imply: stream H's two
 /// on a layer chunk, stream UU's one on an `lm_head` chunk (the input side
 /// only, see `sides`), or none.
 ///
 /// Arithmetic on `Fixed.params` alone, like `kv_layout`'s, so the pair check
 /// derives the tree layout without building a plan.
-fn glue_sides(p: &crate::compose::Params) -> usize {
-    match &p.glue {
+fn residual_stream_sides(p: &crate::compose::Params) -> usize {
+    match &p.residual_stream {
         Some(g) if p.layer_boundary => {
             if g.head_norm { 1 } else { 2 }
         }
@@ -451,10 +451,10 @@ fn glue_sides(p: &crate::compose::Params) -> usize {
 /// This is what says whether the edge into a chunk is a link or an unchecked end,
 /// and it is deliberately a fact about the statement and not about the flag: a
 /// head chunk proved with `--bounds` from a dump that carries no final norm has
-/// `glue: None`, commits nothing, and must still be reported as an unchecked end
+/// `residual_stream: None`, commits nothing, and must still be reported as an unchecked end
 /// rather than as a link that failed.
 pub fn has_in_side(p: &crate::compose::Params) -> bool {
-    glue_sides(p) >= 1
+    residual_stream_sides(p) >= 1
 }
 
 /// Everything about two chunks' wiring parameters that has to agree for their
@@ -465,7 +465,7 @@ pub fn has_in_side(p: &crate::compose::Params) -> bool {
 ///
 ///  * `head_norm` says which family this is. Both families take the input side
 ///    from the same claim over the same residual in the same canonical
-///    channel-major order (`GluePlan::head`), which is why the head needed a
+///    channel-major order (`ResidualStreamPlan::head`), which is why the head needed a
 ///    side and not a shape.
 ///  * `dff` is the SwiGLU's own tiling width. A head chunk has no FFN, so its
 ///    `dff` is 0 by construction, and it fixes nothing about the residual
@@ -474,8 +474,8 @@ pub fn has_in_side(p: &crate::compose::Params) -> bool {
 ///
 /// Between two layer chunks `dff` is still compared, so nothing that used to be
 /// checked on the recorded path stopped being checked.
-fn glue_layout_eq(a: &crate::compose::Params, b: &crate::compose::Params) -> bool {
-    match (&a.glue, &b.glue) {
+fn residual_stream_layout_eq(a: &crate::compose::Params, b: &crate::compose::Params) -> bool {
+    match (&a.residual_stream, &b.residual_stream) {
         (Some(ga), Some(gb)) => {
             ga.d == gb.d
                 && ga.a == gb.a
@@ -490,7 +490,7 @@ fn glue_layout_eq(a: &crate::compose::Params, b: &crate::compose::Params) -> boo
 
 pub fn kv_layout(p: &crate::compose::Params) -> Option<KvLayout> {
     p.kv_boundary.then(|| KvLayout {
-        first: FIRST_TREE + glue_sides(p),
+        first: FIRST_TREE + residual_stream_sides(p),
         groups: p.bands.len(),
         with_in: p.c > 0,
     })
@@ -549,7 +549,7 @@ pub fn chain_of(
 ) -> ChainVerdict {
     let (na, nb) = (tree_count(fa), tree_count(fb));
     let (ka, kb) = (kv_layout(&fa.params), kv_layout(&fb.params));
-    let (ga, gb) = (glue_sides(&fa.params), glue_sides(&fb.params));
+    let (ga, gb) = (residual_stream_sides(&fa.params), residual_stream_sides(&fb.params));
     // Stream AA: the expected tree count is a function of the statement --
     // three, plus stream H's two when `--bounds` is on, plus one per K/V side.
     // With `--kv-boundary` absent and `--bounds` on this is `FIRST_TREE + 2`
@@ -575,7 +575,7 @@ pub fn chain_of(
     // and the consumer an *in* side.  A layer chunk has both (`ga == 2`); an
     // `lm_head` chunk has the input side alone (`gb == 1`), which is why it can
     // be the second of a pair and never the first -- there is no layer 33.
-    let glue_present = ga == 2 && gb >= 1;
+    let residual_stream_present = ga == 2 && gb >= 1;
     // Stream UU: the consumer is a head chunk, so it has no tree 4 and the
     // conjuncts over one are not asked.
     let head_b = gb == 1;
@@ -584,16 +584,16 @@ pub fn chain_of(
     // actually compares -- the producer's out tree against the consumer's in
     // tree.  On a layer -> layer pair the old pairwise comparison is still made
     // as well, so nothing that used to be checked stopped being checked.
-    let shape_ok = glue_present
+    let shape_ok = residual_stream_present
         && fa.params.s == fb.params.s
-        && glue_layout_eq(&fa.params, &fb.params)
+        && residual_stream_layout_eq(&fa.params, &fb.params)
         && fa.log_blowup == fb.log_blowup
         && fa.sizes[FIRST_TREE + 1] == fb.sizes[FIRST_TREE]
         && (head_b
             || (fa.sizes[FIRST_TREE] == fb.sizes[FIRST_TREE]
                 && fa.sizes[FIRST_TREE + 1] == fb.sizes[FIRST_TREE + 1]));
-    let out_root = glue_present.then(|| roots_a[FIRST_TREE + 1].clone());
-    let in_root = glue_present.then(|| roots_b[FIRST_TREE].clone());
+    let out_root = residual_stream_present.then(|| roots_a[FIRST_TREE + 1].clone());
+    let in_root = residual_stream_present.then(|| roots_b[FIRST_TREE].clone());
     // ---- stream AA: the K/V link ------------------------------------------
     //
     // The integer comparisons come first and they are not a formality.  Root
@@ -657,10 +657,10 @@ pub fn chain_of(
     };
     let mut v = ChainVerdict {
         axis,
-        present: glue_present,
+        present: residual_stream_present,
         shape_ok,
         coord_ok,
-        roots_equal: glue_present && out_root == in_root,
+        roots_equal: residual_stream_present && out_root == in_root,
         out_root,
         in_root,
         kv_present,
@@ -719,9 +719,9 @@ fn prove_one(tag: &str, name: &str, dir: &str, out_dir: &str, args: &[String],
     let (l, vname) = crate::layer_of(&a);
     let mut params = crate::params_of(&l, &a, &vname);
     params.layer_boundary = true;
-    assert!(params.glue.is_some(),
+    assert!(params.residual_stream.is_some(),
             "{name}: the boundary is the wiring family's two stream bindings, and this \
-             witness has no glue columns -- extract it with `extract.py --glue`");
+             witness has no residual-stream columns -- extract it with `extract.py --residual-stream`");
     let out = crate::compose::prove_layer(&l, &params, tamper);
     let ser = crate::compose_ser(&out);
     std::fs::create_dir_all(out_dir).expect("the output directory");
@@ -752,7 +752,7 @@ fn chunk_json(c: &Chunk) -> Value {
         "trace_secs": c.json.get("trace_secs"),
         "verify_secs": c.json.get("verify_secs"),
         "stream_bindings_ok": c.json.get("stream_bindings_ok"),
-        "glue_vs_b1": c.json.pointer("/family_cells/glue_vs_b1"),
+        "residual_stream_vs_b1": c.json.pointer("/family_cells/residual_stream_vs_b1"),
         "verdict": c.json.get("verdict"),
     })
 }
@@ -1265,7 +1265,7 @@ pub fn grid_cmd(args: &[String]) {
     // so the edge from the last layer chunk into it is an ordinary layer-axis
     // link and is run below with every other one.  `head_end` is what is left of
     // stream KK's rule: a head chunk that committed no input side -- `--bounds`
-    // off, or a dump too old to carry the final norm, so `glue` is null -- is
+    // off, or a dump too old to carry the final norm, so `residual_stream` is null -- is
     // still an unchecked end and not a link that ran and failed.
     let head_end = |i: &usize| {
         chunks[*i].is_head && !has_in_side(&chunks[*i].fixed.params)
@@ -1788,7 +1788,7 @@ pub fn grid_cmd(args: &[String]) {
 // chunk, so two chunks of one sequence may have attended to two different
 // prefixes and no verifier can tell.
 //
-// The three differences from the glue sides are all simplifications:
+// The three differences from the residual-stream sides are all simplifications:
 //
 //  * K and V are single integers, not bf16 `(sm, ef)` pairs, so there is no
 //    `PACK` and no degree-1 packing question -- one cell per value.
@@ -1862,7 +1862,7 @@ pub struct KvSide {
 /// The K/V sides, read off the per-band summary the plan already has.
 ///
 /// `first_tree` is where they start: after the three that were always there and
-/// after stream H's glue sides, so that turning either feature on does not move
+/// after stream H's residual-stream sides, so that turning either feature on does not move
 /// the other's tree indices.
 ///
 /// The **out** side comes first in each group.  Block 0 of a sequence has no
@@ -1985,8 +1985,9 @@ pub struct SideRoot {
 
 /// Every side's root, off the plan's two side lists and a root-by-tree lookup.
 /// The order is the prover's commit order, so it is also `boundary_roots`' order.
-pub fn side_roots(glue: &[Side], kv: &[KvSide], root: impl Fn(usize) -> String) -> Vec<SideRoot> {
-    let mut v: Vec<SideRoot> = glue
+pub fn side_roots(residual_stream: &[Side], kv: &[KvSide],
+                  root: impl Fn(usize) -> String) -> Vec<SideRoot> {
+    let mut v: Vec<SideRoot> = residual_stream
         .iter()
         .map(|s| SideRoot {
             tree: s.bound.tree,
@@ -2021,7 +2022,7 @@ pub fn side_roots(glue: &[Side], kv: &[KvSide], root: impl Fn(usize) -> String) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compose::{Fixed, GlueParams, Params};
+    use crate::compose::{Fixed, ResidualStreamParams, Params};
 
     /// A statement for one chunk: `c` keys of unchecked prefix, `s` decoded
     /// tokens, stream H's boundary always on, `--kv-boundary` optional.
@@ -2036,7 +2037,7 @@ mod tests {
             corner: kv,
             layer_boundary: true,
             kv_boundary: kv,
-            glue: Some(GlueParams { d: 64, a: 4, ..Default::default() }),
+            residual_stream: Some(ResidualStreamParams { d: 64, a: 4, ..Default::default() }),
             ..Default::default()
         };
         // stream PP: four trees before the boundary ones -- the shape tree, the
@@ -2077,8 +2078,9 @@ mod tests {
         let mut f = fixed(c, s, false);
         f.params.prove_argmax = true;
         f.params.corner = false;
-        f.params.glue = Some(GlueParams { d: 64, a: 4, head_norm: true, ..Default::default() });
-        f.sizes = vec![vec![4]; FIRST_TREE + glue_sides(&f.params)];
+        f.params.residual_stream =
+            Some(ResidualStreamParams { d: 64, a: 4, head_norm: true, ..Default::default() });
+        f.sizes = vec![vec![4]; FIRST_TREE + residual_stream_sides(&f.params)];
         f
     }
 
@@ -2087,7 +2089,7 @@ mod tests {
     ///
     /// Tree layout for `--kv-boundary` with two head band groups and `c > 0`
     /// (stream PP: the preprocessed trace is two trees, so the boundary ones
-    /// start at 4): `[0 shape][1 model][2 base][3 inter][4 glue in][5 glue out]
+    /// start at 4): `[0 shape][1 model][2 base][3 inter][4 residual stream in][5 residual stream out]
     /// [6 g0 out][7 g0 in][8 g1 out][9 g1 in]`.
     fn roots(fa: &Fixed, fb: &Fixed, kv_equal: bool, residual_equal: bool)
         -> (Vec<String>, Vec<String>) {
@@ -2134,7 +2136,7 @@ mod tests {
     fn side_roots_are_labelled_from_the_plan() {
         // the root of tree `t` is the string `t`
         let root = |t: usize| t.to_string();
-        let glue = [
+        let residual_stream = [
             Side { bound: Boundary { tree: 3, kind: BindingKind::In(0), n: 1 }, region: 0, log_rows: 1 },
             Side { bound: Boundary { tree: 4, kind: BindingKind::Out(1), n: 1 }, region: 0, log_rows: 1 },
         ];
@@ -2143,7 +2145,7 @@ mod tests {
             KvSide { tree: 6, group: 0, out: false, bands: vec![], columns: 0, cells: 0 },
             KvSide { tree: 7, group: 1, out: true, bands: vec![], columns: 0, cells: 0 },
         ];
-        let v = side_roots(&glue, &kv, root);
+        let v = side_roots(&residual_stream, &kv, root);
         let lab: Vec<(usize, Axis, &str, Option<usize>, &str)> =
             v.iter().map(|s| (s.tree, s.axis, s.role, s.group, s.root.as_str())).collect();
         assert_eq!(lab, [
@@ -2320,12 +2322,12 @@ mod tests {
     #[test]
     fn head_chunk_commits_the_input_side_only() {
         let h = head_fixed(1024, 512);
-        assert_eq!(glue_sides(&h.params), 1,
+        assert_eq!(residual_stream_sides(&h.params), 1,
                    "the head takes the first boundary tree and no second one");
         assert!(has_in_side(&h.params));
         assert_eq!(h.sizes.len(), FIRST_TREE + 1);
         let l = fixed(1024, 512, true);
-        assert_eq!(glue_sides(&l.params), 2, "a layer chunk still takes both");
+        assert_eq!(residual_stream_sides(&l.params), 2, "a layer chunk still takes both");
     }
 
     #[test]
@@ -2370,10 +2372,10 @@ mod tests {
 
     #[test]
     fn a_head_chunk_without_a_wiring_family_is_still_an_unchecked_end() {
-        // a dump too old to carry the final norm: `glue` is null, so no input
+        // a dump too old to carry the final norm: `residual_stream` is null, so no input
         // side exists however the flag was set
         let mut h = head_fixed(1024, 512);
-        h.params.glue = None;
+        h.params.residual_stream = None;
         h.sizes = vec![vec![4]; 3];
         assert!(!has_in_side(&h.params));
     }

@@ -43,7 +43,7 @@
 //! pattern order, but logits are signed, so the key is the sign-flipped pattern
 //! (`k = s ? 0x7FFF - mag : 0x8000 + mag`), which is a total order matching the
 //! float order.  Pinning `k` to the `lm_head` dequant's own output is a
-//! positionwise binding of the kind B10 step 2 built for the glue, and it is the
+//! positionwise binding of the kind B10 step 2 built for the residual stream, and it is the
 //! composition's job, not this region's.  Standalone, `k` is the statement's
 //! input.
 

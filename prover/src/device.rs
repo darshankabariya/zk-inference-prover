@@ -535,7 +535,7 @@ impl AnyCol<'_> {
     }
 
     /// The same, by value, for the standalone probe paths that hand their
-    /// columns straight to a `Session`. B11 stream M: the glue's rung is one
+    /// columns straight to a `Session`. B11 stream M: the residual stream's rung is one
     /// of those, and it is a SimdBackend path -- it has no device fill to take
     /// and no device column to hand over -- so a device column here is the same
     /// loud bug as above.

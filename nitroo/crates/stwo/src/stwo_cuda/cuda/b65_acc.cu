@@ -613,9 +613,9 @@ extern "C" void b65_acc_ao(const m31 *den_col, const m31 *const *acc_cols,
     cuda_free_memory(d_rv);
 }
 
-// ============================================================== the glue bindings ==
+// ============================================================== the residual-stream bindings ==
 
-// `glue::m31_of` again -- `b65_gfill.cu` has its own copy for the same reason,
+// `residual_stream::m31_of` again -- `b65_residual_stream_fill.cu` has its own copy for the same reason,
 // that the natural arrays hold the witness's signed values and not field
 // elements. `(((v % p) + p) % p)`, which is a ring map, so folding here is
 // folding what the host folded.
@@ -626,10 +626,10 @@ __device__ __forceinline__ m31 b65a_m31_of(long long v) {
 
 // One binding, one lane: the row's own sum in `b`, the constant step in `a`, and
 // nothing else. Row 0 opens the recurrence, so its multiplier is zero.
-__global__ void b65a_gtie_kernel(const int *__restrict__ in_nat,
+__global__ void b65a_residual_stream_bind_kernel(const int *__restrict__ in_nat,
                                  const int *__restrict__ out_nat,
                                  const qm31 *__restrict__ weights, qm31 lam,
-                                 const B65AccGTie *__restrict__ specs,
+                                 const B65AccResidualStreamBind *__restrict__ specs,
                                  qm31 *__restrict__ a, qm31 *__restrict__ b,
                                  unsigned rows, unsigned mutate) {
     const unsigned j = blockIdx.x * blockDim.x + threadIdx.x;
@@ -637,8 +637,8 @@ __global__ void b65a_gtie_kernel(const int *__restrict__ in_nat,
         return;
     }
     const unsigned lane = blockIdx.y;
-    const B65AccGTie S = specs[lane];
-    // Coset row order, as `b65_gfill.cu` wrote it and as the host folded it:
+    const B65AccResidualStreamBind S = specs[lane];
+    // Coset row order, as `b65_residual_stream_fill.cu` wrote it and as the host folded it:
     // the bindings never permute, only the committed columns do.
     const int *src = (S.src == 0u) ? in_nat : out_nat;
     const size_t row = (size_t)j * S.stride + S.off;
@@ -659,9 +659,9 @@ __global__ void b65a_gtie_kernel(const int *__restrict__ in_nat,
     b[(size_t)lane * rows + j] = f;
 }
 
-extern "C" void b65_acc_gtie(const int *in_nat, const int *out_nat,
+extern "C" void b65_acc_residual_stream_bind(const int *in_nat, const int *out_nat,
                              const qm31 *weights, unsigned n_weights, qm31 lam,
-                             const B65AccGTie *specs, unsigned n_specs, qm31 *a,
+                             const B65AccResidualStreamBind *specs, unsigned n_specs, qm31 *a,
                              qm31 *b, unsigned rows, unsigned mutate) {
     if (n_specs == 0u) {
         return;
@@ -669,10 +669,10 @@ extern "C" void b65_acc_gtie(const int *in_nat, const int *out_nat,
     // Host arrays both, so both are cloned to the card before the kernel
     // indexes them -- the trap stream M's Record (5) names.
     qm31 *d_w = clone_to_device<qm31>(const_cast<qm31 *>(weights), n_weights);
-    B65AccGTie *d_s = clone_to_device<B65AccGTie>(const_cast<B65AccGTie *>(specs), n_specs);
+    B65AccResidualStreamBind *d_s = clone_to_device<B65AccResidualStreamBind>(const_cast<B65AccResidualStreamBind *>(specs), n_specs);
     const unsigned bw = rows < B65A_BLOCK ? rows : B65A_BLOCK;
     const dim3 grid((rows + bw - 1u) / bw, n_specs);
-    b65a_gtie_kernel<<<grid, bw>>>(in_nat, out_nat, d_w, lam, d_s, a, b, rows, mutate);
+    b65a_residual_stream_bind_kernel<<<grid, bw>>>(in_nat, out_nat, d_w, lam, d_s, a, b, rows, mutate);
     ASSERT_CUDA_SUCCESS(cudaDeviceSynchronize());
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
     cuda_free_memory(d_w);

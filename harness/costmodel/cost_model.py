@@ -378,7 +378,7 @@ DEQUANT_POW2_PER_ACC = (B6C or {}).get("pow2") or 0.0
 DEQUANT_POW2_AWAY_PER_ACC = (B6C or {}).get("pow2_away") or DEQUANT_POW2_PER_ACC
 ATTNOUT_CELLS_PER_ACC = (B6C or {}).get("int8") or 0.0
 
-# --- B10 step 2: the glue between the regions ---------------------------------
+# --- B10 step 2: the residual stream between the regions ---------------------------------
 # B6.5 open gap 1: the composition bindings every matmul's accumulators to its own
 # committed activations, and nothing bindings one region's output to the next
 # region's input.  The wiring is four gadgets, and every one of them is bf16
@@ -404,13 +404,13 @@ ATTNOUT_CELLS_PER_ACC = (B6C or {}).get("int8") or 0.0
 #     selector), aligned by the exponent difference into one integer, and that
 #     integer is normalised by the *same* `NORM`/`FRAC` tables the dequant
 #     already commits -- so the add is B6's `round` variant plus an alignment.
-#     `b65/out/glue.json` carries the measured marginal; until it exists the
+#     `b65/out/residual_stream.json` carries the measured marginal; until it exists the
 #     model prints the construction's own column count and says so.  Both the add
 #     and the multiply range-check their own output against `VAL` (README 3.7's
 #     named gap: without it the gadget can prove a value bf16 cannot represent),
 #     which is +2 cells on each and is in the measured numbers below.
-def b10_glue_constants():
-    f = B65 / "glue.json"
+def b10_residual_stream_constants():
+    f = B65 / "residual_stream.json"
     if not f.exists():
         return None
     try:
@@ -427,7 +427,7 @@ def b10_glue_constants():
     )
 
 
-B10G = b10_glue_constants()
+B10G = b10_residual_stream_constants()
 # the bf16 multiply, read off B6's ladder: `chain` is `pow2` plus two of them
 MUL_CELLS = ((DEQUANT_AWAY_PER_ACC - DEQUANT_POW2_AWAY_PER_ACC) / 2.0
              if DEQUANT_AWAY_PER_ACC and DEQUANT_POW2_AWAY_PER_ACC else 0.0)
@@ -598,7 +598,7 @@ def band_fresh(nh, hd, s, c, corner=True, **kw):
 #   logup the LogUp interaction column each lookup drags along (B2, measured)
 
 
-# --- B10 step 2: the glue, priced ---------------------------------------------
+# --- B10 step 2: the residual stream, priced ---------------------------------------------
 # The reduction is the whole question.  B1 accumulates the RMSNorm mean in fp32
 # and rounds once (`reduce="fp32"`), an order no bf16-add gadget reproduces, so
 # proving the norm *pins the reduction's order* -- a spec change with a quality
@@ -625,7 +625,7 @@ def sum_order(n, order):
     raise SystemExit(f"unknown sum order {order}")
 
 
-def glue_cells(cfg, order="tree", topk=1, final_norm=True):
+def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True):
     """B6.5 open gap 1, per decoded token: what the wiring between the regions
     costs, per gadget.  `d`-wide terms are the residual stream's width, `dff`-wide
     the SwiGLU's.
@@ -1129,10 +1129,11 @@ def report():
                   f"{cp['columns']} columns, {cp['proof_bytes'] / 2**20:.2f} MiB, "
                   f"accepted by the serialized-statement verifier alone")
 
-    # --- B10 step 2: the glue's price table ----------------------------------------
+    # --- B10 step 2: the residual stream's price table ------------------------
     print()
-    print("B10 step 2 -- the glue between the regions (B6.5 open gap 1), priced")
-    SRC = "b65/out/glue.json, measured" if B10G and B10G.get("add") else "from the construction"
+    print("B10 step 2 -- the residual stream between the regions (B6.5 open gap 1), priced")
+    SRC = ("b65/out/residual_stream.json, measured" if B10G and B10G.get("add")
+           else "from the construction")
     print(f"  bf16 unary (2^16 table)  {UNARY_CELLS:.2f} cells/application  ({SRC}; B4's "
           f"packed {(B4C or {}).get('lookup_cells', 0):.2f} in a pattern layout)")
     print(f"  bf16 multiply            {MUL_CELLS:.2f} cells/product       ({SRC}; B6's "
@@ -1174,19 +1175,19 @@ def report():
             pass
     if B65C and B65C.get("compose"):
         CHUNKS["Qwen2.5-0.5B"] = (B65C["compose"]["fresh"], SEQ, 1024)
-    GLUE_MODELS = [("Qwen2.5-0.5B", QWEN), ("Llama-3.1-8B", LLAMA8B), ("Gemma-3-27B", GEMMA)]
+    RESIDUAL_STREAM_MODELS = [("Qwen2.5-0.5B", QWEN), ("Llama-3.1-8B", LLAMA8B), ("Gemma-3-27B", GEMMA)]
     print("  cells per decoded token, per gadget (the tree order), and per layer chunk")
     print(f"  {'model':<13} {'gadget':<21} {'cells/token':>12} {'per layer':>11} "
           f"{'chunk S=512':>12} {'% of chunk':>10}")
-    for name, cfg in GLUE_MODELS:
-        gl = glue_cells(cfg, "tree")
+    for name, cfg in RESIDUAL_STREAM_MODELS:
+        gl = residual_stream_cells(cfg, "tree")
         L, d, dff = cfg[0], cfg[1], cfg[5]
         chunk = CHUNKS.get(name)
         rows = [("(a) RMSNorm x2", gl["norm"]), ("      of it, the sum", gl["norm_reduce"]),
                 ("(b) SwiGLU", gl["swiglu"]), ("(c) residual adds", gl["resid"]),
                 ("(d) requantize place", gl["requant_place"]),
-                ("glue, total", gl["total"]), ("the stub it replaces", gl["stub"]),
-                ("glue, net", gl["net"])]
+                ("residual stream, total", gl["total"]), ("the stub it replaces", gl["stub"]),
+                ("residual stream, net", gl["net"])]
         print(f"  {name:<13} {f'L={L} d={d} dff={dff}':<21}"
               + (f" {'':>12} {'':>11} {g(chunk[0]):>12}   the chunk, S={chunk[1]} C={chunk[2]}"
                  if chunk else ""))
@@ -1196,9 +1197,9 @@ def report():
             pc = f"{per_chunk / chunk[0] * 100:9.1f}%" if chunk else f"{'--':>10}"
             print(f"  {'':<13} {label:<21} {g(v):>12} {g(per_layer):>11} "
                   f"{g(per_chunk):>12} {pc:>10}")
-    gl27 = glue_cells(GEMMA, "tree")
+    gl27 = residual_stream_cells(GEMMA, "tree")
     print()
-    print(f"  at 27B the glue is {g(gl27['net'])}cells/token net of the stub, i.e. "
+    print(f"  at 27B the residual stream is {g(gl27['net'])}cells/token net of the stub, i.e. "
           f"{gl27['net'] / c['total']:+.1%} on {g(c['total'])} -> {g(c['total'] + gl27['net'])}, "
           f"and {TARGET_TOKS:.0f} tok/s needs "
           f"{g((c['total'] + gl27['net']) * TARGET_TOKS)}cells/s")

@@ -680,7 +680,7 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         // 3 per band + attnout + one per matmul + one per walk, and a margin.
         use_sums: (0..(3 * nb + 1 + nm + nw + 16)).map(|_| felt()).collect(),
         // exp + norm/frac/mul/qnz + one per range width, and a margin (the
-        // glue's table sides come out of the same margin).
+        // residual stream's table sides come out of the same margin).
         table_sums: (0..(5 + plan.widths.len() + 16)).map(|_| felt()).collect(),
         // Stream QQ (log rows 61 and 66): every binding claim vector is filled here
         // too, with the same distinct nonzero placeholders `felt()` gives the
@@ -694,12 +694,12 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         // the same shape, and that a vector added by a later stream is wrong in
         // one place instead of two.
         stream_bindings: plan
-            .glue
+            .residual_stream
             .as_ref()
             .map(|g| g.regions.iter().map(|r| r.bindings.iter().map(|_| felt()).collect()).collect())
             .unwrap_or_default(),
         deq_out: plan
-            .glue
+            .residual_stream
             .as_ref()
             .map(|g| g.output_bindings.iter().map(|_| felt()).collect())
             .unwrap_or_default(),
@@ -742,7 +742,7 @@ pub fn cmd(args: &[String]) {
         let mut ch = stwo::core::channel::Blake2sM31Channel::default();
         ch.mix_u64(0xB65_2B00 + u64::from(tag));
         let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
-                                              plan.glue.as_ref().map(|g| g.uns.as_slice()),
+                                              plan.residual_stream.as_ref().map(|g| g.uns.as_slice()),
                                               plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
                                           plan.q_tabs.len());
         let f = ch.draw_secure_felts(6);

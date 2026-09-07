@@ -1,4 +1,4 @@
-//! B10 step 2 — the glue between the composed layer's regions.
+//! B10 step 2 — the residual stream between the composed layer's regions.
 //!
 //! B6.5's composition bindings every matmul's accumulators to its own committed
 //! activations and weights, and nothing at all bindings one region's output to the
@@ -87,7 +87,7 @@
 //! add's read it with plain geometric weights.  So `resid.h_out == norm.h_in`
 //! says "the same values in the same positions", however differently the two
 //! regions cut the stream into rows, and the layer's statement becomes
-//! *committed residual-stream in -> committed residual-stream out*.  A slot's
+//! *committed residual stream in -> committed residual stream out*.  A slot's
 //! output also pays a `VAL` lookup — the output range check README 3.7 named:
 //! it says the result is a value bf16 can represent.
 
@@ -149,11 +149,11 @@ pub const UN_COLS: [&str; 4] = ["b10_un_i_sm", "b10_un_i_ef", "b10_un_o_sm", "b1
 /// Stream II: a region's `i`-th preprocessed value, as its two fields.  The
 /// norm weights are the only user today; they are the model's, so they belong
 /// beside the tables in tree 0 rather than beside the stream in tree 1.
-pub fn glue_pre_col(tag: &str, i: usize, k: usize) -> PreProcessedColumnId {
+pub fn residual_stream_pre_col(tag: &str, i: usize, k: usize) -> PreProcessedColumnId {
     PreProcessedColumnId { id: format!("b10_gpre_{tag}_{i}_{}", ["sm", "ef"][k]) }
 }
 
-pub fn glue_sel(tag: &str, name: &str) -> PreProcessedColumnId {
+pub fn residual_stream_sel(tag: &str, name: &str) -> PreProcessedColumnId {
     id(format!("b10_g{tag}_{name}"))
 }
 pub fn un_col(kind: &str, i: usize) -> PreProcessedColumnId {
@@ -560,7 +560,7 @@ impl Prog {
     }
 
     /// Stream NN: the third rounding.  Its leaves are `rope_mul`'s `2 hd`
-    /// outputs in the same row order, so the join is one `GlueEq` between
+    /// outputs in the same row order, so the join is one `ResidualStreamEq` between
     /// `rope_mul.Out(0)` and this region's `In(0)`, and its own `Out(0)` is the
     /// rotated value the quantize consumes.
     pub fn rope_add(hd: usize) -> Self {
@@ -612,7 +612,7 @@ impl Prog {
         }
     }
     /// Stream II: where the region's `i`-th preprocessed value sits inside
-    /// `GlueRegion::pre`.  The two selectors come first, as `glue_region` and
+    /// `ResidualStreamRegion::pre`.  The two selectors come first, as `residual_stream_region` and
     /// `Plan::pre_ids` both write them.
     pub fn pre_at(&self, i: usize, k: usize) -> usize {
         2 + 2 * i + k
@@ -681,7 +681,7 @@ pub struct Binding {
 }
 
 #[derive(Clone)]
-pub struct GlueEval {
+pub struct ResidualStreamEval {
     pub log_rows: u32,
     pub tag: String,
     pub prog: Prog,
@@ -692,7 +692,7 @@ pub struct GlueEval {
     pub smul: SMulRel,
     /// one per entry of `uns`
     pub un: Vec<UnRel>,
-    /// the kinds `un` is indexed by -- the plan's union, see `GlueRels::uns`
+    /// the kinds `un` is indexed by -- the plan's union, see `ResidualStreamRels::uns`
     pub uns: Vec<UnKind>,
     pub val: ValRel,
     pub binding: Option<Binding>,
@@ -711,7 +711,7 @@ pub struct GlueEval {
 }
 
 
-impl FrameworkEval for GlueEval {
+impl FrameworkEval for ResidualStreamEval {
     /// milestone 2b: the flat parameter block for the generated
     /// constraint kernel (`gpu/m2b/cudagen.rs`); `None` when this
     /// component's fingerprint has no kernel, which is the fork's
@@ -722,7 +722,7 @@ impl FrameworkEval for GlueEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_glue_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "b65_residual_stream_eval" }
 
     fn log_size(&self) -> u32 {
         self.log_rows
@@ -742,7 +742,7 @@ impl FrameworkEval for GlueEval {
         // ---- tree 0, in the region's own column order (stream OO) -------------
         // The order these are *read* in is the order the lowered IR indexes
         // tree 0 in, and `devfrac::frac_cols` is handed the region's `pre`
-        // vector by position -- so the read order has to be `glue_region`'s
+        // vector by position -- so the read order has to be `residual_stream_region`'s
         // build order and `Plan::pre_ids`' registration order, which are both
         // the two selectors and then the `Src::Pre` pairs. Stream II read the
         // pairs first, which made no difference while `n_pre` was zero
@@ -751,13 +751,13 @@ impl FrameworkEval for GlueEval {
         // The selectors are read whether or not this region carries a binding: the
         // region commits them either way, so a conditional read would leave the
         // supplied column list two longer than the IR's.
-        let nofirst = eval.get_preprocessed_column(glue_sel(&self.tag, "nofirst"));
-        let end = eval.get_preprocessed_column(glue_sel(&self.tag, "end"));
+        let nofirst = eval.get_preprocessed_column(residual_stream_sel(&self.tag, "nofirst"));
+        let end = eval.get_preprocessed_column(residual_stream_sel(&self.tag, "end"));
         // the statement's own values (stream II): preprocessed, so nothing pins
         // them but the root every table hangs on.
         let pre_vals: Vec<(E::F, E::F)> = (0..self.prog.n_pre)
-            .map(|i| (eval.get_preprocessed_column(glue_pre_col(&self.tag, i, 0)),
-                      eval.get_preprocessed_column(glue_pre_col(&self.tag, i, 1))))
+            .map(|i| (eval.get_preprocessed_column(residual_stream_pre_col(&self.tag, i, 0)),
+                      eval.get_preprocessed_column(residual_stream_pre_col(&self.tag, i, 1))))
             .collect();
 
         // ---- leaves: the committed inputs, and the unary that consumes them ---
@@ -943,7 +943,7 @@ impl FrameworkEval for GlueEval {
 // ------------------------------------------------------------------ witness ---
 
 /// The values a region consumes: one `rows x n` block of bf16 patterns per group.
-pub struct GlueWitness {
+pub struct ResidualStreamWitness {
     pub rows: usize,
     pub groups: Vec<Vec<u16>>,
     /// Stream II: `rows * prog.n_pre` bf16 patterns the *statement* carries --
@@ -955,7 +955,7 @@ pub struct GlueWitness {
     pub odd: usize,
 }
 
-impl GlueWitness {
+impl ResidualStreamWitness {
     pub fn new(rows: usize, groups: Vec<Vec<u16>>, prog: &Prog, round: Round, source: String)
                -> Self {
         Self::with_pre(rows, groups, vec![], prog, round, source)
@@ -1089,8 +1089,8 @@ pub fn reference(groups: &[Vec<u16>], pre: &[u16], rows: usize, prog: &Prog, rou
 /// `NORM` and `FRAC` are B6's, shared with the dequant regions in a composed
 /// proof -- there the layer's own multiplicity vectors are moved in here and
 /// moved back, so the two families' uses land in one column.  The other four are
-/// the glue's own.
-pub struct GlueTables {
+/// the residual stream's own.
+pub struct ResidualStreamTables {
     pub pow: Vec<(M31, M31)>,
     pub smul: Vec<[M31; 5]>,
     pub uns: Vec<UnKind>,
@@ -1115,16 +1115,16 @@ pub struct GlueTables {
     pub off_table: usize,
 }
 
-/// Stream PP (E11): the glue tables' four `round`-only heights, for the
-/// preprocessed split.  See `GlueTables::log_sizes`.
-pub struct GlueLogSizes {
+/// Stream PP (E11): the residual-stream tables' four `round`-only heights, for the
+/// preprocessed split.  See `ResidualStreamTables::log_sizes`.
+pub struct ResidualStreamLogSizes {
     pub pow: u32,
     pub smul: u32,
     pub un: u32,
     pub val: u32,
 }
 
-impl GlueTables {
+impl ResidualStreamTables {
     pub fn new(kmax: u32, round: Round, uns: &[UnKind]) -> Self {
         assert!(kmax >= DMAX + 1, "kmax {kmax} is below the add's DMAX + 1 = {}", DMAX + 1);
         let pow = pow_table();
@@ -1158,23 +1158,23 @@ impl GlueTables {
         }
     }
 
-    /// Stream PP (E11): the four glue-table heights the preprocessed split
+    /// Stream PP (E11): the four residual-stream table heights the preprocessed split
     /// needs, without building the tables.
     ///
     /// `Plan::pre_split` classifies a column by its id and its `log_size`, and
-    /// the four glue tables it has to size -- `pow`, `smul`, `val` and the
+    /// the four residual-stream tables it has to size -- `pow`, `smul`, `val` and the
     /// unary ones -- depend on `round` alone.  Only `log_norm` and `log_frac`
-    /// depend on `kmax`, and the split names neither.  Asking `GlueTables::new`
+    /// depend on `kmax`, and the split names neither.  Asking `ResidualStreamTables::new`
     /// for them built a `frac` table of `2^(kmax+1)` rows on every call to
     /// `pre_split_report`, and -- the reason this exists -- it asserts
-    /// `kmax >= DMAX + 1`, which a plan that carries a glue gadget it never
+    /// `kmax >= DMAX + 1`, which a plan that carries a residual-stream gadget it never
     /// proves need not satisfy (`embed`'s fixture, `kmax` 12).
     ///
     /// The heights are `new`'s own, `log_un` included: it is `val`'s length
     /// there and it is `val`'s length here.
-    pub fn log_sizes(round: Round) -> GlueLogSizes {
+    pub fn log_sizes(round: Round) -> ResidualStreamLogSizes {
         let log_val = log_rows_for(val_table().len(), 1);
-        GlueLogSizes {
+        ResidualStreamLogSizes {
             pow: log_rows_for(pow_table().len(), 1),
             smul: log_rows_for(smul_table(round).len(), 1),
             un: log_val,
@@ -1306,7 +1306,7 @@ impl Tamper {
     }
 }
 
-pub struct GlueRegion {
+pub struct ResidualStreamRegion {
     pub pre: Vec<Eval>,
     pub base: Vec<Eval>,
     pub log_rows: u32,
@@ -1330,15 +1330,15 @@ pub struct GlueRegion {
     pub in_nat: Vec<Vec<(i64, i64)>>,
     pub out_nat: Vec<Vec<(i64, i64)>>,
     /// B11 stream M: the region's columns when the fill left them on the card,
-    /// under `B7_M4_GFILL=1`. `pre` and `base` are then empty and this is where
+    /// under `B7_M4_RESIDUAL_STREAM_FILL=1`. `pre` and `base` are then empty and this is where
     /// the columns are. The three arrays above are *not* on the card: the bindings
     /// and the boundary sides read them by row, they are a fifth of the
     /// columns' bytes, and bringing them back is what lets the whole binding half
     /// stay exactly where it was.
-    pub dev: Option<crate::devgfill::DevGlue>,
+    pub dev: Option<crate::dev_residual_stream_fill::DevResidualStream>,
 }
 
-impl GlueRegion {
+impl ResidualStreamRegion {
     /// Committed cells, wherever the columns are.
     pub fn base_cells(&self) -> usize {
         let n = match &self.dev {
@@ -1415,12 +1415,12 @@ const T_UN: u8 = 8;
 
 /// Build one region's committed columns and bump the shared tables.
 /// The reference count the host loop keeps inline: how many of this region's
-/// outputs agree with `GlueWitness::ref_out`, the one f64-rounded evaluation.
+/// outputs agree with `ResidualStreamWitness::ref_out`, the one f64-rounded evaluation.
 ///
 /// B11 stream M: pulled out so the device path reports the same two numbers
 /// from the same comparison. It reads `outs` and nothing else, so it does not
 /// care which side built them.
-fn ref_count(w: &GlueWitness, prog: &Prog, outs: &[Vec<u16>]) -> (usize, usize) {
+fn ref_count(w: &ResidualStreamWitness, prog: &Prog, outs: &[Vec<u16>]) -> (usize, usize) {
     let (mut ok, mut n) = (0usize, 0usize);
     for (oi, o) in prog.outs.iter().enumerate() {
         for j in 0..w.rows {
@@ -1435,8 +1435,9 @@ fn ref_count(w: &GlueWitness, prog: &Prog, outs: &[Vec<u16>]) -> (usize, usize) 
     (ok, n)
 }
 
-pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
-                   tables: &mut GlueTables, tamper: Option<Tamper>) -> GlueRegion {
+pub fn residual_stream_region(w: &ResidualStreamWitness, prog: &Prog, round: Round, tag: &str,
+                              tables: &mut ResidualStreamTables, tamper: Option<Tamper>)
+                              -> ResidualStreamRegion {
     let log_rows = log_rows_for(w.rows, 1);
     let rows = 1usize << log_rows;
     // B11 stream M: which fill runs. 1 is the device's alone -- `pre` and
@@ -1448,9 +1449,10 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
     // path rather than running a kernel that has never heard of them. That is
     // announced: a probe that silently proved the untampered witness would read
     // as a gadget that accepts.
-    let m4g = crate::devgfill::mode();
+    let m4g = crate::dev_residual_stream_fill::mode();
     let m4g = if m4g != 0 && tamper.is_some() {
-        eprintln!("gfill-dev: {tag}: a glue tamper is set, so this region fills on the host");
+        eprintln!("residual_stream_fill-dev: {tag}: a residual-stream tamper is set, \
+                  so this region fills on the host");
         0
     } else if m4g != 0 && prog.n_pre > 0 {
         // stream II: `FSlot` has no encoding for a preprocessed operand -- a
@@ -1459,19 +1461,20 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
         // switch says, as a wide walk group already does.  Announced, because a
         // device fill that silently multiplied by zero would look like a bad
         // witness.
-        eprintln!("gfill-dev: {tag}: the region reads preprocessed values, so it fills on the host");
+        eprintln!("residual_stream_fill-dev: {tag}: the region reads preprocessed values, \
+                  so it fills on the host");
         0
     } else {
         m4g
     };
     if m4g == 1 {
-        let dev = crate::devgfill::glue_region_dev(w, prog, round, tables);
+        let dev = crate::dev_residual_stream_fill::residual_stream_region_dev(w, prog, round, tables);
         let (ref_ok, ref_n) = ref_count(w, prog, &dev.outs);
         let bad_exp = dev.bad_exp;
         let (in_nat, out_nat, outs) =
             (dev.in_nat.clone(), dev.out_nat.clone(), dev.outs.clone());
-        crate::devgfill::merge(tables, &dev);
-        return GlueRegion {
+        crate::dev_residual_stream_fill::merge(tables, &dev);
+        return ResidualStreamRegion {
             pre: vec![], base: vec![], log_rows, rows: w.rows,
             n_ops: w.rows * prog.slots.len(),
             n_leaves: w.rows * prog.n_leaves(),
@@ -1480,7 +1483,7 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
             dev: Some(dev),
         };
     }
-    let m4g_snap = (m4g == 2).then(|| crate::devgfill::GlueSnap::of(tables));
+    let m4g_snap = (m4g == 2).then(|| crate::dev_residual_stream_fill::ResidualStreamSnap::of(tables));
     let m4g_off = tables.off_table;
     let n_cols = prog.n_cols(round);
     let sticky = round.needs_sticky();
@@ -1799,7 +1802,7 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                     ref_n += 1;
                     if f.outs[base + k] == w.ref_out[oi][j * o.len() + k] {
                         ref_ok += 1;
-                    } else if std::env::var("B10_GLUE_DEBUG").is_ok() && ref_n - ref_ok < 8 {
+                    } else if std::env::var("B10_RESIDUAL_STREAM_DEBUG").is_ok() && ref_n - ref_ok < 8 {
                         eprintln!("  {tag} ref mismatch row {j} out {oi}.{k}: got {:#06x} \
                                    want {:#06x}", f.outs[base + k], w.ref_out[oi][j * o.len() + k]);
                     }
@@ -1815,7 +1818,7 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                 T_FRAC => tables.m_frac[*i] += 1,
                 T_SMUL => tables.m_smul[*i] += 1,
                 u if u >= T_UN => tables.m_un[(u - T_UN) as usize][*i] += 1,
-                u => unreachable!("unknown glue lookup tag {u}"),
+                u => unreachable!("unknown residual-stream lookup tag {u}"),
             }
         }
         tables.off_table += f.off;
@@ -1863,16 +1866,16 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
     // any column is used. The device's own bumps are the check's and not the
     // proof's, so the host's tables go back where the host fill left them.
     if m4g == 2 {
-        let after = crate::devgfill::GlueSnap::of(tables);
+        let after = crate::dev_residual_stream_fill::ResidualStreamSnap::of(tables);
         let after_off = tables.off_table;
-        let dev = crate::devgfill::glue_region_dev(w, prog, round, tables);
-        crate::devgfill::check_glue_dev(tag, &base, &pre, &dev,
-                                        after_off - m4g_off, bad_exp,
-                                        &in_nat, &out_nat, &outs,
-                                        &m4g_snap.unwrap(), &after);
-        crate::devgfill::restore(tables, &after, after_off);
+        let dev = crate::dev_residual_stream_fill::residual_stream_region_dev(w, prog, round, tables);
+        crate::dev_residual_stream_fill::check_residual_stream_dev(tag, &base, &pre, &dev,
+                                                                   after_off - m4g_off, bad_exp,
+                                                                   &in_nat, &out_nat, &outs,
+                                                                   &m4g_snap.unwrap(), &after);
+        crate::dev_residual_stream_fill::restore(tables, &after, after_off);
     }
-    GlueRegion {
+    ResidualStreamRegion {
         pre, base, log_rows, rows: w.rows, n_ops, n_leaves: n_leaf_tot,
         ref_ok, ref_n, outs, prog: prog.clone(), round,
         tag: tag.to_string(), bad_exp, fired, in_nat, out_nat, dev: None,
@@ -1881,9 +1884,9 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
 
 // ------------------------------------------------------------- interaction ----
 
-/// Every relation the glue draws, in one canonical order.
+/// Every relation the residual stream draws, in one canonical order.
 #[derive(Clone)]
-pub struct GlueRels {
+pub struct ResidualStreamRels {
     pub norm: NormRel,
     pub frac: FracRel,
     pub pow: PowRel,
@@ -1897,7 +1900,7 @@ pub struct GlueRels {
     pub val: ValRel,
 }
 
-pub struct GlueInteraction {
+pub struct ResidualStreamInteraction {
     /// B11 stream M: columns of either kind. The bindings are host accumulators and
     /// always will be; the LogUp half goes wherever `devfrac::frac_cols` sends
     /// it, which since this stream is the generated kernel.
@@ -1938,7 +1941,7 @@ fn src_cols_any(prog: &Prog, s: &Src, round: Round) -> (usize, usize) {
 ///
 /// B11 stream N. The host reads a binding through `binding_vals`, which hands back the
 /// one regrouped vector for that group or output. The device has no regrouped
-/// vectors -- `b65_fill_glue` writes one array per kind, `n_leaves` or `out_w`
+/// vectors -- `b65_fill_residual_stream` writes one array per kind, `n_leaves` or `out_w`
 /// `(sm, ef)` pairs to a row -- so a binding is named by where its sequence starts
 /// in a row and how wide it is. Both offsets are the same running sums the fill
 /// itself uses: `FGroup::flat` for the leaves, and `out_slot`'s concatenation
@@ -1946,7 +1949,8 @@ fn src_cols_any(prog: &Prog, s: &Src, round: Round) -> (usize, usize) {
 ///
 /// The weights of every binding are packed into one array, so the kernel takes one
 /// upload rather than one per lane.
-fn binding_specs(r: &GlueRegion, t: &Binding) -> (Vec<crate::devacc::FAccGBinding>, Vec<SecureField>) {
+fn binding_specs(r: &ResidualStreamRegion, t: &Binding)
+                 -> (Vec<crate::devacc::FAccResidualStreamBinding>, Vec<SecureField>) {
     let prog = &r.prog;
     let n_leaves = prog.n_leaves();
     let out_w: usize = prog.outs.iter().map(|o| o.len()).sum();
@@ -1968,7 +1972,7 @@ fn binding_specs(r: &GlueRegion, t: &Binding) -> (Vec<crate::devacc::FAccGBindin
             assert_eq!(width, spec.w.len(), "a binding's weight count is its width");
             let w_off = weights.len();
             weights.extend_from_slice(&spec.w);
-            crate::devacc::FAccGBinding {
+            crate::devacc::FAccResidualStreamBinding {
                 src,
                 off: off as u32,
                 width: width as u32,
@@ -1986,13 +1990,14 @@ fn binding_specs(r: &GlueRegion, t: &Binding) -> (Vec<crate::devacc::FAccGBindin
 ///
 /// B11 stream M: `air` is this region's own eval, and it is here because the
 /// LogUp half now goes through `devfrac::frac_cols` like every other family's.
-/// The glue was the last component with no device route at all -- not for want
+/// The residual stream was the last component with no device route at all -- not for want
 /// of a kernel, which stream K's split emitter has compiled and installed since
-/// `b65_glue_eval` fit under the cap, but because nothing ever called the
+/// `b65_residual_stream_eval` fit under the cap, but because nothing ever called the
 /// router. The bindings stay on the host: they are a serial Horner fold over the
 /// region's own values, which is `devacc`'s shape and not this stream's.
-pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, binding: Option<&Binding>,
-                        air: &GlueEval, gkr: bool) -> GlueInteraction {
+pub fn residual_stream_interaction(r: &ResidualStreamRegion, rels: &ResidualStreamRels,
+                                   binding: Option<&Binding>, air: &ResidualStreamEval,
+                                   gkr: bool) -> ResidualStreamInteraction {
     use stwo::prover::backend::simd::m31::PackedM31;
     let prog = &r.prog;
     let round = r.round;
@@ -2030,7 +2035,7 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, binding: Option<&Bindin
         match m4t {
             Some(d) => {
                 let (specs, weights) = binding_specs(r, t);
-                let got = crate::devacc::gtie(
+                let got = crate::devacc::residual_stream_bind(
                     d.d_in_nat.device_ptr as *const i32,
                     d.d_out_nat.device_ptr as *const i32,
                     r.log_rows,
@@ -2039,7 +2044,7 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, binding: Option<&Bindin
                     t.lam,
                 );
                 claimed = crate::devacc::place(
-                    &format!("glue {} bindings", r.tag),
+                    &format!("residual stream {} bindings", r.tag),
                     got,
                     host.then_some((host_cols, host_claims)),
                     &mut cols,
@@ -2135,11 +2140,11 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, binding: Option<&Bindin
     };
     // B11 stream M: the router, with the hand-written builder as the closure it
     // compares against at modes 2 and 4 and falls back to at mode 0. The
-    // region's columns are the host's today -- `gen/glue` has no device path --
+    // region's columns are the host's today -- `gen/residual_stream` has no device path --
     // so this is `Cols::Host` and the opt-in `B7_M4_LOGUPIR` decides. When
-    // `gen/glue` puts them on the card the same call takes the kernel
+    // `gen/residual_stream` puts them on the card the same call takes the kernel
     // unconditionally, which is how the two levers compose.
-    // B11 stream V, lever 3: under `--gkr-glue` the region's fractions were
+    // B11 stream V, lever 3: under `--gkr-residual-stream` the region's fractions were
     // handed to the collector before the GKR proof ran, in `compose`'s own pass
     // -- see the comment there for why the two are in different places -- so
     // there are no running-sum columns to build and no claimed sum to carry.
@@ -2148,14 +2153,14 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, binding: Option<&Bindin
     // lookup.
     if gkr {
         let _ = fr;
-        return GlueInteraction {
+        return ResidualStreamInteraction {
             cols: cols.into_inner(),
             use_sum: SecureField::zero(),
             claimed,
         };
     }
     let (lcols, use_sum) = crate::devfrac::frac_cols(
-        air, &format!("glue {}", r.tag), r.log_rows,
+        air, &format!("residual stream {}", r.tag), r.log_rows,
         crate::devfrac::cols_of(&r.pre, r.dev.as_ref().map(|d| &d.pre[..])),
         crate::devfrac::cols_of(&r.base, r.dev.as_ref().map(|d| &d.base[..])),
         || {
@@ -2163,13 +2168,13 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, binding: Option<&Bindin
             crate::plogup::build(r.log_rows, n_pairs, fpair)
         });
     cols.extend_any(lcols);
-    debug_assert!(cols.len() > n_binding, "glue {}: no LogUp columns", r.tag);
-    GlueInteraction { cols: cols.into_inner(), use_sum, claimed }
+    debug_assert!(cols.len() > n_binding, "residual stream {}: no LogUp columns", r.tag);
+    ResidualStreamInteraction { cols: cols.into_inner(), use_sum, claimed }
 }
 
 // ---------------------------------------------------------------- the tables --
 
-/// The glue's own tables, in the shape `dequant::TableEval` has for B6's: a
+/// The residual stream's own tables, in the shape `dequant::TableEval` has for B6's: a
 /// preprocessed row, a committed multiplicity, yielded at `-m`.
 #[derive(Clone)]
 pub enum GKind {
@@ -2212,7 +2217,7 @@ impl FrameworkEval for GTableEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_g_table_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "b65_residual_stream_table_eval" }
 
     fn log_size(&self) -> u32 {
         self.log_rows
@@ -2246,9 +2251,9 @@ pub fn table_side(log_rows: u32, kind: &GKind, row: &[&Eval], mult: &Eval)
     })
 }
 
-/// The glue's own preprocessed columns, in the order the prover commits them:
+/// The residual stream's own preprocessed columns, in the order the prover commits them:
 /// `POW`, `SMUL`, `VAL`, then one unary table per kind in `uns`.
-pub fn glue_table_ids(uns: &[UnKind]) -> Vec<PreProcessedColumnId> {
+pub fn residual_stream_table_ids(uns: &[UnKind]) -> Vec<PreProcessedColumnId> {
     let mut ids: Vec<PreProcessedColumnId> = POW_COLS.iter().map(|c| id(*c)).collect();
     ids.extend(SMUL_COLS.iter().map(|c| id(*c)));
     ids.extend(VAL_COLS.iter().map(|c| id(*c)));
@@ -2271,7 +2276,7 @@ pub fn glue_table_ids(uns: &[UnKind]) -> Vec<PreProcessedColumnId> {
 /// The unary tables need it for a second reason: `UnKind::NormR`'s image of
 /// `(0, 0)` is `rsqrt(eps)`, not zero, so a zero-padded `UN` would have offered
 /// `r = 0` for a zero sum of squares.
-pub fn glue_table_cols(t: &GlueTables) -> Vec<Eval> {
+pub fn residual_stream_table_cols(t: &ResidualStreamTables) -> Vec<Eval> {
     let pad = |n: u32| 1usize << n;
     // the last real row, repeated -- `i.min(len - 1)`
     let at = |len: usize, i: usize| i.min(len.saturating_sub(1));
@@ -2301,7 +2306,7 @@ pub fn glue_table_cols(t: &GlueTables) -> Vec<Eval> {
 }
 
 /// Their multiplicity columns, in the same order.
-pub fn glue_mult_cols(t: &GlueTables) -> Vec<Eval> {
+pub fn residual_stream_mult_cols(t: &ResidualStreamTables) -> Vec<Eval> {
     let mut out = vec![
         eval_of(t.log_pow, t.m_pow.iter().map(|m| m31_u32(*m)).collect()),
         eval_of(t.log_smul, t.m_smul.iter().map(|m| m31_u32(*m)).collect()),
@@ -2313,19 +2318,19 @@ pub fn glue_mult_cols(t: &GlueTables) -> Vec<Eval> {
     out
 }
 
-/// The glue tables' row counts, from their closed forms -- the verifier needs
+/// The residual-stream tables' row counts, from their closed forms -- the verifier needs
 /// them and has no reason to materialise 200k rows to find out.
-pub fn glue_table_logs() -> (u32, u32, u32) {
+pub fn residual_stream_table_logs() -> (u32, u32, u32) {
     let pow = DMAX as usize + 1 + UMIN as usize;
     let val = 1 + 254 * 128 * 2;
     let smul = 257 * 257;
     (log_rows_for(pow, 1), log_rows_for(smul, 1), log_rows_for(val, 1))
 }
 
-/// `(log_rows, columns, kind)` for the glue's own table components, in order.
-pub fn glue_table_kinds(uns: &[UnKind], rels: &GlueRels)
+/// `(log_rows, columns, kind)` for the residual stream's own table components, in order.
+pub fn residual_stream_table_kinds(uns: &[UnKind], rels: &ResidualStreamRels)
                         -> Vec<(u32, Vec<PreProcessedColumnId>, GKind)> {
-    let (log_pow, log_smul, log_val) = glue_table_logs();
+    let (log_pow, log_smul, log_val) = residual_stream_table_logs();
     let mut v = vec![
         (log_pow, POW_COLS.iter().map(|c| id(*c)).collect::<Vec<_>>(),
          GKind::Pow(rels.pow.clone())),
@@ -2358,7 +2363,7 @@ pub struct Outcome {
     pub table_cells_pre: usize,
     pub table_cells_fresh: usize,
     pub region_cells: usize,
-    /// the glue component's own interaction cells: the Horner bindings and the
+    /// the residual-stream component's own interaction cells: the Horner bindings and the
     /// LogUp columns its lookups drag along (a pair of lookups is 4 columns)
     pub inter_cells: usize,
     pub n_columns: [usize; 3],
@@ -2427,7 +2432,7 @@ impl Outcome {
 
 /// The binding specs a standalone region carries: one per input group and one per
 /// `outs` group, with the plain descending weights -- the composed proof picks
-/// its own so that two differently tiled regions line up (see `compose::glue`).
+/// its own so that two differently tiled regions line up (see `compose::residual_stream`).
 pub fn plain_bindings(prog: &Prog, log_rows: u32, w: SecureField) -> Vec<TieSpec> {
     let _ = log_rows;
     let mut specs = vec![];
@@ -2449,25 +2454,25 @@ pub fn plain_bindings(prog: &Prog, log_rows: u32, w: SecureField) -> Vec<TieSpec
 }
 
 /// One region, proved on its own: the measurement and the probes both run here.
-pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
+pub fn run(w: &ResidualStreamWitness, prog: &Prog, round: Round, kmax: u32,
            tamper: Option<Tamper>) -> Outcome {
     let t0 = std::time::Instant::now();
     let uns = prog.un_kinds();
-    let mut tables = GlueTables::new(kmax, round, &uns);
-    let region = glue_region(w, prog, round, "r", &mut tables, tamper);
+    let mut tables = ResidualStreamTables::new(kmax, round, &uns);
+    let region = residual_stream_region(w, prog, round, "r", &mut tables, tamper);
 
     // ---- tree 0: the region's selector, then every table ----------------------
-    let mut ids = vec![glue_sel("r", "nofirst"), glue_sel("r", "end")];
-    // stream II: and the region's own preprocessed values, in `glue_region`'s
+    let mut ids = vec![residual_stream_sel("r", "nofirst"), residual_stream_sel("r", "end")];
+    // stream II: and the region's own preprocessed values, in `residual_stream_region`'s
     // order -- the standalone rung has to name them too or tree 0 has columns
     // the allocator has never heard of
     for i in 0..prog.n_pre {
-        ids.push(glue_pre_col("r", i, 0));
-        ids.push(glue_pre_col("r", i, 1));
+        ids.push(residual_stream_pre_col("r", i, 0));
+        ids.push(residual_stream_pre_col("r", i, 1));
     }
     let mut pre: Vec<Eval> = region.pre.clone();
-    ids.extend(glue_table_ids(&uns));
-    pre.extend(glue_table_cols(&tables));
+    ids.extend(residual_stream_table_ids(&uns));
+    pre.extend(residual_stream_table_cols(&tables));
     let pad = |n: u32| 1usize << n;
     {
         let get: [fn(&bf16::NormRow) -> u32; 6] =
@@ -2492,7 +2497,7 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
     let mut base: Vec<Eval> = region.base.clone();
     let region_cells: usize = base.iter().map(|e| e.domain.size()).sum();
     let mult_start = base.len();
-    base.extend(glue_mult_cols(&tables));
+    base.extend(residual_stream_mult_cols(&tables));
     base.push(eval_of(tables.log_norm, tables.m_norm.iter().map(|m| m31_u32(*m)).collect()));
     base.push(eval_of(tables.log_frac, tables.m_frac.iter().map(|m| m31_u32(*m)).collect()));
     let table_cells_fresh: usize = base[mult_start..].iter().map(|e| e.domain.size()).sum();
@@ -2504,7 +2509,7 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
     let mut sess = Session::new(&tw);
     sess.commit(pre.clone());
     sess.commit(base.clone());
-    let rels = GlueRels {
+    let rels = ResidualStreamRels {
         norm: sess.draw_relation(NormRel::draw),
         frac: sess.draw_relation(FracRel::draw),
         pow: sess.draw_relation(PowRel::draw),
@@ -2515,14 +2520,14 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
     };
     let ch = sess.draw_felts(2);
     let (w_ch, lam) = (ch[0], ch[1]);
-    let notie = std::env::var("B10_GLUE_NOTIE").is_ok();
+    let notie = std::env::var("B10_RESIDUAL_STREAM_NOTIE").is_ok();
     let specs = plain_bindings(prog, region.log_rows, w_ch);
     let tie0 = Binding { lam, specs: specs.clone() };
     // B11 stream M: the eval the LogUp half lowers, built before the claims
     // exist. `compose` does the same thing for the same reason (`claims_for`'s
     // placeholders): a claimed sum enters constraints and never a lookup, so
     // the fraction IR this produces is the one `genemit` compiled.
-    let air0 = GlueEval {
+    let air0 = ResidualStreamEval {
         log_rows: region.log_rows, tag: "r".into(), prog: prog.clone(), round,
         norm: rels.norm.clone(), frac: rels.frac.clone(), pow: rels.pow.clone(),
         smul: rels.smul.clone(), un: rels.un.clone(), uns: rels.uns.clone(),
@@ -2531,8 +2536,8 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
         // the standalone gadget has no GKR arm; the flag lives in `compose`
         gkr: false,
     };
-    let it = glue_interaction(&region, &rels, if notie { None } else { Some(&tie0) },
-                              &air0, false);
+    let it = residual_stream_interaction(&region, &rels, if notie { None } else { Some(&tie0) },
+                                         &air0, false);
     let inter_cells = it.cols.len() << region.log_rows;
     let binding = Binding {
         lam,
@@ -2556,7 +2561,7 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
     let mut icols: Vec<Eval> = it.cols.into_iter().map(|c| c.into_host()).collect();
 
     // the tables' own sides
-    let mut kinds = glue_table_kinds(&tables.uns, &rels);
+    let mut kinds = residual_stream_table_kinds(&tables.uns, &rels);
     kinds.push((tables.log_norm, crate::dequant::NORM_COLS.iter().map(|c| id(*c)).collect(),
                 GKind::Norm(rels.norm.clone())));
     kinds.push((tables.log_frac, crate::dequant::FRAC_COLS.iter().map(|c| id(*c)).collect(),
@@ -2577,9 +2582,9 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
 
     // ---- components -------------------------------------------------------------
     let alloc = &mut TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let comp = FrameworkComponent::<GlueEval>::new(
+    let comp = FrameworkComponent::<ResidualStreamEval>::new(
         alloc,
-        GlueEval { log_rows: region.log_rows, tag: "r".into(), prog: prog.clone(), round,
+        ResidualStreamEval { log_rows: region.log_rows, tag: "r".into(), prog: prog.clone(), round,
                    norm: rels.norm.clone(), frac: rels.frac.clone(), pow: rels.pow.clone(),
                    smul: rels.smul.clone(), un: rels.un.clone(), uns: rels.uns.clone(),
                    val: rels.val.clone(),
@@ -2767,8 +2772,8 @@ pub fn norm_drift(dir: &str, d: usize, tokens_cap: usize, round: Round, which: &
     let man: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(format!("{dir}/manifest.json"))
             .map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let eps = man["glue"]["eps"].as_u64().ok_or("manifest: glue.eps")? as u16;
-    let inv_d = man["glue"]["inv_d"].as_u64().ok_or("manifest: glue.inv_d")? as u16;
+    let eps = man["residual_stream"]["eps"].as_u64().ok_or("manifest: residual_stream.eps")? as u16;
+    let inv_d = man["residual_stream"]["inv_d"].as_u64().ok_or("manifest: residual_stream.inv_d")? as u16;
     let tokens = (x.len() / d).min(tokens_cap.max(1)).max(1);
     let pad = d.next_power_of_two();
     let (mut same, mut worst, mut worst_ulp) = (0usize, 0f64, 0i64);

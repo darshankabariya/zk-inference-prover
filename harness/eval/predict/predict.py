@@ -94,14 +94,15 @@ REF8B_SOURCE = "experiments/b10/out/seq5/seq_c{4096,16384}_L16.json (result.poin
 #
 #   rest    everything else in a layer chunk: the dequant, the walk, the
 #           requantize, the int8 range checks, the attention-output fold and
-#           the glue.  Pure arithmetic in the 7-tuple, from the B2-B10 gadget
+#           the residual stream.  Pure arithmetic in the 7-tuple, from the B2-B10 gadget
 #           marginals.  This is the half that can be wrong at a new scale.
 #
 # `rest` is the cost model's layers-only per-token total minus its `attn` term,
-# plus the glue's NET cost (`glue_cells(...)['net']` -- total minus the stub the
-# composed statement replaces).  Charging the glue's gross total instead
-# over-predicts the 8B chunk by 11.6%; charging no glue at all under-predicts it
-# by 14.3%.  The net is the one that matches what the prover builds.
+# plus the residual stream's NET cost (`residual_stream_cells(...)['net']` --
+# total minus the stub the composed statement replaces).  Charging the residual
+# stream's gross total instead over-predicts the 8B chunk by 11.6%; charging no
+# residual stream at all under-predicts it by 14.3%.  The net is the one that
+# matches what the prover builds.
 # --------------------------------------------------------------------------
 
 
@@ -125,14 +126,14 @@ def predict(cfg, ctx, seq=S, base_slope=2.0):
     """Layers-only fresh cells per decoded token, split bands / rest."""
     L, d, nh, nkv, hd, dff, vocab = cfg
     r = cm.cells_per_token(cfg, ctx, B, seq=seq, head=False)
-    gl = cm.glue_cells(cfg, "tree")
+    gl = cm.residual_stream_cells(cfg, "tree")
     bb, bi, sat = bands_per_chunk(nh, hd, seq, ctx, base_slope=base_slope)
     bands = L * (bb + bi) / seq
     rest = r["total"] - r["attn"] + gl["net"]
     return dict(bands=bands, rest=rest, total=bands + rest,
                 bands_base_per_chunk=bb, bands_interaction_per_chunk=bi,
                 per_layer_chunk=(bands + rest) * seq / L,
-                saturated=sat, glue_net=gl["net"], bare=r["total"])
+                saturated=sat, residual_stream_net=gl["net"], bare=r["total"])
 
 
 def head_chunk(cfg, seq=S):
@@ -154,9 +155,9 @@ def anchors():
             scale="Llama-3.1-8B", ctx=ctx, predicted=p["total"], measured=m,
             ratio=p["total"] / m, source=get(key)["source"], grade=get(key)["grade"],
             card=get(key)["card"])
-    # Qwen2.5-0.5B: B6.5's composed layer, a DIFFERENT statement -- no glue
-    # family, no corner band, and q/k/v/o on the pow2 dequant rung while
-    # gate/up/down are on the chain.  Evaluated the same way, as a weak anchor.
+    # Qwen2.5-0.5B: B6.5's composed layer, a DIFFERENT statement -- no
+    # residual-stream family, no corner band, and q/k/v/o on the pow2 dequant
+    # rung while gate/up/down are on the chain.  Evaluated the same way, as a weak anchor.
     L, d, nh, nkv, hd, dff, vocab = cm.QWEN
     r = cm.cells_per_token(cm.QWEN, 1024, B, seq=S, head=False, corner=False)
     mixed = L * (((nh + 2 * nkv) * hd + d) * cm.HEAD_DEQUANT_PER_ACC
@@ -167,7 +168,7 @@ def anchors():
         scale="Qwen2.5-0.5B", ctx=1024, predicted=tot, measured=meas,
         ratio=tot / meas, source="experiments/b65/out/compose_host.json "
         "(result.point.cells.fresh)", grade="measured", card="none (host, macOS)",
-        note="weak anchor: no glue family, no corner band, mixed dequant rungs, "
+        note="weak anchor: no residual-stream family, no corner band, mixed dequant rungs, "
              "and a prover generation older than the seq5 statement")
     return out
 
@@ -331,7 +332,7 @@ def provenance():
         predictor=dict(
             engine="experiments/b2/cost_model.py",
             entry_points=["cells_per_token(cfg, ctx, batch, seq, head=False)",
-                          "glue_cells(cfg, 'tree')", "band_cells", "band_fresh",
+                          "residual_stream_cells(cfg, 'tree')", "band_cells", "band_fresh",
                           "lm_head_chunk"],
             not_the_engine="experiments/budget.py is an early one-shape proxy "
                            "(eval-plan.md section 3) and is not used here",

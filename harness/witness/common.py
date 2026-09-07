@@ -151,37 +151,38 @@ for _n in (9, 10, 12, 16):
 SPECS["b10-design"] = replace(SPECS["b6-design-p2o"],
                               dequant_round="away", num_bits=9)
 
-# B10 step 2: the two knobs the *glue* decides, and owes a row for.  Proving the
-# RMSNorm pins both.  The layer's rounding mode stops being the dequant's choice
+# B10 step 2: the two knobs the *residual stream* decides, and owes a row for.
+# Proving the RMSNorm pins both.  The layer's rounding mode stops being the dequant's choice
 # -- `store()` is ties-to-even and one shared `NORM` table is built in one mode,
 # so the whole layer rounds even -- and the reduction's *order* stops being B1's
 # fp32 accumulation, which no bf16-add gadget reproduces, in favour of B1's own
-# balanced tree.  `b10-glue` is `b10-design` with both, i.e. the spec the AIR
-# actually proves; `b10-design-even` isolates the mode so the two are separable.
+# balanced tree.  `b10-residual-stream` is `b10-design` with both, i.e. the spec
+# the AIR actually proves; `b10-design-even` isolates the mode so the two are
+# separable.
 SPECS["b10-design-even"] = replace(SPECS["b10-design"], dequant_round="even")
-SPECS["b10-glue"] = replace(SPECS["b10-design"], dequant_round="even",
-                            reduce="bf16-norm")
+SPECS["b10-residual-stream"] = replace(SPECS["b10-design"], dequant_round="even",
+                                       reduce="bf16-norm")
 
 # B10 step 5: the frozen spec, and the end of the drift.  Steps 2 to 4 were each
 # measured on a different system, which is the thing this name exists to stop.
-# Step 2's glue forces round-to-even and the balanced-tree reduction, so
-# `b10-design`'s ties-away rounding cannot survive alongside it -- the shared
+# Step 2's residual stream forces round-to-even and the balanced-tree reduction,
+# so `b10-design`'s ties-away rounding cannot survive alongside it -- the shared
 # `NORM` table is built in one mode and the whole layer rounds that way.  Step 4
 # then found that the output head wants power-of-two linear scales: the head
 # chunk's dequant is 79% of it, the two rungs differ by 52% in cells, and B8
 # priced the quality cost of the cheaper rung at +0.02%.  `b10-final` is
-# `b10-glue` plus that one rung, and it is the only spec B10 both scores and
-# proves from here on.  A witness and a spec are one object, so every dump under
+# `b10-residual-stream` plus that one rung, and it is the only spec B10 both
+# scores and proves from here on.  A witness and a spec are one object, so every dump under
 # it declares it: `deq_variants` in the manifest names `pow2` for `lm_head` and
 # `chain` for the seven layer matmuls.
 #
 # Read as a lineage: `b6-design-p2o` + ties-away + 9-bit numerator = `b10-design`;
-# + round-to-even + `reduce="bf16-norm"` = `b10-glue`; + power-of-two scales on
-# `lm_head` = `b10-final`.
-SPECS["b10-final"] = replace(SPECS["b10-glue"], pow2_matmuls=("lm_head",))
+# + round-to-even + `reduce="bf16-norm"` = `b10-residual-stream`; + power-of-two
+# scales on `lm_head` = `b10-final`.
+SPECS["b10-final"] = replace(SPECS["b10-residual-stream"], pow2_matmuls=("lm_head",))
 
 # B10's own list: one spec, scored against B8's fp32 and `b6-design-p2o` rows
-B10_SPECS = ["b10-design", "b10-design-even", "b10-glue", "b10-final"]
+B10_SPECS = ["b10-design", "b10-design-even", "b10-residual-stream", "b10-final"]
 
 # --- stream Y: requantization probes (briefs/y-requant.md) --------------------
 # The dequant -> bf16 -> requant round trips the witness pays for, attacked at

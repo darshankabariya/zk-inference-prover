@@ -24,7 +24,7 @@ does not is **nothing new** -- the prefix length is `Params.c`, which
 `params_of` reads off the witness's own manifest (`main.rs:567`,
 `c: b0.shape.c`), so a block is a directory and a table size and that is all.
 No `Params` field is added, which matters because `boundary.rs:253-257`'s
-`shape_ok` compares `params.s`, `params.glue`, the blowup and the two boundary
+`shape_ok` compares `params.s`, `params.residual_stream`, the blowup and the two boundary
 trees' sizes and would reject every cross-block link if a block index entered
 the statement.
 

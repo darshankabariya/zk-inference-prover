@@ -306,19 +306,19 @@ pub enum RCol {
     /// offline, so its mantissa enters the `mul` lookup from the preprocessed
     /// side while everything else in the lookup is committed.
     DeqPre(usize),
-    /// B11 stream V: a glue region's `i`-th trace mask. The index is the
+    /// B11 stream V: a residual-stream region's `i`-th trace mask. The index is the
     /// region's own committed column index, which *is* the mask index: the
     /// evaluator reads its masks in `Prog` order and the fill writes the
-    /// columns in the same order, which is what lets `glue_interaction`'s
+    /// columns in the same order, which is what lets `residual_stream_interaction`'s
     /// builder index `r.base` by what `Prog` returns.
-    Glue(usize),
-    /// Stream OO (E11): a glue region's preprocessed value `i`, half `k` --
+    ResidualStream(usize),
+    /// Stream OO (E11): a residual-stream region's preprocessed value `i`, half `k` --
     /// the `(sm, ef)` pair of a `Src::Pre` operand. Stream II's norm scales read
     /// the model's norm weight, which is the statement's and so lives in tree 0
     /// under `pre_root`; the pair sits at `Prog::pre_at(i, k)` in the region's
-    /// own `pre` list and is named by `glue::glue_pre_col(tag, i, k)`. The only
-    /// preprocessed column a glue lookup reads.
-    GluePre(usize, usize),
+    /// own `pre` list and is named by `residual_stream::residual_stream_pre_col(tag, i, k)`. The only
+    /// preprocessed column a residual-stream lookup reads.
+    ResidualStreamPre(usize, usize),
     /// B11 stream V: a walk group's `i`-th trace mask. The activations are the
     /// region's first `pq` committed columns, which is the slice
     /// `walk_interaction`'s builder range-checks.
@@ -347,8 +347,8 @@ pub enum Reg {
     Band(usize),
     /// dequant region `m`, in the plan's matmul order
     Deq(usize),
-    /// B11 stream V: glue region `g`, in the plan's region order
-    Glue(usize),
+    /// B11 stream V: residual-stream region `g`, in the plan's region order
+    ResidualStream(usize),
     /// B11 stream V: walk group `w`, in the plan's walk order
     Walk(usize),
     /// B11 stream V: the attention-output region, of which there is one
@@ -368,7 +368,7 @@ impl Reg {
         match self {
             Reg::Band(b) => format!("band{b}"),
             Reg::Deq(m) => format!("deq{m}"),
-            Reg::Glue(g) => format!("glue{g}"),
+            Reg::ResidualStream(g) => format!("residual_stream{g}"),
             Reg::Walk(w) => format!("walk{w}"),
             Reg::Ao => "attnout".to_string(),
         }
@@ -541,11 +541,11 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
     if plan.p.gkr_dequant {
         out.extend(deq_looks(plan, rels));
     }
-    // B11 stream V, lever 3: the glue family, after dequant, which is memo
+    // B11 stream V, lever 3: the residual-stream family, after dequant, which is memo
     // section 8's order and therefore the order `sites_of` derives and the
     // interaction pass collects in.
-    if plan.p.gkr_glue {
-        out.extend(glue_looks(plan, rels));
+    if plan.p.gkr_residual_stream {
+        out.extend(residual_stream_looks(plan, rels));
     }
     if plan.p.gkr_walks {
         out.extend(walk_looks(plan, rels));
@@ -678,17 +678,17 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
     out
 }
 
-/// The glue family's lookup sites as affine forms.
+/// The residual-stream family's lookup sites as affine forms.
 ///
-/// B11 stream V, lever 3. This mirrors `glue::glue_interaction`'s `fr` closure
+/// B11 stream V, lever 3. This mirrors `residual_stream::residual_stream_interaction`'s `fr` closure
 /// look for look and column for column -- that closure is the ground truth for
 /// the *order*, because `plogup::paired` batches in it and the generated kernel
-/// lowers `GlueEval::evaluate` in it, so all three agree or `B7_M4_LOGUPIR=2`
-/// fails. Every value a glue lookup reads is one of the region's own committed
+/// lowers `ResidualStreamEval::evaluate` in it, so all three agree or `B7_M4_LOGUPIR=2`
+/// fails. Every value a residual-stream lookup reads is one of the region's own committed
 /// trace masks or the constant zero -- `usize::MAX` is the `+0` operand, which
 /// contributes no term at all -- so every denominator is affine in committed
 /// columns exactly as memo section 4 needs, and every numerator is the literal
-/// one, which puts every glue instance in `Layer::LogUpSingles`.
+/// one, which puts every residual-stream instance in `Layer::LogUpSingles`.
 ///
 /// Three of the six kinds read a *pair* of masks two apart (`c(a + 2)` is the
 /// unary's output beside its input) and one reads an affine combination rather
@@ -700,13 +700,13 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
 /// `B11_GKR_AFFINE=1` compares the two. This one is what both the prover and
 /// the *verifier* run, because it needs the plan and the drawn relations and
 /// nothing else -- the verifier has no evaluator to lower.
-pub fn glue_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
+pub fn residual_stream_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
                   -> Vec<SiteLooks> {
-    use crate::glue::{Kind, Src, UnKind};
-    let Some(gp) = plan.glue.as_ref() else { return vec![] };
-    let Some(gr) = rels.glue.as_ref() else { return vec![] };
+    use crate::residual_stream::{Kind, Src, UnKind};
+    let Some(gp) = plan.residual_stream.as_ref() else { return vec![] };
+    let Some(gr) = rels.residual_stream.as_ref() else { return vec![] };
     let one = SecureField::one();
-    let dmax = SecureField::from(M31::from_u32_unchecked(crate::glue::DMAX));
+    let dmax = SecureField::from(M31::from_u32_unchecked(crate::residual_stream::DMAX));
     let mut out = vec![];
     for (g, r) in gp.regions.iter().enumerate() {
         let prog = &r.prog;
@@ -727,12 +727,12 @@ pub fn glue_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
         };
         // one of the region's committed masks, or the constant zero
         let col = |x: usize| -> Option<Affine> {
-            (x != usize::MAX).then(|| Affine::col(RCol::Glue(x), one))
+            (x != usize::MAX).then(|| Affine::col(RCol::ResidualStream(x), one))
         };
         // Stream OO: a slot operand's half `k` (0 the mantissa, 1 the exponent).
         // `Prog::src_cols` answers `None` for `Src::Pre` because the *fill*
         // reads a preprocessed operand out of a second vector
-        // (`glue::src_cols_any`'s `PRE_TAG`), and the two callers that took the
+        // (`residual_stream::src_cols_any`'s `PRE_TAG`), and the two callers that took the
         // `None` for the constant zero dropped the operand's term from the
         // affine form -- so a tail's slots folded under a form missing one
         // column and `gkrlink`'s own assert fired at the first tail height.
@@ -740,9 +740,9 @@ pub fn glue_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
         // look is the same shape, at a different tree index.
         let src = |s: &Src, k: usize| -> Option<Affine> {
             match s {
-                Src::Pre(i) => Some(Affine::col(RCol::GluePre(*i, k), one)),
+                Src::Pre(i) => Some(Affine::col(RCol::ResidualStreamPre(*i, k), one)),
                 _ => prog.src_cols(s, plan.round).map(|c| {
-                    Affine::col(RCol::Glue(if k == 0 { c.0 } else { c.1 }), one)
+                    Affine::col(RCol::ResidualStream(if k == 0 { c.0 } else { c.1 }), one)
                 }),
             }
         };
@@ -760,7 +760,7 @@ pub fn glue_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
                     looks.push(unit(rel(z, al, &[col(b), col(b + 1)])));
                 } else {
                     let k = gr.uns.iter().position(|x| *x == grp.un)
-                        .expect("a glue group's unary kind is not in the plan's union");
+                        .expect("a residual-stream group's unary kind is not in the plan's union");
                     let (z, al) = gr.un[k].parts();
                     looks.push(unit(rel(z, al,
                         &[col(b), col(b + 1), col(b + 2), col(b + 3)])));
@@ -787,13 +787,13 @@ pub fn glue_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
                             a.terms.extend(e.terms);
                             a.k += e.k;
                         }
-                        a.terms.push((RCol::Glue(b + 2), -one));
+                        a.terms.push((RCol::ResidualStream(b + 2), -one));
                         Some(a)
                     };
                     let (z, al) = gr.pow.parts();
                     looks.push(unit(rel(z, al, &[align(ea), col(b)])));
                     looks.push(unit(rel(z, al, &[align(eb), col(b + 1)])));
-                    let st = sticky.then(|| Affine::col(RCol::Glue(b + 8), one));
+                    let st = sticky.then(|| Affine::col(RCol::ResidualStream(b + 8), one));
                     let (z, al) = gr.norm.parts();
                     looks.push(unit(rel(z, al, &[col(b + 5), col(b + 6), st.clone(),
                                                  col(b + k), col(b + k + 1),
@@ -815,7 +815,7 @@ pub fn glue_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
             }
         }
         out.push(SiteLooks {
-            reg: Reg::Glue(g),
+            reg: Reg::ResidualStream(g),
             which: 0,
             log_rows: r.log_rows,
             looks,
@@ -939,16 +939,16 @@ pub fn ao_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
     vec![SiteLooks { reg: Reg::Ao, which: 0, log_rows: lay.log_rows, looks }]
 }
 
-/// How many looks a glue region has, from its program alone.
+/// How many looks a residual-stream region has, from its program alone.
 ///
 /// The verifier's `sites_of` needs the look count and the numerator kinds
-/// without an evaluator to lower, and this is the count `glue_looks` produces:
+/// without an evaluator to lower, and this is the count `residual_stream_looks` produces:
 /// one per committed leaf, then five per Add-tree slot or two per Mul slot.
 /// Every one is unit.
-pub fn glue_look_count(prog: &crate::glue::Prog) -> usize {
+pub fn residual_stream_look_count(prog: &crate::residual_stream::Prog) -> usize {
     let per_slot = match prog.kind {
-        crate::glue::Kind::Add => 5,
-        crate::glue::Kind::Mul => 2,
+        crate::residual_stream::Kind::Add => 5,
+        crate::residual_stream::Kind::Mul => 2,
     };
     prog.groups.iter().map(|g| g.n).sum::<usize>() + per_slot * prog.slots.len()
 }
@@ -1670,7 +1670,7 @@ impl<B: stwo::prover::backend::Backend> ComponentProver<B> for LinkTie {
 /// Placeholder link parameters for the emit path: the heights are the plan's
 /// own, the scalars distinct nonzero pseudo-random values. The blob replays
 /// the real scalars at prove time; distinctness keeps `lit` from folding
-/// slots away, exactly as `fill_binding_claims` does for the glue bindings.
+/// slots away, exactly as `fill_binding_claims` does for the residual-stream bindings.
 pub fn link_for(plan: &crate::compose::Plan, seed: u64) -> Vec<HeightLink> {
     let mut x = seed | 1;
     let mut felt = || {

@@ -64,7 +64,7 @@
 #define B65A_MUT_NOMASK 7u     // let an inert lead row contribute a numerator
 #define B65A_MUT_EVERYROW 8u   // land stage 2's term on every row, not the last
 #define B65A_MUT_NOSPLIT 9u    // read the key column alone, not `idx 2^k + aux`
-// B11 stream N: the glue's bindings, whose three ways of being wrong are its three
+// B11 stream N: the residual stream's bindings, whose three ways of being wrong are its three
 // factors -- the row-to-row step, the within-row weight, and `lam`, which is
 // the only thing that keeps a leaf's two halves apart.
 #define B65A_MUT_NOBINDSTEP 10u  // fold the rows with 1 instead of the binding's step
@@ -264,7 +264,7 @@ struct B65AccAo {
     unsigned mutate;
 };
 
-// B11 stream N: one of the glue region's Horner bindings, which is the seventh
+// B11 stream N: one of the residual-stream region's Horner bindings, which is the seventh
 // region of the table at the top of this file and the plainest of them.
 //
 // A binding folds one of the region's *value sequences* -- a group's committed
@@ -277,13 +277,13 @@ struct B65AccAo {
 // So a binding needs no flags and no stage 2 -- it is one stage-1 lane and the
 // shared scan, and `a[j]` is the constant `step` everywhere but row 0.
 //
-// What it reads is not a committed column. `b65_gfill.cu` leaves `(sm, ef)`
+// What it reads is not a committed column. `b65_residual_stream_fill.cu` leaves `(sm, ef)`
 // per leaf and per output in `in_nat` / `out_nat`, in **coset row order**, for
 // exactly this purpose; before this stream those two arrays were copied back
-// across the link and folded on the host, which is all `gen/gfill_d2h` was.
+// across the link and folded on the host, which is all `gen/residual_stream_fill_d2h` was.
 // `src` picks the array, `off` and `width` cut this binding's sequence out of a
 // row of it, and `stride` is that array's own row width.
-struct B65AccGTie {
+struct B65AccResidualStreamBind {
     unsigned src;     // 0 = `in_nat`, 1 = `out_nat`
     unsigned off;     // first member of this binding's sequence within a row
     unsigned width;   // members of the sequence
@@ -361,12 +361,12 @@ extern "C" void b65_acc_ao(const m31 *den_col, const m31 *const *acc_cols,
                            const qm31 *rv_pow, qm31 rv_step, unsigned *flags,
                            qm31 *a, qm31 *b, B65AccAo cfg);
 
-// B11 stream N: every binding of one glue region, one lane each. `specs` and
+// B11 stream N: every binding of one residual-stream region, one lane each. `specs` and
 // `weights` are host arrays and are cloned to the card here; `in_nat` and
-// `out_nat` are already there, where `b65_gfill.cu` left them.
-extern "C" void b65_acc_gtie(const int *in_nat, const int *out_nat,
+// `out_nat` are already there, where `b65_residual_stream_fill.cu` left them.
+extern "C" void b65_acc_residual_stream_bind(const int *in_nat, const int *out_nat,
                              const qm31 *weights, unsigned n_weights, qm31 lam,
-                             const B65AccGTie *specs, unsigned n_specs, qm31 *a,
+                             const B65AccResidualStreamBind *specs, unsigned n_specs, qm31 *a,
                              qm31 *b, unsigned rows, unsigned mutate);
 
 #endif

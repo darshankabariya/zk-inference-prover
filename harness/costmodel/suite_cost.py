@@ -129,7 +129,7 @@ def cell_model():
     `per_token` is `design.prefill_chunk_remainder[1]`, DD's two-point fit of
     everything the band family does not cover.  Its `[0]` partner is the same
     floor for B9's SYNTHETIC probe chunk; our composed layer statement also
-    carries the glue, both residual adds and the committed residual streams,
+    carries the residual stream, both residual adds and the committed residual streams,
     so `fixed` is solved separately against our own measured chunk at C=4096.
     Predicting C=16384 from it lands at -0.63% -- a held-out check, whose
     residual is the composed chunk's own small C-growth outside the family.

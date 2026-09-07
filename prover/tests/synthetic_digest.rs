@@ -13,8 +13,10 @@ const SYN: &[&str] = &[
     "compose", "--round", "away", "--variants", "intsplit6", "--table-bits", "16",
     "--s", "32", "--ctx", "128", "--hd", "32",
 ];
-const GLUE: &[&str] = &["--nout", "64", "--glue-a", "32", "--kmax", "16", "--synth-glue"];
-const GKR5: &[&str] = &["--gkr-bands", "--gkr-dequant", "--gkr-glue", "--gkr-walks", "--gkr-attnout"];
+const RESIDUAL_STREAM: &[&str] =
+    &["--nout", "64", "--residual-stream-a", "32", "--kmax", "16", "--synth-residual-stream"];
+const GKR5: &[&str] =
+    &["--gkr-bands", "--gkr-dequant", "--gkr-residual-stream", "--gkr-walks", "--gkr-attnout"];
 const SKIP_RS: &str = "--unsound-skip-residual-stream";
 const SKIP_LB: &str = "--unsound-skip-layer-boundary";
 const SKIP_KV: &str = "--unsound-skip-kv-boundary";
@@ -23,7 +25,7 @@ struct Case {
     name: &'static str,
     /// the first 16 hex of `proof_sha256`
     digest: &'static str,
-    /// the flags after `SYN`; `GLUE` and `GKR5` expand
+    /// the flags after `SYN`; `RESIDUAL_STREAM` and `GKR5` expand
     flags: &'static [&'static str],
     /// the edge numbers the binding table must leave unbound, in order
     unbound: &'static [u8],
@@ -35,14 +37,14 @@ struct Case {
 const CASES: &[Case] = &[
     // the residual-stream family with both boundaries on; the 64-wide matmuls
     // under three heads of 32 leave the rotation (3) and the o seam (5) open
-    Case { name: "sound", digest: "82085896a8408f36", flags: &["--bands", "2,1", "GLUE", "--corner"],
-           unbound: &[3, 5] },
+    Case { name: "sound", digest: "82085896a8408f36",
+           flags: &["--bands", "2,1", "RESIDUAL_STREAM", "--corner"], unbound: &[3, 5] },
     Case { name: "sound_gkrfive", digest: "6bee5972d6f616aa",
-           flags: &["--bands", "2,1", "GLUE", "--corner", "GKR5"], unbound: &[3, 5] },
+           flags: &["--bands", "2,1", "RESIDUAL_STREAM", "--corner", "GKR5"], unbound: &[3, 5] },
     // four heads of 32 over 128-wide matmuls: every layer edge bound
     Case { name: "sound_aligned", digest: "9c3cdebd97a7d57b",
-           flags: &["--bands", "2,2", "--nin", "128", "--nout", "128", "--glue-a", "32",
-                    "--kmax", "16", "--synth-glue", "--corner"],
+           flags: &["--bands", "2,2", "--nin", "128", "--nout", "128", "--residual-stream-a", "32",
+                    "--kmax", "16", "--synth-residual-stream", "--corner"],
            unbound: &[] },
     // the unbound configuration (recorded 2026-09-06 on the SIMD backend; the sound
     // shapes above on 2026-09-07)
@@ -67,15 +69,15 @@ const CASES: &[Case] = &[
     Case { name: "kv_gkrfive", digest: "a379fa16dc2b0e98",
            flags: &["--bands", "2,1", "--corner", SKIP_RS, "GKR5"],
            unbound: &[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 13] },
-    Case { name: "glue_corner", digest: "5a4a05ea6274e7c6",
-           flags: &["--bands", "2,1", "GLUE", "--corner", SKIP_LB, SKIP_KV],
+    Case { name: "residual_stream_corner", digest: "5a4a05ea6274e7c6",
+           flags: &["--bands", "2,1", "RESIDUAL_STREAM", "--corner", SKIP_LB, SKIP_KV],
            unbound: &[3, 5, 13, 14] },
-    Case { name: "glue_kv", digest: "94c32161ecbbef84",
-           flags: &["--bands", "2,1", "GLUE", "--corner", SKIP_LB], unbound: &[3, 5, 13] },
-    Case { name: "glue_bounds", digest: "775b1972badf31e4",
-           flags: &["--bands", "2,1", "GLUE", "--corner", SKIP_KV], unbound: &[3, 5, 14] },
-    Case { name: "glue_gkrfive", digest: "d1aff3e6580569a4",
-           flags: &["--bands", "2,1", "GLUE", "--corner", SKIP_LB, SKIP_KV, "GKR5"],
+    Case { name: "residual_stream_kv", digest: "94c32161ecbbef84",
+           flags: &["--bands", "2,1", "RESIDUAL_STREAM", "--corner", SKIP_LB], unbound: &[3, 5, 13] },
+    Case { name: "residual_stream_bounds", digest: "775b1972badf31e4",
+           flags: &["--bands", "2,1", "RESIDUAL_STREAM", "--corner", SKIP_KV], unbound: &[3, 5, 14] },
+    Case { name: "residual_stream_gkrfive", digest: "d1aff3e6580569a4",
+           flags: &["--bands", "2,1", "RESIDUAL_STREAM", "--corner", SKIP_LB, SKIP_KV, "GKR5"],
            unbound: &[3, 5, 13, 14] },
 ];
 
@@ -83,7 +85,7 @@ fn args_of(flags: &[&str]) -> Vec<String> {
     let mut a: Vec<String> = SYN.iter().map(|s| s.to_string()).collect();
     for f in flags {
         match *f {
-            "GLUE" => a.extend(GLUE.iter().map(|s| s.to_string())),
+            "RESIDUAL_STREAM" => a.extend(RESIDUAL_STREAM.iter().map(|s| s.to_string())),
             "GKR5" => a.extend(GKR5.iter().map(|s| s.to_string())),
             _ => a.push(f.to_string()),
         }

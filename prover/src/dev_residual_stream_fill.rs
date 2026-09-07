@@ -1,27 +1,27 @@
-//! B11 stream M: the glue's witness generation, on the device.
+//! B11 stream M: the residual stream's witness generation, on the device.
 //!
-//! `gen/glue` was the last named host term with no device path at all: 49.784 s
+//! `gen/residual_stream` was the last named host term with no device path at all: 49.784 s
 //! of seq3's 190.94 s wall at C=4K and 49.28 s of 241.40 at C=16K, 97% of it
-//! inside four `glue::glue_region` calls per chunk. The context-independence is
-//! the tell -- the glue's regions are sized by the model's hidden dimension and
+//! inside four `residual_stream::residual_stream_region` calls per chunk. The context-independence is
+//! the tell -- the residual stream's regions are sized by the model's hidden dimension and
 //! not by the context -- and it is why this term dominates at C=4K.
 //!
 //! **Interpreted, not emitted.** The route was a choice and the measurement
 //! made it. A `genemit` target compiling each region's straight-line `Prog` to
-//! CUDA would have been the other one; against it, a glue region's program is
+//! CUDA would have been the other one; against it, a residual-stream region's program is
 //! tiny and uniform (255 add slots over 256 leaves on `gn1`/`gn2`, 31 over 32
 //! on `gn1b`/`gn2b`) while the rows are many, so the per-slot interpretive
 //! overhead sits against a normalisation and four table lookups and disappears.
-//! And an emit would have to be re-run for every new glue shape, on the family
+//! And an emit would have to be re-run for every new residual-stream shape, on the family
 //! whose *constraint* kernel took 617.7 s of ptxas before stream K split it.
-//! `b65_gfill.cuh` carries the argument in full.
+//! `b65_residual_stream_fill.cuh` carries the argument in full.
 //!
 //! What the kernel needs from here is the program as *column indices*: every
 //! `Src` resolves to the columns its `(sm, ef)` pair lives in, so the kernel
 //! keeps no per-row state and reads its operands back out of cells it wrote.
 //! `Prog::src_cols` is that resolution, and it already existed for the AIR.
 //!
-//! `B7_M4_GFILL` says which path runs, on the three-value pattern every fill in
+//! `B7_M4_RESIDUAL_STREAM_FILL` says which path runs, on the three-value pattern every fill in
 //! this series uses: 0 the host, 1 the device, 2 both with every cell, every
 //! multiplicity delta, `off_table`, `bad_exp` and both natural-value arrays
 //! asserted equal.
@@ -31,7 +31,7 @@ use std::sync::{Mutex, OnceLock};
 use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
 
 use crate::common::{Eval, eval_of, log_rows_for, m31_u32};
-use crate::glue::{GlueTables, GlueWitness, Kind, Prog, Src, UnKind};
+use crate::residual_stream::{ResidualStreamTables, ResidualStreamWitness, Kind, Prog, Src, UnKind};
 
 // ---------------------------------------------------------------- the FFI shapes --
 
@@ -73,7 +73,7 @@ impl FMult {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct FGlueCfg {
+struct FResidualStreamCfg {
     log_rows: u32,
     rows: u32,
     live: u32,
@@ -91,7 +91,7 @@ struct FGlueCfg {
 const NONE: u32 = u32::MAX;
 
 unsafe extern "C" {
-    fn b65_fill_glue(
+    fn b65_fill_residual_stream(
         wit: *const u32,
         groups: *const FGroup,
         slots: *const FSlot,
@@ -114,15 +114,15 @@ unsafe extern "C" {
         m_smul: FMult,
         m_un: *const FMult,
         counts: *mut u32,
-        cfg: FGlueCfg,
+        cfg: FResidualStreamCfg,
     );
 }
 
 // ------------------------------------------------------------------ the switches --
 
-/// `B7_M4_GFILL`: 0 the host, 1 the device, 2 both with every cell asserted.
+/// `B7_M4_RESIDUAL_STREAM_FILL`: 0 the host, 1 the device, 2 both with every cell asserted.
 pub fn mode() -> u32 {
-    crate::util::m4b_mode("B7_M4_GFILL")
+    crate::util::m4b_mode("B7_M4_RESIDUAL_STREAM_FILL")
 }
 
 /// Whether anything on the host will read the two natural arrays.
@@ -133,17 +133,17 @@ pub fn mode() -> u32 {
 /// otherwise: `in_nat` / `out_nat` have three host readers, and only one of
 /// them is the fold.
 ///
-///  * `glue::glue_interaction`'s Horner bindings -- the fold, which stream N moves
-///    to the device (`devacc::gtie`).
+///  * `residual_stream::residual_stream_interaction`'s Horner bindings -- the fold, which stream N moves
+///    to the device (`devacc::residual_stream_bind`).
 ///  * `boundary::cols` (`boundary.rs:130`), which builds the **boundary tree's
 ///    committed columns** out of the same sequence, packed `sm * PACK + ef`
 ///    per (row, slot). That is stream H's chunk-to-chunk chaining, it is on in
 ///    the sequence's pins (`--bounds`), and it is a committed column rather
 ///    than a check -- so it cannot simply be dropped, and a device path for it
 ///    is its own lever with its own gate.
-///  * `GlueRegion::binding_claim`, the independent recomputation of every claim
+///  * `ResidualStreamRegion::binding_claim`, the independent recomputation of every claim
 ///    from the witness rather than from the trace (`compose.rs:2447`,
-///    `glue.rs:2165`). The bar keeps checks, and with the fold on the card
+///    `residual_stream.rs:2165`). The bar keeps checks, and with the fold on the card
 ///    this one gains teeth: it now cross-checks the *device's* claim against a
 ///    host recomputation on every run, not only under mode 2.
 ///
@@ -155,10 +155,10 @@ pub fn binding_host() -> bool {
     true
 }
 
-/// `B7_M4_GFILLMUT`: one deliberate defect in the device fill, so mode 2's
+/// `B7_M4_RESIDUAL_STREAM_FILLMUT`: one deliberate defect in the device fill, so mode 2's
 /// check has negative controls. The names are the kernel's.
-fn gfill_mut() -> u32 {
-    match std::env::var("B7_M4_GFILLMUT").ok().as_deref() {
+fn residual_stream_fill_mut() -> u32 {
+    match std::env::var("B7_M4_RESIDUAL_STREAM_FILLMUT").ok().as_deref() {
         None | Some("") | Some("none") => 0,
         Some("noperm") => 1,
         Some("anchor") => 2,
@@ -167,7 +167,7 @@ fn gfill_mut() -> u32 {
         Some("clamp") => 5,
         Some("nomul") => 6,
         Some("offby") => 7,
-        Some(other) => panic!("unknown B7_M4_GFILLMUT {other:?}"),
+        Some(other) => panic!("unknown B7_M4_RESIDUAL_STREAM_FILLMUT {other:?}"),
     }
 }
 
@@ -204,7 +204,7 @@ fn gtables_cache() -> &'static Mutex<Vec<(GKey, std::sync::Arc<DevGTables>)>> {
     CACHE.get_or_init(|| Mutex::new(vec![]))
 }
 
-fn dev_gtables(t: &GlueTables) -> std::sync::Arc<DevGTables> {
+fn dev_gtables(t: &ResidualStreamTables) -> std::sync::Arc<DevGTables> {
     let key: GKey = (t.kmax, u32::from(t.sticky), t.norm.len(), t.smul.len(), t.uns.clone());
     let mut c = gtables_cache().lock().unwrap();
     if let Some((_, v)) = c.iter().find(|(k, _)| *k == key) {
@@ -222,7 +222,7 @@ fn dev_gtables(t: &GlueTables) -> std::sync::Arc<DevGTables> {
     for r in &t.smul {
         // the sign is resolved here, so the kernel reads a plain `i32` and
         // never has to know the field encoding
-        smul3.push(crate::glue::sgn_of(r[2]) as i32 as u32);
+        smul3.push(crate::residual_stream::sgn_of(r[2]) as i32 as u32);
         smul3.push(r[3].0);
         smul3.push(r[4].0);
     }
@@ -236,7 +236,7 @@ fn dev_gtables(t: &GlueTables) -> std::sync::Arc<DevGTables> {
         .map(|tab| {
             let mut v: Vec<u32> = Vec::with_capacity(tab.len() * 2);
             for r in tab {
-                v.push(crate::glue::sgn_of(r[2]) as i32 as u32);
+                v.push(crate::residual_stream::sgn_of(r[2]) as i32 as u32);
                 v.push(r[3].0);
             }
             up_u32(v)
@@ -265,9 +265,9 @@ fn up_u32(v: Vec<u32>) -> Uint32Vec {
 
 // --------------------------------------------------------------------- the region --
 
-/// One glue region's columns, on the device, plus the host-side arrays the
+/// One residual-stream region's columns, on the device, plus the host-side arrays the
 /// bindings, the next region and the reference check read back.
-pub struct DevGlue {
+pub struct DevResidualStream {
     pub pre: Vec<BaseFieldVec>,
     pub base: Vec<BaseFieldVec>,
     /// the multiplicity counters this fill scatter-added into, left where the
@@ -281,16 +281,16 @@ pub struct DevGlue {
     pub off_table: usize,
     pub bad_exp: usize,
     /// `(sm, ef)` per leaf and per output, in row order, regrouped the way
-    /// `GlueRegion` holds them. **Empty when the bindings fold on the device**
-    /// (`B7_M4_GTIE=1`): nothing on the host reads them then, and bringing them
-    /// back is all `gen/gfill_d2h` ever was.
+    /// `ResidualStreamRegion` holds them. **Empty when the bindings fold on the device**
+    /// (`B7_M4_RESIDUAL_STREAM_BIND=1`): nothing on the host reads them then, and bringing them
+    /// back is all `gen/residual_stream_fill_d2h` ever was.
     pub in_nat: Vec<Vec<(i64, i64)>>,
     pub out_nat: Vec<Vec<(i64, i64)>>,
     pub outs: Vec<Vec<u16>>,
     /// B11 stream N: the same two arrays where the kernel wrote them, row-flat
-    /// and in coset row order, kept alive for `devacc::gtie`. The `Uint32Vec`
+    /// and in coset row order, kept alive for `devacc::residual_stream_bind`. The `Uint32Vec`
     /// owns the allocation; the bindings read it as `i32`, which is how
-    /// `b65_fill_glue` wrote it.
+    /// `b65_fill_residual_stream` wrote it.
     pub d_in_nat: Uint32Vec,
     pub d_out_nat: Uint32Vec,
     /// the two arrays' row widths, which are the bindings' strides
@@ -298,13 +298,13 @@ pub struct DevGlue {
     pub out_w: usize,
 }
 
-/// Build one glue region on the device.
+/// Build one residual-stream region on the device.
 ///
 /// `tables` is read for the value tables and *not* written: the counters come
-/// back in `DevGlue` and the caller merges them, because mode 2 has to compare
+/// back in `DevResidualStream` and the caller merges them, because mode 2 has to compare
 /// the device's delta against the host's before either is used.
-pub fn glue_region_dev(w: &GlueWitness, prog: &Prog, round: crate::bf16::Round,
-                       tables: &GlueTables) -> DevGlue {
+pub fn residual_stream_region_dev(w: &ResidualStreamWitness, prog: &Prog, round: crate::bf16::Round,
+                                  tables: &ResidualStreamTables) -> DevResidualStream {
     let log_rows = log_rows_for(w.rows, 1);
     let rows = 1usize << log_rows;
     let n_cols = prog.n_cols(round);
@@ -380,7 +380,7 @@ pub fn glue_region_dev(w: &GlueWitness, prog: &Prog, round: crate::bf16::Round,
     let d_out_slot = up_u32(out_slot.clone());
     let tbl = dev_gtables(tables);
     let un_ptrs = tbl.un_ptrs();
-    crate::util::m4_add("gen/gfill_up", t_up.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/residual_stream_fill_up", t_up.elapsed().as_secs_f64());
 
     // ---- the columns and the counters --------------------------------------
     let t_alloc = std::time::Instant::now();
@@ -400,9 +400,9 @@ pub fn glue_region_dev(w: &GlueWitness, prog: &Prog, round: crate::bf16::Round,
     let d_out_pat = Uint32Vec::new_zeroes(rows * out_w.max(1));
     let d_out_nat = Uint32Vec::new_zeroes(rows * out_w.max(1) * 2);
     let d_in_nat = Uint32Vec::new_zeroes(rows * n_leaves * 2);
-    crate::util::m4_add("gen/gfill_alloc", t_alloc.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/residual_stream_fill_alloc", t_alloc.elapsed().as_secs_f64());
 
-    let cfg = FGlueCfg {
+    let cfg = FResidualStreamCfg {
         log_rows,
         rows: rows as u32,
         live: w.rows as u32,
@@ -414,12 +414,12 @@ pub fn glue_region_dev(w: &GlueWitness, prog: &Prog, round: crate::bf16::Round,
         sticky: u32::from(sticky),
         kmax: tables.kmax,
         out_w: out_w as u32,
-        mutate: gfill_mut(),
+        mutate: residual_stream_fill_mut(),
     };
 
     let t_k = std::time::Instant::now();
     unsafe {
-        b65_fill_glue(
+        b65_fill_residual_stream(
             d_wit.device_ptr,
             d_groups.device_ptr as *const FGroup,
             d_slots.device_ptr as *const FSlot,
@@ -446,25 +446,25 @@ pub fn glue_region_dev(w: &GlueWitness, prog: &Prog, round: crate::bf16::Round,
         );
     }
     let kernel_secs = t_k.elapsed().as_secs_f64();
-    crate::util::m4_add("gen/gfill_kernel", kernel_secs);
+    crate::util::m4_add("gen/residual_stream_fill_kernel", kernel_secs);
 
     // ---- back to the host: the counters and the three natural arrays -------
     let t_d = std::time::Instant::now();
     let got = counts.to_vec();
     assert_eq!(
         got[2], 0,
-        "glue fill: {} leaves whose unary input is off the value table -- the host \
+        "residual-stream fill: {} leaves whose unary input is off the value table -- the host \
          evaluates the unary there and the device has no table row to read",
         got[2]
     );
     // B11 stream N: the two `(sm, ef)` arrays come back only if something on
     // the host is going to fold them.
     //
-    // They exist for one reader -- `glue::glue_interaction`'s Horner bindings --
-    // and under `B7_M4_GTIE=1` that fold happens on the card, out of the very
+    // They exist for one reader -- `residual_stream::residual_stream_interaction`'s Horner bindings --
+    // and under `B7_M4_RESIDUAL_STREAM_BIND=1` that fold happens on the card, out of the very
     // arrays this would copy. So the download and the regrouping below are
     // skipped and `in_nat` / `out_nat` stay empty; the device arrays are kept
-    // alive in `DevGlue` instead, which is what `devacc::gtie` reads.
+    // alive in `DevResidualStream` instead, which is what `devacc::residual_stream_bind` reads.
     //
     // `out_pat` is a different array and a different reader: `ref_count`'s f64
     // cross-check compares it against `w.ref_out` on the host. It is one
@@ -474,7 +474,7 @@ pub fn glue_region_dev(w: &GlueWitness, prog: &Prog, round: crate::bf16::Round,
     let flat_in = if host_nat { d_in_nat.to_vec() } else { vec![] };
     let flat_on = if host_nat { d_out_nat.to_vec() } else { vec![] };
     let flat_op = d_out_pat.to_vec();
-    // regroup: the kernel writes one row-flat array, `GlueRegion` holds one
+    // regroup: the kernel writes one row-flat array, `ResidualStreamRegion` holds one
     // vector per group and per output
     let mut in_nat: Vec<Vec<(i64, i64)>> = if host_nat {
         prog.groups.iter().map(|g| Vec::with_capacity(rows * g.n)).collect()
@@ -514,7 +514,7 @@ pub fn glue_region_dev(w: &GlueWitness, prog: &Prog, round: crate::bf16::Round,
             }
         }
     }
-    crate::util::m4_add("gen/gfill_d2h", t_d.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/residual_stream_fill_d2h", t_d.elapsed().as_secs_f64());
 
     // ---- the two preprocessed selectors, which are row-index functions -----
     let t_p = std::time::Instant::now();
@@ -526,10 +526,10 @@ pub fn glue_region_dev(w: &GlueWitness, prog: &Prog, round: crate::bf16::Round,
         .into_iter()
         .map(|c| crate::device::upload_col(&eval_of(log_rows, c)))
         .collect();
-    crate::util::m4_add("gen/gfill_pre", t_p.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/residual_stream_fill_pre", t_p.elapsed().as_secs_f64());
 
     eprintln!(
-        "gfill-dev: {} 2^{} x {} slots -- {} base and {} pre columns, {} cells, \
+        "residual_stream_fill-dev: {} 2^{} x {} slots -- {} base and {} pre columns, {} cells, \
          kernel {:.4} s",
         prog.slots.len(),
         log_rows,
@@ -540,7 +540,7 @@ pub fn glue_region_dev(w: &GlueWitness, prog: &Prog, round: crate::bf16::Round,
         kernel_secs
     );
 
-    DevGlue {
+    DevResidualStream {
         pre, base, m_pow, m_norm, m_val, m_frac, m_smul, m_un,
         off_table: got[0] as usize,
         bad_exp: got[1] as usize,
@@ -562,25 +562,26 @@ fn up_struct<T: Copy>(v: &[T]) -> Uint32Vec {
     up_u32(raw)
 }
 
-/// `B7_M4_GFILL=2`: the device fill against the host's, everything at once.
+/// `B7_M4_RESIDUAL_STREAM_FILL=2`: the device fill against the host's, everything at once.
 ///
 /// Not a sample. A fill that is wrong on one cell of one row is wrong, and the
 /// point of checking here rather than against a digest is that a mismatch names
 /// the column and the cell.
 #[allow(clippy::too_many_arguments)]
-pub fn check_glue_dev(tag: &str, base: &[Eval], pre: &[Eval], dev: &DevGlue,
-                      off_host: usize, bad_host: usize,
-                      in_nat: &[Vec<(i64, i64)>], out_nat: &[Vec<(i64, i64)>],
-                      outs: &[Vec<u16>], before: &GlueSnap, after: &GlueSnap) {
+pub fn check_residual_stream_dev(tag: &str, base: &[Eval], pre: &[Eval], dev: &DevResidualStream,
+                                 off_host: usize, bad_host: usize,
+                                 in_nat: &[Vec<(i64, i64)>], out_nat: &[Vec<(i64, i64)>],
+                                 outs: &[Vec<u16>],
+                                 before: &ResidualStreamSnap, after: &ResidualStreamSnap) {
     use stwo::prover::backend::Column as _;
     let cmp = |what: &str, host: &[Eval], got: &[BaseFieldVec]| {
-        assert_eq!(host.len(), got.len(), "glue {tag}: {what} column count");
+        assert_eq!(host.len(), got.len(), "residual stream {tag}: {what} column count");
         for (i, (a, b)) in host.iter().zip(got).enumerate() {
             let (a, b) = (a.values.to_cpu(), b.to_vec());
-            assert_eq!(a.len(), b.len(), "glue {tag}: {what} column {i} length");
+            assert_eq!(a.len(), b.len(), "residual stream {tag}: {what} column {i} length");
             if let Some(k) = (0..a.len()).find(|k| a[*k] != b[*k]) {
-                panic!("glue {tag}: {what} column {i} differs at cell {k}: \
-                        host {:?}, device {:?}", a[k], b[k]);
+                panic!("residual stream {tag}: {what} column {i} differs at cell {k}: \
+                       host {:?}, device {:?}", a[k], b[k]);
             }
         }
     };
@@ -590,10 +591,10 @@ pub fn check_glue_dev(tag: &str, base: &[Eval], pre: &[Eval], dev: &DevGlue,
         a.iter().zip(b).map(|(x, y)| x - y).collect()
     };
     let one = |what: &str, h: Vec<u32>, d: Vec<u32>| {
-        assert_eq!(h.len(), d.len(), "glue {tag}: {what} length");
+        assert_eq!(h.len(), d.len(), "residual stream {tag}: {what} length");
         if let Some(k) = (0..h.len()).find(|k| h[*k] != d[*k]) {
-            panic!("glue {tag}: {what}[{k}] bumped {} times by the host and {} by \
-                    the device", h[k], d[k]);
+            panic!("residual stream {tag}: {what}[{k}] bumped {} times by the host and {} by \
+                   the device", h[k], d[k]);
         }
     };
     one("m_pow", delta(&after.pow, &before.pow), dev.m_pow.to_vec());
@@ -604,35 +605,35 @@ pub fn check_glue_dev(tag: &str, base: &[Eval], pre: &[Eval], dev: &DevGlue,
     for (u, d) in dev.m_un.iter().enumerate() {
         one(&format!("m_un[{u}]"), delta(&after.un[u], &before.un[u]), d.to_vec());
     }
-    assert_eq!(off_host, dev.off_table, "glue {tag}: off-table bumps differ");
-    assert_eq!(bad_host, dev.bad_exp, "glue {tag}: out-of-range exponents differ");
+    assert_eq!(off_host, dev.off_table, "residual stream {tag}: off-table bumps differ");
+    assert_eq!(bad_host, dev.bad_exp, "residual stream {tag}: out-of-range exponents differ");
     for (g, (h, d)) in in_nat.iter().zip(&dev.in_nat).enumerate() {
-        assert_eq!(h.len(), d.len(), "glue {tag}: in_nat[{g}] length");
+        assert_eq!(h.len(), d.len(), "residual stream {tag}: in_nat[{g}] length");
         if let Some(k) = (0..h.len()).find(|k| h[*k] != d[*k]) {
-            panic!("glue {tag}: in_nat[{g}][{k}] host {:?} device {:?}", h[k], d[k]);
+            panic!("residual stream {tag}: in_nat[{g}][{k}] host {:?} device {:?}", h[k], d[k]);
         }
     }
     for (o, (h, d)) in out_nat.iter().zip(&dev.out_nat).enumerate() {
-        assert_eq!(h.len(), d.len(), "glue {tag}: out_nat[{o}] length");
+        assert_eq!(h.len(), d.len(), "residual stream {tag}: out_nat[{o}] length");
         if let Some(k) = (0..h.len()).find(|k| h[*k] != d[*k]) {
-            panic!("glue {tag}: out_nat[{o}][{k}] host {:?} device {:?}", h[k], d[k]);
+            panic!("residual stream {tag}: out_nat[{o}][{k}] host {:?} device {:?}", h[k], d[k]);
         }
     }
     for (o, (h, d)) in outs.iter().zip(&dev.outs).enumerate() {
-        assert_eq!(h.len(), d.len(), "glue {tag}: outs[{o}] length");
+        assert_eq!(h.len(), d.len(), "residual stream {tag}: outs[{o}] length");
         if let Some(k) = (0..h.len()).find(|k| h[*k] != d[*k]) {
-            panic!("glue {tag}: outs[{o}][{k}] host {:#06x} device {:#06x}", h[k], d[k]);
+            panic!("residual stream {tag}: outs[{o}][{k}] host {:#06x} device {:#06x}", h[k], d[k]);
         }
     }
     eprintln!(
-        "gfill-dev: {tag} -- {} base and {} pre columns, {} cells, the five \
+        "residual_stream_fill-dev: {tag} -- {} base and {} pre columns, {} cells, the five \
          multiplicity tables, off_table, bad_exp and both natural arrays all match",
         base.len(), pre.len(), (base.len() + pre.len()) << dev.pre[0].size.trailing_zeros()
     );
 }
 
 /// The five counter families, snapshotted around the host fill.
-pub struct GlueSnap {
+pub struct ResidualStreamSnap {
     pub pow: Vec<u32>,
     pub norm: Vec<u32>,
     pub val: Vec<u32>,
@@ -641,9 +642,9 @@ pub struct GlueSnap {
     pub un: Vec<Vec<u32>>,
 }
 
-impl GlueSnap {
-    pub fn of(t: &GlueTables) -> Self {
-        GlueSnap {
+impl ResidualStreamSnap {
+    pub fn of(t: &ResidualStreamTables) -> Self {
+        ResidualStreamSnap {
             pow: t.m_pow.clone(),
             norm: t.m_norm.clone(),
             val: t.m_val.clone(),
@@ -658,7 +659,7 @@ impl GlueSnap {
 ///
 /// Counting is commutative, so the order the kernel's scatter-add left them in
 /// cannot matter -- the same argument `mat_region_dev` makes.
-pub fn merge(t: &mut GlueTables, dev: &DevGlue) {
+pub fn merge(t: &mut ResidualStreamTables, dev: &DevResidualStream) {
     let add = |h: &mut Vec<u32>, d: Vec<u32>| {
         for (a, b) in h.iter_mut().zip(d) {
             *a += b;
@@ -677,7 +678,7 @@ pub fn merge(t: &mut GlueTables, dev: &DevGlue) {
 
 /// Restore the host's counters to where the host fill left them, so mode 2's
 /// device bumps are the check's and not the proof's.
-pub fn restore(t: &mut GlueTables, after: &GlueSnap, off: usize) {
+pub fn restore(t: &mut ResidualStreamTables, after: &ResidualStreamSnap, off: usize) {
     t.m_pow.copy_from_slice(&after.pow);
     t.m_norm.copy_from_slice(&after.norm);
     t.m_val.copy_from_slice(&after.val);
