@@ -68,7 +68,7 @@ __device__ __forceinline__ qm31 b65a_step(bool nofirst, qm31 step, unsigned muta
 
 // =============================================================== the flags ==
 
-// One band sub-region's per-row layout facts, and nothing else.
+// One key tile sub-region's per-row layout facts, and nothing else.
 //
 // B7a milestone 4 (section 25): this used to be the first six lines of each of
 // the three region kernels below. It is a kernel of its own because the 48
@@ -87,7 +87,7 @@ __global__ void b65a_flags_kernel(unsigned *__restrict__ flags,
                    : b65a_flags_of_grid(cfg.g, cfg.modulus, j);
 }
 
-extern "C" void b65_flags_band(unsigned *flags, B65AccFlags cfg) {
+extern "C" void b65_flags_key_tile(unsigned *flags, B65AccFlags cfg) {
     const unsigned rows = cfg.g.rows;
     const unsigned bw = rows < B65A_BLOCK ? rows : B65A_BLOCK;
     b65a_flags_kernel<<<(rows + bw - 1u) / bw, bw>>>(flags, cfg);
@@ -276,7 +276,7 @@ extern "C" void b65_acc_last(const qm31 *v, qm31 *host, unsigned rows, unsigned 
     }
 }
 
-// ========================================================== the band channel ==
+// ========================================================== the key tile channel ==
 
 __global__ void b65a_chan_kernel(const m31 *const *__restrict__ cols,
                                  const qm31 *__restrict__ r_pow,
@@ -320,7 +320,7 @@ extern "C" void b65_acc_chan(const m31 *const *cols, const qm31 *r_pow,
     cuda_free_memory(d_s);
 }
 
-// ============================================================= the band grid ==
+// ============================================================= the key tile grid ==
 
 __global__ void b65a_grid_kernel(const m31 *const *__restrict__ key_cols,
                                  const m31 *const *__restrict__ num_cols,

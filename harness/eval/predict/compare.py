@@ -4,7 +4,7 @@ Reads the prover's per-layer JSONs (one `compose` run per layer, reference backe
 and the committed registration, writes the per-chunk record the run-book asks
 for and the comparison, in the run-book's order:
 
-  (a) the bands integers, exact -- reported whatever rho does;
+  (a) the key tiles integers, exact -- reported whatever rho does;
   (b) rho = measured / predicted on layers-only fresh cells per decoded token,
       with section 3's protocol widening and no other adjustment;
   (c) the tier, and the consequence the bracket table fixed in advance.
@@ -43,12 +43,12 @@ def load_run(path):
                    interaction=p["cells"]["interaction"],
                    preprocessed=p["cells"]["preprocessed"]),
         columns=p["columns"],
-        family_cells=dict(bands=fc["bands"], dequant=fc["dequant"],
+        family_cells=dict(key_tiles=fc["key_tiles"], dequant=fc["dequant"],
                           residual_stream=fc["residual_stream"],
                           attnout=fc["attnout"], interaction=fc["interaction"]),
         interaction_by_family={f: ibf[f]["cells"] for f in ibf},
         params=dict(log_table=pa["log_table"], ao_rem_bits=pa["ao_rem_bits"],
-                    ao_q_bits=pa["ao_q_bits"], bands=pa["bands"], nh=pa["nh"], hd=pa["hd"],
+                    ao_q_bits=pa["ao_q_bits"], key_tiles=pa["key_tiles"], nh=pa["nh"], hd=pa["hd"],
                     s=pa["s"], c=pa["c"], diagonal_block=pa.get("diagonal_block", False), layer_boundary=pa.get("layer_boundary", False),
                     grid_target=pa["grid_target"], chan_target=pa["chan_target"], rw=pa["rw"],
                     k_bits=pa["k_bits"], q_bits=pa["q_bits"], nmax=pa["nmax"],
@@ -83,7 +83,7 @@ CONSEQUENCE = {
     "prize": "the model predicts a never-fitted scale to 3%. Licence claimed unqualified; "
              "section 6.3 keeps [projected]",
     "pass": "licence claimed with the measured residual quoted beside it",
-    "marginal": "licence claimed only with an explicit +/-25% band printed on every "
+    "marginal": "licence claimed only with an explicit +/-25% key tile printed on every "
                 "frontier row",
     "fail": "the cost model is refuted as an extrapolator. Section 6.3 regraded "
             "[projected] -> [illustrative]; the section 7 'you didn't build it' mitigation "
@@ -108,8 +108,8 @@ def main():
     pc = shape["contexts"][str(a.ctx)]
     br = reg["bracket"]
     pred_cpt = pc["cells_per_token_layers"]
-    pred_bands_base = pc["bands_family_base_per_chunk"]
-    pred_bands_inter = pc["bands_family_interaction_per_chunk"]
+    pred_key_tiles_base = pc["key_tiles_family_base_per_chunk"]
+    pred_key_tiles_inter = pc["key_tiles_family_interaction_per_chunk"]
     pred_chunk = pc["per_layer_chunk_fresh"]
 
     files = sorted(glob.glob(os.path.join(a.runs, "L*.json")),
@@ -126,7 +126,7 @@ def main():
             problems.append(f"L{k}: accepts != true")
         if not r["cells"]["fresh"] > 0:
             problems.append(f"L{k}: cells.fresh not > 0")
-        if not r["family_cells"]["bands"] > 0:
+        if not r["family_cells"]["key_tiles"] > 0:
             problems.append(f"L{k}: family_cells empty")
         want = dict(q=(5120, 5120), k=(5120, 1024), v=(5120, 1024), o=(5120, 5120),
                     gate=(5120, 13824), up=(5120, 13824), down=(13824, 5120))
@@ -149,15 +149,15 @@ def main():
         if r["residual_stream_ties_ok"] is False:
             problems.append(f"L{k}: residual_stream_ties_ok false")
 
-    # ---- (a) the bands integers, exact ------------------------------------
-    bands_rows = []
+    # ---- (a) the key tiles integers, exact ------------------------------------
+    key_tiles_rows = []
     for r in runs:
-        b, i = r["family_cells"]["bands"], r["interaction_by_family"]["bands"]
-        bands_rows.append(dict(layer=r["layer"], bands_base=b, bands_interaction=i,
-                               base_delta=b - pred_bands_base,
-                               interaction_delta=i - pred_bands_inter,
-                               exact=(b == pred_bands_base and i == pred_bands_inter)))
-    bands_exact = all(x["exact"] for x in bands_rows)
+        b, i = r["family_cells"]["key_tiles"], r["interaction_by_family"]["key_tiles"]
+        key_tiles_rows.append(dict(layer=r["layer"], key_tiles_base=b, key_tiles_interaction=i,
+                               base_delta=b - pred_key_tiles_base,
+                               interaction_delta=i - pred_key_tiles_inter,
+                               exact=(b == pred_key_tiles_base and i == pred_key_tiles_inter)))
+    key_tiles_exact = all(x["exact"] for x in key_tiles_rows)
 
     # ---- (b) rho, with the protocol widening ------------------------------
     n = len(runs)
@@ -187,9 +187,9 @@ def main():
     rss = [r["peak_rss_bytes"] for r in runs if r["peak_rss_bytes"]]
     table_cells = [r["interaction_by_family"]["table"] for r in runs]
     logt = sorted(set(r["params"]["log_table"] for r in runs))
-    # the 8B identity's analogue: fresh - bands_fresh - 5 * 2^log_table, per layer
-    rest = [r["cells"]["fresh"] - r["family_cells"]["bands"]
-            - r["interaction_by_family"]["bands"] - 5 * (1 << r["params"]["log_table"])
+    # the 8B identity's analogue: fresh - key_tiles_fresh - 5 * 2^log_table, per layer
+    rest = [r["cells"]["fresh"] - r["family_cells"]["key_tiles"]
+            - r["interaction_by_family"]["key_tiles"] - 5 * (1 << r["params"]["log_table"])
             for r in runs]
     measured = dict(
         schema="e4-measured/1", shape=SHAPES[a.shape], hf=shape["hf"], cfg=shape["cfg"],
@@ -208,12 +208,12 @@ def main():
             table_cells_min=min(table_cells), table_cells_max=max(table_cells),
             ao_rem_bits_values=sorted(set(r["params"]["ao_rem_bits"] for r in runs)),
             kmax_values=sorted(set(r["params"]["kmax"] for r in runs)),
-            rest_after_bands_and_table=dict(values=sorted(set(rest)), constant=len(set(rest)) == 1),
+            rest_after_key_tiles_and_table=dict(values=sorted(set(rest)), constant=len(set(rest)) == 1),
             # which families move across layers (at 8B every family but the table is
             # identical to the cell on all 32 chunks)
             family_spread={f: dict(min=min(r["family_cells"][f] for r in runs),
                                    max=max(r["family_cells"][f] for r in runs))
-                           for f in ("bands", "dequant", "residual_stream", "attnout", "interaction")},
+                           for f in ("key_tiles", "dequant", "residual_stream", "attnout", "interaction")},
             interaction_spread={f: dict(min=min(r["interaction_by_family"][f] for r in runs),
                                         max=max(r["interaction_by_family"][f] for r in runs))
                                 for f in runs[0]["interaction_by_family"]},
@@ -239,11 +239,11 @@ def main():
         registration=dict(file=os.path.relpath(REG, HERE), prediction_sha256=reg["prediction_sha256"],
                           prediction_block_sha256=reg["prediction_block_sha256"]),
         predicted=dict(cells_per_token_layers=pred_cpt, per_layer_chunk_fresh=pred_chunk,
-                       bands_family_base_per_chunk=pred_bands_base,
-                       bands_family_interaction_per_chunk=pred_bands_inter,
-                       cells_per_token_layers_bands=pc["cells_per_token_layers_bands"],
+                       key_tiles_family_base_per_chunk=pred_key_tiles_base,
+                       key_tiles_family_interaction_per_chunk=pred_key_tiles_inter,
+                       cells_per_token_layers_key_tiles=pc["cells_per_token_layers_key_tiles"],
                        cells_per_token_layers_rest=pc["cells_per_token_layers_rest"]),
-        a_bands_exact=dict(exact_on_every_chunk=bands_exact, rows=bands_rows),
+        a_key_tiles_exact=dict(exact_on_every_chunk=key_tiles_exact, rows=key_tiles_rows),
         b_rho=dict(protocol=protocol, layers_proved=n, widen_pct_lower=widen_lo,
                    widen_pct_upper=widen_hi, measured_cells_per_token_layers=measured_cpt,
                    predicted_cells_per_token_layers=pred_cpt, rho=rho,
@@ -265,28 +265,28 @@ def main():
     print(f"registration: prediction_sha256 {reg['prediction_sha256'][:12]}...  "
           f"predicted cells/token (layers) {pred_cpt:,.1f}, per chunk {pred_chunk:,.1f}")
     print()
-    print(f"{'L':>3} {'fresh':>14} {'bands':>12} {'i.bands':>12} {'table':>12} {'logT':>4} "
+    print(f"{'L':>3} {'fresh':>14} {'key_tiles':>12} {'i.key tiles':>12} {'table':>12} {'logT':>4} "
           f"{'aorem':>5} {'kmax':>4} {'proof_B':>10} {'ser_B':>11} {'rss_GiB':>7} {'prove_s':>7} digest")
     for r in runs:
-        print(f"{r['layer']:>3} {r['cells']['fresh']:>14,} {r['family_cells']['bands']:>12,} "
-              f"{r['interaction_by_family']['bands']:>12,} {r['interaction_by_family']['table']:>12,} "
+        print(f"{r['layer']:>3} {r['cells']['fresh']:>14,} {r['family_cells']['key_tiles']:>12,} "
+              f"{r['interaction_by_family']['key_tiles']:>12,} {r['interaction_by_family']['table']:>12,} "
               f"{r['params']['log_table']:>4} {r['params']['ao_rem_bits']:>5} {r['params']['kmax']:>4} "
               f"{r['proof_bytes']:>10,} {r['proof_ser_bytes']:>11,} "
               f"{(r['peak_rss_bytes'] or 0) / 2**30:>7.1f} {(r['secs']['prove'] or 0):>7.1f} "
               f"{r['proof_sha256'][:16]}")
     print()
-    print(f"(a) bands exact on every chunk: {bands_exact}  "
-          f"(registered {pred_bands_base:,} / {pred_bands_inter:,})")
-    if not bands_exact:
-        for x in bands_rows:
+    print(f"(a) key tiles exact on every chunk: {key_tiles_exact}  "
+          f"(registered {pred_key_tiles_base:,} / {pred_key_tiles_inter:,})")
+    if not key_tiles_exact:
+        for x in key_tiles_rows:
             if not x["exact"]:
-                print(f"    L{x['layer']}: base {x['bands_base']:,} ({x['base_delta']:+,}), "
-                      f"interaction {x['bands_interaction']:,} ({x['interaction_delta']:+,})")
+                print(f"    L{x['layer']}: base {x['key_tiles_base']:,} ({x['base_delta']:+,}), "
+                      f"interaction {x['key_tiles_interaction']:,} ({x['interaction_delta']:+,})")
     print(f"(b) protocol {protocol}: {n}/{L} layers; measured {measured_cpt:,.1f} cells/token "
           f"(layers), predicted {pred_cpt:,.1f}; rho = {rho:.5f} ({(rho - 1) * 100:+.3f}%)")
     print(f"    per-chunk ratio range {comparison['b_rho']['chunk_ratio_min']:.4f} .. "
           f"{comparison['b_rho']['chunk_ratio_max']:.4f}; log_table {logt}; "
-          f"rest-after-bands-and-table constant: {len(set(rest)) == 1} {sorted(set(rest))[:4]}")
+          f"rest-after-key-tiles-and-table constant: {len(set(rest)) == 1} {sorted(set(rest))[:4]}")
     print(f"(c) tier: {tier.upper()} -- {CONSEQUENCE[tier]}")
     sp = measured["summary"]
     moving = {f: v for f, v in {**{"family." + k: v for k, v in sp["family_spread"].items()},

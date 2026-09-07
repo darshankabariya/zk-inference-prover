@@ -14,9 +14,9 @@
 //
 // | region | stage 1 (`a` resets at a group start) | stage 2 (`b` lands on a group's last row) |
 // |---|---|---|
-// | band channel | `u` (r), `v` (s) | `acc` = sum of `u v`, folded by `r^C` per instance |
-// | band grid | `zs`, `zn` (s), `wv` (rv) | `hs` (Horner in r), `av` = sum `wv zn`, `sn` = sum `zn` |
-// | band per-token | `am`, `az` (s, `mu` at an instance start) | -- |
+// | key tile channel | `u` (r), `v` (s) | `acc` = sum of `u v`, folded by `r^C` per instance |
+// | key tile grid | `zs`, `zn` (s), `wv` (rv) | `hs` (Horner in r), `av` = sum `wv zn`, `sn` = sum `zn` |
+// | key tile per-token | `am`, `az` (s, `mu` at an instance start) | -- |
 // | Freivalds group | `v` (s), `us[m]` (rv) | `accs[m]` = sum of `us[m] v` |
 // | dequant | `z` (rv) | `h` (Horner in s) |
 // | attnout | `z` (rv), `den` (raw) | `h`, `dz` (Horner in s, `mu` at a head start) |
@@ -53,7 +53,7 @@
 
 // The negative controls (`B7_M4_ACCMUT`), each a way this design could
 // plausibly be wrong. Section 5 rule 5: each takes a `:region` suffix, because
-// unaimed every one of them panics at `chan band0`, which is checked first.
+// unaimed every one of them panics at `chan key_tile0`, which is checked first.
 #define B65A_MUT_NONE 0u
 #define B65A_MUT_NOPERM 1u     // read the coset row, not the committed one
 #define B65A_MUT_NOCARRY 2u    // drop the scan's inter-block carry
@@ -77,7 +77,7 @@
 #define B65A_NOFIRST 2u
 #define B65A_LAST 4u
 // The row where this lane's Horner picks up its per-instance weight. Each
-// region defines it: an instance start for the bands and the Freivalds checks, a head
+// region defines it: an instance start for the key tiles and the Freivalds checks, a head
 // start for the attnout, never for the dequant.
 #define B65A_ISTART 8u
 
@@ -97,7 +97,7 @@ struct B65AccGrid {
 // ---------------------------------------------------- the shared layout half --
 //
 // B7a milestone 4 (section 3 row 1, section 25): these four were `static` inside
-// `b65_acc.cu` until the band selectors needed them. They are the *only* thing
+// `b65_acc.cu` until the key tile selectors needed them. They are the *only* thing
 // `commit_pre`'s 48 preprocessed columns say -- ACTIVE, NOFIRST, LAST and
 // ISTART per coset row -- so they live in the header and `b65_pre_fill.cu`
 // builds the columns from the same three lines the accumulators segment on.
@@ -176,12 +176,12 @@ __device__ __forceinline__ unsigned b65a_flags_of_tok(unsigned rows, unsigned rw
     return f;
 }
 
-// Which band shape a flags run is for.
+// Which key tile shape a flags run is for.
 #define B65A_SHAPE_CHAN 0u
 #define B65A_SHAPE_KEY 1u
 #define B65A_SHAPE_TOK 2u
 
-// One band sub-region's layout, for the flags kernel alone.
+// One key tile sub-region's layout, for the flags kernel alone.
 struct B65AccFlags {
     unsigned shape;
     B65AccGrid g;      // the chan and key grids; `log_rows`/`rows` only for tok
@@ -324,11 +324,11 @@ extern "C" void b65_acc_last(const qm31 *v, qm31 *host, unsigned rows,
 
 // ------------------------------------------------------------- the six regions --
 
-// B7a milestone 4 (section 25): the band shapes' flags, written once at fill
+// B7a milestone 4 (section 25): the key tile shapes' flags, written once at fill
 // time. `commit_pre` runs before the challenges are drawn and the accumulators
 // run after, so the array outlives both and the selectors and the segmentation
 // are one computation rather than two that agree.
-extern "C" void b65_flags_band(unsigned *flags, B65AccFlags cfg);
+extern "C" void b65_flags_key_tile(unsigned *flags, B65AccFlags cfg);
 
 
 extern "C" void b65_acc_chan(const m31 *const *cols, const qm31 *r_pow,

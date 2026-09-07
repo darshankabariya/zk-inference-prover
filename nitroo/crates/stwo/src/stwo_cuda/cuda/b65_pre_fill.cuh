@@ -11,10 +11,10 @@
 //    (23.1's trick, nine more times), and `norm_table`, the fraction table and
 //    `mul_table` are all closed forms of the *row index* -- integer bit surgery
 //    and one exact float conversion, no `exp`, no libm, nothing uploaded.
-//  * **48 band selectors, 0.004 GB.** `commit_pre`'s per-band ACTIVE / NOFIRST
+//  * **48 key tile selectors, 0.004 GB.** `commit_pre`'s per-key-tile ACTIVE / NOFIRST
 //    / LAST / ISTART predicates, which `b65_acc.cu` has computed since 24.1 --
 //    at the wrong time, because `commit_pre` runs before the challenges are
-//    drawn and the accumulators run after. `b65_flags_band` is that computation
+//    drawn and the accumulators run after. `b65_flags_key_tile` is that computation
 //    lifted into a kernel of its own; this file turns its array into columns.
 //
 // **What each of the three tables is, as a function of its row.**
@@ -90,7 +90,7 @@
 
 // Which family a defect is aimed at. `norm`/`frac`/`mul`/`qnz`/`range` are the
 // shared tables (each covering that table's own multiplicity column too), and
-// `chan`/`key`/`row` are the band's three sub-regions.
+// `chan`/`key`/`row` are the key tile's three sub-regions.
 #define B65P_AT_NORM 0u
 #define B65P_AT_FRAC 1u
 #define B65P_AT_MUL 2u
@@ -140,7 +140,7 @@ extern "C" void b65_fill_pre_table(const unsigned *const *counters,
                                    unsigned n_patch, m31 *const *cols, m31 *m_col,
                                    B65PreCfg cfg);
 
-// One band sub-region's selector columns, out of the flags `b65_flags_band`
+// One key tile sub-region's selector columns, out of the flags `b65_flags_key_tile`
 // wrote for exactly those rows. `inv_delta` is the master exp table's key
 // scale, inverted, per instance -- null unless the key region wants it.
 extern "C" void b65_fill_sel(const unsigned *flags, m31 *const *cols,

@@ -34,13 +34,13 @@ SS = (256, 512, 1024, 2048)
 GRID_TARGET = 64          # `--scores-per-row`, the tiling granularity of the grid
 
 # Every two-point reading this probe published names the pair it was taken on.
-# Stream DD showed `bands` is exact at all four S under `64 S^2 + 12,416 S`, so
-# `p = d(bands)/d(S^2)` is a SECANT and moves with the pair it is read between:
+# Stream DD showed `key_tiles` is exact at all four S under `64 S^2 + 12,416 S`, so
+# `p = d(key_tiles)/d(S^2)` is a SECANT and moves with the pair it is read between:
 # 80.167 (256->512), 72.083 (512->1024), 68.042 (1024->2048), all reproduced by
 # the identity `64 + 12,416/(S1+S2)`.  Reading it off the two largest rows would
 # silently re-price a published line every time the S list grows, so the pair is
 # pinned here and labelled for what it is: the SUPERSEDED single-parameter fit.
-INCUMBENT_PAIR = (512, 1024)   # the retired `bands = p S^2` reading, and its 2.25
+INCUMBENT_PAIR = (512, 1024)   # the retired `key_tiles = p S^2` reading, and its 2.25
 REMAINDER_PAIR = (512, 1024)   # `design.prefill_chunk_remainder`, frozen on this pair
 HEADLINE_S = 1024              # the S every published sentence in this probe quotes
 
@@ -61,7 +61,7 @@ B1_PREFILL_TOK_S = 40 * 512 / 15.8
 MFU_FLOPS = 0.40 * 400e12
 # B10 step 0: E6c's own baseline was 2 N / 1 POPS -- a full petaop of dense int8,
 # no MFU discount -- which is x6.3 cheaper per token than the 40%-MFU one above.
-# Half the distance between this probe's ratio and E6c's 50-150x band is that
+# Half the distance between this probe's ratio and E6c's 50-150x key tile is that
 # choice, and it belongs beside the ratio.
 E6C_OPS = 1e15
 # B9 step 0's denominator, printed by b2/cost_model.py
@@ -94,9 +94,9 @@ def load(s):
     fc = d["family_cells"]
     return dict(s=s, src=p.name, accepts=d["accepts"], off_table=d["off_table"],
                 fresh=d["cells"]["fresh"], pre=d["cells"]["preprocessed"],
-                bands=fc["bands"], dequant=fc["dequant"], inter=fc["interaction"],
+                key_tiles=fc["key_tiles"], dequant=fc["dequant"], inter=fc["interaction"],
                 freivalds=fc["freivalds"],
-                leads=sorted({(l["chan"], l["key"], l["out"]) for l in fc["band_leads"]}),
+                leads=sorted({(l["chan"], l["key"], l["out"]) for l in fc["key_tile_leads"]}),
                 wall=d["phases"]["wall_secs"])
 
 
@@ -123,8 +123,8 @@ print()
 print(f"  {'S = C':>6} {'chunk (fresh)':>14} {'grid':>10} {'grid share':>11} "
       f"{'dequant':>10} {'lead rows':>11} {'accepts':>8} {'artifact':>18}")
 for r in rows:
-    print(f"  {r['s']:>6} {g(r['fresh']):>14} {g(r['bands']):>10} "
-          f"{r['bands'] / r['fresh'] * 100:>10.1f}% {g(r['dequant']):>10} "
+    print(f"  {r['s']:>6} {g(r['fresh']):>14} {g(r['key_tiles']):>10} "
+          f"{r['key_tiles'] / r['fresh'] * 100:>10.1f}% {g(r['dequant']):>10} "
           f"{str(r['leads']):>11} {str(r['accepts']):>8} {r['src']:>18}")
 for s in missing:
     print(f"  {s:>6} {'-- no artifact':>62}")
@@ -149,17 +149,17 @@ print(f"  {'S = C':>6} {'naive /rect':>12} {'naive /useful':>14} {'split /useful
 marg = None
 if all(s in by_s for s in INCUMBENT_PAIR):
     a, b = (by_s[s] for s in INCUMBENT_PAIR)
-    marg = ((b["bands"] - a["bands"])
+    marg = ((b["key_tiles"] - a["key_tiles"])
             / (NH * (b["s"] ** 2 - a["s"] ** 2)))
 for r in rows:
     S = r["s"]
-    per_rect = r["bands"] / (NH * S * S)
+    per_rect = r["key_tiles"] / (NH * S * S)
     useful = NH * S * (S + 1) / 2
     B = min(GRID_TARGET, S)
     ratio = 0.5 + B / (2 * S)
-    saved = r["bands"] * (1 - ratio)
-    print(f"  {S:>6} {per_rect:>12.2f} {r['bands'] / useful:>14.2f} "
-          f"{r['bands'] * ratio / useful:>14.2f} {ratio:>12.3f} {g(saved):>11} "
+    saved = r["key_tiles"] * (1 - ratio)
+    print(f"  {S:>6} {per_rect:>12.2f} {r['key_tiles'] / useful:>14.2f} "
+          f"{r['key_tiles'] * ratio / useful:>14.2f} {ratio:>12.3f} {g(saved):>11} "
           f"{saved / r['fresh'] * 100:>12.1f}%")
 if marg:
     print(f"\n  marginal grid cost, {INCUMBENT_PAIR[0]}->{INCUMBENT_PAIR[1]} (the PUBLISHED pair, "
@@ -172,8 +172,8 @@ if marg:
 big = by_s[HEADLINE_S]
 print()
 print("**The diagonal block is a correctness gap, not a cost gap, at these S.**")
-print(f"  At C = S = {big['s']} the grid is {big['bands'] / big['fresh'] * 100:.1f}% of the chunk, so halving it saves")
-print(f"  {(1 - (0.5 + GRID_TARGET / (2 * big['s']))) * big['bands'] / big['fresh'] * 100:.1f}%.  A prefill chunk is dominated by the per-token matmul work, not by")
+print(f"  At C = S = {big['s']} the grid is {big['key_tiles'] / big['fresh'] * 100:.1f}% of the chunk, so halving it saves")
+print(f"  {(1 - (0.5 + GRID_TARGET / (2 * big['s']))) * big['key_tiles'] / big['fresh'] * 100:.1f}%.  A prefill chunk is dominated by the per-token matmul work, not by")
 print("  attention: the grid grows as S^2 and everything else as S, so the grid only")
 print(f"  takes over at large S.  From the pinned {INCUMBENT_PAIR[0]}->{INCUMBENT_PAIR[1]} "
       "pair the crossover is")
@@ -182,18 +182,18 @@ if all(s in by_s for s in INCUMBENT_PAIR):
     # fresh = F + q S + p S^2, with the S^2 term read off the grid family.
     # PINNED to INCUMBENT_PAIR: this is the superseded two-point reading, kept
     # so the correction below has the published number to be measured against.
-    p = (b["bands"] - a["bands"]) / (b["s"] ** 2 - a["s"] ** 2)
-    q = ((b["fresh"] - b["bands"]) - (a["fresh"] - a["bands"])) / (b["s"] - a["s"])
-    fix = (a["fresh"] - a["bands"]) - q * a["s"]
+    p = (b["key_tiles"] - a["key_tiles"]) / (b["s"] ** 2 - a["s"] ** 2)
+    q = ((b["fresh"] - b["key_tiles"]) - (a["fresh"] - a["key_tiles"])) / (b["s"] - a["s"])
+    fix = (a["fresh"] - a["key_tiles"]) - q * a["s"]
     cross = (q + (q * q + 4 * p * fix) ** 0.5) / (2 * p)
     print(f"  S ~ {cross / 1000:.0f} k -- fresh = {g(fix)}+ {q:,.0f} S + {p:.1f} S^2, so the grid passes")
     print("  half the chunk only around the context the *decode* path already runs at.")
     print("  -- but see the next section: that `p` is 12.6% high and the crossover moves.")
 
 # --- the S^2 coefficient: two models, only one of them a model ----------------
-# Stream DD, 2026-09-01.  The fit above reads `p` off the bands family alone as
-# d(bands)/d(S^2), i.e. it assumes `bands = p S^2` with no lower-order term.  The
-# data already refutes that: `bands / (NH S^2)` is 2.758 at S=512 and 2.379 at
+# Stream DD, 2026-09-01.  The fit above reads `p` off the key tiles family alone as
+# d(key tiles)/d(S^2), i.e. it assumes `key_tiles = p S^2` with no lower-order term.  The
+# data already refutes that: `key_tiles / (NH S^2)` is 2.758 at S=512 and 2.379 at
 # S=1024, so a two-point marginal absorbs a linear term into the quadratic
 # coefficient.  Both models hit both measured points, so fit quality cannot
 # discriminate between them.  The mechanism can.
@@ -210,10 +210,10 @@ if all(s in by_s for s in INCUMBENT_PAIR):
 #   channel: queries                 pq*rows  = hd*NH*S       2*hd*NH*S
 #   grid: scores + numerators        2q*rows  = 2*NH*S*C      (12 + 64)*S*C
 #   grid: V values    (`Cells::kv`)  pv*rows  = hd*NH*C       2*hd*NH*C
-#   out (A.V)                        moved to the `attnout` region -- not in `bands`
+#   out (A.V)                        moved to the `attnout` region -- not in `key_tiles`
 #   per-token: max, denom, 2 limbs   4*rw*rrows = 4*NH*S      8.5*rw*rrows = 272*S
 #
-# `bands` in `family_cells` is BASE ONLY -- `compose.rs:3216` sums each band
+# `key_tiles` in `family_cells` is BASE ONLY -- `compose.rs:3216` sums each key tile
 # region's committed column domains -- which is why the fresh figures below are
 # larger than the `grid share` column at the top of this probe.
 if len(rows) < 2:
@@ -221,15 +221,15 @@ if len(rows) < 2:
 NH_HD = NH * HD                      # 4096: one channel column per head, per token
 
 
-def band_base(s, c, rows_region=True):
-    """Committed base cells of the band family at (S, C).  Exact, not fitted."""
+def key_tile_base(s, c, rows_region=True):
+    """Committed base cells of the key tile family at (S, C).  Exact, not fitted."""
     return (2 * NH * s * c                          #   64 S C  scores + numerators
             + 2 * NH_HD * c                         # 8192 C    K and V = `Cells::kv`
             + NH_HD * s                             # 4096 S    queries
             + (4 * NH * s if rows_region else 0))   #  128 S    max, denom, two limbs
 
 
-def band_inter(s, c, rows_region=True):
+def key_tile_inter(s, c, rows_region=True):
     """The same family's LogUp/Horner interaction cells.  Also exact."""
     return (76 * s * c                              # 12 Horner + 64 exp/numerator LogUp
             + (2 * NH_HD + 384 + 8192) * c          # 16,768 C: V range, chan Horner, K range
@@ -237,35 +237,35 @@ def band_inter(s, c, rows_region=True):
             + (272 * s if rows_region else 0))
 
 
-def band_fresh(s, c, rows_region=True):
-    return band_base(s, c, rows_region) + band_inter(s, c, rows_region)
+def key_tile_fresh(s, c, rows_region=True):
+    return key_tile_base(s, c, rows_region) + key_tile_inter(s, c, rows_region)
 
 
-def bands_of(s, c, diagonal_block):
-    """A composed chunk's bands: the prefix bands, plus an S x S diagonal block that
+def key_tiles_of(s, c, diagonal_block):
+    """A composed chunk's key tiles: the prefix key tiles, plus an S x S diagonal block that
     carries no per-token region (one max and one denominator per token, not per
-    band -- `attn_trace.rs`'s `with_rows = !a.diagonal_block`)."""
-    return (band_base(s, c) + (band_base(s, s, False) if diagonal_block else 0),
-            band_inter(s, c) + (band_inter(s, s, False) if diagonal_block else 0))
+    key tile -- `attn_trace.rs`'s `with_rows = !a.diagonal_block`)."""
+    return (key_tile_base(s, c) + (key_tile_base(s, s, False) if diagonal_block else 0),
+            key_tile_inter(s, c) + (key_tile_inter(s, s, False) if diagonal_block else 0))
 
 
 gamma, delta = 2 * NH, 2 * NH_HD + NH_HD + 4 * NH
 print()
-print("the S^2 coefficient: `bands = p S^2` against `bands = gamma S C + ... `")
-print("  bands / (NH S^2) is "
-      + " / ".join(f"{r['bands'] / (NH * r['s'] ** 2):.3f}" for r in rows)
+print("the S^2 coefficient: `key tiles = p S^2` against `key tiles = gamma S C + ... `")
+print("  key tiles / (NH S^2) is "
+      + " / ".join(f"{r['key_tiles'] / (NH * r['s'] ** 2):.3f}" for r in rows)
       + " at S = " + " / ".join(str(r["s"]) for r in rows) + " -- not constant,")
-print("  so `bands` is not purely quadratic and the marginal read above absorbs a linear term.")
+print("  so `key_tiles` is not purely quadratic and the marginal read above absorbs a linear term.")
 print(f"  The secants themselves move the same way: "
       + " / ".join(
-          f"{(by_s[y]['bands'] - by_s[x]['bands']) / (y * y - x * x):.3f}"
+          f"{(by_s[y]['key_tiles'] - by_s[x]['key_tiles']) / (y * y - x * x):.3f}"
           for x, y in zip([r['s'] for r in rows], [r['s'] for r in rows][1:]))
       + f" for the {len(rows) - 1} adjacent pairs,")
 print("  which is the identity 64 + 12,416/(S1+S2) -- so `p` is a property of the PAIR.")
 print()
-print(f"  incumbent   bands = {p:.3f} S^2        (SUPERSEDED; the S={INCUMBENT_PAIR[0]}->{INCUMBENT_PAIR[1]} "
+print(f"  incumbent   key tiles = {p:.3f} S^2        (SUPERSEDED; the S={INCUMBENT_PAIR[0]}->{INCUMBENT_PAIR[1]} "
       f"secant, pinned)")
-print(f"  structural  bands = {gamma} S C + {2 * NH_HD:,} C + {NH_HD + 4 * NH:,} S")
+print(f"  structural  key tiles = {gamma} S C + {2 * NH_HD:,} C + {NH_HD + 4 * NH:,} S")
 print(f"              at C = S that is {gamma} S^2 + {delta:,} S, hitting all {len(rows)} points "
       "exactly with")
 print(f"              gamma = {gamma} = 2*NH (alpha = {gamma / NH:.3f} base cells per head-key-token:")
@@ -275,29 +275,29 @@ print(f"                                  + hd*NH ({NH_HD:,}: the query columns)
 print(f"                                  + 4*NH ({4 * NH}: the per-token region).")
 print(f"  the incumbent p is {p / gamma - 1:+.1%} against gamma, because it charges delta*S to S^2.")
 print()
-print("  the control -- the closed form against every artifact that records a band count:")
+print("  the control -- the closed form against every artifact that records a key tile count:")
 CHECKS = [(f"b9 prefill  S=C={s:<6d}", artifact(s), s, s, False) for s in SS]
 SEQ5 = OUT / "seq5"
 CHECKS += [(f"seq5 8B L{L:<2d} S=512 C={c:<5d}", SEQ5 / f"seq_c{c}_L{L}.json", 512, c, True)
            for L in (0, 16, 31) for c in (4096, 16384)]
 print(f"  {'artifact':25s} {'base predicted':>15} {'base measured':>15} "
       f"{'inter predicted':>16} {'inter measured':>15}")
-band_checks = []
+key_tile_checks = []
 for name, path, s_, c_, diagonal_block in CHECKS:
     if path is None or not path.exists() or path.stat().st_size == 0:
         print(f"  {name:25s} {'-- artifact absent or empty, check skipped':>47}")
         continue
     fc = json.loads(path.read_text())["result"]["point"]["family_cells"]
-    pb, pi = bands_of(s_, c_, diagonal_block)
-    gb = fc["bands"]
-    gi = fc.get("interaction_by_family", {}).get("bands", {}).get("cells")
-    band_checks.append(dict(artifact=str(path), s=s_, c=c_, diagonal_block=diagonal_block, base_pred=pb,
+    pb, pi = key_tiles_of(s_, c_, diagonal_block)
+    gb = fc["key_tiles"]
+    gi = fc.get("interaction_by_family", {}).get("key_tiles", {}).get("cells")
+    key_tile_checks.append(dict(artifact=str(path), s=s_, c=c_, diagonal_block=diagonal_block, base_pred=pb,
                             base_got=gb, inter_pred=pi, inter_got=gi,
                             ok=pb == gb and (gi is None or pi == gi)))
     print(f"  {name:25s} {pb:>15,} {gb:>15,}{'' if pb == gb else ' MISMATCH'} "
           f"{pi:>16,} {(f'{gi:,}' if gi is not None else '(not recorded)'):>15}"
           f"{'' if gi is None or pi == gi else ' MISMATCH'}")
-print(f"  {sum(c['ok'] for c in band_checks)}/{len(band_checks)} exact to the cell, across two "
+print(f"  {sum(c['ok'] for c in key_tile_checks)}/{len(key_tile_checks)} exact to the cell, across two "
       "harnesses, two cards, four S at C = S and three contexts.")
 print()
 print("  **The paper should use the structural model, and this is not a choice of fit.**")
@@ -308,28 +308,28 @@ print("  the composed chunks at C = 4K and 16K above, on the REAL 8B witness.  A
 print("  alone cannot express chunked prefill at all, where every chunk has its own C.")
 
 # --- the whole chunk, in (S, C) ----------------------------------------------
-# `rest` is everything the band family does not cover: the mats, the dequant, the
+# `rest` is everything the key tile family does not cover: the mats, the dequant, the
 # Freivalds checks, the attnout region and the tables.  Every one of them is
 # per-token or
 # fixed -- none carries a C, because a chunk computes S new keys whatever its
 # prefix -- so a linear fit of `rest` in S is structurally the right shape.  It
 # is still a two-point fit, and that is where the remaining uncertainty lives.
-rest = {r["s"]: r["fresh"] - band_fresh(r["s"], r["s"]) for r in rows}
+rest = {r["s"]: r["fresh"] - key_tile_fresh(r["s"], r["s"]) for r in rows}
 _rlo, _rhi = REMAINDER_PAIR          # PINNED: `design.prefill_chunk_remainder`
 q_star = (rest[_rhi] - rest[_rlo]) / (_rhi - _rlo)
 f_star = rest[_rlo] - q_star * _rlo
-BAND_SC, BAND_C, BAND_S = 140, 24960, 12688      # band FRESH cells: base + interaction
+KEY_TILE_SC, KEY_TILE_C, KEY_TILE_S = 140, 24960, 12688      # key tile FRESH cells: base + interaction
 
 
 def fresh_of(s, c):
     """Fresh cells of one prefill layer chunk at (S, C)."""
-    return f_star + q_star * s + band_fresh(s, c)
+    return f_star + q_star * s + key_tile_fresh(s, c)
 
 
 print()
 print("the whole chunk, in (S, C) rather than in S alone")
-print(f"  fresh(S, C) = {g(f_star)}+ {q_star:,.0f} S  +  band_fresh(S, C)")
-print(f"  band_fresh  = {BAND_SC} S C + {BAND_C:,} C + {BAND_S:,} S   (base + interaction)")
+print(f"  fresh(S, C) = {g(f_star)}+ {q_star:,.0f} S  +  key_tile_fresh(S, C)")
+print(f"  key_tile_fresh  = {KEY_TILE_SC} S C + {KEY_TILE_C:,} C + {KEY_TILE_S:,} S   (base + interaction)")
 for r in rows:
     got = fresh_of(r["s"], r["s"])
     tag = "fitted" if r["s"] in REMAINDER_PAIR else "HELD OUT"
@@ -338,15 +338,15 @@ for r in rows:
 print(f"  The linear fit is pinned to S = {_rlo} and {_rhi} (the pair "
       "`design.prefill_chunk_remainder` was")
 print("  frozen on); the other two S are hold-outs and are NOT refitted.")
-print(f"  the band family in FRESH cells is {BAND_SC / NH:.3f} per (head, key, token), against "
+print(f"  the key tile family in FRESH cells is {KEY_TILE_SC / NH:.3f} per (head, key, token), against "
       f"{ALPHA_CM:.2f} in the")
 print("  cost model and 5.898 for a composed chunk's context slope; the base-only "
       f"{gamma / NH:.3f} is")
 print("  the figure comparable to B10's diagonal block 2.750.  NOTE that the `grid share` column at")
 print(f"  the top of this probe divides a BASE count by a FRESH one: fresh against fresh the")
-print(f"  band family is {band_fresh(HEADLINE_S, HEADLINE_S) / by_s[HEADLINE_S]['fresh'] * 100:.1f}% "
+print(f"  key tile family is {key_tile_fresh(HEADLINE_S, HEADLINE_S) / by_s[HEADLINE_S]['fresh'] * 100:.1f}% "
       f"of the S={HEADLINE_S} chunk, not "
-      f"{by_s[HEADLINE_S]['bands'] / by_s[HEADLINE_S]['fresh'] * 100:.1f}%.")
+      f"{by_s[HEADLINE_S]['key_tiles'] / by_s[HEADLINE_S]['fresh'] * 100:.1f}%.")
 
 
 def cross_of(a2, a1, a0):
@@ -354,13 +354,13 @@ def cross_of(a2, a1, a0):
 
 
 x_str = cross_of(gamma, delta - q, -fix)                          # base-only, like for like
-x_fresh = cross_of(BAND_SC, BAND_S + BAND_C - q_star, -f_star)    # fresh against fresh
+x_fresh = cross_of(KEY_TILE_SC, KEY_TILE_S + KEY_TILE_C - q_star, -f_star)    # fresh against fresh
 print()
 print("the crossover -- where the attention family passes half the chunk")
 print(f"  incumbent   p S^2 = rest                     S ~ {cross:>8,.0f}")
 print(f"  structural  gamma S^2 + delta S = rest       S ~ {x_str:>8,.0f}   {x_str / cross - 1:+.1%}")
 print(f"  fresh against fresh (the one to quote)       S ~ {x_fresh:>8,.0f}   {x_fresh / cross - 1:+.1%}")
-print("  The first two compare a BASE band count against a fresh remainder, which is the top")
+print("  The first two compare a BASE key tile count against a fresh remainder, which is the top")
 print("  table's own inconsistency carried forward; the third counts the family's own")
 print("  interaction and lands well inside the context the decode path already runs at.")
 
@@ -381,8 +381,8 @@ for n_tok, pub in ((4096, 13.7), (16384, 11.6)):
     one = fresh_of(n_tok, n_tok)
     tot = sum(fresh_of(E11_S, (i + 1) * E11_S) for i in range(n))
     tri = n * (n + 1) / 2
-    fixed, kv = (n - 1) * f_star, BAND_C * E11_S * tri - BAND_C * n_tok
-    grid = BAND_SC * E11_S * E11_S * tri - BAND_SC * n_tok * n_tok
+    fixed, kv = (n - 1) * f_star, KEY_TILE_C * E11_S * tri - KEY_TILE_C * n_tok
+    grid = KEY_TILE_SC * E11_S * E11_S * tri - KEY_TILE_SC * n_tok * n_tok
     chunk_rows[n_tok] = dict(chunks=n, one_shot=one, chunked=tot, fixed_pct=fixed / one * 100,
                              kv_pct=kv / one * 100, grid_pct=grid / one * 100,
                              net_pct=(tot / one - 1) * 100, published_pct=pub)
@@ -423,7 +423,7 @@ if DECODE:
     print("  the sequence -- the fourth chunk must attend over all 4,096 keys, not its own")
     print("  1,024.  With the real geometry it is x5.2 (prompt) / x6.2 (prompt+output) at 4K.")
     print("  A head chunk per 512 prompt positions is NOT counted here, and was not counted in")
-    print("  the published band either; at 4K it would add ~8x `cells.c4096.fresh_head`.")
+    print("  the published key tile either; at 4K it would add ~8x `cells.c4096.fresh_head`.")
 
 # --- the overhead ratio -------------------------------------------------------
 print()
@@ -462,7 +462,7 @@ print()
 print("the same cell counts at the *target* rate (15.95 G cells/s = 53 tok/s at 27B/16K)")
 print("  -- i.e. prefill's own overhead, with the decode throughput gap taken out.  H4's")
 print("  first face already counts that gap; charging it twice is what puts this probe")
-print("  three to five times above E6c's band.")
+print("  three to five times above E6c's key tile.")
 e6c27_ms = 2 * 27e9 / E6C_OPS * 1e3
 print(f"  a production 27B prefill: {prod27_ms:.3f} ms/token at 40% MFU of 400 TFLOP/s,")
 print(f"                            {e6c27_ms:.3f} ms/token at E6c's own 1 POPS "
@@ -484,7 +484,7 @@ print()
 print("  Read this way the structural claim is the opposite of a miss: at the rate the")
 print("  scheme is aimed at, proven 27B prefill is x35 (4K) to x56 (16K) a production")
 print("  prefill -- at or below the low end of E6c's 50-150 -- and E6c's own, cheaper")
-print("  baseline puts it above the band again.  What survives either baseline is the")
+print("  baseline puts it above the key tile again.  What survives either baseline is the")
 print("  *ratio*: prefill k / decode k ~ 0.8-1.0, because prefill costs a full decode")
 print("  token's trace per token.  That is E6c's flat-k assumption **confirmed**, not a")
 print("  term E6c missed; the absolute overhead is the decode gap H4's first face")
@@ -493,18 +493,18 @@ print("  already reports, and it is reached iff the decode target is.")
 print()
 print("the verdict, in one paragraph.")
 print("The diagonal block's price is settled and it is small: at C = S the attention grid is")
-print(f"{big['bands'] / big['fresh'] * 100:.1f}% of a prefill chunk, so the two-region split -- bulk rectangle plus a")
+print(f"{big['key_tiles'] / big['fresh'] * 100:.1f}% of a prefill chunk, so the two-region split -- bulk rectangle plus a")
 print(f"B x B diagonal block, {0.5 + GRID_TARGET / (2 * big['s']):.3f} of the naive rectangle at S = {big['s']} -- is worth")
-print(f"{(1 - (0.5 + GRID_TARGET / (2 * big['s']))) * big['bands'] / big['fresh'] * 100:.1f}% of the chunk.  The mask is a **soundness and completeness** gap (no AIR")
+print(f"{(1 - (0.5 + GRID_TARGET / (2 * big['s']))) * big['key_tiles'] / big['fresh'] * 100:.1f}% of the chunk.  The mask is a **soundness and completeness** gap (no AIR")
 print("here has it, and 1.4 shows its absence already leaking into the fold's scale),")
 print("not a throughput one, until S reaches the context where the grid dominates.")
-print("**At the measured rate the overhead ratio does not land in E6c's 50-150x band.**")
-print("Against B1's own forward pass on this box it is ~60x at 8B, inside the band;")
+print("**At the measured rate the overhead ratio does not land in E6c's 50-150x key tile.**")
+print("Against B1's own forward pass on this box it is ~60x at 8B, inside the key tile;")
 print("against a production prefill at 40% MFU it is ~450x at 8B and ~550-700x")
 print("extrapolated to 27B, three to five times above it.  B10 step 0's amendment:")
 print("that number charges the decode throughput gap (x12.5, H4's first face) a second")
 print("time.  At the target rate the same counts give x35-x56 at 27B, at or below the")
-print("band's low end, and E6c's own 1-POPS baseline moves it back above -- so the")
+print("key tile's low end, and E6c's own 1-POPS baseline moves it back above -- so the")
 print("absolute ratio is a baseline choice.  The term that moved is not attention: it")
 print("is that **prefill in this scheme costs a full decode-token's trace per token**.")
 print("The weight Freivalds check")
@@ -529,16 +529,16 @@ OUT.mkdir(exist_ok=True)
     target_cells_s=TARGET_CELLS_S, e6c_ops=E6C_OPS,
     e6c_prod27_ms=2 * 27e9 / E6C_OPS * 1e3, prod27_ms=prod27_ms,
     target_27b=target27,
-    # stream DD, 2026-09-01: the structural band model and what it moves
-    band_model=dict(
+    # stream DD, 2026-09-01: the structural key tile model and what it moves
+    key_tile_model=dict(
         base_form="2*NH*S*C + 2*hd*NH*C + hd*NH*S + 4*NH*S",
         inter_form="76*S*C + 16768*C + 8464*S",
-        s_c_base=gamma, s_c_fresh=BAND_SC, c_base=2 * NH_HD, s_base=NH_HD + 4 * NH,
-        alpha_base=gamma / NH, alpha_fresh=BAND_SC / NH,
+        s_c_base=gamma, s_c_fresh=KEY_TILE_SC, c_base=2 * NH_HD, s_base=NH_HD + 4 * NH,
+        alpha_base=gamma / NH, alpha_fresh=KEY_TILE_SC / NH,
         delta_at_c_eq_s=delta, incumbent_p=p, incumbent_pair=list(INCUMBENT_PAIR),
-        checks=band_checks),
-    chunk_model=dict(fixed=f_star, per_token=q_star, band_sc=BAND_SC,
-                     band_c=BAND_C, band_s=BAND_S, fitted_pair=list(REMAINDER_PAIR)),
+        checks=key_tile_checks),
+    chunk_model=dict(fixed=f_star, per_token=q_star, key_tile_sc=KEY_TILE_SC,
+                     key_tile_c=KEY_TILE_C, key_tile_s=KEY_TILE_S, fitted_pair=list(REMAINDER_PAIR)),
     crossover=dict(incumbent=cross, structural_base=x_str, structural_fresh=x_fresh),
     chunking=chunk_rows, e11=e11, e11_chunk_s=E11_S), indent=1))
 print()

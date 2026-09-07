@@ -1,4 +1,4 @@
-//! B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and band fills, on the
+//! B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and key tile fills, on the
 //! device.
 //!
 //! 20.6's row 1, and 20.1's design three more times. What it moves, per family:
@@ -6,7 +6,7 @@
 //! | | host today | here |
 //! |---|---|---|
 //! | Freivalds checks | `freivalds_region` over 2^15-2^16 rows, 0.532 s | two kernels, one thread per committed row |
-//! | bands | `commit_base` over three grids and a token block, 0.401 s | four kernels per band |
+//! | key tiles | `commit_base` over three grids and a token block, 0.401 s | four kernels per key tile |
 //! | attnout | `ao_region`, 0.042 s | one kernel |
 //! | all three | `eval_of` on 59 M cells | nothing: the thread owns the output index |
 //!
@@ -14,7 +14,7 @@
 //! smaller than the columns it replaces.** The Freivalds checks upload `qx` and `qw` as
 //! *int8*, four to a word, because that is how the witness is quantized in the
 //! first place: 34 MB against 168 MB of committed and preprocessed cells. The
-//! attnout uploads 3.7 MB against 17.7 MB. The bands are the honest exception
+//! attnout uploads 3.7 MB against 17.7 MB. The key tiles are the honest exception
 //! -- 46 MB of shift and numerator against 68 MB of columns -- and that is
 //! written down rather than averaged away.
 //!
@@ -117,7 +117,7 @@ pub struct FAoCfg {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct FBandCfg {
+pub struct FKeyTileCfg {
     pub gc: FGrid,
     pub gk: FGrid,
     pub go: FGrid,
@@ -179,16 +179,16 @@ unsafe extern "C" {
         counts: *mut u32,
         cfg: FAoCfg,
     );
-    fn b65_fill_band_chan(
+    fn b65_fill_key_tile_chan(
         kk: *const i32,
         qq: *const i32,
         cols: *const *mut u32,
         m_k: FMult,
         m_q: FMult,
         counts: *mut u32,
-        cfg: FBandCfg,
+        cfg: FKeyTileCfg,
     );
-    fn b65_fill_band_grid(
+    fn b65_fill_key_tile_grid(
         dd: *const i32,
         num: *const u16,
         xx: *const u16,
@@ -202,15 +202,15 @@ unsafe extern "C" {
         m_aux: FMult,
         m_v: FMult,
         counts: *mut u32,
-        cfg: FBandCfg,
+        cfg: FKeyTileCfg,
     );
-    fn b65_fill_band_out(
+    fn b65_fill_key_tile_out(
         out: *const u32,
         cols: *const *mut u32,
         counts: *mut u32,
-        cfg: FBandCfg,
+        cfg: FKeyTileCfg,
     );
-    fn b65_fill_band_tok(
+    fn b65_fill_key_tile_tok(
         mm: *const u32,
         zz: *const u32,
         cols: *const *mut u32,
@@ -218,7 +218,7 @@ unsafe extern "C" {
         m_lo: FMult,
         m_hi: FMult,
         counts: *mut u32,
-        cfg: FBandCfg,
+        cfg: FKeyTileCfg,
     );
 }
 
@@ -227,7 +227,7 @@ unsafe extern "C" {
 pub enum Fam {
     Freivalds,
     Ao,
-    Band,
+    KeyTile,
 }
 
 impl Fam {
@@ -235,7 +235,7 @@ impl Fam {
         match self {
             Fam::Freivalds => "freivalds",
             Fam::Ao => "ao",
-            Fam::Band => "band",
+            Fam::KeyTile => "key_tile",
         }
     }
 }
@@ -243,12 +243,12 @@ impl Fam {
 /// `B7_M4_WFILLMUT`: one deliberate defect in the device fills, so mode 2's
 /// check has negative controls. The names are the kernel's.
 ///
-/// **The `:family` suffix matters, and 19.6 is why.** The bands are checked
+/// **The `:family` suffix matters, and 19.6 is why.** The key tiles are checked
 /// before the attnout and the Freivalds checks, so an unscoped mutation always panics at
-/// the *bands* and the run says nothing about whether the other two families'
+/// the *key tiles* and the run says nothing about whether the other two families'
 /// checks would have caught the same defect. `B7_M4_WFILLMUT=chan:freivalds` aims it
 /// at one family, so each check is shown to bite on its own rather than
-/// inheriting the bands' evidence.
+/// inheriting the key tiles' evidence.
 pub fn wfill_mut(fam: Fam) -> u32 {
     let raw = std::env::var("B7_M4_WFILLMUT").ok();
     let raw = raw.as_deref().unwrap_or("");
@@ -257,7 +257,7 @@ pub fn wfill_mut(fam: Fam) -> u32 {
         None => (raw, None),
     };
     if let Some(f) = want {
-        assert!(["freivalds", "ao", "band"].contains(&f),
+        assert!(["freivalds", "ao", "key_tile"].contains(&f),
                 "unknown B7_M4_WFILLMUT family {f:?}");
         if f != fam.name() {
             return 0;
@@ -271,61 +271,61 @@ pub fn wfill_mut(fam: Fam) -> u32 {
         "descend" => 4,
         "inst" => 5,
         "aoref" => 6,
-        // B11 stream N, lever 2: the two ways a diagonal block band's fill could be
+        // B11 stream N, lever 2: the two ways a diagonal block key tile's fill could be
         // wrong that no earlier control reaches. `nomask` is the kernel's (a
         // masked slot bumping the exp table); `notok` is this side's (a diagonal block
-        // band building the per-token region it does not own).
+        // key tile building the per-token region it does not own).
         "nomask" => 7,
         "notok" => 8,
         other => panic!("unknown B7_M4_WFILLMUT {other:?}"),
     }
 }
 
-/// B11 stream L: the band fill's own switch, defaulting to `B7_M4_WFILL`.
+/// B11 stream L: the key tile fill's own switch, defaulting to `B7_M4_WFILL`.
 ///
 /// `B7_M4_WFILL` turns on three device generation paths at once -- the Freivalds check
-/// regions, the attnout, and every non-diagonal block band. Stream L measured them
+/// regions, the attnout, and every non-diagonal block key tile. Stream L measured them
 /// apart on the sequence's own witness and they are not in the same state: the
-/// Freivalds check and attnout fills reproduce the host cell for cell, while the band fill
+/// Freivalds check and attnout fills reproduce the host cell for cell, while the key tile fill
 /// disagrees with the host on the grid region and the proof is then rejected
 /// (`off_table` bumps that the host never makes). One switch cannot express
-/// that, so the band gate becomes its own three-value variable which falls back
-/// to `B7_M4_WFILL` when it is not set. `B7_M4_WFILL=1 B7_M4_WFILL_BAND=0` is
-/// the configuration that takes the Freivalds checks' win and leaves the bands on the host
+/// that, so the key tile gate becomes its own three-value variable which falls back
+/// to `B7_M4_WFILL` when it is not set. `B7_M4_WFILL=1 B7_M4_WFILL_KEY_TILE=0` is
+/// the configuration that takes the Freivalds checks' win and leaves the key tiles on the host
 /// until the fill is fixed.
-pub fn band_mode() -> u32 {
-    match std::env::var("B7_M4_WFILL_BAND") {
+pub fn key_tile_mode() -> u32 {
+    match std::env::var("B7_M4_WFILL_KEY_TILE") {
         Ok(v) => v.parse().unwrap_or(0),
         Err(_) => crate::util::m4b_mode("B7_M4_WFILL"),
     }
 }
 
-/// B11 stream M: which fill *this* band takes, switch and layout together.
+/// B11 stream M: which fill *this* key tile takes, switch and layout together.
 ///
-/// A diagonal block band commits no per-token region and `commit_base_dev` has no
+/// A diagonal block key tile commits no per-token region and `commit_base_dev` has no
 /// notion of that layout, so it fills on the host whatever the switch says
 /// (`attn_trace::commit_base_any`). That override used to live inline at the
 /// one place that picked the path, and the consequence -- that a diagonal-block-bearing
 /// witness therefore leaves multiplicity bumps on the host -- had to be
 /// rediscovered by whoever else needed it. `devpre::fills_dev` needs it, so the
 /// decision lives here now and both callers read the same function: this one
-/// picks the path, and `compose::generate` asks it of every band before the
+/// picks the path, and `compose::generate` asks it of every key tile before the
 /// first fill runs.
-pub fn band_fill_mode(a: &Attn) -> u32 {
-    if a.diagonal_block { diagonal_block_mode() } else { band_mode() }
+pub fn key_tile_fill_mode(a: &Attn) -> u32 {
+    if a.diagonal_block { diagonal_block_mode() } else { key_tile_mode() }
 }
 
-/// `B7_M4_WFILL_DIAGONAL_BLOCK`: the diagonal block bands' own fill switch, defaulting **off**.
+/// `B7_M4_WFILL_DIAGONAL_BLOCK`: the diagonal block key tiles' own fill switch, defaulting **off**.
 ///
-/// B11 stream N, lever 2. Until this stream a diagonal block band filled on the host
+/// B11 stream N, lever 2. Until this stream a diagonal block key tile filled on the host
 /// whatever any switch said, because `commit_base_dev` had no notion of a
 /// layout with no per-token region and would have committed columns the AIR
 /// does not expect. It has that notion now (`commit_base_dev` takes
-/// `with_rows`, `devpre::band_dev` with it), but a path is born off and
+/// `with_rows`, `devpre::key_tile_dev` with it), but a path is born off and
 /// graduates on its gate: this is the switch that opens it, and the mirror
 /// runs under `B7_M4_WFILL_DIAGONAL_BLOCK=2` on a diagonal-block-bearing witness.
 ///
-/// It falls back to `band_mode` only once it has gated -- until then, not even
+/// It falls back to `key_tile_mode` only once it has gated -- until then, not even
 /// `B7_M4_WFILL=1` reaches the diagonal block.
 pub fn diagonal_block_mode() -> u32 {
     std::env::var("B7_M4_WFILL_DIAGONAL_BLOCK")
@@ -336,29 +336,29 @@ pub fn diagonal_block_mode() -> u32 {
 
 /// B11 stream L: must the exp table's multiplicity column be the host's?
 ///
-/// `B7_M4_TABDEV=1` builds `m_exp` on the card, by summing the per-band exp
+/// `B7_M4_TABDEV=1` builds `m_exp` on the card, by summing the per-key-tile exp
 /// counters `commit_base_dev` left there. That is right exactly when *every*
-/// band's bumps are on the card -- and a diagonal block band always fills on the host,
+/// key tile's bumps are on the card -- and a diagonal block key tile always fills on the host,
 /// because it commits no per-token region and the device fill has no notion of
 /// its layout. So on a diagonal-block-bearing witness the bumps are split across the
 /// two sides and neither half alone is the column.
 ///
-/// Only the two uniform states were ever run. All bands on the host is the
-/// sequence as stream K left it; all bands on the device is a rectangle, which
+/// Only the two uniform states were ever run. All key tiles on the host is the
+/// sequence as stream K left it; all key tiles on the device is a rectangle, which
 /// has no diagonal block. The sequence's own chunks are the mixed state, and taking the
-/// device half alone there silently loses the diagonal block bands' exp lookups -- a
+/// device half alone there silently loses the diagonal block key tiles' exp lookups -- a
 /// LogUp sum that does not cancel, with every other check passing.
 ///
-/// `a.zz_total` is the local signal that a diagonal block rides with this band: it is
+/// `a.zz_total` is the local signal that a diagonal block rides with this key tile: it is
 /// set on the prefix half of a pair and on nothing else (`layer.rs:352`). When
-/// it is, the device band merges its counters into the host array as it does for
+/// it is, the device key tile merges its counters into the host array as it does for
 /// every other table, and the host column is the one committed. `compose.rs`
-/// asks `layer.bands.iter().any(|b| b.diagonal_block)`, which is the same question
+/// asks `layer.key_tiles.iter().any(|b| b.diagonal_block)`, which is the same question
 /// about the same layer, and the two answers have to agree or the column and
 /// its counters come from different places.
 pub fn exp_mult_on_host(a: &Attn) -> bool {
-    // B11 stream N, lever 2: `a.zz_total.is_some()` says a diagonal block band rides
-    // with this one, and the reason that forced this band's counter back to the
+    // B11 stream N, lever 2: `a.zz_total.is_some()` says a diagonal block key tile rides
+    // with this one, and the reason that forced this key tile's counter back to the
     // host was that the diagonal block's own bumps were made *there*. Once the diagonal block
     // fills on the card that reason is gone and both halves are device
     // counters, so the condition gains the diagonal block's mode.
@@ -460,24 +460,24 @@ fn timed_up_into(
     timed_up(pack_tag, h2d_tag, byte_tag, f)
 }
 
-/// One band array, packed and uploaded, with its own byte line.
-fn band_up(byte_tag: &'static str, f: impl FnOnce() -> Vec<u32>) -> Uint32Vec {
-    timed_up("gen/wfill_band_pack", "gen/wfill_band_h2d", byte_tag, f)
+/// One key tile array, packed and uploaded, with its own byte line.
+fn key_tile_up(byte_tag: &'static str, f: impl FnOnce() -> Vec<u32>) -> Uint32Vec {
+    timed_up("gen/wfill_key_tile_pack", "gen/wfill_key_tile_h2d", byte_tag, f)
 }
 
 /// The same, with the pack able to target the pinned pool.
-fn band_up_into(
+fn key_tile_up_into(
     byte_tag: &'static str,
     words: usize,
     into: impl FnOnce(&mut [u32]),
     f: impl FnOnce() -> Vec<u32>,
 ) -> Uint32Vec {
-    timed_up_into("gen/wfill_band_pack", "gen/wfill_band_h2d", byte_tag, words, into, f)
+    timed_up_into("gen/wfill_key_tile_pack", "gen/wfill_key_tile_h2d", byte_tag, words, into, f)
 }
 
-// ------------------------------------------------ the band dump (stream F) --
+// ------------------------------------------------ the key tile dump (stream F) --
 
-static BAND_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static KEY_TILE_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn raw<T>(v: &[T]) -> &[u8] {
     // Safety: writing the exact bytes of a POD slice; the reader is told the
@@ -485,22 +485,22 @@ fn raw<T>(v: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
 }
 
-/// B11 stream F: this band's witness arrays, raw, for the standalone probe.
+/// B11 stream F: this key tile's witness arrays, raw, for the standalone probe.
 ///
-/// `B7_F_BANDDUMP=DIR` writes one subdirectory per band -- the arrays
+/// `B7_F_KEY_TILE_DUMP=DIR` writes one subdirectory per key tile -- the arrays
 /// `commit_base_dev` uploads, plus the exp table and a shape JSON -- so
-/// `experiments/b11/probe/band_up.cu` can price a device-side generation path
+/// `experiments/b11/probe/key_tile_up.cu` can price a device-side generation path
 /// against the *real* values and not only against the right sizes: it
 /// recomputes `dd`, `num`, `zz` and `out` on the card and compares them with
 /// what is here. Off unless the variable is set (~2.4 GB for a 16-instance
-/// band at C=16K), and it never runs in a timed loop.
-fn band_dump(a: &Attn, with_out: bool) {
-    let Ok(dir) = std::env::var("B7_F_BANDDUMP") else { return };
-    let b = BAND_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let d = std::path::Path::new(&dir).join(format!("band{b}"));
-    std::fs::create_dir_all(&d).expect("banddump directory");
+/// key tile at C=16K), and it never runs in a timed loop.
+fn key_tile_dump(a: &Attn, with_out: bool) {
+    let Ok(dir) = std::env::var("B7_F_KEY_TILE_DUMP") else { return };
+    let b = KEY_TILE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let d = std::path::Path::new(&dir).join(format!("key_tile{b}"));
+    std::fs::create_dir_all(&d).expect("key_tile_dump directory");
     let put = |name: &str, bytes: &[u8]| {
-        std::fs::write(d.join(name), bytes).unwrap_or_else(|e| panic!("banddump {name}: {e}"));
+        std::fs::write(d.join(name), bytes).unwrap_or_else(|e| panic!("key_tile_dump {name}: {e}"));
     };
     let sh = a.shape;
     put("kk.i32", raw(&a.kk));
@@ -527,7 +527,7 @@ fn band_dump(a: &Attn, with_out: bool) {
         },
     });
     put("shape.json", serde_json::to_string_pretty(&j).unwrap().as_bytes());
-    eprintln!("banddump: band {b} -> {}", d.display());
+    eprintln!("key_tile_dump: key tile {b} -> {}", d.display());
 }
 
 // B11 stream L: each narrowing is written once, as the word it produces, and
@@ -686,7 +686,7 @@ fn ptrs(v: &[BaseFieldVec]) -> Vec<*mut u32> {
 
 /// Merge a device counter array into the host's. In parallel because the exp
 /// table is `1 << log_table` entries -- 8.4 M at the design point, three times
-/// over -- and a serial merge would be a measurable share of what the band
+/// over -- and a serial merge would be a measurable share of what the key tile
 /// kernel just saved.
 fn add_into(dst: &mut [u32], src: &[u32]) {
     assert_eq!(dst.len(), src.len(), "multiplicity counter length");
@@ -935,24 +935,24 @@ pub fn ao_region_dev(
             ref_bad: got[1] as usize, q_out, want }
 }
 
-// ================================================================= the bands ==
+// ================================================================= the key tiles ==
 
-/// One band's committed columns, on the device, with the log size of each --
-/// a band is four sub-regions on three grids plus a token block, so unlike the
+/// One key tile's committed columns, on the device, with the log size of each --
+/// a key tile is four sub-regions on three grids plus a token block, so unlike the
 /// other two families its columns are not all the same height.
-pub struct DevBand {
+pub struct DevKeyTile {
     pub base: Vec<BaseFieldVec>,
     pub logs: Vec<u32>,
     pub at: Vec<usize>,
-    /// B7a milestone 4 (section 3 row 1): this band's exp-table counter, left
-    /// where the scatter-add put it. `b65_table_fill` sums one per band into
+    /// B7a milestone 4 (section 3 row 1): this key tile's exp-table counter, left
+    /// where the scatter-add put it. `b65_table_fill` sums one per key tile into
     /// the `m_exp` column, so with `B7_M4_TABDEV=1` the 33.5 MB download and
     /// the parallel merge below never happen.
     pub m_exp: Uint32Vec,
-    /// B7a milestone 4 (section 3 row 1): the five range counters this band's
+    /// B7a milestone 4 (section 3 row 1): the five range counters this key tile's
     /// three fills bumped -- the key, query, value and the two `z` limbs -- and
     /// `intsplit`'s auxiliary one where the variant has it. `b65_pre_fill` sums
-    /// one per band into each range table's multiplicity column.
+    /// one per key tile into each range table's multiplicity column.
     pub m_k: Uint32Vec,
     pub m_q: Uint32Vec,
     pub m_v: Uint32Vec,
@@ -961,18 +961,18 @@ pub struct DevBand {
     pub m_hi: Uint32Vec,
 }
 
-/// Build one band's committed columns on the device.
+/// Build one key tile's committed columns on the device.
 ///
 /// `mult_exp` and `mult_r` are the caller's, exactly as `commit_base` takes
 /// them: 20.6 called this the awkward part, and it is a counter array, which is
 /// what the scatter-add already handles.
-/// One band's committed base columns, filled on the device.
+/// One key tile's committed base columns, filled on the device.
 ///
 /// B11 stream N, lever 2 (a): `with_rows` is `!a.diagonal_block`, and it says whether
-/// this band commits the **per-token region** -- the row maxima, the
-/// denominator and its low limb. A diagonal block band does not: there is one maximum
-/// and one denominator per *token*, not per band, so the diagonal block rides on the
-/// prefix band's. That distinction was the whole of why a diagonal block band could
+/// this key tile commits the **per-token region** -- the row maxima, the
+/// denominator and its low limb. A diagonal block key tile does not: there is one maximum
+/// and one denominator per *token*, not per key tile, so the diagonal block rides on the
+/// prefix key tile's. That distinction was the whole of why a diagonal block key tile could
 /// not fill on the card. The fill had no notion of it and would have committed
 /// a per-token region the AIR does not expect there, so `commit_base_any` sent
 /// every diagonal block to the host whatever the switch said; now the fill knows, and
@@ -988,7 +988,7 @@ pub fn commit_base_dev(
     with_out: bool,
     merge_m_exp: bool,
     with_rows: bool,
-) -> DevBand {
+) -> DevKeyTile {
     let sh = a.shape;
     // the host's two layout assertions, kept here because they are about the
     // layout and not about where the fill runs
@@ -1007,39 +1007,39 @@ pub fn commit_base_dev(
     let with_max = a.variant != Variant::Bf16x;
     let n_aux = if a.variant == Variant::IntExp { 0 } else { lk.q };
 
-    band_dump(a, with_out);
+    key_tile_dump(a, with_out);
 
     // B11 stream N, lever 2: `notok` is this lever's own negative control -- a
-    // diagonal block band that builds the per-token region anyway, which is precisely
+    // diagonal block key tile that builds the per-token region anyway, which is precisely
     // what `commit_base_any` used to send every diagonal block to the host to avoid.
     // It has to be decided here, before the uploads, because the two arrays
     // that region reads are skipped with it.
-    let with_rows = with_rows || wfill_mut(Fam::Band) == 8;
+    let with_rows = with_rows || wfill_mut(Fam::KeyTile) == 8;
 
     let t_up = std::time::Instant::now();
-    // The four arrays that are 99.99% of the band's bytes (stream F's table:
+    // The four arrays that are 99.99% of the key tile's bytes (stream F's table:
     // dd 1,073.74 MB, num 536.87, kk 268.44, vv 268.44, qq 8.39) go through the
     // pinned pool when it is on. `mm`/`zz`/`delta` are 0.26 MB together and are
     // left on the pageable path: they would each grow the pool to no measurable
     // end.
-    let d_kk = band_up_into("band/kk", a.kk.len(), |d| pack_i32_from_i32_into(d, &a.kk),
+    let d_kk = key_tile_up_into("key_tile/kk", a.kk.len(), |d| pack_i32_from_i32_into(d, &a.kk),
                             || pack_i32_from_i32(&a.kk));
-    let d_qq = band_up_into("band/qq", a.qq.len(), |d| pack_i32_from_i32_into(d, &a.qq),
+    let d_qq = key_tile_up_into("key_tile/qq", a.qq.len(), |d| pack_i32_from_i32_into(d, &a.qq),
                             || pack_i32_from_i32(&a.qq));
-    let d_vv = band_up_into("band/vv", a.vv.len(), |d| pack_i32_from_i32_into(d, &a.vv),
+    let d_vv = key_tile_up_into("key_tile/vv", a.vv.len(), |d| pack_i32_from_i32_into(d, &a.vv),
                             || pack_i32_from_i32(&a.vv));
-    let d_dd = band_up_into("band/dd", a.dd.len(), |d| pack_i32_into(d, &a.dd, "band dd"),
-                            || pack_i32(&a.dd, "band dd"));
-    let d_num = band_up_into("band/num", a.num.len().div_ceil(2),
-                             |d| pack_u16_into(d, &a.num, "band num"),
-                             || pack_u16(&a.num, "band num"));
-    let d_delta = band_up("band/delta", || pack_i64(&a.delta));
-    let d_mm = with_rows.then(|| band_up("band/mm", || pack_i64(&a.mm)));
+    let d_dd = key_tile_up_into("key_tile/dd", a.dd.len(), |d| pack_i32_into(d, &a.dd, "key tile dd"),
+                            || pack_i32(&a.dd, "key tile dd"));
+    let d_num = key_tile_up_into("key_tile/num", a.num.len().div_ceil(2),
+                             |d| pack_u16_into(d, &a.num, "key tile num"),
+                             || pack_u16(&a.num, "key tile num"));
+    let d_delta = key_tile_up("key_tile/delta", || pack_i64(&a.delta));
+    let d_mm = with_rows.then(|| key_tile_up("key_tile/mm", || pack_i64(&a.mm)));
     // B11 stream L: `zz_row()`, not `zz`.
     //
-    // This is the whole of what b-port called the prefix bands' fill kernels
+    // This is the whole of what b-port called the prefix key tiles' fill kernels
     // "predating the diagonal block's key discipline", and it is on this side of the
-    // link rather than in the kernel. When a diagonal block band rides with this one the
+    // link rather than in the kernel. When a diagonal block key tile rides with this one the
     // per-token region belongs to the *pair*, and the denominator it commits is
     // the pair's total -- `Z >= nmax` holds of the sum and of neither half,
     // because the key whose shift is zero may be in either (`layer.rs:352`).
@@ -1051,21 +1051,21 @@ pub fn commit_base_dev(
     // have no diagonal block, `zz_row()` is `zz` there, and that is why stream G's
     // switch matrix and stream F's whole loop saw nothing.
     // B11 stream N: both of these feed the per-token region alone, so a diagonal block
-    // band uploads neither.
-    let d_zz = with_rows.then(|| band_up("band/zz", || pack_i64(a.zz_row())));
+    // key tile uploads neither.
+    let d_zz = with_rows.then(|| key_tile_up("key_tile/zz", || pack_i64(a.zz_row())));
     // only the bf16x variant reads these two, and only it pays for them
     let bf16x = a.variant == Variant::Bf16x;
-    let d_xx = bf16x.then(|| band_up("band/xx", || pack_u16_raw(&a.xx)));
-    let d_sc = bf16x.then(|| band_up("band/sc", || pack_i64(&a.sc)));
-    let d_out = with_out.then(|| band_up("band/out", || pack_i64(&a.out)));
-    crate::util::m4_add("gen/wfill_band_up", t_up.elapsed().as_secs_f64());
+    let d_xx = bf16x.then(|| key_tile_up("key_tile/xx", || pack_u16_raw(&a.xx)));
+    let d_sc = bf16x.then(|| key_tile_up("key_tile/sc", || pack_i64(&a.sc)));
+    let d_out = with_out.then(|| key_tile_up("key_tile/out", || pack_i64(&a.out)));
+    crate::util::m4_add("gen/wfill_key_tile_up", t_up.elapsed().as_secs_f64());
 
     let (variant, split_k) = match a.variant {
         Variant::Bf16x => (0u32, 0u32),
         Variant::IntExp => (1u32, 0u32),
         Variant::IntSplit(k) => (2u32, k),
     };
-    let bcfg = FBandCfg {
+    let bcfg = FKeyTileCfg {
         gc: FGrid::of(&lc.g),
         gk: FGrid::of(&lk.g),
         go: FGrid::of(&lo.g),
@@ -1091,7 +1091,7 @@ pub fn commit_base_dev(
         z_hi_bits: cfg.z_hi_bits,
         z_min: cfg.z_min as i64,
         diagonal_block: u32::from(a.diagonal_block),
-        mutate: wfill_mut(Fam::Band),
+        mutate: wfill_mut(Fam::KeyTile),
     };
 
     let t_alloc = std::time::Instant::now();
@@ -1113,7 +1113,7 @@ pub fn commit_base_dev(
 
     let t_k = std::time::Instant::now();
     unsafe {
-        b65_fill_band_chan(
+        b65_fill_key_tile_chan(
             d_kk.device_ptr as *const i32,
             d_qq.device_ptr as *const i32,
             chan_p.as_ptr(),
@@ -1137,7 +1137,7 @@ pub fn commit_base_dev(
     };
     let m_v = zeroes(mult_r[ridx(8)].len());
     unsafe {
-        b65_fill_band_grid(
+        b65_fill_key_tile_grid(
             d_dd.device_ptr as *const i32,
             d_num.device_ptr as *const u16,
             d_xx.as_ref().map(|d| d.device_ptr as *const u16).unwrap_or(std::ptr::null()),
@@ -1163,7 +1163,7 @@ pub fn commit_base_dev(
         let outc = uninit(lo.q, lo.g.rows);
         let out_p = ptrs(&outc);
         unsafe {
-            b65_fill_band_out(
+            b65_fill_key_tile_out(
                 d_out.as_ref().unwrap().device_ptr,
                 out_p.as_ptr(),
                 counts.device_ptr as *mut u32,
@@ -1175,7 +1175,7 @@ pub fn commit_base_dev(
     }
 
     // ---- the per-token region ----------------------------------------------
-    // B11 stream N, lever 2 (a): absent on a diagonal block band. `at` still gains both
+    // B11 stream N, lever 2 (a): absent on a diagonal block key tile. `at` still gains both
     // ends of it, so `at[3] == at[4]` there and every index after the outputs
     // keeps its meaning -- the host's `commit_base` pushes the same empty span
     // for the same reason.
@@ -1187,7 +1187,7 @@ pub fn commit_base_dev(
         let m_lo = zeroes(mult_r[ridx(cfg.z_lo_bits)].len());
         let m_hi = zeroes(mult_r[ridx(cfg.z_hi_bits)].len());
         unsafe {
-            b65_fill_band_tok(
+            b65_fill_key_tile_tok(
                 d_mm.as_ref().unwrap().device_ptr,
                 d_zz.as_ref().unwrap().device_ptr,
                 tok_p.as_ptr(),
@@ -1203,21 +1203,21 @@ pub fn commit_base_dev(
         (m_lo, m_hi)
     } else {
         // The two `z` range counters this region would have bumped, at their
-        // real width and all zero. A diagonal block band makes no `z` lookups at all,
-        // but `b65_pre_fill` sums one counter *per band* into each range
+        // real width and all zero. A diagonal block key tile makes no `z` lookups at all,
+        // but `b65_pre_fill` sums one counter *per key tile* into each range
         // table's multiplicity column and asserts every one of them is the
         // table's width -- so the shape has to be there even when the content
         // is nothing.
         (zeroes(mult_r[ridx(cfg.z_lo_bits)].len()), zeroes(mult_r[ridx(cfg.z_hi_bits)].len()))
     };
     at.push(base.len());
-    crate::util::m4_add("gen/wfill_band_kernel", t_k.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/wfill_key_tile_kernel", t_k.elapsed().as_secs_f64());
 
     // ---- the counters, back to the host ------------------------------------
     let t_d = std::time::Instant::now();
     let got = counts.to_vec();
     // 21.4's "counters: D2H and merge" line, for the widest counter there is:
-    // 33.5 MB back and a parallel add, per band, for an array whose only reader
+    // 33.5 MB back and a parallel add, per key tile, for an array whose only reader
     // was `base_mults[0]`. The table fill sums the device copies instead.
     if merge_m_exp {
         add_into(mult_exp, &m_exp.to_vec());
@@ -1231,7 +1231,7 @@ pub fn commit_base_dev(
         if let Variant::IntSplit(k) = a.variant {
             add_into(&mut mult_r[ridx(k)], &m_aux.to_vec());
         }
-        // B11 stream N: a diagonal block band has no per-token region, so it made no
+        // B11 stream N: a diagonal block key tile has no per-token region, so it made no
         // `z` range bumps to merge.
         if with_rows {
             add_into(&mut mult_r[ridx(cfg.z_lo_bits)], &m_lo.to_vec());
@@ -1241,7 +1241,7 @@ pub fn commit_base_dev(
     *off_table += got[0] as usize;
     crate::util::m4_add("gen/wfill_counters", t_d.elapsed().as_secs_f64());
 
-    DevBand { base, logs, at, m_exp, m_k: mk, m_q: mq, m_v,
+    DevKeyTile { base, logs, at, m_exp, m_k: mk, m_q: mq, m_v,
               m_aux: matches!(a.variant, Variant::IntSplit(_)).then_some(m_aux),
               m_lo, m_hi }
 }

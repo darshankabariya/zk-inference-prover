@@ -9,7 +9,7 @@
 //! |---|---|---|
 //! | `x` | the row index | the closed form, on the device |
 //! | `y` | `Tables::exp` | a 2^16 bf16 map, gathered at `bf16(-d 2^-frac)` |
-//! | `m_exp` | the exp table's multiplicities | the counters every band's fill already bumped (21.1), summed on the device |
+//! | `m_exp` | the exp table's multiplicities | the counters every key tile's fill already bumped (21.1), summed on the device |
 //!
 //! **Why `y` is a gather and not an `exp()`.** `exp_int_table` rounds its
 //! argument to bf16 *before* the exponential -- B1's own arithmetic, and the
@@ -195,7 +195,7 @@ fn exp_patch(a: &Attn, exp: &[u32], map: &[u32], tp: f64) -> (Vec<u32>, Vec<u32>
 pub struct DevTabCols {
     pub x: BaseFieldVec,
     pub y: BaseFieldVec,
-    /// `None` when no band fill ran on the device, so there is no counter to sum
+    /// `None` when no key tile fill ran on the device, so there is no counter to sum
     /// and `m_exp` stays a host column and a 4a upload.
     pub m: Option<BaseFieldVec>,
     pub patch: usize,
@@ -209,9 +209,9 @@ fn up_u32(v: Vec<u32>) -> Uint32Vec {
     d
 }
 
-/// Build `x`, `y` and (when the bands filled on the device) `m_exp`.
+/// Build `x`, `y` and (when the key tiles filled on the device) `m_exp`.
 ///
-/// `counters` are the per-band exp counters `commit_base_dev` left on the
+/// `counters` are the per-key-tile exp counters `commit_base_dev` left on the
 /// device. They are summed here, which is what deletes 21.4's "counters: D2H
 /// and merge" line for the exp table -- three 33.5 MB downloads and three
 /// parallel merges for a column that is then uploaded again.

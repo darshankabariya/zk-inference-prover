@@ -76,7 +76,7 @@ impl Half {
 
 /// Stream W: one layer's attention columns, read and widened **once**.
 ///
-/// A layer's six bands -- three over the cache's context, three over the causal
+/// A layer's six key tiles -- three over the cache's context, three over the causal
 /// diagonal block -- each called `Attn::load`, and each of them opened `qq.i16`, its
 /// own half's `kk`, `vv` and `num`, and `mm.i32` for itself before gathering
 /// its slice out of them.  At the sequence's sizes that made a chunk read
@@ -87,25 +87,25 @@ impl Half {
 /// This is not a format change and it does not touch `extract.py`: the same
 /// files hold the same bytes in the same layout, and the same gathers run over
 /// the same images.  What changed is how many times each image is built.
-/// `Layer::load` reads one of these and hands it to every band; the bands
+/// `Layer::load` reads one of these and hands it to every key tile; the key tiles
 /// gather out of it exactly as they gathered out of their private copies, so
 /// every array `Attn::build` receives is element-for-element the array it
 /// received before.
 pub struct LayerRaw {
-    /// The queries.  Both halves of a band read the same `qq.i16` -- the diagonal block
+    /// The queries.  Both halves of a key tile read the same `qq.i16` -- the diagonal block
     /// is the same tokens attending to a different set of keys -- so this was
     /// read six times a layer.
     pub qq16: Vec<i16>,
     /// The joint row maximum, on a `--diagonal-block` dump.  Read by both halves of
-    /// every band, for the same reason.
+    /// every key tile, for the same reason.
     pub mm32: Option<Vec<i32>>,
     pub pre: Option<Half>,
     pub cor: Option<Half>,
 }
 
 impl LayerRaw {
-    /// Read what the bands this layer will build actually want.  A dump with no
-    /// diagonal block has no second half and no `mm.i32`; a single band asked for on
+    /// Read what the key tiles this layer will build actually want.  A dump with no
+    /// diagonal block has no second half and no `mm.i32`; a single key tile asked for on
     /// its own (`Attn::get`'s probe path) reads its own half and no other, so
     /// that path reads exactly the bytes it read before this existed.
     pub fn read(dir: &str, man: &serde_json::Value, prefix: bool, diagonal_block: bool)
@@ -135,21 +135,21 @@ impl LayerRaw {
     }
 }
 
-/// The exp table the last band asked for, kept so the next band does not derive
+/// The exp table the last key tile asked for, kept so the next key tile does not derive
 /// it again.
 ///
-/// Stream P: a layer's bands all read *one* master table -- same rows, same
+/// Stream P: a layer's key tiles all read *one* master table -- same rows, same
 /// exponent, same contents, which `Layer::load` asserts right after building
 /// them -- and each of them was deriving all 2^23..2^27 rows of it for itself.
 /// At the sequence's sizes that was two thirds of the cost of loading a layer
 /// (`briefs/p-witread.md`, its Record).
 ///
 /// The key is the whole of what the table is a function of, so this changes
-/// which work happens and nothing about which values come out: a band that
+/// which work happens and nothing about which values come out: a key tile that
 /// resolved a different exponent or a different row count misses and derives
-/// its own, and `Layer::load`'s cross-band assert still compares two separate
+/// its own, and `Layer::load`'s cross-key-tile assert still compares two separate
 /// arrays -- one derived, one copied -- and still fires when the two disagree.
-/// One entry is the right size: a layer's six bands ask for the same table in a
+/// One entry is the right size: a layer's six key tiles ask for the same table in a
 /// row, and the chunk after them wants a different one.
 static TABLE_MEMO: std::sync::Mutex<Option<((usize, u32, u64), Vec<u32>)>> =
     std::sync::Mutex::new(None);
@@ -229,7 +229,7 @@ pub enum Corrupt {
 #[derive(Clone, Debug)]
 pub struct Src {
     pub dir: Option<String>,
-    /// first head of the band; the band covers `insts` consecutive heads, cycling
+    /// first head of the key tile; the key tile covers `insts` consecutive heads, cycling
     pub head: usize,
     pub q_bits: u32,
     pub k_bits: u32,
@@ -241,11 +241,11 @@ pub struct Src {
     /// (`zk-prover` = B6.5's mixed layout, `b10` = the bf16 chain on all seven).  Empty
     /// means "whatever the witness says", which is what a real dump carries.
     pub layout: String,
-    /// B10 step 3: build the band as the diagonal block (`C == S`, key `c` is
+    /// B10 step 3: build the key tile as the diagonal block (`C == S`, key `c` is
     /// decoded token `c`) rather than as the prefix rectangle.
     pub diagonal_block: bool,
     /// Stream AA (E11), from `--kv-boundary`: load the unchecked prefix as `C / S`
-    /// bands of `S` keys each instead of one rectangle of `C`.  Implies
+    /// key tiles of `S` keys each instead of one rectangle of `C`.  Implies
     /// `diagonal_block`.  See `Attn::load_from`'s `key_off`.
     pub tile: bool,
 }
@@ -277,7 +277,7 @@ pub struct Attn {
     pub table: Vec<u32>,
     pub log_table: u32,
     pub nmax: u32,
-    /// fixed-point exponent of the master table (the largest over the band)
+    /// fixed-point exponent of the master table (the largest over the key tile)
     pub frac: f64,
     /// per-instance `frac`, as the forward pass produced it
     pub frac_per_inst: Vec<f64>,
@@ -290,13 +290,13 @@ pub struct Attn {
     pub off_table: usize,
     /// numerators that disagree with the dumped (torch) ones, if there are any
     pub torch_mismatch: Option<usize>,
-    /// B10 step 3: this band is the *diagonal block* -- key `c` is the decoded
+    /// B10 step 3: this key tile is the *diagonal block* -- key `c` is the decoded
     /// stream's token `c`, so token `t` attends to it iff `c <= t`.  The masked
     /// half still commits its score (Freivalds is over the whole rectangle) and
     /// nothing else: no numerator, no denominator term, no table row.
     pub diagonal_block: bool,
     /// B10 step 3: the denominator the *per-token region* commits, when it is not
-    /// this band's own `zz`.  With the diagonal block there is one per-token region for
+    /// this key tile's own `zz`.  With the diagonal block there is one per-token region for
     /// the pair and it carries the total `Z_prefix + Z_diagonal_block` -- which is the
     /// only quantity the `Z >= nmax` lower bound holds for, since the key whose
     /// shift is zero may be in either half.
@@ -323,7 +323,7 @@ impl Attn {
     /// The value the grid region's first committed column holds.
     ///
     /// For the integer variants this is the shift *scaled to the master table's
-    /// exponent*, so one table serves every head in the band; the AIR divides it
+    /// exponent*, so one table serves every head in the key tile; the AIR divides it
     /// back out by a preprocessed constant inside the score accumulator.
     pub fn col_idx(&self, g: usize) -> i64 {
         match self.variant {
@@ -338,7 +338,7 @@ impl Attn {
     /// reconstructs `d = (idx 2^k + aux) 2^-(F - frac_i)`, so `idx` and `aux` must be
     /// the high and low parts of the same `d 2^(F - frac_i)`.  With one instance
     /// the scale is 1 and the distinction is invisible, which is exactly why it has
-    /// to be got right before the band is packed.
+    /// to be got right before the key tile is packed.
     pub fn aux_of(&self, g: usize) -> i64 {
         match self.variant {
             Variant::Bf16x => self.xx[g] as i64,
@@ -361,11 +361,11 @@ impl Attn {
             _ => self.dd[g],
         }
     }
-    /// Does every instance in the band share one exp-table exponent?
+    /// Does every instance in the key tile share one exp-table exponent?
     pub fn table_shared(&self) -> bool {
         self.delta.iter().all(|d| *d == 1)
     }
-    /// Did the token of grid entry `g` attend to its key?  Always, unless this band
+    /// Did the token of grid entry `g` attend to its key?  Always, unless this key tile
     /// is the diagonal block, where the key axis *is* the decoded token axis.
     pub fn visible(&self, g: usize) -> bool {
         !self.diagonal_block || {
@@ -374,11 +374,11 @@ impl Attn {
         }
     }
     /// The denominator column the per-token region commits: the pair's total where
-    /// there is one, this band's own otherwise.
+    /// there is one, this key tile's own otherwise.
     pub fn zz_row(&self) -> &[i64] {
         self.zz_total.as_deref().unwrap_or(&self.zz)
     }
-    /// Entries the mask removes, over the whole band.
+    /// Entries the mask removes, over the whole key tile.
     pub fn masked(&self) -> usize {
         if self.diagonal_block { self.shape.insts * self.shape.s * (self.shape.s - 1) / 2 } else { 0 }
     }
@@ -407,11 +407,11 @@ impl Attn {
                     None, format!("synthetic(seed={seed})"), None, false, None)
     }
 
-    /// Load `b5/extract.py`'s dump as a band of `insts` heads, cycling if the dump
+    /// Load `b5/extract.py`'s dump as a key tile of `insts` heads, cycling if the dump
     /// has fewer, and tiling along S or C if the shape runs past it.
-    /// `master`: the layer-wide exponent every band's table is pinned to (B9
-    /// step 1a).  `None` keeps the band's own maximum, which is what B6.5 did and
-    /// what makes a layer's bands disagree.
+    /// `master`: the layer-wide exponent every key tile's table is pinned to (B9
+    /// step 1a).  `None` keeps the key tile's own maximum, which is what B6.5 did and
+    /// what makes a layer's key tiles disagree.
     #[allow(clippy::too_many_arguments)]
     pub fn load(dir: &str, head: usize, sh: Shape, variant: Variant, nmax: u32,
                 log_table: u32, master: Option<f64>, diagonal_block: bool) -> Result<Self, String> {
@@ -420,18 +420,18 @@ impl Attn {
         Self::load_from(&raw, &man, head, sh, variant, nmax, log_table, master, diagonal_block, 0)
     }
 
-    /// The same band, out of a layer image its caller already holds.
+    /// The same key tile, out of a layer image its caller already holds.
     ///
     /// Stream W: this is where the signature change lands.  `Layer::load` reads
     /// one `LayerRaw` and one `manifest.json` for the whole layer and calls
-    /// this six times; `load` above keeps the one-band entry point for the
-    /// probe path, by reading an image of exactly one band's worth.  Neither
+    /// this six times; `load` above keeps the one-key-tile entry point for the
+    /// probe path, by reading an image of exactly one key tile's worth.  Neither
     /// path changed a value: the gathers below are the gathers that were here,
     /// over arrays with the same contents.
     ///
-    /// Stream AA (E11): `key_off` is where this band's keys start inside the
+    /// Stream AA (E11): `key_off` is where this key tile's keys start inside the
     /// dump's context.  Zero everywhere before this stream and on every diagonal block
-    /// band; with `--kv-boundary` the unchecked prefix is loaded as `C / S` bands of
+    /// key tile; with `--kv-boundary` the unchecked prefix is loaded as `C / S` key tiles of
     /// `S` keys each and `key_off` is `k * S`.  It is a window into the same
     /// bytes -- no format change, no re-extraction, and the derived values are
     /// recomputed from the window exactly as they always were from the whole.
@@ -449,7 +449,7 @@ impl Attn {
         let k_bits = man["qk_bits"][1].as_u64().unwrap_or(8) as u32;
         // the exp-table exponent torch used, per head: a public constant only when
         // the Q scale is shared per head, and the spread across heads is what
-        // decides whether one master table can serve the whole band
+        // decides whether one master table can serve the whole key tile
         let shared = man["frac_shared_per_head"].as_bool().unwrap_or(false);
         let fracs: Option<Vec<f64>> = shared.then(|| {
             (0..sh.insts)
@@ -459,9 +459,9 @@ impl Attn {
         let hh = |i: usize| (head + i) % nh;
         // B10 step 3: a dump extracted with `--diagonal-block` carries the decoded stream's
         // own keys and values beside the cache's, and one row maximum for the pair.
-        // The diagonal block band reads `kkc`/`vvc` and `numc`; both bands read `mm`,
+        // The diagonal block key tile reads `kkc`/`vvc` and `numc`; both key tiles read `mm`,
         // because with a diagonal block the maximum is no longer the max over either
-        // half's keys and recomputing it per band would give two different ones.
+        // half's keys and recomputing it per key tile would give two different ones.
         let has_diagonal_block = man["diagonal_block"].as_bool().unwrap_or(false);
         if diagonal_block && !has_diagonal_block {
             return Err("the dump was not extracted with --diagonal-block".to_string());
@@ -492,7 +492,7 @@ impl Attn {
                 qq16[hh(inst) * s0 * hd0 + (rest / hd0 % s0) * hd0 + rest % hd0] as i32
             })
             .collect();
-        // stream AA: `+ key_off` before the `% c0`, so a tiled band reads its
+        // stream AA: `+ key_off` before the `% c0`, so a tiled key tile reads its
         // own window of the dump's context and an untiled one (`key_off == 0`)
         // reads exactly the bytes it read before
         if key_off + sh.c > c0 && key_off > 0 {
@@ -517,7 +517,7 @@ impl Attn {
             .collect();
         drop(gather);
         // torch's own numerators, for the bit-for-bit comparison, only where the
-        // shape fits inside the dump (no tiling) and the band is real heads
+        // shape fits inside the dump (no tiling) and the key tile is real heads
         let tiled = sh.s > s0 || sh.c > c0;
         // ... and only where the dump carries them at all: a `--slim-num` dump
         // has no `num.i32`, so there is nothing to compare against and
@@ -540,8 +540,8 @@ impl Attn {
                        None, diagonal_block, mm_in))
     }
 
-    /// A synthetic band whose exp table is pinned to a given master exponent and
-    /// row count, so several bands can share one table (the composed selftest).
+    /// A synthetic key tile whose exp table is pinned to a given master exponent and
+    /// row count, so several key tiles can share one table (the composed selftest).
     #[allow(clippy::too_many_arguments)]
     pub fn synthetic_shared(sh: Shape, variant: Variant, q_bits: u32, k_bits: u32, nmax: u32,
                             log_table: u32, seed: u64, frac: f64, diagonal_block: bool) -> Self {
@@ -551,13 +551,13 @@ impl Attn {
                     Some(vec![frac; sh.insts]), None, src, None, diagonal_block, None)
     }
 
-    /// A prefix band and its diagonal block, built as one object.
+    /// A prefix key tile and its diagonal block, built as one object.
     ///
     /// Two things are not optional and neither is visible from inside a single
-    /// band.  They share the **queries** -- the diagonal block is the same tokens
+    /// key tile.  They share the **queries** -- the diagonal block is the same tokens
     /// attending to a different set of keys, so `qQ` is the same matrix -- and
     /// they share one **row maximum**, taken over the keys of both halves.  A
-    /// per-band maximum would put the two halves' numerators on two different
+    /// per-key-tile maximum would put the two halves' numerators on two different
     /// scales, and the sum the attention output is built from would not be a
     /// softmax.  `frac` pins the master exponent when the caller has one;
     /// `None` lets each derive its own, which is what the probe pass wants.
@@ -566,7 +566,7 @@ impl Attn {
         let csh = Shape { c: sh.s, ..sh };
         let p0 = Self::synthetic(sh, variant, q_bits, k_bits, nmax, log_table, seed);
         let c0 = Self::synthetic(csh, variant, q_bits, k_bits, nmax, log_table, seed ^ 0x5c1);
-        // the diagonal block's own keys and values, against the prefix band's queries
+        // the diagonal block's own keys and values, against the prefix key tile's queries
         let c0 = Self::build(csh, variant, p0.qq.clone(), c0.kk, c0.vv, None, q_bits, k_bits,
                              nmax, log_table, None, None, c0.source, None, true, None);
         let mm: Vec<i64> = p0.mm.iter().zip(&c0.mm).map(|(a, b)| *a.max(b)).collect();
@@ -582,10 +582,10 @@ impl Attn {
         (p, c)
     }
 
-    /// Stream NN: a band from given Q, K and V -- the whole forward pass
+    /// Stream NN: a key tile from given Q, K and V -- the whole forward pass
     /// (scores, shift, table, numerators, denominator, A.V) re-derived from
     /// them.  It is `build` with a public name, and it exists so a synthetic
-    /// layer's bands can be *the layer's own matmul outputs* rather than three
+    /// layer's key tiles can be *the layer's own matmul outputs* rather than three
     /// unrelated draws: without that no synthetic shape can carry a positionwise
     /// q/k/v binding, which is what `briefs/jj-layerwire-out.md` section 11.4 item 2
     /// names as the thing stream NN has to build first.
@@ -632,13 +632,13 @@ impl Attn {
         if cfg.diagonal_block { a.into_diagonal_block() } else { a }
     }
 
-    /// Stream AA (E11): this band restricted to the key window `[c0, c0 + len)`.
+    /// Stream AA (E11): this key tile restricted to the key window `[c0, c0 + len)`.
     ///
     /// The window's derived values -- the scores, the shift, the numerators, the
     /// denominator, the A.V output -- are *recomputed from the window* by the
-    /// same `build` the whole band came out of, against the parent's row
+    /// same `build` the whole key tile came out of, against the parent's row
     /// maximum.  That is the same construction the diagonal block already uses
-    /// (`mm_in`), and it is what makes a partial band's `zz` the partial sum the
+    /// (`mm_in`), and it is what makes a partial key tile's `zz` the partial sum the
     /// group's total is assembled from.
     ///
     /// It exists so a synthetic layer can be tiled without a second generator.
@@ -714,11 +714,11 @@ impl Attn {
             }
         });
         drop(scores);
-        // The row maximum is a property of the *token*, not of the band: with the
-        // diagonal block the token's keys are split over two bands and one maximum
+        // The row maximum is a property of the *token*, not of the key tile: with the
+        // diagonal block the token's keys are split over two key tiles and one maximum
         // has to serve both, or their numerators are on two different scales and
         // `Z_prefix + Z_diagonal_block` is not a softmax denominator.  `mm_in` is how the
-        // caller hands the joint one down; alone, a band takes its own.
+        // caller hands the joint one down; alone, a key tile takes its own.
         let maxima = witread::scope(Site::Maxima);
         let mut mm: Vec<i64> = match mm_in {
             Some(m) => {
@@ -762,18 +762,18 @@ impl Attn {
         // scaled up to it by a public power of two, so the table is shared.
         //
         // B9 step 1a: that exponent has to be a *layer*-wide constant, not a
-        // band-wide one.  Taking the largest `frac` over the band's own heads makes
-        // the table a function of how the heads were split into bands, so
-        // `Layer::load`'s "every band's table is identical" holds only where every
-        // band happens to contain a head at the layer-wide maximum -- 4 of 24
+        // key-tile-wide one.  Taking the largest `frac` over the key tile's own heads makes
+        // the table a function of how the heads were split into key tiles, so
+        // `Layer::load`'s "every key tile's table is identical" holds only where every
+        // key tile happens to contain a head at the layer-wide maximum -- 4 of 24
         // Qwen-0.5B layers, and by B8's `frac_per_head`, 0 of 32 Llama-3.1-8B ones.
-        // With `master` supplied every band scales its shifts up to the same
+        // With `master` supplied every key tile scales its shifts up to the same
         // exponent and reads one table of `d_bits + spread` rows (B6 section 6).
         let natural = frac_per_inst.iter().cloned().fold(f64::MIN, f64::max);
         let frac = match master {
             Some(m) => {
                 assert!(m >= natural - 1e-9,
-                        "master exponent {m} is below this band's own maximum {natural}");
+                        "master exponent {m} is below this key tile's own maximum {natural}");
                 m
             }
             None => natural,
@@ -801,7 +801,7 @@ impl Attn {
         let log_table = if log_table > 0 {
             log_table
         } else {
-            // capped: past 2^22 rows the table dominates a single-band benchmark,
+            // capped: past 2^22 rows the table dominates a single-key-tile benchmark,
             // and an index that no longer fits is exactly the incompleteness the
             // `off_table` count is there to report
             match variant {
@@ -876,7 +876,7 @@ impl Attn {
             // the mask is preprocessed, so a prover cannot move it; what it *can*
             // do is claim a denominator and an output that count a masked key.
             let masked: Vec<usize> = (0..ni * ns * nc).filter(|g| !vis(*g)).collect();
-            assert!(!masked.is_empty(), "Unmask on a band with no masked entries");
+            assert!(!masked.is_empty(), "Unmask on a key tile with no masked entries");
             num[masked[i % masked.len()]] = nmax as i64;
         }
         if let Some(Corrupt::Numerator(i)) = bad {
@@ -936,7 +936,7 @@ impl Attn {
             let _s = witread::scope(Site::CheckTorchNum);
             (0..num.len()).into_par_iter().filter(|i| t[*i] != num[*i]).count()
         });
-        // One master table serves the band only if the per-head exponents differ by
+        // One master table serves the key tile only if the per-head exponents differ by
         // integers; computed-and-discarded in B6, asserted here (B6 review).  Only
         // the real-witness path carries calibrated fracs -- a synthetic witness
         // derives them from random data, where the sharing is a rounded
@@ -966,9 +966,9 @@ impl Attn {
         64 - d.max(1).leading_zeros()
     }
 
-    /// Stream J: the largest key this band actually looks up, and the rows that
+    /// Stream J: the largest key this key tile actually looks up, and the rows that
     /// hold it.  `d_bits` is the *unscaled* shift; the table is indexed by the
-    /// shift scaled to the master exponent, so the two differ by up to the band's
+    /// shift scaled to the master exponent, so the two differ by up to the key tile's
     /// spread -- and the driver's `d_bits + spread` sizing takes the maximum of
     /// each separately, which over-counts whenever the largest raw shift does not
     /// come from the lowest-exponent head (measured: every layer of b10-final,
@@ -996,7 +996,7 @@ impl Attn {
         64 - self.key_max().max(1).leading_zeros()
     }
 
-    /// Re-size this band's exp table to `bits` rows.  The table is a prefix of the
+    /// Re-size this key tile's exp table to `bits` rows.  The table is a prefix of the
     /// same closed form, so shrinking it is a truncation and every numerator the
     /// witness already holds is unchanged -- what changes is which keys are still
     /// in range, which is what `off_table` counts.
@@ -1033,15 +1033,15 @@ impl Attn {
 }
 
 impl Attn {
-    /// Stream LL (E11), the model-only load: a band at this shape carrying the
+    /// Stream LL (E11), the model-only load: a key tile at this shape carrying the
     /// model's exp table and its per-instance scales, and **no witness**.
     ///
-    /// Tree 0 holds three things off a band -- the layout's selectors, the
+    /// Tree 0 holds three things off a key tile -- the layout's selectors, the
     /// causal mask and `dinv`, the per-instance table-key scale `2^(F - frac_i)`
     /// -- plus the master exp table itself, which `Tables::new` takes off
-    /// `bands[0]`. All four are functions of the shape and of the dump's
+    /// `key_tiles[0]`. All four are functions of the shape and of the dump's
     /// *manifest* (`frac_per_head`, `master_table_bits`), and of no activation.
-    /// So a verifier deriving the chunk's tree-0 root can build the band from
+    /// So a verifier deriving the chunk's tree-0 root can build the key tile from
     /// the manifest alone; the grid arrays are allocated at their shape and left
     /// zero, so that the rest of the generator still runs over a well-formed
     /// witness of the right shape.
@@ -1066,7 +1066,7 @@ impl Attn {
         let frac = match master {
             Some(m) => {
                 assert!(m >= natural - 1e-9,
-                        "master exponent {m} is below this band's own maximum {natural}");
+                        "master exponent {m} is below this key tile's own maximum {natural}");
                 m
             }
             None => natural,
@@ -1095,7 +1095,7 @@ impl Attn {
             dd: vec![0i64; grid],
             xx: vec![0u16; if matches!(variant, Variant::Bf16x) { grid } else { 0 }],
             num: vec![0i64; grid],
-            // `Z >= nmax` is the band's own lower bound and a zero denominator
+            // `Z >= nmax` is the key tile's own lower bound and a zero denominator
             // divides in the attention-output fold, so the stand-in sits on the
             // bound rather than at zero.
             zz: vec![nmax as i64; ni * ns],

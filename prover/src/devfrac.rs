@@ -11,12 +11,12 @@
 //! Three things it has to get right, each asserted rather than assumed:
 //!
 //! * **the columns a shape reads.** 19.2 measured that no fraction IR reads a
-//!   shifted row or the interaction trace, and that the bands read the base
+//!   shifted row or the interaction trace, and that the key tiles read the base
 //!   tree alone. A component still *declares* its preprocessed columns and the
 //!   generated kernel still checks the count, so `Cols::Unread` supplies a null
 //!   per named-but-unread column and `assert_supplied` checks, per shape and
 //!   per witness, that no column the IR loads is one of them. That is what lets
-//!   a band's interaction run without its preprocessed columns being uploaded
+//!   a key tile's interaction run without its preprocessed columns being uploaded
 //!   -- which would put back exactly the 4a bytes this row removes.
 //! * **which builder ran.** `B7_M4_LOGUPIR` keeps 19.3's meaning for every
 //!   family: 0 the hand-written builder, 1 the IR on the host, 2 both asserted
@@ -109,35 +109,35 @@ impl Cols<'_> {
     }
 }
 
-/// A band's three components, and its columns when its fill left them on the
+/// A key tile's three components, and its columns when its fill left them on the
 /// device.
 ///
-/// A band is one region with three components in it -- the channel grid, the
+/// A key tile is one region with three components in it -- the channel grid, the
 /// score grid and the per-token block -- so what a component owns is the slice
 /// `Committed::at` names, and that slice is the same on both sides of the link
 /// (mode 2 asserts `at == dev.at`).
-pub struct BandAir<'a> {
+pub struct KeyTileAir<'a> {
     pub tag: usize,
     pub chan: &'a crate::attn_air::ChanEval,
     pub key: &'a crate::attn_air::KeyEval,
     pub row: &'a crate::attn_air::RowEval,
-    pub dev: Option<&'a crate::devwfill::DevBand>,
-    /// B7a milestone 4 (section 3 row 1): this band's selector columns and the
+    pub dev: Option<&'a crate::devwfill::DevKeyTile>,
+    /// B7a milestone 4 (section 3 row 1): this key tile's selector columns and the
     /// flags they came from. `Some` whenever `dev` is, because the accumulators
     /// read the flags.
-    pub pre: Option<&'a crate::devpre::DevPreBand>,
+    pub pre: Option<&'a crate::devpre::DevPreKeyTile>,
 }
 
-/// One band component's LogUp columns. `which` is its index in `Committed::at`.
+/// One key tile component's LogUp columns. `which` is its index in `Committed::at`.
 ///
 /// The preprocessed columns are `Unread` for all three, and that is a
-/// measurement and not a shortcut: 19.2 found the bands read the base tree
-/// alone. It used to be a saving as well -- a band's selectors were host
+/// measurement and not a shortcut: 19.2 found the key tiles read the base tree
+/// alone. It used to be a saving as well -- a key tile's selectors were host
 /// columns and supplying them would have meant an upload -- and since section
 /// 25 they are on the device, so supplying them would cost nothing either.
 /// `assert_supplied` is what keeps the measurement true per shape.
-pub fn band_cols(
-    air: Option<&BandAir<'_>>,
+pub fn key_tile_cols(
+    air: Option<&KeyTileAir<'_>>,
     which: usize,
     log_rows: u32,
     at: &[usize],
@@ -153,12 +153,12 @@ pub fn band_cols(
         Some(d) => Cols::Dev(d.base[lo..hi].iter().collect()),
         None => Cols::Host(host_base[lo..hi].iter().collect()),
     };
-    let tag = format!("{} band{}", ["chan", "key", "out", "row"][which], air.tag);
+    let tag = format!("{} key_tile{}", ["chan", "key", "out", "row"][which], air.tag);
     match which {
         0 => frac_cols(air.chan, &tag, log_rows, Cols::Unread, base, host),
         1 => frac_cols(air.key, &tag, log_rows, Cols::Unread, base, host),
         3 => frac_cols(air.row, &tag, log_rows, Cols::Unread, base, host),
-        _ => panic!("band component {which} has no eval"),
+        _ => panic!("key tile component {which} has no eval"),
     }
 }
 
@@ -166,7 +166,7 @@ pub fn band_cols(
 /// set and aimed at this family.
 ///
 /// The suffix is section 5 rule 5. Unaimed, a defect in the lowering always
-/// panics at whichever family is lowered first -- `chan band0` -- and the run
+/// panics at whichever family is lowered first -- `chan key_tile0` -- and the run
 /// then says nothing at all about whether the other families' checks would
 /// have caught it. `B7_M4_LOGUPMUT=relbyname:chan` is the case 19.6 asked for
 /// by name: the defect is inert on a family with one instance per relation

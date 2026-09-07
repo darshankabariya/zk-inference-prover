@@ -106,7 +106,7 @@ impl PairRel {
     }
 }
 // one range-relation type across the whole crate, so a composed proof's range
-// tables serve the attention bands and the dequant regions alike
+// tables serve the attention key tiles and the dequant regions alike
 pub use crate::attn_air::RangeRel;
 
 pub fn id(s: impl Into<String>) -> PreProcessedColumnId {
@@ -493,7 +493,7 @@ pub enum OKind {
     /// Stream SS: the signed **integer** `qc (1 - 2 sg)`, the only output a
     /// `Variant::Fold` region has.  The fold's single rounding *is* B1's
     /// `quantize(v, s_v)` -- there is no bf16 waypoint to publish -- so what a
-    /// consumer reads off this region is the int8 cell the band commits, and
+    /// consumer reads off this region is the int8 cell the key tile commits, and
     /// the claim is a Horner over those integers rather than over `(sm, ef)`
     /// pairs.  Degree 2, like `Pair` and `Key`: one `qc sg` product.
     Int,
@@ -503,9 +503,9 @@ pub enum OKind {
 /// selectors say which row takes which -- the AIR does not care what the two
 /// mean.  For `Pair` and `Key` they are stream E's: the ordinary chunk step
 /// inside a token, and the jump at the row that begins one.  For `Int` they are
-/// the *band grid*'s: the ordinary step, and the jump on the row after one that
+/// the *key tile grid*'s: the ordinary step, and the jump on the row after one that
 /// begins a kv head (`rope::QTie::step_out` and `step_out_h`), which is what
-/// makes the claim comparable with the bands' own V fold under grouped-query
+/// makes the claim comparable with the key tiles' own V fold under grouped-query
 /// attention.  A token boundary is a head start, so one pair of constants
 /// serves both.
 #[derive(Clone)]
@@ -682,7 +682,7 @@ impl FrameworkEval for DequantEval {
                 // stream SS: this region's output, for the output side.  `qc` is
                 // the clamped quotient and `sg` its sign, and `qc (1 - 2 sg)` is
                 // cell for cell what `experiments/b1`'s `quantize(v, s_v)`
-                // returns -- the value the band commits as `vv.i8`.  The two
+                // returns -- the value the key tile commits as `vv.i8`.  The two
                 // zeros stand where a bf16 rung's `nz` and `eo` would; `OKind`
                 // says which pair is read.
                 outs.push((sg.clone(), E::F::zero(), qc.clone(), E::F::zero()));
@@ -916,7 +916,7 @@ impl FrameworkEval for DequantEval {
                     // `nz`/`eo` are zero (see the `Fold` arm), so this is
                     // `qc (1 - 2 sg)` and nothing else -- the same signed
                     // integer `rope::QuantEval`'s output side folds and the
-                    // band's V column commits.
+                    // key tile's V column commits.
                     OKind::Int => {
                         f += (m7.clone() * (E::F::one() - sg.clone() * two)) * o.w[i];
                     }

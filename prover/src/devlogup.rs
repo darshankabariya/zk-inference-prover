@@ -101,7 +101,7 @@ pub fn logup_cols_dev(
 /// preprocessed column still declares them, and the kernel still checks the
 /// count -- so the caller passes a null for each one it does not supply and
 /// `devfrac` asserts that no *loaded* column is null. That is what lets the
-/// bands' interactions run without their preprocessed columns being uploaded,
+/// key tiles' interactions run without their preprocessed columns being uploaded,
 /// which would put back exactly the 4a bytes this row is removing.
 pub fn logup_cols_dev_ptrs(
     ir: &Ir,

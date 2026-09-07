@@ -53,7 +53,7 @@ add_library(
         # B7a m4c: the dequant fill kernel
         b65_fill.cu
         # end B7a m4c
-        # B7a m4d: the Freivalds check, attnout and band fill kernels
+        # B7a m4d: the Freivalds check, attnout and key tile fill kernels
         b65_wfill.cu
         b65_residual_stream_fill.cu
         # end B7a m4d

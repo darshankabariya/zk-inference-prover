@@ -6,9 +6,9 @@
 //!
 //! | region | columns | what they are |
 //! |---|---|---|
-//! | 3 bands x channel | `u`, `v`, `acc` | Q.K^T's inner products and their folded sum |
-//! | 3 bands x grid | `zs`, `hs`, `zn`, `wv`, `av`, `sn` | the score, numerator and value Horners |
-//! | 3 bands x per-token | `am`, `az` | the row maxima and denominators |
+//! | 3 key tiles x channel | `u`, `v`, `acc` | Q.K^T's inner products and their folded sum |
+//! | 3 key tiles x grid | `zs`, `hs`, `zn`, `wv`, `av`, `sn` | the score, numerator and value Horners |
+//! | 3 key tiles x per-token | `am`, `az` | the row maxima and denominators |
 //! | 7 dequant regions | `z`, `h` | the Freivalds claimed side |
 //! | attnout | `z`, `h`, `dz` | the output and denominator claims |
 //! | 4 Freivalds groups | `v`, `us[m]`, `accs[m]` | `r^T W` per matmul |
@@ -51,7 +51,7 @@
 //! a vacuous control rather than a pass. It is not vacuous now: `KeyEval`'s
 //! numerator fold carries an `act` factor, so on a padded grid the honest device
 //! sum is the one the AIR wants and `nomask` is a real divergence from it. Run it
-//! at a shape with `band_leads.key > 0` or it says nothing.
+//! at a shape with `key_tile_leads.key > 0` or it says nothing.
 //!
 //! `B7_M4_ACC` says which path runs, on the three-value pattern every fill in
 //! this series uses: 0 the host builds them, 1 the device does and they are
@@ -271,9 +271,9 @@ impl Reg {
 
 /// `B7_M4_ACCMUT`, `name` or `name:region`.
 ///
-/// **The suffix is section 5 rule 5, again.** The bands are built first and the
+/// **The suffix is section 5 rule 5, again.** The key tiles are built first and the
 /// channel region first of all, so an unaimed defect always panics at `chan
-/// band0` and the run says nothing about whether the grid, the per-token block,
+/// key_tile0` and the run says nothing about whether the grid, the per-token block,
 /// the Freivalds checks, the dequant or the attnout would have caught the same thing.
 pub fn accmut(reg: Reg) -> u32 {
     let raw = std::env::var("B7_M4_ACCMUT").unwrap_or_default();
@@ -333,9 +333,9 @@ struct Acc {
     lanes: usize,
     a: SecureFieldVec,
     b: SecureFieldVec,
-    /// B7a milestone 4 (section 3 row 1): the three band shapes' flags belong
+    /// B7a milestone 4 (section 3 row 1): the three key tile shapes' flags belong
     /// to `devpre` now -- one array per sub-region, written by
-    /// `b65_flags_band` at fill time, read both by the selector columns
+    /// `b65_flags_key_tile` at fill time, read both by the selector columns
     /// `commit_pre` used to build on the host and by the segmentation here. The
     /// Freivalds check, dequant and attnout regions have no preprocessed selectors left on
     /// the host, so they still own theirs. `own` keeps a borrowed array's owner
@@ -360,7 +360,7 @@ impl Acc {
         }
     }
 
-    /// The same, over flags somebody else wrote -- the three band shapes.
+    /// The same, over flags somebody else wrote -- the three key tile shapes.
     fn borrowed(log_rows: u32, lanes: usize, f: &Uint32Vec) -> Self {
         let rows = 1usize << log_rows;
         assert_eq!(f.size, rows, "the flags array is not this region's height");
@@ -496,7 +496,7 @@ pub fn check(tag: &str, host: &[Eval], want: &[SecureField], got: &DevAccCols) {
               got.cols.len(), want.len());
 }
 
-// ========================================================== the band channel ==
+// ========================================================== the key tile channel ==
 
 /// `u`, `v` and `acc`: Q.K^T's two inner products and the sum of their product.
 ///
@@ -533,11 +533,11 @@ pub fn chan(base: &[BaseFieldVec], at: &[usize], lc: &LayoutChan, a: &Attn,
     acc.scan(2, 1, mutate);
     let claims = acc.last();
     let cols = acc.split(&[0, 1, 2], mutate);
-    note(Reg::Chan, "band", cols.len(), acc.rows, t.elapsed().as_secs_f64());
+    note(Reg::Chan, "key_tile", cols.len(), acc.rows, t.elapsed().as_secs_f64());
     DevAccCols { cols, claims: vec![claims[2]], log_rows: lc.g.log_rows }
 }
 
-// ============================================================= the band grid ==
+// ============================================================= the key tile grid ==
 
 /// `zs`, `hs`, `zn`, `wv`, `av`, `sn`, in the order the host commits them.
 ///
@@ -619,7 +619,7 @@ pub fn grid(base: &[BaseFieldVec], at: &[usize], lk: &LayoutKey, a: &Attn,
     acc.scan(3, 3, mutate);
     let claims = acc.last();
     let cols = acc.split(&[0, 3, 1, 2, 4, 5], mutate);
-    note(Reg::Grid, "band", cols.len(), acc.rows, t.elapsed().as_secs_f64());
+    note(Reg::Grid, "key_tile", cols.len(), acc.rows, t.elapsed().as_secs_f64());
     DevAccCols { cols, claims: vec![claims[3], claims[4], claims[5]],
                  log_rows: lk.g.log_rows }
 }
@@ -653,7 +653,7 @@ pub fn tok(base: &[BaseFieldVec], at: &[usize], log_row: u32, rw: usize, a: &Att
     acc.scan(0, 2, mutate);
     let claims = acc.last();
     let cols = acc.split(&[0, 1], mutate);
-    note(Reg::Tok, "band", cols.len(), acc.rows, t.elapsed().as_secs_f64());
+    note(Reg::Tok, "key_tile", cols.len(), acc.rows, t.elapsed().as_secs_f64());
     DevAccCols { cols, claims: vec![claims[0], claims[1]], log_rows: log_row }
 }
 

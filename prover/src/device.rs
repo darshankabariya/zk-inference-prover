@@ -151,7 +151,7 @@ mod pinned {
         if !enabled() || words == 0 {
             return None;
         }
-        // `try_lock`, not `lock`: the fills are sequential today (one band, then
+        // `try_lock`, not `lock`: the fills are sequential today (one key tile, then
         // the next), so contention means an assumption has changed and the right
         // answer is the old path rather than a wait or a second pinned buffer.
         let mut g = POOL.try_lock().ok()?;
@@ -184,7 +184,7 @@ staying on the pageable path",
         // control that has never fired is not a control (B7A section 5 rule 5).
         // This changes one word of one staged array after the pack has written
         // it and before the copy reads it -- the exact failure the pool makes
-        // possible, and the narrowest version of it. The band and Freivalds mirrors
+        // possible, and the narrowest version of it. The key tile and Freivalds mirrors
         // must panic under it; if they do not, they are not covering the pool.
         if mutate() {
             let k = words / 2;
@@ -550,14 +550,14 @@ impl AnyCol<'_> {
     /// The same, downloading a device column rather than refusing it: for a
     /// reader that needs the cells on this side of the bus and knows it is
     /// paying for them.  Open item 18: the one such reader is the K/V boundary
-    /// tamper (`boundary::kv_cols`), which bumps one cell of a side whose bands
+    /// tamper (`boundary::kv_cols`), which bumps one cell of a side whose key tiles
     /// filled on the card; the honest commit takes the device references
     /// instead and never comes here.
     ///
     /// `common::eval_of` takes values in coset order and permutes them into the
     /// committed one; a device column is already in committed order, so this
     /// reinterprets rather than permutes -- the construction `take_all` makes
-    /// without the cuda feature and `gkrband`'s controls make with it.  Counted
+    /// without the cuda feature and `gkr_key_tile`'s controls make with it.  Counted
     /// as a mirror download, which is what it is.
     pub fn download(self) -> HostEval {
         let down = |d: &BaseFieldVec, l: u32| {

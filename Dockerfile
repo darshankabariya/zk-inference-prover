@@ -5,8 +5,8 @@
 # 595.84; any driver that supports CUDA 12.9 runs the CUDA backend.
 #
 #   docker build -t zk-prover .
-#   docker run --rm zk-prover zk-prover-simd compose --round away --variants intsplit6 --table-bits 16 --s 32 --ctx 128 --hd 32 --bands 2,1 --nout 64 --residual-stream-a 32 --kmax 16 --synth-residual-stream --diagonal-block
-#   docker run --rm --gpus all zk-prover zk-prover-cuda compose --round away --variants intsplit6 --table-bits 16 --s 32 --ctx 128 --hd 32 --bands 2,1 --nout 64 --residual-stream-a 32 --kmax 16 --synth-residual-stream --diagonal-block
+#   docker run --rm zk-prover zk-prover-simd compose --round away --variants intsplit6 --table-bits 16 --s 32 --ctx 128 --hd 32 --key-tiles 2,1 --nout 64 --residual-stream-a 32 --kmax 16 --synth-residual-stream --diagonal-block
+#   docker run --rm --gpus all zk-prover zk-prover-cuda compose --round away --variants intsplit6 --table-bits 16 --s 32 --ctx 128 --hd 32 --key-tiles 2,1 --nout 64 --residual-stream-a 32 --kmax 16 --synth-residual-stream --diagonal-block
 FROM nvidia/cuda:12.9.1-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive

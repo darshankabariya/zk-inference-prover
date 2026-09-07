@@ -24,7 +24,7 @@
 //! `insts` must be a power of two, because the grid's token axis has to tile
 //! exactly (B5's assertion, and the plan's warning): `chunks = rows / groups` is a
 //! power of two only when `groups = insts * C` is.  A real `L*nh` therefore
-//! decomposes into `popcount(L*nh)` bands -- 3 for B1's 336, 5 for the 27B proxy's
+//! decomposes into `popcount(L*nh)` key tiles -- 3 for B1's 336, 5 for the 27B proxy's
 //! 1984 -- all sharing the same column widths, so the column count stays
 //! proportional to `popcount(L*nh)` rather than to `L*nh`.
 //!
@@ -118,11 +118,11 @@ impl Grid {
         if rows < groups {
             return None;
         }
-        // Open item 1: a `c = 0` band (block 0 has no prefix) reaches here with
+        // Open item 1: a `c = 0` key tile (block 0 has no prefix) reaches here with
         // `groups = c * insts = 0`, slips past the guard above and divides by
-        // zero.  Block 0 is a solo diagonal block and must never build a prefix band at
+        // zero.  Block 0 is a solo diagonal block and must never build a prefix key tile at
         // all; this says so rather than panicking in arithmetic.
-        assert!(groups > 0, "a c = 0 band has no key grid: block 0 is the solo                              diagonal block and builds no prefix band (open item 1)");
+        assert!(groups > 0, "a c = 0 key tile has no key grid: block 0 is the solo                              diagonal block and builds no prefix key tile (open item 1)");
         let chunks = (rows / groups).min(cap.max(1));
         Some(Self { log_rows, rows, groups, chunks, lead: rows - groups * chunks, descending })
     }

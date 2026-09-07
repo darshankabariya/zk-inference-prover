@@ -22,7 +22,7 @@ extern "C" void gen_b65_dispatch(
 }
 
 // The unpaired variant, which B11 stream T added to the emitter and to
-// `prover/src/gkrband.rs` without adding it here. That omission cost the
+// `prover/src/gkr_key_tile.rs` without adding it here. That omission cost the
 // stand-in the one property it exists for: from stream T until 2026-09-01 the
 // cuda arm did not LINK on a fork with no installed store
 // (`rust-lld: error: undefined symbol: gen_b65_feed_dispatch`), so every box

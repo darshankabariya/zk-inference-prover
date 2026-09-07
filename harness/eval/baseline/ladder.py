@@ -77,7 +77,7 @@ E11_ASSUMPTION = (
     "proved position is charged one measured C=4096 decoded token, so the proved "
     "rate in positions/second equals the frozen tok/s row unchanged. This is "
     "CONSERVATIVE for E11 -- a prompt position inside a causal rectangle attends "
-    "to ~N/2 keys, not a full C band -- and it is an assumption, not a "
+    "to ~N/2 keys, not a full C key tile -- and it is an assumption, not a "
     "measurement: no E11 proved row exists. The unproved side needs no assumption; "
     "it is measured directly as (prompt + output) / wall of the concatenated pass."
 )

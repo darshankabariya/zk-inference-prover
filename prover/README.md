@@ -59,7 +59,7 @@ and a model tree whose root is compared with the published model commitment).
 The synthetic shapes share one base command and differ in the flags after it.
 `RESIDUAL_STREAM` builds the residual-stream components on the synthetic
 segment and `GKR5` stands for the five flags
-`--gkr-bands --gkr-dequant --gkr-residual-stream --gkr-freivalds --gkr-attnout`.
+`--gkr-key-tiles --gkr-dequant --gkr-residual-stream --gkr-freivalds --gkr-attnout`.
 
 ```sh
 SYN="--round away --variants intsplit6 --table-bits 16 --s 32 --ctx 128 --hd 32"
@@ -73,9 +73,9 @@ binding table says); four heads over 128-wide matmuls bind every layer edge.
 
 | shape | flags after `$SYN` | digest (first 16 hex) | unbound edges | recorded |
 |---|---|---|---|---|
-| `sound` | `--bands 2,1 $RESIDUAL_STREAM --diagonal-block` | `82085896a8408f36` | 3, 5 | both backends, 2026-09-07; pinned in `tests/` |
-| `sound_gkrfive` | `--bands 2,1 $RESIDUAL_STREAM --diagonal-block GKR5` | `6bee5972d6f616aa` | 3, 5 | same |
-| `sound_aligned` | `--bands 2,2 --nin 128 --nout 128 --residual-stream-a 32 --kmax 16 --synth-residual-stream --diagonal-block` | `9c3cdebd97a7d57b` | none | same |
+| `sound` | `--key-tiles 2,1 $RESIDUAL_STREAM --diagonal-block` | `82085896a8408f36` | 3, 5 | both backends, 2026-09-07; pinned in `tests/` |
+| `sound_gkrfive` | `--key-tiles 2,1 $RESIDUAL_STREAM --diagonal-block GKR5` | `6bee5972d6f616aa` | 3, 5 | same |
+| `sound_aligned` | `--key-tiles 2,2 --nin 128 --nout 128 --residual-stream-a 32 --kmax 16 --synth-residual-stream --diagonal-block` | `9c3cdebd97a7d57b` | none | same |
 
 Reading these three on the CUDA backend took one fix in the kernel emitter. A
 generated LogUp kernel used to ask for exactly as many preprocessed columns as
@@ -92,17 +92,17 @@ stand for `--unsound-skip-residual-stream`, `--unsound-skip-layer-boundary` and
 
 | shape | flags after `$SYN` | digest (first 16 hex) | recorded |
 |---|---|---|---|
-| `diagonal_block` | `--bands 2,1 --diagonal-block RS KV` | `164079c6a045df22` | SIMD backend, 2026-09-06; pinned in `tests/` |
-| `flagoff` | `--bands 2,1 RS KV` | `156285f2f70eaa80` | same |
-| `kvbind` | `--bands 2,1 --diagonal-block RS` | `4d3835c942072f67` | same |
-| `gkrbands` | `--bands 2,1 --diagonal-block RS KV --gkr-bands` | `c44ce8a832a9bec7` | same |
-| `gkrfive` | `--bands 2,1 --diagonal-block RS KV GKR5` | `5d7aa189c702c2a5` | same |
-| `kv_gkrbands` | `--bands 2,1 --diagonal-block RS --gkr-bands` | `b857c0b7a978642f` | same |
-| `kv_gkrfive` | `--bands 2,1 --diagonal-block RS GKR5` | `a379fa16dc2b0e98` | same |
-| `residual_stream_diagonal_block` | `--bands 2,1 $RESIDUAL_STREAM --diagonal-block LB KV` | `5a4a05ea6274e7c6` | same |
-| `residual_stream_kv` | `--bands 2,1 $RESIDUAL_STREAM --diagonal-block LB` | `94c32161ecbbef84` | same |
-| `residual_stream_bounds` | `--bands 2,1 $RESIDUAL_STREAM --diagonal-block KV` | `775b1972badf31e4` | same |
-| `residual_stream_gkrfive` | `--bands 2,1 $RESIDUAL_STREAM --diagonal-block LB KV GKR5` | `d1aff3e6580569a4` | same |
+| `diagonal_block` | `--key-tiles 2,1 --diagonal-block RS KV` | `164079c6a045df22` | SIMD backend, 2026-09-06; pinned in `tests/` |
+| `flagoff` | `--key-tiles 2,1 RS KV` | `156285f2f70eaa80` | same |
+| `kvbind` | `--key-tiles 2,1 --diagonal-block RS` | `4d3835c942072f67` | same |
+| `gkr_key_tiles` | `--key-tiles 2,1 --diagonal-block RS KV --gkr-key-tiles` | `c44ce8a832a9bec7` | same |
+| `gkrfive` | `--key-tiles 2,1 --diagonal-block RS KV GKR5` | `5d7aa189c702c2a5` | same |
+| `kv_gkr_key_tiles` | `--key-tiles 2,1 --diagonal-block RS --gkr-key-tiles` | `b857c0b7a978642f` | same |
+| `kv_gkrfive` | `--key-tiles 2,1 --diagonal-block RS GKR5` | `a379fa16dc2b0e98` | same |
+| `residual_stream_diagonal_block` | `--key-tiles 2,1 $RESIDUAL_STREAM --diagonal-block LB KV` | `5a4a05ea6274e7c6` | same |
+| `residual_stream_kv` | `--key-tiles 2,1 $RESIDUAL_STREAM --diagonal-block LB` | `94c32161ecbbef84` | same |
+| `residual_stream_bounds` | `--key-tiles 2,1 $RESIDUAL_STREAM --diagonal-block KV` | `775b1972badf31e4` | same |
+| `residual_stream_gkrfive` | `--key-tiles 2,1 $RESIDUAL_STREAM --diagonal-block LB KV GKR5` | `d1aff3e6580569a4` | same |
 
 **The full-size reference.** One Llama-3.1-8B layer-16 segment, `S = 512`
 output positions against a `C = 16384` key prefix, from a dump
@@ -143,7 +143,7 @@ record of what that configuration gave.
 
 | proof | command after `zk-prover compose` | digest (first 16 hex) | recorded |
 |---|---|---|---|
-| Llama-3.1-8B layer 16, `S = 512`, `C = 16384` | `--round away --numbits 9 --z-hi-bits 7 --variants intexp --table-bits 25 --bands 16,8,8 --unsound-skip-kv-boundary --witness <dir>` | `42fceb1f3a8643cd` | both backends, 2026-09-06, before the sound defaults |
+| Llama-3.1-8B layer 16, `S = 512`, `C = 16384` | `--round away --numbits 9 --z-hi-bits 7 --variants intexp --table-bits 25 --key-tiles 16,8,8 --unsound-skip-kv-boundary --witness <dir>` | `42fceb1f3a8643cd` | both backends, 2026-09-06, before the sound defaults |
 
 That command names `--round away` while `b10-final` rounds a half to even, so
 either the dump was written under an earlier quantization configuration or the

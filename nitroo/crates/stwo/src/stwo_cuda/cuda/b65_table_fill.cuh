@@ -11,7 +11,7 @@
 //    table is a gather out of a 2^16-entry map of bf16 patterns to numerators.
 //    The map is built on the host -- 262 kB, and `exp()` never runs on the
 //    device, so there is no libm to agree with.
-//  * `m_exp` is a counter every band's fill already scatter-adds into (21.1).
+//  * `m_exp` is a counter every key tile's fill already scatter-adds into (21.1).
 //    It came back to the host only to be merged and re-uploaded.
 //
 // **Rule 8 is the reason for the patch.** `Layer::corrupt_exp_table` is rung
@@ -40,7 +40,7 @@
 #define B65T_MUT_NOSCALE 2u      // index the map with `d`, not with bf16(-d 2^-frac)
 #define B65T_MUT_BF16TRUNC 3u    // truncate to bf16 instead of round-to-nearest-even
 #define B65T_MUT_NOPATCH 4u      // skip the rows where this witness's table differs
-#define B65T_MUT_ONECOUNTER 5u   // sum one band's exp counter instead of every band's
+#define B65T_MUT_ONECOUNTER 5u   // sum one key tile's exp counter instead of every key tile's
 
 // Which column a defect is aimed at. Unaimed, every one of them would show at
 // `x`, which is compared first, and the run would say nothing about the other
@@ -54,7 +54,7 @@ struct B65TabCfg {
     unsigned log_rows;    // `p.log_table`
     unsigned rows;        // `1 << log_rows`
     unsigned variant;
-    unsigned n_counters;  // one per band whose fill ran on the device
+    unsigned n_counters;  // one per key tile whose fill ran on the device
     // `frac.exp2()` as the host computed it, passed rather than recomputed so
     // the division is the same IEEE division on both sides.
     double two_pow;
@@ -64,7 +64,7 @@ struct B65TabCfg {
 
 // `x_col`, `y_col` and `m_col` are `1 << log_rows` cells each, in committed
 // order. `expmap` is 2^16 numerators. `counters` are the device counter arrays
-// the band fills bumped, each `1 << log_rows` wide.
+// the key tile fills bumped, each `1 << log_rows` wide.
 extern "C" void b65_fill_tables(const unsigned *expmap,
                                 const unsigned *const *counters,
                                 const unsigned *patch_idx, const unsigned *patch_val,

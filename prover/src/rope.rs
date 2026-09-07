@@ -6,7 +6,7 @@
 //!   qq = quantize(q, s_q)     qk = quantize(k, s_k)        # round-half-away
 //!   qv = quantize(v, s_v)                                  # v is not rotated
 //!
-//! so the bands' committed Q, K and V are *not* the q/k/v dequant outputs and
+//! so the key tiles' committed Q, K and V are *not* the q/k/v dequant outputs and
 //! the seam between the layer's matmuls and its attention was a hole
 //! (`notes/witness-slack.md` section 1e, `briefs/jj-layerwire-out.md` section 3).
 //!
@@ -15,7 +15,7 @@
 //! `Src::Pre` operands -- preprocessed, and therefore a **function of the block
 //! index**, because `rope(pos)` reads the token's absolute position
 //! `block * S + t`.  This module owns the other half: the quantize, and the
-//! consumer-side weights that read the bands' own columns.
+//! consumer-side weights that read the key tiles' own columns.
 //!
 //! `QuantEval` is `requant.rs`'s power-of-two requantize with the scale moved
 //! from a committed per-token column to a **preprocessed per-slot** one, which
@@ -316,7 +316,7 @@ pub fn q_scale_col(tag: &str, sl: usize) -> PreProcessedColumnId {
 /// Both fold the region's own rows under the **token-major** canonical position
 /// `p = t n + c`, which is the order `MatLayout` walks its rows in -- so a
 /// single row step serves, and the producing region's `Out(0)` binding and the
-/// consuming band's fold are two sums over the same positions.
+/// consuming key tile's fold are two sums over the same positions.
 #[derive(Clone)]
 pub struct QTie {
     /// the bf16 side, per slot: `w^(M - 1 - sl)` over the producer's own stream
@@ -324,10 +324,10 @@ pub struct QTie {
     pub w_in: Vec<SecureField>,
     /// its row step, `w^(-per_row)`
     pub step_in: SecureField,
-    /// the integer side, per slot.  The band holds one column per **query**
+    /// the integer side, per slot.  The key tile holds one column per **query**
     /// head, and grouped-query attention replicates one kv head across `rep` of
     /// them, so a producer value carries the sum of the `rep` weights its copies
-    /// have on the band side -- `sum_r w^(-r hd)` times `w^(N - 1 - sl)` with
+    /// have on the key tile side -- `sum_r w^(-r hd)` times `w^(N - 1 - sl)` with
     /// `N = tokens nh hd`.  With the sum in the weight the equality still forces
     /// each copy separately: the exponents are distinct over
     /// (query head, channel, token), so the difference is a polynomial in `w`
@@ -341,7 +341,7 @@ pub struct QTie {
     pub lam: SecureField,
     /// the bf16 side: `sm + lam ef`, what the rotation (or the v dequant) produced
     pub claimed_in: SecureField,
-    /// the integer side: `q (1 - 2 sg)`, what the bands' columns have to hold
+    /// the integer side: `q (1 - 2 sg)`, what the key tiles' columns have to hold
     pub claimed_out: SecureField,
 }
 
@@ -509,7 +509,7 @@ pub struct QRegion {
     /// the same, for the signed integer the output side folds
     pub out_nat: Vec<i64>,
     pub off_table: usize,
-    /// how many of the derived integers equal the band's committed value
+    /// how many of the derived integers equal the key tile's committed value
     pub ref_ok: usize,
     pub ref_n: usize,
     /// Stream NN-3: sites whose true quotient is past **this side's own**
@@ -545,7 +545,7 @@ pub const Q_PER_SLOT: usize = 7; // ef, m7, q, nz, sm, sg, cl
 /// Build one quantize region.  `x` is the bf16 stream in `(token, channel)`
 /// order -- the rotation's output for q and k, the dequant's for v -- `jj` the
 /// per-channel exponent (`n` of them, constant down the tokens) and `want` the
-/// integers the band committed, which the region only *checks* against.
+/// integers the key tile committed, which the region only *checks* against.
 #[allow(clippy::too_many_arguments)]
 pub fn q_region(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, tokens: usize,
                 n: usize, hd: usize, bits: u32, nz_bits: u32, lay: MatLayout,
@@ -856,7 +856,7 @@ pub fn q_tiles(n: usize, hd: usize, tokens: usize) -> bool {
 }
 
 /// The reference: `round_half_away(x / 2^j)`, clamped, as B1's `quantize` does
-/// it.  Used by the synthetic witness generator to build the bands' own columns
+/// it.  Used by the synthetic witness generator to build the key tiles' own columns
 /// and by the desk's B1 check.
 pub fn quant_ref(pat: u16, j: i64, qmax: i64) -> i64 {
     let (sm, ef) = crate::residual_stream::split(crate::residual_stream::canon(pat));

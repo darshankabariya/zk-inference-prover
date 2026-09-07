@@ -17,7 +17,7 @@
 //!
 //! The three application-level checks come out *identical* to B5's -- `r_sum am - hs
 //! == chan`, `av == out`, `sn == az` -- because every term carries the same weight.
-//! So one claimed value per identity covers every instance in the band, and
+//! So one claimed value per identity covers every instance in the key tile, and
 //! per-instance soundness is Schwartz-Zippel on a polynomial of degree `insts C`
 //! rather than `C`: 336 instances cost 8.4 bits of the 124 QM31 has.
 //!
@@ -77,16 +77,16 @@ impl RangeRel {
 pub fn id(s: impl Into<String>) -> PreProcessedColumnId {
     PreProcessedColumnId { id: s.into() }
 }
-/// A band-local preprocessed column: several bands share one proof in B6.5, so
-/// every selector id carries its band's tag.
-pub fn band_id(tag: usize, s: &str) -> PreProcessedColumnId {
-    id(format!("{s}_band{tag}"))
+/// A key-tile-local preprocessed column: several key tiles share one proof in B6.5, so
+/// every selector id carries its key tile's tag.
+pub fn key_tile_id(tag: usize, s: &str) -> PreProcessedColumnId {
+    id(format!("{s}_key_tile{tag}"))
 }
 pub const CHAN_SEL: [&str; 5] =
     ["b6_c_nofirst", "b6_c_last", "b6_c_notzero", "b6_c_end", "b6_c_istart"];
 /// The grid region's preprocessed columns.  The last is not a selector: it is
 /// `2^-(F - frac_i)`, the constant that turns the committed *scaled* shift back into
-/// the shift itself, so one master exp table can serve every head in the band.
+/// the shift itself, so one master exp table can serve every head in the key tile.
 pub const KEY_SEL: [&str; 8] =
     ["b6_k_nofirst", "b6_k_last", "b6_k_notzero", "b6_k_end", "b6_k_m1", "b6_k_m2",
      "b6_k_istart", "b6_k_dinv"];
@@ -119,19 +119,19 @@ pub const DIAGONAL_BLOCK_SEL: [&str; 9] =
 /// there.
 pub const KEY_ACT: &str = "b6_k_act";
 pub const DIAGONAL_BLOCK_ACT: &str = "b6_x_act";
-/// The `act` column's id for a band, `None` when the grid tiles exactly and the
+/// The `act` column's id for a key tile, `None` when the grid tiles exactly and the
 /// column is not committed at all.  One function, so `commit_pre`, `pre_ids`,
 /// `attn_run` and the AIR cannot disagree about whether it is there.
 pub fn act_id(tag: usize, diagonal_block: bool, lead: usize) -> Option<PreProcessedColumnId> {
-    (lead > 0).then(|| band_id(tag, if diagonal_block { DIAGONAL_BLOCK_ACT } else { KEY_ACT }))
+    (lead > 0).then(|| key_tile_id(tag, if diagonal_block { DIAGONAL_BLOCK_ACT } else { KEY_ACT }))
 }
 /// The diagonal block's causal mask, one preprocessed column per token slot of a row:
 /// 1 where the key is in the decoded stream's future of that token.  A slot's
 /// token is a function of the row *and* the column, so the mask cannot be one
 /// column; what makes it affordable is that it lives on the diagonal block's rows alone
-/// (`S` keys, not `C`), which is 4.2 M preprocessed cells a band at 8B.
+/// (`S` keys, not `C`), which is 4.2 M preprocessed cells a key tile at 8B.
 pub fn msk_id(tag: usize, i: usize) -> PreProcessedColumnId {
-    id(format!("b6_x_msk{i}_band{tag}"))
+    id(format!("b6_x_msk{i}_key_tile{tag}"))
 }
 pub const OUT_SEL: [&str; 5] =
     ["b6_o_nofirst", "b6_o_chanend", "b6_o_m1", "b6_o_m2", "b6_o_end"];
@@ -224,8 +224,8 @@ impl Powers {
     /// weight of the channel region.
     ///
     /// `mu` is deliberately *not* among them: it is read only by `RowEval`'s
-    /// step and the per-token trace loop, and a diagonal block band has neither -- the
-    /// pair's one per-token region is the prefix band's (B10 step 3), and the
+    /// step and the per-token trace loop, and a diagonal block key tile has neither -- the
+    /// pair's one per-token region is the prefix key tile's (B10 step 3), and the
     /// row maximum both halves shift by is *its* `am`, checked against the
     /// diagonal block's Q.K^T by `verify_composed`'s claim equality.  (An earlier
     /// version overrode `self.mu` here with a docstring claiming that override
@@ -244,12 +244,12 @@ impl Powers {
     }
 
     /// The **solo** diagonal block's powers: block 0 of a sequence has no unchecked
-    /// prefix, so its diagonal block is its head band group's only band and it carries
+    /// prefix, so its diagonal block is its head key tile group's only key tile and it carries
     /// the per-token region itself (CC deliverable 4, option A).
     ///
     /// That is `as_diagonal_block` plus one thing.  `as_diagonal_block` deliberately drops `mu`
     /// because a *paired* diagonal block has no per-token region and rides on the
-    /// prefix band's; a solo one has one and needs its own.  `Powers::new`
+    /// prefix key tile's; a solo one has one and needs its own.  `Powers::new`
     /// already built `mu = r_c s^{-(S-rw)}` from **this** grid's `r_c`
     /// (`r_diagonal_block^S`), so the `s` factor is recoverable as `mu / r_c` without
     /// re-deriving `s` or `rw`, and rebasing it onto the borrowed global `r^C`
@@ -280,9 +280,9 @@ fn sum_pow(p: &[SecureField]) -> SecureField {
     p.iter().fold(SecureField::zero(), |a, b| a + *b)
 }
 
-/// Stream NN: one Horner claim over a band's own committed Q, K or V column.
+/// Stream NN: one Horner claim over a key tile's own committed Q, K or V column.
 ///
-/// The band's three existing folds are all *bilinear* -- `u v` for `Q.K^T`,
+/// The key tile's three existing folds are all *bilinear* -- `u v` for `Q.K^T`,
 /// `wv zn` for `A.V` -- so none of them publishes Q, K or V alone, and the
 /// value the layer's matmuls produced had nothing in the proof to be compared
 /// against (`notes/witness-slack.md` section 1e).  This is that missing sum: one
@@ -291,12 +291,12 @@ fn sum_pow(p: &[SecureField]) -> SecureField {
 /// the **token-major** canonical position the quantize region folds under, so
 /// the two claims are directly comparable.
 ///
-/// The offset every band commits (`off_k`, `off_q`, 128) is subtracted here for
+/// The offset every key tile commits (`off_k`, `off_q`, 128) is subtracted here for
 /// the same reason `kf` subtracts it: an inert lead row and an out-of-range slot
 /// both commit exactly the offset, so they fold to zero and no `act` selector is
 /// needed.
 #[derive(Clone)]
-pub struct BandTie {
+pub struct KeyTileTie {
     /// per slot within a row
     pub w: Vec<SecureField>,
     /// the row step inside one row group
@@ -307,14 +307,14 @@ pub struct BandTie {
     /// affine in the position (the channel region) and one boundary constant
     /// serves
     pub s_ib: Option<SecureField>,
-    /// the offset the band's cells carry
+    /// the offset the key tile's cells carry
     pub off: u32,
     pub claimed: SecureField,
 }
 
-impl BandTie {
+impl KeyTileTie {
     /// The claim, from the values rather than from the trace: `vals[j][k]` is
-    /// the band's own committed cell, offset included.
+    /// the key tile's own committed cell, offset included.
     pub fn claim_of(&self, rows: usize, per_row: usize, vals: &[i64],
                     step: &dyn Fn(usize) -> SecureField) -> SecureField {
         let off = SecureField::from(M31::from_u32_unchecked(self.off));
@@ -349,24 +349,24 @@ pub struct ChanEval {
     /// GKR instead of committed running-sum columns, so the AIR emits neither
     /// the relation entries nor the interaction masks they would allocate.
     pub gkr: bool,
-    /// Stream AA: the K/V boundary trees this band's committed **keys** are
-    /// copied into -- 0, 1 or 2 of them (an unchecked-prefix sub-band writes both
+    /// Stream AA: the K/V boundary trees this key tile's committed **keys** are
+    /// copied into -- 0, 1 or 2 of them (an unchecked-prefix sub-key-tile writes both
     /// its group's out and in sides; the chunk's own block writes the out side
     /// alone).  Empty on a chunk proved with `--kv-boundary` off, which is why that
     /// chunk's constraint IR, its kernel fingerprint and its proof are
     /// byte-for-byte the old ones.
     pub boundary_k: Vec<crate::boundary::KvBoundary>,
-    /// Stream NN: this band's own K and Q claims, in that order.  `Some` only on
-    /// a **diagonal block** band of a chunk that carries the RoPE regions -- the diagonal block's
+    /// Stream NN: this key tile's own K and Q claims, in that order.  `Some` only on
+    /// a **diagonal block** key tile of a chunk that carries the RoPE regions -- the diagonal block's
     /// keys are this block's own tokens, which are the ones the layer's `k`
-    /// matmul produced; a prefix band's keys are the cache and are bound across
+    /// matmul produced; a prefix key tile's keys are the cache and are bound across
     /// blocks by root equality instead (stream AA/EE).  `None` everywhere else,
     /// which is why every other chunk's constraint IR and kernel fingerprint are
     /// byte-for-byte the old ones.
-    pub qk_bind: Option<(BandTie, BandTie)>,
-    /// Stream NN (NN-2): this band's own Q claim alone, on a **prefix** band.
+    pub qk_bind: Option<(KeyTileTie, KeyTileTie)>,
+    /// Stream NN (NN-2): this key tile's own Q claim alone, on a **prefix** key tile.
     ///
-    /// A band group is a prefix band and a diagonal block over the same heads and the
+    /// A key tile group is a prefix key tile and a diagonal block over the same heads and the
     /// same `S` queries, and each commits its own `Q` column.  NN-1 bound the
     /// diagonal block's and left the prefix's untied, so a prover could attend to the
     /// cache with queries the `q` matmul did not produce while attending to
@@ -374,9 +374,9 @@ pub struct ChanEval {
     /// same fold under the same canonical weights, and one equality per group
     /// (`nn_q_ok`) saying the two are the same queries.
     ///
-    /// At most one of `qk_bind` and `q_bind` is `Some` on any band, so the
+    /// At most one of `qk_bind` and `q_bind` is `Some` on any key tile, so the
     /// interaction masks below are read in one unambiguous order.
-    pub q_bind: Option<BandTie>,
+    pub q_bind: Option<KeyTileTie>,
 }
 
 impl FrameworkEval for ChanEval {
@@ -398,7 +398,7 @@ impl FrameworkEval for ChanEval {
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let sel: Vec<E::F> =
-            CHAN_SEL.iter().map(|n| eval.get_preprocessed_column(band_id(self.tag, n))).collect();
+            CHAN_SEL.iter().map(|n| eval.get_preprocessed_column(key_tile_id(self.tag, n))).collect();
         let (nofirst, last, notzero, end, istart) =
             (sel[0].clone(), sel[1].clone(), sel[2].clone(), sel[3].clone(), sel[4].clone());
         let ks: Vec<E::F> = (0..self.lay.pk).map(|_| eval.next_trace_mask()).collect();
@@ -413,7 +413,7 @@ impl FrameworkEval for ChanEval {
         // framework and every generated kernel expect it.  See
         // `notes/bounds-design.md` and `boundary.rs`'s stream AA section.
         for b in &self.boundary_k {
-            assert_eq!(b.n, self.lay.pk, "a K boundary side's width is not the band's `pk`");
+            assert_eq!(b.n, self.lay.pk, "a K boundary side's width is not the key tile's `pk`");
             for kp in ks.iter() {
                 let [c] = eval.next_interaction_mask(b.tree, [0]);
                 eval.add_constraint(c - kp.clone());
@@ -452,7 +452,7 @@ impl FrameworkEval for ChanEval {
         // `u` and `v` above are inner sums of one row group and are consumed by
         // the bilinear `acc`; these two run over the whole region under the
         // quantize region's own weights, so an equality against it says the
-        // band's columns are the values the layer's matmuls produced.  Both
+        // key tile's columns are the values the layer's matmuls produced.  Both
         // steps are built from selectors the region already reads.
         if let Some((kt, qt)) = &self.qk_bind {
             for (t, vals) in [(kt, &ks), (qt, &qs)] {
@@ -471,10 +471,10 @@ impl FrameworkEval for ChanEval {
             }
         }
 
-        // ---- stream NN (NN-2): the prefix band's Q claim ----------------------
-        // The same fold as the diagonal block's `qt` above, on this band's own layout.
+        // ---- stream NN (NN-2): the prefix key tile's Q claim ----------------------
+        // The same fold as the diagonal block's `qt` above, on this key tile's own layout.
         // The diagonal block is not on this arm and the prefix is not on that one, so
-        // no band reads both and the mask order is the trace's.
+        // no key tile reads both and the mask order is the trace's.
         if let Some(t) = &self.q_bind {
             let [h_prev, h] =
                 eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
@@ -535,14 +535,14 @@ pub struct KeyEval {
     /// fold and the exp lookup, which is what "the token did not attend to it"
     /// means in the AIR.
     pub diagonal_block: bool,
-    /// Stream AA: the K/V boundary trees this band's committed **values** are
+    /// Stream AA: the K/V boundary trees this key tile's committed **values** are
     /// copied into -- the V half of `ChanEval::boundary_k`, same sides, same
-    /// order, so that one tree holds `[band's K][band's V]` per band in
+    /// order, so that one tree holds `[key_tile's K][key_tile's V]` per key tile in
     /// component-registration order.
     pub boundary_v: Vec<crate::boundary::KvBoundary>,
-    /// Stream NN: this band's own V claim, the counterpart of `ChanEval::qk_bind`.
-    /// `Some` only on a diagonal block band of a chunk that carries the quantize regions.
-    pub v_bind: Option<BandTie>,
+    /// Stream NN: this key tile's own V claim, the counterpart of `ChanEval::qk_bind`.
+    /// `Some` only on a diagonal block key tile of a chunk that carries the quantize regions.
+    pub v_bind: Option<KeyTileTie>,
 }
 
 impl FrameworkEval for KeyEval {
@@ -565,7 +565,7 @@ impl FrameworkEval for KeyEval {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let names: &[&str] = if self.diagonal_block { &DIAGONAL_BLOCK_SEL } else { &KEY_SEL };
         let sel: Vec<E::F> =
-            names.iter().map(|n| eval.get_preprocessed_column(band_id(self.tag, n))).collect();
+            names.iter().map(|n| eval.get_preprocessed_column(key_tile_id(self.tag, n))).collect();
         let (nofirst, last, notzero, end, m1, m2, istart) = (sel[0].clone(), sel[1].clone(),
             sel[2].clone(), sel[3].clone(), sel[4].clone(), sel[5].clone(), sel[6].clone());
         // stream NN: the V claim's instance-boundary step reads the same column
@@ -602,7 +602,7 @@ impl FrameworkEval for KeyEval {
         };
         // 2^-(F - frac_i): the committed index is the shift scaled to the master
         // table's exponent, and this divides it back out (one preprocessed column
-        // for the whole band, zero fresh cells -- the cost of sharing is table rows)
+        // for the whole key tile, zero fresh cells -- the cost of sharing is table rows)
         let dinv = sel[7].clone();
         let q = self.lay.q;
         let idx: Vec<E::F> = (0..q).map(|_| eval.next_trace_mask()).collect();
@@ -615,7 +615,7 @@ impl FrameworkEval for KeyEval {
         // axis, so a V column is `lay.pv` wide where a K column is `lay.pk`.
         // Nothing else differs -- same trees, same order, same bare equality.
         for b in &self.boundary_v {
-            assert_eq!(b.n, self.lay.pv, "a V boundary side's width is not the band's `pv`");
+            assert_eq!(b.n, self.lay.pv, "a V boundary side's width is not the key tile's `pv`");
             for vp in vals.iter() {
                 let [c] = eval.next_interaction_mask(b.tree, [0]);
                 eval.add_constraint(c - vp.clone());
@@ -799,7 +799,7 @@ impl FrameworkEval for OutEval {
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let sel: Vec<E::F> =
-            OUT_SEL.iter().map(|n| eval.get_preprocessed_column(band_id(self.tag, n))).collect();
+            OUT_SEL.iter().map(|n| eval.get_preprocessed_column(key_tile_id(self.tag, n))).collect();
         let (nofirst, chanend, m1, m2, end) = (sel[0].clone(), sel[1].clone(),
             sel[2].clone(), sel[3].clone(), sel[4].clone());
         let ys: Vec<E::F> = (0..self.lay.q).map(|_| eval.next_trace_mask()).collect();
@@ -866,7 +866,7 @@ impl FrameworkEval for RowEval {
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let sel: Vec<E::F> =
-            ROW_SEL.iter().map(|n| eval.get_preprocessed_column(band_id(self.tag, n))).collect();
+            ROW_SEL.iter().map(|n| eval.get_preprocessed_column(key_tile_id(self.tag, n))).collect();
         let (notzero, end, istart) = (sel[0].clone(), sel[1].clone(), sel[2].clone());
         // s^rw inside an instance, mu at an instance start
         let step = |istart: E::F, notzero: E::F, pow: &Powers| -> E::EF {

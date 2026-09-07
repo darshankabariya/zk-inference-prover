@@ -2,19 +2,19 @@
 
 `b9/prefill.py` fitted `fresh ~ 326 M + 1.37 M*S + 72.1*S^2` from S=512 and
 S=1024, and eval-plan §2 showed the fit is unidentifiable: two points, two
-unknowns, and `bands = p S^2` and `bands = gamma S^2 + delta S` both hit both
+unknowns, and `key tiles = p S^2` and `key tiles = gamma S^2 + delta S` both hit both
 points exactly while disagreeing 11% on the coefficient E11's headline rests on.
 The S=2048 point that would separate them died at 127.60 GiB RSS on a box with a
 128 GiB cap.  This script does two things the two survivors could not support:
 
-  `--geom`   which S tile the band grids exactly, from a Python mirror of
+  `--geom`   which S tile the key tile grids exactly, from a Python mirror of
              `prover/src/layout.rs` validated against every artifact's own
-             `family_cells.band_leads`.  eval-plan §5.1 asserts S=3072 tiles
+             `family_cells.key_tile_leads`.  eval-plan §5.1 asserts S=3072 tiles
              exactly; it does not, and the mirror says why.
 
-  (default)  the re-fit over every measured point: the two competing `bands`
+  (default)  the re-fit over every measured point: the two competing `key_tiles`
              models and the parameter-free structural one, the linearity of the
-             non-band remainder (never testable before -- it WAS the two-point
+             non-key-tile remainder (never testable before -- it WAS the two-point
              fit), the crossover, and E11's multiple under each.
 
     uv run experiments/b9/dd_fit.py [--geom]
@@ -34,14 +34,14 @@ HERE = pathlib.Path(__file__).parent
 OUT = inputs.artifacts_dir()
 
 NH, HD, L8B = 32, 128, 32
-BANDS = (16, 8, 8)                # nh = 32 as three power-of-two instance bands
+KEY_TILES = (16, 8, 8)                # nh = 32 as three power-of-two instance key tiles
 GRID_TARGET, CHAN_TARGET = 64, 128
 MIN_LOG_ROWS, MAX_LOG_ROWS = 4, 26
 
 # ---------------------------------------------------------------- geometry ----
 # A line-for-line mirror of `prover/src/layout.rs`: `Grid::new`, `pick`, and the
 # three layouts.  Nothing here is fitted or guessed -- if it disagrees with an
-# artifact's `band_leads` the mirror is wrong and `--geom` says so.
+# artifact's `key_tile_leads` the mirror is wrong and `--geom` says so.
 
 
 def grid(groups, log_rows, cap):
@@ -101,7 +101,7 @@ def lay_out(s, c, hd, insts, target=GRID_TARGET):
 def row_region(s, insts, rw_cfg=16):
     """The per-token region, `attn_trace.rs:155-165`: `rw` tokens per row over
     `insts * S` of them, then padded up to a power of two.  It is the third
-    place a shape can fail to tile, and the one `band_leads` does not report."""
+    place a shape can fail to tile, and the one `key_tile_leads` does not report."""
     floor = 1 << MIN_LOG_ROWS
     toks = s * insts
     rw = max(min(rw_cfg, toks // floor), 1)
@@ -112,14 +112,14 @@ def row_region(s, insts, rw_cfg=16):
                 lead=(1 << log_row) - rows)
 
 
-def band_base_geom(s, c, hd=HD, bands=BANDS, rows_region=True, rw_cfg=16):
-    """The band family's committed BASE cells read off the realised layouts --
+def key_tile_base_geom(s, c, hd=HD, key_tiles=KEY_TILES, rows_region=True, rw_cfg=16):
+    """The key tile family's committed BASE cells read off the realised layouts --
     the same three region sums the closed form below collapses to when every
     grid tiles exactly, but valid when they do not.  `attn_trace.rs:1170-1174`:
     the channel region's `(pk + pq)`, the key region's `(2q + pv)`, and the
     per-token region's `4 * rw`; the `out` region is billed to `attnout`."""
     tot = 0
-    for i in bands:
+    for i in key_tiles:
         lc, lk = lay_chan(s, c, hd, i), lay_key(s, c, hd, i)
         tot += (lc["pk"] + lc["pq"]) * lc["rows"] + (2 * lk["q"] + lk["pv"]) * lk["rows"]
         if rows_region:
@@ -128,24 +128,24 @@ def band_base_geom(s, c, hd=HD, bands=BANDS, rows_region=True, rw_cfg=16):
     return tot
 
 
-def geometry(s, c, hd=HD, bands=BANDS):
-    """The three regions of every band, as the composition lays them out."""
+def geometry(s, c, hd=HD, key_tiles=KEY_TILES):
+    """The three regions of every key tile, as the composition lays them out."""
     return [dict(insts=i,
                  chan=lay_chan(s, c, hd, i),
                  key=lay_key(s, c, hd, i),
-                 out=lay_out(s, c, hd, i)) for i in bands]
+                 out=lay_out(s, c, hd, i)) for i in key_tiles]
 
 
-def leads(s, c, hd=HD, bands=BANDS):
+def leads(s, c, hd=HD, key_tiles=KEY_TILES):
     return [(b["chan"]["lead"], b["key"]["lead"], b["out"]["lead"])
-            for b in geometry(s, c, hd, bands)]
+            for b in geometry(s, c, hd, key_tiles)]
 
 
-def tiles_exactly(s, c=None, hd=HD, bands=BANDS):
-    return all(l == (0, 0, 0) for l in leads(s, c if c else s, hd, bands))
+def tiles_exactly(s, c=None, hd=HD, key_tiles=KEY_TILES):
+    return all(l == (0, 0, 0) for l in leads(s, c if c else s, hd, key_tiles))
 
 
-def composable(s, c=None, hd=HD, bands=BANDS, rw_cfg=16):
+def composable(s, c=None, hd=HD, key_tiles=KEY_TILES, rw_cfg=16):
     """Will the AIR build this shape at all?  `attn_trace.rs:320-326` asserts the
     grid's and the output region's TOKEN axes tile exactly --
 
@@ -158,7 +158,7 @@ def composable(s, c=None, hd=HD, bands=BANDS, rw_cfg=16):
     a stronger condition than `Grid::lead == 0`, which is about the row-group
     (key) axis; a shape can fail this and still report `lead 0` everywhere."""
     c = c if c else s
-    for i in bands:
+    for i in key_tiles:
         lk, lo = lay_key(s, c, hd, i), lay_out(s, c, hd, i)
         if lk["q"] * lk["chunks"] != s or lo["q"] * lo["chunks"] != s:
             return False
@@ -169,7 +169,7 @@ def composable(s, c=None, hd=HD, bands=BANDS, rw_cfg=16):
     return True
 
 
-# -------------------------------------------------------- the band closed form -
+# -------------------------------------------------------- the key tile closed form -
 # `prefill.py`'s structural model, verified exact against 8 artifacts across two
 # harnesses and three contexts.  Zero free parameters; every coefficient is read
 # off `attn_trace.rs:1167-1181` with `layout.rs`.  Valid only where the regions
@@ -177,23 +177,23 @@ def composable(s, c=None, hd=HD, bands=BANDS, rw_cfg=16):
 NH_HD = NH * HD                                    # 4,096
 
 
-def band_base(s, c, rows_region=True):
+def key_tile_base(s, c, rows_region=True):
     return (2 * NH * s * c + 2 * NH_HD * c + NH_HD * s
             + (4 * NH * s if rows_region else 0))
 
 
-def band_inter(s, c, rows_region=True):
+def key_tile_inter(s, c, rows_region=True):
     return (76 * s * c + (2 * NH_HD + 384 + 8192) * c + 2 * NH_HD * s
             + (272 * s if rows_region else 0))
 
 
-def band_fresh(s, c, rows_region=True):
-    return band_base(s, c, rows_region) + band_inter(s, c, rows_region)
+def key_tile_fresh(s, c, rows_region=True):
+    return key_tile_base(s, c, rows_region) + key_tile_inter(s, c, rows_region)
 
 
 GAMMA = 2 * NH                                     # 64  = the S*C base coefficient
 DELTA = 2 * NH_HD + NH_HD + 4 * NH                 # 12,416 at C = S
-BAND_SC, BAND_C, BAND_S = 140, 24960, 12688        # band FRESH: base + interaction
+KEY_TILE_SC, KEY_TILE_C, KEY_TILE_S = 140, 24960, 12688        # key tile FRESH: base + interaction
 
 
 # ------------------------------------------------------------------ loading ---
@@ -219,10 +219,10 @@ def load(path):
         s=p["s"], c=p["c"], accepts=d["accepts"], off_table=d["off_table"],
         fresh=d["cells"]["fresh"], base=d["cells"]["base"],
         inter=d["cells"]["interaction"], pre=d["cells"]["preprocessed"],
-        bands=fc["bands"], dequant=fc["dequant"], freivalds=fc["freivalds"],
+        key_tiles=fc["key_tiles"], dequant=fc["dequant"], freivalds=fc["freivalds"],
         attnout=fc["attnout"],
-        band_inter=(fc.get("interaction_by_family", {}).get("bands", {}) or {}).get("cells"),
-        band_leads=[(l["chan"], l["key"], l["out"]) for l in fc["band_leads"]],
+        key_tile_inter=(fc.get("interaction_by_family", {}).get("key_tiles", {}) or {}).get("cells"),
+        key_tile_leads=[(l["chan"], l["key"], l["out"]) for l in fc["key_tile_leads"]],
         ao_rem_bits=p["ao_rem_bits"], kmax=p["kmax"], log_table=p["log_table"],
         peak_rss=d.get("peak_rss_bytes"), wall=d["phases"]["wall_secs"],
         prove=d["phases"].get("prove_call_secs"),
@@ -250,40 +250,40 @@ def g(x, unit=""):
 # ------------------------------------------------------------------- --geom ---
 def geom_report():
     print("=" * 92)
-    print("DD: which S tile the band grids exactly (mirror of prover/src/layout.rs)")
+    print("DD: which S tile the key tile grids exactly (mirror of prover/src/layout.rs)")
     print("=" * 92)
-    print("C = S, hd = 128, bands 16/8/8, scores-per-row 64, keys-per-row 128.")
+    print("C = S, hd = 128, key tiles 16/8/8, scores-per-row 64, keys-per-row 128.")
     print("The (t, c) grid is `LayoutKey`: one row group per (instance, key), so its")
     print("group count is `C * insts` -- and a power-of-two row count can only tile")
     print("that exactly when C has no odd factor.  `chunks` is capped at min(S, hd) =")
     print("128, which is why the padding does not shrink away at larger S.")
     print()
-    print(f"  {'S = C':>6} {'tiles':>7} {'AIR':>7} {'band':>5} {'key log_rows':>13} "
+    print(f"  {'S = C':>6} {'tiles':>7} {'AIR':>7} {'key_tile':>5} {'key log_rows':>13} "
           f"{'chunks':>7} {'scores/row':>11} {'key lead':>10} {'lead frac':>10} "
           f"{'chan/out lead':>14} {'per-tok lead':>13}")
     rows = {}
     for s in SS:
         ex, cmp_ = tiles_exactly(s), composable(s)
-        rows[s] = dict(exact=ex, composable=cmp_, bands=[],
-                       bands_base_layout=band_base_geom(s, s),
-                       bands_base_closed=band_base(s, s))
+        rows[s] = dict(exact=ex, composable=cmp_, key_tiles=[],
+                       key_tiles_base_layout=key_tile_base_geom(s, s),
+                       key_tiles_base_closed=key_tile_base(s, s))
         for b in geometry(s, s):
             k, ch, ou = b["key"], b["chan"], b["out"]
             rr = row_region(s, b["insts"])
-            rows[s]["bands"].append(dict(
+            rows[s]["key_tiles"].append(dict(
                 insts=b["insts"], key_log_rows=k["log_rows"], key_chunks=k["chunks"],
                 scores_per_row=k["q"], key_lead=k["lead"],
                 key_lead_frac=k["lead"] / k["rows"], chan_lead=ch["lead"],
                 out_lead=ou["lead"], row_lead=rr["lead"], row_rows=rr["rrows"]))
-            print(f"  {s if b['insts'] == BANDS[0] else '':>6} "
-                  f"{('EXACT' if ex else 'padded') if b['insts'] == BANDS[0] else '':>7} "
-                  f"{(('builds' if cmp_ else 'REFUSES') if b['insts'] == BANDS[0] else ''):>7} "
+            print(f"  {s if b['insts'] == KEY_TILES[0] else '':>6} "
+                  f"{('EXACT' if ex else 'padded') if b['insts'] == KEY_TILES[0] else '':>7} "
+                  f"{(('builds' if cmp_ else 'REFUSES') if b['insts'] == KEY_TILES[0] else ''):>7} "
                   f"{b['insts']:>5} {k['log_rows']:>13} {k['chunks']:>7} {k['q']:>11} "
                   f"{k['lead']:>10} {k['lead'] / k['rows'] * 100:>9.4f}% "
                   f"{str((ch['lead'], ou['lead'])):>14} "
                   f"{str(rr['lead']) + '/' + str(rr['rrows']):>13}")
-        gm, cl = rows[s]["bands_base_layout"], rows[s]["bands_base_closed"]
-        print(f"  {'':>6} {'':>7} {'band base from the layouts':>31}: {gm:>15,}"
+        gm, cl = rows[s]["key_tiles_base_layout"], rows[s]["key_tiles_base_closed"]
+        print(f"  {'':>6} {'':>7} {'key tile base from the layouts':>31}: {gm:>15,}"
               f"   exact-tiling closed form {cl:>15,}"
               f"   {'equal' if gm == cl else f'+{gm - cl:,} = +{(gm / cl - 1) * 100:.3f}%'}")
     print()
@@ -306,15 +306,15 @@ def geom_report():
     lead13 = [s for s in build if not tiles_exactly(s)]
     print(f"    {len(build)} of 512 shapes build; {len(lead13)} of those leave a lead row.")
     frac = lambda s: max(b["key"]["lead"] / b["key"]["rows"] for b in geometry(s, s)) * 100
-    print("    a few, with the largest band lead fraction: "
+    print("    a few, with the largest key tile lead fraction: "
           + ", ".join(f"{s} ({frac(s):.2f}%)" for s in (240, 336, 480, 1600, 2016)
                       if s in lead13))
     print("    so rule 13 IS reachable -- just not at 1536 or 3072, and never at a")
     print("    power of two.  This sweep arms the controls at S = C = 240.")
     print()
-    print("  the mirror against every artifact that records `band_leads`, including")
-    print("  B10's seq5 chunks -- the real 8B witness at C != S, three prefix bands plus")
-    print("  three diagonal block bands at C = S, which is the only check of the C != S arm:")
+    print("  the mirror against every artifact that records `key_tile_leads`, including")
+    print("  B10's seq5 chunks -- the real 8B witness at C != S, three prefix key tiles plus")
+    print("  three diagonal block key tiles at C = S, which is the only check of the C != S arm:")
     ok = bad = 0
     checks = [(tag, s, r) for tag, _ in SETS for s, r in sorted(load_all()[tag].items())]
     seq5 = OUT / "seq5"
@@ -325,13 +325,13 @@ def geom_report():
                 checks.append((f"seq5 L{lay}", r["s"], r))
     for tag, s, r in checks:
         pred = leads(r["s"], r["c"])
-        if len(r["band_leads"]) == 2 * len(pred):        # a diagonal block rides at C = S
+        if len(r["key_tile_leads"]) == 2 * len(pred):        # a diagonal block rides at C = S
             pred = pred + leads(r["s"], r["s"])
-        good = pred == r["band_leads"]
+        good = pred == r["key_tile_leads"]
         ok, bad = ok + good, bad + (not good)
         print(f"    {tag:9s} S={r['s']:<5d} C={r['c']:<6d} "
-              f"{'ok' if good else 'MISMATCH: ' + str(pred) + ' vs ' + str(r['band_leads'])}"
-              f"   ({len(pred)} bands, all {'0/0/0' if not any(any(t) for t in pred) else 'padded'})")
+              f"{'ok' if good else 'MISMATCH: ' + str(pred) + ' vs ' + str(r['key_tile_leads'])}"
+              f"   ({len(pred)} key tiles, all {'0/0/0' if not any(any(t) for t in pred) else 'padded'})")
     print(f"    {ok} agree, {bad} disagree.")
     return rows
 
@@ -359,7 +359,7 @@ def lstsq(cols, y):
 
 
 def cross_of(a2, a1, a0):
-    """The S where `a2 S^2 + a1 S + a0 = 0`, i.e. where the band family passes
+    """The S where `a2 S^2 + a1 S + a0 = 0`, i.e. where the key tile family passes
     half the chunk."""
     return (-a1 + math.sqrt(a1 * a1 - 4 * a2 * a0)) / (2 * a2)
 
@@ -373,15 +373,15 @@ def report():
         if not got[tag]:
             continue
         print(f"\n{tag}:")
-        print(f"  {'S = C':>6} {'tiles':>6} {'fresh':>11} {'bands(base)':>12} "
+        print(f"  {'S = C':>6} {'tiles':>6} {'fresh':>11} {'key tiles(base)':>12} "
               f"{'pre':>10} {'peak RSS':>10} {'wall':>8} {'ao_rem':>7} {'acc':>5} "
               f"{'lead rows':>11}")
         for s, r in sorted(got[tag].items()):
             print(f"  {s:>6} {('exact' if tiles_exactly(s) else 'padded'):>6} "
-                  f"{g(r['fresh']):>11} {g(r['bands']):>12} {g(r['pre']):>10} "
+                  f"{g(r['fresh']):>11} {g(r['key_tiles']):>12} {g(r['pre']):>10} "
                   f"{(r['peak_rss'] / 2**30 if r['peak_rss'] else 0):>9.2f}G "
                   f"{r['wall']:>7.1f}s {r['ao_rem_bits']:>7} {str(r['accepts']):>5} "
-                  f"{str(sorted(set(r['band_leads']))):>11}")
+                  f"{str(sorted(set(r['key_tile_leads']))):>11}")
 
     # -- the reproduction control: does today's tree give the 2026-08-22 numbers?
     print()
@@ -392,14 +392,14 @@ def report():
     repro = []
     for s in sorted(set(got["b9"]) & set(got["dd"])):
         a, b = got["b9"][s], got["dd"][s]
-        same = {k: a[k] == b[k] for k in ("fresh", "bands", "pre", "base", "inter")}
+        same = {k: a[k] == b[k] for k in ("fresh", "key_tiles", "pre", "base", "inter")}
         repro.append(dict(s=s, **{f"{k}_same": v for k, v in same.items()},
                           b9_fresh=a["fresh"], dd_fresh=b["fresh"],
-                          b9_bands=a["bands"], dd_bands=b["bands"],
+                          b9_key_tiles=a["key_tiles"], dd_key_tiles=b["key_tiles"],
                           b9_sha=a["sha"], dd_sha=b["sha"], sha_same=a["sha"] == b["sha"]))
         print(f"  S={s:<5d} fresh {a['fresh']:>15,} vs {b['fresh']:>15,} "
-              f"{'SAME' if same['fresh'] else 'MOVED'};  bands {a['bands']:>13,} vs "
-              f"{b['bands']:>13,} {'SAME' if same['bands'] else 'MOVED'};  "
+              f"{'SAME' if same['fresh'] else 'MOVED'};  key tiles {a['key_tiles']:>13,} vs "
+              f"{b['key_tiles']:>13,} {'SAME' if same['key_tiles'] else 'MOVED'};  "
               f"digest {'SAME' if a['sha'] == b['sha'] else 'MOVED'}")
     if not repro:
         print("  (no overlap yet)")
@@ -407,36 +407,36 @@ def report():
     # -- the one confound §5.1 named: `ao_rem_bits` is data-derived and moved
     #    17 -> 18 -> 20 across the family.  Pinning it at one value above every
     #    point's own makes the family parameter identical.  It widens the
-    #    attnout region and the `o` Freivalds table, so `fresh` must move and `bands`
+    #    attnout region and the `o` Freivalds table, so `fresh` must move and `key_tiles`
     #    must NOT -- which is the check.
     pinned, pinned_fit = [], None
     if got["ddpin"]:
         print()
         print("the `ao_rem_bits` confound, removed -- the same points at one pinned value")
-        print(f"  {'S':>6} {'ao_rem nat/pin':>15} {'bands nat':>14} {'bands pin':>14} "
+        print(f"  {'S':>6} {'ao_rem nat/pin':>15} {'key tiles nat':>14} {'key tiles pin':>14} "
               f"{'fresh nat':>15} {'fresh pin':>15} {'d fresh':>9}")
         for s in sorted(set(got["dd"]) & set(got["ddpin"])):
             a, b = got["dd"][s], got["ddpin"][s]
-            pinned.append(dict(s=s, bands_same=a["bands"] == b["bands"],
+            pinned.append(dict(s=s, key_tiles_same=a["key_tiles"] == b["key_tiles"],
                                nat_ao=a["ao_rem_bits"], pin_ao=b["ao_rem_bits"],
                                nat_fresh=a["fresh"], pin_fresh=b["fresh"],
-                               nat_bands=a["bands"], pin_bands=b["bands"]))
+                               nat_key_tiles=a["key_tiles"], pin_key_tiles=b["key_tiles"]))
             ao = f"{a['ao_rem_bits']}/{b['ao_rem_bits']}"
             print(f"  {s:>6} {ao:>15} "
-                  f"{a['bands']:>14,} {b['bands']:>14,}"
-                  f"{'' if a['bands'] == b['bands'] else ' MOVED'} "
+                  f"{a['key_tiles']:>14,} {b['key_tiles']:>14,}"
+                  f"{'' if a['key_tiles'] == b['key_tiles'] else ' MOVED'} "
                   f"{a['fresh']:>15,} {b['fresh']:>15,} "
                   f"{b['fresh'] / a['fresh'] - 1:>+8.3%}")
-        print("  `bands` unmoved at every point is the confound shown to be outside the")
-        print("  band family; what moves is the attention-output region alone.")
+        print("  `key_tiles` unmoved at every point is the confound shown to be outside the")
+        print("  key tile family; what moves is the attention-output region alone.")
         pin_ex = {s: got["ddpin"][s] for s in sorted(got["ddpin"])
                   if tiles_exactly(s) and got["ddpin"][s]["accepts"]}
         if len(pin_ex) >= 3:
             pss = sorted(pin_ex)
-            pr = {s: pin_ex[s]["fresh"] - band_fresh(s, s) for s in pss}
+            pr = {s: pin_ex[s]["fresh"] - key_tile_fresh(s, s) for s in pss}
             pq, pf = lstsq([[float(s) for s in pss], [1.0] * len(pss)],
                            [pr[s] for s in pss])
-            px = cross_of(BAND_SC, BAND_S + BAND_C - pq, -pf)
+            px = cross_of(KEY_TILE_SC, KEY_TILE_S + KEY_TILE_C - pq, -pf)
             print(f"  the whole fit redone on the pinned family: rest = {pf:,.0f} + "
                   f"{pq:,.0f} S, crossover S ~ {px:,.0f}")
             pinned_fit = dict(fixed=pf, per_token=pq, crossover=px, points=pss)
@@ -454,25 +454,25 @@ def report():
           f"{f' (padded, held out: {sorted(padded)})' if padded else ''}")
 
     ss = sorted(exact)
-    y = [exact[s]["bands"] for s in ss]
-    # M1, the incumbent: bands = p S^2, one free parameter
+    y = [exact[s]["key_tiles"] for s in ss]
+    # M1, the incumbent: key tiles = p S^2, one free parameter
     (p1,) = lstsq([[s * s for s in ss]], y)
-    # M2: bands = gamma S^2 + delta S, two free parameters
+    # M2: key tiles = gamma S^2 + delta S, two free parameters
     g2, d2 = lstsq([[s * s for s in ss], [float(s) for s in ss]], y)
     # M3, structural: zero free parameters
     print()
-    print("model selection on the band family (BASE cells), C = S")
+    print("model selection on the key tile family (BASE cells), C = S")
     print(f"  {'S':>6} {'measured':>15} {'M1 p S^2':>15} {'resid':>10} "
           f"{'M2 gS^2+dS':>15} {'resid':>8} {'M3 structural':>15} {'resid':>8}")
     res = dict(m1=[], m2=[], m3=[])
     for s in ss:
-        m1, m2, m3 = p1 * s * s, g2 * s * s + d2 * s, band_base(s, s)
+        m1, m2, m3 = p1 * s * s, g2 * s * s + d2 * s, key_tile_base(s, s)
         for k, v in (("m1", m1), ("m2", m2), ("m3", m3)):
-            res[k].append(exact[s]["bands"] - v)
-        print(f"  {s:>6} {exact[s]['bands']:>15,} {m1:>15,.0f} "
-              f"{(m1 / exact[s]['bands'] - 1) * 100:>9.3f}% {m2:>15,.0f} "
-              f"{(m2 / exact[s]['bands'] - 1) * 100:>7.3f}% {m3:>15,} "
-              f"{(m3 / exact[s]['bands'] - 1) * 100:>7.3f}%")
+            res[k].append(exact[s]["key_tiles"] - v)
+        print(f"  {s:>6} {exact[s]['key_tiles']:>15,} {m1:>15,.0f} "
+              f"{(m1 / exact[s]['key_tiles'] - 1) * 100:>9.3f}% {m2:>15,.0f} "
+              f"{(m2 / exact[s]['key_tiles'] - 1) * 100:>7.3f}% {m3:>15,} "
+              f"{(m3 / exact[s]['key_tiles'] - 1) * 100:>7.3f}%")
 
     def rms(v):
         return math.sqrt(sum(x * x for x in v) / len(v))
@@ -487,11 +487,11 @@ def report():
     print("  The 2026-08 runs predate `interaction_by_family`, so S=2048 is the first")
     print("  C = S shape at which the interaction closed form can be checked at all:")
     for s in ss:
-        gi = exact[s]["band_inter"]
+        gi = exact[s]["key_tile_inter"]
         if gi is None:
             print(f"    {s:>5}  (not recorded in this artifact)")
             continue
-        pi = band_inter(s, s)
+        pi = key_tile_inter(s, s)
         print(f"    {s:>5}  predicted {pi:>15,}   measured {gi:>15,}"
               f"   {'exact' if pi == gi else 'MISMATCH'}")
     print()
@@ -501,25 +501,25 @@ def report():
     secants = []
     for i in range(len(ss) - 1):
         a_, b_ = ss[i], ss[i + 1]
-        pm = (exact[b_]["bands"] - exact[a_]["bands"]) / (b_ * b_ - a_ * a_)
+        pm = (exact[b_]["key_tiles"] - exact[a_]["key_tiles"]) / (b_ * b_ - a_ * a_)
         secants.append(dict(lo=a_, hi=b_, p=pm, closed=GAMMA + DELTA / (a_ + b_)))
         print(f"    {a_:>5} -> {b_:<5}  p = {pm:>8.4f}   gamma + delta/(S1+S2) = "
               f"{GAMMA + DELTA / (a_ + b_):>8.4f}   {'exact' if abs(pm - GAMMA - DELTA / (a_ + b_)) < 1e-9 else 'DIFFERS'}")
     pub = 72.0833333
     if max(ss) >= 2048:
         pred_inc = pub * 2048 ** 2
-        meas = exact[2048]["bands"]
-        print(f"\n  the published p = 72.083 predicts bands(2048) = {pred_inc:,.0f};")
+        meas = exact[2048]["key_tiles"]
+        print(f"\n  the published p = 72.083 predicts key_tiles(2048) = {pred_inc:,.0f};")
         print(f"  the measurement is {meas:,} -- the incumbent is out by "
               f"{pred_inc - meas:,.0f} cells ({pred_inc / meas - 1:+.2%}), and the")
-        print(f"  structural model is out by {band_base(2048, 2048) - meas}.")
+        print(f"  structural model is out by {key_tile_base(2048, 2048) - meas}.")
 
     # -- the remainder, which is what the crossover actually turns on
     print()
-    print("the non-band remainder `rest = fresh - band_fresh(S, C)`, and whether it is")
+    print("the non-key-tile remainder `rest = fresh - key_tile_fresh(S, C)`, and whether it is")
     print("linear in S.  This was NEVER testable: with two points a linear fit is exact")
     print("by construction, and `prefill.py` says so in its own comment.")
-    rest = {s: exact[s]["fresh"] - band_fresh(s, s) for s in ss}
+    rest = {s: exact[s]["fresh"] - key_tile_fresh(s, s) for s in ss}
     q, f0 = lstsq([[float(s) for s in ss], [1.0] * len(ss)], [rest[s] for s in ss])
     print(f"  rest(S) = {g(f0)}+ {q:,.0f} S")
     print(f"  {'S':>6} {'rest measured':>16} {'linear fit':>16} {'resid':>10} "
@@ -536,10 +536,10 @@ def report():
 
     # -- the whole-chunk model and what it implies
     print()
-    print("the whole chunk, and the crossover -- where the band family passes half of it")
+    print("the whole chunk, and the crossover -- where the key tile family passes half of it")
 
     def fresh_of(s, c):
-        return f0 + q * s + band_fresh(s, c)
+        return f0 + q * s + key_tile_fresh(s, c)
     for s in ss:
         m = fresh_of(s, s)
         print(f"    S = C = {s:>5}: model {m:>16,.0f}   measured {exact[s]['fresh']:>16,}   "
@@ -549,37 +549,37 @@ def report():
     a, b = got["b9"].get(512), got["b9"].get(1024)
     inc = None
     if a and b:
-        p_i = (b["bands"] - a["bands"]) / (b["s"] ** 2 - a["s"] ** 2)
-        q_i = ((b["fresh"] - b["bands"]) - (a["fresh"] - a["bands"])) / (b["s"] - a["s"])
-        f_i = (a["fresh"] - a["bands"]) - q_i * a["s"]
+        p_i = (b["key_tiles"] - a["key_tiles"]) / (b["s"] ** 2 - a["s"] ** 2)
+        q_i = ((b["fresh"] - b["key_tiles"]) - (a["fresh"] - a["key_tiles"])) / (b["s"] - a["s"])
+        f_i = (a["fresh"] - a["key_tiles"]) - q_i * a["s"]
         x_i = cross_of(p_i, -q_i, -f_i)
         inc = dict(p=p_i, q=q_i, fix=f_i, crossover=x_i)
-        print(f"\n  incumbent (2 points, base bands against a fresh rest)  S ~ {x_i:>9,.0f}")
+        print(f"\n  incumbent (2 points, base key tiles against a fresh rest)  S ~ {x_i:>9,.0f}")
     # The incumbent's question is ill-posed, and four points is what shows it.
-    # It sets a BASE band count against `fresh - bands_base`, and that remainder
-    # still contains the band family's own INTERACTION, which grows as 76 S^2.
+    # It sets a BASE key tile count against `fresh - key_tiles_base`, and that remainder
+    # still contains the key tile family's own INTERACTION, which grows as 76 S^2.
     # So it fits a quadratic with a line: the answer is whatever pair you secant.
-    rest_b = {s: exact[s]["fresh"] - band_base(s, s) for s in ss}
+    rest_b = {s: exact[s]["fresh"] - key_tile_base(s, s) for s in ss}
     qb, fb = lstsq([[float(s) for s in ss], [1.0] * len(ss)], [rest_b[s] for s in ss])
     pair_x = []
     for i in range(len(ss) - 1):
         a_, b_ = ss[i], ss[i + 1]
-        p_ = (exact[b_]["bands"] - exact[a_]["bands"]) / (b_ * b_ - a_ * a_)
+        p_ = (exact[b_]["key_tiles"] - exact[a_]["key_tiles"]) / (b_ * b_ - a_ * a_)
         q_ = (rest_b[b_] - rest_b[a_]) / (b_ - a_)
         f_ = rest_b[a_] - q_ * a_
         pair_x.append(dict(lo=a_, hi=b_, p=p_, crossover=cross_of(p_, -q_, -f_)))
         print(f"  the same construction on the {a_:>5} / {b_:<5} pair             "
               f"S ~ {pair_x[-1]['crossover']:>9,.0f}")
-    print("  -- it moves by a third across the sweep, because `fresh - bands_base`")
-    print("  keeps the band family's own interaction (76 S^2) and is not linear:")
+    print("  -- it moves by a third across the sweep, because `fresh - key_tiles_base`")
+    print("  keeps the key tile family's own interaction (76 S^2) and is not linear:")
     print(f"     a line through all four misses it by {rms([rest_b[s] - (fb + qb * s) for s in ss]):,.0f} "
           f"cells RMS, against {rms(rest_res):,.0f} for the fresh remainder.")
     print("  Setting a base count against a fresh one has no crossover at all when")
-    print("  it is written out: `bands_base = fresh/2` is `12 S^2 + (12,816 + q) S")
+    print("  it is written out: `key_tiles_base = fresh/2` is `12 S^2 + (12,816 + q) S")
     print("  + F = 0`, which has no positive root -- the family's interaction alone")
     print("  outgrows its base.  The quantity was never well posed.")
     x_str = cross_of(GAMMA, DELTA - qb, -fb)
-    x_fresh = cross_of(BAND_SC, BAND_S + BAND_C - q, -f0)
+    x_fresh = cross_of(KEY_TILE_SC, KEY_TILE_S + KEY_TILE_C - q, -f0)
     print()
     print(f"  fresh against fresh, all four points (THE one to quote)  "
           f"S ~ {x_fresh:>9,.0f}")
@@ -590,7 +590,7 @@ def report():
         keep = [s for s in ss if s != drop]
         qj, fj = lstsq([[float(s) for s in keep], [1.0] * len(keep)],
                        [rest[s] for s in keep])
-        jack.append((drop, cross_of(BAND_SC, BAND_S + BAND_C - qj, -fj)))
+        jack.append((drop, cross_of(KEY_TILE_SC, KEY_TILE_S + KEY_TILE_C - qj, -fj)))
     lo, hi = min(x for _, x in jack), max(x for _, x in jack)
     print(f"  leave-one-out on the remainder: "
           + ", ".join(f"-{d}: {x:,.0f}" for d, x in jack))
@@ -631,26 +631,26 @@ def report():
         print()
         print("the padded shapes, held OUT of the fit -- eval-plan §5.1's bias, measured")
         print("rather than simulated.  The closed form is the exactly-tiling one, so the")
-        print("excess IS the inert padding entering `bands`, the term being fitted, and")
+        print("excess IS the inert padding entering `key_tiles`, the term being fitted, and")
         print("`layout` is what the realised layouts predict it to be.")
-        print(f"  {'S':>6} {'bands measured':>16} {'layout predicts':>16} "
+        print(f"  {'S':>6} {'key tiles measured':>16} {'layout predicts':>16} "
               f"{'exact-tiling form':>18} {'excess':>12} {'excess %':>9}")
         for s, r in padded.items():
-            if r.get("bands") is None:
+            if r.get("key_tiles") is None:
                 continue
-            ex, gm = band_base(s, s), band_base_geom(s, s)
-            print(f"  {s:>6} {r['bands']:>16,} {gm:>16,}"
-                  f"{'' if gm == r['bands'] else ' MISMATCH'} {ex:>18,} "
-                  f"{r['bands'] - ex:>12,} {(r['bands'] / ex - 1) * 100:>8.3f}%")
+            ex, gm = key_tile_base(s, s), key_tile_base_geom(s, s)
+            print(f"  {s:>6} {r['key_tiles']:>16,} {gm:>16,}"
+                  f"{'' if gm == r['key_tiles'] else ' MISMATCH'} {ex:>18,} "
+                  f"{r['key_tiles'] - ex:>12,} {(r['key_tiles'] / ex - 1) * 100:>8.3f}%")
         print("  §5.1 priced the bias at the 1.5625% inert row fraction.  It is larger,")
         print("  because the realised `scores_per_row` also steps (64 -> 74) and the")
-        print("  per-token region pads separately -- `band_leads` reports neither.")
+        print("  per-token region pads separately -- `key_tile_leads` reports neither.")
 
     blob = dict(
         sets={t: {str(s): r for s, r in v.items()} for t, v in got.items()},
         repro=repro, pinned=pinned, pinned_fit=pinned_fit,
         fitted_on=sorted(exact), padded_held_out=sorted(padded),
-        band_models=dict(
+        key_tile_models=dict(
             m1_p=p1, m2_gamma=g2, m2_delta=d2, structural_gamma=GAMMA,
             structural_delta=DELTA,
             rms=dict(m1=rms(res["m1"]), m2=rms(res["m2"]), m3=rms(res["m3"])),

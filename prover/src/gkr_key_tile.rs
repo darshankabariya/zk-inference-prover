@@ -1,11 +1,11 @@
-//! Stream Q: the attention bands' lookups proved by LogUp-GKR.
+//! Stream Q: the attention key tiles' lookups proved by LogUp-GKR.
 //!
-//! Today a band region's lookups are proved by committing running-sum columns:
+//! Today a key tile region's lookups are proved by committing running-sum columns:
 //! `attn_trace::logup_cols` pairs the region's lookups, builds the pointwise
 //! partial sums, and the AIR's `finalize_logup_in_pairs` asserts the recurrence
 //! while a boundary constraint bindings the last row to the region's entry in
-//! `claims.use_sums`. Those columns are 88% of the bands' interaction cells and
-//! the bands are two thirds of the interaction tree at long context, so they are
+//! `claims.use_sums`. Those columns are 88% of the key tiles' interaction cells and
+//! the key tiles are two thirds of the interaction tree at long context, so they are
 //! the largest single thing being committed that does not have to be.
 //!
 //! This module proves the same fractional sums with a sumcheck instead. It
@@ -44,7 +44,7 @@
 //!
 //! ## One `prove_batch` per chunk
 //!
-//! Every instance from every band goes into a single `prove_batch` call. This is
+//! Every instance from every key tile goes into a single `prove_batch` call. This is
 //! not an optimisation to add later: a sumcheck's domain halves every round, so
 //! a per-region GKR would pay per-round launch overhead across dozens of small
 //! trees, which stream C named as the likeliest way the sumcheck's cost model
@@ -73,15 +73,15 @@ use stwo_constraint_framework::FrameworkEval;
 
 use crate::attn_witness::Variant as AttnVariant;
 
-/// One band region's lookup site, as `interaction_phase` reaches it.
+/// One key tile region's lookup site, as `interaction_phase` reaches it.
 ///
-/// `which` is the component index `devfrac::band_cols` uses -- 0 for the channel
+/// `which` is the component index `devfrac::key_tile_cols` uses -- 0 for the channel
 /// region, 1 for the grid, 3 for the per-token -- so a site names the same thing
 /// the existing code names.
 #[derive(Clone, Debug)]
 pub struct Site {
     /// B11 stream U, lever 3: which family and which region within it. Stream S
-    /// carried a band index alone; the dequant family's regions index into the
+    /// carried a key tile index alone; the dequant family's regions index into the
     /// plan's matmul list, and the two spaces are unrelated.
     pub reg: crate::gkrlink::Reg,
     pub which: usize,
@@ -94,8 +94,8 @@ pub struct Site {
 impl Site {
     pub fn tag(&self) -> String {
         match self.reg {
-            crate::gkrlink::Reg::Band(b) =>
-                format!("band{b}/{}", ["chan", "key", "out", "row"][self.which]),
+            crate::gkrlink::Reg::KeyTile(b) =>
+                format!("key_tile{b}/{}", ["chan", "key", "out", "row"][self.which]),
             crate::gkrlink::Reg::Deq(m) => format!("deq{m}"),
             crate::gkrlink::Reg::ResidualStream(g) => format!("residual_stream{g}"),
             crate::gkrlink::Reg::Freivalds(w) => format!("freivalds{w}"),
@@ -173,7 +173,7 @@ pub fn plan(sites: &[Site]) -> Vec<Inst> {
     out
 }
 
-/// The gates the verifier needs, one per instance. Every band instance is a
+/// The gates the verifier needs, one per instance. Every key tile instance is a
 /// LogUp fractional sum.
 pub fn gates(insts: &[Inst]) -> Vec<Gate> {
     vec![Gate::LogUp; insts.len()]
@@ -218,20 +218,20 @@ where
     }
 }
 
-/// The sites and input layers gathered from a pass over the bands.
+/// The sites and input layers gathered from a pass over the key tiles.
 ///
 /// `interaction_phase` builds each region's lookup list already, and that list
 /// plus the column slice it indexes is only in scope right there. Rather than
 /// reconstruct either outside -- two definitions of the same thing is how the
 /// two backends drift apart -- the interaction pass hands them to this collector at
-/// the same three sites where it calls `devfrac::band_cols`. Collecting is
+/// the same three sites where it calls `devfrac::key_tile_cols`. Collecting is
 /// purely additive: it reads the same columns and writes nothing the committed
 /// path can see.
 #[derive(Default)]
 pub struct Collect {
     /// the region whose lookups are arriving; the caller sets it before each
-    /// region's interaction pass, because a diagonal block band reaches
-    /// `interaction_phase` with no `BandAir` to carry its index
+    /// region's interaction pass, because a diagonal block key tile reaches
+    /// `interaction_phase` with no `KeyTileAir` to carry its index
     pub reg: crate::gkrlink::Reg,
     pub sites: Vec<Site>,
     /// the host-built input layers, in the order the host sites arrived
@@ -253,7 +253,7 @@ pub struct Collect {
     pub direct: Vec<SecureField>,
     /// fill `direct` as sites arrive; off for a proving run, on for the test
     pub want_direct: bool,
-    /// B11 stream S, lever 1: the backend owns the bands' fractional sums, so
+    /// B11 stream S, lever 1: the backend owns the key tiles' fractional sums, so
     /// `interaction_phase` builds no committed running-sum columns and pushes
     /// no use sums at the collected sites -- the GKR proves the same sums and
     /// `verify_composed` feeds them to `sums_cancel` directly. Off, collecting
@@ -318,8 +318,8 @@ impl Collect {
     /// B11 stream U, lever 3: one region's input layers from a fraction table
     /// the caller has already built.
     ///
-    /// `Collect::push` above is the bands' path, and it is band-shaped:
-    /// `attn_trace::look_frac` names the columns a band lookup reads. The
+    /// `Collect::push` above is the key tiles' path, and it is key-tile-shaped:
+    /// `attn_trace::look_frac` names the columns a key tile lookup reads. The
     /// dequant family's lookups come from its fraction IR instead, so the
     /// fractions arrive as a table and everything downstream -- the plan, the
     /// layers, the direct sum -- is the same code.
@@ -354,8 +354,8 @@ impl Collect {
 
 /// B11 stream T: one site's fractions, computed where its columns already are.
 ///
-/// This is the call `interaction_phase` makes at each of the three band sites,
-/// in place of `Collect::push` alone. When the band's fill left its columns on
+/// This is the call `interaction_phase` makes at each of the three key tile sites,
+/// in place of `Collect::push` alone. When the key tile's fill left its columns on
 /// the device there is nothing on the host to read -- `com.base` is empty and
 /// the collector's own `look_frac` would index straight out of it, which is
 /// what stream S's empty-env control recorded -- so the fractions are computed
@@ -374,13 +374,13 @@ fn feedcheck_on() -> bool {
     std::env::var("B11_FEEDCHECK").map(|v| v == "1").unwrap_or(false)
 }
 
-/// The bands' numerator kinds, in look order.
+/// The key tiles' numerator kinds, in look order.
 fn unit_of(looks: &[crate::attn_trace::Look]) -> Vec<bool> {
     looks.iter().map(crate::attn_trace::look_is_unit).collect()
 }
 
 /// Whether `cols` actually holds this component's committed span. A
-/// device-filled band has no host columns at all -- but the per-token site
+/// device-filled key tile has no host columns at all -- but the per-token site
 /// passes a list that always carries its two derived high-limb blocks, so
 /// "non-empty" is not the question; "long enough to hold the span" is.
 fn host_span(at: &[usize], which: usize, cols: &[crate::common::Eval]) -> bool {
@@ -389,7 +389,7 @@ fn host_span(at: &[usize], which: usize, cols: &[crate::common::Eval]) -> bool {
 
 pub fn feed_site(
     c: &mut Collect,
-    air: Option<&crate::devfrac::BandAir<'_>>,
+    air: Option<&crate::devfrac::KeyTileAir<'_>>,
     which: usize,
     log_rows: u32,
     looks: &[crate::attn_trace::Look],
@@ -401,7 +401,7 @@ pub fn feed_site(
 ) {
     let dev = air.and_then(|a| a.dev);
     let Some(d) = dev else {
-        // `B11_FEEDCHECK=1` with the band on the host: run the feed anyway over
+        // `B11_FEEDCHECK=1` with the key tile on the host: run the feed anyway over
         // an *uploaded* copy of the same committed columns and compare every
         // cell against the host builder, then throw the fed layers away. The
         // upload is the check's, exactly as `B7_M4_LOGUPIR=3` pays one; nothing
@@ -415,13 +415,13 @@ pub fn feed_site(
         c.push(which, log_rows, looks, cols, pre, exp, ranges);
         return;
     };
-    let air = air.expect("a band with device columns and no AIR");
+    let air = air.expect("a key tile with device columns and no AIR");
     assert_eq!(at, &d.at[..],
                "the committed component split disagrees with the device fill's");
     #[cfg(not(feature = "cuda"))]
     {
         let _ = (air, which, log_rows, looks, exp, ranges);
-        panic!("a band's columns are on the device on a build without the cuda feature");
+        panic!("a key tile's columns are on the device on a build without the cuda feature");
     }
     #[cfg(feature = "cuda")]
     {
@@ -450,7 +450,7 @@ pub fn feed_site(
                 e.gkr = false;
                 c.push_dev(which, log_rows, unit_of(looks), &e, &[], &base);
             }
-            _ => panic!("band component {which} has no eval"),
+            _ => panic!("key tile component {which} has no eval"),
         }
         // `B11_FEEDCHECK=1`: the same check `B7_M4_LOGUPIR=2` is for the paired
         // kernel -- every cell of every instance against the host builder, which
@@ -607,7 +607,7 @@ pub struct FamSite<'a> {
 
 /// One family region's lookups, wherever its columns are.
 ///
-/// This is `feed_site`'s shape for a family that is not the bands. A family's
+/// This is `feed_site`'s shape for a family that is not the key tiles. A family's
 /// interaction builder calls it in place of its own LogUp build under that
 /// family's flag: the region's fractions become GKR input layers instead of
 /// committed running-sum columns, and its claimed sum leaves `use_sums` for
@@ -686,7 +686,7 @@ pub fn fam_site<E: FrameworkEval>(c: &mut Collect, s: FamSite<'_>, eval: &E) {
     let mut flat = deq_fracs(&ir, log_rows, hpre, hbase);
     // `B11_FEEDCHECK=1`: the feed over an uploaded copy of the very columns the
     // host builder just read, cell for cell against it, then thrown away. Stream
-    // T's control for the bands, on the family that joins them; the upload is
+    // T's control for the key tiles, on the family that joins them; the upload is
     // the check's, exactly as `B7_M4_LOGUPIR=3` pays one.
     #[cfg(feature = "cuda")]
     if feedcheck_on() {
@@ -971,7 +971,7 @@ mod feedimpl {
                        ir.fracs.len());
             assert_eq!(ir.cols[1], base_ptrs.len(),
                        "{family}: base column count");
-            // The bands read the base tree alone (18.7's measurement, asserted
+            // The key tiles read the base tree alone (18.7's measurement, asserted
             // per shape here as `devfrac::assert_supplied` asserts it there), so
             // they hand over no preprocessed pointers and a preprocessed load
             // would index a null. B11 stream U: the dequant family *does* read
@@ -1031,13 +1031,13 @@ mod feedimpl {
             self.feed_secs += t0.elapsed().as_secs_f64();
         }
 
-        /// `B11_FEEDCHECK=1` on a host-filled band: the feed over an uploaded
+        /// `B11_FEEDCHECK=1` on a host-filled key tile: the feed over an uploaded
         /// copy of this site's committed columns, against the host builder,
         /// cell for cell. The fed layers are the check's and are dropped.
         #[allow(clippy::too_many_arguments)]
         pub fn feed_check(
             &self,
-            air: &crate::devfrac::BandAir<'_>,
+            air: &crate::devfrac::KeyTileAir<'_>,
             which: usize,
             log_rows: u32,
             looks: &[crate::attn_trace::Look],
@@ -1070,7 +1070,7 @@ mod feedimpl {
                     e.gkr = false;
                     scratch.push_dev(which, log_rows, unit_of(looks), &e, &[], &ptrs);
                 }
-                _ => panic!("band component {which} has no eval"),
+                _ => panic!("key tile component {which} has no eval"),
             }
             scratch.check_fed(0, looks, cols, pre, exp, ranges);
         }
@@ -1385,7 +1385,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             let t0 = Instant::now();
             // B11 stream T: a fed instance is already device-resident in MLE
             // layout and crosses nothing; only a host-built one -- a diagonal block
-            // band, whose fill stays on the host -- is uploaded. The two lists
+            // key tile, whose fill stays on the host -- is uploaded. The two lists
             // interleave back into instance order, which is the transcript's.
             let mut hs = c.layers.iter();
             let mut ds = c.dev_layers.into_iter();
@@ -1437,7 +1437,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             // B11 stream V, lever 1: the fed instances' input layers are freed
             // as their first halving is produced and re-fed in the last round,
             // which is the only round that reads them. The uploaded instances
-            // -- a host-filled diagonal block band's -- have no feed behind them, so
+            // -- a host-filled diagonal block key tile's -- have no feed behind them, so
             // `Refeed::droppable` says no and they are held as stream Q held
             // them. `B11_GKR_REFEED=0` puts every input layer back for the
             // whole run: the same binary, the before against the after.
@@ -1501,7 +1501,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
     }
 }
 
-/// What proving the bands' lookups cost, apart from the proof itself.
+/// What proving the key tiles' lookups cost, apart from the proof itself.
 #[derive(Default, Clone, Debug)]
 pub struct Cost {
     /// building every instance's input layer on the host
@@ -1671,14 +1671,14 @@ pub fn mix_shape(channel: &mut impl Channel, sites: &[Site]) {
     for s in sites {
         // B11 stream U, lever 3: the family joins the separator, because two
         // families' region indices are unrelated and a transcript that could
-        // not tell `band0/chan` from `deq0` would be mixing the same felt for
+        // not tell `key_tile0/chan` from `deq0` would be mixing the same felt for
         // two different shapes.
-        // B11 stream V, lever 3: the residual-stream family takes the next code, 2. Bands
-        // stay 0 and dequant 1, so a bands-only or bands+dequant statement
+        // B11 stream V, lever 3: the residual-stream family takes the next code, 2. Key tiles
+        // stay 0 and dequant 1, so a key-tiles-only or key tiles+dequant statement
         // mixes exactly the felts stream U's did -- which is what the four
-        // bands and two dequant wall digests gate.
+        // key tiles and two dequant wall digests gate.
         let (fam, reg) = match s.reg {
-            crate::gkrlink::Reg::Band(b) => (0u32, b as u32),
+            crate::gkrlink::Reg::KeyTile(b) => (0u32, b as u32),
             crate::gkrlink::Reg::Deq(m) => (1u32, m as u32),
             crate::gkrlink::Reg::ResidualStream(g) => (2u32, g as u32),
             crate::gkrlink::Reg::Freivalds(w) => (3u32, w as u32),
@@ -1699,11 +1699,11 @@ const _: () = assert!(N_LANES == 1usize << LOG_N_LANES);
 
 // ------------------------------------------------------------------ the test ---
 
-/// `zk-prover gkr` -- the GKR backend's own self-test on a synthetic band.
+/// `zk-prover gkr` -- the GKR backend's own self-test on a synthetic key tile.
 ///
 /// What it establishes, in the order the record reports it:
 ///
-/// 1. **The sums agree.** For every band region, the fractional sum the batched
+/// 1. **The sums agree.** For every key tile region, the fractional sum the batched
 ///    GKR yields from its output claims equals, exactly, the claimed sum
 ///    `interaction_phase` pushes onto `use_sums` from the committed running-sum
 ///    columns. This is the strongest correctness statement available without the
@@ -1753,7 +1753,7 @@ pub fn cmd(args: &[String]) {
     let pow = crate::attn_air::Powers::new(f[0], f[1], f[2], &sh, &l.chan, &l.key, &l.out, l.rw);
 
     let mut collect = Collect::with_direct(true);
-    collect.reg = crate::gkrlink::Reg::Band(0);
+    collect.reg = crate::gkrlink::Reg::KeyTile(0);
     let t0 = Instant::now();
     let inter = crate::attn_trace::interaction_phase(
         &a, &l, &cfg, &pow, &rel_exp, &rels, &com, &widths, true, !a.diagonal_block,
@@ -1763,7 +1763,7 @@ pub fn cmd(args: &[String]) {
     let sites: Vec<Site> = collect.sites.clone();
     let direct = collect.direct.clone();
     assert_eq!(sites.len(), inter.use_sums.len(),
-               "the collector saw {} band sites, `interaction_phase` pushed {} use sums",
+               "the collector saw {} key tile sites, `interaction_phase` pushed {} use sums",
                sites.len(), inter.use_sums.len());
 
     // The GKR runs on a channel replayed to the point the backend would reach it at,
@@ -1874,10 +1874,10 @@ fn tamper(proof: &mut GkrBatchProof) -> String {
     "nothing (the proof was empty)".into()
 }
 
-/// The band sites, derived from the plan alone.
+/// The key tile sites, derived from the plan alone.
 ///
 /// This is the verifier's route to the instance list, and it has to agree with
-/// what the prover's collector saw at the three `devfrac::band_cols` sites
+/// what the prover's collector saw at the three `devfrac::key_tile_cols` sites
 /// exactly -- the same rows, the same lookup counts, the same numerator kinds,
 /// in the same order. `Plan` is the object whose whole purpose is that the two
 /// sides cannot disagree about layouts, so the derivation reads only from it.
@@ -1895,7 +1895,7 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
         // ---- the channel region: the key and query range checks, all unit
         if cfg.range_check {
             out.push(Site {
-                reg: crate::gkrlink::Reg::Band(b),
+                reg: crate::gkrlink::Reg::KeyTile(b),
                 which: 0,
                 log_rows: lc.g.log_rows,
                 unit: vec![true; lc.pk + lc.pq],
@@ -1903,7 +1903,7 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
         }
 
         // ---- the grid region: one exp lookup per score slot, then the
-        // variant's remainder checks, then the V range checks. On a diagonal block band
+        // variant's remainder checks, then the V range checks. On a diagonal block key tile
         // the exp lookups carry `1 - mask` and are the only non-unit lookups in
         // the whole set.
         let mut unit = vec![!*diagonal_block; lk.q];
@@ -1913,21 +1913,21 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
         if cfg.range_check {
             unit.extend(vec![true; lk.pv]);
         }
-        out.push(Site { reg: crate::gkrlink::Reg::Band(b), which: 1,
+        out.push(Site { reg: crate::gkrlink::Reg::KeyTile(b), which: 1,
                         log_rows: lk.g.log_rows, unit });
 
         // ---- the per-token region: four denominator limbs per token. There is
-        // one per head band *group* -- one row maximum and one denominator per
-        // token, not per key block -- so it lives on the group's first band and
-        // every other band of the group rides on it. With `--kv-boundary` off that
+        // one per head key tile *group* -- one row maximum and one denominator per
+        // token, not per key block -- so it lives on the group's first key tile and
+        // every other key tile of the group rides on it. With `--kv-boundary` off that
         // is `!diagonal_block`, which is what this read used to say; with it on, a
-        // group is `c/s` prefix sub-bands plus a diagonal block and only the first
-        // sub-band carries the region. `plan.rows_band` is the plan's own
+        // group is `c/s` prefix sub-key-tiles plus a diagonal block and only the first
+        // sub-key-tile carries the region. `plan.rows_key_tile` is the plan's own
         // answer and `attn_trace::interaction_phase`'s `with_rows` argument is
         // fed from it, so this is the derivation the collector actually saw.
-        if plan.rows_band[b] {
+        if plan.rows_key_tile[b] {
             out.push(Site {
-                reg: crate::gkrlink::Reg::Band(b),
+                reg: crate::gkrlink::Reg::KeyTile(b),
                 which: 3,
                 log_rows: l.log_row,
                 unit: vec![true; 4 * l.rw],

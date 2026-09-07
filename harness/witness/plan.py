@@ -4,7 +4,7 @@
 One line per chunk, in the order the sequence proves them: the 32 layers and
 then the head. A line carries only what that chunk decides for itself -- its
 witness, its master table, and for the head the argmax and its row count.
-Everything the whole sequence shares (the round, the band sizes, the pins, the
+Everything the whole sequence shares (the round, the key tile sizes, the pins, the
 tight table) stays on the command line, because that is where the loop's
 shared arguments live and repeating them per line is how a driver drifts.
 

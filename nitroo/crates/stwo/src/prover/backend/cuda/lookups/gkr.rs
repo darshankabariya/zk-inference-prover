@@ -699,7 +699,7 @@ mod tests {
     fn next_layer_matches_cpu() {
         let mut rng = rng();
         // Sizes from the smallest halvable layer through the odd tails the
-        // band plan produces (2-entry instances over tall rows are halved all
+        // key tile plan produces (2-entry instances over tall rows are halved all
         // the way down), including sizes around the launch geometry.
         for log_n in [1usize, 2, 3, 5, 8, 9, 12] {
             let n = 1 << log_n;
@@ -812,7 +812,7 @@ mod tests {
     }
 
     /// The port's oracle in miniature: the whole batched proof, byte for byte.
-    /// Instances of differing sizes stagger into the batch exactly as the band
+    /// Instances of differing sizes stagger into the batch exactly as the key tile
     /// plan's odd tails do.
     #[test]
     fn prove_batch_matches_cpu() {
@@ -878,7 +878,7 @@ mod tests {
             .expect("the device proof verifies");
     }
 
-    /// Grand product through the whole pipeline too -- the band arm never uses
+    /// Grand product through the whole pipeline too -- the key tile arm never uses
     /// it, but the backend claims all four variants.
     /// B11 stream T: the fused round against the unfused path it replaces.
     ///

@@ -7,7 +7,7 @@ output rounded straight to int8 with a power-of-two `s_o`) and writes everything
 the composed proof's regions read:
 
   * **the attention block**, in `b5/extract.py`'s format (the S queries of the
-    last prefill chunk against the C-key prefix) -- the packed bands load a band
+    last prefill chunk against the C-key prefix) -- the packed key tiles load a key tile
     of heads from it;
   * **the matmul accumulators and scales**, as in B6 -- the dequant regions;
   * **new against B6**: the quantized weights `qw_*.i8` (the preprocessed side of
@@ -452,7 +452,7 @@ if __name__ == "__main__":
 
             # ---- the attention-output fold's scales ---------------------------------
             # The composed attnout region proves the *rectangle* sub-computation (the
-            # same statement the bands prove; the diagonal block stays outside every AIR
+            # same statement the key tiles prove; the diagonal block stays outside every AIR
             # in the project, B9's job), so its accumulators and denominators are the
             # recomputed `out`/`zz` above.  The V scales are the forward pass's,
             # power-of-two per (head, channel).
@@ -839,7 +839,7 @@ if __name__ == "__main__":
                     z_diagonal_block_max=int(numc.sum(-1).max()),
                     z_diagonal_block_min=int(numc.sum(-1).min()),
                     # which half the row maximum came from, per token: the reason
-                    # `Z >= nmax` is a statement about the total and not about a band
+                    # `Z >= nmax` is a statement about the total and not about a key tile
                     # 2026-09-01: block 0 has no prefix, so `sc` is
                     # (nh, S, 0) and `amax(-1)` raises "Expected reduction dim
                     # -1 to have non-zero size".  With no prefix keys every row

@@ -1,4 +1,4 @@
-// B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and band fills, on the
+// B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and key tile fills, on the
 // device.
 #include "fields.cuh"
 #include "utils.cuh"
@@ -73,7 +73,7 @@ __device__ __forceinline__ bool b65w_grid_row(const B65Grid &g, unsigned j,
 }
 
 // `attn_trace::split`: `(instance, local)` of a packed group index. `inst` is
-// the control 19.6 asked for by name -- it is invisible on a one-instance band
+// the control 19.6 asked for by name -- it is invisible on a one-instance key tile
 // and bites on every other one, which is what makes it worth having.
 __device__ __forceinline__ void b65w_split(unsigned g, unsigned n, unsigned insts,
                                            unsigned *inst, unsigned *local,
@@ -103,7 +103,7 @@ __device__ __forceinline__ bool b65w_ao_at(const B65AoCfg &cfg, unsigned j,
 }
 
 // `attn_trace::tok_of`.
-__device__ __forceinline__ bool b65w_tok(const B65BandCfg &cfg, unsigned j, unsigned i,
+__device__ __forceinline__ bool b65w_tok(const B65KeyTileCfg &cfg, unsigned j, unsigned i,
                                          unsigned *t) {
     const unsigned v = (cfg.rows_tok - 1u - j) * cfg.rw + i;
     *t = v;
@@ -447,14 +447,14 @@ extern "C" void b65_fill_attnout(const unsigned *acc, const unsigned *den,
     cuda_free_memory(d_pre);
 }
 
-// ============================================================== the band fill ==
+// ============================================================== the key tile fill ==
 
 // The channel region: `pk` key columns then `pq` query columns, each cell
 // offset into its range table so the committed value is non-negative.
-__global__ void b65w_band_chan(const int *__restrict__ kk, const int *__restrict__ qq,
+__global__ void b65w_key_tile_chan(const int *__restrict__ kk, const int *__restrict__ qq,
                                m31 *const *__restrict__ cols,
                                B65Mult m_k, B65Mult m_q,
-                               unsigned *__restrict__ counts, const B65BandCfg cfg) {
+                               unsigned *__restrict__ counts, const B65KeyTileCfg cfg) {
     const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= cfg.gc.rows) {
         return;
@@ -505,8 +505,8 @@ __global__ void b65w_band_chan(const int *__restrict__ kk, const int *__restrict
 
 // `Attn::col_idx`, `aux_of` and `table_key` in one place, because they are three
 // readings of the same scaled shift and getting them out of step is the bug the
-// band packing exists to make visible.
-__device__ __forceinline__ void b65w_grid_vals(const B65BandCfg &cfg,
+// key tile packing exists to make visible.
+__device__ __forceinline__ void b65w_grid_vals(const B65KeyTileCfg &cfg,
                                                const int *dd, const unsigned short *xx,
                                                const unsigned *sc,
                                                const unsigned *delta,
@@ -532,7 +532,7 @@ __device__ __forceinline__ void b65w_grid_vals(const B65BandCfg &cfg,
 
 // The grid region: the committed index, the numerator, the auxiliary limb the
 // split variant needs, and the packed V values.
-__global__ void b65w_band_grid(const int *__restrict__ dd,
+__global__ void b65w_key_tile_grid(const int *__restrict__ dd,
                                const unsigned short *__restrict__ num,
                                const unsigned short *__restrict__ xx,
                                const unsigned *__restrict__ sc,
@@ -540,7 +540,7 @@ __global__ void b65w_band_grid(const int *__restrict__ dd,
                                const int *__restrict__ vv, long long table0,
                                m31 *const *__restrict__ cols, unsigned n_aux,
                                B65Mult m_exp, B65Mult m_aux, B65Mult m_v,
-                               unsigned *__restrict__ counts, const B65BandCfg cfg) {
+                               unsigned *__restrict__ counts, const B65KeyTileCfg cfg) {
     const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= cfg.gk.rows) {
         return;
@@ -574,7 +574,7 @@ __global__ void b65w_band_grid(const int *__restrict__ dd,
                     // AIR reads it at multiplicity zero -- so it bumps nothing
                     // and cannot be off-table. This is the *only* thing the
                     // mask changes for the fill: the committed value below is
-                    // `col_idx(g)` either way, which is why a diagonal block band's
+                    // `col_idx(g)` either way, which is why a diagonal block key tile's
                     // columns matched cell for cell before this line existed
                     // and only its counters did not.
                     vis = (cfg.diagonal_block == 0u) || (cfg.mutate == B65W_MUT_NOMASK)
@@ -618,32 +618,32 @@ __global__ void b65w_band_grid(const int *__restrict__ dd,
     }
 }
 
-extern "C" void b65_fill_band_chan(const int *kk, const int *qq,
+extern "C" void b65_fill_key_tile_chan(const int *kk, const int *qq,
                                    m31 *const *cols,
                                    B65Mult m_k, B65Mult m_q,
-                                   unsigned *counts, B65BandCfg cfg) {
+                                   unsigned *counts, B65KeyTileCfg cfg) {
     const unsigned n = cfg.pk + cfg.pq;
     m31 **d = clone_to_device<m31 *>(const_cast<m31 **>(cols), n);
     dim3 g((cfg.gc.rows + B65W_BLOCK - 1u) / B65W_BLOCK,
            (max(cfg.pk, cfg.pq) + B65W_TILE - 1u) / B65W_TILE);
-    b65w_band_chan<<<g, B65W_BLOCK>>>(kk, qq, d, m_k, m_q, counts, cfg);
+    b65w_key_tile_chan<<<g, B65W_BLOCK>>>(kk, qq, d, m_k, m_q, counts, cfg);
     ASSERT_CUDA_SUCCESS(cudaDeviceSynchronize());
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
     cuda_free_memory(d);
 }
 
-extern "C" void b65_fill_band_grid(const int *dd, const unsigned short *num,
+extern "C" void b65_fill_key_tile_grid(const int *dd, const unsigned short *num,
                                    const unsigned short *xx, const unsigned *sc,
                                    const unsigned *delta, const int *vv,
                                    long long table0,
                                    m31 *const *cols, unsigned n_aux,
                                    B65Mult m_exp, B65Mult m_aux, B65Mult m_v,
-                                   unsigned *counts, B65BandCfg cfg) {
+                                   unsigned *counts, B65KeyTileCfg cfg) {
     const unsigned n = 2u * cfg.kq + n_aux + cfg.pv;
     m31 **d = clone_to_device<m31 *>(const_cast<m31 **>(cols), n);
     dim3 g((cfg.gk.rows + B65W_BLOCK - 1u) / B65W_BLOCK,
            (max(cfg.kq, cfg.pv) + B65W_TILE - 1u) / B65W_TILE);
-    b65w_band_grid<<<g, B65W_BLOCK>>>(dd, num, xx, sc, delta, vv, table0, d, n_aux,
+    b65w_key_tile_grid<<<g, B65W_BLOCK>>>(dd, num, xx, sc, delta, vv, table0, d, n_aux,
                                       m_exp, m_aux, m_v, counts, cfg);
     ASSERT_CUDA_SUCCESS(cudaDeviceSynchronize());
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
@@ -653,8 +653,8 @@ extern "C" void b65_fill_band_grid(const int *dd, const unsigned short *num,
 // The A.V outputs. The composed proof moves these into the attnout region and
 // passes `with_out = false`, so this kernel exists for the standalone path and
 // costs nothing when it is not called.
-__global__ void b65w_band_out(const unsigned *__restrict__ out,
-                              m31 *const *__restrict__ cols, const B65BandCfg cfg) {
+__global__ void b65w_key_tile_out(const unsigned *__restrict__ out,
+                              m31 *const *__restrict__ cols, const B65KeyTileCfg cfg) {
     const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= cfg.go.rows) {
         return;
@@ -680,13 +680,13 @@ __global__ void b65w_band_out(const unsigned *__restrict__ out,
     }
 }
 
-extern "C" void b65_fill_band_out(const unsigned *out, m31 *const *cols,
-                                  unsigned *counts, B65BandCfg cfg) {
+extern "C" void b65_fill_key_tile_out(const unsigned *out, m31 *const *cols,
+                                  unsigned *counts, B65KeyTileCfg cfg) {
     (void)counts;
     m31 **d = clone_to_device<m31 *>(const_cast<m31 **>(cols), cfg.oq);
     dim3 g((cfg.go.rows + B65W_BLOCK - 1u) / B65W_BLOCK,
            (cfg.oq + B65W_TILE - 1u) / B65W_TILE);
-    b65w_band_out<<<g, B65W_BLOCK>>>(out, d, cfg);
+    b65w_key_tile_out<<<g, B65W_BLOCK>>>(out, d, cfg);
     ASSERT_CUDA_SUCCESS(cudaDeviceSynchronize());
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
     cuda_free_memory(d);
@@ -695,11 +695,11 @@ extern "C" void b65_fill_band_out(const unsigned *out, m31 *const *cols,
 // The per-token region: the row maxima, the denominators, and the denominator's
 // low limb taken twice -- once against zero and once against `z_min`, which is
 // the pair the AIR range-checks.
-__global__ void b65w_band_tok(const unsigned *__restrict__ mm,
+__global__ void b65w_key_tile_tok(const unsigned *__restrict__ mm,
                               const unsigned *__restrict__ zz,
                               m31 *const *__restrict__ cols, unsigned with_max,
                               B65Mult m_lo, B65Mult m_hi,
-                              unsigned *__restrict__ counts, const B65BandCfg cfg) {
+                              unsigned *__restrict__ counts, const B65KeyTileCfg cfg) {
     const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= cfg.rows_tok) {
         return;
@@ -730,15 +730,15 @@ __global__ void b65w_band_tok(const unsigned *__restrict__ mm,
     }
 }
 
-extern "C" void b65_fill_band_tok(const unsigned *mm, const unsigned *zz,
+extern "C" void b65_fill_key_tile_tok(const unsigned *mm, const unsigned *zz,
                                   m31 *const *cols, unsigned with_max,
                                   B65Mult m_lo, B65Mult m_hi,
-                                  unsigned *counts, B65BandCfg cfg) {
+                                  unsigned *counts, B65KeyTileCfg cfg) {
     const unsigned n = (with_max != 0u ? cfg.rw : 0u) + 3u * cfg.rw;
     m31 **d = clone_to_device<m31 *>(const_cast<m31 **>(cols), n);
     dim3 g((cfg.rows_tok + B65W_BLOCK - 1u) / B65W_BLOCK,
            (cfg.rw + B65W_TILE - 1u) / B65W_TILE);
-    b65w_band_tok<<<g, B65W_BLOCK>>>(mm, zz, d, with_max, m_lo, m_hi, counts, cfg);
+    b65w_key_tile_tok<<<g, B65W_BLOCK>>>(mm, zz, d, with_max, m_lo, m_hi, counts, cfg);
     ASSERT_CUDA_SUCCESS(cudaDeviceSynchronize());
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
     cuda_free_memory(d);

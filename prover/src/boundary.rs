@@ -313,9 +313,9 @@ pub struct ChainVerdict {
     /// the two statements agree on everything that fixes the K/V layout, the
     /// adjacency `c_a + S == c_b` included
     pub kv_shape_ok: bool,
-    /// every head band group's out root equals its successor's in root
+    /// every head key tile group's out root equals its successor's in root
     pub kv_roots_equal: bool,
-    /// one entry per head band group, so a failure says which group moved
+    /// one entry per head key tile group, so a failure says which group moved
     pub kv: Vec<KvLink>,
     /// which conjunct of the pair's own axis failed, when it did.  `None` when
     /// the pair chains.
@@ -323,7 +323,7 @@ pub struct ChainVerdict {
     pub error: Option<String>,
 }
 
-/// One head band group's K/V link, for the record and for a failure to be
+/// One head key tile group's K/V link, for the record and for a failure to be
 /// attributable.
 #[derive(Debug, Clone, Serialize)]
 pub struct KvLink {
@@ -375,7 +375,7 @@ impl ChainVerdict {
                                                  boundary's layout"))
                 .or_else(|| need(v.coord_ok, "the two statements' unchecked (layer, block) \
                                               coordinates are not a token edge"))
-                .or_else(|| need(v.kv_roots_equal, "a head band group's out root is not its \
+                .or_else(|| need(v.kv_roots_equal, "a head key_tile group's out root is not its \
                                                     successor's in root")),
             Axis::None => Some(
                 "the two chunks share no edge of the (layer, token block) grid: they are \
@@ -410,7 +410,7 @@ impl ChainVerdict {
 /// plan, never opens a commitment and never touches a witness, so it cannot be
 /// made to panic by a malformed statement the way `Plan::new` can.  The layout
 /// it derives is the one `Plan::new` builds -- stream H's two residual-stream sides first,
-/// then, per head band group, the out side and (unless the chunk is block 0,
+/// then, per head key tile group, the out side and (unless the chunk is block 0,
 /// which has no unchecked prefix) the in side.
 #[derive(Clone, Copy, Debug)]
 pub struct KvLayout {
@@ -491,7 +491,7 @@ fn residual_stream_layout_eq(a: &crate::compose::Params, b: &crate::compose::Par
 pub fn kv_layout(p: &crate::compose::Params) -> Option<KvLayout> {
     p.kv_boundary.then(|| KvLayout {
         first: FIRST_TREE + residual_stream_sides(p),
-        groups: p.bands.len(),
+        groups: p.key_tiles.len(),
         with_in: p.c > 0,
     })
 }
@@ -599,7 +599,7 @@ pub fn chain_of(
     // The integer comparisons come first and they are not a formality.  Root
     // equality compares byte strings, so two roots are only *comparable* once
     // the two chunks agree on everything that fixes what a K/V column holds and
-    // how tall it is: the head geometry, the band decomposition, the two grid
+    // how tall it is: the head geometry, the key tile decomposition, the two grid
     // targets that choose the tilings, the quantisation widths that fix the
     // committed offsets, and -- the one that says the pair is a pair --
     // `c_a + S == c_b`, the consumer's context being the producer's plus one
@@ -612,7 +612,7 @@ pub fn chain_of(
             let p = (&fa.params, &fb.params);
             let ok = p.0.hd == p.1.hd
                 && p.0.nh == p.1.nh
-                && p.0.bands == p.1.bands
+                && p.0.key_tiles == p.1.key_tiles
                 && p.0.diagonal_block
                 && p.1.diagonal_block
                 && p.0.variant == p.1.variant
@@ -1798,9 +1798,9 @@ pub fn grid_cmd(args: &[String]) {
 //
 //  * K and V are single integers, not bf16 `(sm, ef)` pairs, so there is no
 //    `PACK` and no degree-1 packing question -- one cell per value.
-//  * a side is not one region's values but a *head band group's*, spread over
-//    the group's band components; the tree's column order is therefore the
-//    component-registration order, `[band's K][band's V]` band by band.
+//  * a side is not one region's values but a *head key tile group's*, spread over
+//    the group's key tile components; the tree's column order is therefore the
+//    component-registration order, `[key_tile's K][key_tile's V]` key tile by key tile.
 //  * a chunk commits an **out** side over its whole key set and an **in** side
 //    over its unchecked prefix, and the chain is `out(L, b) == in(L, b+1)` -- so
 //    every prefix key is committed twice.
@@ -1815,16 +1815,16 @@ pub fn grid_cmd(args: &[String]) {
 // of `FIRST_TREE = 3`, and the rule "add no commitment tree below index 3" is
 // what makes it unavoidable.
 //
-// Why one pair per head band group rather than one global pair: the bands run
-// all prefix bands first and then all diagonal block bands (CC's frozen order), so a
+// Why one pair per head key tile group rather than one global pair: the key tiles run
+// all prefix key tiles first and then all diagonal block key tiles (CC's frozen order), so a
 // producer's global out tree would read
 // `[g0 sub..][g1 sub..][g2 sub..][g0 diagonal_block][g1 diagonal_block][g2 diagonal_block]` while the
 // consumer's global in tree reads `[g0 sub..][g1 sub..][g2 sub..]` with each
-// group's last sub-band inline.  Per-group pairs put each group's diagonal block
-// immediately after its own sub-bands on both sides, and the two column lists
-// coincide without moving CC's band order.
+// group's last sub-key-tile inline.  Per-group pairs put each group's diagonal block
+// immediately after its own sub-key-tiles on both sides, and the two column lists
+// coincide without moving CC's key tile order.
 
-/// One K/V boundary tree as a band component sees it: which tree, and how many
+/// One K/V boundary tree as a key tile component sees it: which tree, and how many
 /// of that component's columns go into it.
 #[derive(Clone, Copy, Debug)]
 pub struct KvBoundary {
@@ -1834,14 +1834,14 @@ pub struct KvBoundary {
     pub n: usize,
 }
 
-/// One band's contribution to the K/V sides, as the plan knows it before any
+/// One key tile's contribution to the K/V sides, as the plan knows it before any
 /// column exists.
 #[derive(Clone, Copy, Debug)]
-pub struct KvBand {
-    /// which head band group the band belongs to
+pub struct KvKeyTile {
+    /// which head key tile group the key tile belongs to
     pub group: usize,
     /// the group's own block (`c = S` over the chunk's own decoded tokens)
-    /// rather than one of its unchecked-prefix sub-bands
+    /// rather than one of its unchecked-prefix sub-key-tiles
     pub diagonal_block: bool,
     pub pk: usize,
     pub pv: usize,
@@ -1853,19 +1853,19 @@ pub struct KvBand {
 #[derive(Clone, Debug)]
 pub struct KvSide {
     pub tree: usize,
-    /// which head band group's keys this side carries
+    /// which head key tile group's keys this side carries
     pub group: usize,
     /// the **out** side carries the group's whole key set, the chunk's own
     /// block included; the **in** side carries its unchecked prefix alone
     pub out: bool,
-    /// the bands that write it, ascending -- which is component-registration
+    /// the key tiles that write it, ascending -- which is component-registration
     /// order, and therefore the tree's column order
-    pub bands: Vec<usize>,
+    pub key_tiles: Vec<usize>,
     pub columns: usize,
     pub cells: usize,
 }
 
-/// The K/V sides, read off the per-band summary the plan already has.
+/// The K/V sides, read off the per-key-tile summary the plan already has.
 ///
 /// `first_tree` is where they start: after the three that were always there and
 /// after stream H's residual-stream sides, so that turning either feature on does not move
@@ -1876,12 +1876,12 @@ pub struct KvSide {
 /// tree -- `verify_ex` requires every committed tree to be read by at least one
 /// component -- so ordering out first means block 0 drops a *trailing* side and
 /// every other side keeps its index.
-pub fn kv_sides(first_tree: usize, bands: &[KvBand]) -> Vec<KvSide> {
-    let ngroups = bands.iter().map(|b| b.group + 1).max().unwrap_or(0);
+pub fn kv_sides(first_tree: usize, key_tiles: &[KvKeyTile]) -> Vec<KvSide> {
+    let ngroups = key_tiles.iter().map(|b| b.group + 1).max().unwrap_or(0);
     let mut sides: Vec<KvSide> = vec![];
     for g in 0..ngroups {
         for out in [true, false] {
-            let idx: Vec<usize> = bands
+            let idx: Vec<usize> = key_tiles
                 .iter()
                 .enumerate()
                 .filter(|(_, b)| b.group == g && (out || !b.diagonal_block))
@@ -1890,16 +1890,16 @@ pub fn kv_sides(first_tree: usize, bands: &[KvBand]) -> Vec<KvSide> {
             if idx.is_empty() {
                 continue;
             }
-            let columns = idx.iter().map(|i| bands[*i].pk + bands[*i].pv).sum();
+            let columns = idx.iter().map(|i| key_tiles[*i].pk + key_tiles[*i].pv).sum();
             let cells = idx
                 .iter()
-                .map(|i| bands[*i].pk * bands[*i].chan_rows + bands[*i].pv * bands[*i].key_rows)
+                .map(|i| key_tiles[*i].pk * key_tiles[*i].chan_rows + key_tiles[*i].pv * key_tiles[*i].key_rows)
                 .sum();
             sides.push(KvSide {
                 tree: first_tree + sides.len(),
                 group: g,
                 out,
-                bands: idx,
+                key_tiles: idx,
                 columns,
                 cells,
             });
@@ -1908,15 +1908,15 @@ pub fn kv_sides(first_tree: usize, bands: &[KvBand]) -> Vec<KvSide> {
     sides
 }
 
-/// What band `b` writes into the K/V trees, in the order the AIR must read the
-/// masks: one `KvBoundary` per side the band participates in, in `plan.kv`'s order.
+/// What key tile `b` writes into the K/V trees, in the order the AIR must read the
+/// masks: one `KvBoundary` per side the key tile participates in, in `plan.kv`'s order.
 ///
 /// `n` is the component's own column count -- `lay.pk` for `ChanEval`, `lay.pv`
 /// for `KeyEval` -- and the AIR asserts it against the mask count it reads.
-pub fn kv_boundaries_of(sides: &[KvSide], band: usize, n: usize) -> Vec<KvBoundary> {
+pub fn kv_boundaries_of(sides: &[KvSide], key_tile: usize, n: usize) -> Vec<KvBoundary> {
     sides
         .iter()
-        .filter(|s| s.bands.contains(&band))
+        .filter(|s| s.key_tiles.contains(&key_tile))
         .map(|s| KvBoundary { tree: s.tree, n })
         .collect()
 }
@@ -1957,7 +1957,7 @@ pub fn kv_report(sides: &[KvSide]) -> Value {
                 "tree": s.tree,
                 "group": s.group,
                 "side": if s.out { "out" } else { "in" },
-                "bands": s.bands,
+                "key_tiles": s.key_tiles,
                 "columns": s.columns,
                 "cells": s.cells,
             })
@@ -1974,7 +1974,7 @@ pub fn kv_report(sides: &[KvSide]) -> Value {
 
 /// One boundary side's root as the verifier reports it: which tree, which axis
 /// it binds, whether it is the `in` or the `out` side, and -- for a K/V side --
-/// which head band group.  Stream H named the residual pair `boundary_in` and
+/// which head key tile group.  Stream H named the residual pair `boundary_in` and
 /// `boundary_out` by tree index (3 and 4), which was right while a statement
 /// carried exactly one boundary pair; a statement now carries the sides its
 /// plan lists, and a reader asks for a side by label.
@@ -1984,7 +1984,7 @@ pub struct SideRoot {
     pub axis: Axis,
     /// `"in"` or `"out"`
     pub role: &'static str,
-    /// the head band group, on a K/V side; `None` on the residual pair
+    /// the head key tile group, on a K/V side; `None` on the residual pair
     pub group: Option<usize>,
     pub root: String,
 }
@@ -2038,7 +2038,7 @@ mod tests {
             c,
             hd: 32,
             nh: 3,
-            bands: vec![2, 1],
+            key_tiles: vec![2, 1],
             variant: "intexp".into(),
             diagonal_block: kv,
             layer_boundary: true,
@@ -2093,7 +2093,7 @@ mod tests {
     /// Root lists for a pair, with the boundaries the caller asks for made
     /// equal and every other root distinct.
     ///
-    /// Tree layout for `--kv-boundary` with two head band groups and `c > 0`
+    /// Tree layout for `--kv-boundary` with two head key tile groups and `c > 0`
     /// (stream PP: the preprocessed trace is two trees, so the boundary ones
     /// start at 4): `[0 shape][1 model][2 base][3 inter][4 residual stream in][5 residual stream out]
     /// [6 g0 out][7 g0 in][8 g1 out][9 g1 in]`.
@@ -2147,9 +2147,9 @@ mod tests {
             Side { bound: Boundary { tree: 4, kind: BindingKind::Out(1), n: 1 }, region: 0, log_rows: 1 },
         ];
         let kv = [
-            KvSide { tree: 5, group: 0, out: true, bands: vec![], columns: 0, cells: 0 },
-            KvSide { tree: 6, group: 0, out: false, bands: vec![], columns: 0, cells: 0 },
-            KvSide { tree: 7, group: 1, out: true, bands: vec![], columns: 0, cells: 0 },
+            KvSide { tree: 5, group: 0, out: true, key_tiles: vec![], columns: 0, cells: 0 },
+            KvSide { tree: 6, group: 0, out: false, key_tiles: vec![], columns: 0, cells: 0 },
+            KvSide { tree: 7, group: 1, out: true, key_tiles: vec![], columns: 0, cells: 0 },
         ];
         let v = side_roots(&residual_stream, &kv, root);
         let lab: Vec<(usize, Axis, &str, Option<usize>, &str)> =
@@ -2426,7 +2426,7 @@ mod tests {
     /// Stream LL (E11), log row 58: the precondition tree 0 depends on.
     ///
     /// With `frac_shared_per_head` false the master exponent is derived from
-    /// the chunk's own scores, so the bands' `dinv` and the exp table -- both
+    /// the chunk's own scores, so the key tiles' `dinv` and the exp table -- both
     /// preprocessed -- become functions of the witness and no derived root
     /// could check anything.  Both loaders refuse on this predicate; the test
     /// is here so `cargo test bounds` covers it.

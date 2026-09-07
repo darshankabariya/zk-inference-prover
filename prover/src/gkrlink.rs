@@ -1,6 +1,6 @@
 //! B11 stream S, lever 3: the link that makes the GKR backend sound.
 //!
-//! `gkrband` proves the bands' fractional sums, but its `GkrArtifact` ends in
+//! `gkr_key_tile` proves the key tiles' fractional sums, but its `GkrArtifact` ends in
 //! *claimed evaluations of the input layers at a random point* -- nothing bindings
 //! those to the committed base columns. This module closes that gap along the
 //! reduction of `experiments/b11/gkr/memo.md` section 4: with the input layer
@@ -69,7 +69,7 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkEval, INTERACTION_TRACE_IDX}
 
 use crate::attn_witness::Variant as AttnVariant;
 use crate::common::Eval;
-use crate::gkrband::Inst;
+use crate::gkr_key_tile::Inst;
 
 // ------------------------------------------------------------------------
 // The univariate IOP, promoted from the fork's examples crate
@@ -274,7 +274,7 @@ pub fn eval_is_first(coset: Coset, p: CirclePoint<SecureField>) -> SecureField {
 }
 
 // ------------------------------------------------------------------------
-// The affine looks: every band lookup's numerator and denominator as an
+// The affine looks: every key tile lookup's numerator and denominator as an
 // affine form over committed columns, in mask-relative coordinates.
 // ------------------------------------------------------------------------
 
@@ -335,16 +335,16 @@ pub enum RCol {
 /// Which region a site's looks and a folded weight's column belong to: the
 /// family, and the region's index within it.
 ///
-/// B11 stream U, lever 3: stream S keyed the fold's weights by band index
-/// alone, because the bands were the only family with a backend. The dequant
+/// B11 stream U, lever 3: stream S keyed the fold's weights by key tile index
+/// alone, because the key tiles were the only family with a backend. The dequant
 /// family's regions index into the plan's matmul list, and the two index spaces
 /// are unrelated -- so the key is the pair, and `link_params`' `BTreeMap` is
 /// keyed by it. Nothing else about the fold changes: a weight is still one
 /// `(region, column)` pair's coefficient in one height's affine combination.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Reg {
-    /// band `b`, in `Plan::diagonal_block`'s order (the prefix bands, then the diagonal blocks)
-    Band(usize),
+    /// key tile `b`, in `Plan::diagonal_block`'s order (the prefix key tiles, then the diagonal blocks)
+    KeyTile(usize),
     /// dequant region `m`, in the plan's matmul order
     Deq(usize),
     /// B11 stream V: residual-stream region `g`, in the plan's region order
@@ -356,17 +356,17 @@ pub enum Reg {
 }
 
 impl Default for Reg {
-    /// the collector's field needs one; band 0 is what stream S's single-family
+    /// the collector's field needs one; key tile 0 is what stream S's single-family
     /// collector always meant
     fn default() -> Self {
-        Reg::Band(0)
+        Reg::KeyTile(0)
     }
 }
 
 impl Reg {
     pub fn tag(&self) -> String {
         match self {
-            Reg::Band(b) => format!("band{b}"),
+            Reg::KeyTile(b) => format!("key_tile{b}"),
             Reg::Deq(m) => format!("deq{m}"),
             Reg::ResidualStream(g) => format!("residual_stream{g}"),
             Reg::Freivalds(w) => format!("freivalds{w}"),
@@ -375,7 +375,7 @@ impl Reg {
     }
 }
 
-/// An affine form `sum coeff * col + k` over one band's columns.
+/// An affine form `sum coeff * col + k` over one key tile's columns.
 #[derive(Clone, Debug, Default)]
 pub struct Affine {
     pub terms: Vec<(RCol, SecureField)>,
@@ -413,7 +413,7 @@ fn range_den(rel: &crate::attn_air::RangeRel, slot: Affine) -> Affine {
     den
 }
 
-/// The bands' lookup sites as affine forms, mirroring `gkrband::sites_of`'s
+/// The key tiles' lookup sites as affine forms, mirroring `gkr_key_tile::sites_of`'s
 /// site order and `attn_trace::interaction_phase`'s look order exactly. This
 /// is the verifier's half of "one definition of the fraction": the collector
 /// reads the committed columns, this names them, and the binding constraint is
@@ -443,7 +443,7 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
                                    Affine::col(RCol::Chan(lc.pk + pp), SecureField::one())),
                 });
             }
-            out.push(SiteLooks { reg: Reg::Band(b), which: 0, log_rows: lc.g.log_rows, looks });
+            out.push(SiteLooks { reg: Reg::KeyTile(b), which: 0, log_rows: lc.g.log_rows, looks });
         }
 
         // ---- grid region: exp lookups, the variant's remainder checks, the
@@ -488,19 +488,19 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
                 });
             }
         }
-        out.push(SiteLooks { reg: Reg::Band(b), which: 1, log_rows: lk.g.log_rows, looks });
+        out.push(SiteLooks { reg: Reg::KeyTile(b), which: 1, log_rows: lk.g.log_rows, looks });
 
         // ---- per-token region: the two denominator bounds' limbs. The high
         // limbs are not committed -- `hi = (Z - lo) * 2^-z_lo_bits` -- so they
         // fold into weights on the committed `zs` and `los` columns, which is
         // memo section 4's first consequence.
         //
-        // Gated on `plan.rows_band[b]` and not on `!diagonal_block` for the reason
-        // `gkrband::sites_of` gives at the same site: the region belongs to the
-        // head band group, and with `--kv-boundary` a group has `c/s` prefix
-        // sub-bands of which only the first carries it. `rows_band` is
+        // Gated on `plan.rows_key_tile[b]` and not on `!diagonal_block` for the reason
+        // `gkr_key_tile::sites_of` gives at the same site: the region belongs to the
+        // head key tile group, and with `--kv-boundary` a group has `c/s` prefix
+        // sub-key-tiles of which only the first carries it. `rows_key_tile` is
         // `!diagonal_block` with the flag off.
-        if plan.rows_band[b] {
+        if plan.rows_key_tile[b] {
             let with_max = plan.attn_variant != AttnVariant::Bf16x;
             let ms = if with_max { l.rw } else { 0 };
             let inv = SecureField::from(M31::from_u32_unchecked(1 << cfg.z_lo_bits).inverse());
@@ -535,7 +535,7 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
                     }),
                 });
             }
-            out.push(SiteLooks { reg: Reg::Band(b), which: 3, log_rows: l.log_row, looks });
+            out.push(SiteLooks { reg: Reg::KeyTile(b), which: 3, log_rows: l.log_row, looks });
         }
     }
     if plan.p.gkr_dequant {
@@ -1077,7 +1077,7 @@ fn aff_nodes(ir: &crate::cudagen::Ir) -> Vec<Result<AffForm, String>> {
 ///
 /// This is memo section 4's precondition, decided rather than asserted, and it
 /// is also the link's own derivation: the same walk answers "can this family be
-/// linked" and "what are the weights". `link_looks` states the bands' and
+/// linked" and "what are the weights". `link_looks` states the key tiles' and
 /// dequant's forms by hand -- those two are recorded and their digests gate
 /// every change -- and the families stream V adds take them from here, so a
 /// family's link cannot drift from the builder the kernel was compiled from.
@@ -1135,7 +1135,7 @@ pub fn ir_looks<F: Fn(usize, usize) -> RCol>(
 ///
 /// A family's `look_units` list, derived rather than written down: the
 /// collector needs it to split a site into unit and non-unit instances, and
-/// `gkrband::plan` needs the two to agree with what the fractions actually are.
+/// `gkr_key_tile::plan` needs the two to agree with what the fractions actually are.
 pub fn ir_units(ir: &crate::cudagen::Ir) -> Vec<bool> {
     let one = SecureField::one();
     aff_looks(ir)
@@ -1352,7 +1352,7 @@ pub fn link_params(
 /// `LinkEval` components a statement has before any proof exists (the emit
 /// path needs exactly this).
 pub fn link_heights(plan: &crate::compose::Plan) -> Vec<u32> {
-    let mut hs: Vec<u32> = crate::gkrband::sites_of(plan).iter().map(|s| s.log_rows).collect();
+    let mut hs: Vec<u32> = crate::gkr_key_tile::sites_of(plan).iter().map(|s| s.log_rows).collect();
     hs.sort_unstable();
     hs.dedup();
     hs
@@ -1390,8 +1390,8 @@ fn coords_to_evals(h: u32, c: SecureColumnByCoords<SimdBackend>) -> Vec<Eval> {
 
 /// Where one referenced column of the fold lives.
 ///
-/// B11 stream T: under a device fill a band's committed base columns have no
-/// host mirror, so the fold has to reach them where they are. A diagonal block band is
+/// B11 stream T: under a device fill a key tile's committed base columns have no
+/// host mirror, so the fold has to reach them where they are. A diagonal block key tile is
 /// always host-filled and the causal-mask columns are always host-built, so a
 /// single height can mix the two -- which costs nothing, because field addition
 /// is exact and associative and the two partial folds add up to the same column
@@ -1783,7 +1783,7 @@ pub fn check_height_cols(hl: &HeightLink, cols: &[Eval]) {
 /// Where the link's own columns are built.
 ///
 /// On the cuda backend the whole chain runs on the card and the sixteen columns per
-/// height reach the commitment device-resident, the way the bands' fraction
+/// height reach the commitment device-resident, the way the key tiles' fraction
 /// columns already do. `B11_LINKDEV=0` puts the build back on the host: that is
 /// the control the stream's own Δ is measured against, the same shape as T's
 /// `B11_GKR_FUSE=0`.
@@ -1876,7 +1876,7 @@ pub mod dev {
     /// downloaded the column so the host loops could read it, adding the
     /// host-resident terms on the way. There is nothing left on the host to
     /// read it, so the host-resident terms -- the preprocessed causal masks,
-    /// and every base column of a host-filled band -- are uploaded instead and
+    /// and every base column of a host-filled key tile -- are uploaded instead and
     /// the whole affine combine is one launch. The accumulation order is the
     /// weight order either way and field addition is exact, so it is the same
     /// column.

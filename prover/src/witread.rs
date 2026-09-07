@@ -51,7 +51,7 @@ pub enum Kind {
     /// extractor/AIR disagreement -- and they may only get faster.
     Check,
     /// Building the objects the regions read: the scores, the exp table, the
-    /// numerators, the denominators, the A.V outputs, the per-band tables.
+    /// numerators, the denominators, the A.V outputs, the per-key-tile tables.
     Construct,
     /// Stream W: getting and giving back the memory the four above run in.
     /// A chunk builds and frees several GB of `Vec` and stream P could not see
@@ -79,7 +79,7 @@ impl Kind {
 pub enum Site {
     /// one whole witness file, read and counted
     ReadFile,
-    /// `manifest.json`, which is read once per band today
+    /// `manifest.json`, which is read once per key tile today
     ReadManifest,
     /// the per-element widenings in the read helpers
     DecodeU16,
@@ -92,11 +92,11 @@ pub enum Site {
     /// again or to pair it up
     DecodeRecast,
     /// the head-cycling, S-and-C-tiling copies that put a dump's heads into a
-    /// band's layout
+    /// key tile's layout
     DecodeGather,
     /// rule 21: both diagonal block halves' denominators against the dump's `zz.i32`
     CheckRule21,
-    /// every band reads the same master exp table, asserted by comparing them
+    /// every key tile reads the same master exp table, asserted by comparing them
     CheckTableEq,
     /// torch's own numerators against the ones the prover just derived
     CheckTorchNum,
@@ -115,9 +115,9 @@ pub enum Site {
     Denominator,
     /// the A.V accumulators
     Av,
-    /// a prefix band's total denominator over the pair
+    /// a prefix key tile's total denominator over the pair
     ZzTotal,
-    /// Stream W: `--tight-table`'s two passes over every band's shifts -- the
+    /// Stream W: `--tight-table`'s two passes over every key tile's shifts -- the
     /// largest exp-table key the layer looks up, and then the count of keys the
     /// shrunk table can no longer hold. Both run in `main.rs`'s `tighten_of`,
     /// after `Layer::load` has returned and inside the same `build_secs`, which
@@ -125,11 +125,11 @@ pub enum Site {
     Tighten,
     /// Stream W: one big buffer got, or given back.
     Alloc,
-    /// the per-band loop's own work, outside the sites above
-    Bands,
+    /// the per-key-tile loop's own work, outside the sites above
+    KeyTiles,
     /// the seven matmuls and the head, assembled
     Mats,
-    /// the attnout region's accumulation over the bands
+    /// the attnout region's accumulation over the key tiles
     AttnOut,
 }
 
@@ -142,7 +142,7 @@ impl Site {
         Site::ManifestParse, Site::Scores, Site::Maxima, Site::Table,
         Site::Numerators, Site::Denominator, Site::Av, Site::ZzTotal,
         Site::Tighten, Site::Alloc,
-        Site::Bands, Site::Mats, Site::AttnOut,
+        Site::KeyTiles, Site::Mats, Site::AttnOut,
     ];
 
     pub fn kind(self) -> Kind {
@@ -180,7 +180,7 @@ impl Site {
             Site::ZzTotal => "construct/zz_total",
             Site::Tighten => "construct/tighten",
             Site::Alloc => "alloc/pool",
-            Site::Bands => "construct/bands",
+            Site::KeyTiles => "construct/key_tiles",
             Site::Mats => "construct/mats",
             Site::AttnOut => "construct/attnout",
         }
@@ -236,7 +236,7 @@ pub fn read_file(path: &str) -> Result<Vec<u8>, String> {
 }
 
 /// `manifest.json`, read and parsed, each half timed under its own site. Every
-/// band does this today, which is why the two are visible separately.
+/// key tile does this today, which is why the two are visible separately.
 pub fn read_json(path: &str) -> Result<Value, String> {
     let text = {
         let _s = scope(Site::ReadManifest);

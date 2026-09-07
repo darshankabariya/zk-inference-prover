@@ -82,10 +82,10 @@ __global__ void b65t_tables(const unsigned *__restrict__ expmap,
         y_col[i] = (m31)expmap[pat];
     }
 
-    // `base_mults[0]`: the exp table's multiplicities. Every band's fill
+    // `base_mults[0]`: the exp table's multiplicities. Every key tile's fill
     // scatter-added into a counter of its own (21.1) and the host's array was
     // their sum; the sum happens here instead, and nothing comes back. A null
-    // column is "no band filled on the device", so there is no counter to sum
+    // column is "no key tile filled on the device", so there is no counter to sum
     // and the host keeps this one.
     if (m_col != nullptr) {
         const unsigned d = b65t_row(cfg, i, jp, B65T_COL_M);

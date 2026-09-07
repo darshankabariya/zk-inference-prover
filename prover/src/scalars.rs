@@ -107,7 +107,7 @@ fn tr_base(tag: u8, c: M31) {
 ///
 /// Class 0 and 1 cover the first, class 2 (base field, >= 2) and 3 (extension)
 /// the second, and the first-occurrence index the third. Before this the class
-/// was 0/1/other and the repeat was not hashed at all, which is how a band whose
+/// was 0/1/other and the repeat was not hashed at all, which is how a key tile whose
 /// two claims coincided was served its sibling's IR and lost its `kernel
 /// fallback:` line.
 fn note(v: SecureField) {
@@ -720,7 +720,7 @@ mod tests {
     /// upper limbs zero (`Lower::scalar`'s width, which is in the fingerprint),
     /// and has it been seen before (the slot table interns by value, so a
     /// repeat costs neither slot nor op). Miss any of them and a hit serves an
-    /// IR the caller would not have lowered -- which is how a band whose two
+    /// IR the caller would not have lowered -- which is how a key tile whose two
     /// claims coincided was handed its sibling's IR and lost its announced
     /// `kernel fallback:` line.
     #[test]

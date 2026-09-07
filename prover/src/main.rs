@@ -25,7 +25,7 @@ mod scalars;
 mod devacc;
 mod devwfill;
 mod dev_residual_stream_fill;
-mod gkrband;
+mod gkr_key_tile;
 mod gkrlink;
 mod gencudakernels;
 mod cudakernels;
@@ -151,7 +151,7 @@ pub fn src_of(args: &[String]) -> Src {
         // mixed layout for a synthetic one.  `--layout b10` is the chain on all
         // seven, which is the shape the emit chain has to generate for B10.
         layout: arg_strs(args, "--layout", &[""])[0].clone(),
-        // B10 step 3: prove the band as the diagonal block instead of the prefix
+        // B10 step 3: prove the key tile as the diagonal block instead of the prefix
         // rectangle.  `--ctx` must equal `--s`; the mask is `key <= token`.
         diagonal_block: args.iter().any(|a| a == "--diagonal-block"),
         // Stream AA (E11): `--kv-boundary` also tiles the unchecked prefix into
@@ -412,7 +412,7 @@ fn probes_cmd(args: &[String]) {
 /// This is the question B6 exists to answer.  B5 proved one head at ~1,200 columns
 /// and 600 KiB-1 MiB of proof; B1's model has 24 x 14 = 336 head-instances, so
 /// per-head instantiation extrapolates to a 200-340 MB proof, two orders over
-/// a single-digit MiB proof.  Packing shares one column set across the band, and
+/// a single-digit MiB proof.  Packing shares one column set across the key tile, and
 /// the sweep below is what that is worth.
 fn pack_cmd(args: &[String]) {
     let src = src_of(args);
@@ -446,7 +446,7 @@ fn pack_cmd(args: &[String]) {
     emit("pack", json!({"points": points, "s": s, "ctx": c, "hd": hd}));
 }
 
-/// Everything the packed attention has to reject, at a band of instances.
+/// Everything the packed attention has to reject, at a key tile of instances.
 fn attn_probes_cmd(args: &[String]) {
     let src = src_of(args);
     let sh = Shape {
@@ -763,7 +763,7 @@ fn coord_of(l: &mut layer::Layer, args: &[String]) {
 pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     let vname = arg_strs(args, "--variants", &["intsplit6"])[0].clone();
     let variant = attn_witness::Variant::parse(&vname);
-    let bands = arg_list(args, "--bands", &[8usize, 4, 2]);
+    let key_tiles = arg_list(args, "--key-tiles", &[8usize, 4, 2]);
     let src = src_of(args);
     if let Some(dir) = &src.dir {
         // Stream LL (E11): the verifier's load.  Only the model half of the dump
@@ -777,14 +777,14 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
                  model-only load has no witness -- the size comes from the \
                  statement's `log_table` instead");
         // Under `--weights-only` **every** loader knob comes off the statement,
-        // not off the command line: the variant, the prefix band list, whether
+        // not off the command line: the variant, the prefix key tile list, whether
         // the dump is read with its diagonal block and whether the prefix is tiled, the
         // master table's size and `nmax`.  A verifier holds `Fixed`, not the
         // plan line that produced it -- and a chunk proved with `--tight-table`
         // carries a `log_table` that neither the manifest nor any flag names.
         // So `zk-prover expect-root --weights-only --params <tag>.fixed.json --witness
         // DIR` is the whole command, and there is no line to get wrong.
-        let (variant, vname, bands, src) = if weights_only {
+        let (variant, vname, key_tiles, src) = if weights_only {
             let f = arg_str(args, "--params").expect(
                 "--weights-only needs --params FILE (the chunk's own `Fixed.params`)");
             let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--params {f}: {e}"));
@@ -794,18 +794,18 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
                 serde_json::from_value(v.get("params").cloned().unwrap_or(v))
                     .unwrap_or_else(|e| panic!("--params {f}: not a statement's params: {e}"));
             eprintln!("expect-root: model-only load from the statement \
-(variant={} bands={:?} diagonal_block={} kv_boundary={} log_table={} nmax={})",
-                      p.variant, p.bands, p.diagonal_block, p.kv_boundary, p.log_table, p.nmax);
-            (attn_witness::Variant::parse(&p.variant), p.variant.clone(), p.bands.clone(),
+(variant={} key_tiles={:?} diagonal_block={} kv_boundary={} log_table={} nmax={})",
+                      p.variant, p.key_tiles, p.diagonal_block, p.kv_boundary, p.log_table, p.nmax);
+            (attn_witness::Variant::parse(&p.variant), p.variant.clone(), p.key_tiles.clone(),
              attn_witness::Src { log_table: p.log_table, nmax: p.nmax,
                                  diagonal_block: p.diagonal_block, tile: p.kv_boundary, ..src.clone() })
         } else {
-            (variant, vname, bands, src.clone())
+            (variant, vname, key_tiles, src.clone())
         };
         let loaded = if weights_only {
-            layer::Layer::load_weights(dir, &src, &bands, variant)
+            layer::Layer::load_weights(dir, &src, &key_tiles, variant)
         } else {
-            layer::Layer::load(dir, &src, &bands, variant)
+            layer::Layer::load(dir, &src, &key_tiles, variant)
         };
         match loaded {
             Ok(mut l) => {
@@ -836,10 +836,10 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
             }
         }
     }
-    let bands = arg_list(args, "--bands", &[2usize, 1]);
+    let key_tiles = arg_list(args, "--key-tiles", &[2usize, 1]);
     let mut l = layer::Layer::synthetic(
         arg_scalar(args, "--s", 32usize), arg_scalar(args, "--ctx", 128usize),
-        arg_scalar(args, "--hd", 64usize), &bands, variant, &src,
+        arg_scalar(args, "--hd", 64usize), &key_tiles, variant, &src,
         arg_scalar(args, "--nin", 64usize), arg_scalar(args, "--nout", 48usize), src.seed);
     // Stream Z: exercise the widened attention output on a synthetic layer --
     // a real dump declares its width in the manifest, a synthetic one takes it
@@ -870,7 +870,7 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
 }
 
 /// Stream J, off by default: `--tight-table [slack]` sizes the master exp table by
-/// the largest key the bands actually look up rather than by the manifest's
+/// the largest key the key tiles actually look up rather than by the manifest's
 /// `d_bits + spread`.  A negative slack is the tamper -- it takes the table *below*
 /// what the witness needs, leaving off-table keys with the numerators they already
 /// have, which no honest lookup argument can satisfy.
@@ -881,10 +881,10 @@ fn tighten_of(l: &mut layer::Layer, args: &[String]) {
     let slack: i32 = arg_scalar(args, "--tight-table", 0i32);
     let need = l.key_bits() as i32;
     let (before, after) = l.set_master_table((need + slack).max(1) as u32);
-    let off: usize = l.bands.iter().map(|b| b.off_table).sum();
+    let off: usize = l.key_tiles.iter().map(|b| b.off_table).sum();
     eprintln!("tight-table: 2^{before} -> 2^{after} (key max {}, {} bits, slack {slack}, \
 off_table {off})",
-              l.bands.iter().map(|b| b.key_max()).max().unwrap_or(0), need);
+              l.key_tiles.iter().map(|b| b.key_max()).max().unwrap_or(0), need);
 }
 
 /// The design point a lowering command works on: a witness dump, or -- with
@@ -906,8 +906,8 @@ pub fn plan_params(args: &[String]) -> (String, compose::Params) {
         let p = v.get("params").cloned().unwrap_or(v);
         let params: compose::Params = serde_json::from_value(p)
             .unwrap_or_else(|e| panic!("--params {f}: not a statement's params: {e}"));
-        eprintln!("params: {f} (s={} c={} bands={:?} kv_boundary={})",
-                  params.s, params.c, params.bands, params.kv_boundary);
+        eprintln!("params: {f} (s={} c={} key_tiles={:?} kv_boundary={})",
+                  params.s, params.c, params.key_tiles, params.kv_boundary);
         return (format!("--params {f}"), params);
     }
     let (l, vname) = layer_of(args);
@@ -953,14 +953,14 @@ fn expect_root_params(l: &layer::Layer, args: &[String], vname: &str) -> compose
 }
 
 pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Params {
-    let b0 = &l.bands[0];
+    let b0 = &l.key_tiles[0];
     let kmax = l.mats.iter().map(|m| m.kmax_blind()).max().unwrap()
         .min(bf16::KMAX_SOUND);
-    // B10 step 3: `bands` names the *prefix* bands only.  The diagonal block rides as one
-    // more band per prefix band, with the same `insts` and head offset, and the
+    // B10 step 3: `key_tiles` names the *prefix* key tiles only.  The diagonal block rides as one
+    // more key tile per prefix key tile, with the same `insts` and head offset, and the
     // plan rebuilds them from the flag rather than from the list.
-    let n_pre = l.bands.iter().filter(|b| !b.diagonal_block).count();
-    let diagonal_block = l.bands.len() > n_pre;
+    let n_pre = l.key_tiles.iter().filter(|b| !b.diagonal_block).count();
+    let diagonal_block = l.key_tiles.len() > n_pre;
 
     // The sound defaults.  Each gadget is on wherever the witness can state
     // it; a witness that cannot is refused, and only the named skip gets past
@@ -993,16 +993,16 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
              --embed), so the residual stream it consumes cannot be bound to the embedding \
              rows of its ids; pass --unsound-skip-embedding to prove the unbound statement");
     let embed = has_embed && !skip("embedding");
-    // Stream AA (E11): with the K/V boundary the unchecked prefix is `l.nsub` bands of
-    // `S` keys per head band group, so the chunk's context is the sub-band's
-    // times `nsub` and the head band list takes every `nsub`-th entry.  Both are
+    // Stream AA (E11): with the K/V boundary the unchecked prefix is `l.nsub` key tiles of
+    // `S` keys per head key tile group, so the chunk's context is the sub-key-tile's
+    // times `nsub` and the head key tile list takes every `nsub`-th entry.  Both are
     // the identity when `nsub == 1`, which is every run without the flag.
-    // Block 0 (open item 1) has no prefix band at all: `nsub == 0`, `c == 0`,
-    // and the head band list is the diagonal block bands', one per group.
-    let (c, bands) = if l.nsub == 0 {
-        (0, l.band_sizes[n_pre..].to_vec())
+    // Block 0 (open item 1) has no prefix key tile at all: `nsub == 0`, `c == 0`,
+    // and the head key tile list is the diagonal block key tiles', one per group.
+    let (c, key_tiles) = if l.nsub == 0 {
+        (0, l.key_tile_sizes[n_pre..].to_vec())
     } else {
-        (b0.shape.c * l.nsub, l.band_sizes[..n_pre].iter().step_by(l.nsub).copied().collect())
+        (b0.shape.c * l.nsub, l.key_tile_sizes[..n_pre].iter().step_by(l.nsub).copied().collect())
     };
     // Stream JJ (E11): data-derived and overridable exactly as `ao_rem_bits`
     // is, and for the same reason -- a driver pins the model-wide worst case
@@ -1098,7 +1098,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
     }
     compose::Params {
         s: l.ao.s, c, hd: l.ao.hd, nh: l.ao.nh,
-        bands,
+        key_tiles,
         diagonal_block,
         // Stream E: the head's order-key claim.  Not under `--no-glue`'s gate,
         // because a head dump has no wiring columns to switch off.
@@ -1197,9 +1197,9 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // On by default wherever the chunk has its own block;
         // `--unsound-skip-kv-boundary` turns the trees off.
         kv_boundary: kv_boundary,
-        // B11 stream Q: opt in to the LogUp-GKR backend for the bands. A flag and
+        // B11 stream Q: opt in to the LogUp-GKR backend for the key tiles. A flag and
         // not an env mode, because it changes the proof.
-        gkr_bands: flag(args, "--gkr-bands"),
+        gkr_key_tiles: flag(args, "--gkr-key-tiles"),
         gkr_dequant: flag(args, "--gkr-dequant"),
         gkr_residual_stream: flag(args, "--gkr-residual-stream"),
         gkr_freivalds: flag(args, "--gkr-freivalds"),
@@ -1480,7 +1480,7 @@ fn expect_root_cmd(args: &[String]) {
 ///
 /// `PLAN` is an `o_plan.py` plan file: one `compose` argument line per chunk.
 /// A plan line carries only the chunk's *own* arguments, so `--pins` supplies
-/// the driver's shared prefix (`--round`, `--numbits`, `--variants`, `--bands`,
+/// the driver's shared prefix (`--round`, `--numbits`, `--variants`, `--key-tiles`,
 /// `--kmax` and the fold's two -- `ss_box.sh`'s `SEQPT`).
 ///
 /// `--weights-only --params-dir DIR` is the verifier's form: each row is derived
@@ -1511,7 +1511,7 @@ fn model_roots_cmd(args: &[String]) {
         .unwrap_or_else(|e| panic!("--plan {plan}: {e}"));
     let limit = arg_scalar::<usize>(args, "--limit", usize::MAX);
     // Stream LL box half.  A plan file holds a chunk's *own* arguments; the
-    // shared pins (`--round`, `--numbits`, `--variants`, `--bands`, `--kmax`,
+    // shared pins (`--round`, `--numbits`, `--variants`, `--key-tiles`, `--kmax`,
     // the fold's two) live in the driver that runs it (`ss_box.sh`'s `SEQPT`),
     // so a plan line alone does not compose.  `--pins` is that prefix.
     let pins: Vec<String> = arg_str(args, "--pins").unwrap_or_default()
@@ -1607,7 +1607,7 @@ fn model_roots_cmd(args: &[String]) {
         seen.insert((layer, c));
         // Stream PP (E11), the desk record's open item 2: the shape tree holds
         // two columns that are functions of the *calibration* and of no weight
-        // -- `band/dinv` and the exp table's value column, both classified
+        // -- `key_tile/dinv` and the exp table's value column, both classified
         // `PreNeeds::Manifest` -- and the calibration they need is
         // `frac_per_head` and `master_table_bits`.  `model-roots` published
         // `log_table` and not `frac_per_head`, so a verifier deriving the shape
@@ -1817,9 +1817,9 @@ fn compose_cmd(args: &[String]) {
         }
     }
     let params = expect_root_params(&l, args, &vname);
-    eprintln!("compose: {} bands={:?} variant={} kmax={} rem={} p={} jv=[{},{}] jo=[{},{}] \
+    eprintln!("compose: {} key_tiles={:?} variant={} kmax={} rem={} p={} jv=[{},{}] jo=[{},{}] \
 acc={}+{}",
-              l.source, l.band_sizes, vname, params.kmax, params.ao_rem_bits, params.freivalds_p,
+              l.source, l.key_tile_sizes, vname, params.kmax, params.ao_rem_bits, params.freivalds_p,
               params.ao_jv_min, params.ao_jv_max, params.ao_jo_min, params.ao_jo_max,
               params.ao_acc_lo_bits, params.ao_acc_hi_bits);
     if params.ao_acc_mag {
@@ -1851,7 +1851,7 @@ acc={}+{}",
 /// Stream J: the master exp table at three sizes on one witness.
 ///
 /// `sized` is what the driver picks today (`d_bits + spread`, or `--table-bits`);
-/// `tight` is the largest key the bands actually look up; `tamper` is one bit
+/// `tight` is the largest key the key tiles actually look up; `tamper` is one bit
 /// below that, which leaves keys off the table holding the numerators they already
 /// have -- an internally consistent witness that only the lookup can object to.
 fn oversize_probes_cmd(args: &[String]) {
@@ -1859,7 +1859,7 @@ fn oversize_probes_cmd(args: &[String]) {
     let mut points = vec![];
     let mut probe = |name: &str, l: &layer::Layer| -> bool {
         let params = params_of(l, args, &vname);
-        let off: usize = l.bands.iter().map(|b| b.off_table).sum();
+        let off: usize = l.key_tiles.iter().map(|b| b.off_table).sum();
         eprintln!("oversize probe {name}: table 2^{} off_table {off}", params.log_table);
         let (j, accepts) = compose_once(l, &params, &Default::default(), None);
         points.push(json!({
@@ -1882,7 +1882,7 @@ fn oversize_probes_cmd(args: &[String]) {
 
     let mut bad = layer_clone(&l);
     bad.set_master_table(need - 1);
-    assert!(bad.bands.iter().map(|b| b.off_table).sum::<usize>() > 0,
+    assert!(bad.key_tiles.iter().map(|b| b.off_table).sum::<usize>() > 0,
             "the tamper probe has no off-table key -- nothing to reject");
     assert!(!probe("tamper", &bad),
             "a witness with keys past the table produced an accepting proof");
@@ -2094,11 +2094,11 @@ fn compose_probes_cmd(args: &[String]) {
                    "the Y = W X identity"), "corrupted qx accepted");
     drop(l2);
 
-    // 3. a corrupted key in band 0: the Q.K^T identity
+    // 3. a corrupted key in key tile 0: the Q.K^T identity
     let mut l2 = layer_clone(&l);
-    let n = l2.bands[0].kk.len();
-    l2.bands[0].kk[1234 % n] += 1;
-    assert!(!probe("corrupted key (band 0)", &l2, &Default::default(), "Q.K^T"),
+    let n = l2.key_tiles[0].kk.len();
+    l2.key_tiles[0].kk[1234 % n] += 1;
+    assert!(!probe("corrupted key (key tile 0)", &l2, &Default::default(), "Q.K^T"),
             "corrupted key accepted");
     drop(l2);
 
@@ -2122,7 +2122,7 @@ fn compose_probes_cmd(args: &[String]) {
     //     diagonal block's `sn` and the prefix's `sn` are what the per-token region's `az`
     //     is read against, and the AIR's fold drops the masked slot, so the two no
     //     longer add up to the denominator the witness claims.
-    if l.bands.iter().any(|b| b.diagonal_block) {
+    if l.key_tiles.iter().any(|b| b.diagonal_block) {
         for (k, i) in [(0usize, 11usize), (1, 4242)] {
             let mut l2 = layer_clone(&l);
             l2.unmask_diagonal_block(i);
@@ -2387,7 +2387,7 @@ statable here"),
         //
         //   producer side, q and k   one dequant output copy      deq_out_ok
         //   producer side, all three one committed input          nn_in_ok
-        //   consumer side, all three one band cell                nn_out_ok
+        //   consumer side, all three one key tile cell                nn_out_ok
         //   the rotation's table     one angle cell               root_ok
         //   the quantize's table     one scale exponent           root_ok
         //   the division table       one quotient                 sums_cancel
@@ -2440,9 +2440,9 @@ statable here"),
                                "the pinned preprocessed root"),
                         "a bent quantize exponent accepted");
             }
-            // the consumer side: one *band* cell moved and the bands rebuilt
+            // the consumer side: one *key tile* cell moved and the key tiles rebuilt
             // around it, so the attention this chunk proves is an honest
-            // attention over the bent column and nothing but the band's own
+            // attention over the bent column and nothing but the key tile's own
             // claim against the quantize region's output can see it.  The
             // generator is the witness's, so this needs a synthetic layer.
             for (which, name) in [(0usize, "Q"), (1, "K"), (2, "V")] {
@@ -2451,50 +2451,50 @@ statable here"),
                 // witness under test with a different layer and the probe would
                 // measure nothing about this chunk
                 if arg_str(args, "--witness").is_some() {
-                    eprintln!("  band {name}: SKIP -- the consumer-side control needs the \
-synthetic generator (Layer::synth_residual_stream_band_bent); on a dump the bands are B1's");
+                    eprintln!("  key_tile {name}: SKIP -- the consumer-side control needs the \
+synthetic generator (Layer::synth_residual_stream_key_tile_bent); on a dump the key_tiles are B1's");
                     continue;
                 }
                 let mut lb = layer_of(args).0;
                 if lb.residual_stream.is_none() {
-                    eprintln!("  band {name}: SKIP -- no synthetic wiring family here");
+                    eprintln!("  key tile {name}: SKIP -- no synthetic wiring family here");
                     continue;
                 }
-                lb.synth_residual_stream_band_bent(seed, ga, round, which, 41);
+                lb.synth_residual_stream_key_tile_bent(seed, ga, round, which, 41);
                 // stream SS: with a folded `v` there is no quantize region on
                 // that side, so the falsified field is the dequant output binding
                 // and not `nn_out_ok` -- the fold publishes the int8 cell
-                // itself and the bands' V is what reads it
-                let binding = if which == 2 && rplan.output_claim_band("v") {
-                    "the binding deq_out[v] == the sum of the bands' own V claims"
+                // itself and the key tiles' V is what reads it
+                let binding = if which == 2 && rplan.output_claim_key_tile("v") {
+                    "the binding deq_out[v] == the sum of the key tiles' own V claims"
                 } else {
-                    "the binding nn_out == the sum of the bands' own claims"
+                    "the binding nn_out == the sum of the key tiles' own claims"
                 };
-                assert!(!probe(&format!("band {name}: one committed cell the matmuls did not produce"), &lb, &Default::default(),
+                assert!(!probe(&format!("key tile {name}: one committed cell the matmuls did not produce"), &lb, &Default::default(),
                                binding),
-                        "a band column the layer's matmuls did not produce accepted");
+                        "a key tile column the layer's matmuls did not produce accepted");
             }
-            // stream NN (NN-2): and the prefix band's own copy of Q, whose
+            // stream NN (NN-2): and the prefix key tile's own copy of Q, whose
             // counterparty is its group's diagonal block rather than a quantize region.
-            // The bend moves one prefix cell and the band's whole attention is
+            // The bend moves one prefix cell and the key tile's whole attention is
             // rebuilt around it, so the chunk is an honest attention over the
             // cache with queries the `q` matmul did not produce -- and only
             // `nn_q_ok` can see that.
             if arg_str(args, "--witness").is_some() {
                 eprintln!("  prefix Q: SKIP -- the consumer-side control needs the \
-synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the bands are B1's");
+synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the key_tiles are B1's");
             } else {
                 let mut lp = layer_of(args).0;
                 if lp.residual_stream.is_none() {
                     eprintln!("  prefix Q: SKIP -- no synthetic wiring family here");
-                } else if lp.bands.iter().all(|b| b.diagonal_block) {
-                    eprintln!("  prefix Q: SKIP -- this shape has no prefix band");
+                } else if lp.key_tiles.iter().all(|b| b.diagonal_block) {
+                    eprintln!("  prefix Q: SKIP -- this shape has no prefix key tile");
                 } else {
                     lp.synth_residual_stream_prefix_q_bent(seed, ga, round, 41);
-                    assert!(!probe("prefix band Q: one query the diagonal block does not carry", &lp,
+                    assert!(!probe("prefix key tile Q: one query the diagonal block does not carry", &lp,
                                    &Default::default(),
-                                   "the binding prefix.Q == diagonal_block.Q, per band group"),
-                            "a prefix band's queries that are not the diagonal block's accepted");
+                                   "the binding prefix.Q == diagonal_block.Q, per key tile group"),
+                            "a prefix key tile's queries that are not the diagonal block's accepted");
                 }
             }
         }
@@ -2545,7 +2545,7 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
     //     to it.  A stream that cannot make this reject has not bound the root.
     //
     //     Every side is probed, not just the first: an out side and an in side
-    //     are written by different sets of bands, and a binding that held on one
+    //     are written by different sets of key tiles, and a binding that held on one
     //     and not the other would chain a chunk to a prefix it never proved.
     if params.kv_boundary {
         let n_sides = compose::Plan::new(&params).kv.len();
@@ -2726,8 +2726,8 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
 /// The Layer is plain data; clone by rebuilding the pieces (Attn is not Clone).
 fn layer_clone(l: &layer::Layer) -> layer::Layer {
     layer::Layer {
-        bands: l.bands.iter().map(attn_clone).collect(),
-        band_sizes: l.band_sizes.clone(),
+        key_tiles: l.key_tiles.iter().map(attn_clone).collect(),
+        key_tile_sizes: l.key_tile_sizes.clone(),
         head_offsets: l.head_offsets.clone(),
         nsub: l.nsub,
         mats: l.mats.iter().map(|m| layer::Mat {
@@ -3029,7 +3029,7 @@ fn selftest(args: &[String]) {
             runs.push(json!({"spec": sp.label(), "point": o.json(&w.source)}));
         }
     }
-    // The packed attention, at a band of instances.  `intexp` is left out on
+    // The packed attention, at a key tile of instances.  `intexp` is left out on
     // purpose: its table is indexed by the integer shift, so it needs 2^22-2^23 rows
     // on this witness and ~4.5 GiB per run -- nine of those in one process is how the
     // first version of this selftest got OOM-killed.  `intsplit6` exercises the same
@@ -3163,7 +3163,7 @@ fn main() {
         "residual-stream-probes" => residual_stream_probes_cmd(&args),
         "selftest" => selftest(&args),
         "fpcompare" => fpcompare_cmd(&args),
-        "gkr" => gkrband::cmd(&args),
+        "gkr" => gkr_key_tile::cmd(&args),
         other => {
             eprintln!("unknown subcommand {other:?}; \
                        expected tables|dequant|width|kmax|probes|pack|attn-probes|exprprobe|cudacheck|cudaemit|logupcheck|genemit|\

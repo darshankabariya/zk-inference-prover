@@ -1,4 +1,4 @@
-// B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and band fills, on the
+// B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and key tile fills, on the
 // device.
 //
 // 20.6's row 1 -- "the other three fills, 0.975 s, and none of them needs a new
@@ -10,14 +10,14 @@
 // What is different from `b65_fill.cu`, and why this is its own file:
 //
 //  * **a region is several grids, not one.** The dequant region is one
-//    `MatLayout`; a band is four sub-regions on three different `Grid`s plus a
+//    `MatLayout`; a key tile is four sub-regions on three different `Grid`s plus a
 //    per-token block that is not a `Grid` at all. So the unit here is the
 //    sub-region and there are seven kernels, not one templated pair.
 //  * **the counters are an array of arrays.** `commit_base` threads `mult_exp`
-//    and `mult_r` through by `&mut` across every band, and `mult_r` is one
+//    and `mult_r` through by `&mut` across every key tile, and `mult_r` is one
 //    vector per range width. The kernels take the counter arrays they bump with
 //    their lengths and one shared off-table counter, which is what makes the
-//    bands' "awkward" part (20.6) ordinary.
+//    key tiles' "awkward" part (20.6) ordinary.
 //  * **nothing here is recomputed that the probes can corrupt away.** The grid
 //    region's numerator column is `num[g]`, not `table[key(g)]`, even though an
 //    honest witness makes those equal: `Corrupt::Numerator` replaces one
@@ -33,8 +33,8 @@
 // The negative controls (`B7_M4_WFILLMUT`). Each is a way one of these three
 // fills could plausibly be wrong, and 19.6's caution is the reason `inst` is on
 // the list: a control that cannot fire on the shape under test is a finding and
-// not a pass, and the band's instance split is invisible on a one-instance
-// band.
+// not a pass, and the key tile's instance split is invisible on a one-instance
+// key tile.
 #define B65W_MUT_NONE 0u
 #define B65W_MUT_NOPERM 1u   // write at the coset row, not the committed one
 #define B65W_MUT_CHAN 2u     // the slot-to-channel map, off by one
@@ -42,7 +42,7 @@
 #define B65W_MUT_DESCEND 4u  // the chunk order, not descending
 #define B65W_MUT_INST 5u     // the (instance, local) split of a packed group
 #define B65W_MUT_AOREF 6u    // attnout's f64 reference, ties to even
-// B11 stream N, lever 2: the diagonal block band's own way of being wrong. A masked
+// B11 stream N, lever 2: the diagonal block key tile's own way of being wrong. A masked
 // slot is not a lookup, so it bumps nothing; ignoring the mask bumps every
 // slot and the multiplicity delta parts company with the host's. This is the
 // defect the lever was opened on, made deliberate.
@@ -116,7 +116,7 @@ extern "C" void b65_fill_attnout(const unsigned *acc, const unsigned *den,
                                  int *q_out, unsigned *want_out,
                                  unsigned *counts, B65AoCfg cfg);
 
-// ----------------------------------------------------------------- bands --
+// ----------------------------------------------------------------- key tiles --
 
 // `attn_trace::commit_base`, whose four sub-regions are four kernels sharing
 // one config. `variant` is `Variant`: 0 bf16x, 1 intexp, 2 intsplit(k).
@@ -124,7 +124,7 @@ extern "C" void b65_fill_attnout(const unsigned *acc, const unsigned *den,
 #define B65W_VAR_INTEXP 1u
 #define B65W_VAR_INTSPLIT 2u
 
-struct B65BandCfg {
+struct B65KeyTileCfg {
     B65Grid gc, gk, go;   // LayoutChan, LayoutKey, LayoutOut
     unsigned pk, pq;      // LayoutChan: keys and queries per row
     unsigned kq, pv;      // LayoutKey: scores per row, values per row
@@ -139,7 +139,7 @@ struct B65BandCfg {
     unsigned range_check;
     unsigned z_lo_bits, z_hi_bits;
     long long z_min;
-    // B11 stream N, lever 2: is this the diagonal block band? The grid kernel
+    // B11 stream N, lever 2: is this the diagonal block key tile? The grid kernel
     // needs it for one thing only -- a masked slot is not a lookup at all, so
     // it bumps no exp multiplicity (`Attn::visible`). The committed columns are
     // the same either way.
@@ -148,25 +148,25 @@ struct B65BandCfg {
 };
 
 // `counts[0]` is the off-table total the host adds to `Tables::off_table`.
-extern "C" void b65_fill_band_chan(const int *kk, const int *qq,
+extern "C" void b65_fill_key_tile_chan(const int *kk, const int *qq,
                                    m31 *const *cols,
                                    B65Mult m_k, B65Mult m_q,
-                                   unsigned *counts, B65BandCfg cfg);
+                                   unsigned *counts, B65KeyTileCfg cfg);
 
-extern "C" void b65_fill_band_grid(const int *dd, const unsigned short *num,
+extern "C" void b65_fill_key_tile_grid(const int *dd, const unsigned short *num,
                                    const unsigned short *xx, const unsigned *sc,
                                    const unsigned *delta, const int *vv,
                                    long long table0,
                                    m31 *const *cols, unsigned n_aux,
                                    B65Mult m_exp, B65Mult m_aux, B65Mult m_v,
-                                   unsigned *counts, B65BandCfg cfg);
+                                   unsigned *counts, B65KeyTileCfg cfg);
 
-extern "C" void b65_fill_band_out(const unsigned *out, m31 *const *cols,
-                                  unsigned *counts, B65BandCfg cfg);
+extern "C" void b65_fill_key_tile_out(const unsigned *out, m31 *const *cols,
+                                  unsigned *counts, B65KeyTileCfg cfg);
 
-extern "C" void b65_fill_band_tok(const unsigned *mm, const unsigned *zz,
+extern "C" void b65_fill_key_tile_tok(const unsigned *mm, const unsigned *zz,
                                   m31 *const *cols, unsigned with_max,
                                   B65Mult m_lo, B65Mult m_hi,
-                                  unsigned *counts, B65BandCfg cfg);
+                                  unsigned *counts, B65KeyTileCfg cfg);
 
 #endif

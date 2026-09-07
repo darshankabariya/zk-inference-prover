@@ -14,7 +14,7 @@ extern "C" void gen_b65_dispatch(
     unsigned n_rows, unsigned n_cols);
 // The unpaired variant, added by B11 stream T's device feed. The generated
 // header declares both (`cudagen.rs`, `emit_dispatch`), so the stand-in must
-// too -- without it `prover/src/gkrband.rs`'s `FeedPlan::fill` leaves
+// too -- without it `prover/src/gkr_key_tile.rs`'s `FeedPlan::fill` leaves
 // `gen_b65_feed_dispatch` undefined and the cuda arm does not link at all on a
 // fork with no installed store.
 extern "C" void gen_b65_feed_dispatch(

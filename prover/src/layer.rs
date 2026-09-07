@@ -40,11 +40,11 @@ pub fn m31_of(v: i64) -> M31 {
 /// silently depends on, pinned.
 ///
 /// Two preprocessed families come off the dump's *manifest* and not off the
-/// statement -- the bands' `dinv` (`b6_k_dinv` / `b6_x_dinv`, the per-instance
+/// statement -- the key tiles' `dinv` (`b6_k_dinv` / `b6_x_dinv`, the per-instance
 /// master-table scale `2^-(F - frac_i)`) and the master exp table's value column
 /// (`b6_exp_y`) -- and both are functions of `frac_per_head`. With
 /// `frac_shared_per_head` **false** the forward pass did not publish one
-/// exponent per head, `Attn::build` derives `frac_per_inst` from the band's own
+/// exponent per head, `Attn::build` derives `frac_per_inst` from the key tile's own
 /// shifts (`attn_witness.rs`, `d_max_of`), and tree 0 is then a function of the
 /// *witness*: two chunks of one layer would legitimately carry two different
 /// tree-0 roots, and a derived root would be checking nothing.
@@ -58,7 +58,7 @@ pub fn frac_shared_refusal(man: &serde_json::Value) -> Option<String> {
     }
     Some(format!(
         "manifest: frac_shared_per_head is {} -- the master exponent is then \
-         derived from this chunk's own scores, so the bands' `dinv` and the exp \
+         derived from this chunk's own scores, so the key_tiles' `dinv` and the exp \
          table (tree 0) would be a function of the witness and no verifier could \
          derive this chunk's `pre_root` from the model. Re-extract the layer with \
          a per-head Q scale (`extract.py` writes `frac_per_head`).",
@@ -120,7 +120,7 @@ pub struct AttnOut {
     pub nh: usize,
     pub s: usize,
     pub hd: usize,
-    /// (nh, S, hd): the A.V outputs (the rectangle recomputation, as the bands)
+    /// (nh, S, hd): the A.V outputs (the rectangle recomputation, as the key tiles)
     pub acc: Vec<i64>,
     /// (nh, S): the committed denominators Z
     pub den: Vec<i64>,
@@ -202,15 +202,15 @@ impl AttnOut {
 }
 
 pub struct Layer {
-    pub bands: Vec<Attn>,
-    pub band_sizes: Vec<usize>,
+    pub key_tiles: Vec<Attn>,
+    pub key_tile_sizes: Vec<usize>,
     pub head_offsets: Vec<usize>,
-    /// Stream AA (E11): how many bands one head band group's unchecked prefix is
+    /// Stream AA (E11): how many key tiles one head key tile group's unchecked prefix is
     /// tiled into.  1 everywhere before this stream and without `--kv-boundary`;
-    /// `C / S` with it, which is what makes a consumer's sub-band the same
+    /// `C / S` with it, which is what makes a consumer's sub-key-tile the same
     /// `Shape` as the producer's diagonal block; 0 on block 0 of a sequence, which has
-    /// no unchecked prefix and so no prefix band.  `params_of` reads it back to
-    /// recover the chunk's real context and its head band list.
+    /// no unchecked prefix and so no prefix key tile.  `params_of` reads it back to
+    /// recover the chunk's real context and its head key tile list.
     pub nsub: usize,
     pub mats: Vec<Mat>,
     pub ao: AttnOut,
@@ -357,7 +357,7 @@ impl Layer {
     ///
     /// Two model-derived things it deliberately leaves out, because both are a
     /// function of the *chunk's* shape as well as the layer's: the master exp
-    /// table (`1 << log_table` rows) and the bands' per-instance `dinv` scales.
+    /// table (`1 << log_table` rows) and the key tiles' per-instance `dinv` scales.
     /// Those are covered by the derived tree-0 root, not here.  SHA-256,
     /// little-endian, in the order `Plan::pre_ids` walks the families.
     pub fn model_hash(&self) -> String {
@@ -833,13 +833,13 @@ pub const FREIVALDS_GROUPS: [(&str, &[&str]); 5] =
      ("down", &["down"]), ("head", &["lm_head"])];
 
 impl Layer {
-    pub fn load(dir: &str, cfg: &Src, band_sizes: &[usize], variant: Variant)
+    pub fn load(dir: &str, cfg: &Src, key_tile_sizes: &[usize], variant: Variant)
                 -> Result<Self, String> {
         let man: serde_json::Value = witread::read_json(&format!("{dir}/manifest.json"))?;
         let g = |k: &str| man[k].as_u64().ok_or(format!("manifest: missing {k}"));
         let (nh, s, c, hd) = (g("heads")? as usize, g("s")? as usize,
                               g("c")? as usize, g("hd")? as usize);
-        assert_eq!(band_sizes.iter().sum::<usize>(), nh, "bands must cover every head");
+        assert_eq!(key_tile_sizes.iter().sum::<usize>(), nh, "key tiles must cover every head");
         // Stream LL (E11), log row 58: refused here rather than caught later, so
         // that no chunk whose tree 0 depends on its own scores can be composed at
         // all.  `Layer::load_weights` refuses on the same predicate.
@@ -847,13 +847,13 @@ impl Layer {
             return Err(why);
         }
         // B9 step 1a: the master exponent is layer-wide.  `Attn::build` takes the
-        // largest `frac` over the band's *own* heads, so which table a band builds
+        // largest `frac` over the key tile's *own* heads, so which table a key tile builds
         // depends on how the heads were split -- and the three assertions below
-        // then hold only where every band happens to contain a head at the
+        // then hold only where every key tile happens to contain a head at the
         // layer-wide maximum (4 of 24 Qwen-0.5B layers; 0 of 32 Llama-3.1-8B ones,
         // B8.md section 2 item 3).  The forward pass already writes every head's
         // exponent into the manifest, so the layer-wide maximum is read, not
-        // derived, and handed to every band: each then scales its shifts up to it
+        // derived, and handed to every key tile: each then scales its shifts up to it
         // and reads one table of `d_bits + spread` rows.  The rows are what the
         // sharing costs -- 2^`master_table_bits`, up to 8x a spread-0 layer's --
         // and `off_table` reports any key the chosen table cannot hold.
@@ -864,7 +864,7 @@ impl Layer {
             .flatten()
             .filter(|f| *f > f64::MIN);
         // B10 step 1: on a real dump `--table-bits 0` means *this layer's* table.
-        // `Attn::build`'s own default caps at 2^22 -- right for a single-band
+        // `Attn::build`'s own default caps at 2^22 -- right for a single-key-tile
         // benchmark, wrong for a model whose layers want 2^24..2^26 -- and every
         // driver so far has worked around it by reading `master_table_bits` out of
         // the manifest and passing it back in.  A chunk loop cannot: one
@@ -879,11 +879,11 @@ impl Layer {
             cfg.clone()
         };
         // B10 step 3: a dump extracted with `--diagonal-block` carries the diagonal block
-        // beside the prefix rectangle, and it rides as one more band per prefix
-        // band -- same `insts`, same head offset, `C = S`.
+        // beside the prefix rectangle, and it rides as one more key tile per prefix
+        // key tile -- same `insts`, same head offset, `C = S`.
         let has_diagonal_block = man["diagonal_block"].as_bool().unwrap_or(false);
         // Stream W: the layer's attention columns, read and widened once for
-        // every band that will gather out of them.  Each of the six bands used
+        // every key tile that will gather out of them.  Each of the six key tiles used
         // to open these files for itself -- `qq.i16` and `mm.i32` six times, a
         // half's `kk`, `vv` and `num` three times each -- so a chunk read
         // 1,502 MB where 740 MB exists and the read was the largest single
@@ -892,21 +892,21 @@ impl Layer {
         // one image instead of over three copies of it.
         // Open item 1: block 0 of a sequence has no unchecked prefix, so `c == 0`,
         // `kk.i16` is empty and there is no prefix half to read and no prefix
-        // band to build -- the diagonal block is the group's only band and carries its
-        // per-token region (`compose.rs`'s `rows_band`, `Powers::as_solo_diagonal_block`).
+        // key tile to build -- the diagonal block is the group's only key tile and carries its
+        // per-token region (`compose.rs`'s `rows_key_tile`, `Powers::as_solo_diagonal_block`).
         assert!(c > 0 || has_diagonal_block,
                 "a c = 0 dump is block 0: it is the diagonal block and needs a `--diagonal-block` dump");
         let raw = {
-            let _s = witread::scope(Site::Bands);
+            let _s = witread::scope(Site::KeyTiles);
             AttnRaw::read(dir, &man, c > 0, has_diagonal_block)?
         };
-        let mut bands = vec![];
+        let mut key_tiles = vec![];
         let mut head_offsets = vec![];
         let mut sizes = vec![];
         let mut off = 0usize;
         // Stream AA (E11), layout design A: with `--kv-boundary` the unchecked prefix
-        // is loaded as `c / s` sub-bands of exactly `S` keys each rather than as
-        // one rectangle, because that is what makes a consumer's sub-band `b`
+        // is loaded as `c / s` sub-key-tiles of exactly `S` keys each rather than as
+        // one rectangle, because that is what makes a consumer's sub-key-tile `b`
         // the same `Shape` -- and so the same `LayoutKey`, and so a column of
         // the same height -- as the producer's diagonal block.  `Attn::load_from` reads
         // the same bytes with a key offset; nothing about the dump changes.
@@ -916,12 +916,12 @@ impl Layer {
         let nsub = if c == 0 { 0 } else if cfg.tile { c / s } else { 1 };
         let sub_c = if cfg.tile { s } else { c };
         {
-            let _s = witread::scope(Site::Bands);
-            for insts in band_sizes {
+            let _s = witread::scope(Site::KeyTiles);
+            for insts in key_tile_sizes {
                 for k in 0..nsub {
                     let sh = Shape { s, c: sub_c, hd, insts: *insts };
                     let src = Src { head: off, ..cfg.clone() };
-                    bands.push(Attn::load_from(&raw, &man, off, sh, variant, src.nmax,
+                    key_tiles.push(Attn::load_from(&raw, &man, off, sh, variant, src.nmax,
                                                src.log_table, master, false, k * sub_c)?);
                     head_offsets.push(off);
                     sizes.push(*insts);
@@ -932,11 +932,11 @@ impl Layer {
         if has_diagonal_block {
             let mut off = 0usize;
             {
-                let _s = witread::scope(Site::Bands);
-                for insts in band_sizes {
+                let _s = witread::scope(Site::KeyTiles);
+                for insts in key_tile_sizes {
                     let sh = Shape { s, c: s, hd, insts: *insts };
                     let src = Src { head: off, ..cfg.clone() };
-                    bands.push(Attn::load_from(&raw, &man, off, sh, variant, src.nmax,
+                    key_tiles.push(Attn::load_from(&raw, &man, off, sh, variant, src.nmax,
                                                src.log_table, master, true, 0)?);
                     head_offsets.push(off);
                     sizes.push(*insts);
@@ -947,29 +947,29 @@ impl Layer {
             // commits is the total: `Z >= nmax` is true of the sum and of neither
             // half, because the key whose shift is zero may be in either
             //
-            // Stream AA: with the prefix tiled, "the pair" is a head band
-            // group -- `nsub` sub-bands and the diagonal block -- and the total is over
-            // all of them.  The region lives on the group's *first* sub-band,
-            // which is `plan.rows_band`'s choice on the other side of the wall.
-            let n_pre = band_sizes.len() * nsub;
-            // the band that carries group `g`'s region: its first prefix
-            // sub-band, or -- block 0, no prefix at all -- its diagonal block.
-            // `g * nsub` alone is band 0 for every group when `nsub == 0`, and
+            // Stream AA: with the prefix tiled, "the pair" is a head key tile
+            // group -- `nsub` sub-key-tiles and the diagonal block -- and the total is over
+            // all of them.  The region lives on the group's *first* sub-key-tile,
+            // which is `plan.rows_key_tile`'s choice on the other side of the wall.
+            let n_pre = key_tile_sizes.len() * nsub;
+            // the key tile that carries group `g`'s region: its first prefix
+            // sub-key-tile, or -- block 0, no prefix at all -- its diagonal block.
+            // `g * nsub` alone is key tile 0 for every group when `nsub == 0`, and
             // that read as "the extractor and the AIR disagree about the mask
             // on 16351 of 16384 rows" (open item 1) when every row agreed.
             let first = |g: usize| if nsub > 0 { g * nsub } else { n_pre + g };
             {
                 let _s = witread::scope(Site::ZzTotal);
-                for g in 0..band_sizes.len() {
-                    let mut tot = vec![0i64; bands[first(g)].zz.len()];
+                for g in 0..key_tile_sizes.len() {
+                    let mut tot = vec![0i64; key_tiles[first(g)].zz.len()];
                     for b in (g * nsub..(g + 1) * nsub).chain(std::iter::once(n_pre + g)) {
-                        assert_eq!(bands[b].zz.len(), tot.len(),
-                                   "band {b} of group {g} has a different row count");
-                        for (a, x) in tot.iter_mut().zip(&bands[b].zz) {
+                        assert_eq!(key_tiles[b].zz.len(), tot.len(),
+                                   "key tile {b} of group {g} has a different row count");
+                        for (a, x) in tot.iter_mut().zip(&key_tiles[b].zz) {
                             *a += x;
                         }
                     }
-                    bands[first(g)].zz_total = Some(tot);
+                    key_tiles[first(g)].zz_total = Some(tot);
                 }
             }
             // Rule 21, on the join: the prover recomputes both halves' numerators
@@ -981,8 +981,8 @@ impl Layer {
             let _s = witread::scope(Site::CheckRule21);
             let zz32 = read_i32(&format!("{dir}/zz.i32"))?;
             let mut bad = 0usize;
-            for (g, insts) in band_sizes.iter().enumerate() {
-                let tot = bands[first(g)].zz_total.as_ref().unwrap();
+            for (g, insts) in key_tile_sizes.iter().enumerate() {
+                let tot = key_tiles[first(g)].zz_total.as_ref().unwrap();
                 for i in 0..*insts {
                     let h = head_offsets[first(g)] + i;
                     for t in 0..s {
@@ -997,23 +997,23 @@ impl Layer {
                         on {bad} of {} (head, token) rows -- the extractor and the AIR do \
                         not agree about the causal mask", nh * s);
         }
-        // The image has served every band it will serve, and it is a third of a
+        // The image has served every key tile it will serve, and it is a third of a
         // gigabyte.  Freeing it here rather than at the end of the function
         // keeps the layer's high-water mark where it was before this stream.
         drop(raw);
-        let band_sizes = &sizes[..];
-        // one master table serves every band: same rows, same contents.  With a
+        let key_tile_sizes = &sizes[..];
+        // one master table serves every key tile: same rows, same contents.  With a
         // layer-wide `master` this holds by construction; without one (a dump whose
         // Q scale is not per head) it is the old precondition, and the message
         // names the fix.
         {
             let _s = witread::scope(Site::CheckTableEq);
-            for b in &bands[1..] {
-                assert_eq!(b.log_table, bands[0].log_table, "bands disagree on table rows");
-                assert_eq!(b.table, bands[0].table,
-                           "bands disagree on the exp table (no layer-wide master exponent: \
+            for b in &key_tiles[1..] {
+                assert_eq!(b.log_table, key_tiles[0].log_table, "key tiles disagree on table rows");
+                assert_eq!(b.table, key_tiles[0].table,
+                           "key_tiles disagree on the exp table (no layer-wide master exponent: \
                             the dump has frac_shared_per_head = false)");
-                assert_eq!(b.frac, bands[0].frac, "bands disagree on the master exponent");
+                assert_eq!(b.frac, key_tiles[0].frac, "key tiles disagree on the master exponent");
             }
         }
 
@@ -1110,13 +1110,13 @@ impl Layer {
 
         drop(mats_scope);
 
-        // the attnout region proves what the bands prove -- which with the diagonal block
-        // is two bands per head, so a head's totals accumulate
+        // the attnout region proves what the key tiles prove -- which with the diagonal block
+        // is two key tiles per head, so a head's totals accumulate
         let (mut acc, mut den) = (vec![0i64; nh * s * hd], vec![0i64; nh * s]);
         {
             let _s = witread::scope(Site::AttnOut);
-            for (bi, b) in bands.iter().enumerate() {
-                for i in 0..band_sizes[bi] {
+            for (bi, b) in key_tiles.iter().enumerate() {
+                for i in 0..key_tile_sizes[bi] {
                     let h = head_offsets[bi] + i;
                     for t in 0..s {
                         den[h * s + t] += b.zz[i * s + t];
@@ -1182,8 +1182,8 @@ impl Layer {
             .filter(|v| v.len() >= s)
             .map(|v| v[..s].iter().map(|x| *x as u32).collect());
         Ok(Self {
-            bands,
-            band_sizes: band_sizes.to_vec(),
+            key_tiles,
+            key_tile_sizes: key_tile_sizes.to_vec(),
             head_offsets,
             nsub,
             mats,
@@ -1207,7 +1207,7 @@ impl Layer {
     /// Stream LL (E11), `notes/witness-slack.md` section 5 item 1: the dump's
     /// **model half**, and nothing else.
     ///
-    /// `Layer::load` reads the whole dump -- the bands' `qq`/`kk`/`vv`/`mm`/
+    /// `Layer::load` reads the whole dump -- the key tiles' `qq`/`kk`/`vv`/`mm`/
     /// `num`/`zz`, every matmul's `acc` and `qx`, the wiring stream's seven
     /// activation columns -- and recomputes `Q.K^T` over the whole rectangle on
     /// the way. Tree 0 reads none of it: every preprocessed column is a function
@@ -1231,13 +1231,13 @@ impl Layer {
     /// * the table size must be pinned (the manifest's `master_table_bits` or
     ///   `--table-bits N`), because `--tight-table` sizes it off the witness's
     ///   own shifts and there is no witness here.
-    pub fn load_weights(dir: &str, cfg: &Src, band_sizes: &[usize], variant: Variant)
+    pub fn load_weights(dir: &str, cfg: &Src, key_tile_sizes: &[usize], variant: Variant)
                         -> Result<Self, String> {
         let man: serde_json::Value = witread::read_json(&format!("{dir}/manifest.json"))?;
         let g = |k: &str| man[k].as_u64().ok_or(format!("manifest: missing {k}"));
         let (nh, s, c, hd) = (g("heads")? as usize, g("s")? as usize,
                               g("c")? as usize, g("hd")? as usize);
-        assert_eq!(band_sizes.iter().sum::<usize>(), nh, "bands must cover every head");
+        assert_eq!(key_tile_sizes.iter().sum::<usize>(), nh, "key tiles must cover every head");
         if let Some(why) = frac_shared_refusal(&man) {
             return Err(why);
         }
@@ -1260,23 +1260,23 @@ impl Layer {
                 "`--kv-boundary` tiles the prefix in blocks of S: C={c} is not a multiple of S={s}");
         let q_bits = man["qk_bits"][0].as_u64().unwrap_or(8) as u32;
         let k_bits = man["qk_bits"][1].as_u64().unwrap_or(8) as u32;
-        // the per-head exponents this band's instances take, in `Attn::load_from`'s
+        // the per-head exponents this key tile's instances take, in `Attn::load_from`'s
         // own order, so `dinv` is the column the full load builds
         let fracs_at = |head: usize, insts: usize| -> Vec<f64> {
             (0..insts)
                 .map(|i| man["frac_per_head"][(head + i) % nh].as_f64().unwrap_or(0.0))
                 .collect()
         };
-        let mut bands = vec![];
+        let mut key_tiles = vec![];
         let mut head_offsets = vec![];
         let mut sizes = vec![];
         let nsub = if c == 0 { 0 } else if cfg.tile { c / s } else { 1 };
         let sub_c = if cfg.tile { s } else { c };
         let mut off = 0usize;
-        for insts in band_sizes {
+        for insts in key_tile_sizes {
             for k in 0..nsub {
                 let sh = Shape { s, c: sub_c, hd, insts: *insts };
-                bands.push(Attn::weights_only(
+                key_tiles.push(Attn::weights_only(
                     sh, variant, q_bits, k_bits, cfg.nmax, cfg.log_table,
                     fracs_at(off, *insts), master, false,
                     format!("model-only [{nh}x{s}x{c}, heads {off}..+{insts}, keys {}..]",
@@ -1288,9 +1288,9 @@ impl Layer {
         }
         if has_diagonal_block {
             let mut off = 0usize;
-            for insts in band_sizes {
+            for insts in key_tile_sizes {
                 let sh = Shape { s, c: s, hd, insts: *insts };
-                bands.push(Attn::weights_only(
+                key_tiles.push(Attn::weights_only(
                     sh, variant, q_bits, k_bits, cfg.nmax, cfg.log_table,
                     fracs_at(off, *insts), master, true,
                     format!("model-only [{nh}x{s}x{s}, heads {off}..+{insts}, diagonal block]")));
@@ -1301,19 +1301,19 @@ impl Layer {
             // `Layer::load`'s own accumulation, over the stand-in denominators:
             // the group's region commits the total, so the total has to be the
             // sum of the parts here too or the AO fold divides by the wrong one
-            let n_pre = band_sizes.len() * nsub;
+            let n_pre = key_tile_sizes.len() * nsub;
             let first = |g: usize| if nsub > 0 { g * nsub } else { n_pre + g };
-            for gi in 0..band_sizes.len() {
-                let mut tot = vec![0i64; bands[first(gi)].zz.len()];
+            for gi in 0..key_tile_sizes.len() {
+                let mut tot = vec![0i64; key_tiles[first(gi)].zz.len()];
                 for b in (gi * nsub..(gi + 1) * nsub).chain(std::iter::once(n_pre + gi)) {
-                    for (a, x) in tot.iter_mut().zip(&bands[b].zz) {
+                    for (a, x) in tot.iter_mut().zip(&key_tiles[b].zz) {
                         *a += x;
                     }
                 }
-                bands[first(gi)].zz_total = Some(tot);
+                key_tiles[first(gi)].zz_total = Some(tot);
             }
         }
-        let band_sizes = &sizes[..];
+        let key_tile_sizes = &sizes[..];
         let vars = if !cfg.layout.is_empty() {
             mat_variants(&cfg.layout)
         } else if let serde_json::Value::Object(o) = &man["deq_variants"] {
@@ -1384,11 +1384,11 @@ impl Layer {
             assert!(rep >= 1 && m.n_out % hd == 0, "fold: v shape vs heads");
             m.jv2 = (0..m.n_out).map(|ch| jv[((ch / hd) * rep) * hd + ch % hd]).collect();
         }
-        // the AO region's denominators are the bands' stand-ins, summed exactly
+        // the AO region's denominators are the key tiles' stand-ins, summed exactly
         // as `Layer::load` sums the real ones
         let (acc, mut den) = (vec![0i64; nh * s * hd], vec![0i64; nh * s]);
-        for (bi, b) in bands.iter().enumerate() {
-            for i in 0..band_sizes[bi] {
+        for (bi, b) in key_tiles.iter().enumerate() {
+            for i in 0..key_tile_sizes[bi] {
                 let h = head_offsets[bi] + i;
                 for t in 0..s {
                     den[h * s + t] += b.zz[i * s + t];
@@ -1420,8 +1420,8 @@ impl Layer {
             }
         }
         Ok(Self {
-            bands,
-            band_sizes: band_sizes.to_vec(),
+            key_tiles,
+            key_tile_sizes: key_tile_sizes.to_vec(),
             head_offsets,
             nsub,
             mats,
@@ -1449,16 +1449,16 @@ impl Layer {
         })
     }
 
-    /// Stream NN: derive the bands' Q, K and V from this layer's own `q`, `k`
-    /// and `v` matmuls, and rebuild the bands from them.
+    /// Stream NN: derive the key tiles' Q, K and V from this layer's own `q`, `k`
+    /// and `v` matmuls, and rebuild the key tiles from them.
     ///
     /// Returns the `RopeCols` a chunk proving the rotation needs, or `None` when
     /// the shapes do not admit the statement at all -- in which case nothing is
     /// rewired and the run reports the family as absent.
     ///
-    /// `bend` moves one *band* value after the derivation and rebuilds the
-    /// bands around it: the attention it proves is then honest, the matmuls are
-    /// untouched, and the only thing in the chunk that can see it is the band's
+    /// `bend` moves one *key tile* value after the derivation and rebuilds the
+    /// key tiles around it: the attention it proves is then honest, the matmuls are
+    /// untouched, and the only thing in the chunk that can see it is the key tile's
     /// own claim against the quantize region's output.  `(which of q/k/v, cell)`.
     pub fn rope_from_mats(&mut self, round: bf16::Round, bend: Option<(usize, usize)>)
                           -> Option<RopeCols> {
@@ -1475,8 +1475,8 @@ impl Layer {
         if hd % 2 != 0 {
             return off("hd is odd");
         }
-        if !self.bands.iter().any(|b| b.diagonal_block) {
-            return off("no diagonal block band");
+        if !self.key_tiles.iter().any(|b| b.diagonal_block) {
+            return off("no diagonal block key tile");
         }
         let width = |n: &str| self.mats.iter().find(|m| m.name == n).map(|m| m.n_out);
         let (nq, nk, nv) = match (width("q"), width("k"), width("v")) {
@@ -1503,7 +1503,7 @@ impl Layer {
         if !crate::rope::q_tiles(nq, hd, tokens) || !crate::rope::q_tiles(nk, hd, tokens) {
             return off("a quantize region cannot tile this shape");
         }
-        let b0 = &self.bands[0];
+        let b0 = &self.key_tiles[0];
         let (q_bits, k_bits) = (b0.q_bits, b0.k_bits);
         let (qmax_q, qmax_k) = ((1i64 << (q_bits - 1)) - 1, (1i64 << (k_bits - 1)) - 1);
         // the model's own angles.  A synthetic layer has no model, so it takes
@@ -1598,7 +1598,7 @@ exponent(s) small, so B1's clamp fires");
         // the two sites disagreed and no desk shape could state the binding.  The
         // attention output is rebuilt below, so this is the value it takes.
         self.ao.jv = jv.clone();
-        // the bands' own columns, on the query-head grid: the kv head's values
+        // the key tiles' own columns, on the query-head grid: the kv head's values
         // replicated across its `rep` query heads, exactly as
         // `attention`'s `repeat_interleave` does
         let quant = |x: &[u16], n: usize, jj: &[i32], qmax: i64| -> Vec<i32> {
@@ -1627,9 +1627,9 @@ exponent(s) small, so B1's clamp fires");
         } else {
             quant(&vdeq, nv, &jv_kv, 127)
         };
-        // stream NN (NN-2): `which == 3` is the *prefix* band's own copy of Q --
+        // stream NN (NN-2): `which == 3` is the *prefix* key tile's own copy of Q --
         // the grid above is untouched, so the diagonal block keeps the honest queries
-        // and only the prefix's copy moves.  `rebuild_bands` applies it inside
+        // and only the prefix's copy moves.  `rebuild_key_tiles` applies it inside
         // both of its passes, so the group's joint row maximum, its master
         // exponent and the prefix's whole attention follow the bent query and
         // the chunk is an honest attention over it.
@@ -1644,50 +1644,50 @@ exponent(s) small, so B1's clamp fires");
                 let i = at % n;
                 let lim = match which % 3 { 0 => qmax_q, 1 => qmax_k, _ => 127 } as i32;
                 col[i] += if col[i] < lim { 1 } else { -1 };
-                eprintln!("layer: band {} cell {i} bent (a rejection is the pass)",
+                eprintln!("layer: key tile {} cell {i} bent (a rejection is the pass)",
                           ["Q", "K", "V"][which % 3]);
             }
         }
-        self.rebuild_bands(&qq, &kk, &vv, pre_q_bend);
+        self.rebuild_key_tiles(&qq, &kk, &vv, pre_q_bend);
         Some(RopeCols { nkv, pos0, theta, rope_type: kind, rope_scale: vec![],
                         inv_ref: Some(inv_freq), jq, jk, jv })
     }
 
-    /// Stream NN: rebuild every band from Q, K and V on the query-head grid.
+    /// Stream NN: rebuild every key tile from Q, K and V on the query-head grid.
     ///
     /// The diagonal block's keys *are* this block's tokens, so its K and V are what the
-    /// layer's own `k` and `v` matmuls produced; a prefix band's keys are the
+    /// layer's own `k` and `v` matmuls produced; a prefix key tile's keys are the
     /// cache and keep the ones they had, because this chunk did not produce
     /// them (they are bound across blocks by root equality instead -- stream
-    /// AA/EE).  Every band of a group takes the new queries, and the group's two
+    /// AA/EE).  Every key tile of a group takes the new queries, and the group's two
     /// halves share one row maximum and one master exponent, exactly as
     /// `Attn::synthetic_pair` builds them.
     ///
     /// Stream NN-3: a tiled prefix (`--kv-boundary`, `nsub > 1`) is rebuilt too.
-    /// Its sub-bands are `nsub` windows of one pair's prefix, so each keeps its
+    /// Its sub-key-tiles are `nsub` windows of one pair's prefix, so each keeps its
     /// own slice of the cache and takes the new queries, the group's master
-    /// exponent is the joint maximum over every sub-band **and** the diagonal block, and
+    /// exponent is the joint maximum over every sub-key-tile **and** the diagonal block, and
     /// the pair's total denominator -- which the group's per-token region
-    /// commits on its first sub-band -- is the sum of all of their `zz`.  Before
+    /// commits on its first sub-key-tile -- is the sum of all of their `zz`.  Before
     /// this the function asserted `nsub <= 1` and the rotation simply turned
     /// itself off under `--kv-boundary`.
     ///
     /// `pre_q_bend` is stream NN-2's control: one cell of the **first group's
-    /// prefix band's own** copy of Q, moved before that band's attention is
+    /// prefix key tile's own** copy of Q, moved before that key tile's attention is
     /// built, so the diagonal block keeps the honest queries and the chunk is still an
     /// honest attention over the cache -- and the only thing that can see it is
     /// `nn_q_ok`, the equality between the two halves' Q folds.
-    pub fn rebuild_bands(&mut self, qq: &[i32], kk: &[i32], vv: &[i32],
+    pub fn rebuild_key_tiles(&mut self, qq: &[i32], kk: &[i32], vv: &[i32],
                          pre_q_bend: Option<usize>) {
         let (nh, hd, s) = (self.ao.nh, self.ao.hd, self.ao.s);
         let nsub = self.nsub.max(1);
-        let n_pre = self.bands.iter().filter(|b| !b.diagonal_block).count();
-        let groups = self.bands.len() - n_pre;
+        let n_pre = self.key_tiles.iter().filter(|b| !b.diagonal_block).count();
+        let groups = self.key_tiles.len() - n_pre;
         assert!(groups > 0, "the q/k/v rewiring needs the diagonal block");
         assert!(n_pre == 0 || n_pre == groups * nsub,
-                "{nsub} prefix sub-bands per group, or none: {n_pre} prefix bands, \
+                "{nsub} prefix sub-key_tiles per group, or none: {n_pre} prefix key_tiles, \
 {groups} groups");
-        // the bands of one group, prefix sub-bands first and the diagonal block last --
+        // the key tiles of one group, prefix sub-key-tiles first and the diagonal block last --
         // the order `Layer::synthetic` lays them out in
         let gidx = |g: usize| -> Vec<usize> {
             let pre = if n_pre == 0 { 0 } else { nsub };
@@ -1703,18 +1703,18 @@ exponent(s) small, so B1's clamp fires");
                 .collect()
         };
         // stream NN (NN-2): the prefix half of group 0 takes its Q through here,
-        // so both passes see the same bent cell and the band's own attention is
+        // so both passes see the same bent cell and the key tile's own attention is
         // rebuilt around it.
         if let Some(at) = pre_q_bend {
             if n_pre == 0 {
-                eprintln!("layer: prefix-band Q bend asked for on a chunk with no prefix \
-band -- nothing bent, and this control measures nothing");
+                eprintln!("layer: prefix-key_tile Q bend asked for on a chunk with no prefix \
+key_tile -- nothing bent, and this control measures nothing");
             } else {
-                eprintln!("layer: prefix band (group 0) Q cell {at} bent, the diagonal block's \
+                eprintln!("layer: prefix key_tile (group 0) Q cell {at} bent, the diagonal block's \
 unmoved (a rejection is the pass)");
             }
         }
-        let q_bits0 = self.bands[0].q_bits;
+        let q_bits0 = self.key_tiles[0].q_bits;
         let take_q = |src: &[i32], off: usize, insts: usize, rows: usize,
                       bend_here: bool| -> Vec<i32> {
             let mut q = take(src, off, insts, rows);
@@ -1735,7 +1735,7 @@ unmoved (a rejection is the pass)");
         for g in 0..groups {
             let mut row = vec![];
             for (n, b) in gidx(g).into_iter().enumerate() {
-                let a = &self.bands[b];
+                let a = &self.key_tiles[b];
                 let sh = a.shape;
                 let off = self.head_offsets[b];
                 let q = take_q(qq, off, sh.insts, sh.s, !a.diagonal_block && g == 0 && n == 0);
@@ -1753,7 +1753,7 @@ unmoved (a rejection is the pass)");
         let frac = probe.iter().flatten().map(|b| b.frac).fold(f64::MIN, f64::max).ceil();
         let d_bits = probe.iter().flatten().map(|b| b.d_bits()).max().unwrap() + 1;
         let log_table = d_bits.clamp(4, 22);
-        // pass 2: the joint row maximum per group -- over every sub-band and the
+        // pass 2: the joint row maximum per group -- over every sub-key-tile and the
         // diagonal block -- then all of them under it
         for g in 0..groups {
             let idx = gidx(g);
@@ -1762,7 +1762,7 @@ unmoved (a rejection is the pass)");
                     acc.iter().zip(&b.mm).map(|(x, y)| *x.max(y)).collect()
                 });
             for (n, b) in idx.iter().copied().enumerate() {
-                let a = &self.bands[b];
+                let a = &self.key_tiles[b];
                 let sh = a.shape;
                 let off = self.head_offsets[b];
                 let q = take_q(qq, off, sh.insts, sh.s, !a.diagonal_block && g == 0 && n == 0);
@@ -1774,27 +1774,27 @@ unmoved (a rejection is the pass)");
                 let (variant, qb, kb, nmax, src) =
                     (a.variant, a.q_bits, a.k_bits, a.nmax, a.source.clone());
                 let diagonal_block = a.diagonal_block;
-                self.bands[b] = Attn::from_qkv(sh, variant, q, k, v, qb, kb, nmax, log_table,
+                self.key_tiles[b] = Attn::from_qkv(sh, variant, q, k, v, qb, kb, nmax, log_table,
                                                Some(vec![frac; sh.insts]), Some(frac), src,
                                                diagonal_block, Some(mm.clone()));
             }
-            // the group's denominator: the pair's total, which every sub-band's
-            // `zz` is a partial sum of.  It lives on the band that carries the
-            // per-token region -- the first sub-band when there is a prefix, and
+            // the group's denominator: the pair's total, which every sub-key-tile's
+            // `zz` is a partial sum of.  It lives on the key tile that carries the
+            // per-token region -- the first sub-key-tile when there is a prefix, and
             // the diagonal block itself when there is none.
             let total: Vec<i64> = idx.iter().skip(1)
-                .fold(self.bands[idx[0]].zz.clone(), |acc, b| {
-                    acc.iter().zip(&self.bands[*b].zz).map(|(x, y)| x + y).collect()
+                .fold(self.key_tiles[idx[0]].zz.clone(), |acc, b| {
+                    acc.iter().zip(&self.key_tiles[*b].zz).map(|(x, y)| x + y).collect()
                 });
-            self.bands[idx[0]].zz_total = Some(total);
+            self.key_tiles[idx[0]].zz_total = Some(total);
         }
-        // the attention output follows the bands: its accumulator and
+        // the attention output follows the key tiles: its accumulator and
         // denominator *are* their sums, and the per-token output scale is the
         // smallest power of two that leaves the quotient inside int8
         let (mut acc, mut den) = (vec![0i64; nh * s * hd], vec![0i64; nh * s]);
-        for bi in 0..self.bands.len() {
-            let b = &self.bands[bi];
-            for i in 0..self.band_sizes[bi] {
+        for bi in 0..self.key_tiles.len() {
+            let b = &self.key_tiles[bi];
+            for i in 0..self.key_tile_sizes[bi] {
                 let h = self.head_offsets[bi] + i;
                 for t in 0..s {
                     den[h * s + t] += b.zz[i * s + t];
@@ -1901,7 +1901,7 @@ unmoved (a rejection is the pass)");
     }
 
     /// A small, self-consistent synthetic layer, for the container selftest.
-    pub fn synthetic(s: usize, c: usize, hd: usize, band_sizes: &[usize], variant: Variant,
+    pub fn synthetic(s: usize, c: usize, hd: usize, key_tile_sizes: &[usize], variant: Variant,
                      cfg: &Src, n_in: usize, n_out: usize, seed: u64) -> Self {
         let mut rng = SmallRng::seed_from_u64(seed);
         // Stream AA (E11): a tiled synthetic layer is the *same* pair, with its
@@ -1915,18 +1915,18 @@ unmoved (a rejection is the pass)");
         assert!(!cfg.tile || c % s == 0,
                 "`--kv-boundary` tiles the prefix in blocks of S: C={c} is not a multiple of S={s}");
         let s_nsub = if cfg.tile { c / s } else { 1 };
-        let nh: usize = band_sizes.iter().sum();
-        // pass 1: learn the data-derived exponents; pass 2: rebuild every band
+        let nh: usize = key_tile_sizes.iter().sum();
+        // pass 1: learn the data-derived exponents; pass 2: rebuild every key tile
         // against one shared master exponent and one shared table size
         let mut probe = vec![];
         let mut head_offsets = vec![];
         let mut off = 0usize;
-        // B10 step 3: with the diagonal block, a band is a *pair* -- the prefix
+        // B10 step 3: with the diagonal block, a key tile is a *pair* -- the prefix
         // rectangle and the diagonal block over the same heads, sharing the queries and one
         // row maximum.  Both halves' shifts go into the same master exponent, so
         // both are probed.
         let mut probe_diagonal_block = vec![];
-        for insts in band_sizes {
+        for insts in key_tile_sizes {
             let sh = Shape { s, c, hd, insts: *insts };
             if cfg.diagonal_block {
                 let (p, cc) = Attn::synthetic_pair(sh, variant, cfg.q_bits, cfg.k_bits,
@@ -1938,8 +1938,8 @@ unmoved (a rejection is the pass)");
                 probe.push(Attn::synthetic(sh, variant, cfg.q_bits, cfg.k_bits, cfg.nmax,
                                            cfg.log_table, seed ^ (off as u64 + 1)));
             }
-            // stream AA: one entry per *band*, and a tiled prefix is `s_nsub`
-            // bands over the same heads
+            // stream AA: one entry per *key tile*, and a tiled prefix is `s_nsub`
+            // key tiles over the same heads
             for _ in 0..s_nsub {
                 head_offsets.push(off);
             }
@@ -1947,7 +1947,7 @@ unmoved (a rejection is the pass)");
         }
         if cfg.diagonal_block {
             let mut off = 0usize;
-            for insts in band_sizes {
+            for insts in key_tile_sizes {
                 head_offsets.push(off);
                 off += insts;
             }
@@ -1956,38 +1956,38 @@ unmoved (a rejection is the pass)");
         let frac = probe.iter().map(|b| b.frac).fold(f64::MIN, f64::max).ceil();
         let d_bits = probe.iter().map(|b| b.d_bits()).max().unwrap() + 1;
         let log_table = if cfg.log_table > 0 { cfg.log_table } else { d_bits.clamp(4, 22) };
-        let mut bands = vec![];
-        let mut diagonal_block_bands = vec![];
+        let mut key_tiles = vec![];
+        let mut diagonal_block_key_tiles = vec![];
         let mut sizes = vec![];
         let mut off = 0usize;
-        for insts in band_sizes.iter() {
+        for insts in key_tile_sizes.iter() {
             let sh = Shape { s, c, hd, insts: *insts };
             if cfg.diagonal_block {
                 // the same seeds the probe used, so the master exponent it derived
-                // is an upper bound on the data these bands actually carry
+                // is an upper bound on the data these key tiles actually carry
                 let (p, cc) = Attn::synthetic_pair(sh, variant, cfg.q_bits, cfg.k_bits,
                                                    cfg.nmax, log_table,
                                                    seed ^ (off as u64 + 1), Some(frac));
                 // Stream AA (E11): the tiled prefix, as `nsub` windows of the
-                // pair's own prefix rather than as `nsub` unrelated bands -- so
-                // the sub-bands' `zz` really do sum to the pair's total and the
+                // pair's own prefix rather than as `nsub` unrelated key tiles -- so
+                // the sub-key-tiles' `zz` really do sum to the pair's total and the
                 // synthetic layer is a layer and not a shape rehearsal.
                 if cfg.tile {
                     let total = p.zz_total.clone();
                     for k in 0..s_nsub {
-                        bands.push(p.key_slice(k * s, s));
+                        key_tiles.push(p.key_slice(k * s, s));
                     }
-                    // the group's per-token region lives on its first sub-band,
+                    // the group's per-token region lives on its first sub-key-tile,
                     // and the denominator it commits is the pair's total -- the
                     // slices' own `zz` are the partial sums that make it up
-                    let first = bands.len() - s_nsub;
-                    bands[first].zz_total = total;
+                    let first = key_tiles.len() - s_nsub;
+                    key_tiles[first].zz_total = total;
                 } else {
-                    bands.push(p);
+                    key_tiles.push(p);
                 }
-                diagonal_block_bands.push(cc);
+                diagonal_block_key_tiles.push(cc);
             } else {
-                bands.push(Attn::synthetic_shared(sh, variant, cfg.q_bits, cfg.k_bits, cfg.nmax,
+                key_tiles.push(Attn::synthetic_shared(sh, variant, cfg.q_bits, cfg.k_bits, cfg.nmax,
                                                   log_table, seed ^ (off as u64 + 1),
                                                   frac, false));
             }
@@ -1997,10 +1997,10 @@ unmoved (a rejection is the pass)");
             off += insts;
         }
         if cfg.diagonal_block {
-            sizes.extend(band_sizes.iter().copied());
-            bands.extend(diagonal_block_bands);
+            sizes.extend(key_tile_sizes.iter().copied());
+            key_tiles.extend(diagonal_block_key_tiles);
         }
-        let band_sizes_all = sizes;
+        let key_tile_sizes_all = sizes;
         let mut mats = vec![];
         // matmuls in one Freivalds group share one committed input, as the real layer's do
         let mut group_qx: std::collections::HashMap<&str, Vec<i32>> = Default::default();
@@ -2080,13 +2080,13 @@ unmoved (a rejection is the pass)");
                     .collect();
             }
         }
-        // attnout from the bands, with scales that keep the quotient inside int8
+        // attnout from the key tiles, with scales that keep the quotient inside int8
         // B10 step 3: `+=`, not `=`.  With the diagonal block riding as a second set of
-        // bands over the same heads, a head's denominator and A.V output are the
+        // key tiles over the same heads, a head's denominator and A.V output are the
         // sum of its two halves -- which is what the attention output *is*.
         let (mut acc, mut den) = (vec![0i64; nh * s * hd], vec![0i64; nh * s]);
-        for (bi, b) in bands.iter().enumerate() {
-            for i in 0..band_sizes_all[bi] {
+        for (bi, b) in key_tiles.iter().enumerate() {
+            for i in 0..key_tile_sizes_all[bi] {
                 let h = head_offsets[bi] + i;
                 for t in 0..s {
                     den[h * s + t] += b.zz[i * s + t];
@@ -2113,7 +2113,7 @@ unmoved (a rejection is the pass)");
             }
             jo[t] = (m / 127.0).log2().ceil().max(-30.0) as i32;
         }
-        Self { bands, band_sizes: band_sizes_all, head_offsets, nsub: s_nsub, mats,
+        Self { key_tiles, key_tile_sizes: key_tile_sizes_all, head_offsets, nsub: s_nsub, mats,
                ao: AttnOut { nh, s, hd, acc, den, jo, jv },
                source: format!("synthetic layer (seed={seed})"), residual_stream: None,
                head_keys: None, head_tok: None, attn_out_bits: 8,
@@ -2143,19 +2143,19 @@ impl Layer {
         self.synth_family(seed, a, round, 0, None, None);
     }
 
-    /// Stream NN, the band side's control.  The same layer with **one** band
-    /// cell moved and the bands rebuilt around it: the attention is an honest
+    /// Stream NN, the key tile side's control.  The same layer with **one** key tile
+    /// cell moved and the key tiles rebuilt around it: the attention is an honest
     /// attention over the bent K (or Q, or V), the matmuls are untouched, and
-    /// the only thing that can see it is that band's claim against the
+    /// the only thing that can see it is that key tile's claim against the
     /// quantize region's output.  `which` picks Q, K or V.
-    pub fn synth_residual_stream_band_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
+    pub fn synth_residual_stream_key_tile_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
                                            which: usize, idx: usize) {
         self.synth_family(seed, a, round, 0, None, Some((which, idx)));
     }
 
-    /// Stream NN (NN-2), the prefix band's control.  The same layer with **one**
-    /// cell of the first group's *prefix* band's own copy of Q moved, and that
-    /// band's whole attention rebuilt around it -- the diagonal block's queries are
+    /// Stream NN (NN-2), the prefix key tile's control.  The same layer with **one**
+    /// cell of the first group's *prefix* key tile's own copy of Q moved, and that
+    /// key tile's whole attention rebuilt around it -- the diagonal block's queries are
     /// untouched, so the chunk proves an honest attention over the cache with
     /// queries the `q` matmul did not produce, and the only thing that can see
     /// it is `nn_q_ok`.
@@ -2324,14 +2324,14 @@ impl Layer {
         if !head {
             wire(self, &["q", "k", "v"], &h1, d);
         }
-        // ---- stream NN: the bands are the q/k/v matmuls' own outputs --------
+        // ---- stream NN: the key tiles are the q/k/v matmuls' own outputs --------
         //
-        // A synthetic layer's bands were three unrelated draws, so no shape it
+        // A synthetic layer's key tiles were three unrelated draws, so no shape it
         // could prove carried a positionwise q/k/v binding
         // (`briefs/jj-layerwire-out.md` section 11.4 item 2).  Here the layer's
         // own `q`/`k`/`v` dequant outputs are rotated and quantized -- through
         // `residual_stream::reference` on the very programs the regions prove, so the two
-        // cannot disagree -- and the bands are rebuilt from the result.
+        // cannot disagree -- and the key tiles are rebuilt from the result.
         //
         // Wired exactly when the widths line up, the way `o` is: `q` must be
         // `nh hd` channels wide, `k` and `v` equally wide and a whole number of
@@ -2782,7 +2782,7 @@ impl Tables {
 }
 
 impl Layer {
-    /// Stream J: size the layer's master exp table by the largest key the bands
+    /// Stream J: size the layer's master exp table by the largest key the key tiles
     /// actually look up, instead of by the manifest's `d_bits + spread`.
     ///
     /// The two differ because the formula maximises the raw shift and the spread
@@ -2798,34 +2798,34 @@ impl Layer {
     /// statement's table size, exactly as `--table-bits` does -- and unlike
     /// `--table-bits` it can differ per layer inside one chunk loop.
     ///
-    /// Returns `(before, after)` in table bits, and leaves `off_table` on each band
+    /// Returns `(before, after)` in table bits, and leaves `off_table` on each key tile
     /// recounted against the new size (zero whenever `bits >= key_bits`).
     pub fn set_master_table(&mut self, bits: u32) -> (u32, u32) {
         let _s = witread::scope(Site::Tighten);
-        let before = self.bands.iter().map(|b| b.log_table).max().unwrap_or(0);
+        let before = self.key_tiles.iter().map(|b| b.log_table).max().unwrap_or(0);
         let after = bits.clamp(1, before);
-        for b in self.bands.iter_mut() {
+        for b in self.key_tiles.iter_mut() {
             b.retable(after);
         }
         (before, after)
     }
 
-    /// The largest exp-table key any band of this layer looks up, in bits.
+    /// The largest exp-table key any key tile of this layer looks up, in bits.
     pub fn key_bits(&self) -> u32 {
         let _s = witread::scope(Site::Tighten);
-        self.bands.iter().map(|b| b.key_bits()).max().unwrap_or(1)
+        self.key_tiles.iter().map(|b| b.key_bits()).max().unwrap_or(1)
     }
 
-    /// Rebuild the attnout witness from the (possibly corrupted) bands, keeping
-    /// the scales: the probes mutate a band and need `ao` to follow it.
+    /// Rebuild the attnout witness from the (possibly corrupted) key tiles, keeping
+    /// the scales: the probes mutate a key tile and need `ao` to follow it.
     pub fn rebuild_ao(&mut self) {
         let (nh, s, hd) = (self.ao.nh, self.ao.s, self.ao.hd);
-        // zero first, then accumulate: a head's totals are the sum over every band
+        // zero first, then accumulate: a head's totals are the sum over every key tile
         // that covers it, which with B10 step 3's diagonal block is two of them
         self.ao.den.iter_mut().for_each(|v| *v = 0);
         self.ao.acc.iter_mut().for_each(|v| *v = 0);
-        for (bi, b) in self.bands.iter().enumerate() {
-            for i in 0..self.band_sizes[bi] {
+        for (bi, b) in self.key_tiles.iter().enumerate() {
+            for i in 0..self.key_tile_sizes[bi] {
                 let h = self.head_offsets[bi] + i;
                 for t in 0..s {
                     self.ao.den[h * s + t] += b.zz[i * s + t];
@@ -2843,46 +2843,46 @@ impl Layer {
     ///
     /// The mask is preprocessed, so the only shape the attack can take is to
     /// *claim* a denominator and an output that count a masked key: the diagonal block
-    /// band's numerator gets a legal table output, and `Z`, `A.V` and the attnout
+    /// key tile's numerator gets a legal table output, and `Z`, `A.V` and the attnout
     /// witness are rebuilt from it.  The AIR reads neither -- its numerator fold
     /// and its exp lookup drop the slot -- so the diagonal block's `sn` no longer joins
     /// the prefix's to make the denominator the per-token region claims.
     pub fn unmask_diagonal_block(&mut self, i: usize) {
-        let n_pre = self.bands.iter().filter(|b| !b.diagonal_block).count();
-        let ci = self.bands.iter().position(|b| b.diagonal_block).expect("no diagonal block band");
-        let nmax = self.bands[ci].nmax as i64;
-        let sh = self.bands[ci].shape;
+        let n_pre = self.key_tiles.iter().filter(|b| !b.diagonal_block).count();
+        let ci = self.key_tiles.iter().position(|b| b.diagonal_block).expect("no diagonal block key tile");
+        let nmax = self.key_tiles[ci].nmax as i64;
+        let sh = self.key_tiles[ci].shape;
         let masked: Vec<usize> = (0..sh.insts * sh.s * sh.c)
-            .filter(|g| !self.bands[ci].visible(*g))
+            .filter(|g| !self.key_tiles[ci].visible(*g))
             .collect();
-        assert!(!masked.is_empty(), "the diagonal block band has no masked entries");
+        assert!(!masked.is_empty(), "the diagonal block key tile has no masked entries");
         let g = masked[i % masked.len()];
-        self.bands[ci].num[g] = nmax;
-        // rebuild that band's denominator and A.V output from the changed numerator
+        self.key_tiles[ci].num[g] = nmax;
+        // rebuild that key tile's denominator and A.V output from the changed numerator
         let (ni, ns, nc, nhd) = (sh.insts, sh.s, sh.c, sh.hd);
         let (inst, t, c) = (g / (ns * nc), (g / nc) % ns, g % nc);
-        self.bands[ci].zz[inst * ns + t] += nmax;
+        self.key_tiles[ci].zz[inst * ns + t] += nmax;
         for j in 0..nhd {
-            let v = self.bands[ci].vv[(inst * nc + c) * nhd + j] as i64;
-            self.bands[ci].out[(inst * ns + t) * nhd + j] += nmax * v;
+            let v = self.key_tiles[ci].vv[(inst * nc + c) * nhd + j] as i64;
+            self.key_tiles[ci].out[(inst * ns + t) * nhd + j] += nmax * v;
         }
         let _ = ni;
-        // and the total the paired prefix band's per-token region commits
+        // and the total the paired prefix key tile's per-token region commits
         let pi = ci - n_pre;
-        let add = self.bands[ci].zz[inst * ns + t];
-        let own = self.bands[pi].zz[inst * ns + t];
-        if let Some(tot) = self.bands[pi].zz_total.as_mut() {
+        let add = self.key_tiles[ci].zz[inst * ns + t];
+        let own = self.key_tiles[pi].zz[inst * ns + t];
+        if let Some(tot) = self.key_tiles[pi].zz_total.as_mut() {
             tot[inst * ns + t] = own + add;
         }
         self.rebuild_ao();
     }
 
     /// B4 section 3's probe on the composed proof: flip one row of the shared exp
-    /// table and rebuild every band's numerators, denominators and outputs to
+    /// table and rebuild every key tile's numerators, denominators and outputs to
     /// match.  Internally consistent everywhere; only the preprocessed root
     /// differs.
     pub fn corrupt_exp_table(&mut self, i: usize) {
-        for b in self.bands.iter_mut() {
+        for b in self.key_tiles.iter_mut() {
             let n = b.table.len();
             let i = i % n;
             b.table[i] = if b.table[i] == 0 { 1 } else { b.table[i] - 1 };
@@ -2961,8 +2961,8 @@ impl MatRegion {
 /// multiplicities bumped into the shared tables.  Mirrors `dequant::run`'s
 /// witness loop without the tampers (compose probes corrupt the layer witness).
 /// Stream SS: `ohead` is `Some(rows per kv head)` on the one region whose output
-/// side folds under the *band* grid -- a folded `v`, whose published output is an
-/// integer and whose counterparty is the bands' own V (`dequant::OKind::Int`).
+/// side folds under the *key tile* grid -- a folded `v`, whose published output is an
+/// integer and whose counterparty is the key tiles' own V (`dequant::OKind::Int`).
 /// It changes nothing but which rows the `oin`/`obd` step selectors mark, so no
 /// preprocessed column is added and no other region moves.
 pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bool,
@@ -2983,7 +2983,7 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bool,
     // builds both and asserts every cell equal before either is used.
     //
     // Stream Z: the fold has no device fill; its region takes the host path
-    // whatever the switch says (the diagonal block bands' pattern), and
+    // whatever the switch says (the diagonal block key tiles' pattern), and
     // `devpre::note_host_fill` is told in `generate`.
     let m4c = if spec.variant == DeqVariant::Fold {
         0
@@ -3171,7 +3171,7 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bool,
         // the accumulator is multiplied by zero there, which is exact because it
         // is still zero at that point.
         //
-        // Stream SS: with `ohead` the step is the band grid's instead, and the
+        // Stream SS: with `ohead` the step is the key tile grid's instead, and the
         // row it changes on is the row *after* one that begins a kv head --
         // `j % mh == 0`, exactly `rope::Q_SEL`'s `nn_q_hstart` on the same
         // layout.  A token boundary is a head start (the channel index wraps to
@@ -3182,8 +3182,8 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bool,
         let bd: Box<dyn Fn(usize) -> bool> = match ohead {
             Some(mh) => {
                 assert_eq!(lay.lead, 0,
-                           "{}: a band-grid output side needs an exact tiling", m.name);
-                assert!(mh > 0, "{}: a band-grid output side needs hd % per_row == 0", m.name);
+                           "{}: a key-tile-grid output side needs an exact tiling", m.name);
+                assert!(mh > 0, "{}: a key-tile-grid output side needs hd % per_row == 0", m.name);
                 Box::new(move |j: usize| j % mh == 0)
             }
             None => Box::new(first),
@@ -3570,7 +3570,7 @@ pub struct OutputClaimW {
     pub k_bd: SecureField,
     pub kind: crate::dequant::OKind,
     /// Stream SS: rows per kv head, on the one output side that folds under the
-    /// band grid (a folded `v`).  `None` everywhere else, and then `k_bd` is
+    /// key tile grid (a folded `v`).  `None` everywhere else, and then `k_bd` is
     /// taken at a token boundary exactly as stream E wrote it.  Whatever this
     /// says, `mat_region` marks the same rows -- the two have to agree or the
     /// interaction column and its AIR read different steps.
@@ -3585,7 +3585,7 @@ pub struct OutputClaimW {
 /// LogUp half: instead of `mat_logup`'s committed running-sum columns, the
 /// region's fractions become GKR input layers (collected in `compose`, before
 /// the proof's transcript position) and its claimed sum leaves `use_sums` for
-/// `sums_cancel`. This is the same shape stream S gave the bands in
+/// `sums_cancel`. This is the same shape stream S gave the key tiles in
 /// `attn_trace::interaction_phase`.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
@@ -3730,7 +3730,7 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
             }
             // the multiplier is the step *into* this row: an ordinary chunk step
             // inside a token, the boundary jump on a row that begins one --
-            // and, with `o.head`, the band grid's jump on the row after one that
+            // and, with `o.head`, the key tile grid's jump on the row after one that
             // begins a kv head.  The same predicate `mat_region` marked.
             let mult = if j == 0 {
                 SecureField::zero()
@@ -3817,7 +3817,7 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
 /// here once and both callers take it. `gkr` is false in both -- the fractions
 /// the backend proves are the ones the committed backend would have built, so the
 /// lowering is of the *un-ablated* evaluator and asks for the flag-off shape,
-/// which is stream T's precedent for the bands and is why the kernel store
+/// which is stream T's precedent for the key tiles and is why the kernel store
 /// already carries this fingerprint.
 pub fn deq_logup_eval(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
                       rels: &crate::compose::Rels) -> crate::dequant::DequantEval {
@@ -4793,7 +4793,7 @@ pub fn freivalds_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: 
     //
     // Stream Z: the device fill packs activations as int8 and bumps the 8-bit
     // table in its kernel, so a wide group takes the host fill whatever the
-    // switch says -- the diagonal block bands' pattern, and `devpre::note_host_fill`
+    // switch says -- the diagonal block key tiles' pattern, and `devpre::note_host_fill`
     // is told in `generate`.
     let m4d = if act_bits == 8 { crate::util::m4b_mode("B7_M4_WFILL") } else { 0 };
     assert!(m4d == 0 || corrupt_qx.is_none(),

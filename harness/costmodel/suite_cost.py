@@ -13,7 +13,7 @@ Two accountings, both reported:
             C=4096 decoded token at the named boundary.  The paper's unit,
             and the only one made of measurements alone.
   regime 2  per-proof: one proof per eval item, priced in cells from stream
-            DD's exact (S, C) band model plus a shared-table floor solved
+            DD's exact (S, C) key tile model plus a shared-table floor solved
             against our own measured composed chunk, converted at the
             measured G cells/s of the named boundary.  [projected]
 
@@ -116,18 +116,18 @@ def usd_per_position(tok_s, usd_h):
 def cell_model():
     """The whole layer chunk in (S, C), composed from frozen pieces.
 
-        chunk_fresh(S, C) = fixed + per_token*S + band_fresh(S, C)
-        band_fresh(S, C)  = 140*S*C + 24,960*C + 12,688*S
+        chunk_fresh(S, C) = fixed + per_token*S + key_tile_fresh(S, C)
+        key_tile_fresh(S, C)  = 140*S*C + 24,960*C + 12,688*S
 
-    The band half is stream DD's exact closed form
-    (`attention_grid.band_model_fresh_coeffs`) -- structural, not fitted, and
+    The key tile half is stream DD's exact closed form
+    (`attention_grid.key_tile_model_fresh_coeffs`) -- structural, not fitted, and
     reproduced to the cell on eight artifacts including composed 8B chunks at
     C != S.  It REPLACES the retired `326 M + 1.37 M*S + 72.1*S^2` fit, whose
     S^2 coefficient (72.083) ran +12.6% against the true 64 because it charged
-    the band family's whole linear term to the quadratic.
+    the key tile family's whole linear term to the quadratic.
 
     `per_token` is `design.prefill_chunk_remainder[1]`, DD's two-point fit of
-    everything the band family does not cover.  Its `[0]` partner is the same
+    everything the key tile family does not cover.  Its `[0]` partner is the same
     floor for B9's SYNTHETIC probe chunk; our composed layer statement also
     carries the residual stream, both residual adds and the committed residual streams,
     so `fixed` is solved separately against our own measured chunk at C=4096.
@@ -135,7 +135,7 @@ def cell_model():
     residual is the composed chunk's own small C-growth outside the family.
     """
     S = v("spec.decoded_tokens")
-    sc, bc, bs = v("attention_grid.band_model_fresh_coeffs")
+    sc, bc, bs = v("attention_grid.key_tile_model_fresh_coeffs")
     fixed_b9, per_token = v("design.prefill_chunk_remainder")
     return dict(
         L=32, S=S, sc=sc, bc=bc, bs=bs,
@@ -148,20 +148,20 @@ def cell_model():
     )
 
 
-def band_fresh(m, S, C):
-    """The attention band family's fresh cells: S query tokens over C keys."""
+def key_tile_fresh(m, S, C):
+    """The attention key tile family's fresh cells: S query tokens over C keys."""
     return m["sc"] * S * C + m["bc"] * C + m["bs"] * S
 
 
 def cells_decode_item(m, n_prompt, n_gen, fixed=None):
     """One proof of one item under the v1 decode-only statement: n_gen decoded
-    positions (1 for a multiple-choice item) over an UNCHECKED band of n_prompt
+    positions (1 for a multiple-choice item) over an UNCHECKED key tile of n_prompt
     keys, plus the diagonal block in which those positions attend to each other.  The
     per-chunk shared tables are paid once per layer, per item."""
     Sn = max(n_gen, 1)
     f = m["fixed"] if fixed is None else fixed
     per_layer = (f + m["per_token"] * Sn
-                 + band_fresh(m, Sn, n_prompt) + band_fresh(m, Sn, Sn))
+                 + key_tile_fresh(m, Sn, n_prompt) + key_tile_fresh(m, Sn, Sn))
     return m["L"] * per_layer + m["head_per_token"] * Sn
 
 
@@ -172,7 +172,7 @@ def cells_e11_item(m, n_prompt, n_gen, fixed=None):
     block size, so `design.e11_chunking_net_pct` does not bite here."""
     N = n_prompt + n_gen
     f = m["fixed"] if fixed is None else fixed
-    per_layer = f + m["per_token"] * N + band_fresh(m, N, N)
+    per_layer = f + m["per_token"] * N + key_tile_fresh(m, N, N)
     return m["L"] * per_layer + m["head_per_token"] * N
 
 
@@ -271,18 +271,18 @@ def main():
     print("3. REGIME 2 -- one proof per item, priced in cells  [projected]")
     print("=" * 86)
     m = cell_model()
-    held = (m["fixed"] + m["per_token"] * m["S"] + band_fresh(m, m["S"], 16384)
-            + band_fresh(m, m["S"], m["S"]))
-    print(f"   band model (frozen, exact)        {m['sc']}*S*C + {m['bc']:,}*C + {m['bs']:,}*S")
+    held = (m["fixed"] + m["per_token"] * m["S"] + key_tile_fresh(m, m["S"], 16384)
+            + key_tile_fresh(m, m["S"], m["S"]))
+    print(f"   key tile model (frozen, exact)        {m['sc']}*S*C + {m['bc']:,}*C + {m['bs']:,}*S")
     print(f"   per_token (prefill_chunk_remainder)  {m['per_token']:,.0f} cells/token/layer")
     print(f"   fixed, solved on our C=4096 chunk {m['fixed'] / 1e6:,.1f} M   "
           f"(b9 probe's own floor {m['fixed_b9'] / 1e6:,.1f} M, "
           f"{m['fixed'] / m['fixed_b9'] - 1:+.1%})")
     print(f"   HELD OUT at C=16384: model {held:,.0f}  measured "
           f"{m['per_layer_c16384']:,.0f}   {held / m['per_layer_c16384'] - 1:+.4%}")
-    print(f"   band alpha_fresh {m['sc'] / 32:.3f} + its C-term aliased at S=512 "
+    print(f"   key tile alpha_fresh {m['sc'] / 32:.3f} + its C-term aliased at S=512 "
           f"{m['bc'] / (32 * m['S']):.4f} = "
-          f"{v('attention_grid.composed_slope_explained_by_band_model'):.4f}")
+          f"{v('attention_grid.composed_slope_explained_by_key_tile_model'):.4f}")
     print(f"   against the frozen composed slope "
           f"{v('attention_grid.composed_chunk_fresh_slope')} -- so 5.898 is NOT a per-entry price")
     print()
@@ -351,7 +351,7 @@ def main():
         _, _, d, e = reg1[(name, card)]
         print(f"      {name:12s} {card}   decode-only x{d / usd125:6.1f}   E11 x{e / usd125:6.1f}")
     print("   The T column is NOT frozen. notes/final-framing.md section 4 carries")
-    print("   ~125-200 tok/s as a [derived] band awaiting E2; it is an illustration,")
+    print("   ~125-200 tok/s as a [derived] range awaiting E2; it is an illustration,")
     print("   not a measurement, and no single value may be quoted from it.")
     print("   Against BATCHED serving the dollar multiple is larger again; section 4")
     print("   puts it at ~10^3 at the whole wall. Also blocked on E2.")

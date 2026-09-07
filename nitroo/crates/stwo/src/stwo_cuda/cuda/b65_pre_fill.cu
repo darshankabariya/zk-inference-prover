@@ -263,11 +263,11 @@ extern "C" void b65_fill_pre_table(const unsigned *const *counters,
     }
 }
 
-// ========================================================== the band selectors ==
+// ========================================================== the key tile selectors ==
 
-// One thread, one committed row, one band sub-region's selector columns.
+// One thread, one committed row, one key tile sub-region's selector columns.
 //
-// Every one of them is a predicate of the flags `b65_flags_band` wrote for that
+// Every one of them is a predicate of the flags `b65_flags_key_tile` wrote for that
 // coset row -- which is the point: `attn_trace.rs` spells the predicates once,
 // the accumulators segment on them and the AIR reads them out of tree 0, and
 // after this row all three are the same array rather than three transcriptions

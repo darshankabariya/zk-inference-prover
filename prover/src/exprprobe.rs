@@ -548,11 +548,11 @@ fn probe_one<E: FrameworkEval>(
 pub fn probe(a: &BuiltComponents, b: &BuiltComponents) -> Value {
     let mut rows = vec![];
     for i in 0..a.chans.len() {
-        rows.push(probe_one("chan", format!("chan_band{i}"), &a.chans[i], &b.chans[i]));
-        rows.push(probe_one("key", format!("key_band{i}"), &a.keys[i], &b.keys[i]));
+        rows.push(probe_one("chan", format!("chan_key_tile{i}"), &a.chans[i], &b.chans[i]));
+        rows.push(probe_one("key", format!("key_key_tile{i}"), &a.keys[i], &b.keys[i]));
     }
     for i in 0..a.rows.len() {
-        rows.push(probe_one("row", format!("row_band{i}"), &a.rows[i], &b.rows[i]));
+        rows.push(probe_one("row", format!("row_key_tile{i}"), &a.rows[i], &b.rows[i]));
     }
     rows.push(probe_one("attnout", "attnout".into(), &a.ao, &b.ao));
     for i in 0..a.mats.len() {
@@ -666,7 +666,7 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
     let nm = plan.mat_lays.len();
     let nw = plan.freivalds.len();
     crate::compose::Claims {
-        bands: (0..nb).map(|_| std::array::from_fn(|_| felt())).collect(),
+        key_tiles: (0..nb).map(|_| std::array::from_fn(|_| felt())).collect(),
         ao_out: felt(),
         ao_den: felt(),
         // stream JJ: a binding claim like the others -- a zero here would fold away
@@ -677,7 +677,7 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
             .iter()
             .map(|w| (0..w.mats.len()).map(|_| felt()).collect())
             .collect(),
-        // 3 per band + attnout + one per matmul + one per Freivalds check, and a margin.
+        // 3 per key tile + attnout + one per matmul + one per Freivalds check, and a margin.
         use_sums: (0..(3 * nb + 1 + nm + nw + 16)).map(|_| felt()).collect(),
         // exp + norm/frac/mul/qnz + one per range width, and a margin (the
         // residual stream's table sides come out of the same margin).
@@ -713,11 +713,11 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         rq_sc: (0..plan.rqs.len()).map(|_| felt()).collect(),
         freivalds_qx: (0..nw).map(|_| felt()).collect(),
         deq_sc: (0..nm).map(|_| felt()).collect(),
-        // stream NN: the rotation's quantize regions and the bands' own K/Q/V
+        // stream NN: the rotation's quantize regions and the key tiles' own K/Q/V
         nn_in: (0..plan.quants.len()).map(|_| felt()).collect(),
         nn_out: (0..plan.quants.len()).map(|_| felt()).collect(),
-        band_qkv: (0..plan.nn_bands.len()).map(|_| std::array::from_fn(|_| felt())).collect(),
-        band_q: (0..plan.nn_qbands.len()).map(|_| felt()).collect(),
+        key_tile_qkv: (0..plan.nn_key_tiles.len()).map(|_| std::array::from_fn(|_| felt())).collect(),
+        key_tile_q: (0..plan.nn_q_key_tiles.len()).map(|_| felt()).collect(),
         // B11 stream Q: the GKR bundle is bytes, not a claim; nothing the
         // components lower reads it, so the placeholder statement carries none.
         gkr: None,
@@ -733,8 +733,8 @@ pub fn cmd(args: &[String]) {
     let params = crate::params_of(&l, args, &vname);
     let plan = crate::compose::Plan::new(&params);
     eprintln!(
-        "exprprobe: {} bands={:?} variant={} widths={:?}",
-        l.source, l.band_sizes, vname, plan.widths
+        "exprprobe: {} key_tiles={:?} variant={} widths={:?}",
+        l.source, l.key_tile_sizes, vname, plan.widths
     );
 
     let draw = |tag: u8| {

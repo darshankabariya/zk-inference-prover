@@ -6,7 +6,7 @@
 //! | half | columns | bytes at the synthetic point | what they are |
 //! |---|---|---|---|
 //! | the shared tables | 31 | 11,849,728 | 13 rows of host-built table, 8 closed forms of the row index, 10 multiplicities |
-//! | the band selectors | 48 | 3,818,752 | `commit_pre`'s ACTIVE / NOFIRST / LAST / ISTART, three sub-regions per band |
+//! | the key tile selectors | 48 | 3,818,752 | `commit_pre`'s ACTIVE / NOFIRST / LAST / ISTART, three sub-regions per key tile |
 //!
 //! **The 13 that looked like data are closed forms.** 23.1 left the 31 alone
 //! with one sentence -- "their contents are host-built tables ... not closed
@@ -22,9 +22,9 @@
 //! one of them is already a device counter that a fill scatter-added into:
 //! `b65_fill_dequant` bumps `m_norm`, `m_frac`, `m_mul` and the 8-bit range,
 //! `b65_fill_freivalds` the 8-bit range, `b65_fill_attnout` `m_qnz` and the
-//! remainder range, `b65_fill_band_chan` the key and query ranges,
-//! `b65_fill_band_grid` `m_exp`, the auxiliary range and the value range, and
-//! `b65_fill_band_tok` the two `z` ranges. They came back to the host only to
+//! remainder range, `b65_fill_key_tile_chan` the key and query ranges,
+//! `b65_fill_key_tile_grid` `m_exp`, the auxiliary range and the value range, and
+//! `b65_fill_key_tile_tok` the two `z` ranges. They came back to the host only to
 //! be merged and re-uploaded, which is 21.4's line and 23.1's fix -- so the
 //! sums happen where the counters already are and `gen/wfill_counters` and
 //! `gen/deq_dev_counters` go with them.
@@ -49,7 +49,7 @@
 //! coset row from the region's layout -- which is exactly what `commit_pre`'s
 //! 48 columns say. What it could not do is compute them at the right time:
 //! `commit_pre` runs before the challenges are drawn and the accumulators run
-//! after. `b65_flags_band` is that computation lifted out into a kernel of its
+//! after. `b65_flags_key_tile` is that computation lifted out into a kernel of its
 //! own, called here at fill time; the array outlives the challenge draw, this
 //! file turns it into columns, and `b65_acc_chan` / `_grid` / `_tok` read it
 //! rather than recompute it. The AIR's selectors and the accumulator's
@@ -125,7 +125,7 @@ unsafe extern "C" {
                           m_col: *mut u32, cfg: FPreCfg);
     fn b65_fill_sel(flags: *const u32, cols: *const *mut u32, scale: *const u32,
                     cfg: FSelCfg);
-    fn b65_flags_band(flags: *mut u32, cfg: FAccFlags);
+    fn b65_flags_key_tile(flags: *mut u32, cfg: FAccFlags);
 }
 
 // `B65P_KIND_*`.
@@ -198,8 +198,8 @@ pub fn premut() -> (u32, u32) {
 /// B11 stream M: does some fill in this chunk bump a *host* multiplicity
 /// counter, for a reason no switch states?
 ///
-/// One band can be on the host while the switch says device -- a diagonal block band,
-/// which fills on the host whatever `B7_M4_WFILL_BAND` says because the device
+/// One key tile can be on the host while the switch says device -- a diagonal block key tile,
+/// which fills on the host whatever `B7_M4_WFILL_KEY_TILE` says because the device
 /// fill has no notion of its layout. `fills_dev` has to know, and it is asked
 /// from inside the fills themselves (`merge_counters` is read by
 /// `mat_region_dev`, `freivalds_region_dev` and `commit_base_dev`), none of which
@@ -208,7 +208,7 @@ pub fn premut() -> (u32, u32) {
 ///
 /// Keyed by chunk exactly as the phase timers are, so a pipelined loop -- chunk
 /// k proving while chunk k+1 generates -- cannot have one chunk read another's
-/// answer. A run that never records one is a run with no bands to ask about.
+/// answer. A run that never records one is a run with no key tiles to ask about.
 static HOST_FILL: OnceLock<Mutex<std::collections::BTreeMap<u64, bool>>> = OnceLock::new();
 
 fn host_fill_map() -> &'static Mutex<std::collections::BTreeMap<u64, bool>> {
@@ -228,23 +228,23 @@ fn host_fill() -> bool {
 /// device? Mode 2 of a fill builds both ways and returns the *host* columns
 /// (20.2's shape), so only mode 1 leaves a counter where the kernel can sum it.
 pub fn fills_dev() -> bool {
-    // B11 stream L: the band fill has its own switch now, and a host-built band
+    // B11 stream L: the key tile fill has its own switch now, and a host-built key tile
     // bumps the host multiplicity arrays. So "every fill that bumps a counter
-    // ran on the device" has to read the band gate too -- otherwise
-    // `B7_M4_WFILL=1 B7_M4_WFILL_BAND=0` would claim the counters are on the
-    // device while three bands' worth of bumps sit on the host.
+    // ran on the device" has to read the key tile gate too -- otherwise
+    // `B7_M4_WFILL=1 B7_M4_WFILL_KEY_TILE=0` would claim the counters are on the
+    // device while three key tiles' worth of bumps sit on the host.
     //
-    // B11 stream M: the switches are not the whole answer. A diagonal block band is on
+    // B11 stream M: the switches are not the whole answer. A diagonal block key tile is on
     // the host with every switch at 1, so `B7_M4_PRE=1` on a sequence chunk
     // used to build the nine multiplicity columns on the card from the device
-    // counters alone and drop the diagonal block bands' chan and key bumps -- accepted
+    // counters alone and drop the diagonal block key tiles' chan and key bumps -- accepted
     // by every other check and rejected by `sums_cancel`. Stream L had already
     // met this for the tenth counter, `m_exp`, and fixed it there alone
     // (`devwfill::exp_mult_on_host`); this is the same predicate asked of all
     // ten.
     crate::util::m4b_mode("B7_M4_FILL") == 1
         && crate::util::m4b_mode("B7_M4_WFILL") == 1
-        && crate::devwfill::band_mode() == 1
+        && crate::devwfill::key_tile_mode() == 1
         && !host_fill()
 }
 
@@ -502,35 +502,35 @@ pub fn tables_dev(t: &Tables, log_norm: u32, log_frac: u32, log_mul: u32, q_bits
     DevPreTables { pre: pre.into_iter().flatten().collect(), mult, patched }
 }
 
-// ------------------------------------------------------------ the band selectors --
+// ------------------------------------------------------------ the key tile selectors --
 
-/// One band's three sub-regions: the flags, and the selector columns built out
+/// One key tile's three sub-regions: the flags, and the selector columns built out
 /// of them.
 ///
 /// The flags outlive the challenge draw on purpose. `commit_pre` runs before it
 /// and the accumulators after, and this is the array that lets both read one
 /// computation instead of two.
-pub struct DevPreBand {
+pub struct DevPreKeyTile {
     pub flags: Vec<Uint32Vec>,
     /// the 16 selector columns, or empty when the host still builds them
     pub cols: Vec<BaseFieldVec>,
     pub logs: Vec<u32>,
 }
 
-impl DevPreBand {
+impl DevPreKeyTile {
     pub fn chan(&self) -> &Uint32Vec {
         &self.flags[0]
     }
     pub fn key(&self) -> &Uint32Vec {
         &self.flags[1]
     }
-    /// B11 stream N: absent on a diagonal block band, which has no per-token region.
+    /// B11 stream N: absent on a diagonal block key tile, which has no per-token region.
     /// Every caller is already inside a `with_rows` arm, so reaching this on a
     /// diagonal block is a bug in the caller and says so rather than indexing past the
     /// end.
     pub fn row(&self) -> &Uint32Vec {
         assert_eq!(self.flags.len(), 3,
-                   "a diagonal block band has no per-token flags: this caller is outside a \
+                   "a diagonal block key_tile has no per-token flags: this caller is outside a \
                     `with_rows` arm");
         &self.flags[2]
     }
@@ -556,8 +556,8 @@ fn scale_of(a: &Attn) -> Vec<u32> {
     v
 }
 
-/// Build one band's flags and, when the device owns them, its 16 selectors.
-pub fn band_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> DevPreBand {
+/// Build one key tile's flags and, when the device owns them, its 16 selectors.
+pub fn key_tile_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> DevPreKeyTile {
     let (mutate, at) = premut();
     let sh = a.shape;
     let rrows = 1usize << l.log_row;
@@ -566,14 +566,14 @@ pub fn band_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> DevP
     let tokg = FGridA { log_rows: l.log_row, rows: rrows as u32, groups: 1, chunks: 1,
                         lead: 0, descending: 0 };
     // B11 stream N, lever 2 (b): `SHAPE_TOK` was carried unconditionally, and a
-    // diagonal block band has no rows for it. `commit_pre` has always skipped those
+    // diagonal block key tile has no rows for it. `commit_pre` has always skipped those
     // three selector columns on a diagonal block (`attn_trace.rs:258`), so a diagonal block
-    // band's device selectors have to skip them too or the two disagree by
+    // key tile's device selectors have to skip them too or the two disagree by
     // three columns. The *flags* are cut with them: nothing segments a region
     // that does not exist.
     // Stream CC (E11): a ninth key selector, `act`, when the grid leaves inert
     // lead rows -- the AIR's numerator-fold guard.  `commit_pre` appends it to
-    // the end of the grid's block and a device band is never a diagonal block band, so
+    // the end of the grid's block and a device key tile is never a diagonal block key tile, so
     // on this side it is slot 8 of the key group and the two lists still line up
     // column for column (`check_run` is what says so).
     let n_key = 8 + usize::from(crate::attn_air::act_id(0, a.diagonal_block, l.key.g.lead)
@@ -597,7 +597,7 @@ pub fn band_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> DevP
         .map(|(shape, g, modulus, rw, _, _)| {
             let f = Uint32Vec::new_zeroes(g.rows as usize);
             unsafe {
-                b65_flags_band(f.device_ptr as *mut u32,
+                b65_flags_key_tile(f.device_ptr as *mut u32,
                                FAccFlags { shape: *shape, g: *g, modulus: *modulus,
                                            rw: *rw });
             }
@@ -609,7 +609,7 @@ pub fn band_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> DevP
     let mut cols: Vec<BaseFieldVec> = vec![];
     let mut logs: Vec<u32> = vec![];
     if !want_cols {
-        return DevPreBand { flags, cols, logs };
+        return DevPreKeyTile { flags, cols, logs };
     }
 
     let t_s = std::time::Instant::now();
@@ -637,7 +637,7 @@ pub fn band_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> DevP
         cols.extend(mine);
     }
     crate::util::m4_add("gen/pre_sel", t_s.elapsed().as_secs_f64());
-    DevPreBand { flags, cols, logs }
+    DevPreKeyTile { flags, cols, logs }
 }
 
 // --------------------------------------------------------------------- the check --

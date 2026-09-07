@@ -22,7 +22,7 @@ so the delta to upstream stays readable in `git log -- nitroo/`:
    `gen_b65_feed_dispatch`, prototyped in `cuda/gen_b65_dispatch.cuh` and defined
    as an aborting fallthrough in `cuda/gen_b65_dispatch.cu`, matching what the
    generator emits for zero kernel groups. An earlier change added that symbol to the
-   emitter and to `../prover/src/gkrband.rs` but not to the stand-in, so from
+   emitter and to `../prover/src/gkr_key_tile.rs` but not to the stand-in, so from
    that change until this commit the CUDA backend did **not link** on any tree with no
    installed kernel store. Digest-neutral by construction: the only call path
    reaches a kernel group with no kernel, which already aborted. Gated on the

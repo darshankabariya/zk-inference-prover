@@ -614,7 +614,7 @@ impl Lower {
     ///  * **allocated by occurrence.** Two claims that happen to be equal get
     ///    two slots and two nodes, exactly as two unequal ones do -- which is
     ///    the half of the class EE's `b65_key_eval 0x18afbca6` was (one slot and
-    ///    one instruction short of its group, because a band's two claims
+    ///    one instruction short of its group, because a key tile's two claims
     ///    coincided).
     ///  * **width 4, always.** The width is in the fingerprint, and whether a
     ///    claim's upper limbs are zero is a fact about the chunk. Four limbs is
@@ -671,8 +671,8 @@ impl Lower {
     /// component to a kernel that computes something else.
     ///
     /// Stream RR: a *claim* slot is excluded, and that is not a 2^-124 event
-    /// but a data property -- a Horner binding over an all-zero sub-band closes on
-    /// zero, and two bands' claims coincide when their values do (README items
+    /// but a data property -- a Horner binding over an all-zero sub-key-tile closes on
+    /// zero, and two key tiles' claims coincide when their values do (README items
     /// 21 and 23, log rows 53, 61 and 66). A claim's value is never read here,
     /// so `x - claim` is an instruction whatever the claim is.
     fn lit(&self, id: usize) -> Option<u32> {
@@ -1014,7 +1014,7 @@ fn lower_impl<E: FrameworkEval>(
     // columns with one counter across all interactions, so the j-th column of
     // interaction i is the j-th smallest idx *claimed* there. B11 stream S:
     // ranked over the evaluator's claim log rather than over the constraints'
-    // references, because the GKR backend's band evals keep base-column claims no
+    // references, because the GKR backend's key tile evals keep base-column claims no
     // constraint reads (the trace allocator must stay aligned with the
     // committed order); an unclaimed reference is still an error, below.
     let mut seen = BTreeSet::new();
@@ -1445,8 +1445,8 @@ pub fn cmd(args: &[String]) {
         &["none", "relbyname", "colshift", "constorder", "packwidth"],
     );
     eprintln!(
-        "cudacheck: {} bands={:?} variant={} at log_size={} ({} rows each)",
-        l.source, l.band_sizes, vname, log_size, 1usize << (log_size + 1)
+        "cudacheck: {} key_tiles={:?} variant={} at log_size={} ({} rows each)",
+        l.source, l.key_tile_sizes, vname, log_size, 1usize << (log_size + 1)
     );
 
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
@@ -1472,11 +1472,11 @@ pub fn cmd(args: &[String]) {
             }};
         }
         for i in 0..b.chans.len() {
-            go!(format!("chan_band{i}"), &b.chans[i]);
-            go!(format!("key_band{i}"), &b.keys[i]);
+            go!(format!("chan_key_tile{i}"), &b.chans[i]);
+            go!(format!("key_key_tile{i}"), &b.keys[i]);
         }
         for i in 0..b.rows.len() {
-            go!(format!("row_band{i}"), &b.rows[i]);
+            go!(format!("row_key_tile{i}"), &b.rows[i]);
         }
         go!("attnout".to_string(), &b.ao);
         for i in 0..b.mats.len() {
@@ -2508,14 +2508,14 @@ fn fill_binding_claims(plan: &crate::compose::Plan, claims: &mut crate::compose:
     claims.rq_sc = plan.rqs.iter().map(|_| felt()).collect();
     // Stream QQ at the NN merge (log row 66): stream NN's four, in the same
     // state stream II's were in -- `nn_in`/`nn_out` are read per quantize
-    // region, `band_qkv` per rotated band and `band_q` per prefix band, all
+    // region, `key_tile_qkv` per rotated key tile and `key_tile_q` per prefix key tile, all
     // through `.get(..)`, and an unfilled one folds `x - 0` out of
     // `b65_quant_eval` and of the diagonal block and prefix `b65_chan_eval`s. Found by
     // this stream's own guard on its first contact with someone else's work.
     claims.nn_in = plan.quants.iter().map(|_| felt()).collect();
     claims.nn_out = plan.quants.iter().map(|_| felt()).collect();
-    claims.band_qkv = plan.nn_bands.iter().map(|_| std::array::from_fn(|_| felt())).collect();
-    claims.band_q = plan.nn_qbands.iter().map(|_| felt()).collect();
+    claims.key_tile_qkv = plan.nn_key_tiles.iter().map(|_| std::array::from_fn(|_| felt())).collect();
+    claims.key_tile_q = plan.nn_q_key_tiles.iter().map(|_| felt()).collect();
 }
 
 /// `cudaemit`: lower every component, group by fingerprint into kernels, and
@@ -2545,7 +2545,7 @@ pub fn emit_cmd(args: &[String]) {
     // Stream QQ (log row 61): from here on a claim the placeholder set does
     // not supply is a panic naming the vector, not a zero that folds away.
     crate::compose::set_emit_strict(true);
-    let link = plan.p.gkr_bands.then(|| crate::gkrlink::link_for(&plan, 0x0b65_1157));
+    let link = plan.p.gkr_key_tiles.then(|| crate::gkrlink::link_for(&plan, 0x0b65_1157));
     let b = crate::compose::build_components_linked(&plan, &rels, f[0], f[1], f[2], f[3], f[4],
                                                     f[5], &claims, link.as_deref());  // family -> shapes, in first-seen order; a shape is a fingerprint. Seeded
     // from every shape a previous emit run saw, so one library serves every
@@ -2611,13 +2611,13 @@ pub fn emit_cmd(args: &[String]) {
             }};
         }
         for i in 0..b.chans.len() {
-            go!(b.chans[i], format!("chan_band{i}"));
-            go!(b.keys[i], format!("key_band{i}"));
+            go!(b.chans[i], format!("chan_key_tile{i}"));
+            go!(b.keys[i], format!("key_key_tile{i}"));
         }
-        // a diagonal block band has no row component (B10 step 3): `rows` is shorter
+        // a diagonal block key tile has no row component (B10 step 3): `rows` is shorter
         // than `chans`, so it is walked on its own
         for i in 0..b.rows.len() {
-            go!(b.rows[i], format!("row_band{i}"));
+            go!(b.rows[i], format!("row_key_tile{i}"));
         }
         for i in 0..b.links.len() {
             go!(b.links[i], format!("link{i}"));
@@ -2675,7 +2675,7 @@ pub fn emit_cmd(args: &[String]) {
             go!(et, "emb_table".to_string());
         }
 
-        // Stream EE (open item 21): the **collapsed** grid bands.
+        // Stream EE (open item 21): the **collapsed** grid key tiles.
         //
         // `Lower::ext` folds `x - 0` and `schedule` then drops the dead scalar
         // slot with it, so a claim a witness drives to exactly zero takes two
@@ -2687,29 +2687,29 @@ pub fn emit_cmd(args: &[String]) {
         // The grid region has one such pair.  `KeyEval`'s `claimed_av` and
         // `claimed_sn` are both folds of the numerator accumulator `zn`
         // (`attn_air.rs`'s `av`/`sn` constraints), so both are exactly zero on
-        // a band whose numerator column is identically zero -- and that is an
+        // a key tile whose numerator column is identically zero -- and that is an
         // ordinary witness, not a coincidence: `commit_base` writes a zero
         // numerator wherever a key's shift is off the exp table, and at a long
-        // prefix a whole `S`-key sub-band can be off it for every token of the
+        // prefix a whole `S`-key sub-key-tile can be off it for every token of the
         // chunk.  The C=16384 E11 run met exactly that on layer 2 of blocks
         // 17-32: the prover asked for `b65_key_eval 0x67c40d82` at **744**
-        // instructions where every emitted shape of that band is **748**, and
+        // instructions where every emitted shape of that key tile is **748**, and
         // 16 chunks took the announced scalar fallback.
         //
-        // So the emitter lowers every band a second time with that pair zeroed
+        // So the emitter lowers every key tile a second time with that pair zeroed
         // and installs whatever shape is new.  It is additive -- no fingerprint
         // an earlier emit produced moves -- and value-preserving: the kernel is
         // chosen by shape and the blob still replays the proof's own scalars,
-        // so a collapsed band computes `av - 0` exactly as the fallback did.
+        // so a collapsed key tile computes `av - 0` exactly as the fallback did.
         let mut zclaims = claims.clone();
-        for bc in zclaims.bands.iter_mut() {
+        for bc in zclaims.key_tiles.iter_mut() {
             bc[2] = [0; 4];
             bc[3] = [0; 4];
         }
         let bz = crate::compose::build_components_linked(&plan, &rels, f[0], f[1], f[2], f[3],
                                                          f[4], f[5], &zclaims, link.as_deref());
         for i in 0..bz.keys.len() {
-            go!(bz.keys[i], format!("key_band{i}_zav"));
+            go!(bz.keys[i], format!("key_key_tile{i}_zav"));
         }
     }
 
@@ -3011,11 +3011,11 @@ pub fn logup_cmd(args: &[String]) {
         };
     }
     for i in 0..b.chans.len() {
-        go!(format!("chan_band{i}"), &b.chans[i]);
-        go!(format!("key_band{i}"), &b.keys[i]);
+        go!(format!("chan_key_tile{i}"), &b.chans[i]);
+        go!(format!("key_key_tile{i}"), &b.keys[i]);
     }
     for i in 0..b.rows.len() {
-        go!(format!("row_band{i}"), &b.rows[i]);
+        go!(format!("row_key_tile{i}"), &b.rows[i]);
     }
     go!("attnout".to_string(), &b.ao);
     for i in 0..b.mats.len() {
@@ -3393,20 +3393,20 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch, s
 pub fn gen_emit_cmd(args: &[String]) {
     let (l, vname) = crate::layer_of(args);
     let mut params = crate::params_of(&l, args, &vname);
-    // The GKR backend asks for no fraction shape of its own.  `gkrband::feed_site`
+    // The GKR backend asks for no fraction shape of its own.  `gkr_key_tile::feed_site`
     // lowers the *un-ablated* evaluator -- stream S's lever 1 makes a flag-on
     // evaluator emit no lookups at all -- so every fingerprint the feed looks
     // up is a flag-off one.  Lowering the ablated form here produced an empty
     // IR and `emit_frac_family` asserts on it (open item 3).  Undo the ablation
     // for the lowering: these are the shapes the feed will ask for.
-    if params.gkr_bands || params.gkr_dequant || params.gkr_residual_stream
+    if params.gkr_key_tiles || params.gkr_dequant || params.gkr_residual_stream
         || params.gkr_freivalds || params.gkr_attnout
     {
         eprintln!(
             "genemit: a GKR design point lowers the flag-off fractions -- \
              those are the shapes the feed asks for"
         );
-        params.gkr_bands = false;
+        params.gkr_key_tiles = false;
         params.gkr_dequant = false;
         params.gkr_residual_stream = false;
         params.gkr_freivalds = false;
@@ -3524,13 +3524,13 @@ pub fn gen_emit_cmd(args: &[String]) {
             }};
         }
         for i in 0..b.chans.len() {
-            go!(b.chans[i], format!("chan_band{i}"));
-            go!(b.keys[i], format!("key_band{i}"));
+            go!(b.chans[i], format!("chan_key_tile{i}"));
+            go!(b.keys[i], format!("key_key_tile{i}"));
         }
-        // a diagonal block band has no row component (B10 step 3): `rows` is shorter
+        // a diagonal block key tile has no row component (B10 step 3): `rows` is shorter
         // than `chans`, so it is walked on its own
         for i in 0..b.rows.len() {
-            go!(b.rows[i], format!("row_band{i}"));
+            go!(b.rows[i], format!("row_key_tile{i}"));
         }
         for i in 0..b.links.len() {
             go!(b.links[i], format!("link{i}"));

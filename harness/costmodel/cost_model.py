@@ -206,8 +206,8 @@ B5C = b5_constants()
 #     rounding: 9 cells against a bf16 dequant plus a reciprocal lookup plus a
 #     requantize.  B1 scores it at -0.29% perplexity, i.e. free.
 # (3) the packing.  Committed columns and proof size are ~independent of L*nh once
-#     instances share one column set, so the whole-model proof is bands x one
-#     band's columns, with popcount(L*nh) bands.
+#     instances share one column set, so the whole-model proof is key tiles x one
+#     key tile's columns, with popcount(L*nh) key tiles.
 def b6_constants():
     fd, fp = B6 / "dequant.json", B6 / "pack.json"
     if not fd.exists():
@@ -507,9 +507,9 @@ def attn_window(num_bits, ctx, z_lo_bits=Z_LO_BITS):
 ALPHA = (B5C["intexp"]["alpha_grid"] if B5C and "intexp" in B5C else 5.0)
 ALPHA_V1 = (B5C["bf16x"]["alpha_grid"] if B5C and "bf16x" in B5C else 5.0)
 
-# --- the attention band family, as a closed form in (S, C) ---------------------
+# --- the attention key tile family, as a closed form in (S, C) ---------------------
 # Stream DD (2026-09-01) replaced B9's `p S^2` fit with a two-variable model of the
-# band family, and stream E1 re-derived its coefficients symbolically so they can
+# key tile family, and stream E1 re-derived its coefficients symbolically so they can
 # be evaluated at a shape that is not Llama-8B's.  Every line below is an identity
 # of the layout, read off `prover/src/attn_trace.rs:1167-1181` against
 # `prover/src/layout.rs`; nothing here is fitted.
@@ -522,11 +522,11 @@ ALPHA_V1 = (B5C["bf16x"]["alpha_grid"] if B5C and "bf16x" in B5C else 5.0)
 #                                                          + 24*nh/gt*S*C (Horner)
 #   grid: V values  `Cells::kv`   pv*rows   = nh*hd*C      2*nh*hd*C  (V range LogUp)
 #   per-token: max, denom, 2 limbs 4*nh*S                  (8*nh + 8*nh/rw)*S
-#   out (A.V)                     the `attnout` family, NOT `bands` -- charged
+#   out (A.V)                     the `attnout` family, NOT `key_tiles` -- charged
 #                                 separately by `cells_per_token`'s `attn_out`
 #
 # The layout identities the row counts come from, with `insts` summing to `nh`
-# over the bands (every term is linear in `insts`, so how the heads are banded is
+# over the key tiles (every term is linear in `insts`, so how the heads are grouped into key tiles is
 # cost-neutral -- 16/8/8 costs what 32 would):
 #   lc.g.rows = hd*insts*C/pk,  pk -> chan_target   (LayoutChan::choose)
 #   lk.g.rows =  C*insts*S/q,   q  -> grid_target   (LayoutKey::choose)
@@ -541,18 +541,18 @@ ALPHA_V1 = (B5C["bf16x"]["alpha_grid"] if B5C and "bf16x" in B5C else 5.0)
 #     real cost is a few percent above this.
 #   * `Grid::new` caps `q` at `min(S, hd)` and `pk` at `min(C, S)`.  Below those
 #     caps the targets are met; above them the layout saturates and these
-#     expressions stop being exact.  `band_cells` reports when it saturates.
+#     expressions stop being exact.  `key_tile_cells` reports when it saturates.
 GRID_TARGET, CHAN_TARGET, ROW_WIDTH = 64, 128, 16
 
 
-def band_cells(nh, hd, s, c, grid_target=GRID_TARGET, chan_target=CHAN_TARGET,
+def key_tile_cells(nh, hd, s, c, grid_target=GRID_TARGET, chan_target=CHAN_TARGET,
                rw=ROW_WIDTH, rows_region=True):
-    """Committed cells of the attention band family at (S, C) for `nh` heads of
+    """Committed cells of the attention key tile family at (S, C) for `nh` heads of
     width `hd`.  Returns (base, interaction, saturated).
 
     `rows_region=False` drops the per-token max/denominator region, which is what
-    a diagonal block band does (`attn_trace.rs`, `with_rows = !a.diagonal_block`): the diagonal block
-    shares the prefix band's one max and one denominator per token.
+    a diagonal block key tile does (`attn_trace.rs`, `with_rows = !a.diagonal_block`): the diagonal block
+    shares the prefix key tile's one max and one denominator per token.
 
     **`hd` here is the ATTENTION head width and `nh` the number of ATTENTION
     heads.**  The AIR commits one K and one V column set per attention head, not
@@ -582,12 +582,12 @@ def band_cells(nh, hd, s, c, grid_target=GRID_TARGET, chan_target=CHAN_TARGET,
     return base, inter, saturated
 
 
-def band_fresh(nh, hd, s, c, diagonal_block=True, **kw):
-    """The whole band family of one composed layer chunk: the prefix bands over
+def key_tile_fresh(nh, hd, s, c, diagonal_block=True, **kw):
+    """The whole key tile family of one composed layer chunk: the prefix key tiles over
     `c` keys, plus an S x S diagonal block that carries no per-token region."""
-    b, i, sat = band_cells(nh, hd, s, c, **kw)
+    b, i, sat = key_tile_cells(nh, hd, s, c, **kw)
     if diagonal_block:
-        b2, i2, s2 = band_cells(nh, hd, s, s, rows_region=False, **kw)
+        b2, i2, s2 = key_tile_cells(nh, hd, s, s, rows_region=False, **kw)
         b, i, sat = b + b2, i + i2, sat or s2
     return b + i, sat
 
@@ -720,7 +720,7 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     acc = acc_layer + vocab
     act = L * (2 * d + nh * hd + dff_active) + d
     nl = L * (2 * dff_active + 4 * d)
-    # The attention band family.  Two regimes, and the default is the band model.
+    # The attention key tile family.  Two regimes, and the default is the key tile model.
     #
     # `alpha=<x>` keeps the LEGACY single-slope term, `x * L * nh * C`, which is
     # what every figure before 2026-09-01 used.  It is retained only so the two
@@ -730,15 +730,15 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     # K/V commitment, divided by S), so any single slope is only valid at the S it
     # was solved at -- S=512 here -- and mis-scales in `hd`, `nh` and C together.
     #
-    # The band model charges the two separately and subsumes what used to be three
+    # The key tile model charges the two separately and subsumes what used to be three
     # terms: `attn`, `kv` (the committed KV cache and queries) and `softmax_rows`.
     # Charging any of those beside it double-counts.
     legacy_alpha = alpha is not None
     if legacy_alpha:
         attn = alpha * L * nh * ctx
-        band_saturated = False
+        key_tile_saturated = False
     else:
-        per_layer, band_saturated = band_fresh(nh, hd, seq or 1, ctx, diagonal_block=diagonal_block)
+        per_layer, key_tile_saturated = key_tile_fresh(nh, hd, seq or 1, ctx, diagonal_block=diagonal_block)
         attn = L * per_layer / (seq or 1)
     n_lookups = L * (2 * dff_active + 2 * (2 * d + 1)) + vocab
     logup = n_lookups * LOGUP_MARGINAL[batch]
@@ -789,7 +789,7 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
         kv = kv_vals + q_vals + (1.5 * kv_vals + 2.0 * q_vals if seq else 0.0)
         softmax_rows = 5.0 * L * nh
     else:
-        # both are inside `attn` now: the band family's `C` term IS the committed
+        # both are inside `attn` now: the key tile family's `C` term IS the committed
         # K and V (`Cells::kv`) with their range checks, its `S` term carries the
         # queries, and its per-token row region carries the max, the denominator
         # and their two limbs.
@@ -805,7 +805,7 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     return dict(acc=acc, act=act, nl=nl, attn=attn, logup=logup, n_lookups=n_lookups,
                 freivalds=freivalds, range=rng, limbs=limbs, kv=kv, softmax_rows=softmax_rows,
                 attn_out=attn_out, requant=requant, argmax=argmax, route=route,
-                bands=attn, band_saturated=band_saturated, legacy_alpha=legacy_alpha,
+                key_tiles=attn, key_tile_saturated=key_tile_saturated, legacy_alpha=legacy_alpha,
                 dequant_per_acc=per_acc,
                 head_per_acc=head_acc, n_acc=acc, n_acc_layer=acc_layer,
                 flat=acc + act + nl, total=total, freivalds_params=params,
@@ -1101,7 +1101,7 @@ def report():
         print(f"    B6.5's mixed layout spanned {g(mix['total'])}-{g(ch['total'])} per token "
               f"({g(mix['total'] * TARGET_TOKS)}-{g(ch['total'] * TARGET_TOKS)}cells/s for "
               f"{TARGET_TOKS:.0f} tok/s); B8's attribution retires that range -- pow2 on the "
-              f"layer costs +3.67% perplexity at 8B, so there is one layout, not a band")
+              f"layer costs +3.67% perplexity at 8B, so there is one layout, not a key tile")
         print()
         print("the numerator width, and the window the AIR as built certifies:")
         print(f"  {'bits':>4} {'nmax':>5} {'Z bits':>7} {'z_hi':>5} {'|A.V| <':>10}  "

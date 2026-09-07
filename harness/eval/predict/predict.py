@@ -85,10 +85,10 @@ REF8B_SOURCE = "experiments/b10/out/seq5/seq_c{4096,16384}_L16.json (result.poin
 # The predictor.  Two halves, deliberately kept apart because they have very
 # different standing:
 #
-#   bands   the attention band family.  A CLOSED FORM read off the layout
+#   key tiles   the attention key tile family.  A CLOSED FORM read off the layout
 #           (`prover/src/attn_trace.rs` x `layout.rs`), not a fit -- see
-#           `attention_grid.band_model_{base,fresh}_coeffs`.  It reproduces the
-#           measured `family_cells.bands` of all 32 seq5 layer chunks EXACTLY,
+#           `attention_grid.key_tile_model_{base,fresh}_coeffs`.  It reproduces the
+#           measured `family_cells.key_tiles` of all 32 seq5 layer chunks EXACTLY,
 #           at both contexts.  So the E4 claim on this half is exact, not
 #           bracketed.
 #
@@ -106,33 +106,33 @@ REF8B_SOURCE = "experiments/b10/out/seq5/seq_c{4096,16384}_L16.json (result.poin
 # --------------------------------------------------------------------------
 
 
-def bands_per_chunk(nh, hd, s, c, base_slope=2.0):
-    """`cm.band_cells` + diagonal block, with the ONE coefficient caveat 1 disputes exposed.
+def key_tiles_per_chunk(nh, hd, s, c, base_slope=2.0):
+    """`cm.key_tile_cells` + diagonal block, with the ONE coefficient caveat 1 disputes exposed.
 
-    `base_slope` is the band family's committed BASE cells per (head, key, token)
-    -- the `2 * nh * s * c` score-and-numerator term of `cm.band_cells`, i.e. the
-    64 in `attention_grid.band_model_base_coeffs` divided by NH=32.  The refuted
-    `bands = p * S^2` reading of B9's two prefill points puts it at
+    `base_slope` is the key tile family's committed BASE cells per (head, key, token)
+    -- the `2 * nh * s * c` score-and-numerator term of `cm.key_tile_cells`, i.e. the
+    64 in `attention_grid.key_tile_model_base_coeffs` divided by NH=32.  The refuted
+    `key tiles = p * S^2` reading of B9's two prefill points puts it at
     72.083 / 32 = 2.2526 instead.  Everything else is untouched: this is a
     sensitivity, not a second model.
     """
-    b, i, sat1 = cm.band_cells(nh, hd, s, c)
-    cb, ci, sat2 = cm.band_cells(nh, hd, s, s, rows_region=False)
+    b, i, sat1 = cm.key_tile_cells(nh, hd, s, c)
+    cb, ci, sat2 = cm.key_tile_cells(nh, hd, s, s, rows_region=False)
     extra = (base_slope - 2.0) * nh * (s * c + s * s)
     return b + cb + extra, i + ci, bool(sat1 or sat2)
 
 
 def predict(cfg, ctx, seq=S, base_slope=2.0):
-    """Layers-only fresh cells per decoded token, split bands / rest."""
+    """Layers-only fresh cells per decoded token, split key tiles / rest."""
     L, d, nh, nkv, hd, dff, vocab = cfg
     r = cm.cells_per_token(cfg, ctx, B, seq=seq, head=False)
     gl = cm.residual_stream_cells(cfg, "tree")
-    bb, bi, sat = bands_per_chunk(nh, hd, seq, ctx, base_slope=base_slope)
-    bands = L * (bb + bi) / seq
+    bb, bi, sat = key_tiles_per_chunk(nh, hd, seq, ctx, base_slope=base_slope)
+    key_tiles = L * (bb + bi) / seq
     rest = r["total"] - r["attn"] + gl["net"]
-    return dict(bands=bands, rest=rest, total=bands + rest,
-                bands_base_per_chunk=bb, bands_interaction_per_chunk=bi,
-                per_layer_chunk=(bands + rest) * seq / L,
+    return dict(key_tiles=key_tiles, rest=rest, total=key_tiles + rest,
+                key_tiles_base_per_chunk=bb, key_tiles_interaction_per_chunk=bi,
+                per_layer_chunk=(key_tiles + rest) * seq / L,
                 saturated=sat, residual_stream_net=gl["net"], bare=r["total"])
 
 
@@ -156,7 +156,7 @@ def anchors():
             ratio=p["total"] / m, source=get(key)["source"], grade=get(key)["grade"],
             card=get(key)["card"])
     # Qwen2.5-0.5B: B6.5's composed layer, a DIFFERENT statement -- no
-    # residual-stream family, no diagonal block band, and q/k/v/o on the pow2 dequant
+    # residual-stream family, no diagonal block key tile, and q/k/v/o on the pow2 dequant
     # rung while gate/up/down are on the chain.  Evaluated the same way, as a weak anchor.
     L, d, nh, nkv, hd, dff, vocab = cm.QWEN
     r = cm.cells_per_token(cm.QWEN, 1024, B, seq=S, head=False, diagonal_block=False)
@@ -168,7 +168,7 @@ def anchors():
         scale="Qwen2.5-0.5B", ctx=1024, predicted=tot, measured=meas,
         ratio=tot / meas, source="experiments/b65/out/compose_host.json "
         "(result.point.cells.fresh)", grade="measured", card="none (host, macOS)",
-        note="weak anchor: no residual-stream family, no diagonal block band, mixed dequant rungs, "
+        note="weak anchor: no residual-stream family, no diagonal block key tile, mixed dequant rungs, "
              "and a prover generation older than the seq5 statement")
     return out
 
@@ -191,7 +191,7 @@ BRACKET = dict(
         "+4.2% at 8B). The licence is claimed with the measured residual quoted "
         "beside it.\n"
         "MARGINAL rho in [0.80, 0.90) or (1.10, 1.25] -- the licence is claimed "
-        "only with an explicit +/-25% band printed on every frontier row.\n"
+        "only with an explicit +/-25% key tile printed on every frontier row.\n"
         "FAIL   rho < 0.80 or rho > 1.25 -- the cost model is REFUTED as an "
         "extrapolator. Section 6.3 is regraded from [projected] to "
         "[illustrative], the 'you didn't build it' mitigation falls back to "
@@ -216,24 +216,24 @@ BRACKET = dict(
                   "mean at C=4096, ENTIRELY from the per-layer master exp table. "
                   "Every other family is identical to the cell across all 32 "
                   "layers, and the whole chunk is the exact identity "
-                  "`cells.fresh == bands(S, C) + 1,006,949,376 + 5 * 2^log_table`, "
+                  "`cells.fresh == key tiles(S, C) + 1,006,949,376 + 5 * 2^log_table`, "
                   "verified on all 32 chunks at BOTH contexts (`log_table` 22..25, "
                   "`interaction_by_family.table` 56.0-173.4 Mcells). The run MUST "
                   "report `params.log_table` and "
                   "`interaction_by_family.table.cells` for the layer it proved."),
     ),
     also=(
-        "SEPARATE and EXACT: the bands family. `family_cells.bands` (base) and "
-        "`interaction_by_family.bands.cells` must equal the registered integers "
+        "SEPARATE and EXACT: the key tiles family. `family_cells.key tiles` (base) and "
+        "`interaction_by_family.key tiles.cells` must equal the registered integers "
         "TO THE CELL, as they do on all 32 seq5 layer chunks at both contexts. "
         "Any nonzero deviation is a finding in its own right and must be "
         "reported even if rho passes -- it means the layout identities in "
-        "`band_cells` do not hold at a shape whose `nh` and `d` are not powers "
+        "`key_tile_cells` do not hold at a shape whose `nh` and `d` are not powers "
         "of two, which is the one thing the closed form's own docstring flags."),
     invalidation=(
         "The comparison is void, not failed, if the run does not reproduce the "
         "registered configuration: spec `b10-final` (round even, all seven "
-        "matmuls on the `chain` dequant rung), S=512, diagonal block band ON, "
+        "matmuls on the `chain` dequant rung), S=512, diagonal block key tile ON, "
         "grid_target 64 / chan_target 128 / rw 16, k_bits 11 / q_bits 12, "
         "bounds on, and a REAL extracted witness (not `B7_SYNTH_DIMS`). "
         "A void run is re-run, never re-bracketed."),
@@ -241,9 +241,9 @@ BRACKET = dict(
 
 
 def selfcheck():
-    """The predictor must reproduce the 8B chunk's bands family TO THE CELL.
+    """The predictor must reproduce the 8B chunk's key tiles family TO THE CELL.
 
-    This is what licenses registering the bands half with no bracket at all: the
+    This is what licenses registering the key tiles half with no bracket at all: the
     same code path, at the shape it was derived from, against the artifact.
     """
     out = []
@@ -251,15 +251,15 @@ def selfcheck():
         pt = _seq5(ctx)
         nh, hd = pt["params"]["nh"], pt["params"]["hd"]
         assert (nh, hd) == (cm.LLAMA8B[2], cm.LLAMA8B[4]), (nh, hd)
-        bb, bi, sat = bands_per_chunk(nh, hd, S, ctx)
-        mb = pt["family_cells"]["bands"]
-        mi = pt["family_cells"]["interaction_by_family"]["bands"]["cells"]
+        bb, bi, sat = key_tiles_per_chunk(nh, hd, S, ctx)
+        mb = pt["family_cells"]["key_tiles"]
+        mi = pt["family_cells"]["interaction_by_family"]["key_tiles"]["cells"]
         assert int(bb) == mb, (ctx, bb, mb)
         assert int(round(bi)) == mi, (ctx, bi, mi)
-        # and the local reimplementation must equal cost_model's own band_fresh
-        bf, _ = cm.band_fresh(nh, hd, S, ctx, diagonal_block=True)
+        # and the local reimplementation must equal cost_model's own key_tile_fresh
+        bf, _ = cm.key_tile_fresh(nh, hd, S, ctx, diagonal_block=True)
         assert abs(bf - (bb + bi)) < 1e-6, (ctx, bf, bb + bi)
-        out.append(dict(ctx=ctx, bands_base=mb, bands_interaction=mi, exact=True,
+        out.append(dict(ctx=ctx, key_tiles_base=mb, key_tiles_interaction=mi, exact=True,
                         saturated=sat))
     return out
 
@@ -287,14 +287,14 @@ def build():
             ref8 = REF8B[ctx]
             entry["contexts"][str(ctx)] = dict(
                 cells_per_token_layers=p["total"],
-                cells_per_token_layers_bands=p["bands"],
+                cells_per_token_layers_key_tiles=p["key_tiles"],
                 cells_per_token_layers_rest=p["rest"],
                 per_layer_chunk_fresh=p["per_layer_chunk"],
-                bands_family_base_per_chunk=int(p["bands_base_per_chunk"]),
-                bands_family_interaction_per_chunk=int(round(p["bands_interaction_per_chunk"])),
-                bands_family_fresh_per_chunk=int(round(p["bands_base_per_chunk"]
-                                                       + p["bands_interaction_per_chunk"])),
-                band_layout_saturated=p["saturated"],
+                key_tiles_family_base_per_chunk=int(p["key_tiles_base_per_chunk"]),
+                key_tiles_family_interaction_per_chunk=int(round(p["key_tiles_interaction_per_chunk"])),
+                key_tiles_family_fresh_per_chunk=int(round(p["key_tiles_base_per_chunk"]
+                                                       + p["key_tiles_interaction_per_chunk"])),
+                key_tile_layout_saturated=p["saturated"],
                 chunk_over_8b_l16_chunk=p["per_layer_chunk"] / ref8,
                 sensitivity_base_slope_2p2526=dict(
                     cells_per_token_layers=hi["total"],
@@ -332,11 +332,11 @@ def provenance():
         predictor=dict(
             engine="experiments/b2/cost_model.py",
             entry_points=["cells_per_token(cfg, ctx, batch, seq, head=False)",
-                          "residual_stream_cells(cfg, 'tree')", "band_cells", "band_fresh",
+                          "residual_stream_cells(cfg, 'tree')", "key_tile_cells", "key_tile_fresh",
                           "lm_head_chunk"],
             not_the_engine="experiments/budget.py is an early one-shape proxy "
                            "(eval-plan.md section 3) and is not used here",
-            attention_term="the BAND MODEL (alpha=None). The legacy single-slope "
+            attention_term="the KEY_TILE MODEL (alpha=None). The legacy single-slope "
                            "alpha=4.00 path is NOT used -- section 7.5(e)'s ruling "
                            "is that the paper uses the composed-chunk value.",
             lookup_batch=B, seq_per_chunk=S,
@@ -350,9 +350,9 @@ def frozen_inputs():
         "cells_per_token.8b.c16384.fresh_layers",
         "cells.c4096.fresh_layers32",
         "cells.c16384.fresh_layers32",
-        "attention_grid.band_model_base_coeffs",
-        "attention_grid.band_model_fresh_coeffs",
-        "attention_grid.band_model_alpha_fresh",
+        "attention_grid.key_tile_model_base_coeffs",
+        "attention_grid.key_tile_model_fresh_coeffs",
+        "attention_grid.key_tile_model_alpha_fresh",
         "attention_grid.composed_chunk_fresh_slope",
         "attention_grid.composed_chunk_fresh_slope_32layers",
         "attention_grid.b5_standalone_alpha",
@@ -404,11 +404,11 @@ def integrator_notes(reg):
     for ctx, key in ((4096, "cells_per_token.27b.c4096.model"),
                      (16384, "cells_per_token.27b.c16384.model")):
         alpha4 = cm.cells_per_token(g, ctx, B, seq=S, alpha=4.0)["total"]
-        band = cm.cells_per_token(g, ctx, B, seq=S)["total"]
+        key_tile = cm.cells_per_token(g, ctx, B, seq=S)["total"]
         rows[str(ctx)] = dict(frozen=value(key), rerun_alpha_4p00=alpha4,
-                              rerun_band_model=band,
-                              band_over_frozen=band / value(key),
-                              understated_pct=100.0 * (band / value(key) - 1.0))
+                              rerun_key_tile_model=key_tile,
+                              key_tile_over_frozen=key_tile / value(key),
+                              understated_pct=100.0 * (key_tile / value(key) - 1.0))
     mem = {}
     for name, e in reg.items():
         mem[name] = {ctx: dict(chunk_over_8b_l16=c["chunk_over_8b_l16_chunk"])
@@ -418,7 +418,7 @@ def integrator_notes(reg):
             finding="Every `cells_per_token.27b.*` row in paper/constants.json "
                     "reproduces EXACTLY when the cost model is re-run with the "
                     "legacy alpha=4.00 path, and not otherwise. Re-running the "
-                    "same shape on the band model -- the composed-chunk value "
+                    "same shape on the key tile model -- the composed-chunk value "
                     "W0's freeze ruled the paper must use (eval-plan.md 7.5(e)) "
                     "-- raises them as below. E4 reports this and does not patch "
                     "it: `paper/constants.json` is owned elsewhere this session.",
@@ -453,7 +453,7 @@ def main():
     # unrelated constant is edited, or the hash cannot answer the only question
     # a later reader asks of it: is this the prediction that was registered?
     content = dict(schema="e4-registration/1", shapes=reg, bracket=BRACKET,
-                   anchors=anc, bands_selfcheck_8b=chk,
+                   anchors=anc, key_tiles_selfcheck_8b=chk,
                    frozen_inputs=frozen_inputs())
     content_digest = hashlib.sha256(canonical(content)).hexdigest()
     block = dict(content, provenance=provenance())
@@ -468,10 +468,10 @@ def main():
     print("E4 -- unfitted-scale prediction, registered before measurement")
     print("=" * 78)
     print()
-    print("bands self-check against the 8B artifacts (must be exact to the cell):")
+    print("key tiles self-check against the 8B artifacts (must be exact to the cell):")
     for c in chk:
-        print(f"  C={c['ctx']:<6} base {c['bands_base']:>13,}  interaction "
-              f"{c['bands_interaction']:>13,}  exact={c['exact']}  saturated={c['saturated']}")
+        print(f"  C={c['ctx']:<6} base {c['key_tiles_base']:>13,}  interaction "
+              f"{c['key_tiles_interaction']:>13,}  exact={c['exact']}  saturated={c['saturated']}")
     print()
     print("the predictor's residual at the two scales it WAS built from:")
     for k, v in anc.items():
@@ -484,21 +484,21 @@ def main():
               f"nkv={e['cfg'][3]} hd={e['cfg'][4]} dff={e['cfg'][5]} vocab={e['cfg'][6]}")
         for ctx, c in e["contexts"].items():
             print(f"    C={ctx:<6} cells/token (layers) {c['cells_per_token_layers']:>15,.0f}"
-                  f"   = bands {c['cells_per_token_layers_bands']:>14,.0f}"
+                  f"   = key tiles {c['cells_per_token_layers_key_tiles']:>14,.0f}"
                   f" + rest {c['cells_per_token_layers_rest']:>13,.0f}")
             print(f"    {'':<8} one layer chunk, fresh {c['per_layer_chunk_fresh']:>13,.0f}"
-                  f"   bands family/chunk: base {c['bands_family_base_per_chunk']:,}"
-                  f"  interaction {c['bands_family_interaction_per_chunk']:,}")
+                  f"   key tiles family/chunk: base {c['key_tiles_family_base_per_chunk']:,}"
+                  f"  interaction {c['key_tiles_family_interaction_per_chunk']:,}")
             print(f"    {'':<8} caveat-1 sensitivity (base slope 2.0 -> 2.2526): "
                   f"{c['sensitivity_base_slope_2p2526']['shift_pct']:+.2f}%"
-                  f"   saturated={c['band_layout_saturated']}"
+                  f"   saturated={c['key_tile_layout_saturated']}"
                   f"   chunk vs 8B L16 x{c['chunk_over_8b_l16_chunk']:.3f}")
         print()
     _n = integrator_notes(reg)["frontier_rows_still_on_4p00"]["rows"]
     print("section 7.5(e) check -- the frozen 27B frontier rows:")
     for ctx, r in _n.items():
         print(f"  C={ctx:<6} frozen {r['frozen']:>13,}  = alpha 4.00 rerun "
-              f"{r['rerun_alpha_4p00']:>13,.0f}   band model {r['rerun_band_model']:>13,.0f}"
+              f"{r['rerun_alpha_4p00']:>13,.0f}   key tile model {r['rerun_key_tile_model']:>13,.0f}"
               f"  ({r['understated_pct']:+.2f}% understated)")
     print()
     print(f"prediction sha256 (content only): {content_digest}")

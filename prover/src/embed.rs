@@ -1110,7 +1110,7 @@ mod tests {
             })
             .collect();
         crate::compose::Params {
-            s: 32, c: 128, hd: 32, nh: 3, bands: vec![2, 1],
+            s: 32, c: 128, hd: 32, nh: 3, key_tiles: vec![2, 1],
             variant: "intsplit6".into(), log_table: 16,
             q_bits: 8, k_bits: 8, nmax: 1, chan_target: 128, grid_target: 64, rw: 16,
             z_lo_bits: 16, z_hi_bits: 6, z_min: 1, mats, deq_target: 16, kmax: 12,
@@ -1134,13 +1134,13 @@ mod tests {
                 eps: crate::bf16::from_f64(1e-5),
                 inv_d: crate::bf16::from_f64(1.0 / 64.0),
             }),
-            diagonal_block: false, gkr_bands: false, gkr_dequant: false, gkr_residual_stream: false,
+            diagonal_block: false, gkr_key_tiles: false, gkr_dequant: false, gkr_residual_stream: false,
             gkr_freivalds: false, gkr_attnout: false, layer_boundary: false, kv_boundary: false,
             logits_claim: false, prove_argmax: false, prove_argmax_lax: false,
             embed_vocab: if embed { 300 } else { 0 },
             embed_per_row: if embed { 32 } else { 0 },
             // stream NN: this fixture's q/k/v widths do not line up with its
-            // bands, so it carries no rotation -- exactly as a shape whose
+            // key tiles, so it carries no rotation -- exactly as a shape whose
             // matmuls are not the attention's does in the field
             rope: None,
         }

@@ -314,11 +314,11 @@ pub fn modes_json() -> Value {
     ] {
         put(name, m4b_mode(name));
     }
-    // `B7_M4_WFILL_BAND` is the one mode whose fallback is another mode
+    // `B7_M4_WFILL_KEY_TILE` is the one mode whose fallback is another mode
     // rather than the table, so it is asked for through its own reader. This
-    // is the switch's global value; which fill a *particular* band takes also
-    // depends on its layout (`devwfill::band_fill_mode`).
-    put("B7_M4_WFILL_BAND", crate::devwfill::band_mode());
+    // is the switch's global value; which fill a *particular* key tile takes also
+    // depends on its layout (`devwfill::key_tile_fill_mode`).
+    put("B7_M4_WFILL_KEY_TILE", crate::devwfill::key_tile_mode());
     // `B7_M4_WFILL_DIAGONAL_BLOCK` has not gated and defaults off, but a run that
     // sets it must still name it here, or its JSON claims a configuration it
     // did not run.

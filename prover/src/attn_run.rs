@@ -1,10 +1,10 @@
-//! Prove / verify a band of `insts` attention heads sharing one column set, and
+//! Prove / verify a key tile of `insts` attention heads sharing one column set, and
 //! report what it cost.
 //!
 //! The three application-level checks are *identical* to B5's even though the proof
 //! now covers many instances, because every region carries the same per-instance
 //! weight (`attn_air`'s module doc): one claimed value per identity, whatever the
-//! band size.
+//! key tile size.
 //!
 //! Three application-level checks sit on top of stwo's `verify()`, because none
 //! of them is a constraint (B2 section 4, B3 section 1):
@@ -28,7 +28,7 @@ use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::attn_air::{
     ChanEval, ExpRel, ExpTableEval, KeyEval, Offsets, OutEval, Powers, RangeRel, RangeTableEval,
-    RowEval, band_id, id, msk_id, tbl_range, CHAN_SEL, DIAGONAL_BLOCK_SEL, KEY_SEL, OUT_SEL, ROW_SEL,
+    RowEval, key_tile_id, id, msk_id, tbl_range, CHAN_SEL, DIAGONAL_BLOCK_SEL, KEY_SEL, OUT_SEL, ROW_SEL,
     TBL_EXP_X, TBL_EXP_Y,
 };
 use crate::common::{Proven, Session, Sums, twiddles};
@@ -187,17 +187,17 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
     let off = Offsets::new(a.q_bits, a.k_bits);
     let ridx = |b: u32| widths.iter().position(|w| *w == b).unwrap();
     let mut ids = vec![];
-    ids.extend(CHAN_SEL.iter().map(|n| band_id(0, n)));
+    ids.extend(CHAN_SEL.iter().map(|n| key_tile_id(0, n)));
     if a.diagonal_block {
-        ids.extend(DIAGONAL_BLOCK_SEL.iter().map(|n| band_id(0, n)));
+        ids.extend(DIAGONAL_BLOCK_SEL.iter().map(|n| key_tile_id(0, n)));
         ids.extend((0..l.key.q).map(|i| msk_id(0, i)));
     } else {
-        ids.extend(KEY_SEL.iter().map(|n| band_id(0, n)));
+        ids.extend(KEY_SEL.iter().map(|n| key_tile_id(0, n)));
     }
     // Stream CC (E11): the inert-lead-row selector, in `commit_pre`'s order.
     ids.extend(crate::attn_air::act_id(0, a.diagonal_block, l.key.g.lead));
-    ids.extend(OUT_SEL.iter().map(|n| band_id(0, n)));
-    ids.extend(ROW_SEL.iter().map(|n| band_id(0, n)));
+    ids.extend(OUT_SEL.iter().map(|n| key_tile_id(0, n)));
+    ids.extend(ROW_SEL.iter().map(|n| key_tile_id(0, n)));
     ids.push(id(TBL_EXP_X));
     ids.push(id(TBL_EXP_Y));
     ids.extend(widths.iter().map(|w| tbl_range(*w)));

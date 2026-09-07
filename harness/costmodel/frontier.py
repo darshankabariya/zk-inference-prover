@@ -71,15 +71,15 @@ KEYS = dict(
     # composite slope: a single cells-per-(head, key, token) number is a per-entry
     # cost and a per-key cost collapsed together by the accident that the
     # calibration point has S=512, and it is valid only at that S.
-    band_fresh_coeffs="attention_grid.band_model_fresh_coeffs",
-    band_base_coeffs="attention_grid.band_model_base_coeffs",
-    band_alpha_fresh="attention_grid.band_model_alpha_fresh",
-    band_alpha_base="attention_grid.band_model_alpha_base",
+    key_tile_fresh_coeffs="attention_grid.key_tile_model_fresh_coeffs",
+    key_tile_base_coeffs="attention_grid.key_tile_model_base_coeffs",
+    key_tile_alpha_fresh="attention_grid.key_tile_model_alpha_fresh",
+    key_tile_alpha_base="attention_grid.key_tile_model_alpha_base",
     # the superseded single slopes, kept only so the table can show what they cost
     alpha_e1="attention_grid.e1_composed_solve",
     alpha_w0_32layers="attention_grid.composed_chunk_fresh_slope_32layers",
     alpha_b5="attention_grid.b5_standalone_alpha",
-    # E11, re-priced by stream E7 on the band model
+    # E11, re-priced by stream E7 on the key tile model
     e11_multiple="design.e11_cells_multiple_c4096",
     e11_chunking_net="design.e11_chunking_net_pct",
     e11_chunking_fixed="design.e11_chunking_overhead_pct",
@@ -342,7 +342,7 @@ def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
             experts=grp["experts"], topk=grp["topk"], seq_batch=seq_batch, head=head,
             attn_accs_per_layer=grp.get("attn_accs_per_layer"),
             attn_params_per_layer=grp.get("attn_params_per_layer"), diagonal_block=diagonal_block)
-        out["saturated"] = out.get("saturated", False) or bool(c["band_saturated"])
+        out["saturated"] = out.get("saturated", False) or bool(c["key_tile_saturated"])
         gl = cm.residual_stream_cells(cfg, "tree", topk=grp["topk"], final_norm=head)
         out["total"] += c["total"] + gl["net"]
         out["preprocessed"] += c["preprocessed"]
@@ -359,22 +359,22 @@ def check_8b(h200, shape, consts, batch=None):
 
     Before 2026-09-01 the attention term was one slope, `alpha`, solved from the
     two measured contexts -- one fitted parameter, two points, one residual dof.
-    Stream DD's band model and stream E1's symbolic re-derivation of it replace
+    Stream DD's key tile model and stream E1's symbolic re-derivation of it replace
     that with a closed form whose every coefficient is an identity of the layout,
     so the model now predicts both measured levels with nothing solved: two points,
     zero fitted parameters, two residual degrees of freedom.
 
     Also re-checks the coefficients themselves against the freeze, and against the
-    band family measured directly in the seq5 artifacts."""
+    key tile family measured directly in the seq5 artifacts."""
     meas = measured_8b(h200)
     nh, hd = shape["nh"], shape["hd"]
     got_fresh = _coeffs(nh, hd)
     got_base = _coeffs(nh, hd, base_only=True)
-    want_fresh = consts["band_fresh_coeffs"]["value"]
-    want_base = consts["band_base_coeffs"]["value"]
+    want_fresh = consts["key_tile_fresh_coeffs"]["value"]
+    want_base = consts["key_tile_base_coeffs"]["value"]
     out = dict(
         measured=meas,
-        band={c: model_cells(shape, c, batch=batch)["total"] / meas[c] - 1 for c in meas},
+        key_tile={c: model_cells(shape, c, batch=batch)["total"] / meas[c] - 1 for c in meas},
         legacy_slope={c: model_cells(shape, c, alpha=consts["alpha_e1"]["value"],
                                      batch=batch)["total"] / meas[c] - 1 for c in meas},
         legacy_b5={c: model_cells(shape, c, alpha=consts["alpha_b5"]["value"],
@@ -382,20 +382,20 @@ def check_8b(h200, shape, consts, batch=None):
         coeffs_fresh=got_fresh, coeffs_base=got_base,
         frozen_fresh=want_fresh, frozen_base=want_base,
         coeffs_agree=(got_fresh == tuple(want_fresh) and got_base == tuple(want_base)),
-        family=_band_family_check(nh, hd))
+        family=_key_tile_family_check(nh, hd))
     return out
 
 
 def _coeffs(nh, hd, base_only=False, s0=512, c0=4096):
-    """The (S*C, C, S) coefficients this module's band model implies at a shape.
+    """The (S*C, C, S) coefficients this module's key tile model implies at a shape.
 
-    Recovered from the band function itself by finite differences, rather than
+    Recovered from the key tile function itself by finite differences, rather than
     restated, so the drift guard compares the code that is actually used against
     the freeze.  Differenced at (s0, c0) and its doublings, well clear of
     `Grid::new`'s caps -- at S or C below them the layout saturates, `q` and `pk`
     stop being the targets, and the form is no longer a plain trilinear."""
     def f(s, c):
-        b, i, _ = cm.band_cells(nh, hd, s, c)
+        b, i, _ = cm.key_tile_cells(nh, hd, s, c)
         return b if base_only else b + i
     a = (f(2 * s0, 2 * c0) - f(2 * s0, c0) - f(s0, 2 * c0) + f(s0, c0)) / (s0 * c0)
     b = (f(s0, 2 * c0) - f(s0, c0)) / c0 - a * s0
@@ -403,8 +403,8 @@ def _coeffs(nh, hd, base_only=False, s0=512, c0=4096):
     return tuple(round(x, 6) for x in (a, b, d))
 
 
-def _band_family_check(nh, hd):
-    """`family_cells.bands` is base-only; predict it on every seq5 layer chunk and
+def _key_tile_family_check(nh, hd):
+    """`family_cells.key_tiles` is base-only; predict it on every seq5 layer chunk and
     on B9's two prefill points, and report exact-or-not.  Nothing is fitted, so a
     miss here is a real disagreement, not a residual."""
     rows = []
@@ -416,22 +416,22 @@ def _band_family_check(nh, hd):
         pr = d["params"]
         if pr["nh"] != nh or pr["hd"] != hd:
             continue
-        b, _, _ = cm.band_cells(nh, hd, pr["s"], pr["c"],
+        b, _, _ = cm.key_tile_cells(nh, hd, pr["s"], pr["c"],
                                 grid_target=pr["grid_target"], chan_target=pr["chan_target"],
                                 rw=pr["rw"])
         if pr.get("diagonal_block"):
-            b2, _, _ = cm.band_cells(nh, hd, pr["s"], pr["s"], rows_region=False,
+            b2, _, _ = cm.key_tile_cells(nh, hd, pr["s"], pr["s"], rows_region=False,
                                      grid_target=pr["grid_target"],
                                      chan_target=pr["chan_target"], rw=pr["rw"])
             b += b2
-        rows.append((f.name, pr["s"], pr["c"], d["family_cells"]["bands"], b))
+        rows.append((f.name, pr["s"], pr["c"], d["family_cells"]["key_tiles"], b))
     for s in (512, 1024):
         f = ROOT / "b9" / "out" / f"prefill_s{s}.json"
         if not (f.exists() and f.stat().st_size):
             continue
         d = json.loads(f.read_text())["result"]["point"]
-        b, _, _ = cm.band_cells(nh, hd, s, s)
-        rows.append((f.name, s, s, d["family_cells"]["bands"], b))
+        b, _, _ = cm.key_tile_cells(nh, hd, s, s)
+        rows.append((f.name, s, s, d["family_cells"]["key_tiles"], b))
     return rows
 
 
@@ -449,13 +449,13 @@ def prefill_fit():
         p = ROOT / "b9" / "out" / f"prefill_s{s}.json"
         if p.exists() and p.stat().st_size:
             d = json.loads(p.read_text())["result"]["point"]
-            pts.append(dict(s=s, fresh=d["cells"]["fresh"], bands=d["family_cells"]["bands"]))
+            pts.append(dict(s=s, fresh=d["cells"]["fresh"], key_tiles=d["family_cells"]["key_tiles"]))
     if len(pts) < 2:
         return None
     a, b = pts[-2], pts[-1]
-    p = (b["bands"] - a["bands"]) / (b["s"] ** 2 - a["s"] ** 2)
-    q = ((b["fresh"] - b["bands"]) - (a["fresh"] - a["bands"])) / (b["s"] - a["s"])
-    f = (a["fresh"] - a["bands"]) - q * a["s"]
+    p = (b["key_tiles"] - a["key_tiles"]) / (b["s"] ** 2 - a["s"] ** 2)
+    q = ((b["fresh"] - b["key_tiles"]) - (a["fresh"] - a["key_tiles"])) / (b["s"] - a["s"])
+    f = (a["fresh"] - a["key_tiles"]) - q * a["s"]
     return dict(fixed=f, per_token=q, per_pair=p, points=[x["s"] for x in pts],
                 missing=[s for s in (512, 1024, 2048)
                          if s not in [x["s"] for x in pts]],
@@ -1035,17 +1035,17 @@ def main(argv=None):
     # This module derives them symbolically and the freeze carries stream DD's;
     # they must agree exactly at the 8B geometry, because both claim to be
     # identities of the same layout rather than fits.
-    if consts["band_fresh_coeffs"]["value"] and not cal["coeffs_agree"]:
-        sys.exit(f"band coefficients disagree with the freeze:\n"
+    if consts["key_tile_fresh_coeffs"]["value"] and not cal["coeffs_agree"]:
+        sys.exit(f"key tile coefficients disagree with the freeze:\n"
                  f"  fresh  derived {cal['coeffs_fresh']}  frozen {cal['frozen_fresh']}\n"
                  f"  base   derived {cal['coeffs_base']}  frozen {cal['frozen_base']}\n"
                  "Both claim to be layout identities, so one of them is wrong; "
                  "resolve it, do not average.")
     bad = [r for r in cal["family"] if r[3] != r[4]]
     if bad:
-        sys.exit("the band model no longer reproduces `family_cells.bands` exactly on "
+        sys.exit("the key tile model no longer reproduces `family_cells.key_tiles` exactly on "
                  + ", ".join(r[0] for r in bad))
-    alpha = None                       # the band model IS the attention term now
+    alpha = None                       # the key tile model IS the attention term now
     fit = prefill_fit()
     mib_per_chunk = (h200["per_ctx"][4096]["proof_bytes"] / 2 ** 20
                      / h200["per_ctx"][4096]["chunks"] / TOKENS)
@@ -1097,21 +1097,21 @@ def main(argv=None):
     # --- the check: no free parameter at all ---------------------------------
     print("\nthe check: the attention term now has ZERO fitted parameters")
     print("  The model used to charge one slope, `alpha`, solved from the two measured")
-    print("  contexts -- one parameter, two points, one residual dof.  Stream DD's band")
+    print("  contexts -- one parameter, two points, one residual dof.  Stream DD's key tile")
     print("  model and this module's symbolic re-derivation of it replace that slope with")
     print("  a closed form in (S, C) whose every coefficient is an identity of the layout,")
     print("  so both measured levels are now predicted with nothing solved: two points,")
     print("  zero fitted parameters, TWO residual degrees of freedom.")
-    print(f"\n  {'context':>8} {'measured M/token':>18} {'band model':>12} {'residual':>10}"
+    print(f"\n  {'context':>8} {'measured M/token':>18} {'key tile model':>12} {'residual':>10}"
           f"   {'slope 5.855':>12} {'B5 4.00':>10}")
     for ctx in sorted(cal["measured"]):
         m = cal["measured"][ctx]
-        print(f"  {ctx:>8} {m/1e6:>18.2f} {m*(1+cal['band'][ctx])/1e6:>12.2f} "
-              f"{cal['band'][ctx]:>+9.2%}   {cal['legacy_slope'][ctx]:>+11.2%} "
+        print(f"  {ctx:>8} {m/1e6:>18.2f} {m*(1+cal['key_tile'][ctx])/1e6:>12.2f} "
+              f"{cal['key_tile'][ctx]:>+9.2%}   {cal['legacy_slope'][ctx]:>+11.2%} "
               f"{cal['legacy_b5'][ctx]:>+9.2%}")
-    print(f"  band model residual {min(cal['band'].values()):+.2%} to "
-          f"{max(cal['band'].values()):+.2%}, on no fitted attention parameter at all.")
-    print("  The two superseded columns are the same model with the band term replaced by")
+    print(f"  key tile model residual {min(cal['key_tile'].values()):+.2%} to "
+          f"{max(cal['key_tile'].values()):+.2%}, on no fitted attention parameter at all.")
+    print("  The two superseded columns are the same model with the key tile term replaced by")
     print("  a single slope: 5.855 was solved to hit these two points, and 4.00 is B5's")
     print("  standalone block AIR, which is what everything before 2026-09-01 charged.")
 
@@ -1121,13 +1121,13 @@ def main(argv=None):
     print(f"  {'fresh':<10} {cal['coeffs_fresh'][0]:>10} {cal['coeffs_fresh'][1]:>12} "
           f"{cal['coeffs_fresh'][2]:>12}   derived symbolically here")
     print(f"  {'':<10} {cal['frozen_fresh'][0]:>10} {cal['frozen_fresh'][1]:>12} "
-          f"{cal['frozen_fresh'][2]:>12}   attention_grid.band_model_fresh_coeffs")
+          f"{cal['frozen_fresh'][2]:>12}   attention_grid.key_tile_model_fresh_coeffs")
     print(f"  {'base':<10} {cal['coeffs_base'][0]:>10} {cal['coeffs_base'][1]:>12} "
           f"{cal['coeffs_base'][2]:>12}   derived symbolically here")
     print(f"  {'':<10} {cal['frozen_base'][0]:>10} {cal['frozen_base'][1]:>12} "
-          f"{cal['frozen_base'][2]:>12}   attention_grid.band_model_base_coeffs")
+          f"{cal['frozen_base'][2]:>12}   attention_grid.key_tile_model_base_coeffs")
     n_exact = sum(1 for r in cal["family"] if r[3] == r[4])
-    print(f"  and `family_cells.bands` reproduced EXACTLY, to the cell, on "
+    print(f"  and `family_cells.key_tiles` reproduced EXACTLY, to the cell, on "
           f"{n_exact}/{len(cal['family'])} artifacts")
     print("  (every seq5 layer chunk at C=4096 and C=16384 on the real extracted")
     print("  witness, plus B9's two S=C prefill points).  Nothing is fitted, so a miss")
@@ -1146,8 +1146,8 @@ def main(argv=None):
           f"{cal['frozen_base']} base.")
     print("  Read off `prover/src/attn_trace.rs:1167-1181` with `prover/src/layout.rs`:")
     print("    lc.g.rows = hd*insts*C/pk (pk -> ct), lk.g.rows = C*insts*S/q (q -> gt),")
-    print("    rrows*rw = nh*S, and `insts` sums to nh over the bands -- every term is")
-    print("    linear in `insts`, so banding 16/8/8 costs exactly what 32 would.")
+    print("    rrows*rw = nh*S, and `insts` sums to nh over the key tiles -- every term is")
+    print("    linear in `insts`, so grouping the heads 16/8/8 costs exactly what 32 would.")
     print("\n  Three things this derivation does NOT settle, and they are the extrapolation")
     print("  risk the frontier rows carry:")
     print("   1. **K and V are committed per ATTENTION head, not per KV group.**")
@@ -1163,7 +1163,7 @@ def main(argv=None):
     print("      C, hd and `insts` are powers of two and the target divides; `Grid::new`")
     print("      also caps q at min(S, hd) and pk at min(C, S).  Where a shape saturates a")
     print("      cap the table says so.")
-    print("   3. **The out (A.V) region is not in the band family.**  It is the `attnout`")
+    print("   3. **The out (A.V) region is not in the key tile family.**  It is the `attnout`")
     print("      family and `cells_per_token` charges it separately, so there is no double")
     print("      count -- but it is also the one attention region whose price here is a")
     print("      measured per-element constant rather than a derived column count.")
@@ -1232,11 +1232,11 @@ def main(argv=None):
 
     print("\n(2a) what the superseded attention terms cost.  Section 6.3's dense table")
     print("     was produced at B5's 4.00; the version this stream committed at 3ec240c")
-    print("     used the single composed slope 5.855.  Both are here against the band model.")
+    print("     used the single composed slope 5.855.  Both are here against the key tile model.")
     b5 = consts["alpha_b5"]["value"]
     slope = consts["alpha_e1"]["value"]
-    print(f"  {'model':<18} {'@4.00':>10} {'@5.855':>10} {'band':>10} {'band vs 4.00':>13}"
-          f" {'band vs 5.855':>14}   {'C=16K: vs 4.00':>15} {'vs 5.855':>10}")
+    print(f"  {'model':<18} {'@4.00':>10} {'@5.855':>10} {'key_tile':>10} {'key tile vs 4.00':>13}"
+          f" {'key tile vs 5.855':>14}   {'C=16K: vs 4.00':>15} {'vs 5.855':>10}")
     grid_delta = {}
     for shape in SHAPES:
         row = {}
@@ -1245,19 +1245,19 @@ def main(argv=None):
             row[ctx] = dict(
                 b5=model_cells(shape, ctx, alpha=b5, **kw)["total"],
                 slope=model_cells(shape, ctx, alpha=slope, **kw)["total"],
-                band=model_cells(shape, ctx, **kw)["total"])
-            row[ctx]["d_b5"] = row[ctx]["band"] / row[ctx]["b5"] - 1
-            row[ctx]["d_slope"] = row[ctx]["band"] / row[ctx]["slope"] - 1
+                key_tile=model_cells(shape, ctx, **kw)["total"])
+            row[ctx]["d_b5"] = row[ctx]["key_tile"] / row[ctx]["b5"] - 1
+            row[ctx]["d_slope"] = row[ctx]["key_tile"] / row[ctx]["slope"] - 1
         grid_delta[shape["name"]] = {str(k): v for k, v in row.items()}
         a, b = row[4096], row[16384]
-        print(f"  {shape['name']:<18} {g(a['b5']):>10} {g(a['slope']):>10} {g(a['band']):>10}"
+        print(f"  {shape['name']:<18} {g(a['b5']):>10} {g(a['slope']):>10} {g(a['key_tile']):>10}"
               f" {a['d_b5']:>+12.1%} {a['d_slope']:>+13.1%}   {b['d_b5']:>+14.1%}"
               f" {b['d_slope']:>+9.1%}")
     d5 = [v["4096"]["d_b5"] for v in grid_delta.values()]
     d5c = [v["16384"]["d_b5"] for v in grid_delta.values()]
     ds = [v["4096"]["d_slope"] for v in grid_delta.values()]
     dsc = [v["16384"]["d_slope"] for v in grid_delta.values()]
-    print(f"  Against B5's 4.00 the band model is {min(d5):+.1%} to {max(d5):+.1%} at C=4K")
+    print(f"  Against B5's 4.00 the key tile model is {min(d5):+.1%} to {max(d5):+.1%} at C=4K")
     print(f"  and {min(d5c):+.1%} to {max(d5c):+.1%} at C=16K -- that is the error in")
     print("  section 6.3's table, and it grows with the context because the term that was")
     print("  wrong is the one on the context.")
@@ -1278,7 +1278,7 @@ def main(argv=None):
     print("  It does not depend on `nh` at all, and every shape in this table has hd=128")
     print("  and is priced at S=512 -- so the aliased constant happens to be the SAME")
     print("  number for all eight rows, which is exactly why the residual spread is small.")
-    print("  Two things follow, and they are the reason the band model is still required:")
+    print("  Two things follow, and they are the reason the key tile model is still required:")
     print("   * The composite moves 13% between S=512 and S=1024 and doubles by S=128.  A")
     print("     'constant' that is a function of the chunk length is not extrapolable to")
     print("     the two regimes this table cares most about -- E11's S=1024 prompt chunks")
@@ -1398,10 +1398,10 @@ def main(argv=None):
 
     # --- E11 -----------------------------------------------------------------
     print("\n(6) the full prompt+output statement (E11, decided 2026-08-31)")
-    print("  Re-priced by stream E7 on DD's band model.  The old numbers in this section")
+    print("  Re-priced by stream E7 on DD's key tile model.  The old numbers in this section")
     print("  came from B9's `326 M + 1.37 M*S + 72.1*S^2` fit, whose S^2 coefficient was")
     print("  +12.6% against the true 64 because a two-point marginal in S alone absorbs the")
-    print("  band family's linear term into its quadratic one.  A model in S alone also")
+    print("  key tile family's linear term into its quadratic one.  A model in S alone also")
     print("  cannot express the term that turns out to matter most: a chunked prompt")
     print("  re-commits the growing K/V prefix, which is a function of C, not S.")
     e11 = {}
@@ -1414,7 +1414,7 @@ def main(argv=None):
     print("    at C=16384 the same model gives x17.55 / x18.55")
     print("  The superseded ~x4.5-5.5 priced each prompt chunk as its own S=C=1024 SQUARE.")
     print("  That is not a proof of the sequence: the fourth chunk must attend over all")
-    print("  4,096 keys, not its own 1,024.  Under the band model the square reading is")
+    print("  4,096 keys, not its own 1,024.  Under the key tile model the square reading is")
     print("  x4.56 / x5.56, so the correction is +14% on the prompt multiple -- and a head")
     print("  chunk per 512 prompt positions is counted in NEITHER (at 4K it would add")
     print("  ~8 x the measured lm_head chunk).")
@@ -1448,7 +1448,7 @@ def main(argv=None):
     print("  chunk model carries a `design.prefill_chunk_remainder` fitted on B9's two")
     print("  SYNTHETIC S=C points, which is the only fitted part left and the only place")
     print("  its uncertainty lives.  Per shape the multiple would move with nh/L and with")
-    print("  hd (the re-commitment term is the band family's C term, and that one this")
+    print("  hd (the re-commitment term is the key tile family's C term, and that one this")
     print("  module can now evaluate at any shape -- but the remainder cannot).")
     floor = consts["chunk_floor"]["value"]
     if floor:
@@ -1936,7 +1936,7 @@ def main(argv=None):
         constants=consts, cards={k: v for k, v in cards.items()},
         calibration=cal, alpha=alpha, seq=args.seq, seq_batch=args.seq_batch,
         prefill_fit=fit,
-        band_coeffs=dict(fresh=cal["coeffs_fresh"], base=cal["coeffs_base"],
+        key_tile_coeffs=dict(fresh=cal["coeffs_fresh"], base=cal["coeffs_base"],
                          frozen_fresh=cal["frozen_fresh"], frozen_base=cal["frozen_base"]),
         shapes=[dict(name=s["name"], tag=s["tag"], source=s["source"],
                      groups=s["groups"], d=s["d"], nh=s["nh"], nkv=s["nkv"],

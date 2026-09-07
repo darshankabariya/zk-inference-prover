@@ -195,8 +195,8 @@ pub struct Committed {
     pub off_table: usize,
 }
 
-/// The per-band selector columns (tree 0), without the shared tables: the
-/// composed proof commits several bands' selectors alongside one master table
+/// The per-key-tile selector columns (tree 0), without the shared tables: the
+/// composed proof commits several key tiles' selectors alongside one master table
 /// set, so tables are split into `pre_tables`.
 pub fn commit_pre(a: &Attn, l: &Layouts, with_out: bool, with_rows: bool)
                   -> Vec<Eval> {
@@ -258,7 +258,7 @@ pub fn commit_pre(a: &Attn, l: &Layouts, with_out: bool, with_rows: bool)
     // Stream CC (E11): the inert-lead-row selector, last of the grid's block and
     // committed only when the grid has such rows.  Placed after the mask columns
     // so `msk0` -- `CHAN_SEL.len() + DIAGONAL_BLOCK_SEL.len()`, in two other files -- is
-    // the index it always was.  On a prefix band there are no mask columns, so it
+    // the index it always was.  On a prefix key tile there are no mask columns, so it
     // lands at slot 8 of the key group, which is where `devpre`'s `b65p_sel`
     // writes it.
     if crate::attn_air::act_id(0, a.diagonal_block, lk.g.lead).is_some() {
@@ -275,7 +275,7 @@ pub fn commit_pre(a: &Attn, l: &Layouts, with_out: bool, with_rows: bool)
             }
             for i in 0..lk.q {
                 assert!(!masked(lk, sh.c, j, i),
-                        "the causal mask is set on an inert row (band row {j}, slot {i}): \
+                        "the causal mask is set on an inert row (key_tile row {j}, slot {i}): \
                          `act - msk` is not `act * (1 - msk)` there");
             }
         }
@@ -292,9 +292,9 @@ pub fn commit_pre(a: &Attn, l: &Layouts, with_out: bool, with_rows: bool)
         pre.push(sel(lo.g.log_rows, &|j| j + 1 == lo.g.rows));
     }
 
-    // B10 step 3: a diagonal block band has no per-token region.  There is one row maximum
-    // and one denominator per *token*, not per band, so the pair shares the prefix
-    // band's -- which is also the only column the `Z >= nmax` bound can sit on.
+    // B10 step 3: a diagonal block key tile has no per-token region.  There is one row maximum
+    // and one denominator per *token*, not per key tile, so the pair shares the prefix
+    // key tile's -- which is also the only column the `Z >= nmax` bound can sit on.
     if with_rows {
         let rrows = 1usize << l.log_row;
         pre.push(sel(l.log_row, &|j| j > 0));
@@ -505,7 +505,7 @@ pub fn commit_base(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
 
     // per-token region: maxima, denominators, and the denominator's low limb.
     // The denominator it commits is `zz_row()`: the pair's total where a diagonal block
-    // rides with this band, this band's own otherwise.
+    // rides with this key tile, this key tile's own otherwise.
     at.push(base.len());
     if with_rows {
         let rrows = 1usize << l.log_row;
@@ -553,54 +553,54 @@ pub fn commit_base(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
 pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
                        mult_exp: &mut [u32], mult_r: &mut [Vec<u32>],
                        off_table: &mut usize, with_out: bool, with_rows: bool)
-                       -> (Vec<Eval>, Vec<usize>, Option<crate::devwfill::DevBand>) {
+                       -> (Vec<Eval>, Vec<usize>, Option<crate::devwfill::DevKeyTile>) {
     // `with_rows` postdates this milestone: it is `!a.diagonal_block`, and it says
-    // whether this band commits the per-token region (the row maxima, the
-    // denominator and its low limb).  A *diagonal block* band does not -- there is one
-    // maximum and one denominator per token, not per band, so the diagonal block rides
-    // on the prefix band's -- and `commit_base_dev` has no notion of any of
+    // whether this key tile commits the per-token region (the row maxima, the
+    // denominator and its low limb).  A *diagonal block* key tile does not -- there is one
+    // maximum and one denominator per token, not per key tile, so the diagonal block rides
+    // on the prefix key tile's -- and `commit_base_dev` has no notion of any of
     // this: `devwfill.rs` mentions neither `with_rows` nor `diagonal_block`.  A device
     // fill that always built the per-token region would commit columns the AIR
-    // does not expect on a diagonal block band.
+    // does not expect on a diagonal block key tile.
     //
-    // So diagonal block bands take the host path, whatever the switch says.  That is
+    // So diagonal block key tiles take the host path, whatever the switch says.  That is
     // correct by construction rather than by a guess at the kernel, and it
     // costs the device fill only the S x S diagonal block -- the cells are in the
-    // C - S prefix band, which still fills on the device.  Teaching the fill
+    // C - S prefix key tile, which still fills on the device.  Teaching the fill
     // the distinction is its own piece of work; until then this cannot be
     // silently wrong.
     //
-    // B11 stream L: the switch read here is the band fill's own
-    // (`B7_M4_WFILL_BAND`, defaulting to `B7_M4_WFILL`), because the band fill
-    // and the Freivalds fill are not in the same state -- see `devwfill::band_mode`.
+    // B11 stream L: the switch read here is the key tile fill's own
+    // (`B7_M4_WFILL_KEY_TILE`, defaulting to `B7_M4_WFILL`), because the key tile fill
+    // and the Freivalds fill are not in the same state -- see `devwfill::key_tile_mode`.
     //
     // B11 stream M: and the diagonal block override above is now that function's twin,
-    // `devwfill::band_fill_mode`, because `devpre::fills_dev` has to reach the
+    // `devwfill::key_tile_fill_mode`, because `devpre::fills_dev` has to reach the
     // same answer before any fill has run.
-    // Stream AA: `with_rows` used to *be* `!a.diagonal_block`, because the only band
+    // Stream AA: `with_rows` used to *be* `!a.diagonal_block`, because the only key tile
     // that rode on another's per-token region was the diagonal block.  With
-    // `--kv-boundary` the unchecked prefix is tiled into sub-bands of `S` keys and
-    // the group's one region lives on its first sub-band, so a band with
+    // `--kv-boundary` the unchecked prefix is tiled into sub-key-tiles of `S` keys and
+    // the group's one region lives on its first sub-key-tile, so a key tile with
     // `diagonal_block == false` and `with_rows == false` is now a legal and ordinary
     // thing.  The implication that survives is the one that matters here, and
     // it is asserted instead: a diagonal block never carries the region.
     // Open item 1 / CC deliverable 4: a *solo* diagonal block (block 0, whose group has
-    // no prefix band at all) does carry the region, so the old implication
+    // no prefix key tile at all) does carry the region, so the old implication
     // "a diagonal block never carries the region" is no longer true.  What survives is
-    // that a band carrying the region is its group's first band, and `Plan`
-    // establishes that by construction -- `rows_band` is `k == 0` for a prefix
-    // sub-band and `nsub == 0` for a diagonal block.
+    // that a key tile carrying the region is its group's first key tile, and `Plan`
+    // establishes that by construction -- `rows_key_tile` is `k == 0` for a prefix
+    // sub-key-tile and `nsub == 0` for a diagonal block.
     debug_assert!(!(a.diagonal_block && with_rows) || a.shape.c == a.shape.s,
                   "only a diagonal block (c == S) may carry the region");
     // ... and the device fill still has no notion of any of this
-    // (`devwfill.rs` mentions neither `with_rows` nor `diagonal_block`), so a band that
+    // (`devwfill.rs` mentions neither `with_rows` nor `diagonal_block`), so a key tile that
     // does not carry the region takes the host path whatever the switch says --
-    // which for a diagonal block band is the answer `band_fill_mode` already gives.
-    let m4d = if with_rows { crate::devwfill::band_fill_mode(a) } else { 0 };
+    // which for a diagonal block key tile is the answer `key_tile_fill_mode` already gives.
+    let m4d = if with_rows { crate::devwfill::key_tile_fill_mode(a) } else { 0 };
     if m4d == 1 {
         // B7a milestone 4 (section 3 row 1): with the tables' columns on the
         // device the exp counter has no host reader left, so it stays there --
-        // unless a diagonal block band rides with this one, in which case it does have
+        // unless a diagonal block key tile rides with this one, in which case it does have
         // one. See `devwfill::exp_mult_on_host`; `compose.rs` decides which
         // column is committed from the same predicate, and the two must agree.
         let dev = crate::devwfill::commit_base_dev(a, l, cfg, widths, mult_exp, mult_r,
@@ -626,7 +626,7 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     let after_off = *off_table;
     let dev = crate::devwfill::commit_base_dev(a, l, cfg, widths, mult_exp, mult_r,
                                                off_table, with_out, true, with_rows);
-    let label = format!("band {} 2^{}", a.shape.label(), l.key.g.log_rows);
+    let label = format!("key tile {} 2^{}", a.shape.label(), l.key.g.log_rows);
     // B11 stream L: the region offsets, printed before the comparison rather
     // than after it.  `check_cols` names a column by its index in the whole
     // base vector, and which *region* that index falls in is the first thing a
@@ -702,24 +702,24 @@ pub struct Interaction {
     pub claimed_out: SecureField,
     pub claimed_am: SecureField,
     pub claimed_az: SecureField,
-    /// Stream NN: this band's own K, Q and V claims -- the sums the quantize
-    /// regions are read against.  Empty on a band with no `NnBind`.
+    /// Stream NN: this key tile's own K, Q and V claims -- the sums the quantize
+    /// regions are read against.  Empty on a key tile with no `NnBind`.
     pub claimed_nn: Vec<SecureField>,
     pub use_sums: Vec<SecureField>,
     pub table_sums: Vec<SecureField>,
 }
 
-/// Stream NN: the band-side Horner claims this band publishes over its own
+/// Stream NN: the key-tile-side Horner claims this key tile publishes over its own
 /// committed K, Q and V columns.
 ///
-/// A **diagonal block** band of a chunk that carries the quantize regions publishes all
-/// three; a **prefix** band of the same chunk publishes `q` alone (NN-2), whose
+/// A **diagonal block** key tile of a chunk that carries the quantize regions publishes all
+/// three; a **prefix** key tile of the same chunk publishes `q` alone (NN-2), whose
 /// counterparty is its group's diagonal block rather than a quantize region.  `Q` is
 /// therefore never optional and `K`/`V` always are.
 pub struct NnBind<'a> {
-    pub k: Option<&'a crate::attn_air::BandTie>,
-    pub q: &'a crate::attn_air::BandTie,
-    pub v: Option<&'a crate::attn_air::BandTie>,
+    pub k: Option<&'a crate::attn_air::KeyTileTie>,
+    pub q: &'a crate::attn_air::KeyTileTie,
+    pub v: Option<&'a crate::attn_air::KeyTileTie>,
 }
 
 /// Everything committed after the challenges: the Horner accumulators and the
@@ -729,8 +729,8 @@ pub struct NnBind<'a> {
 pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &ExpRel,
                          ranges: &[RangeRel], com: &Committed, widths: &[u32],
                          with_out: bool, with_rows: bool,
-                         air: Option<&crate::devfrac::BandAir<'_>>,
-                         mut gkr: Option<&mut crate::gkrband::Collect>,
+                         air: Option<&crate::devfrac::KeyTileAir<'_>>,
+                         mut gkr: Option<&mut crate::gkr_key_tile::Collect>,
                          nn: Option<&NnBind<'_>>)
                          -> Interaction {
     let sh = a.shape;
@@ -752,12 +752,12 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     let m4g = air.and_then(|x| x.dev).filter(|_| crate::devacc::mode() >= 1);
     let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
     // B7a milestone 4 (section 3 row 1): the per-row layout flags, written once
-    // at fill time by `b65_flags_band` and read here. Before this row each of
+    // at fill time by `b65_flags_key_tile` and read here. Before this row each of
     // the three kernels below recomputed them; now the AIR's selector columns
     // and this segmentation are the same array.
     let m4g_flags = air.and_then(|x| x.pre);
     assert!(m4g.is_none() || m4g_flags.is_some(),
-            "the device accumulators need this band's flags: `devpre::band_dev` did not run");
+            "the device accumulators need this key tile's flags: `devpre::key_tile_dev` did not run");
     assert!(m4g.is_none() || !with_out,
             "the device accumulators have no A.V output region: \
              the composed proof moves it into the attnout region");
@@ -822,7 +822,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
                 e.extend(secure_cols(lc.g.log_rows, &acc));
                 (e, vec![acc[lc.g.rows - 1]])
             });
-            crate::devacc::place(&format!("chan band 2^{}", lc.g.log_rows), got, h,
+            crate::devacc::place(&format!("chan key tile 2^{}", lc.g.log_rows), got, h,
                                  &mut cols)[0]
         }
         None => {
@@ -832,16 +832,16 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             acc[lc.g.rows - 1]
         }
     };
-    // ---- stream NN: the band's own K and Q claims --------------------------
+    // ---- stream NN: the key tile's own K and Q claims --------------------------
     // Built on the host whatever `B7_M4_ACC` says: the values are the witness's
     // `kk` and `qq`, which the host holds either way, and the two columns are
     // appended after the region's three so the AIR's mask order is the tree's.
     let mut claimed_nn: Vec<SecureField> = vec![];
     if let Some(b) = nn {
-        // K first where the band publishes one (the diagonal block), then Q, which
-        // every bound band publishes -- the order `ChanEval::evaluate` reads
+        // K first where the key tile publishes one (the diagonal block), then Q, which
+        // every bound key tile publishes -- the order `ChanEval::evaluate` reads
         // the two masks in.
-        let sides: Vec<(&crate::attn_air::BandTie, usize)> = b.k.map(|k| (k, 0usize))
+        let sides: Vec<(&crate::attn_air::KeyTileTie, usize)> = b.k.map(|k| (k, 0usize))
             .into_iter()
             .chain(std::iter::once((b.q, 1usize)))
             .collect();
@@ -896,15 +896,15 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             looks.push(Look::Range(ridx(a.q_bits), base0 + lc.pk + p));
         }
         if let Some(g) = gkr.as_deref_mut() {
-            // B11 stream T: where this band's fill left its columns on the
+            // B11 stream T: where this key tile's fill left its columns on the
             // device there is no host column to read, so the feed computes the
-            // same fractions there instead. A host-filled band -- a diagonal block --
+            // same fractions there instead. A host-filled key tile -- a diagonal block --
             // takes the host builder, unchanged.
-            crate::gkrband::feed_site(g, air, 0, lc.g.log_rows, &looks, &com.at,
+            crate::gkr_key_tile::feed_site(g, air, 0, lc.g.log_rows, &looks, &com.at,
                                       &com.base, &com.pre, exp, ranges);
         }
         if !gkr_owns {
-            let (c, s) = crate::devfrac::band_cols(
+            let (c, s) = crate::devfrac::key_tile_cols(
                 air, 0, lc.g.log_rows, &com.at, &com.base,
                 || logup_cols(lc.g.log_rows, &looks, &com.base, &com.pre, exp, ranges));
             cols.extend_any(c);
@@ -1039,7 +1039,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
                 }
                 (e, vec![hs[n - 1], av[n - 1], sn[n - 1]])
             });
-            let c = crate::devacc::place(&format!("grid band 2^{}", lk.g.log_rows), got,
+            let c = crate::devacc::place(&format!("grid key tile 2^{}", lk.g.log_rows), got,
                                          h, &mut cols);
             (c[0], c[1], c[2])
         }
@@ -1050,8 +1050,8 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             (hs[n - 1], av[n - 1], sn[n - 1])
         }
     };
-    // ---- stream NN: the band's own V claim ---------------------------------
-    // Diagonal block bands only: a prefix band's values are the cache, bound across
+    // ---- stream NN: the key tile's own V claim ---------------------------------
+    // Diagonal block key tiles only: a prefix key tile's values are the cache, bound across
     // blocks by root equality (stream AA/EE), and it publishes Q alone.
     if let Some(t) = nn.and_then(|b| b.v) {
         let rows = lk.g.rows;
@@ -1113,15 +1113,15 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             }
         }
         if let Some(g) = gkr.as_deref_mut() {
-            // B11 stream T: where this band's fill left its columns on the
+            // B11 stream T: where this key tile's fill left its columns on the
             // device there is no host column to read, so the feed computes the
-            // same fractions there instead. A host-filled band -- a diagonal block --
+            // same fractions there instead. A host-filled key tile -- a diagonal block --
             // takes the host builder, unchanged.
-            crate::gkrband::feed_site(g, air, 1, lk.g.log_rows, &looks, &com.at,
+            crate::gkr_key_tile::feed_site(g, air, 1, lk.g.log_rows, &looks, &com.at,
                                       &com.base, &com.pre, exp, ranges);
         }
         if !gkr_owns {
-            let (c, s) = crate::devfrac::band_cols(
+            let (c, s) = crate::devfrac::key_tile_cols(
                 air, 1, lk.g.log_rows, &com.at, &com.base,
                 || logup_cols(lk.g.log_rows, &looks, &com.base, &com.pre, exp, ranges));
             cols.extend_any(c);
@@ -1173,8 +1173,8 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     }
 
     // ---- per-token region --------------------------------------------------
-    // Absent on a diagonal block band: the pair has one per-token region, the prefix
-    // band's, and it carries the row maximum both halves shift by and the total
+    // Absent on a diagonal block key tile: the pair has one per-token region, the prefix
+    // key tile's, and it carries the row maximum both halves shift by and the total
     // denominator both halves sum to.
     let rrows = if with_rows { 1usize << l.log_row } else { 0 };
     let n_tok = if m4g_host { rrows } else { 0 };
@@ -1198,7 +1198,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         az[j] = if j > 0 { az[j - 1] * step } else { SecureField::zero() } + zf;
     }
     let (claimed_am, claimed_az) = if !with_rows {
-        // A diagonal block band has no per-token region, so there is nothing to build
+        // A diagonal block key tile has no per-token region, so there is nothing to build
         // on either side of the device link.
         (SecureField::zero(), SecureField::zero())
     } else {
@@ -1211,7 +1211,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
                     e.extend(secure_cols(l.log_row, &az));
                     (e, vec![am[rrows - 1], az[rrows - 1]])
                 });
-                let c = crate::devacc::place(&format!("tok band 2^{}", l.log_row), got, h,
+                let c = crate::devacc::place(&format!("tok key tile 2^{}", l.log_row), got, h,
                                              &mut cols);
                 (c[0], c[1])
             }
@@ -1252,15 +1252,15 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             looks.push(Look::Range(ridx(cfg.z_hi_bits), hi_base + l.rw + i));
         }
         if let Some(g) = gkr.as_deref_mut() {
-            // B11 stream T: where this band's fill left its columns on the
+            // B11 stream T: where this key tile's fill left its columns on the
             // device there is no host column to read, so the feed computes the
-            // same fractions there instead. A host-filled band -- a diagonal block --
+            // same fractions there instead. A host-filled key tile -- a diagonal block --
             // takes the host builder, unchanged.
-            crate::gkrband::feed_site(g, air, 3, l.log_row, &looks, &com.at,
+            crate::gkr_key_tile::feed_site(g, air, 3, l.log_row, &looks, &com.at,
                                       &all, &com.pre, exp, ranges);
         }
         if !gkr_owns {
-            let (c, s) = crate::devfrac::band_cols(
+            let (c, s) = crate::devfrac::key_tile_cols(
                 air, 3, l.log_row, &com.at, &com.base,
                 || logup_cols(l.log_row, &looks, &all, &com.pre, exp, ranges));
             cols.extend_any(c);

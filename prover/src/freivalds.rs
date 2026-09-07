@@ -9,11 +9,11 @@
 //! over the *same committed accumulator cells* the dequant rounds — that equality
 //! is the Freivalds identity `acc = qX qW` (mod p), with nothing committed twice.
 //!
-//! `AttnOutEval` replaces the bands' A.V output region *and* rounds the output:
+//! `AttnOutEval` replaces the key tiles' A.V output region *and* rounds the output:
 //! one row per (head, token, channel-chunk), the A.V outputs committed here as
 //! `acc`, the int8 fold (`q = round(acc * 2^e / Z)`, B6's `int8` variant with the
 //! review's two edge fixes) applied slot-wise, and two Horner accumulators that
-//! reproduce the claims the bands' identities need:
+//! reproduce the claims the key tiles' identities need:
 //!
 //!   h  = sum_h rv^(hd*h) sum_t s^t sum_j rv^j acc[h,t,j]   vs  sum_b rv^(hd*off_b) av_b
 //!   dz = sum_h r^(C*h)   sum_t s^t den[h,t]                vs  sum_b r^(C*off_b)  az_b
@@ -302,7 +302,7 @@ impl FrameworkEval for AttnOutEval {
         // `den` at [-1, 0] and pinning it across the token's rows -- `nofirst`
         // is exactly "not the first row of this token's group", the selector the
         // `z` fold already chains on -- makes every row's `den` the row the `dz`
-        // fold publishes, and so the band's `az` claim.
+        // fold publishes, and so the key tile's `az` claim.
         let [den_prev, den] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
         eval.add_constraint((den.clone() - den_prev) * nofirst.clone());
         // Stream JJ (E11), `witness-slack.md` section 1f: the per-token output
