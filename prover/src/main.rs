@@ -1197,7 +1197,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // On by default wherever the chunk has its own block;
         // `--unsound-skip-kv-boundary` turns the trees off.
         kv_boundary: kv_boundary,
-        // B11 stream Q: opt in to the LogUp-GKR arm for the bands. A flag and
+        // B11 stream Q: opt in to the LogUp-GKR backend for the bands. A flag and
         // not an env mode, because it changes the proof.
         gkr_bands: flag(args, "--gkr-bands"),
         gkr_dequant: flag(args, "--gkr-dequant"),
@@ -1833,7 +1833,7 @@ acc={}+{}",
                                         ser_dir.as_deref().map(|d| (d, ser_tag.as_str())));
     // B12 stream GG: the `Composed` is dropped and the proof serialized by
     // now, so this is what the process still holds; then every mark of the
-    // chunk goes into the point (the cuda arm only -- the reference arm has
+    // chunk goes into the point (the cuda backend only -- the reference backend has
     // none and the field stays absent).
     device::mem_mark("after_drop");
     if let Some(m) = device::mem_marks_json() {
@@ -1857,13 +1857,13 @@ acc={}+{}",
 fn oversize_probes_cmd(args: &[String]) {
     let (l, vname) = layer_of(args);
     let mut points = vec![];
-    let mut arm = |name: &str, l: &layer::Layer| -> bool {
+    let mut probe = |name: &str, l: &layer::Layer| -> bool {
         let params = params_of(l, args, &vname);
         let off: usize = l.bands.iter().map(|b| b.off_table).sum();
         eprintln!("oversize probe {name}: table 2^{} off_table {off}", params.log_table);
         let (j, accepts) = compose_once(l, &params, &Default::default(), None);
         points.push(json!({
-            "arm": name, "log_table": params.log_table,
+            "probe": name, "log_table": params.log_table,
             "table_rows": 1usize << params.log_table,
             "witness_off_table": off,
             "accepts": accepts,
@@ -1873,21 +1873,21 @@ fn oversize_probes_cmd(args: &[String]) {
         }));
         accepts
     };
-    assert!(arm("sized", &l), "the honest layer at the driver's size was rejected");
+    assert!(probe("sized", &l), "the honest layer at the driver's size was rejected");
     let need = l.key_bits();
 
     let mut tight = layer_clone(&l);
     tight.set_master_table(need);
-    assert!(arm("tight", &tight), "the honest layer at the tight size was rejected");
+    assert!(probe("tight", &tight), "the honest layer at the tight size was rejected");
 
     let mut bad = layer_clone(&l);
     bad.set_master_table(need - 1);
     assert!(bad.bands.iter().map(|b| b.off_table).sum::<usize>() > 0,
-            "the tamper arm has no off-table key -- nothing to reject");
-    assert!(!arm("tamper", &bad),
+            "the tamper probe has no off-table key -- nothing to reject");
+    assert!(!probe("tamper", &bad),
             "a witness with keys past the table produced an accepting proof");
 
-    emit("oversize-probes", json!({"source": l.source, "key_bits": need, "arms": points}));
+    emit("oversize-probes", json!({"source": l.source, "key_bits": need, "probes": points}));
 }
 
 fn psweep_cmd(args: &[String]) {
@@ -3127,7 +3127,7 @@ fn main() {
     let cmd = args.first().cloned().unwrap_or_default();
     spans::install();
     // B12 stream GG: the fork's three marks inside `prove_ex` (a no-op on
-    // the SimdBackend arm).
+    // the SIMD backend).
     device::install_mem_hook();
     match cmd.as_str() {
         "tables" => tables_cmd(&args),

@@ -86,8 +86,8 @@ pub fn logup_cols(
 /// One lookup's numerator and denominator at one packed row.
 ///
 /// B11 stream Q: this used to be a closure inside `logup_cols`. It is a free
-/// function now because the GKR arm proves the *same* fractions this returns
-/// without ever pairing them into columns, and the two arms have to be reading
+/// function now because the GKR backend proves the *same* fractions this returns
+/// without ever pairing them into columns, and the two backends have to be reading
 /// one definition. Nothing about the committed path changes: `logup_cols` calls
 /// it through `paired` exactly where the closure used to be called.
 pub fn look_frac(l: &Look, vec_row: usize, cols: &[Eval], pre: &[Eval], exp: &ExpRel,
@@ -913,8 +913,8 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     }
 
     // ---- grid region -------------------------------------------------------
-    // Stream CC (E11): the host arm's aimed corruption for the inert-lead-row
-    // guard, the twin of `b65_acc.cu`'s `nomask:grid` on the arm that has no
+    // Stream CC (E11): the host backend's aimed corruption for the inert-lead-row
+    // guard, the twin of `b65_acc.cu`'s `nomask:grid` on the backend that has no
     // card.  See the inert-row branch of `grid_inner` below.  Off unless
     // `B12_GRIDMUT=padnf`.
     //

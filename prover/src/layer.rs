@@ -3813,9 +3813,9 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
 /// placeholder is correct. `B7_M4_LOGUPIR=2` is what says the two agree.
 /// The evaluator whose fraction IR *is* this region's lookups.
 ///
-/// B11 stream U, lever 3: the GKR arm needs the same evaluator, so it is built
+/// B11 stream U, lever 3: the GKR backend needs the same evaluator, so it is built
 /// here once and both callers take it. `gkr` is false in both -- the fractions
-/// the arm proves are the ones the committed arm would have built, so the
+/// the backend proves are the ones the committed backend would have built, so the
 /// lowering is of the *un-ablated* evaluator and asks for the flag-off shape,
 /// which is stream T's precedent for the bands and is why the kernel store
 /// already carries this fingerprint.
@@ -4139,7 +4139,7 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
     let pr = lay.per_row;
     // B7a milestone 4 (section 3 row 1): the same three-value mode.
     //
-    // Stream TT: the magnitude form fills on the host on both arms.  The
+    // Stream TT: the magnitude form fills on the host on both backends.  The
     // fork's `b65_fill_attnout` writes the nine-column layout and bumps the
     // limbs at `acc + acc_off`; it has no tenth column and no `mag`, so a
     // device fill here would write the wrong region rather than a slow one.

@@ -279,10 +279,10 @@ impl FrameworkEval for AttnOutEval {
         let two = M31::from_u32_unchecked(2);
         // Stream JJ (E11): the per-slot `jvp` comes first, because a lowered
         // evaluator numbers its preprocessed loads in `get_preprocessed_column`
-        // call order (`cudagen::Ir::pre_ids`) and the GKR arm's `fam_site`
+        // call order (`cudagen::Ir::pre_ids`) and the GKR backend's `fam_site`
         // indexes the region's own `pre` vector with that number.  `ao_region`
         // builds `pre` as the slots' `jvp` then `AO_SEL`, so the reads have to
-        // run in that order or the arm's fractions read a selector for a `jv`.
+        // run in that order or the backend's fractions read a selector for a `jv`.
         let jvps: Vec<E::F> = (0..self.per_row)
             .map(|slot| eval.get_preprocessed_column(ao_chan("jv", slot)))
             .collect();
@@ -318,7 +318,7 @@ impl FrameworkEval for AttnOutEval {
         // load-bearing: `joff` is the first column of this region a *lookup*
         // reads at a mask, and `gkrlink::LinkTie` resolves a referenced column
         // as `mask[tree][col][0]` -- the value at the column's *first* sampled
-        // offset.  With `[-1, 0]` the GKR arm's binding would read the previous
+        // offset.  With `[-1, 0]` the GKR backend's binding would read the previous
         // row's `joff`, which agrees with this row's on every witness whose
         // `jo` is constant and on no other; `--gkr-attnout` then accepts or
         // rejects by luck of the data.  Any future lookup over a masked column

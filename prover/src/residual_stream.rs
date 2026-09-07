@@ -2533,7 +2533,7 @@ pub fn run(w: &ResidualStreamWitness, prog: &Prog, round: Round, kmax: u32,
         smul: rels.smul.clone(), un: rels.un.clone(), uns: rels.uns.clone(),
         val: rels.val.clone(),
         binding: if notie { None } else { Some(tie0.clone()) }, bound: None,
-        // the standalone gadget has no GKR arm; the flag lives in `compose`
+        // the standalone gadget has no GKR backend; the flag lives in `compose`
         gkr: false,
     };
     let it = residual_stream_interaction(&region, &rels, if notie { None } else { Some(&tie0) },

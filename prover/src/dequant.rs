@@ -286,7 +286,7 @@ pub fn look_units(sp: &Spec) -> Vec<bool> {
                     u.push(true); // the output exponent's range check
                 }
             }
-            v => panic!("the dequant GKR arm has no looks for variant {}", v.name()),
+            v => panic!("the dequant GKR backend has no looks for variant {}", v.name()),
         }
     }
     u
@@ -1782,7 +1782,7 @@ pub fn run(w: &Witness, sp: &Spec, tamper: Option<Tamper>) -> Outcome {
             qnz: qnz_rel.clone(),
             rels: rels.clone(),
             yside: None, output_claim: None, sside: None,
-            // the standalone dequant probe has no GKR arm to hand its lookups to
+            // the standalone dequant probe has no GKR backend to hand its lookups to
             gkr: false,
         },
         use_sum,

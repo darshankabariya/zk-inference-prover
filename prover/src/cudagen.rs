@@ -1014,7 +1014,7 @@ fn lower_impl<E: FrameworkEval>(
     // columns with one counter across all interactions, so the j-th column of
     // interaction i is the j-th smallest idx *claimed* there. B11 stream S:
     // ranked over the evaluator's claim log rather than over the constraints'
-    // references, because the GKR arm's band evals keep base-column claims no
+    // references, because the GKR backend's band evals keep base-column claims no
     // constraint reads (the trace allocator must stay aligned with the
     // committed order); an unclaimed reference is still an error, below.
     let mut seen = BTreeSet::new();
@@ -2653,7 +2653,7 @@ pub fn emit_cmd(args: &[String]) {
             go!(b.tables[i], format!("table{i}"));
         }
         // Stream NN, added at its merge: the q/k/v quantize regions.  Without
-        // this the family has no shape in the store at all, so the cuda arm
+        // this the family has no shape in the store at all, so the cuda backend
         // falls back to `accumulate_pointwise_cpu` for all three on every
         // chunk that carries the rotation and no emit can ever change that.
         for i in 0..b.quants.len() {
@@ -3393,7 +3393,7 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch, s
 pub fn gen_emit_cmd(args: &[String]) {
     let (l, vname) = crate::layer_of(args);
     let mut params = crate::params_of(&l, args, &vname);
-    // The GKR arm asks for no fraction shape of its own.  `gkrband::feed_site`
+    // The GKR backend asks for no fraction shape of its own.  `gkrband::feed_site`
     // lowers the *un-ablated* evaluator -- stream S's lever 1 makes a flag-on
     // evaluator emit no lookups at all -- so every fingerprint the feed looks
     // up is a flag-off one.  Lowering the ablated form here produced an empty
@@ -3568,7 +3568,7 @@ pub fn gen_emit_cmd(args: &[String]) {
         }
         // B11 stream BB: the same two families here. This Freivalds check is the one the
         // argmax is missing from (`$FAMS` names ten families and not
-        // `b65_argmax_eval`), which is why both arms are written in one commit.
+        // `b65_argmax_eval`), which is why both backends are written in one commit.
         if let Some(em) = &b.embed {
             go!(em, "embed".to_string());
         }

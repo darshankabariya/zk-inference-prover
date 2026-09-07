@@ -767,7 +767,7 @@ pub fn ao(dev: &crate::devwfill::DevAo, lay: &crate::layer::AoLayout, nh: usize,
     // `gkrlink`'s `c0`).
     // stream TT (E11), log row 73: the magnitude form's layout is `2 + 10 pr`,
     // but it never reaches here -- `ao_region` fills it on the host on both
-    // arms, so `dev` is `None` and this fold is the host's.
+    // backends, so `dev` is `None` and this fold is the host's.
     assert_eq!(dev.base.len(), 2 + 9 * pr, "the attnout region's column count");
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, pr);
     let cols: Vec<*const u32> =
@@ -830,7 +830,7 @@ pub fn binding_mode() -> u32 {
 ///
 /// The caller owns the order: `specs` is `Binding::specs` as the AIR reads it, and
 /// the columns come back four per binding in that order, which is exactly what
-/// `attn_trace::secure_cols_pub` produces on the host arm.
+/// `attn_trace::secure_cols_pub` produces on the host backend.
 pub fn residual_stream_bind(in_nat: *const i32, out_nat: *const i32, log_rows: u32,
                             specs: &[FAccResidualStreamBinding], weights: &[SecureField], lam: SecureField)
             -> DevAccCols {

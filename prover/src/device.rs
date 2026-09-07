@@ -280,7 +280,7 @@ pub fn mem_used_bytes() -> u64 {
     total.saturating_sub(free) as u64
 }
 
-/// The reference arm has no card to ask.
+/// The reference backend has no card to ask.
 #[cfg(not(feature = "cuda"))]
 pub fn mem_used_bytes() -> u64 {
     0
@@ -402,7 +402,7 @@ pub fn set_mem_tag(tag: &str) {
     marks::set_tag(tag);
 }
 
-/// The reference arm marks nothing: no card, no pool, no field in the JSON.
+/// The reference backend marks nothing: no card, no pool, no field in the JSON.
 #[cfg(not(feature = "cuda"))]
 pub fn mem_mark(_label: &str) {}
 

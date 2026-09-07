@@ -1,4 +1,4 @@
-//! B11 stream S, lever 3: the link that makes the GKR arm sound.
+//! B11 stream S, lever 3: the link that makes the GKR backend sound.
 //!
 //! `gkrband` proves the bands' fractional sums, but its `GkrArtifact` ends in
 //! *claimed evaluations of the input layers at a random point* -- nothing bindings
@@ -336,7 +336,7 @@ pub enum RCol {
 /// family, and the region's index within it.
 ///
 /// B11 stream U, lever 3: stream S keyed the fold's weights by band index
-/// alone, because the bands were the only family with an arm. The dequant
+/// alone, because the bands were the only family with a backend. The dequant
 /// family's regions index into the plan's matmul list, and the two index spaces
 /// are unrelated -- so the key is the pair, and `link_params`' `BTreeMap` is
 /// keyed by it. Nothing else about the fold changes: a weight is still one
@@ -665,7 +665,7 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
                         });
                     }
                 }
-                v => panic!("the dequant GKR arm has no looks for variant {}", v.name()),
+                v => panic!("the dequant GKR backend has no looks for variant {}", v.name()),
             }
         }
         out.push(SiteLooks {
@@ -1082,7 +1082,7 @@ fn aff_nodes(ir: &crate::cudagen::Ir) -> Vec<Result<AffForm, String>> {
 /// every change -- and the families stream V adds take them from here, so a
 /// family's link cannot drift from the builder the kernel was compiled from.
 ///
-/// The arm is sound only because an instance's input-layer claim collapses to
+/// The backend is sound only because an instance's input-layer claim collapses to
 /// one affine combination of committed-column MLEs at the row part of the OOD
 /// point. That needs three things of every look, and all three are properties
 /// of the fraction rather than of the prover: the denominator affine in what it
@@ -1122,7 +1122,7 @@ pub fn ir_looks<F: Fn(usize, usize) -> RCol>(
         .map(|(i, r)| {
             let (num, den) = r.unwrap_or_else(|e| panic!(
                 "{tag}: look {i} cannot be linked -- {e}. The affinity check \
-                 (`B11_GKR_AFFINE=1`) is what this family's arm was built on."));
+                 (`B11_GKR_AFFINE=1`) is what this family's backend was built on."));
             LinkLook {
                 num: (!(num.is_const() && num.k == one)).then(|| conv(&num)),
                 den: conv(&den),
@@ -1773,7 +1773,7 @@ pub fn check_height_cols(hl: &HeightLink, cols: &[Eval]) {
 // Stream T measured the five host loops this section replaces -- the carry
 // quotient at 0.078 s, the eq column at 0.041 s, the coordinate split at
 // 0.032 s, the prefix sums at 0.024 s and the term products at 0.014 s, so
-// 0.190 s per C=16384 chunk -- and named them the arm's single largest
+// 0.190 s per C=16384 chunk -- and named them the backend's single largest
 // remaining item, host work in a regime where every other interaction column
 // is built on the card. Nothing about *what* is computed changes here: the
 // same values in the same slots, which is why every one of T's digests is a
@@ -1782,7 +1782,7 @@ pub fn check_height_cols(hl: &HeightLink, cols: &[Eval]) {
 
 /// Where the link's own columns are built.
 ///
-/// On the cuda arm the whole chain runs on the card and the sixteen columns per
+/// On the cuda backend the whole chain runs on the card and the sixteen columns per
 /// height reach the commitment device-resident, the way the bands' fraction
 /// columns already do. `B11_LINKDEV=0` puts the build back on the host: that is
 /// the control the stream's own Δ is measured against, the same shape as T's

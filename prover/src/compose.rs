@@ -278,7 +278,7 @@ pub struct Params {
     pub corner: bool,
     /// B11 stream Q: prove the attention bands' lookups with LogUp-GKR instead
     /// of committing their running-sum columns. A flag and not an env mode,
-    /// because it changes the proof: the GKR arm has its own digests by design.
+    /// because it changes the proof: the GKR backend has its own digests by design.
     /// Skipped when false, so a statement written with the flag off is byte
     /// identical to one from a crate that never had it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -591,7 +591,7 @@ pub struct Claims {
     pub rq_sc: Vec<[u32; 4]>,
     #[serde(default)]
     pub deq_sc: Vec<[u32; 4]>,
-    /// B11 stream Q: the bands' batch GKR proof, as bytes, on the GKR arm only.
+    /// B11 stream Q: the bands' batch GKR proof, as bytes, on the GKR backend only.
     /// It rides here because the statement already travels everywhere the proof
     /// does and `Claims::flat` -- what the transcript mixes -- reads only the
     /// felt fields, so carrying it changes no channel state. Absent with the
@@ -1698,24 +1698,24 @@ impl Plan {
         // another -- the dequant family's instances join the *same*
         // `prove_batch` call and its heights the same link. Asking for the
         // second family without the first is a configuration error, and a loud
-        // one: the arm's shape assumes the bands' collector exists.
+        // one: the backend's shape assumes the bands' collector exists.
         assert!(!p.gkr_dequant || p.gkr_bands,
                 "--gkr-dequant composes with --gkr-bands; it does not replace it");
         assert!(!p.gkr_residual_stream || p.gkr_bands,
-                "`--gkr-residual-stream` extends the bands' GKR arm; it needs `--gkr-bands`");
+                "`--gkr-residual-stream` extends the bands' GKR backend; it needs `--gkr-bands`");
         assert!(!p.gkr_freivalds || p.gkr_bands,
-                "`--gkr-freivalds` extends the bands' GKR arm; it needs `--gkr-bands`");
+                "`--gkr-freivalds` extends the bands' GKR backend; it needs `--gkr-bands`");
         assert!(!p.gkr_attnout || p.gkr_bands,
-                "`--gkr-attnout` extends the bands' GKR arm; it needs `--gkr-bands`");
+                "`--gkr-attnout` extends the bands' GKR backend; it needs `--gkr-bands`");
         // Stream AA left `--kv-boundary` and `--gkr-bands` asserted apart, because
-        // the bands' GKR arm gated the per-token region on `plan.corner` in two
+        // the bands' GKR backend gated the per-token region on `plan.corner` in two
         // places of its own while the composed path had already moved to
         // `plan.rows_band`.  What pairing by `corner` assumed is "every band
         // that is not the corner carries the group's per-token region", and
         // design A breaks exactly that: a group is now `c/s` prefix sub-bands
         // plus a corner, and the region lives on the *first* sub-band only.
         // Both derivations now read `plan.rows_band[b]`, which is `!corner[b]`
-        // whenever the flag is off, so the two flags compose and the arm's
+        // whenever the flag is off, so the two flags compose and the backend's
         // flag-off digests do not move.  See `briefs/aa-kvbind.md`, item 4.
         let lays: Vec<Layouts> = shapes.iter().map(|sh| Layouts::choose(sh, &cfg)).collect();
 
@@ -2716,7 +2716,7 @@ impl Plan {
         }
         // stream BB: the embedding gadget's own columns -- the use region's four
         // selectors and its block index, then the table's index pair and its
-        // `pe` value columns.  After the argmax and before the GKR arm's, so no
+        // `pe` value columns.  After the argmax and before the GKR backend's, so no
         // family that exists today moves an index.
         if let Some(l) = &self.emb {
             ids.extend(crate::embed::EMB_SEL.iter().map(|n| crate::embed::id(n)));
@@ -2726,7 +2726,7 @@ impl Plan {
             ids.extend((0..l.pe).map(crate::embed::tab_e_id));
         }
         // B11 stream S, lever 3: the link heights' boundary selectors, after
-        // everything -- they exist only on the GKR arm, so the flag-off tree
+        // everything -- they exist only on the GKR backend, so the flag-off tree
         // is untouched
         if self.p.gkr_bands {
             for h in crate::gkrlink::link_heights(self) {
@@ -2741,7 +2741,7 @@ impl Plan {
     pub fn n_use(&self) -> usize {
         // chan + grid + per-token per prefix band; a corner band has no per-token
         // region (the pair shares the prefix band's), so it contributes two.
-        // B11 stream S, lever 1: on the GKR arm the bands' sums are proved by
+        // B11 stream S, lever 1: on the GKR backend the bands' sums are proved by
         // the GKR and never enter `use_sums`.
         (if self.p.gkr_bands {
             0
@@ -2827,7 +2827,7 @@ pub struct BuiltComponents {
     pub rows: Vec<FrameworkComponent<RowEval>>,
     /// B11 stream S, lever 3: one univariate IOP per link height, and the binding
     /// component that pins its columns to the base columns at OODS. Empty and
-    /// `None` off the GKR arm (and on the emit and probe paths, which have no
+    /// `None` off the GKR backend (and on the emit and probe paths, which have no
     /// artifact to derive them from).
     pub links: Vec<FrameworkComponent<crate::gkrlink::LinkEval>>,
     pub link_binding: Option<crate::gkrlink::LinkTie>,
@@ -3173,7 +3173,7 @@ fn inter_mark(
 /// sides cannot diverge.
 #[allow(clippy::too_many_arguments)]
 /// `build_components` without link parameters: the AIR probe and any caller
-/// that runs before a GKR artifact exists. On the GKR arm the prove and
+/// that runs before a GKR artifact exists. On the GKR backend the prove and
 /// verify paths call `build_components_linked` with the derived heights.
 #[allow(clippy::too_many_arguments)]
 pub fn build_components(plan: &Plan, rels: &Rels, r: SecureField, s: SecureField,
@@ -3211,7 +3211,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         let nn = nn_band_bindings(plan, b, w_residual_stream, claims);
         // stream NN (NN-2): a prefix band's Q claim, against its group's corner
         let nn_q = nn_band_qtie(plan, b, w_residual_stream, claims);
-        // B11 stream S, lever 1: on the GKR arm a band component carries no
+        // B11 stream S, lever 1: on the GKR backend a band component carries no
         // LogUp, so there is no claimed sum to hand it and none to consume.
         chans.push(FrameworkComponent::<ChanEval>::new(
             alloc,
@@ -4198,7 +4198,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             || tamper.ao_mag.is_some()
             // stream TT (E11), log row 73: and the magnitude form, whose tenth
             // column the fork's `b65_fill_attnout` does not write -- `ao_region`
-            // sets its own mode to 0 for it on both arms
+            // sets its own mode to 0 for it on both backends
             || p.ao_acc_mag || p.ao_denp2,
     );
     let mut mult_exp = std::mem::take(&mut tables.m_exp);
@@ -4938,7 +4938,7 @@ different rotation", inv.len(), 2 * hd * p.s);
             pre_tables.push(None);
         }
     }
-    // Stream JJ (E11): the exponent window table.  Host-built on both arms --
+    // Stream JJ (E11): the exponent window table.  Host-built on both backends --
     // it is `1 << log_epow` rows, a few dozen at most -- so it sits after the
     // 21 columns `tables_dev` builds and the device parity check skips it.
     let log_epow = plan.log_epow();
@@ -4989,7 +4989,7 @@ different rotation", inv.len(), 2 * hd * p.s);
             base_mults.push(None);
         }
     }
-    // and its multiplicity, bumped by `ao_region` (and, on the device arm, by
+    // and its multiplicity, bumped by `ao_region` (and, on the device backend, by
     // the host loop `ao_region_dev` runs beside the kernel -- `e = jv - jo` is
     // a function of `ao.jv`, `ao.jo` and the layout alone, so no counter has to
     // come back off the card for it)
@@ -5051,7 +5051,7 @@ different rotation", inv.len(), 2 * hd * p.s);
         // `ao_acc_hi_bits` table did on the H200's reference chunk ("shared
         // table 4 has no device counter to sum"), the defaults cuda regime
         // being the only place that asks.  `EPOW` is deliberately not here: its
-        // column is a host loop on both arms, so it has no device counter.
+        // column is a host loop on both backends, so it has no device counter.
         pre_counters[ri(p.ao_acc_lo_bits)].push(&d.m_acc_lo);
         pre_counters[ri(p.ao_acc_hi_bits)].push(&d.m_acc_hi);
         for (b, a) in layer.bands.iter().enumerate() {
@@ -5344,7 +5344,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         base_all.push(AnyCol::Host(&r.tab_mult));
     }
     // B11 stream S, lever 3: the link heights' boundary selectors close the
-    // preprocessed tree, matching `pre_ids` -- GKR arm only
+    // preprocessed tree, matching `pre_ids` -- GKR backend only
     if p.gkr_bands {
         for h in crate::gkrlink::link_heights(&plan) {
             pre_all.extend(crate::gkrlink::boundary_cols(h)
@@ -5560,14 +5560,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // B11 stream V, lever 2: whether each family's looks can be linked at all,
     // decided from the same fraction IR the generated kernel runs.
     //
-    // The model in `band_split.py --families` counted columns; the arm needs the
+    // The model in `band_split.py --families` counted columns; the backend needs the
     // *looks*, and memo section 4's collapse is a property of the fraction. So
     // this lowers every family's evaluator -- the un-ablated one, the shape the
     // feed asks for -- and reports, per region, whether every denominator is
     // affine in committed base masks and preprocessed columns at this row, and
     // which numerators are the literal one. It is the family's own `look_units`
     // list, derived rather than written down, and a family that fails here gets
-    // a named stop in the record and no arm.
+    // a named stop in the record and no backend.
     //
     // `B11_GKR_AFFINE=1` only. It lowers a dozen evaluators and proves nothing,
     // so it never runs under a wall number.
@@ -5637,14 +5637,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let mut inter_split: Vec<serde_json::Value> = vec![];
     let mut inter_seen = (0usize, 0usize);
     let mut claims = Claims::default();
-    // B11 stream Q: on the GKR arm the same lookup lists the committed columns
+    // B11 stream Q: on the GKR backend the same lookup lists the committed columns
     // are built from are handed to the collector at each of the three band
     // sites. Collecting is additive -- it reads the committed columns and
     // writes nothing the committed path can see -- so the flag-off pass is the
     // pass it always was.
     let mut gkr: Option<Box<crate::gkrband::Collect>> = p.gkr_bands.then(|| {
         let mut g = crate::gkrband::Collect::with_direct(false);
-        // B11 stream S, lever 1: on the composed arm the collector owns the
+        // B11 stream S, lever 1: on the composed backend the collector owns the
         // sums -- the committed running-sum columns leave with it, and the
         // GKR's per-site sums stand in for them in the cancellation.
         g.replace = true;
@@ -5810,7 +5810,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     });
     if let Some(pr) = gkr_proved.as_ref() {
         let mut b = serde_json::to_vec(&pr.proof).expect("the GKR proof serialises");
-        // B11 stream Q, the arm's own control: `B11_GKRMUT=<index>` flips one
+        // B11 stream Q, the backend's own control: `B11_GKRMUT=<index>` flips one
         // digit of the serialised GKR bundle. Everything else about the chunk
         // stays honest, so the only thing that can catch it is the sumcheck
         // itself -- which is the point. Off, the bundle is untouched.
@@ -5986,7 +5986,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 / SecureField::from(M31::from_u32_unchecked(1u32 << hl[at].h));
         }
         // B11 stream U, lever 1: the fold and the five column builds are one
-        // call now, because on the cuda arm they are one chain that stays on
+        // call now, because on the cuda backend they are one chain that stays on
         // the card -- the coefficient column is no longer downloaded for the
         // host loops to read. `B11_LINKDEV=0` is the host control.
         for l in &hl {
@@ -6146,7 +6146,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // B11 stream X, lever 2: one entry per table region, in the order the
     // interaction pass emits them. `interaction_split` already records what
     // each region *cost*; this records what it *is* -- the height, which
-    // decides both what an arm could remove and whether the link already pays
+    // decides both what a backend could remove and whether the link already pays
     // for that height, and how many committed key columns the relation
     // combines, which is the read set a link would have to name. It is the
     // block `band_split.py`'s family model needs and the only one the tables
@@ -6629,7 +6629,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // B11 stream V, lever 2: the affinity verdict per region, or an empty
         // list when `B11_GKR_AFFINE` did not ask for it.
         "affinity": affinity,
-        // B11 stream Q: what the GKR arm proved and what it cost, or null with
+        // B11 stream Q: what the GKR backend proved and what it cost, or null with
         // the flag off. Reported beside `interaction_by_family` because the two
         // are the same question from the two sides.
         "gkr": gkr_proved.as_ref().map(|p| p.cost.json()),
@@ -6685,7 +6685,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // `base_all` loop above), and a boundary side takes the same references
     // to the same buffers -- `device::take_all` clones a borrowed device column
     // on the device, so the side sees the bytes tree 1 saw and nothing crosses
-    // the bus.  A host-filled band (the reference arm, `B7_M4_WFILL_BAND=0`,
+    // the bus.  A host-filled band (the reference backend, `B7_M4_WFILL_BAND=0`,
     // every corner band) hands its host columns over exactly as before.  The
     // one reader that needs the cells on the host is the tamper probe, which
     // bumps one cell of one column: that side comes down (`AnyCol::download`)
@@ -7082,7 +7082,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         (SecureField::zero(), SecureField::zero())
     };
     let r_corner = if plan.p.corner { f[plan.corner_challenge_at()] } else { SecureField::zero() };
-    // B11 stream Q: on the GKR arm the bands' fractional sums are proved here,
+    // B11 stream Q: on the GKR backend the bands' fractional sums are proved here,
     // between the relation challenges the fractions depend on and the
     // interaction tree's own commit -- the position the prover occupies. The
     // sumcheck moves the channel, so a verifier that skipped it would diverge
@@ -7091,7 +7091,8 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let mut link_hl: Option<Vec<crate::gkrlink::HeightLink>> = None;
     if plan.p.gkr_bands {
         let Some(bytes) = claims.gkr.as_ref() else {
-            return Verdict::rejected("the statement asks for the GKR arm and carries no GKR proof");
+            return Verdict::rejected(
+                "the statement asks for the GKR backend and carries no GKR proof");
         };
         let sites = crate::gkrband::sites_of(&plan);
         let (sums, artifact, insts) = match crate::gkrband::verify(&mut ch, &sites, bytes) {
@@ -7100,7 +7101,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         };
         gkr_sums = sums;
         // B11 stream S, lever 1: the bands' sums never enter `use_sums` on
-        // this arm -- the committed running-sum columns are gone. The GKR's
+        // this backend -- the committed running-sum columns are gone. The GKR's
         // per-site sums join the cancellation directly below, standing exactly
         // where the claimed sums stood, and the sumcheck the channel just
         // replayed is what certifies them.
@@ -7152,7 +7153,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let error = vres.err().map(|e| format!("{e:?}"));
 
     // ---- claimed sums and identities -------------------------------------------
-    // B11 stream S, lever 1: on the GKR arm the bands' fractional sums arrive
+    // B11 stream S, lever 1: on the GKR backend the bands' fractional sums arrive
     // from the GKR's output claims instead of `use_sums`; the cancellation is
     // the same global identity over the same fractions either way.
     let total = claims

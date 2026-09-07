@@ -260,7 +260,7 @@ fn m4b_default(name: &str) -> u32 {
         // +832 MiB at C=4096 and +2,560 MiB at C=16384 against a 143,771 MiB
         // card, measured, and the worst pair the sequence contains (L0 and L1
         // at C=16384, 76,823 MiB apiece on their own) peaked at 76,823 MiB
-        // together. The reference arm is untouched -- `m4b_default` is
+        // together. The reference backend is untouched -- `m4b_default` is
         // all-zero without the `cuda` feature -- so the digest comparison
         // still has something to be a comparison against.
         "B7_M5_PIPE" => 1,
@@ -273,8 +273,8 @@ fn m4b_default(name: &str) -> u32 {
 
 /// Without the `cuda` feature every mode stays off. This is the one hard
 /// constraint on step 0's table: the SimdBackend build is the reference that
-/// every digest comparison is made against, and a device default on that arm
-/// would call FFI stubs. The reference arm is untouched by construction.
+/// every digest comparison is made against, and a device default on that backend
+/// would call FFI stubs. The reference backend is untouched by construction.
 #[cfg(not(feature = "cuda"))]
 fn m4b_default(_name: &str) -> u32 {
     0

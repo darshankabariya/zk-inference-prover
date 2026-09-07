@@ -1,6 +1,6 @@
 """E4, section 7 steps 6-7: the measured layer chunks against the registered prediction.
 
-Reads the prover's per-layer JSONs (one `compose` run per layer, reference arm)
+Reads the prover's per-layer JSONs (one `compose` run per layer, reference backend)
 and the committed registration, writes the per-chunk record the run-book asks
 for and the comparison, in the run-book's order:
 
@@ -98,7 +98,7 @@ def main():
     ap.add_argument("--shape", default="qwen2p5_14b")
     ap.add_argument("--ctx", type=int, default=4096)
     ap.add_argument("--card", default="H200")
-    ap.add_argument("--arm", default="ref (SimdBackend)")
+    ap.add_argument("--backend", default="ref (SimdBackend)")
     ap.add_argument("--out", default=os.path.join(HERE, "out"))
     a = ap.parse_args()
 
@@ -193,7 +193,7 @@ def main():
             for r in runs]
     measured = dict(
         schema="e4-measured/1", shape=SHAPES[a.shape], hf=shape["hf"], cfg=shape["cfg"],
-        ctx=a.ctx, s=512, spec="b10-final", card=a.card, arm=a.arm,
+        ctx=a.ctx, s=512, spec="b10-final", card=a.card, backend=a.backend,
         boundary="cell count (card-independent); bytes; peak host RSS",
         layers_proved=layers, n_layers_proved=n, n_layers_model=L,
         chunks=runs,
@@ -235,7 +235,7 @@ def main():
     )
     comparison = dict(
         schema="e4-comparison/1", shape=SHAPES[a.shape], ctx=a.ctx, s=512, spec="b10-final",
-        card=a.card, arm=a.arm,
+        card=a.card, backend=a.backend,
         registration=dict(file=os.path.relpath(REG, HERE), prediction_sha256=reg["prediction_sha256"],
                           prediction_block_sha256=reg["prediction_block_sha256"]),
         predicted=dict(cells_per_token_layers=pred_cpt, per_layer_chunk_fresh=pred_chunk,
@@ -261,7 +261,7 @@ def main():
     json.dump(comparison, open(cp, "w"), indent=1, sort_keys=True)
 
     # ---- the table ----------------------------------------------------------
-    print(f"E4 -- {SHAPES[a.shape]} at C={a.ctx}, S=512, spec b10-final, {a.card}, {a.arm}")
+    print(f"E4 -- {SHAPES[a.shape]} at C={a.ctx}, S=512, spec b10-final, {a.card}, {a.backend}")
     print(f"registration: prediction_sha256 {reg['prediction_sha256'][:12]}...  "
           f"predicted cells/token (layers) {pred_cpt:,.1f}, per chunk {pred_chunk:,.1f}")
     print()

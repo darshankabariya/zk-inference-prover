@@ -804,7 +804,7 @@ impl Outcome {
             "cells_per_position_channel": fresh as f64 / (w.tokens * w.d) as f64,
             "proof_bytes": self.proven.proof_bytes, "prove_secs": self.proven.prove_secs,
             "verify_secs": self.proven.verify_secs,
-            // the byte-exact reference the gate compares across arms: this
+            // the byte-exact reference the gate compares across backends: this
             // harness builds no serialized proof, so its three tree roots are
             // what stands in for `proof_sha256`
             "roots": self.proven.roots,
@@ -1193,7 +1193,7 @@ mod tests {
             // dispatched component. `prewarm` bumps `blob_report().lowerings`
             // once per call whatever the kernel store holds, so the count is
             // the list's length and the components' is what it has to equal.
-            // Off the GKR arm there is no `link_binding`, so the two coincide.
+            // Off the GKR backend there is no `link_binding`, so the two coincide.
             let before = crate::cudagen::blob_report()["lowerings"].as_u64().unwrap();
             b.prewarm_blobs();
             let after = crate::cudagen::blob_report()["lowerings"].as_u64().unwrap();

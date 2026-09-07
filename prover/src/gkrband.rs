@@ -223,7 +223,7 @@ where
 /// `interaction_phase` builds each region's lookup list already, and that list
 /// plus the column slice it indexes is only in scope right there. Rather than
 /// reconstruct either outside -- two definitions of the same thing is how the
-/// two arms drift apart -- the interaction pass hands them to this collector at
+/// two backends drift apart -- the interaction pass hands them to this collector at
 /// the same three sites where it calls `devfrac::band_cols`. Collecting is
 /// purely additive: it reads the same columns and writes nothing the committed
 /// path can see.
@@ -253,7 +253,7 @@ pub struct Collect {
     pub direct: Vec<SecureField>,
     /// fill `direct` as sites arrive; off for a proving run, on for the test
     pub want_direct: bool,
-    /// B11 stream S, lever 1: the arm owns the bands' fractional sums, so
+    /// B11 stream S, lever 1: the backend owns the bands' fractional sums, so
     /// `interaction_phase` builds no committed running-sum columns and pushes
     /// no use sums at the collected sites -- the GKR proves the same sums and
     /// `verify_composed` feeds them to `sums_cancel` directly. Off, collecting
@@ -427,7 +427,7 @@ pub fn feed_site(
     {
         let (lo, hi) = (at[which], at[which + 1]);
         let base: Vec<*const u32> = d.base[lo..hi].iter().map(|c| c.device_ptr).collect();
-        // The fractions the feed computes are the ones the *committed* arm would
+        // The fractions the feed computes are the ones the *committed* backend would
         // have built, so the evaluator it lowers is the un-ablated one: stream
         // S's lever 1 makes the flag-on evaluator emit no lookups at all, and
         // its fraction IR would be empty. Flipping the flag back for the
@@ -710,7 +710,7 @@ pub fn fam_site<E: FrameworkEval>(c: &mut Collect, s: FamSite<'_>, eval: &E) {
     // consistent and every claim it yields is the claim of the layer it saw; the
     // *link*'s coefficient column is built from the committed columns, which are
     // untouched. The two can only disagree, and the prover's own boundary assert
-    // is where they do, naming the height. That is the property the arm's
+    // is where they do, naming the height. That is the property the backend's
     // soundness rests on for this family -- the GKR's input layer and the
     // committed columns are one function -- and this is what says it is load
     // bearing rather than assumed.
@@ -960,7 +960,7 @@ mod feedimpl {
             let n_looks = site.n_looks();
 
             // The IR, and the kernel compiled for it. Same lowering, same
-            // fingerprint and same shape id as the committed arm's paired
+            // fingerprint and same shape id as the committed backend's paired
             // kernel: the two differ only in the write-back.
             let ir = crate::scalars::cached_ir(eval, log_rows, log_rows, true, || {
                 crate::devfrac::ir_of(eval, log_rows)
@@ -1190,12 +1190,12 @@ mod feedimpl {
     }
 }
 
-/// B11 stream R: the device arm's layer plumbing.
+/// B11 stream R: the device backend's layer plumbing.
 ///
 /// The collected input layers are host (simd) columns; the sumcheck runs on
 /// `CudaBackend`. The upload is timed on its own line because on the composed
-/// cuda arm it is a stand-in: `gen_b65_dispatch` computes these very fractions
-/// on the device already, so a resident arm pays a device-side *reshape* (one
+/// cuda backend it is a stand-in: `gen_b65_dispatch` computes these very fractions
+/// on the device already, so a resident backend pays a device-side *reshape* (one
 /// pass moving the paired fractions into MLE layout), not a PCIe transfer. The
 /// reshape's cost is measured directly -- one device-to-device copy of every
 /// layer -- and reported beside the upload so neither is assumed.
@@ -1266,7 +1266,7 @@ pub mod dev {
         // the pool's high-water mark -- worth it when the input layers arrived by
         // upload. The feed allocates every input layer before this runs, so the
         // pool is already at size and the extra budget only raises the mark:
-        // measured on the card at C=16384, the arm's peak is 57,185 MiB with the
+        // measured on the card at C=16384, the backend's peak is 57,185 MiB with the
         // 4x pre-grow and 44,705 MiB without, against 46,337 MiB flag off -- so
         // the pre-grow alone was 12.4 GiB, and it turned a 1.6 GiB saving into a
         // 10.6 GiB regression. The wall is the same either way (2.050 s against
@@ -1359,7 +1359,7 @@ pub mod dev {
 
 /// Prove everything a `Collect` gathered, in one batched GKR.
 ///
-/// On the cuda build the sumcheck runs on the device -- that is the arm this
+/// On the cuda build the sumcheck runs on the device -- that is the backend this
 /// build exists to measure -- unless `B11_GKR_HOST=1` pins it to the host simd
 /// backend for an on-box comparison. The proof bytes are the same either way,
 /// which is the port's digest gate.
@@ -1372,7 +1372,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
     let n_fed = c.on_dev.iter().filter(|d| **d).count();
 
     #[cfg(feature = "cuda")]
-    let (proof, artifact, arm, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases,
+    let (proof, artifact, backend, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases,
          refeeds) = {
         if std::env::var("B11_GKR_HOST").map(|v| v != "0").unwrap_or(false) {
             assert_eq!(n_fed, 0,
@@ -1409,10 +1409,10 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             crate::util::m4_mark("gkr/inputs_resident");
             // Once per process in production -- the pool keeps its high-water
             // mark across chunks -- so it is timed and reported, not counted
-            // among the arm's per-chunk adds. Before the reshape, so no later
+            // among the backend's per-chunk adds. Before the reshape, so no later
             // allocation pays the pool's first-touch mapping.
             let prewarm_secs = dev::prewarm(&layers);
-            // The reshape pass was stream R's *measurement* of what an arm whose
+            // The reshape pass was stream R's *measurement* of what a backend whose
             // fractions were already resident would pay to put them into MLE
             // layout. The feed writes that layout directly, so where it ran
             // there is no pass to time and none to pay.
@@ -1462,7 +1462,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
         }
     };
     #[cfg(not(feature = "cuda"))]
-    let (proof, artifact, arm, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases,
+    let (proof, artifact, backend, upload_secs, reshape_secs, prewarm_secs, prove_secs, phases,
          refeeds) = {
         let t1 = Instant::now();
         let (proof, artifact) = prove_batch(channel, c.layers);
@@ -1487,7 +1487,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             fractions,
             unpaired,
             proof_bytes,
-            arm,
+            backend,
             upload_secs,
             reshape_secs,
             prewarm_secs,
@@ -1521,9 +1521,9 @@ pub struct Cost {
     /// the serialised `GkrBatchProof`
     pub proof_bytes: usize,
     /// where the sumcheck ran: "host simd" or "device"
-    pub arm: &'static str,
-    /// host-to-device transfer of the collected layers (device arm only). On a
-    /// composed cuda arm the fractions are already resident, so this line is a
+    pub backend: &'static str,
+    /// host-to-device transfer of the collected layers (device backend only). On a
+    /// composed cuda backend the fractions are already resident, so this line is a
     /// stand-in and `reshape_secs` is the honest input cost.
     pub upload_secs: f64,
     /// one device-to-device pass over every layer: putting already resident
@@ -1537,9 +1537,9 @@ pub struct Cost {
     /// the device sumcheck's phase split, when `B11_GKR_PROF=1`
     pub phases: Option<Vec<(&'static str, f64, u64)>>,
     /// B11 stream V, lever 1: how many feed launches the last round asked for,
-    /// one per fed site. Zero under `B11_GKR_REFEED=0` and on the host arm.
+    /// one per fed site. Zero under `B11_GKR_REFEED=0` and on the host backend.
     pub refeeds: usize,
-    /// everything the arm costs where the committed path costs its LogUp build:
+    /// everything the backend costs where the committed path costs its LogUp build:
     /// the input layers plus `prove_batch`
     pub total_secs: f64,
 }
@@ -1557,7 +1557,7 @@ impl Cost {
             "total_secs": self.total_secs,
             "proof_bytes": self.proof_bytes,
             "refeeds": self.refeeds,
-            "arm": self.arm,
+            "backend": self.backend,
             "upload_secs": self.upload_secs,
             "reshape_secs": self.reshape_secs,
             "prewarm_secs": self.prewarm_secs,
@@ -1699,7 +1699,7 @@ const _: () = assert!(N_LANES == 1usize << LOG_N_LANES);
 
 // ------------------------------------------------------------------ the test ---
 
-/// `zk-prover gkr` -- the GKR arm's own self-test on a synthetic band.
+/// `zk-prover gkr` -- the GKR backend's own self-test on a synthetic band.
 ///
 /// What it establishes, in the order the record reports it:
 ///
@@ -1707,7 +1707,7 @@ const _: () = assert!(N_LANES == 1usize << LOG_N_LANES);
 ///    GKR yields from its output claims equals, exactly, the claimed sum
 ///    `interaction_phase` pushes onto `use_sums` from the committed running-sum
 ///    columns. This is the strongest correctness statement available without the
-///    `mle_eval` link: the two arms prove the same number about the same
+///    `mle_eval` link: the two backends prove the same number about the same
 ///    fractions, bit for bit, and `sums_cancel` is what consumes that number.
 /// 2. **A direct sum agrees too**, computed by plain inversion over every
 ///    fraction with no sumcheck in it, so a bug that moved the committed columns
@@ -1766,7 +1766,7 @@ pub fn cmd(args: &[String]) {
                "the collector saw {} band sites, `interaction_phase` pushed {} use sums",
                sites.len(), inter.use_sums.len());
 
-    // The GKR runs on a channel replayed to the point the arm would reach it at,
+    // The GKR runs on a channel replayed to the point the backend would reach it at,
     // and the verifier gets a channel in the same state.
     let mut pch = ch.clone();
     let proved = prove_collected(&mut pch, collect);
@@ -1844,7 +1844,7 @@ pub fn cmd(args: &[String]) {
         "committed_interaction_secs": committed_secs,
     }));
 
-    assert!(all_match, "the GKR arm's sums do not match the committed columns'");
+    assert!(all_match, "the GKR backend's sums do not match the committed columns'");
     assert!(verified.is_ok(), "the GKR proof did not verify from bytes");
     assert!(bad_rejected, "a corrupted GKR proof was accepted");
 }

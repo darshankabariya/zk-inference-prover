@@ -704,7 +704,7 @@ impl Attn {
         // consumer of the shift -- the table sizing, the numerators, the
         // denominator, the A.V outputs, `check/torch_num` and `--tight-table`
         // -- runs inside `Layer::load`, before `compose::generate` first
-        // touches the card, and this loader is also the SimdBackend arm's.
+        // touches the card, and this loader is also the SIMD backend's.
         sc.par_chunks_mut(nc).enumerate().for_each(|(ti, row)| {
             let (inst, t) = (ti / ns, ti % ns);
             let qrow = &qq[(inst * ns + t) * nhd..(inst * ns + t + 1) * nhd];
