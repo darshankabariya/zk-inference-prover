@@ -114,6 +114,35 @@ def load():
     return provenance.rows(json.load(open(RESULTS))) if os.path.exists(RESULTS) else {}
 
 
+def paired_table(rows):
+    """Every variant against fp32: the perplexity difference and its paired
+    standard error, from the per-token losses the rows were measured from.
+
+    Paired over positions.  Both variants scored the same tokens in the same
+    order, so the difference of their losses has a standard error that does not
+    assume the two perplexities are independent, and that is the number a claim
+    of the form "this variant costs x% and the error is smaller than x" needs.
+    A variant whose losses are not on disk beside fp32's is left out rather than
+    given an unpaired error.
+    """
+    out = {}
+    if "fp32" not in rows:
+        return out
+    ref = os.path.join(OUT, "nll", "fp32.npy")
+    if not os.path.exists(ref):
+        return out
+    n = len(np.load(ref))
+    for name in rows:
+        if name == "fp32":
+            continue
+        f = os.path.join(OUT, "nll", f"{name}.npy")
+        if not os.path.exists(f) or len(np.load(f)) != n:
+            continue
+        delta, se = paired("fp32", name)
+        out[name] = {"delta_pct": delta * 100, "se_nats": se, "positions": n}
+    return out
+
+
 def save(rows, written, n_chunks):
     """`ppl.json`, with the provenance block of the invocation that wrote it.
 
@@ -128,7 +157,8 @@ def save(rows, written, n_chunks):
                module="harness.witness.ppl",
                specs_written=list(written), specs_in_file=sorted(rows),
                chunks=n_chunks, corpus=provenance.digest(TEXT)),
-           "result": rows}
+           "result": rows,
+           "paired": paired_table(rows)}
     json.dump(doc, open(RESULTS, "w"), indent=1)
 
 

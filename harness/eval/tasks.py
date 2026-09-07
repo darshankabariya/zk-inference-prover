@@ -19,6 +19,7 @@ Outputs are one JSONL row per item, appended, so a shard can be resumed.
 import argparse
 import glob
 import json
+import math
 import os
 import random
 import re
@@ -263,10 +264,31 @@ def ifeval_scores(docs, rows):
         ps.append(all(strict)); pl.append(all(loose))
         iss += strict; il += loose
     mean = lambda xs: sum(xs) / len(xs)
-    return dict(prompt_strict=mean(ps), inst_strict=mean(iss), prompt_loose=mean(pl),
+    return dict(ok={r["id"]: v for r, v in zip(rows, ps)},
+                prompt_strict=mean(ps), inst_strict=mean(iss), prompt_loose=mean(pl),
                 inst_loose=mean(il), n_prompts=len(ps), n_inst=len(iss),
                 mean_gen=mean([r["n_gen"] for r in rows]),
                 unfinished=sum(1 for r in rows if not r["finished"]))
+
+
+def mcnemar(a, b):
+    """Two arms scored on the same items: the difference and its paired error.
+
+    `a` and `b` map an item to whether that arm answered it correctly.  Only
+    the items both scored count.  The pairs that agree carry no information
+    about the difference, so the error is built from the two discordant counts,
+    which is what makes it the error of the difference rather than of either
+    accuracy.
+    """
+    ids = [i for i in b if i in a]
+    n = len(ids)
+    if not n:
+        return None
+    n01 = sum(1 for i in ids if not a[i] and b[i])
+    n10 = sum(1 for i in ids if a[i] and not b[i])
+    var = (n01 + n10 - (n01 - n10) ** 2 / n) / n ** 2
+    return {"n": n, "n01": n01, "n10": n10, "delta": (n01 - n10) / n,
+            "se": math.sqrt(var) if var > 0 else 0.0}
 
 
 def score():
@@ -295,7 +317,8 @@ def score():
                 g[0] += x["pred"] == x["gold"]
                 g[1] += 1
             r = dict(acc=acc, n=len(rows), by_group={g: v[0] / v[1] for g, v in groups.items()},
-                     preds={x["id"]: x["pred"] for x in rows})
+                     preds={x["id"]: x["pred"] for x in rows},
+                     ok={x["id"]: x["pred"] == x["gold"] for x in rows})
         r["complete"] = complete
         res.setdefault(spec_name, {})[task] = r
     # agreement with the float baseline's predictions, per spec
@@ -305,9 +328,21 @@ def score():
                 base = res["fp32"][task]["preds"]
                 common = [i for i in r["preds"] if i in base]
                 r["agree_fp32"] = sum(r["preds"][i] == base[i] for i in common) / max(1, len(common))
+    # The difference against the float baseline on the items both scored, with
+    # the standard error of that difference.  The two arms answer the same
+    # questions, so the difference is paired and its error is not the error of
+    # either accuracy on its own.
+    for spec_name, tasks in res.items():
+        if spec_name == "fp32":
+            continue
+        for task, r in tasks.items():
+            base = res.get("fp32", {}).get(task)
+            if base and "ok" in r and "ok" in base:
+                r["paired_vs_fp32"] = mcnemar(base["ok"], r["ok"])
     for tasks in res.values():
         for r in tasks.values():
             r.pop("preds", None)
+            r.pop("ok", None)
     json.dump({"provenance": provenance.block(
                    model=MODEL, device=DEVICE, threads=THREADS,
                    module="harness.eval.tasks",
