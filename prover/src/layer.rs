@@ -141,6 +141,67 @@ impl AttnOut {
         let hi = self.jo.iter().copied().max().unwrap_or(0);
         (lo, hi)
     }
+    /// Which way a one-step `jo` move can go on slots whose exponents are `es`,
+    /// or `None` when the statement's own windows leave no room.
+    ///
+    /// A `jo` control has to stay inside those windows, or the `EPOW` lookup
+    /// would catch the move instead of the pin the control exists to test:
+    /// `joff = jo_max - jo` must stay non-negative and every slot's
+    /// `e = jv - jo` must stay in `[e_lo, e_hi]`.  Up first, because a larger
+    /// `jo` is a smaller `num` and a smaller `num` cannot push `qm` past the
+    /// `ao_q_bits` pair table; moving `jo` down can, which is itself worth
+    /// knowing -- see the record.
+    ///
+    /// `None` is not a defect in this arithmetic. It says the two windows
+    /// between them admit exactly one `jo` for these slots, so there is no `jo`
+    /// a prover could commit that they do not already refuse, and the `joff`
+    /// pin has nothing left to catch here. A witness whose `jv` spans the whole
+    /// exponent window and whose every token carries the same `jo` -- the
+    /// synthetic layer's -- is exactly that shape, and `compose-probes` skips
+    /// the two controls on it by name rather than asserting on them.
+    pub fn jo_step(es: &[i32], jo: i32, jo_max: i32, e_lo: i32, e_hi: i32) -> Option<i32> {
+        if jo < jo_max && es.iter().all(|e| e - 1 >= e_lo) {
+            Some(1)
+        } else if es.iter().all(|e| e + 1 <= e_hi) {
+            Some(-1)
+        } else {
+            None
+        }
+    }
+    /// The exponents one row of the attention output covers: its token's, over
+    /// the `per_row` channels of its channel block.
+    pub fn row_es(&self, lay: &AoLayout, h: usize, t: usize, b: usize) -> Vec<i32> {
+        (0..lay.per_row)
+            .map(|s| self.jv[h * self.hd + b * lay.per_row + s] - self.jo[t])
+            .collect()
+    }
+    /// The site `--corrupt-ao-jo` can be stated on: a channel index whose row
+    /// has room for a one-step `jo` move, or `None` when no row of this witness
+    /// has. The row must also not be its token's first, since the `nofirst` pin
+    /// compares a row with its predecessor -- the same rule `ao_component`
+    /// asserts on the index it is handed.
+    pub fn jo_bend_site(&self, lay: &AoLayout, jo_max: i32, e_lo: i32, e_hi: i32)
+                        -> Option<usize> {
+        (0..1usize << lay.log_rows).find_map(|j| {
+            let (h, t, b) = lay.at(self.nh, self.s, j)?;
+            if b + 1 >= lay.chunks {
+                return None;
+            }
+            Self::jo_step(&self.row_es(lay, h, t, b), self.jo[t], jo_max, e_lo, e_hi)?;
+            Some((h * self.s + t) * self.hd + b * lay.per_row)
+        })
+    }
+    /// The same for `--corrupt-ao-jo-tok`, whose move is over every row of one
+    /// token: the token whose every slot has room, or `None`.
+    pub fn jo_tok_site(&self, jo_max: i32, e_lo: i32, e_hi: i32) -> Option<usize> {
+        (0..self.s).find(|t| {
+            let es: Vec<i32> = (0..self.nh)
+                .flat_map(|h| (0..self.hd).map(move |c| (h, c)))
+                .map(|(h, c)| self.jv[h * self.hd + c] - self.jo[*t])
+                .collect();
+            Self::jo_step(&es, self.jo[*t], jo_max, e_lo, e_hi).is_some()
+        })
+    }
     /// Stream II (E11), at the JJ merge: the attention output's requantized
     /// integers, `sign(acc) * round(|acc| 2^(jv - jo) / den)` per
     /// `(head, token, channel)` in that order -- exactly what `ao_component`
@@ -4180,30 +4241,23 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
         j
     };
     let bend_jo: Option<usize> = corrupt_jo.map(|idx| row_of_site(idx, "--corrupt-ao-jo"));
-    // Which way the `jo` control moves.  It has to stay inside the statement's
-    // own windows or it would be caught by the `EPOW` lookup instead of by the
-    // pin it exists to test -- `joff = jo_max - jo` must stay non-negative and
-    // every slot's `e = jv - jo` must stay in `[e_lo, e_hi]`.  Down when the
-    // top of the exponent window has room, up otherwise; a window with no room
-    // either way is a statement too tight to test on, and says so.
+    // Which way the `jo` control moves: `AttnOut::jo_step`, which is also what
+    // `compose-probes` asks before it runs the control at all.  A shape whose
+    // windows admit one `jo` and no other has no move to make, and that is a
+    // statement about the shape and not a defect here; the caller picks a row
+    // that has room (`AttnOut::jo_bend_site`) or skips the control by name.
     let bend_jo_step: i32 = match bend_jo {
         None => 0,
         Some(j) => {
             let (h, t, b) = lay.at(ao.nh, ao.s, j).expect("--corrupt-ao-jo: an inert row");
-            let es: Vec<i32> = (0..pr)
-                .map(|s| ao.jv[h * ao.hd + b * pr + s] - ao.jo[t])
-                .collect();
-            // Up first: a larger `jo` is a smaller `num`, and a smaller `num`
-            // cannot push `qm` past the `ao_q_bits` pair table.  Moving `jo`
-            // *down* can, which is itself worth knowing -- see the record.
-            let down = es.iter().all(|e| e + 1 <= tables.e_hi);
-            let up = ao.jo[t] < jo_max && es.iter().all(|e| e - 1 >= tables.e_lo);
-            assert!(down || up,
+            let es = ao.row_es(&lay, h, t, b);
+            AttnOut::jo_step(&es, ao.jo[t], jo_max, tables.e_lo, tables.e_hi)
+                .unwrap_or_else(|| panic!(
                     "--corrupt-ao-jo: the jo window (top {jo_max}) and the exponent \
-                     window [{}, {}] leave no room to move one row's jo; widen one with \
-                     --ao-jo-min / --ao-jo-max",
-                    tables.e_lo, tables.e_hi);
-            if up { 1 } else { -1 }
+                     window [{}, {}] admit one jo for this row and no other, so there is \
+                     no move to make on it; ask `AttnOut::jo_bend_site` for a row that \
+                     has room, or widen a window with --ao-jo-min / --ao-jo-max",
+                    tables.e_lo, tables.e_hi))
         }
     };
     // The same choice for the whole-token control, over that token's every row.
@@ -4215,12 +4269,11 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
                 .flat_map(|h| (0..ao.hd).map(move |c| (h, c)))
                 .map(|(h, c)| ao.jv[h * ao.hd + c] - ao.jo[t])
                 .collect();
-            let down = es.iter().all(|e| e + 1 <= tables.e_hi);
-            let up = ao.jo[t] < jo_max && es.iter().all(|e| e - 1 >= tables.e_lo);
-            assert!(down || up,
-                    "--corrupt-ao-jo-tok: the windows leave no room to move token {t}'s \
-                     jo; widen one with --ao-jo-min / --ao-jo-max");
-            if up { 1 } else { -1 }
+            AttnOut::jo_step(&es, ao.jo[t], jo_max, tables.e_lo, tables.e_hi)
+                .unwrap_or_else(|| panic!(
+                    "--corrupt-ao-jo-tok: the windows admit one jo for token {t} and no \
+                     other, so there is no move to make; ask `AttnOut::jo_tok_site` for a \
+                     token that has room, or widen a window with --ao-jo-min / --ao-jo-max"))
         }
     };
     let (acc_lo_bits, acc_hi_bits) = acc_bits;

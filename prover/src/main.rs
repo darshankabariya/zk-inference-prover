@@ -2026,10 +2026,42 @@ fn compose_probes_cmd(args: &[String]) {
     // With no `--probe` the list is what it always was.
     let only = arg_strs(args, "--probe", &[]);
     let selected = |name: &str| only.is_empty() || only.iter().any(|w| name.contains(w.as_str()));
+    // Stream JJ (E11): the two `jo` controls move `jo` by one and have to stay
+    // inside the statement's own windows, or the `EPOW` lookup would catch the
+    // move instead of the pin the control exists to test.  A shape whose
+    // windows admit one `jo` and no other -- the synthetic layer's, whose `jv`
+    // spans the exponent window and whose every token carries the same `jo` --
+    // can state neither, and the prover's own step choice panics on it.  A
+    // control the shape cannot state is skipped here by name, with its reason
+    // in its own record: a crash is never a verdict, and it would take every
+    // probe after it and the suite's JSON with it.
+    let (jo_row_site, jo_tok_site) = {
+        let lay = layer::AoLayout::choose(params.nh, params.s, params.hd, params.ao_target);
+        let (e_lo, e_hi) = compose::Plan::new(&params).e_window();
+        (l.ao.jo_bend_site(&lay, params.ao_jo_max, e_lo, e_hi),
+         l.ao.jo_tok_site(params.ao_jo_max, e_lo, e_hi))
+    };
+    let unstatable: Vec<(&str, String)> = [("attnout: one row's jo", jo_row_site.is_none(), "row"),
+                                           ("attnout: a whole token's jo", jo_tok_site.is_none(),
+                                            "token")]
+        .iter()
+        .filter(|(_, none, _)| *none)
+        .map(|(w, _, what)| (*w, format!(
+            "this statement's windows admit one jo for every {what} of this witness and no \
+             other, so a one-step move leaves the EPOW window and is refused by that lookup \
+             before the joff pin it tests can see it; a run with --ao-jo-max above the \
+             witness's own jo states it")))
+        .collect();
+    let statable = |name: &str| !unstatable.iter().any(|(w, _)| name.contains(*w));
     let mut probe = |name: &str, l2: &layer::Layer, t: &compose::ProverTamper,
                      expect: &str| -> bool {
         if !selected(name) {
             out.push(json!({"probe": name, "skipped": "not selected by --probe"}));
+            return false;
+        }
+        if let Some((_, why)) = unstatable.iter().find(|(w, _)| name.contains(*w)) {
+            eprintln!("compose probe SKIP {name}: {why}");
+            out.push(json!({"probe": name, "skipped": why}));
             return false;
         }
         eprintln!("compose probe {name}");
@@ -2657,14 +2689,16 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
     {
         let lay = layer::AoLayout::choose(params.nh, params.s, params.hd, params.ao_target);
         if lay.chunks > 1 {
-            // a channel in the first block: `b = 0`, a row the `nofirst` pin
-            // compares against its predecessor
-            let idx = params.hd;
-            assert!(!probe("attnout: one row's jo moved by one", &l,
-                           &compose::ProverTamper { ao_jo: Some(idx),
-                                                    ..Default::default() },
-                           "the `joff` pin across a token's rows"),
-                    "a per-row output exponent accepted");
+            // a row the `nofirst` pin compares against its predecessor and whose
+            // channels have room for the move -- `jo_bend_site` picks it, and
+            // `None` is the shape that cannot state this control at all, which
+            // is skipped by name and asserted on by nothing
+            let jo_row = "attnout: one row's jo moved by one";
+            let rejected = !probe(jo_row, &l,
+                                  &compose::ProverTamper { ao_jo: jo_row_site,
+                                                           ..Default::default() },
+                                  "the `joff` pin across a token's rows");
+            assert!(!statable(jo_row) || rejected, "a per-row output exponent accepted");
         }
         assert!(!probe("attnout: one slot's num a doubling out of the window", &l,
                        &compose::ProverTamper { ao_num: Some(params.hd + 1),
@@ -2717,16 +2751,16 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
             && l.mats.iter().any(|m| m.name == "o" && m.n_in == l.ao.nh * l.ao.hd);
         let jo_name = "attnout: a whole token's jo moved by one";
         let jo_tok = probe(jo_name, &l,
-                           &compose::ProverTamper { ao_jo_tok: Some(1),
+                           &compose::ProverTamper { ao_jo_tok: jo_tok_site,
                                                     ..Default::default() },
                            if seam_live { "the o seam, `ao_q` against the Freivalds check's qX" }
                            else { "nothing -- this chunk has no consumer for it" });
         // this is the one control whose pass is an acceptance on some shapes, so
         // it reads the probe's own answer rather than a rejection; a `--probe`
-        // that leaves it out returns the same `false` a rejection does, and the
-        // assert has to know the difference or a filtered run fails on a control
-        // it never ran.
-        assert!(!selected(jo_name) || !jo_tok == seam_live,
+        // that leaves it out, and a shape that cannot state the move at all,
+        // both return the same `false` a rejection does, and the assert has to
+        // know the difference or a run fails on a control it never ran.
+        assert!(!selected(jo_name) || !statable(jo_name) || !jo_tok == seam_live,
                 "a whole token's jo must reject exactly when the o seam is live: \
                  seam_live={seam_live}, accepted={jo_tok}");
     }
