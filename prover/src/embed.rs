@@ -1110,7 +1110,7 @@ mod tests {
             })
             .collect();
         crate::compose::Params {
-            s: 32, c: 128, hd: 32, nh: 3, key_tiles: vec![2, 1],
+            s: 32, c: 128, hd: 32, nh: 3, head_groups: vec![2, 1],
             variant: "intsplit6".into(), log_table: 16,
             q_bits: 8, k_bits: 8, nmax: 1, chan_target: 128, grid_target: 64, rw: 16,
             z_lo_bits: 16, z_hi_bits: 6, z_min: 1, mats, deq_target: 16, kmax: 12,

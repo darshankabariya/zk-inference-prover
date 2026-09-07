@@ -190,7 +190,7 @@ pub struct Params {
     pub c: usize,
     pub hd: usize,
     pub nh: usize,
-    pub key_tiles: Vec<usize>,
+    pub head_groups: Vec<usize>,
     pub variant: String,
     pub log_table: u32,
     pub q_bits: u32,
@@ -1669,7 +1669,7 @@ impl Plan {
         let mut shapes = vec![];
         let mut group = vec![];
         let mut rows_key_tile = vec![];
-        for (g, insts) in p.key_tiles.iter().enumerate() {
+        for (g, insts) in p.head_groups.iter().enumerate() {
             for k in 0..nsub {
                 head_offsets.push(off);
                 shapes.push(Shape { s: p.s, c: sub_c, hd: p.hd, insts: *insts });
@@ -1683,7 +1683,7 @@ impl Plan {
         let mut diagonal_block = vec![false; shapes.len()];
         if p.diagonal_block {
             let mut off = 0;
-            for (g, insts) in p.key_tiles.iter().enumerate() {
+            for (g, insts) in p.head_groups.iter().enumerate() {
                 head_offsets.push(off);
                 off += insts;
                 shapes.push(Shape { s: p.s, c: p.s, hd: p.hd, insts: *insts });
@@ -7177,7 +7177,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // prefix sub-key-tile *per key block* plus the chunk's own diagonal block, not a pair.
     // `plan.group` and `plan.rows_key_tile` are that generalisation and with the
     // flag off they name exactly the key tiles the two lines below named.
-    let row_of: Vec<usize> = (0..plan.p.key_tiles.len())
+    let row_of: Vec<usize> = (0..plan.p.head_groups.len())
         .map(|g| {
             (0..plan.shapes.len())
                 .find(|b| plan.group[*b] == g && plan.rows_key_tile[*b])
@@ -7202,7 +7202,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
             az_sum += r_c.pow(plan.head_offsets[b] as u128) * unqm(bc[5]);
         }
     }
-    let den_ok: Vec<bool> = (0..plan.p.key_tiles.len())
+    let den_ok: Vec<bool> = (0..plan.p.head_groups.len())
         .map(|g| {
             let sn = (0..plan.shapes.len())
                 .filter(|b| plan.group[*b] == g)
@@ -7830,7 +7830,7 @@ mod tests {
         // `residual_stream_diagonal_block` of prover/README.md, with both boundaries on: 64-wide
         // matmuls under three heads of 32, so the rotation cannot tile (edge 3)
         // and the `o` matmul does not read the attention output's width (edge 5)
-        let plan = plan_of(argv(&["--key-tiles", "2,1", "--nout", "64", "--residual-stream-a", "32",
+        let plan = plan_of(argv(&["--head-groups", "2,1", "--nout", "64", "--residual-stream-a", "32",
                                    "--kmax", "16", "--synth-residual-stream", "--diagonal-block"]));
         let want = vec![
             (1, Bound), (2, Bound), (3, Unbound), (4, Bound), (5, Unbound), (6, Bound),
@@ -7851,7 +7851,7 @@ mod tests {
         use EdgeState::*;
         // four heads of 32 over 128-wide matmuls: q/k/v are `nh x hd` wide, the
         // rotation tiles, and the `o` matmul reads the attention output
-        let plan = plan_of(argv(&["--key-tiles", "2,2", "--nin", "128", "--nout", "128",
+        let plan = plan_of(argv(&["--head-groups", "2,2", "--nin", "128", "--nout", "128",
                                    "--residual-stream-a", "32", "--kmax", "16", "--synth-residual-stream",
                                    "--diagonal-block"]));
         let got = states(&plan, Some(3));
@@ -7865,7 +7865,7 @@ mod tests {
     #[test]
     fn the_skips_are_reported_as_unbound_not_absent() {
         use EdgeState::*;
-        let plan = plan_of(argv(&["--key-tiles", "2,1", "--nout", "64", "--residual-stream-a", "32",
+        let plan = plan_of(argv(&["--head-groups", "2,1", "--nout", "64", "--residual-stream-a", "32",
                                   "--kmax", "16", "--synth-residual-stream", "--diagonal-block",
                                   "--unsound-skip-layer-boundary",
                                   "--unsound-skip-kv-boundary"]));
@@ -7875,7 +7875,7 @@ mod tests {
         // no residual-stream family at all: every seam and add is the prover's
         // word, while the K/V boundary (on by default on a diagonal block chunk) and the
         // attention and Freivalds components stand
-        let bare = plan_of(argv(&["--key-tiles", "2,1", "--diagonal-block",
+        let bare = plan_of(argv(&["--head-groups", "2,1", "--diagonal-block",
                                    "--unsound-skip-residual-stream"]));
         let got = states(&bare, None);
         for n in [1u8, 2, 3, 5, 6, 7, 8, 9, 10, 11, 13] {
@@ -7889,19 +7889,19 @@ mod tests {
     #[test]
     #[should_panic(expected = "--unsound-skip-kv-boundary")]
     fn a_chunk_without_its_own_block_is_refused_unless_the_kv_boundary_is_skipped() {
-        plan_of(argv(&["--key-tiles", "2,1", "--unsound-skip-residual-stream"]));
+        plan_of(argv(&["--head-groups", "2,1", "--unsound-skip-residual-stream"]));
     }
 
     #[test]
     #[should_panic(expected = "--unsound-skip-residual-stream")]
     fn a_chunk_without_the_family_is_refused_unless_the_family_is_skipped() {
-        plan_of(argv(&["--key-tiles", "2,1", "--diagonal-block"]));
+        plan_of(argv(&["--head-groups", "2,1", "--diagonal-block"]));
     }
 
     #[test]
     #[should_panic(expected = "not a skip")]
     fn an_unknown_skip_is_an_error() {
-        plan_of(argv(&["--key-tiles", "2,1", "--diagonal-block", "--unsound-skip-everything"]));
+        plan_of(argv(&["--head-groups", "2,1", "--diagonal-block", "--unsound-skip-everything"]));
     }
 
     #[test]
@@ -7909,7 +7909,7 @@ mod tests {
         use EdgeState::*;
         // a synthetic head has no `key_head.u16`, so the argmax has to be
         // skipped to prove it at all, and the table says what that costs
-        let plan = plan_of(argv(&["--key-tiles", "2,1", "--nout", "64", "--residual-stream-a", "32",
+        let plan = plan_of(argv(&["--head-groups", "2,1", "--nout", "64", "--residual-stream-a", "32",
                                   "--kmax", "16", "--synth-head", "--synth-vocab", "256",
                                   "--diagonal-block", "--unsound-skip-argmax"]));
         let got = states(&plan, Some(32));

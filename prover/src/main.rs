@@ -763,7 +763,7 @@ fn coord_of(l: &mut layer::Layer, args: &[String]) {
 pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     let vname = arg_strs(args, "--variants", &["intsplit6"])[0].clone();
     let variant = attn_witness::Variant::parse(&vname);
-    let key_tiles = arg_list(args, "--key-tiles", &[8usize, 4, 2]);
+    let head_groups = arg_list(args, "--head-groups", &[8usize, 4, 2]);
     let src = src_of(args);
     if let Some(dir) = &src.dir {
         // Stream LL (E11): the verifier's load.  Only the model half of the dump
@@ -784,7 +784,7 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
         // carries a `log_table` that neither the manifest nor any flag names.
         // So `zk-prover expect-root --weights-only --params <tag>.fixed.json --witness
         // DIR` is the whole command, and there is no line to get wrong.
-        let (variant, vname, key_tiles, src) = if weights_only {
+        let (variant, vname, head_groups, src) = if weights_only {
             let f = arg_str(args, "--params").expect(
                 "--weights-only needs --params FILE (the chunk's own `Fixed.params`)");
             let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--params {f}: {e}"));
@@ -794,18 +794,18 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
                 serde_json::from_value(v.get("params").cloned().unwrap_or(v))
                     .unwrap_or_else(|e| panic!("--params {f}: not a statement's params: {e}"));
             eprintln!("expect-root: model-only load from the statement \
-(variant={} key_tiles={:?} diagonal_block={} kv_boundary={} log_table={} nmax={})",
-                      p.variant, p.key_tiles, p.diagonal_block, p.kv_boundary, p.log_table, p.nmax);
-            (attn_witness::Variant::parse(&p.variant), p.variant.clone(), p.key_tiles.clone(),
+(variant={} head_groups={:?} diagonal_block={} kv_boundary={} log_table={} nmax={})",
+                      p.variant, p.head_groups, p.diagonal_block, p.kv_boundary, p.log_table, p.nmax);
+            (attn_witness::Variant::parse(&p.variant), p.variant.clone(), p.head_groups.clone(),
              attn_witness::Src { log_table: p.log_table, nmax: p.nmax,
                                  diagonal_block: p.diagonal_block, tile: p.kv_boundary, ..src.clone() })
         } else {
-            (variant, vname, key_tiles, src.clone())
+            (variant, vname, head_groups, src.clone())
         };
         let loaded = if weights_only {
-            layer::Layer::load_weights(dir, &src, &key_tiles, variant)
+            layer::Layer::load_weights(dir, &src, &head_groups, variant)
         } else {
-            layer::Layer::load(dir, &src, &key_tiles, variant)
+            layer::Layer::load(dir, &src, &head_groups, variant)
         };
         match loaded {
             Ok(mut l) => {
@@ -836,10 +836,10 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
             }
         }
     }
-    let key_tiles = arg_list(args, "--key-tiles", &[2usize, 1]);
+    let head_groups = arg_list(args, "--head-groups", &[2usize, 1]);
     let mut l = layer::Layer::synthetic(
         arg_scalar(args, "--s", 32usize), arg_scalar(args, "--ctx", 128usize),
-        arg_scalar(args, "--hd", 64usize), &key_tiles, variant, &src,
+        arg_scalar(args, "--hd", 64usize), &head_groups, variant, &src,
         arg_scalar(args, "--nin", 64usize), arg_scalar(args, "--nout", 48usize), src.seed);
     // Stream Z: exercise the widened attention output on a synthetic layer --
     // a real dump declares its width in the manifest, a synthetic one takes it
@@ -907,7 +907,7 @@ pub fn plan_params(args: &[String]) -> (String, compose::Params) {
         let params: compose::Params = serde_json::from_value(p)
             .unwrap_or_else(|e| panic!("--params {f}: not a statement's params: {e}"));
         eprintln!("params: {f} (s={} c={} key_tiles={:?} kv_boundary={})",
-                  params.s, params.c, params.key_tiles, params.kv_boundary);
+                  params.s, params.c, params.head_groups, params.kv_boundary);
         return (format!("--params {f}"), params);
     }
     let (l, vname) = layer_of(args);
@@ -999,7 +999,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
     // the identity when `nsub == 1`, which is every run without the flag.
     // Block 0 (open item 1) has no prefix key tile at all: `nsub == 0`, `c == 0`,
     // and the head key tile list is the diagonal block key tiles', one per group.
-    let (c, key_tiles) = if l.nsub == 0 {
+    let (c, head_groups) = if l.nsub == 0 {
         (0, l.key_tile_sizes[n_pre..].to_vec())
     } else {
         (b0.shape.c * l.nsub, l.key_tile_sizes[..n_pre].iter().step_by(l.nsub).copied().collect())
@@ -1098,7 +1098,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
     }
     compose::Params {
         s: l.ao.s, c, hd: l.ao.hd, nh: l.ao.nh,
-        key_tiles,
+        head_groups,
         diagonal_block,
         // Stream E: the head's order-key claim.  Not under `--no-glue`'s gate,
         // because a head dump has no wiring columns to switch off.
@@ -1480,7 +1480,7 @@ fn expect_root_cmd(args: &[String]) {
 ///
 /// `PLAN` is an `o_plan.py` plan file: one `compose` argument line per chunk.
 /// A plan line carries only the chunk's *own* arguments, so `--pins` supplies
-/// the driver's shared prefix (`--round`, `--numbits`, `--variants`, `--key-tiles`,
+/// the driver's shared prefix (`--round`, `--numbits`, `--variants`, `--head-groups`,
 /// `--kmax` and the fold's two -- `ss_box.sh`'s `SEQPT`).
 ///
 /// `--weights-only --params-dir DIR` is the verifier's form: each row is derived
@@ -1511,7 +1511,7 @@ fn model_roots_cmd(args: &[String]) {
         .unwrap_or_else(|e| panic!("--plan {plan}: {e}"));
     let limit = arg_scalar::<usize>(args, "--limit", usize::MAX);
     // Stream LL box half.  A plan file holds a chunk's *own* arguments; the
-    // shared pins (`--round`, `--numbits`, `--variants`, `--key-tiles`, `--kmax`,
+    // shared pins (`--round`, `--numbits`, `--variants`, `--head-groups`, `--kmax`,
     // the fold's two) live in the driver that runs it (`ss_box.sh`'s `SEQPT`),
     // so a plan line alone does not compose.  `--pins` is that prefix.
     let pins: Vec<String> = arg_str(args, "--pins").unwrap_or_default()

@@ -491,7 +491,7 @@ fn residual_stream_layout_eq(a: &crate::compose::Params, b: &crate::compose::Par
 pub fn kv_layout(p: &crate::compose::Params) -> Option<KvLayout> {
     p.kv_boundary.then(|| KvLayout {
         first: FIRST_TREE + residual_stream_sides(p),
-        groups: p.key_tiles.len(),
+        groups: p.head_groups.len(),
         with_in: p.c > 0,
     })
 }
@@ -612,7 +612,7 @@ pub fn chain_of(
             let p = (&fa.params, &fb.params);
             let ok = p.0.hd == p.1.hd
                 && p.0.nh == p.1.nh
-                && p.0.key_tiles == p.1.key_tiles
+                && p.0.head_groups == p.1.head_groups
                 && p.0.diagonal_block
                 && p.1.diagonal_block
                 && p.0.variant == p.1.variant
@@ -2038,7 +2038,7 @@ mod tests {
             c,
             hd: 32,
             nh: 3,
-            key_tiles: vec![2, 1],
+            head_groups: vec![2, 1],
             variant: "intexp".into(),
             diagonal_block: kv,
             layer_boundary: true,
