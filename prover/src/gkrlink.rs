@@ -1450,7 +1450,7 @@ fn fold_dev(h: u32, konst: SecureField, terms: &[(*const u32, SecureField)])
             -> Vec<PackedSecureField> {
     use stwo::stwo_cuda::secure_field_vec::SecureFieldVec;
     unsafe extern "C" {
-        fn b65_link_coeff(cols: *const *const u32, w_host: *const u32, n_cols: u32,
+        fn zk_link_coeff(cols: *const *const u32, w_host: *const u32, n_cols: u32,
                           k: [u32; 4], out: *const u32, n_rows: u32);
     }
     let n_rows = 1usize << h;
@@ -1459,7 +1459,7 @@ fn fold_dev(h: u32, konst: SecureField, terms: &[(*const u32, SecureField)])
         terms.iter().flat_map(|(_, w)| w.to_m31_array().map(|x| x.0)).collect();
     let out = SecureFieldVec::new_uninitialized(n_rows);
     unsafe {
-        b65_link_coeff(cols.as_ptr(), w.as_ptr(), cols.len() as u32,
+        zk_link_coeff(cols.as_ptr(), w.as_ptr(), cols.len() as u32,
                        konst.to_m31_array().map(|x| x.0), out.device_ptr, n_rows as u32);
     }
     out.to_vec().into_iter().collect::<SecureColumn>().data
@@ -1541,7 +1541,7 @@ impl FrameworkEval for LinkEval {
         crate::cudagen::blob_for(self)
     }
 
-    fn cuda_eval_name(&self) -> &'static str { "b65_link_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_link_eval" }
 
     fn log_size(&self) -> u32 {
         self.h
@@ -1829,7 +1829,7 @@ pub fn fold_total<'a, F: Fn(Comp, &RCol) -> Src<'a>>(
 
 /// The link's column build on the card.
 ///
-/// Five kernels in `nitroo/.../cuda/gkr.cu` beside `b65_link_coeff`, one per
+/// Five kernels in `nitroo/.../cuda/gkr.cu` beside `zk_link_coeff`, one per
 /// host loop, each reproducing its loop value for value. The intermediate
 /// columns -- the folded coefficients, the eq evaluations, the shifted
 /// products -- never come home; only the claim's own total does, as the block
@@ -1843,17 +1843,17 @@ pub mod dev {
     use stwo::stwo_cuda::secure_field_vec::SecureFieldVec;
 
     unsafe extern "C" {
-        fn b65_link_coeff(cols: *const *const u32, w_host: *const u32, n_cols: u32,
+        fn zk_link_coeff(cols: *const *const u32, w_host: *const u32, n_cols: u32,
                           k: [u32; 4], out: *const u32, n_rows: u32);
-        fn b65_link_split(src: *const u32, o0: *const u32, o1: *const u32,
+        fn zk_link_split(src: *const u32, o0: *const u32, o1: *const u32,
                           o2: *const u32, o3: *const u32, n_rows: u32);
-        fn b65_link_terms(coeff: *const u32, eq: *const u32, shift: [u32; 4],
+        fn zk_link_terms(coeff: *const u32, eq: *const u32, shift: [u32; 4],
                           out: *const u32, partials: *mut u32, n_blocks: u32,
                           n_rows: u32);
-        fn b65_link_carry(half0: *const u32, half1: *const u32, n_vars: u32,
+        fn zk_link_carry(half0: *const u32, half1: *const u32, n_vars: u32,
                           log_size: u32, o0: *const u32, o1: *const u32,
                           o2: *const u32, o3: *const u32);
-        fn b65_link_prefix(src: *const u32, o0: *const u32, o1: *const u32,
+        fn zk_link_prefix(src: *const u32, o0: *const u32, o1: *const u32,
                            o2: *const u32, o3: *const u32, log_size: u32);
     }
 
@@ -1902,7 +1902,7 @@ pub mod dev {
         }
         let out = SecureFieldVec::new_uninitialized(n);
         unsafe {
-            b65_link_coeff(ptrs.as_ptr(), ws.as_ptr(), ptrs.len() as u32,
+            zk_link_coeff(ptrs.as_ptr(), ws.as_ptr(), ptrs.len() as u32,
                            hl.konst.to_m31_array().map(|x| x.0),
                            out.device_ptr, n as u32);
         }
@@ -1918,7 +1918,7 @@ pub mod dev {
         let n_blocks = n_rows.div_ceil(256).clamp(1, 1024);
         let mut part = vec![0u32; 4 * n_blocks];
         unsafe {
-            b65_link_terms(coeff.device_ptr, eq.device_ptr,
+            zk_link_terms(coeff.device_ptr, eq.device_ptr,
                            shift.to_m31_array().map(|x| x.0),
                            out.map(|o| o.device_ptr).unwrap_or(std::ptr::null()),
                            part.as_mut_ptr(), n_blocks as u32, n_rows as u32);
@@ -1970,7 +1970,7 @@ pub mod dev {
         let t = std::time::Instant::now();
         let prefix = quad(n);
         unsafe {
-            b65_link_prefix(terms.device_ptr, prefix[0].device_ptr, prefix[1].device_ptr,
+            zk_link_prefix(terms.device_ptr, prefix[0].device_ptr, prefix[1].device_ptr,
                             prefix[2].device_ptr, prefix[3].device_ptr, h);
         }
         sync();
@@ -1982,7 +1982,7 @@ pub mod dev {
         let (f0, f1) = (flat(&half0), flat(&half1));
         let q = quad(n);
         unsafe {
-            b65_link_carry(f0.as_ptr(), f1.as_ptr(), half0.len() as u32, h,
+            zk_link_carry(f0.as_ptr(), f1.as_ptr(), half0.len() as u32, h,
                            q[0].device_ptr, q[1].device_ptr, q[2].device_ptr,
                            q[3].device_ptr);
         }
@@ -1993,9 +1993,9 @@ pub mod dev {
         let coeff4 = quad(n);
         let eq4 = quad(n);
         unsafe {
-            b65_link_split(coeff.device_ptr, coeff4[0].device_ptr, coeff4[1].device_ptr,
+            zk_link_split(coeff.device_ptr, coeff4[0].device_ptr, coeff4[1].device_ptr,
                            coeff4[2].device_ptr, coeff4[3].device_ptr, n as u32);
-            b65_link_split(eq.device_ptr, eq4[0].device_ptr, eq4[1].device_ptr,
+            zk_link_split(eq.device_ptr, eq4[0].device_ptr, eq4[1].device_ptr,
                            eq4[2].device_ptr, eq4[3].device_ptr, n as u32);
         }
         sync();

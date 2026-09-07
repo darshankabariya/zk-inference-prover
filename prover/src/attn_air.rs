@@ -388,7 +388,7 @@ impl FrameworkEval for ChanEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_chan_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_chan_eval" }
 
     fn log_size(&self) -> u32 {
         self.lay.g.log_rows
@@ -554,7 +554,7 @@ impl FrameworkEval for KeyEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_key_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_key_eval" }
 
     fn log_size(&self) -> u32 {
         self.lay.g.log_rows
@@ -652,7 +652,7 @@ impl FrameworkEval for KeyEval {
         // Stream CC (E11): it also drops the inert lead rows.  `commit_base` pads
         // the numerator column with `a.table[0]`, a real table row so the exp
         // lookup's multiplicities stay exact, and both interaction builders --
-        // `interaction_phase` here and `b65a_grid_kernel`, which gates `nf` on
+        // `interaction_phase` here and `zk_acc_grid_kernel`, which gates `nf` on
         // `act` -- contribute no term on such a row.  Without `act` this fold
         // demanded `zn = table[0] * sum sg_pow[i]` where the builders wrote 0, and
         // that single disagreement is why an honest witness at a padded key grid
@@ -789,7 +789,7 @@ impl FrameworkEval for OutEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_out_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_out_eval" }
 
     fn log_size(&self) -> u32 {
         self.lay.g.log_rows
@@ -856,7 +856,7 @@ impl FrameworkEval for RowEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_row_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_row_eval" }
 
     fn log_size(&self) -> u32 {
         self.log_rows
@@ -944,7 +944,7 @@ impl FrameworkEval for ExpTableEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_exp_table_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_exp_table_eval" }
 
     fn log_size(&self) -> u32 {
         self.log_rows
@@ -978,7 +978,7 @@ impl FrameworkEval for RangeTableEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_range_table_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_range_table_eval" }
 
     fn log_size(&self) -> u32 {
         self.bits

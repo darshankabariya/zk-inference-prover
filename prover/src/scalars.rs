@@ -22,7 +22,7 @@
 //! match at witness-generation time and are equal on every chunk.
 //!
 //! The *shape* is not the family name (section 5 rule 9: the four Freivalds groups
-//! share `b65_freivalds_eval` and differ in how many matmuls they carry). The probe
+//! share `zk_freivalds_eval` and differ in how many matmuls they carry). The probe
 //! also hashes the eval's structure as it runs -- every mask, preprocessed,
 //! relation and constraint call, every base-field constant's value, every
 //! arithmetic step's kind, and, per extension constant, everything the lowering
@@ -513,7 +513,7 @@ fn mutation(family: &str) -> &'static str {
     };
     let aimed = match fam {
         None => true,
-        Some(f) => family == format!("b65_{f}_eval"),
+        Some(f) => family == format!("zk_{f}_eval"),
     };
     if !aimed {
         return "none";
@@ -687,7 +687,7 @@ mod tests {
 
     impl FrameworkEval for TwoClaims {
         fn cuda_eval_name(&self) -> &'static str {
-            "b65_qq_probe_test"
+            "zk_qq_probe_test"
         }
         fn log_size(&self) -> u32 {
             4
@@ -768,7 +768,7 @@ mod rr {
 
     impl FrameworkEval for TwoClaims {
         fn cuda_eval_name(&self) -> &'static str {
-            "b65_rr_probe_test"
+            "zk_rr_probe_test"
         }
         fn log_size(&self) -> u32 {
             4
@@ -795,7 +795,7 @@ mod rr {
 
     impl FrameworkEval for OneClaim {
         fn cuda_eval_name(&self) -> &'static str {
-            "b65_rr_probe_test"
+            "zk_rr_probe_test"
         }
         fn log_size(&self) -> u32 {
             4
@@ -859,7 +859,7 @@ mod rr {
         let prov = provenance(&ir, &witness_gen.consts, &rels).expect("every slot accounted for");
 
         let later = probe(&TwoClaims { a: ext(11), b: ext(13) });
-        let got = replay(&prov, &later.consts, &later.claims, &rels, "b65_rr_probe_test");
+        let got = replay(&prov, &later.consts, &later.claims, &rels, "zk_rr_probe_test");
         let want = [ext(11), ext(13)];
         for (slot, n) in &ir.claim_slots {
             assert_eq!(got[*slot], want[*n], "slot {slot} is claim #{n}");

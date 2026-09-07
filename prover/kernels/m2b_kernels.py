@@ -3,7 +3,7 @@
 Reads `$ZK_KERNEL_STORE/manifest.json` (written by `zk-prover cudaemit`) and applies three
 asserted, idempotent edits to the fork's CUDA tree:
 
-  1. copy the generated `evaluate_b65_*.cu` / `.cuh` and `b65_ops.cuh` into
+  1. copy the generated `evaluate_zk_*.cu` / `.cuh` and `zk_ops.cuh` into
      `crates/stwo/src/stwo_cuda/cuda/`;
   2. add each `.cu` to the explicit source list in `CMakeLists.txt` (the `.cuh`
      files are picked up by its GLOB_RECURSE, so only the sources need listing);
@@ -67,9 +67,9 @@ def replace_block(path, begin, end, body, anchor):
 
 
 if UNDO:
-    for f in CUDA.glob("evaluate_b65_*"):
+    for f in CUDA.glob("evaluate_zk_*"):
         f.unlink()
-    (CUDA / "b65_ops.cuh").unlink(missing_ok=True)
+    (CUDA / "zk_ops.cuh").unlink(missing_ok=True)
     print("  removed generated sources")
     replace_block("CMakeLists.txt", BEGIN, END, "", "        batch_inverse.cu\n")
     replace_block("evaluate_constraints.cu", INC_BEGIN, INC_END, "",

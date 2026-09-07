@@ -6,7 +6,7 @@
 //! fractions need no new generator: `ExprEvaluator::add_to_relation` makes each
 //! lookup's denominator an extension intermediate, so 2b's lowering has been
 //! emitting them since 2b and the only thing missing was the numerator. So the
-//! per-family half of this file is *generated* (`gen_b65_<family>.cu`, from
+//! per-family half of this file is *generated* (`gen_zk_<family>.cu`, from
 //! `cudagen::emit_frac_family`), and what is written by hand is the four
 //! phases that do not depend on the AIR at all.
 //!
@@ -14,11 +14,11 @@
 //!
 //! | step | what | `plogup` |
 //! |---|---|---|
-//! | `gen_b65_dispatch` | every lookup's numerator and denominator at every row, already batched in pairs | phase A, and `paired` |
+//! | `gen_zk_dispatch` | every lookup's numerator and denominator at every row, already batched in pairs | phase A, and `paired` |
 //! | `batch_inverse_secure_field` | the denominators, one call over every column | phase A |
-//! | `b65_logup_scale` | `frac = num * den^-1` | phase A |
-//! | `b65_logup_running` | the pointwise running sum across columns | phase B |
-//! | `b65_logup_partial_sums` + `b65_logup_finish_last` | the claimed sum, the shift, the prefix sum | phase C, `finalize_last` |
+//! | `zk_logup_scale` | `frac = num * den^-1` | phase A |
+//! | `zk_logup_running` | the pointwise running sum across columns | phase B |
+//! | `zk_logup_partial_sums` + `zk_logup_finish_last` | the claimed sum, the shift, the prefix sum | phase C, `finalize_last` |
 //!
 //! Every one of those is exact field arithmetic, so the device columns equal
 //! the host columns cell for cell or something is wrong -- which is what
@@ -39,7 +39,7 @@ use crate::cudagen::Ir;
 unsafe extern "C" {
     /// The generated per-family fraction kernel, behind one dispatcher keyed on
     /// `cuda_eval_name()` -- the same key the fork's constraint dispatch uses.
-    fn gen_b65_dispatch(
+    fn gen_zk_dispatch(
         family: *const c_char,
         shape: u32,
         fingerprint: u32,
@@ -54,21 +54,21 @@ unsafe extern "C" {
         n_rows: u32,
         n_cols: u32,
     );
-    fn b65_logup_scale(num: *const u32, inv: *const u32, frac: *const u32, n: u32);
-    fn b65_logup_running(
+    fn zk_logup_scale(num: *const u32, inv: *const u32, frac: *const u32, n: u32);
+    fn zk_logup_running(
         frac: *const u32,
         out_cols: *const *const u32,
         last: *const u32,
         n_rows: u32,
         n_cols: u32,
     );
-    fn b65_logup_partial_sums(
+    fn zk_logup_partial_sums(
         last: *const u32,
         partials_host: *mut u32,
         n_rows: u32,
         n_partials: *mut u32,
     );
-    fn b65_logup_finish_last(
+    fn zk_logup_finish_last(
         last: *const u32,
         out_cols: *const *const u32,
         shift: [u32; 4],
@@ -130,7 +130,7 @@ pub fn logup_cols_dev_ptrs(
     let den = SecureFieldVec::new_uninitialized(n);
     let cname = CString::new(family).unwrap();
     unsafe {
-        gen_b65_dispatch(
+        gen_zk_dispatch(
             cname.as_ptr(),
             shape as u32,
             ir.fingerprint(),
@@ -152,7 +152,7 @@ pub fn logup_cols_dev_ptrs(
     let inv = SecureFieldVec::new_uninitialized(n);
     unsafe {
         batch_inverse_secure_field(den.device_ptr, inv.device_ptr, n);
-        b65_logup_scale(num.device_ptr, inv.device_ptr, num.device_ptr, n as u32);
+        zk_logup_scale(num.device_ptr, inv.device_ptr, num.device_ptr, n as u32);
     }
 
     let out: Vec<BaseFieldVec> =
@@ -160,7 +160,7 @@ pub fn logup_cols_dev_ptrs(
     let out_ptrs: Vec<*const u32> = out.iter().map(|c| c.device_ptr).collect();
     let last = SecureFieldVec::new_uninitialized(n_rows);
     unsafe {
-        b65_logup_running(
+        zk_logup_running(
             num.device_ptr,
             out_ptrs.as_ptr(),
             last.device_ptr,
@@ -176,7 +176,7 @@ pub fn logup_cols_dev_ptrs(
     let mut partials = vec![0u32; 4 * blocks];
     let mut got = 0u32;
     unsafe {
-        b65_logup_partial_sums(
+        zk_logup_partial_sums(
             last.device_ptr,
             partials.as_mut_ptr(),
             n_rows as u32,
@@ -198,7 +198,7 @@ pub fn logup_cols_dev_ptrs(
     let cumsum_shift = claimed_sum * BaseField::from_u32_unchecked(1 << log_rows).inverse();
     let shift: [u32; 4] = cumsum_shift.to_m31_array().map(|x| x.0);
     unsafe {
-        b65_logup_finish_last(
+        zk_logup_finish_last(
             last.device_ptr,
             out_ptrs[4 * (n_cols - 1)..].as_ptr(),
             shift,

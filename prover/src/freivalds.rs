@@ -41,17 +41,17 @@ pub fn id(s: impl Into<String>) -> PreProcessedColumnId {
 }
 pub const FREIVALDS_SEL: [&str; 4] = ["nofirst", "last", "notzero", "end"];
 pub fn freivalds_sel(tag: &str, name: &str) -> PreProcessedColumnId {
-    id(format!("b65_freivalds{tag}_{name}"))
+    id(format!("zk_freivalds{tag}_{name}"))
 }
 pub fn freivalds_w(tag: &str, mat: usize, p: usize) -> PreProcessedColumnId {
-    id(format!("b65_freivalds{tag}_w{mat}_{p:04}"))
+    id(format!("zk_freivalds{tag}_w{mat}_{p:04}"))
 }
 pub const AO_SEL: [&str; 6] = ["nofirst", "last", "m1", "m2", "m3", "end"];
 pub fn ao_sel(name: &str) -> PreProcessedColumnId {
-    id(format!("b65_ao_{name}"))
+    id(format!("zk_ao_{name}"))
 }
 pub fn ao_chan(kind: &str, slot: usize) -> PreProcessedColumnId {
-    id(format!("b65_ao_{kind}{slot:04}"))
+    id(format!("zk_ao_{kind}{slot:04}"))
 }
 /// Stream JJ (E11): the exponent-window table's three preprocessed columns,
 /// `(e - e_min, 2^max(e,0), 2^max(-e,0))` row for row over the admissible
@@ -59,7 +59,7 @@ pub fn ao_chan(kind: &str, slot: usize) -> PreProcessedColumnId {
 /// rows at the key `jvp + joff`, which is what pins the committed `(num, pj)`
 /// to a real exponent -- and so bounds `pj`, and with it `denp`, inside the
 /// AIR rather than in tree 0.
-pub const EPOW_COLS: [&str; 3] = ["b65_epow_e", "b65_epow_n", "b65_epow_p"];
+pub const EPOW_COLS: [&str; 3] = ["zk_epow_e", "zk_epow_n", "zk_epow_p"];
 
 /// Stream II: the Freivalds check's own Horner claim over its committed activations, in
 /// the canonical channel-major stream order `q = c * tokens + t`, so that a
@@ -128,7 +128,7 @@ impl FrameworkEval for FreivaldsEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_freivalds_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_freivalds_eval" }
 
     fn log_size(&self) -> u32 {
         self.g.log_rows
@@ -267,7 +267,7 @@ impl FrameworkEval for AttnOutEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_attn_out_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_attn_out_eval" }
 
     fn log_size(&self) -> u32 {
         self.log_rows

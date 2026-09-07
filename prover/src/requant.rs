@@ -54,12 +54,12 @@ pub fn m31_of(v: i64) -> M31 {
     crate::attn_trace::m31_of(v)
 }
 
-pub const RQ3_COLS: [&str; 3] = ["b65_rq_t", "b65_rq_m", "b65_rq_q"];
-pub const RQ4_COLS: [&str; 4] = ["b65_rq_t", "b65_rq_s", "b65_rq_m", "b65_rq_q"];
-pub const SCL2_COLS: [&str; 2] = ["b65_scl_pm", "b65_scl_j"];
-pub const SCL3_COLS: [&str; 3] = ["b65_scl_pm", "b65_scl_ms", "b65_scl_es"];
-pub const QNZ_COLS: [&str; 2] = ["b65_rqnz_q", "b65_rqnz_nz"];
-pub const RANGE15: &str = "b65_range_15";
+pub const RQ3_COLS: [&str; 3] = ["zk_rq_t", "zk_rq_m", "zk_rq_q"];
+pub const RQ4_COLS: [&str; 4] = ["zk_rq_t", "zk_rq_s", "zk_rq_m", "zk_rq_q"];
+pub const SCL2_COLS: [&str; 2] = ["zk_scl_pm", "zk_scl_j"];
+pub const SCL3_COLS: [&str; 3] = ["zk_scl_pm", "zk_scl_ms", "zk_scl_es"];
+pub const QNZ_COLS: [&str; 2] = ["zk_rqnz_q", "zk_rqnz_nz"];
+pub const RANGE15: &str = "zk_range_15";
 /// Stream II: the selectors are per component now -- a composed proof carries one
 /// requantize component per seam and their row counts differ -- and there is a
 /// fourth, `gt0`.  `nofirst` is "not this token's first row", so it cannot also
@@ -70,7 +70,7 @@ pub const RANGE15: &str = "b65_range_15";
 /// `log_rows + 1`.
 pub const RQ_SEL: [&str; 5] = ["nofirst", "last", "end", "gt0", "mlast"];
 pub fn rq_sel(tag: &str, name: &str) -> PreProcessedColumnId {
-    id(format!("b65_rq{tag}_{name}"))
+    id(format!("zk_rq{tag}_{name}"))
 }
 
 /// Stream II: `(sm, m7, sg)` over every legal signed significand -- 257 rows.
@@ -79,7 +79,7 @@ pub fn rq_sel(tag: &str, name: &str) -> PreProcessedColumnId {
 /// language and the Freivalds check's `qX` needs a sign.  One lookup per element pins both
 /// derived fields from one committed `sm`, which is cheaper than a 2^15 pair
 /// table and keeps the binding's folded value degree 1.
-pub const RQV_COLS: [&str; 3] = ["b65_rqv_sm", "b65_rqv_m7", "b65_rqv_sg"];
+pub const RQV_COLS: [&str; 3] = ["zk_rqv_sm", "zk_rqv_m7", "zk_rqv_sg"];
 
 /// Stream II: the division and scale tables' preprocessed ids, tagged by
 /// variant.  `RQ3_COLS` and `RQ4_COLS` share three names, which is fine for a
@@ -87,10 +87,10 @@ pub const RQV_COLS: [&str; 3] = ["b65_rqv_sm", "b65_rqv_m7", "b65_rqv_sg"];
 /// that carries both -- the `qkv` seam's scale is a power of two and the
 /// `gateup` and `down` seams' are bf16, on the very first shape this runs on.
 pub fn rq_tab_col(v: SVariant, k: usize) -> PreProcessedColumnId {
-    id(format!("b65_rqt_{}_{k}", v.name()))
+    id(format!("zk_rqt_{}_{k}", v.name()))
 }
 pub fn scl_tab_col(v: SVariant, k: usize) -> PreProcessedColumnId {
-    id(format!("b65_rqs_{}_{k}", v.name()))
+    id(format!("zk_rqs_{}_{k}", v.name()))
 }
 /// How many columns each carries, by variant.
 pub fn rq_tab_width(v: SVariant) -> usize {
@@ -316,7 +316,7 @@ impl FrameworkEval for RequantEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_requant_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_requant_eval" }
 
     fn log_size(&self) -> u32 {
         self.log_rows

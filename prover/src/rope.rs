@@ -256,7 +256,7 @@ pub fn clamp_pat(bits: u32) -> i64 {
 pub const QDIV_COLS: usize = 3;
 
 pub fn qdiv_col(bits: u32, k: usize) -> PreProcessedColumnId {
-    id(format!("b65_qdiv{bits}_{k}"))
+    id(format!("zk_qdiv{bits}_{k}"))
 }
 pub fn qdiv_log_rows(bits: u32) -> u32 {
     crate::common::log_rows_for(qdiv_table(bits).len(), 1)
@@ -280,7 +280,7 @@ pub fn qdiv_tab_cols(bits: u32) -> Vec<Eval> {
 
 /// The quantize family's own `(q, nz)` pair table, one per chunk at the widest
 /// side's width.  It is not the attention output's: widening *that* one would
-/// move `b65_attn_out_eval`'s fingerprint and every digest this repo has
+/// move `zk_attn_out_eval`'s fingerprint and every digest this repo has
 /// recorded.  Its width is not load-bearing for soundness -- the division table
 /// is what fixes the admissible `q` -- so one table at the maximum serves all
 /// three components.
@@ -288,7 +288,7 @@ pub fn qnz_log_rows(bits: u32) -> u32 {
     bits - 1
 }
 pub fn qnz_col(bits: u32, k: usize) -> PreProcessedColumnId {
-    id(format!("b65_qqnz{bits}_{k}"))
+    id(format!("zk_qqnz{bits}_{k}"))
 }
 pub fn qnz_tab_cols(bits: u32) -> Vec<Eval> {
     let lr = qnz_log_rows(bits);
@@ -368,7 +368,7 @@ impl FrameworkEval for QuantEval {
     fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
         crate::cudagen::blob_for(self)
     }
-    fn cuda_eval_name(&self) -> &'static str { "b65_quant_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_quant_eval" }
     fn log_size(&self) -> u32 {
         self.log_rows
     }

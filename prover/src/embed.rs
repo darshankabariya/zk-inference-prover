@@ -301,7 +301,7 @@ impl FrameworkEval for EmbedEval {
         crate::cudagen::blob_for(self)
     }
     fn cuda_eval_name(&self) -> &'static str {
-        "b65_embed_eval"
+        "zk_embed_eval"
     }
     fn log_size(&self) -> u32 {
         self.log_rows
@@ -387,7 +387,7 @@ impl FrameworkEval for EmbTableEval {
         crate::cudagen::blob_for(self)
     }
     fn cuda_eval_name(&self) -> &'static str {
-        "b65_emb_table_eval"
+        "zk_emb_table_eval"
     }
     fn log_size(&self) -> u32 {
         self.log_rows

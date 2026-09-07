@@ -612,7 +612,7 @@ pub fn qm(v: SecureField) -> [u32; 4] {
 /// folds `x - 0` and `Ir::schedule` drops the dead slot with it, so the emitter
 /// installs a shape two instructions and one slot shorter than the one every
 /// real chunk asks for, and the component takes the announced scalar fallback
-/// for the life of the store. It happened once on `b65_key_eval` (open item 21,
+/// for the life of the store. It happened once on `zk_key_eval` (open item 21,
 /// the other direction: a claim the *witness* drove to zero) and again on
 /// `deq_sc` and `freivalds_qx`, which stream II added without extending
 /// `fill_binding_claims` -- ten of the wired C=4K chunk's thirteen fallback lines.
@@ -794,7 +794,7 @@ fn nn_key_tile_bindings(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
     let base = n - 1 - plan.head_offsets[b] as i128 * hd;
     // Stream QQ (log row 66): the same backstop the other claim vectors read
     // through -- an emit that reaches here without a placeholder folds this
-    // key tile's three claims away and installs a `b65_chan_eval`/`b65_key_eval`
+    // key tile's three claims away and installs a `zk_chan_eval`/`zk_key_eval`
     // shape no rotated chunk asks for.
     let cl = claims.key_tile_qkv.get(k).copied();
     let cl = |j: usize| claim_at(cl.map(|c| c[j]), "key_tile_qkv");
@@ -2914,8 +2914,8 @@ impl BuiltComponents {
         // some other family wrote in an earlier chunk. Measured at C=4096 over
         // the 32-chunk pipelined loop, that happened twice in nine runs, and
         // both times in exactly one of the five families missing here:
-        // `evaluate_b65_residual_stream_eval: scalar count` and
-        // `evaluate_b65_residual_stream_table_eval: shape id out of range`. Both are the
+        // `evaluate_zk_residual_stream_eval: scalar count` and
+        // `evaluate_zk_residual_stream_table_eval: shape id out of range`. Both are the
         // generated dispatch's own checks, so the failure is fail-stop and
         // cannot reach a digest -- which is why every completed run has always
         // reproduced stream O's references. Completing the list restores the
@@ -4197,7 +4197,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             || tamper.ao_acc.is_some() || tamper.ao_jo_tok.is_some()
             || tamper.ao_mag.is_some()
             // stream TT (E11), log row 73: and the magnitude form, whose tenth
-            // column the fork's `b65_witness_gen_attnout` does not write -- `ao_component`
+            // column the fork's `zk_witness_gen_attnout` does not write -- `ao_component`
             // sets its own mode to 0 for it on both backends
             || p.ao_acc_mag || p.ao_denp2,
     );
@@ -4206,7 +4206,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     for (b, a) in layer.key_tiles.iter().enumerate() {
         let l = &plan.lays[b];
         // B7a milestone 4 (section 3 row 1): 48 columns of ACTIVE / NOFIRST /
-        // LAST / ISTART, which `b65_acc.cu` has computed since 24.1 -- at the
+        // LAST / ISTART, which `zk_acc.cu` has computed since 24.1 -- at the
         // wrong time. Mode 1 never builds them here; 2 builds them and asserts
         // every cell against the kernel's below.  A diagonal block key tile always builds
         // and keeps its `pre`: the interaction phase reads the causal-mask

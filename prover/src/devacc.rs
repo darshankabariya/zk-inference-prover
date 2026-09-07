@@ -76,7 +76,7 @@ use crate::layout::{Grid, LayoutChan, LayoutKey};
 
 // ---------------------------------------------------------------- the FFI shapes --
 
-/// Mirrors `B65AccGrid` in `b65_acc.cuh`, field for field.
+/// Mirrors `ZkAccGrid` in `zk_acc.cuh`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FGridA {
@@ -101,7 +101,7 @@ impl FGridA {
     }
 }
 
-/// Mirrors `B65AccS2`: one stage-2 lane.
+/// Mirrors `ZkAccS2`: one stage-2 lane.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct FAccS2 {
@@ -114,7 +114,7 @@ pub struct FAccS2 {
     pub m_n: [u32; 4],
 }
 
-/// Mirrors `B65AccResidualStreamBind`: one of the residual-stream component's Horner bindings.
+/// Mirrors `ZkAccResidualStreamBind`: one of the residual-stream component's Horner bindings.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FAccResidualStreamBinding {
@@ -198,40 +198,40 @@ pub struct FAccAo {
 }
 
 unsafe extern "C" {
-    fn b65_acc_scan(a: *mut u32, b: *mut u32, rows: u32, lanes: u32, mutate: u32);
-    fn b65_acc_stage2(flags: *const u32, a: *mut u32, b: *mut u32, lanes: *const FAccS2,
+    fn zk_acc_scan(a: *mut u32, b: *mut u32, rows: u32, lanes: u32, mutate: u32);
+    fn zk_acc_stage2(flags: *const u32, a: *mut u32, b: *mut u32, lanes: *const FAccS2,
                       n_lanes: u32, rows: u32, mutate: u32);
-    fn b65_acc_split(v: *const u32, out: *const *mut u32, lane: *const u32, n_out: u32,
+    fn zk_acc_split(v: *const u32, out: *const *mut u32, lane: *const u32, n_out: u32,
                      rows: u32, log_rows: u32, mutate: u32);
-    fn b65_acc_last(v: *const u32, host: *mut u32, rows: u32, lanes: u32);
-    fn b65_acc_chan(cols: *const *const u32, r_pow: *const u32, sq_pow: *const u32,
+    fn zk_acc_last(v: *const u32, host: *mut u32, rows: u32, lanes: u32);
+    fn zk_acc_chan(cols: *const *const u32, r_pow: *const u32, sq_pow: *const u32,
                     r_step: [u32; 4], sq_step: [u32; 4], flags: *const u32, a: *mut u32,
                     b: *mut u32, cfg: FAccChan);
-    fn b65_acc_grid(key_cols: *const *const u32, num_cols: *const *const u32,
+    fn zk_acc_grid(key_cols: *const *const u32, num_cols: *const *const u32,
                     aux_cols: *const *const u32, val_cols: *const *const u32,
                     sg_pow: *const u32, rv_pow: *const u32, sg_step: [u32; 4],
                     rv_step: [u32; 4], inv_delta: *const u32, flags: *const u32,
                     a: *mut u32, b: *mut u32, cfg: FAccKey);
-    fn b65_acc_tok(max_cols: *const *const u32, z_cols: *const *const u32,
+    fn zk_acc_tok(max_cols: *const *const u32, z_cols: *const *const u32,
                    sr_pow: *const u32, sr_step: [u32; 4], mu: [u32; 4],
                    flags: *const u32, a: *mut u32, b: *mut u32, cfg: FAccTok);
-    fn b65_acc_freivalds(base_cols: *const *const u32, pre_cols: *const *const u32,
+    fn zk_acc_freivalds(base_cols: *const *const u32, pre_cols: *const *const u32,
                          s_pow: *const u32, rv_pow: *const u32, s_step: [u32; 4],
                          rv_step: [u32; 4], flags: *mut u32, a: *mut u32, b: *mut u32,
                          cfg: FAccFreivalds);
-    fn b65_acc_deq(acc_cols: *const *const u32, rv_pow: *const u32, rv_step: [u32; 4],
+    fn zk_acc_deq(acc_cols: *const *const u32, rv_pow: *const u32, rv_step: [u32; 4],
                    flags: *mut u32, a: *mut u32, b: *mut u32, cfg: FAccDeq);
-    fn b65_acc_ao(den_col: *const u32, acc_cols: *const *const u32, rv_pow: *const u32,
+    fn zk_acc_ao(den_col: *const u32, acc_cols: *const *const u32, rv_pow: *const u32,
                   rv_step: [u32; 4], flags: *mut u32, a: *mut u32, b: *mut u32,
                   cfg: FAccAo);
-    fn b65_acc_residual_stream_bind(in_nat: *const i32, out_nat: *const i32, weights: *const u32,
+    fn zk_acc_residual_stream_bind(in_nat: *const i32, out_nat: *const i32, weights: *const u32,
                                     n_weights: u32, lam: [u32; 4], specs: *const FAccResidualStreamBinding,
                                     n_specs: u32, a: *mut u32, b: *mut u32, rows: u32, mutate: u32);
 }
 
-/// `B65A_ISTART`, the only flag a stage-2 lane ever selects on.
+/// `ZK_ACC_ISTART`, the only flag a stage-2 lane ever selects on.
 const SEL_ISTART: u32 = 8;
-/// `B65A_ONE`: a stage-2 lane with one factor.
+/// `ZK_ACC_ONE`: a stage-2 lane with one factor.
 const ONE_SRC: u32 = u32::MAX;
 
 // ------------------------------------------------------------------ the switches --
@@ -335,7 +335,7 @@ struct Acc {
     b: SecureFieldVec,
     /// B7a milestone 4 (section 3 row 1): the three key tile shapes' flags belong
     /// to `devpre` now -- one array per sub-component, written by
-    /// `b65_flags_key_tile` at witness-generation time, read both by the selector columns
+    /// `zk_flags_key_tile` at witness-generation time, read both by the selector columns
     /// `commit_pre` used to build on the host and by the segmentation here. The
     /// Freivalds check, dequant and attnout components have no preprocessed selectors left on
     /// the host, so they still own theirs. `own` keeps a borrowed array's owner
@@ -396,14 +396,14 @@ impl Acc {
     fn scan(&self, lo: usize, n: usize, mutate: u32) {
         let off = 4 * lo * self.rows;
         unsafe {
-            b65_acc_scan(self.ap().add(off), self.bp().add(off), self.rows as u32,
+            zk_acc_scan(self.ap().add(off), self.bp().add(off), self.rows as u32,
                          n as u32, mutate);
         }
     }
 
     fn stage2(&self, lanes: &[FAccS2], mutate: u32) {
         unsafe {
-            b65_acc_stage2(self.fc(), self.ap(), self.bp(), lanes.as_ptr(),
+            zk_acc_stage2(self.fc(), self.ap(), self.bp(), lanes.as_ptr(),
                            lanes.len() as u32, self.rows as u32, mutate);
         }
     }
@@ -414,7 +414,7 @@ impl Acc {
             (0..4 * order.len()).map(|_| BaseFieldVec::new_uninitialized(self.rows)).collect();
         let p: Vec<*mut u32> = out.iter().map(|c| c.device_ptr as *mut u32).collect();
         unsafe {
-            b65_acc_split(self.b.device_ptr, p.as_ptr(), order.as_ptr(),
+            zk_acc_split(self.b.device_ptr, p.as_ptr(), order.as_ptr(),
                           order.len() as u32, self.rows as u32, self.log_rows, mutate);
         }
         out
@@ -425,7 +425,7 @@ impl Acc {
     fn last(&self) -> Vec<SecureField> {
         let mut host = vec![SecureField::zero(); self.lanes];
         unsafe {
-            b65_acc_last(self.b.device_ptr, host.as_mut_ptr() as *mut u32,
+            zk_acc_last(self.b.device_ptr, host.as_mut_ptr() as *mut u32,
                          self.rows as u32, self.lanes as u32);
         }
         host
@@ -523,7 +523,7 @@ pub fn chan(base: &[BaseFieldVec], at: &[usize], lc: &LayoutChan, a: &Attn,
         mutate,
     };
     unsafe {
-        b65_acc_chan(cols.as_ptr(), rp.as_ptr() as *const u32, sq.as_ptr() as *const u32,
+        zk_acc_chan(cols.as_ptr(), rp.as_ptr() as *const u32, sq.as_ptr() as *const u32,
                      q4(pow.r_step), q4(pow.sq_step), acc.fc(), acc.ap(), acc.bp(), cfg);
     }
     acc.scan(0, 2, mutate);
@@ -595,7 +595,7 @@ pub fn grid(base: &[BaseFieldVec], at: &[usize], lk: &LayoutKey, a: &Attn,
         mutate,
     };
     unsafe {
-        b65_acc_grid(key.as_ptr(), num.as_ptr(),
+        zk_acc_grid(key.as_ptr(), num.as_ptr(),
                      if aux.is_empty() { std::ptr::null() } else { aux.as_ptr() },
                      val.as_ptr(), sg.as_ptr() as *const u32, rv.as_ptr() as *const u32,
                      q4(pow.sg_step), q4(pow.rv_step), inv.as_ptr(), acc.fc(), acc.ap(),
@@ -647,7 +647,7 @@ pub fn tok(base: &[BaseFieldVec], at: &[usize], log_row: u32, rw: usize, a: &Att
         mutate,
     };
     unsafe {
-        b65_acc_tok(max.as_ptr(), z.as_ptr(), sr.as_ptr() as *const u32, q4(pow.sr_step),
+        zk_acc_tok(max.as_ptr(), z.as_ptr(), sr.as_ptr() as *const u32, q4(pow.sr_step),
                     q4(pow.mu), acc.fc(), acc.ap(), acc.bp(), cfg);
     }
     acc.scan(0, 2, mutate);
@@ -683,7 +683,7 @@ pub fn freivalds(dev: &crate::dev_witness_gen::DevFreivalds, lay: &crate::layer:
         mutate,
     };
     unsafe {
-        b65_acc_freivalds(base.as_ptr(), pre.as_ptr(), sp.as_ptr() as *const u32,
+        zk_acc_freivalds(base.as_ptr(), pre.as_ptr(), sp.as_ptr() as *const u32,
                           rp.as_ptr() as *const u32, q4(s_step), q4(rv_step), acc.fp(),
                           acc.ap(), acc.bp(), cfg);
     }
@@ -733,7 +733,7 @@ pub fn deq(dev: &crate::dev_dequant_witness_gen::DevDequantWitnessGen, lay: &cra
         mutate,
     };
     unsafe {
-        b65_acc_deq(cols.as_ptr(), rp.as_ptr() as *const u32, q4(rv_step), acc.fp(),
+        zk_acc_deq(cols.as_ptr(), rp.as_ptr() as *const u32, q4(rv_step), acc.fp(),
                     acc.ap(), acc.bp(), cfg);
     }
     acc.scan(0, 1, mutate);
@@ -785,7 +785,7 @@ pub fn ao(dev: &crate::dev_witness_gen::DevAo, lay: &crate::layer::AoLayout, nh:
         mutate,
     };
     unsafe {
-        b65_acc_ao(dev.base[0].device_ptr, cols.as_ptr(), rp.as_ptr() as *const u32,
+        zk_acc_ao(dev.base[0].device_ptr, cols.as_ptr(), rp.as_ptr() as *const u32,
                    q4(rv_step), acc.fp(), acc.ap(), acc.bp(), cfg);
     }
     acc.scan(0, 2, mutate);
@@ -818,13 +818,13 @@ pub fn binding_mode() -> u32 {
 
 /// One residual-stream component's Horner bindings, on their way into the tree.
 ///
-/// The seventh component of `b65_acc.cuh`'s table and the plainest of them: a binding
+/// The seventh component of `zk_acc.cuh`'s table and the plainest of them: a binding
 /// has no segmentation at all, so there are no flags and no stage 2 -- one
 /// stage-1 lane per binding and then the shared affine scan, which is the same
 /// primitive as every other component's and therefore the same field element the
 /// host's serial fold produces.
 ///
-/// `in_nat` and `out_nat` are the arrays `b65_residual_stream_witness_gen.cu` already leaves on the
+/// `in_nat` and `out_nat` are the arrays `zk_residual_stream_witness_gen.cu` already leaves on the
 /// card, in coset row order. Before this stream they were copied back across
 /// the link for the host to fold, which is the whole of `gen/residual_stream_witness_gen_d2h`.
 ///
@@ -839,7 +839,7 @@ pub fn residual_stream_bind(in_nat: *const i32, out_nat: *const i32, log_rows: u
     let acc = Acc::new(log_rows, specs.len());
     let w = pows(weights);
     unsafe {
-        b65_acc_residual_stream_bind(in_nat, out_nat, w.as_ptr() as *const u32, w.len() as u32,
+        zk_acc_residual_stream_bind(in_nat, out_nat, w.as_ptr() as *const u32, w.len() as u32,
                                      q4(lam), specs.as_ptr(), specs.len() as u32, acc.ap(), acc.bp(),
                                      acc.rows as u32, mutate);
     }

@@ -4140,7 +4140,7 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
     // B7a milestone 4 (section 3 row 1): the same three-value mode.
     //
     // Stream TT: the magnitude form generates its witness on the host on both backends.  The
-    // fork's `b65_witness_gen_attnout` writes the nine-column layout and bumps the
+    // fork's `zk_witness_gen_attnout` writes the nine-column layout and bumps the
     // limbs at `acc + acc_off`; it has no tenth column and no `mag`, so a
     // device witness generation here would write the wrong component rather than a slow one.
     // `compose::note_host_witness_gen` knows, which is what keeps the shared

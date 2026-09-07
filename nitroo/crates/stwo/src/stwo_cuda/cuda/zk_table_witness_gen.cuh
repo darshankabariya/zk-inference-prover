@@ -21,36 +21,36 @@
 // diffs its actual table against the closed form -- one parallel pass, and it
 // is the *measured* path, not a check mode -- and uploads the rows that differ.
 // On an honest witness the list is empty; on the probe it has one entry.
-#ifndef B65_TABLE_WITNESS_GEN_CUH
-#define B65_TABLE_WITNESS_GEN_CUH
+#ifndef ZK_TABLE_WITNESS_GEN_CUH
+#define ZK_TABLE_WITNESS_GEN_CUH
 #include "fields.cuh"
 
-// `Variant`, as `b65_witness_gen.cuh` numbers it.
-#define B65T_VAR_BF16X 0u
-#define B65T_VAR_INTEXP 1u
-#define B65T_VAR_INTSPLIT 2u
+// `Variant`, as `zk_witness_gen.cuh` numbers it.
+#define ZK_TABLE_VAR_BF16X 0u
+#define ZK_TABLE_VAR_INTEXP 1u
+#define ZK_TABLE_VAR_INTSPLIT 2u
 
 // The negative controls (`ZK_MUT_TABLES`), each a way this design could
 // plausibly be wrong. `nopatch` is the one aimed at rule 8, and it is vacuous
 // on an honest witness by construction -- which is a finding to write down and
 // not a pass (20.2's `ref32` wearing another hat), so it is run against the
 // corrupted-table witness `--corrupt-exp` builds.
-#define B65T_MUT_NONE 0u
-#define B65T_MUT_NOPERM 1u       // write at the coset row, not the committed one
-#define B65T_MUT_NOSCALE 2u      // index the map with `d`, not with bf16(-d 2^-frac)
-#define B65T_MUT_BF16TRUNC 3u    // truncate to bf16 instead of round-to-nearest-even
-#define B65T_MUT_NOPATCH 4u      // skip the rows where this witness's table differs
-#define B65T_MUT_ONECOUNTER 5u   // sum one key tile's exp counter instead of every key tile's
+#define ZK_TABLE_MUT_NONE 0u
+#define ZK_TABLE_MUT_NOPERM 1u       // write at the coset row, not the committed one
+#define ZK_TABLE_MUT_NOSCALE 2u      // index the map with `d`, not with bf16(-d 2^-frac)
+#define ZK_TABLE_MUT_BF16TRUNC 3u    // truncate to bf16 instead of round-to-nearest-even
+#define ZK_TABLE_MUT_NOPATCH 4u      // skip the rows where this witness's table differs
+#define ZK_TABLE_MUT_ONECOUNTER 5u   // sum one key tile's exp counter instead of every key tile's
 
 // Which column a defect is aimed at. Unaimed, every one of them would show at
 // `x`, which is compared first, and the run would say nothing about the other
 // two (section 5 rule 5).
-#define B65T_COL_X 0u
-#define B65T_COL_Y 1u
-#define B65T_COL_M 2u
-#define B65T_COL_ALL 3u
+#define ZK_TABLE_COL_X 0u
+#define ZK_TABLE_COL_Y 1u
+#define ZK_TABLE_COL_M 2u
+#define ZK_TABLE_COL_ALL 3u
 
-struct B65TabCfg {
+struct ZkTabCfg {
     unsigned log_rows;    // `p.log_table`
     unsigned rows;        // `1 << log_rows`
     unsigned variant;
@@ -65,11 +65,11 @@ struct B65TabCfg {
 // `x_col`, `y_col` and `m_col` are `1 << log_rows` cells each, in committed
 // order. `expmap` is 2^16 numerators. `counters` are the device counter arrays
 // the key tile witness generations bumped, each `1 << log_rows` wide.
-extern "C" void b65_witness_gen_tables(const unsigned *expmap,
+extern "C" void zk_witness_gen_tables(const unsigned *expmap,
                                 const unsigned *const *counters,
                                 const unsigned *patch_idx, const unsigned *patch_val,
                                 unsigned n_patch,
                                 m31 *x_col, m31 *y_col, m31 *m_col,
-                                B65TabCfg cfg);
+                                ZkTabCfg cfg);
 
 #endif

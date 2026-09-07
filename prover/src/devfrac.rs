@@ -182,7 +182,7 @@ pub fn ir_of<E: FrameworkEval>(eval: &E, log_rows: u32) -> Ir {
             };
             let aimed = match fam {
                 None => true,
-                Some(f) => eval.cuda_eval_name() == format!("b65_{f}_eval"),
+                Some(f) => eval.cuda_eval_name() == format!("zk_{f}_eval"),
             };
             if aimed { crate::cudagen::Mutate::parse(name) } else { crate::cudagen::Mutate::None }
         }

@@ -7,7 +7,7 @@
 // written; the multiplicities are a warp-aggregated scatter-add whose counters
 // come back as a D2H, which 4a permits.
 //
-// What is different from `b65_dequant_witness_gen.cu`, and why this is its own file:
+// What is different from `zk_dequant_witness_gen.cu`, and why this is its own file:
 //
 //  * **a component is several grids, not one.** The dequant component is one
 //    `MatLayout`; a key tile is four sub-components on three different `Grid`s plus a
@@ -24,32 +24,32 @@
 //    numerator with a different *legal* table output, and a kernel that
 //    recomputed it from the table would silently repair the probe and turn a
 //    rung-3 rejection into an acceptance.
-#ifndef B65_WITNESS_GEN_CUH
-#define B65_WITNESS_GEN_CUH
+#ifndef ZK_WITNESS_GEN_CUH
+#define ZK_WITNESS_GEN_CUH
 #include "fields.cuh"
 
-#define B65_WITNESS_GEN_NONE 0xffffffffu
+#define ZK_WITNESS_GEN_NONE 0xffffffffu
 
 // The negative controls (`ZK_MUT_WITNESS_GEN`). Each is a way one of these three
 // witness generations could plausibly be wrong, and 19.6's caution is the reason `inst` is on
 // the list: a control that cannot fire on the shape under test is a finding and
 // not a pass, and the key tile's instance split is invisible on a one-instance
 // key tile.
-#define B65W_MUT_NONE 0u
-#define B65W_MUT_NOPERM 1u   // write at the coset row, not the committed one
-#define B65W_MUT_CHAN 2u     // the slot-to-channel map, off by one
-#define B65W_MUT_NOBUMP 3u   // drop one multiplicity per 1,024 rows
-#define B65W_MUT_DESCEND 4u  // the chunk order, not descending
-#define B65W_MUT_INST 5u     // the (instance, local) split of a packed group
-#define B65W_MUT_AOREF 6u    // attnout's f64 reference, ties to even
+#define ZK_WITNESS_MUT_NONE 0u
+#define ZK_WITNESS_MUT_NOPERM 1u   // write at the coset row, not the committed one
+#define ZK_WITNESS_MUT_CHAN 2u     // the slot-to-channel map, off by one
+#define ZK_WITNESS_MUT_NOBUMP 3u   // drop one multiplicity per 1,024 rows
+#define ZK_WITNESS_MUT_DESCEND 4u  // the chunk order, not descending
+#define ZK_WITNESS_MUT_INST 5u     // the (instance, local) split of a packed group
+#define ZK_WITNESS_MUT_AOREF 6u    // attnout's f64 reference, ties to even
 // B11 stream N, lever 2: the diagonal block key tile's own way of being wrong. A masked
 // slot is not a lookup, so it bumps nothing; ignoring the mask bumps every
 // slot and the multiplicity delta parts company with the host's. This is the
 // defect the lever was opened on, made deliberate.
-#define B65W_MUT_NOMASK 7u   // let a masked diagonal block slot bump the exp table
+#define ZK_WITNESS_MUT_NOMASK 7u   // let a masked diagonal block slot bump the exp table
 
 // `Grid` from `layout.rs`, field for field. `rows` is `1 << log_rows`.
-struct B65Grid {
+struct ZkGrid {
     unsigned log_rows;
     unsigned rows;
     unsigned groups;
@@ -61,7 +61,7 @@ struct B65Grid {
 // One counter array, as `Tables` holds it: `m_exp`, one `m_r[t]` per range
 // width, or `m_qnz`. A null `m` means this witness generation does not bump that table at all
 // (`range_check` off, or a variant with no auxiliary column).
-struct B65Mult {
+struct ZkMult {
     unsigned *m;
     unsigned n;
 };
@@ -70,8 +70,8 @@ struct B65Mult {
 
 // `freivalds_component`: activations committed with the +128 offset, weights
 // preprocessed, one 8-bit range bump per committed cell.
-struct B65FreivaldsCfg {
-    B65Grid g;
+struct ZkFreivaldsCfg {
+    ZkGrid g;
     unsigned pq;       // activation slots per row
     unsigned pk;       // weight slots per row, per matmul
     unsigned n_in;
@@ -80,18 +80,18 @@ struct B65FreivaldsCfg {
     unsigned mutate;
 };
 
-extern "C" void b65_witness_gen_freivalds(const signed char *qx,
+extern "C" void zk_witness_gen_freivalds(const signed char *qx,
                                    const signed char *const *qw, const unsigned *n_out,
                                    m31 *const *base_cols, unsigned n_base,
                                    m31 *const *pre_cols, unsigned n_pre,
-                                   B65Mult m_r8, unsigned *counts,
-                                   B65FreivaldsCfg cfg);
+                                   ZkMult m_r8, unsigned *counts,
+                                   ZkFreivaldsCfg cfg);
 
 // --------------------------------------------------------------- attnout --
 
 // `ao_component`: the rounding fold, its two range bumps and its `qm`
 // multiplicity, plus the f64 reference the host computes alongside.
-struct B65AoCfg {
+struct ZkAoCfg {
     unsigned nh, s, hd;
     unsigned per_row;
     unsigned chunks;
@@ -107,25 +107,25 @@ struct B65AoCfg {
     unsigned acc_hi_bits;
 };
 
-extern "C" void b65_witness_gen_attnout(const unsigned *acc, const unsigned *den,
+extern "C" void zk_witness_gen_attnout(const unsigned *acc, const unsigned *den,
                                  const int *jo, const int *jv,
                                  m31 *const *base_cols, unsigned n_base,
                                  m31 *const *pre_cols, unsigned n_pre,
-                                 B65Mult m_qnz, B65Mult m_rem,
-                                 B65Mult m_acc_lo, B65Mult m_acc_hi,
+                                 ZkMult m_qnz, ZkMult m_rem,
+                                 ZkMult m_acc_lo, ZkMult m_acc_hi,
                                  int *q_out, unsigned *want_out,
-                                 unsigned *counts, B65AoCfg cfg);
+                                 unsigned *counts, ZkAoCfg cfg);
 
 // ----------------------------------------------------------------- key tiles --
 
 // `attn_trace::commit_base`, whose four sub-components are four kernels sharing
 // one config. `variant` is `Variant`: 0 bf16x, 1 intexp, 2 intsplit(k).
-#define B65W_VAR_BF16X 0u
-#define B65W_VAR_INTEXP 1u
-#define B65W_VAR_INTSPLIT 2u
+#define ZK_WITNESS_VAR_BF16X 0u
+#define ZK_WITNESS_VAR_INTEXP 1u
+#define ZK_WITNESS_VAR_INTSPLIT 2u
 
-struct B65KeyTileCfg {
-    B65Grid gc, gk, go;   // LayoutChan, LayoutKey, LayoutOut
+struct ZkKeyTileCfg {
+    ZkGrid gc, gk, go;   // LayoutChan, LayoutKey, LayoutOut
     unsigned pk, pq;      // LayoutChan: keys and queries per row
     unsigned kq, pv;      // LayoutKey: scores per row, values per row
     unsigned oq;          // LayoutOut: outputs per row
@@ -148,25 +148,25 @@ struct B65KeyTileCfg {
 };
 
 // `counts[0]` is the off-table total the host adds to `Tables::off_table`.
-extern "C" void b65_witness_gen_key_tile_chan(const int *kk, const int *qq,
+extern "C" void zk_witness_gen_key_tile_chan(const int *kk, const int *qq,
                                    m31 *const *cols,
-                                   B65Mult m_k, B65Mult m_q,
-                                   unsigned *counts, B65KeyTileCfg cfg);
+                                   ZkMult m_k, ZkMult m_q,
+                                   unsigned *counts, ZkKeyTileCfg cfg);
 
-extern "C" void b65_witness_gen_key_tile_grid(const int *dd, const unsigned short *num,
+extern "C" void zk_witness_gen_key_tile_grid(const int *dd, const unsigned short *num,
                                    const unsigned short *xx, const unsigned *sc,
                                    const unsigned *delta, const int *vv,
                                    long long table0,
                                    m31 *const *cols, unsigned n_aux,
-                                   B65Mult m_exp, B65Mult m_aux, B65Mult m_v,
-                                   unsigned *counts, B65KeyTileCfg cfg);
+                                   ZkMult m_exp, ZkMult m_aux, ZkMult m_v,
+                                   unsigned *counts, ZkKeyTileCfg cfg);
 
-extern "C" void b65_witness_gen_key_tile_out(const unsigned *out, m31 *const *cols,
-                                  unsigned *counts, B65KeyTileCfg cfg);
+extern "C" void zk_witness_gen_key_tile_out(const unsigned *out, m31 *const *cols,
+                                  unsigned *counts, ZkKeyTileCfg cfg);
 
-extern "C" void b65_witness_gen_key_tile_tok(const unsigned *mm, const unsigned *zz,
+extern "C" void zk_witness_gen_key_tile_tok(const unsigned *mm, const unsigned *zz,
                                   m31 *const *cols, unsigned with_max,
-                                  B65Mult m_lo, B65Mult m_hi,
-                                  unsigned *counts, B65KeyTileCfg cfg);
+                                  ZkMult m_lo, ZkMult m_hi,
+                                  unsigned *counts, ZkKeyTileCfg cfg);
 
 #endif

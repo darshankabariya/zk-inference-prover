@@ -20,11 +20,11 @@
 //!
 //! **The 10 multiplicities are 23.1's counter trick, nine more times.** Every
 //! one of them is already a device counter that a witness generation scatter-added into:
-//! `b65_witness_gen_dequant` bumps `m_norm`, `m_frac`, `m_mul` and the 8-bit range,
-//! `b65_witness_gen_freivalds` the 8-bit range, `b65_witness_gen_attnout` `m_qnz` and the
-//! remainder range, `b65_witness_gen_key_tile_chan` the key and query ranges,
-//! `b65_witness_gen_key_tile_grid` `m_exp`, the auxiliary range and the value range, and
-//! `b65_witness_gen_key_tile_tok` the two `z` ranges. They came back to the host only to
+//! `zk_witness_gen_dequant` bumps `m_norm`, `m_frac`, `m_mul` and the 8-bit range,
+//! `zk_witness_gen_freivalds` the 8-bit range, `zk_witness_gen_attnout` `m_qnz` and the
+//! remainder range, `zk_witness_gen_key_tile_chan` the key and query ranges,
+//! `zk_witness_gen_key_tile_grid` `m_exp`, the auxiliary range and the value range, and
+//! `zk_witness_gen_key_tile_tok` the two `z` ranges. They came back to the host only to
 //! be merged and re-uploaded, which is 21.4's line and 23.1's fix -- so the
 //! sums happen where the counters already are and `gen/witness_gen_counters` and
 //! `gen/deq_dev_counters` go with them.
@@ -44,14 +44,14 @@
 //! uploads rows that did not need uploading, where a kernel closed form that is
 //! wrong is caught cell for cell by `ZK_DEVICE_PREPROCESSED=2`.
 //!
-//! **The selectors are the flags `b65_acc.cu` already computes.** Since 24.1
+//! **The selectors are the flags `zk_acc.cu` already computes.** Since 24.1
 //! every accumulator kernel has derived ACTIVE / NOFIRST / LAST / ISTART per
 //! coset row from the component's layout -- which is exactly what `commit_pre`'s
 //! 48 columns say. What it could not do is compute them at the right time:
 //! `commit_pre` runs before the challenges are drawn and the accumulators run
-//! after. `b65_flags_key_tile` is that computation lifted out into a kernel of its
+//! after. `zk_flags_key_tile` is that computation lifted out into a kernel of its
 //! own, called here at witness-generation time; the array outlives the challenge draw, this
-//! file turns it into columns, and `b65_acc_chan` / `_grid` / `_tok` read it
+//! file turns it into columns, and `zk_acc_chan` / `_grid` / `_tok` read it
 //! rather than recompute it. The AIR's selectors and the accumulator's
 //! segmentation are now one array instead of two transcriptions that agree.
 //!
@@ -77,7 +77,7 @@ use crate::layer::Tables;
 
 // ---------------------------------------------------------------- the FFI shapes --
 
-/// Mirrors `B65PreCfg` in `b65_pre_witness_gen.cuh`, field for field.
+/// Mirrors `ZkPreCfg` in `zk_pre_witness_gen.cuh`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FPreCfg {
@@ -94,7 +94,7 @@ pub struct FPreCfg {
     pub at: u32,
 }
 
-/// Mirrors `B65SelCfg`.
+/// Mirrors `ZkSelCfg`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FSelCfg {
@@ -109,7 +109,7 @@ pub struct FSelCfg {
     pub at: u32,
 }
 
-/// Mirrors `B65AccFlags` in `b65_acc.cuh`.
+/// Mirrors `ZkAccFlags` in `zk_acc.cuh`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FAccFlags {
@@ -120,28 +120,28 @@ pub struct FAccFlags {
 }
 
 unsafe extern "C" {
-    fn b65_witness_gen_pre_table(counters: *const *const u32, patch_idx: *const u32,
+    fn zk_witness_gen_pre_table(counters: *const *const u32, patch_idx: *const u32,
                           patch_val: *const u32, n_patch: u32, cols: *const *mut u32,
                           m_col: *mut u32, cfg: FPreCfg);
-    fn b65_witness_gen_sel(flags: *const u32, cols: *const *mut u32, scale: *const u32,
+    fn zk_witness_gen_sel(flags: *const u32, cols: *const *mut u32, scale: *const u32,
                     cfg: FSelCfg);
-    fn b65_flags_key_tile(flags: *mut u32, cfg: FAccFlags);
+    fn zk_flags_key_tile(flags: *mut u32, cfg: FAccFlags);
 }
 
-// `B65P_KIND_*`.
+// `ZK_PRE_KIND_*`.
 const KIND_NORM: u32 = 0;
 const KIND_FRAC: u32 = 1;
 const KIND_MUL: u32 = 2;
 const KIND_QNZ: u32 = 3;
 const KIND_RANGE: u32 = 4;
 
-// `B65P_AT_*`.
+// `ZK_PRE_AT_*`.
 const AT_CHAN: u32 = 5;
 const AT_KEY: u32 = 6;
 const AT_ROW: u32 = 7;
 const AT_ALL: u32 = 8;
 
-// `B65A_SHAPE_*`.
+// `ZK_ACC_SHAPE_*`.
 const SHAPE_CHAN: u32 = 0;
 const SHAPE_KEY: u32 = 1;
 const SHAPE_TOK: u32 = 2;
@@ -339,7 +339,7 @@ fn patch_of(what: &str, n: usize, w: usize,
         .collect();
     assert!(
         bad.len() <= MAX,
-        "the {what} table differs from its closed form in {} rows: b65_pre_witness_gen \
+        "the {what} table differs from its closed form in {} rows: zk_pre_witness_gen \
          expects the closed form plus at most a probe's tamper",
         bad.len()
     );
@@ -478,7 +478,7 @@ pub fn tables_dev(t: &Tables, log_norm: u32, log_frac: u32, log_mul: u32, q_bits
             _ => (std::ptr::null(), std::ptr::null(), 0),
         };
         unsafe {
-            b65_witness_gen_pre_table(
+            zk_witness_gen_pre_table(
                 cptr.as_ptr(),
                 pi,
                 pv,
@@ -597,7 +597,7 @@ pub fn key_tile_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> 
         .map(|(shape, g, modulus, rw, _, _)| {
             let f = Uint32Vec::new_zeroes(g.rows as usize);
             unsafe {
-                b65_flags_key_tile(f.device_ptr as *mut u32,
+                zk_flags_key_tile(f.device_ptr as *mut u32,
                                FAccFlags { shape: *shape, g: *g, modulus: *modulus,
                                            rw: *rw });
             }
@@ -631,7 +631,7 @@ pub fn key_tile_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> 
             at,
         };
         unsafe {
-            b65_witness_gen_sel(flags[k].device_ptr, p.as_ptr(), d_scale.device_ptr, cfg);
+            zk_witness_gen_sel(flags[k].device_ptr, p.as_ptr(), d_scale.device_ptr, cfg);
         }
         logs.extend(std::iter::repeat(g.log_rows).take(*n_cols));
         cols.extend(mine);

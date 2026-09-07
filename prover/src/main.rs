@@ -644,10 +644,10 @@ fn embed_cmd(args: &[String]) {
                 "loads_per_row": ir.loads(),
             });
             vec![
-                one("b65_embed_eval",
+                one("zk_embed_eval",
                     cudagen::lower(&use_eval, stwo::core::fields::qm31::SecureField::default(),
                                    l.log_use, l.log_use + 1)),
-                one("b65_emb_table_eval",
+                one("zk_emb_table_eval",
                     cudagen::lower(&tab_eval, stwo::core::fields::qm31::SecureField::default(),
                                    l.log_tab, l.log_tab + 1)),
             ]

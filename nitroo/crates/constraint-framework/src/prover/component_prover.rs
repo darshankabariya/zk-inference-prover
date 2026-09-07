@@ -497,15 +497,15 @@ impl<E: FrameworkEval + Sync> ComponentProver<CudaBackend> for FrameworkComponen
 
         let span = span!(Level::INFO, "GPU evaluate_constraint_quotients_on_domain").entered();
         // B7a 2b: a non-POD eval supplies its own flat blob. An eval that opted
-        // into the blob protocol (its name starts with `b65_`) but returned no
+        // into the blob protocol (its name starts with `zk_`) but returned no
         // blob has already announced its CPU fallback during lowering; its
         // family may still be in the dispatcher's switch, whose launcher would
         // then read the raw struct bytes as a blob and abort on the magic
         // check. Skip the device call and take the auto-fallback below.
-        // Fork-native evals (no `b65_` prefix) keep the raw-bytes path -- it is
+        // Fork-native evals (no `zk_` prefix) keep the raw-bytes path -- it is
         // their contract.
         let blob = self.eval.cuda_eval_blob();
-        let blob_declined = blob.is_none() && self.eval.cuda_eval_name().starts_with("b65_");
+        let blob_declined = blob.is_none() && self.eval.cuda_eval_name().starts_with("zk_");
         let cuda_handled = !blob_declined && unsafe {
             // Prepend eval_id (FNV1a hash of component name) before the Eval struct data.
             // The CUDA dispatcher reads eval_id from offset 0 to select the correct kernel.

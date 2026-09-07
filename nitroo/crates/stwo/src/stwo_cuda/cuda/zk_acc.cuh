@@ -47,45 +47,45 @@
 // across the key and auxiliary columns (`nosplit`), and the grid's numerator
 // column commits `table[0]` on an inert lead row where the host's sum has no
 // term at all (`nomask`).
-#ifndef B65_ACC_CUH
-#define B65_ACC_CUH
+#ifndef ZK_ACC_CUH
+#define ZK_ACC_CUH
 #include "fields.cuh"
 
 // The negative controls (`ZK_MUT_ACCUMULATORS`), each a way this design could
 // plausibly be wrong. Section 5 rule 5: each takes a `:component` suffix, because
 // unaimed every one of them panics at `chan key_tile0`, which is checked first.
-#define B65A_MUT_NONE 0u
-#define B65A_MUT_NOPERM 1u     // read the coset row, not the committed one
-#define B65A_MUT_NOCARRY 2u    // drop the scan's inter-block carry
-#define B65A_MUT_NORESET 3u    // never reset a stage-1 lane at a group start
-#define B65A_MUT_NOISTART 4u   // ignore the instance-start multiplier
-#define B65A_MUT_NOOFFSET 5u   // do not subtract the column's committed offset
-#define B65A_MUT_NODELTA 6u    // do not scale the grid's key column back down
-#define B65A_MUT_NOMASK 7u     // let an inert lead row contribute a numerator
-#define B65A_MUT_EVERYROW 8u   // land stage 2's term on every row, not the last
-#define B65A_MUT_NOSPLIT 9u    // read the key column alone, not `idx 2^k + aux`
+#define ZK_ACC_MUT_NONE 0u
+#define ZK_ACC_MUT_NOPERM 1u     // read the coset row, not the committed one
+#define ZK_ACC_MUT_NOCARRY 2u    // drop the scan's inter-block carry
+#define ZK_ACC_MUT_NORESET 3u    // never reset a stage-1 lane at a group start
+#define ZK_ACC_MUT_NOISTART 4u   // ignore the instance-start multiplier
+#define ZK_ACC_MUT_NOOFFSET 5u   // do not subtract the column's committed offset
+#define ZK_ACC_MUT_NODELTA 6u    // do not scale the grid's key column back down
+#define ZK_ACC_MUT_NOMASK 7u     // let an inert lead row contribute a numerator
+#define ZK_ACC_MUT_EVERYROW 8u   // land stage 2's term on every row, not the last
+#define ZK_ACC_MUT_NOSPLIT 9u    // read the key column alone, not `idx 2^k + aux`
 // B11 stream N: the residual stream's bindings, whose three ways of being wrong are its three
 // factors -- the row-to-row step, the within-row weight, and `lam`, which is
 // the only thing that keeps a leaf's two halves apart.
-#define B65A_MUT_NOBINDSTEP 10u  // fold the rows with 1 instead of the binding's step
-#define B65A_MUT_NOTIEW 11u     // weigh every member of a row's sequence alike
-#define B65A_MUT_NOTIELAM 12u   // drop `ef`'s `lam`, collapsing (sm, ef) to sm
+#define ZK_ACC_MUT_NOBINDSTEP 10u  // fold the rows with 1 instead of the binding's step
+#define ZK_ACC_MUT_NOTIEW 11u     // weigh every member of a row's sequence alike
+#define ZK_ACC_MUT_NOTIELAM 12u   // drop `ef`'s `lam`, collapsing (sm, ef) to sm
 
 // Per-row layout facts, computed once by the component's own kernel so that the
 // stage-2 builder and the scan need to know nothing about the layout.
-#define B65A_ACTIVE 1u
-#define B65A_NOFIRST 2u
-#define B65A_LAST 4u
+#define ZK_ACC_ACTIVE 1u
+#define ZK_ACC_NOFIRST 2u
+#define ZK_ACC_LAST 4u
 // The row where this lane's Horner picks up its per-instance weight. Each
 // component defines it: an instance start for the key tiles and the Freivalds checks, a head
 // start for the attnout, never for the dequant.
-#define B65A_ISTART 8u
+#define ZK_ACC_ISTART 8u
 
 // `src1` of a stage-2 lane that has only one factor.
-#define B65A_ONE 0xffffffffu
+#define ZK_ACC_ONE 0xffffffffu
 
-// `Grid`, as `b65_witness_gen.cuh` spells it.
-struct B65AccGrid {
+// `Grid`, as `zk_witness_gen.cuh` spells it.
+struct ZkAccGrid {
     unsigned log_rows;
     unsigned rows;
     unsigned groups;
@@ -97,23 +97,23 @@ struct B65AccGrid {
 // ---------------------------------------------------- the shared layout half --
 //
 // B7a milestone 4 (section 3 row 1, section 25): these four were `static` inside
-// `b65_acc.cu` until the key tile selectors needed them. They are the *only* thing
+// `zk_acc.cu` until the key tile selectors needed them. They are the *only* thing
 // `commit_pre`'s 48 preprocessed columns say -- ACTIVE, NOFIRST, LAST and
-// ISTART per coset row -- so they live in the header and `b65_pre_witness_gen.cu`
+// ISTART per coset row -- so they live in the header and `zk_pre_witness_gen.cu`
 // builds the columns from the same three lines the accumulators segment on.
 
 // `common.rs`'s `m4_perm`: the closed form of
 // `bit_reverse_coset_to_circle_domain_order`. An involution, so the thread that
 // owns committed row `i` reads coset row `f(i)` and the coset row `j` a scan
 // walks is held at committed index `f(j)`.
-__device__ __forceinline__ unsigned b65a_perm(unsigned i, unsigned log_n) {
+__device__ __forceinline__ unsigned zk_acc_perm(unsigned i, unsigned log_n) {
     const unsigned n = 1u << log_n;
     const unsigned c = (i & 1u) ? ((2u * n - i - 1u) >> 1) : (i >> 1);
     return __brev(c) >> (32u - log_n);
 }
 
-// `Grid::row`, as `b65_witness_gen.cu` has it.
-__device__ __forceinline__ bool b65a_grid_row(const B65AccGrid &g, unsigned j,
+// `Grid::row`, as `zk_witness_gen.cu` has it.
+__device__ __forceinline__ bool zk_acc_grid_row(const ZkAccGrid &g, unsigned j,
                                               unsigned *grp, unsigned *chunk) {
     if (j < g.lead) {
         return false;
@@ -129,18 +129,18 @@ __device__ __forceinline__ bool b65a_grid_row(const B65AccGrid &g, unsigned j,
 }
 
 // The three flags every grid-shaped component shares.
-__device__ __forceinline__ unsigned b65a_grid_flags(bool act, unsigned chunk,
+__device__ __forceinline__ unsigned zk_acc_grid_flags(bool act, unsigned chunk,
                                                     unsigned chunks) {
     unsigned f = 0u;
     if (!act) {
         return f;
     }
-    f |= B65A_ACTIVE;
+    f |= ZK_ACC_ACTIVE;
     if (chunk + 1u < chunks) {
-        f |= B65A_NOFIRST;
+        f |= ZK_ACC_NOFIRST;
     }
     if (chunk == 0u) {
-        f |= B65A_LAST;
+        f |= ZK_ACC_LAST;
     }
     return f;
 }
@@ -149,13 +149,13 @@ __device__ __forceinline__ unsigned b65a_grid_flags(bool act, unsigned chunk,
 // component, where the outer sum picks up its per-instance weight. `modulus` is
 // `hd` for the channel component and `C` for the key component -- `attn_trace.rs`
 // writes them as one predicate each and this is that predicate.
-__device__ __forceinline__ unsigned b65a_flags_of_grid(const B65AccGrid &g,
+__device__ __forceinline__ unsigned zk_acc_flags_of_grid(const ZkAccGrid &g,
                                                        unsigned modulus, unsigned j) {
     unsigned grp = 0u, chunk = 0u;
-    const bool act = b65a_grid_row(g, j, &grp, &chunk);
-    unsigned f = b65a_grid_flags(act, chunk, g.chunks);
+    const bool act = zk_acc_grid_row(g, j, &grp, &chunk);
+    unsigned f = zk_acc_grid_flags(act, chunk, g.chunks);
     if (j > 0u && act && chunk + 1u == g.chunks && (grp % modulus) == modulus - 1u) {
-        f |= B65A_ISTART;
+        f |= ZK_ACC_ISTART;
     }
     return f;
 }
@@ -163,35 +163,35 @@ __device__ __forceinline__ unsigned b65a_flags_of_grid(const B65AccGrid &g,
 // `tok_istart`: the per-token component carries no group structure, so an instance
 // starts wherever the row's highest token is `S - 1` mod `S`. Every row is
 // active and there are no chunks, so LAST never fires here.
-__device__ __forceinline__ unsigned b65a_flags_of_tok(unsigned rows, unsigned rw,
+__device__ __forceinline__ unsigned zk_acc_flags_of_tok(unsigned rows, unsigned rw,
                                                       unsigned s_inst, unsigned j) {
     const unsigned long long hi = (unsigned long long)(rows - 1u - j) * rw + rw;
-    unsigned f = B65A_ACTIVE;
+    unsigned f = ZK_ACC_ACTIVE;
     if (j > 0u) {
-        f |= B65A_NOFIRST;
+        f |= ZK_ACC_NOFIRST;
     }
     if (j > 0u && (hi % s_inst) == 0ull) {
-        f |= B65A_ISTART;
+        f |= ZK_ACC_ISTART;
     }
     return f;
 }
 
 // Which key tile shape a flags run is for.
-#define B65A_SHAPE_CHAN 0u
-#define B65A_SHAPE_KEY 1u
-#define B65A_SHAPE_TOK 2u
+#define ZK_ACC_SHAPE_CHAN 0u
+#define ZK_ACC_SHAPE_KEY 1u
+#define ZK_ACC_SHAPE_TOK 2u
 
 // One key tile sub-component's layout, for the flags kernel alone.
-struct B65AccFlags {
+struct ZkAccFlags {
     unsigned shape;
-    B65AccGrid g;      // the chan and key grids; `log_rows`/`rows` only for tok
+    ZkAccGrid g;      // the chan and key grids; `log_rows`/`rows` only for tok
     unsigned modulus;  // `hd`, `C`, or `S` -- the instance-start modulus
     unsigned rw;       // the per-token component's row width
 };
 
 // One stage-2 lane: `b = last ? V[src0] * V[src1] : 0` and
 // `a = (flags & sel_i) ? m_i : (last ? m_l : m_n)`.
-struct B65AccS2 {
+struct ZkAccS2 {
     unsigned dst;
     unsigned src0;
     unsigned src1;
@@ -201,8 +201,8 @@ struct B65AccS2 {
     qm31 m_n;
 };
 
-struct B65AccChan {
-    B65AccGrid g;
+struct ZkAccChan {
+    ZkAccGrid g;
     unsigned pk;
     unsigned pq;
     unsigned hd;      // channels per instance: `chan_istart`'s modulus
@@ -211,8 +211,8 @@ struct B65AccChan {
     unsigned mutate;
 };
 
-struct B65AccKey {
-    B65AccGrid g;
+struct ZkAccKey {
+    ZkAccGrid g;
     unsigned q;       // scores (and numerators) per row
     unsigned pv;      // V values per row
     unsigned ctx;     // keys per instance: `key_istart`'s modulus, and `split`'s
@@ -227,7 +227,7 @@ struct B65AccKey {
     unsigned mutate;
 };
 
-struct B65AccTok {
+struct ZkAccTok {
     unsigned log_rows;
     unsigned rows;
     unsigned rw;
@@ -236,8 +236,8 @@ struct B65AccTok {
     unsigned mutate;
 };
 
-struct B65AccFreivalds {
-    B65AccGrid g;
+struct ZkAccFreivalds {
+    ZkAccGrid g;
     unsigned pq;      // activations per row (the committed side)
     unsigned pk;      // weights per row, per matmul (the preprocessed side)
     unsigned n_mats;
@@ -245,7 +245,7 @@ struct B65AccFreivalds {
     unsigned mutate;
 };
 
-struct B65AccDeq {
+struct ZkAccDeq {
     unsigned log_rows;
     unsigned rows;
     unsigned per_row;
@@ -253,7 +253,7 @@ struct B65AccDeq {
     unsigned mutate;
 };
 
-struct B65AccAo {
+struct ZkAccAo {
     unsigned log_rows;
     unsigned rows;
     unsigned per_row;
@@ -277,13 +277,13 @@ struct B65AccAo {
 // So a binding needs no flags and no stage 2 -- it is one stage-1 lane and the
 // shared scan, and `a[j]` is the constant `step` everywhere but row 0.
 //
-// What it reads is not a committed column. `b65_residual_stream_witness_gen.cu` leaves `(sm, ef)`
+// What it reads is not a committed column. `zk_residual_stream_witness_gen.cu` leaves `(sm, ef)`
 // per leaf and per output in `in_nat` / `out_nat`, in **coset row order**, for
 // exactly this purpose; before this stream those two arrays were copied back
 // across the link and folded on the host, which is all `gen/residual_stream_witness_gen_d2h` was.
 // `src` picks the array, `off` and `width` cut this binding's sequence out of a
 // row of it, and `stride` is that array's own row width.
-struct B65AccResidualStreamBind {
+struct ZkAccResidualStreamBind {
     unsigned src;     // 0 = `in_nat`, 1 = `out_nat`
     unsigned off;     // first member of this binding's sequence within a row
     unsigned width;   // members of the sequence
@@ -298,28 +298,28 @@ struct B65AccResidualStreamBind {
 // The inclusive affine scan: `b[l][j] <- a[l][j] * b[l][j-1] + b[l][j]`, with
 // `b[l][-1] = 0`, for `lanes` independent recurrences of `rows` rows each. `a`
 // is clobbered (it becomes the within-block product prefix). Three phases, the
-// shape `b65_logup_running`'s neighbours have: a block-local scan, a serial
+// shape `zk_logup_running`'s neighbours have: a block-local scan, a serial
 // scan of the block totals, and the carry applied.
-extern "C" void b65_acc_scan(qm31 *a, qm31 *b, unsigned rows, unsigned lanes,
+extern "C" void zk_acc_scan(qm31 *a, qm31 *b, unsigned rows, unsigned lanes,
                              unsigned mutate);
 
 // Stage 2's `(a, b)`, from the flags one of the component kernels wrote and the
 // stage-1 lanes the scan has already closed.
-extern "C" void b65_acc_stage2(const unsigned *flags, qm31 *a, qm31 *b,
-                               const B65AccS2 *lanes, unsigned n_lanes,
+extern "C" void zk_acc_stage2(const unsigned *flags, qm31 *a, qm31 *b,
+                               const ZkAccS2 *lanes, unsigned n_lanes,
                                unsigned rows, unsigned mutate);
 
 // The committed columns: `out[4 k + t][i] = v[lane[k]][f(i)].to_m31_array()[t]`,
 // with `f` the closed form of `bit_reverse_coset_to_circle_domain_order`, so
 // `eval_of` never runs on an accumulator column (20.1's design, for a QM31).
-extern "C" void b65_acc_split(const qm31 *v, m31 **out, const unsigned *lane,
+extern "C" void zk_acc_split(const qm31 *v, m31 **out, const unsigned *lane,
                               unsigned n_out, unsigned rows, unsigned log_rows,
                               unsigned mutate);
 
 // The claimed sums: the last *coset* row of every lane, which is the value the
 // component's Horner leaves behind. A few QM31 back to the host, and the only
 // thing that comes back at all.
-extern "C" void b65_acc_last(const qm31 *v, qm31 *host, unsigned rows,
+extern "C" void zk_acc_last(const qm31 *v, qm31 *host, unsigned rows,
                              unsigned lanes);
 
 // ------------------------------------------------------------- the six components --
@@ -327,45 +327,45 @@ extern "C" void b65_acc_last(const qm31 *v, qm31 *host, unsigned rows,
 // B7a milestone 4 (section 25): the key tile shapes' flags, written once at witness-generation time. `commit_pre` runs before the challenges are drawn and the accumulators
 // run after, so the array outlives both and the selectors and the segmentation
 // are one computation rather than two that agree.
-extern "C" void b65_flags_key_tile(unsigned *flags, B65AccFlags cfg);
+extern "C" void zk_flags_key_tile(unsigned *flags, ZkAccFlags cfg);
 
 
-extern "C" void b65_acc_chan(const m31 *const *cols, const qm31 *r_pow,
+extern "C" void zk_acc_chan(const m31 *const *cols, const qm31 *r_pow,
                              const qm31 *sq_pow, qm31 r_step, qm31 sq_step,
                              const unsigned *flags, qm31 *a, qm31 *b,
-                             B65AccChan cfg);
+                             ZkAccChan cfg);
 
-extern "C" void b65_acc_grid(const m31 *const *key_cols, const m31 *const *num_cols,
+extern "C" void zk_acc_grid(const m31 *const *key_cols, const m31 *const *num_cols,
                              const m31 *const *aux_cols, const m31 *const *val_cols,
                              const qm31 *sg_pow, const qm31 *rv_pow, qm31 sg_step,
                              qm31 rv_step, const m31 *inv_delta,
                              const unsigned *flags, qm31 *a, qm31 *b,
-                             B65AccKey cfg);
+                             ZkAccKey cfg);
 
-extern "C" void b65_acc_tok(const m31 *const *max_cols, const m31 *const *z_cols,
+extern "C" void zk_acc_tok(const m31 *const *max_cols, const m31 *const *z_cols,
                             const qm31 *sr_pow, qm31 sr_step, qm31 mu,
                             const unsigned *flags, qm31 *a, qm31 *b,
-                            B65AccTok cfg);
+                            ZkAccTok cfg);
 
-extern "C" void b65_acc_freivalds(const m31 *const *base_cols, const m31 *const *pre_cols,
+extern "C" void zk_acc_freivalds(const m31 *const *base_cols, const m31 *const *pre_cols,
                                   const qm31 *s_pow, const qm31 *rv_pow, qm31 s_step,
                                   qm31 rv_step, unsigned *flags, qm31 *a, qm31 *b,
-                                  B65AccFreivalds cfg);
+                                  ZkAccFreivalds cfg);
 
-extern "C" void b65_acc_deq(const m31 *const *acc_cols, const qm31 *rv_pow,
+extern "C" void zk_acc_deq(const m31 *const *acc_cols, const qm31 *rv_pow,
                             qm31 rv_step, unsigned *flags, qm31 *a, qm31 *b,
-                            B65AccDeq cfg);
+                            ZkAccDeq cfg);
 
-extern "C" void b65_acc_ao(const m31 *den_col, const m31 *const *acc_cols,
+extern "C" void zk_acc_ao(const m31 *den_col, const m31 *const *acc_cols,
                            const qm31 *rv_pow, qm31 rv_step, unsigned *flags,
-                           qm31 *a, qm31 *b, B65AccAo cfg);
+                           qm31 *a, qm31 *b, ZkAccAo cfg);
 
 // B11 stream N: every binding of one residual-stream component, one lane each. `specs` and
 // `weights` are host arrays and are cloned to the card here; `in_nat` and
-// `out_nat` are already there, where `b65_residual_stream_witness_gen.cu` left them.
-extern "C" void b65_acc_residual_stream_bind(const int *in_nat, const int *out_nat,
+// `out_nat` are already there, where `zk_residual_stream_witness_gen.cu` left them.
+extern "C" void zk_acc_residual_stream_bind(const int *in_nat, const int *out_nat,
                              const qm31 *weights, unsigned n_weights, qm31 lam,
-                             const B65AccResidualStreamBind *specs, unsigned n_specs, qm31 *a,
+                             const ZkAccResidualStreamBind *specs, unsigned n_specs, qm31 *a,
                              qm31 *b, unsigned rows, unsigned mutate);
 
 #endif

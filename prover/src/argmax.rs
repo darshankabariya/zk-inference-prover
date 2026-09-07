@@ -130,7 +130,7 @@ impl FrameworkEval for ArgmaxEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_argmax_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_argmax_eval" }
 
     fn log_size(&self) -> u32 {
         self.log_rows

@@ -831,7 +831,7 @@ mod feedimpl {
                     "the feed's plan left a look with no denominator slot");
             let cname = CString::new(self.family.clone()).unwrap();
             unsafe {
-                gen_b65_feed_dispatch(
+                gen_zk_feed_dispatch(
                     cname.as_ptr(),
                     self.shape,
                     self.fingerprint,
@@ -911,7 +911,7 @@ mod feedimpl {
         /// carry one device pointer per *look*, aimed at that look's slot in the
         /// GKR instance layer; a null numerator slot is a singles instance,
         /// which stores no numerators at all.
-        fn gen_b65_feed_dispatch(
+        fn gen_zk_feed_dispatch(
             family: *const c_char,
             shape: u32,
             fingerprint: u32,
@@ -1194,7 +1194,7 @@ mod feedimpl {
 ///
 /// The collected input layers are host (simd) columns; the sumcheck runs on
 /// `CudaBackend`. The upload is timed on its own line because on the composed
-/// cuda backend it is a stand-in: `gen_b65_dispatch` computes these very fractions
+/// cuda backend it is a stand-in: `gen_zk_dispatch` computes these very fractions
 /// on the device already, so a resident backend pays a device-side *reshape* (one
 /// pass moving the paired fractions into MLE layout), not a PCIe transfer. The
 /// reshape's cost is measured directly -- one device-to-device copy of every

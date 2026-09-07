@@ -19,8 +19,8 @@ so the delta to upstream stays readable in `git log -- nitroo/`:
    host round-trip, and FRI decommitment reads batched through
    `batch_at_multi`. All in `crates/stwo`.
 3. **The pre-emit stand-in's missing feed dispatcher** (2026-09-01):
-   `gen_b65_feed_dispatch`, prototyped in `cuda/gen_b65_dispatch.cuh` and defined
-   as an aborting fallthrough in `cuda/gen_b65_dispatch.cu`, matching what the
+   `gen_zk_feed_dispatch`, prototyped in `cuda/gen_zk_dispatch.cuh` and defined
+   as an aborting fallthrough in `cuda/gen_zk_dispatch.cu`, matching what the
    generator emits for zero kernel groups. An earlier change added that symbol to the
    emitter and to `../prover/src/gkr_key_tile.rs` but not to the stand-in, so from
    that change until this commit the CUDA backend did **not link** on any tree with no

@@ -43,7 +43,7 @@ use crate::devfrac::Cols;
 
 // ---------------------------------------------------------------- the FFI shape --
 
-/// Mirrors `B65TabCfg` in `b65_table_witness_gen.cuh`, field for field.
+/// Mirrors `ZkTabCfg` in `zk_table_witness_gen.cuh`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FTabCfg {
@@ -57,7 +57,7 @@ pub struct FTabCfg {
 }
 
 unsafe extern "C" {
-    fn b65_witness_gen_tables(
+    fn zk_witness_gen_tables(
         expmap: *const u32,
         counters: *const *const u32,
         patch_idx: *const u32,
@@ -182,7 +182,7 @@ fn exp_patch(a: &Attn, exp: &[u32], map: &[u32], tp: f64) -> (Vec<u32>, Vec<u32>
         .unzip();
     assert!(
         idx.len() <= MAX,
-        "the exp table differs from exp_int_table in {} rows: b65_table_witness_gen expects \
+        "the exp table differs from exp_int_table in {} rows: zk_table_witness_gen expects \
          the closed form plus at most a probe's tamper",
         idx.len()
     );
@@ -264,7 +264,7 @@ pub fn table_cols_dev(a: &Attn, log_rows: u32, exp: &[u32],
 
     let t_k = std::time::Instant::now();
     unsafe {
-        b65_witness_gen_tables(
+        zk_witness_gen_tables(
             d_map.device_ptr,
             cptr.as_ptr(),
             d_pidx.device_ptr,

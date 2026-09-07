@@ -1,14 +1,14 @@
 // B7a milestone 4 (19.6): the dequant witness generation, on the device.
 #include "fields.cuh"
 #include "utils.cuh"
-#include "b65_dequant_witness_gen.cuh"
+#include "zk_dequant_witness_gen.cuh"
 
-#define B65_DEQUANT_WITNESS_GEN_BLOCK 128u
+#define ZK_DEQUANT_WITNESS_GEN_BLOCK 128u
 // Slots per block in the y direction. One thread owns a row and loops its
 // slots, because consecutive threads then write consecutive cells of the same
 // column; splitting the slots across blocks is what keeps a 2^12-row component
 // from running on 32 blocks of a 132-SM device.
-#define B65_DEQUANT_WITNESS_GEN_SLOT_TILE 4u
+#define ZK_DEQUANT_WITNESS_GEN_SLOT_TILE 4u
 
 // ---------------------------------------------------------------- the permutation --
 
@@ -105,7 +105,7 @@ __device__ __forceinline__ unsigned bf16_from_f64(double x, unsigned away = 0u) 
 // magnitude needs a round-bit weight the table does not carry -- the host
 // panics there, and the device counts it so the caller can panic with the
 // component's name instead of proving something wrong.
-__device__ __forceinline__ bool b65_normalise(unsigned long long mag, unsigned kmax,
+__device__ __forceinline__ bool zk_normalise(unsigned long long mag, unsigned kmax,
                                               unsigned *m2, unsigned *ph, unsigned *st,
                                               unsigned long long *r) {
     if (mag == 0ull) {
@@ -129,8 +129,8 @@ __device__ __forceinline__ bool b65_normalise(unsigned long long mag, unsigned k
 }
 
 // `Tables::norm_at`, the O(1) index B6.5 wrote to replace a linear scan.
-// `B65_DEQUANT_WITNESS_GEN_NONE` is the host's `None`.
-__device__ __forceinline__ unsigned b65_norm_at(unsigned m2, unsigned ph, unsigned st,
+// `ZK_DEQUANT_WITNESS_GEN_NONE` is the host's `None`.
+__device__ __forceinline__ unsigned zk_norm_at(unsigned m2, unsigned ph, unsigned st,
                                                 unsigned kmax, unsigned sticky) {
     if (m2 == 0u && ph == 0u && st == 0u) {
         return 0u;
@@ -141,21 +141,21 @@ __device__ __forceinline__ unsigned b65_norm_at(unsigned m2, unsigned ph, unsign
     if (m2 >= 256u && m2 < 512u && ph != 0u && (ph & (ph - 1u)) == 0u) {
         const unsigned k = (unsigned)(31 - __clz((int)ph));
         if (k > kmax || (st == 1u && sticky == 0u) || st > 1u) {
-            return B65_DEQUANT_WITNESS_GEN_NONE;
+            return ZK_DEQUANT_WITNESS_GEN_NONE;
         }
         const unsigned per = 1u + sticky;
         return 256u + (k * 256u + (m2 - 256u)) * per + st;
     }
-    return B65_DEQUANT_WITNESS_GEN_NONE;
+    return ZK_DEQUANT_WITNESS_GEN_NONE;
 }
 
 // `Tables::frac_at`: the `(ph, r, st)` table's rows are `ph + r`.
-__device__ __forceinline__ unsigned b65_frac_at(unsigned ph, unsigned long long r) {
+__device__ __forceinline__ unsigned zk_frac_at(unsigned ph, unsigned long long r) {
     if (ph == 0u) {
-        return (r == 0ull) ? 0u : B65_DEQUANT_WITNESS_GEN_NONE;
+        return (r == 0ull) ? 0u : ZK_DEQUANT_WITNESS_GEN_NONE;
     }
     return (r < (unsigned long long)ph) ? (unsigned)((unsigned long long)ph + r)
-                                        : B65_DEQUANT_WITNESS_GEN_NONE;
+                                        : ZK_DEQUANT_WITNESS_GEN_NONE;
 }
 
 // ------------------------------------------------------------------------ the witness generation --
@@ -163,7 +163,7 @@ __device__ __forceinline__ unsigned b65_frac_at(unsigned ph, unsigned long long 
 // `counts`: [0] off-table range bumps, [1] `ref_bad`, [2] rows the tables
 // cannot describe (the host's two `expect`s).
 template <int VARIANT>
-__global__ void b65_witness_gen_kernel(const int *__restrict__ acc,
+__global__ void zk_witness_gen_kernel(const int *__restrict__ acc,
                                 const int *__restrict__ jx, const int *__restrict__ jw,
                                 const unsigned *__restrict__ sx,
                                 const unsigned *__restrict__ sw,
@@ -177,7 +177,7 @@ __global__ void b65_witness_gen_kernel(const int *__restrict__ acc,
                                 unsigned *__restrict__ m_r8,
                                 unsigned *__restrict__ counts,
                                 unsigned *__restrict__ want_out,
-                                const B65DequantWitnessGenCfg cfg) {
+                                const ZkDequantWitnessGenCfg cfg) {
     const unsigned rows = 1u << cfg.log_rows;
     const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= rows) {
@@ -186,12 +186,12 @@ __global__ void b65_witness_gen_kernel(const int *__restrict__ acc,
     // the output index owns the row: `j` is where the coset order has it.
     // `noperm` is the control that says so -- without it the column is in
     // coset order and every cell but the fixed points of the involution moves.
-    const unsigned j = (cfg.mutate == B65_MUT_NOPERM) ? i : m4_perm(i, cfg.log_rows);
+    const unsigned j = (cfg.mutate == ZK_MUT_NOPERM) ? i : m4_perm(i, cfg.log_rows);
     const unsigned t = cfg.tokens - 1u - j / cfg.chunks;
     const unsigned b = cfg.chunks - 1u - j % cfg.chunks;
 
-    const unsigned s_begin = blockIdx.y * B65_DEQUANT_WITNESS_GEN_SLOT_TILE;
-    const unsigned s_end = min(cfg.per_row, s_begin + B65_DEQUANT_WITNESS_GEN_SLOT_TILE);
+    const unsigned s_begin = blockIdx.y * ZK_DEQUANT_WITNESS_GEN_SLOT_TILE;
+    const unsigned s_end = min(cfg.per_row, s_begin + ZK_DEQUANT_WITNESS_GEN_SLOT_TILE);
 
     if (blockIdx.y == 0u) {
         // the per-row shared columns: the activation's scale
@@ -220,7 +220,7 @@ __global__ void b65_witness_gen_kernel(const int *__restrict__ acc,
         // for the slot-to-channel map, which is the one thing the AIR cannot
         // catch on its own: a consistently misaddressed scale is a consistent
         // witness for the wrong matmul.
-        const unsigned cs = (cfg.mutate == B65_MUT_CHAN) ? (c + 1u) % cfg.n_out : c;
+        const unsigned cs = (cfg.mutate == ZK_MUT_CHAN) ? (c + 1u) % cfg.n_out : c;
         if (VARIANT == 0) {
             pre_cols[s][i] = m31_of_i64((long long)jw[cs]);
         } else {
@@ -235,16 +235,16 @@ __global__ void b65_witness_gen_kernel(const int *__restrict__ acc,
 
         unsigned m2, ph, st;
         unsigned long long r;
-        if (!b65_normalise(mag, cfg.kmax, &m2, &ph, &st, &r)) {
+        if (!zk_normalise(mag, cfg.kmax, &m2, &ph, &st, &r)) {
             atomicAdd(&counts[2], 1u);
             continue;
         }
         if (cfg.sticky == 0u) {
             st = 0u;
         }
-        const unsigned ri = b65_norm_at(m2, ph, st, cfg.kmax, cfg.sticky);
-        const unsigned fi = b65_frac_at(ph, r);
-        if (ri == B65_DEQUANT_WITNESS_GEN_NONE || fi == B65_DEQUANT_WITNESS_GEN_NONE || ri >= cfg.n_norm ||
+        const unsigned ri = zk_norm_at(m2, ph, st, cfg.kmax, cfg.sticky);
+        const unsigned fi = zk_frac_at(ph, r);
+        if (ri == ZK_DEQUANT_WITNESS_GEN_NONE || fi == ZK_DEQUANT_WITNESS_GEN_NONE || ri >= cfg.n_norm ||
             fi >= cfg.n_frac) {
             atomicAdd(&counts[2], 1u);
             continue;
@@ -256,7 +256,7 @@ __global__ void b65_witness_gen_kernel(const int *__restrict__ acc,
         // `nobump` drops one frac multiplicity in every 1024 rows: the columns
         // still match and only the counter comparison can see it, which is
         // what gives that half of the check its own teeth.
-        if (!(cfg.mutate == B65_MUT_NOBUMP && (i & 1023u) == 0u)) {
+        if (!(cfg.mutate == ZK_MUT_NOBUMP && (i & 1023u) == 0u)) {
             bump_at(m_frac, fi);
         }
 
@@ -283,9 +283,9 @@ __global__ void b65_witness_gen_kernel(const int *__restrict__ acc,
                 // `ref32` takes the same value through f32, which is the
                 // double rounding `bf16.rs`'s own doc comment warns about --
                 // the plausible wrong version of this line.
-                const unsigned away = (cfg.mutate == B65_MUT_REFAWAY) ? 1u : 0u;
+                const unsigned away = (cfg.mutate == ZK_MUT_REFAWAY) ? 1u : 0u;
                 const unsigned want =
-                    (cfg.mutate == B65_MUT_REF32)
+                    (cfg.mutate == ZK_MUT_REF32)
                         ? bf16_from_f64((double)ldexpf((float)a, (int)jjx), away)
                         : bf16_from_f64(ldexp((double)a, (int)jjx), away);
                 const unsigned got =
@@ -331,14 +331,14 @@ __global__ void b65_witness_gen_kernel(const int *__restrict__ acc,
                 // Two `double` multiplies, each followed by a bf16 rounding.
                 // There is no add for the compiler to contract into an FMA, and
                 // `__dmul_rn` says so rather than relying on `-fmad`.
-                const unsigned away = (cfg.mutate == B65_MUT_REFAWAY) ? 1u : 0u;
+                const unsigned away = (cfg.mutate == ZK_MUT_REFAWAY) ? 1u : 0u;
                 const double y0 =
                     bf16_to_f64(bf16_from_f64((double)(long long)mag, away));
                 const double sxv = bf16_to_f64(bf16_pattern(0u, sx[2u * t + 1u], sx[2u * t]));
                 const double swv = bf16_to_f64(bf16_pattern(0u, sw[2u * c + 1u], sw[2u * c]));
                 const double t1 = bf16_to_f64(bf16_from_f64(__dmul_rn(y0, sxv), away));
                 const unsigned want =
-                    ((cfg.mutate == B65_MUT_REF32)
+                    ((cfg.mutate == ZK_MUT_REF32)
                          ? bf16_from_f64((double)__fmul_rn((float)t1, (float)swv), away)
                          : bf16_from_f64(__dmul_rn(t1, swv), away))
                     | (sg << 15);
@@ -355,7 +355,7 @@ __global__ void b65_witness_gen_kernel(const int *__restrict__ acc,
     }
 }
 
-extern "C" void b65_witness_gen_dequant(const int *acc,
+extern "C" void zk_witness_gen_dequant(const int *acc,
                                  const int *jx, const int *jw,
                                  const unsigned *sx, const unsigned *sw,
                                  const unsigned *norm3, const unsigned *mul2,
@@ -364,18 +364,18 @@ extern "C" void b65_witness_gen_dequant(const int *acc,
                                  unsigned *m_norm, unsigned *m_frac,
                                  unsigned *m_mul, unsigned *m_r8,
                                  unsigned *counts, unsigned *want_out,
-                                 B65DequantWitnessGenCfg cfg) {
+                                 ZkDequantWitnessGenCfg cfg) {
     const unsigned rows = 1u << cfg.log_rows;
     m31 **d_base = clone_to_device<m31 *>(const_cast<m31 **>(base_cols), n_base);
     m31 **d_pre = clone_to_device<m31 *>(const_cast<m31 **>(pre_cols), n_pre);
-    dim3 grid((rows + B65_DEQUANT_WITNESS_GEN_BLOCK - 1u) / B65_DEQUANT_WITNESS_GEN_BLOCK,
-              (cfg.per_row + B65_DEQUANT_WITNESS_GEN_SLOT_TILE - 1u) / B65_DEQUANT_WITNESS_GEN_SLOT_TILE);
+    dim3 grid((rows + ZK_DEQUANT_WITNESS_GEN_BLOCK - 1u) / ZK_DEQUANT_WITNESS_GEN_BLOCK,
+              (cfg.per_row + ZK_DEQUANT_WITNESS_GEN_SLOT_TILE - 1u) / ZK_DEQUANT_WITNESS_GEN_SLOT_TILE);
     if (cfg.variant == 0u) {
-        b65_witness_gen_kernel<0><<<grid, B65_DEQUANT_WITNESS_GEN_BLOCK>>>(
+        zk_witness_gen_kernel<0><<<grid, ZK_DEQUANT_WITNESS_GEN_BLOCK>>>(
             acc, jx, jw, sx, sw, norm3, mul2, d_base, d_pre, m_norm, m_frac, m_mul,
             m_r8, counts, want_out, cfg);
     } else {
-        b65_witness_gen_kernel<1><<<grid, B65_DEQUANT_WITNESS_GEN_BLOCK>>>(
+        zk_witness_gen_kernel<1><<<grid, ZK_DEQUANT_WITNESS_GEN_BLOCK>>>(
             acc, jx, jw, sx, sw, norm3, mul2, d_base, d_pre, m_norm, m_frac, m_mul,
             m_r8, counts, want_out, cfg);
     }

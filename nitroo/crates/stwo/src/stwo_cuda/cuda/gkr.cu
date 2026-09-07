@@ -482,7 +482,7 @@ void gkr_read_partials(const qm31 *dev, uint32_t n_pairs, qm31 *out_host) {
 // kernel computes per look, under the link's own weights. The accumulation
 // order is the caller's weight order, which is the host builder's -- and field
 // addition is exact either way, so the column is the same column.
-__global__ void b65_link_coeff_kernel(m31 **__restrict__ cols,
+__global__ void zk_link_coeff_kernel(m31 **__restrict__ cols,
                                       const qm31 *__restrict__ w,
                                       unsigned n_cols, qm31 k,
                                       qm31 *__restrict__ out, unsigned n_rows) {
@@ -495,14 +495,14 @@ __global__ void b65_link_coeff_kernel(m31 **__restrict__ cols,
     out[row] = acc;
 }
 
-void b65_link_coeff(m31 **cols, const qm31 *w_host, unsigned n_cols, qm31 k,
+void zk_link_coeff(m31 **cols, const qm31 *w_host, unsigned n_cols, qm31 k,
                     qm31 *out, unsigned n_rows) {
     cudaGetLastError();
     m31 **d_cols = n_cols ? clone_to_device<m31 *>(cols, n_cols) : nullptr;
     qm31 *d_w = n_cols ? clone_to_device<qm31>((qm31 *)w_host, n_cols) : nullptr;
     const unsigned block = n_rows < 256u ? n_rows : 256u;
     const unsigned blocks = (n_rows + block - 1u) / block;
-    b65_link_coeff_kernel<<<blocks, block>>>(d_cols, d_w, n_cols, k, out, n_rows);
+    zk_link_coeff_kernel<<<blocks, block>>>(d_cols, d_w, n_cols, k, out, n_rows);
     ASSERT_CUDA_SUCCESS(cudaDeviceSynchronize());
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
     if (d_cols) cuda_free_memory(d_cols);
@@ -532,7 +532,7 @@ void b65_link_coeff(m31 **cols, const qm31 *w_host, unsigned n_cols, qm31 k,
 // One qm31 column split into the four M31 coordinate columns the tree commits.
 // This is the host's `into_secure_column_by_coords`, whose packed layout is the
 // same coordinate order (`to_m31_array`) that `qm31` has in memory here.
-__global__ void b65_link_split_kernel(const qm31 *__restrict__ src,
+__global__ void zk_link_split_kernel(const qm31 *__restrict__ src,
                                       m31 *__restrict__ o0, m31 *__restrict__ o1,
                                       m31 *__restrict__ o2, m31 *__restrict__ o3,
                                       unsigned n_rows) {
@@ -545,12 +545,12 @@ __global__ void b65_link_split_kernel(const qm31 *__restrict__ src,
     o3[row] = v.b.b;
 }
 
-void b65_link_split(const qm31 *src, m31 *o0, m31 *o1, m31 *o2, m31 *o3,
+void zk_link_split(const qm31 *src, m31 *o0, m31 *o1, m31 *o2, m31 *o3,
                     unsigned n_rows) {
     cudaGetLastError();
     const unsigned block = n_rows < GKR_LINK_BLOCK ? n_rows : GKR_LINK_BLOCK;
     const unsigned blocks = (n_rows + block - 1u) / block;
-    b65_link_split_kernel<<<blocks, block>>>(src, o0, o1, o2, o3, n_rows);
+    zk_link_split_kernel<<<blocks, block>>>(src, o0, o1, o2, o3, n_rows);
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
 }
 
@@ -561,7 +561,7 @@ void b65_link_split(const qm31 *src, m31 *o0, m31 *o1, m31 *o2, m31 *o3,
 // host builder asserts loudly so a weight bug fails the prover rather than only
 // the verifier. The per-block partials come home and the host adds them, which
 // changes nothing: field addition is exact and associative.
-__global__ void b65_link_terms_kernel(const qm31 *__restrict__ coeff,
+__global__ void zk_link_terms_kernel(const qm31 *__restrict__ coeff,
                                       const qm31 *__restrict__ eq, qm31 shift,
                                       qm31 *__restrict__ out,
                                       qm31 *__restrict__ partials,
@@ -583,11 +583,11 @@ __global__ void b65_link_terms_kernel(const qm31 *__restrict__ coeff,
     if (threadIdx.x == 0) partials[blockIdx.x] = red[0];
 }
 
-void b65_link_terms(const qm31 *coeff, const qm31 *eq, qm31 shift, qm31 *out,
+void zk_link_terms(const qm31 *coeff, const qm31 *eq, qm31 shift, qm31 *out,
                     qm31 *partials_host, unsigned n_blocks, unsigned n_rows) {
     cudaGetLastError();
     qm31 *d_part = cuda_malloc<qm31>(n_blocks);
-    b65_link_terms_kernel<<<n_blocks, GKR_LINK_BLOCK>>>(coeff, eq, shift, out,
+    zk_link_terms_kernel<<<n_blocks, GKR_LINK_BLOCK>>>(coeff, eq, shift, out,
                                                         d_part, n_rows);
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
     cuda_mem_copy_device_to_host<qm31>(d_part, partials_host, n_blocks);
@@ -602,7 +602,7 @@ void b65_link_terms(const qm31 *coeff, const qm31 *eq, qm31 shift, qm31 *out,
 // the trailing-ones count of the half-coset row, so the whole column is two
 // small tables and an index map. The host loop walks half-coset rows and
 // scatters two rows each; so does this, thread for row.
-__global__ void b65_link_carry_kernel(const qm31 *__restrict__ half0,
+__global__ void zk_link_carry_kernel(const qm31 *__restrict__ half0,
                                       const qm31 *__restrict__ half1,
                                       unsigned log_size,
                                       m31 *__restrict__ o0, m31 *__restrict__ o1,
@@ -622,7 +622,7 @@ __global__ void b65_link_carry_kernel(const qm31 *__restrict__ half0,
     o0[r1] = v1.a.a; o1[r1] = v1.a.b; o2[r1] = v1.b.a; o3[r1] = v1.b.b;
 }
 
-void b65_link_carry(const qm31 *half0_host, const qm31 *half1_host, unsigned n_vars,
+void zk_link_carry(const qm31 *half0_host, const qm31 *half1_host, unsigned n_vars,
                     unsigned log_size, m31 *o0, m31 *o1, m31 *o2, m31 *o3) {
     cudaGetLastError();
     qm31 *d0 = clone_to_device<qm31>((qm31 *)half0_host, n_vars);
@@ -630,7 +630,7 @@ void b65_link_carry(const qm31 *half0_host, const qm31 *half1_host, unsigned n_v
     const unsigned half = (1u << log_size) / 2u;
     const unsigned block = half < GKR_LINK_BLOCK ? half : GKR_LINK_BLOCK;
     const unsigned blocks = (half + block - 1u) / block;
-    b65_link_carry_kernel<<<blocks, block>>>(d0, d1, log_size, o0, o1, o2, o3, half);
+    zk_link_carry_kernel<<<blocks, block>>>(d0, d1, log_size, o0, o1, o2, o3, half);
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
     cuda_free_memory(d0);
     cuda_free_memory(d1);
@@ -656,7 +656,7 @@ void b65_link_carry(const qm31 *half0_host, const qm31 *half1_host, unsigned n_v
 
 // The four coordinate arrays are scanned in one launch each pass: `blockIdx.y`
 // picks the array and `stride` is its pitch.
-__global__ void b65_link_scan_tile_kernel(m31 *data, m31 *bsums, unsigned n,
+__global__ void zk_link_scan_tile_kernel(m31 *data, m31 *bsums, unsigned n,
                                           unsigned stride, unsigned n_blocks) {
     __shared__ m31 sh[LINK_SCAN_THREADS];
     m31 *arr = data + (size_t)blockIdx.y * stride;
@@ -686,7 +686,7 @@ __global__ void b65_link_scan_tile_kernel(m31 *data, m31 *bsums, unsigned n,
 }
 
 // Every tile but the first takes its predecessors' total.
-__global__ void b65_link_scan_add_kernel(m31 *data, const m31 *bsums, unsigned n,
+__global__ void zk_link_scan_add_kernel(m31 *data, const m31 *bsums, unsigned n,
                                          unsigned stride, unsigned n_blocks) {
     if (blockIdx.x == 0) return;
     m31 *arr = data + (size_t)blockIdx.y * stride;
@@ -706,19 +706,19 @@ static void link_scan(m31 *data, unsigned n, unsigned stride, unsigned n_arrays)
     const unsigned n_blocks = (n + LINK_SCAN_TILE - 1u) / LINK_SCAN_TILE;
     m31 *bsums = cuda_malloc<m31>(n_blocks * n_arrays);
     const dim3 grid(n_blocks, n_arrays);
-    b65_link_scan_tile_kernel<<<grid, LINK_SCAN_THREADS>>>(data, bsums, n, stride,
+    zk_link_scan_tile_kernel<<<grid, LINK_SCAN_THREADS>>>(data, bsums, n, stride,
                                                            n_blocks);
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
     if (n_blocks > 1) {
         link_scan(bsums, n_blocks, n_blocks, n_arrays);
-        b65_link_scan_add_kernel<<<grid, LINK_SCAN_THREADS>>>(data, bsums, n, stride,
+        zk_link_scan_add_kernel<<<grid, LINK_SCAN_THREADS>>>(data, bsums, n, stride,
                                                               n_blocks);
         ASSERT_CUDA_SUCCESS(cudaGetLastError());
     }
     cuda_free_memory(bsums);
 }
 
-__global__ void b65_link_gather_kernel(const qm31 *__restrict__ src,
+__global__ void zk_link_gather_kernel(const qm31 *__restrict__ src,
                                        m31 *__restrict__ dst, unsigned log_size,
                                        unsigned n) {
     const unsigned c = threadIdx.x + blockDim.x * blockIdx.x;
@@ -732,7 +732,7 @@ __global__ void b65_link_gather_kernel(const qm31 *__restrict__ src,
     dst[(size_t)3 * n + c] = v.b.b;
 }
 
-__global__ void b65_link_scatter_kernel(const m31 *__restrict__ src,
+__global__ void zk_link_scatter_kernel(const m31 *__restrict__ src,
                                         m31 *__restrict__ o0, m31 *__restrict__ o1,
                                         m31 *__restrict__ o2, m31 *__restrict__ o3,
                                         unsigned log_size, unsigned n) {
@@ -746,17 +746,17 @@ __global__ void b65_link_scatter_kernel(const m31 *__restrict__ src,
     o3[i] = src[(size_t)3 * n + c];
 }
 
-void b65_link_prefix(const qm31 *src, m31 *o0, m31 *o1, m31 *o2, m31 *o3,
+void zk_link_prefix(const qm31 *src, m31 *o0, m31 *o1, m31 *o2, m31 *o3,
                      unsigned log_size) {
     cudaGetLastError();
     const unsigned n = 1u << log_size;
     m31 *scratch = cuda_malloc<m31>(4u * n);
     const unsigned block = n < GKR_LINK_BLOCK ? n : GKR_LINK_BLOCK;
     const unsigned blocks = (n + block - 1u) / block;
-    b65_link_gather_kernel<<<blocks, block>>>(src, scratch, log_size, n);
+    zk_link_gather_kernel<<<blocks, block>>>(src, scratch, log_size, n);
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
     link_scan(scratch, n, n, 4u);
-    b65_link_scatter_kernel<<<blocks, block>>>(scratch, o0, o1, o2, o3, log_size, n);
+    zk_link_scatter_kernel<<<blocks, block>>>(scratch, o0, o1, o2, o3, log_size, n);
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
     cuda_free_memory(scratch);
 }

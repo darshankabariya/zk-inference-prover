@@ -10,7 +10,7 @@ this step the CUDA backend is correct but evaluates constraints on the CPU.
 2. `m2b_kernels.py --fork ../nitroo --gen STORE` copies the constraint kernels
    into the vendored fork's CUDA tree and adds them to its source list and
    dispatch; `m4b_kernels.py --fork ../nitroo --gen STORE` does the same for the
-   generation kernels together with the hand-written `gen_b65_logup.cu`.
+   generation kernels together with the hand-written `gen_zk_logup.cu`.
 3. `cudakernels.rs` and `gencudakernels.rs` from the store replace the stubs in
    `prover/src/`, and the CUDA backend is rebuilt.
 

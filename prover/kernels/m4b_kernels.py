@@ -1,12 +1,12 @@
 """B7a milestone 4 (18.7): install the generated *generation* kernels into the fork.
 
 The counterpart of `m2b_kernels.py`, and simpler than it, because the fork does
-not dispatch these: our own crate calls `gen_b65_dispatch` directly, so there is
+not dispatch these: our own crate calls `gen_zk_dispatch` directly, so there is
 no case to add to `evaluate_constraints.cu` and no `cuda_eval_name` to key on.
 Two asserted, idempotent edits:
 
-  1. copy `gen_b65_*.cu` / `.cuh` (from `zk-prover genemit`) and the hand-written
-     `gen_b65_logup.cu` / `.cuh` into `crates/stwo/src/stwo_cuda/cuda/`;
+  1. copy `gen_zk_*.cu` / `.cuh` (from `zk-prover genemit`) and the hand-written
+     `gen_zk_logup.cu` / `.cuh` into `crates/stwo/src/stwo_cuda/cuda/`;
   2. add each `.cu` to the explicit source list in `CMakeLists.txt`.
 
 `--undo` removes both.
@@ -56,7 +56,7 @@ def replace_block(path, begin, end, body, anchor):
 
 
 if UNDO:
-    for f in list(CUDA.glob("gen_b65_*")):
+    for f in list(CUDA.glob("gen_zk_*")):
         f.unlink()
     print("  removed the generation sources")
     replace_block("CMakeLists.txt", BEGIN, END, "", ANCHOR)
@@ -68,16 +68,16 @@ fams = [f["family"] for f in man["families"]]
 assert fams, "gen_manifest lists no families"
 
 srcs = []
-for f in sorted(GEN.glob("gen_b65_*.cu")) + sorted(GEN.glob("gen_b65_*.cuh")):
+for f in sorted(GEN.glob("gen_zk_*.cu")) + sorted(GEN.glob("gen_zk_*.cuh")):
     shutil.copy2(f, CUDA / f.name)
     if f.suffix == ".cu":
         srcs.append(f.name)
-# `b65_ops.cuh` is shared with 2b's kernels and both emitters write the same
-# `cudagen::OPS_CUH`; refresh it here so a fork installed before `b65_ext`
+# `zk_ops.cuh` is shared with 2b's kernels and both emitters write the same
+# `cudagen::OPS_CUH`; refresh it here so a fork installed before `zk_ext`
 # existed picks it up.
-shutil.copy2(GEN / "b65_ops.cuh", CUDA / "b65_ops.cuh")
+shutil.copy2(GEN / "zk_ops.cuh", CUDA / "zk_ops.cuh")
 
-for name in ("gen_b65_logup.cu", "gen_b65_logup.cuh"):
+for name in ("gen_zk_logup.cu", "gen_zk_logup.cuh"):
     src = HAND / name
     assert src.exists(), f"missing hand-written source {src}"
     shutil.copy2(src, CUDA / name)

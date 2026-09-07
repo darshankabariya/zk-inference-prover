@@ -14,7 +14,7 @@
 //! overhead sits against a normalisation and four table lookups and disappears.
 //! And an emit would have to be re-run for every new residual-stream shape, on the family
 //! whose *constraint* kernel took 617.7 s of ptxas before stream K split it.
-//! `b65_residual_stream_witness_gen.cuh` carries the argument in full.
+//! `zk_residual_stream_witness_gen.cuh` carries the argument in full.
 //!
 //! What the kernel needs from here is the program as *column indices*: every
 //! `Src` resolves to the columns its `(sm, ef)` pair lives in, so the kernel
@@ -91,7 +91,7 @@ struct FResidualStreamCfg {
 const NONE: u32 = u32::MAX;
 
 unsafe extern "C" {
-    fn b65_witness_gen_residual_stream(
+    fn zk_witness_gen_residual_stream(
         wit: *const u32,
         groups: *const FGroup,
         slots: *const FSlot,
@@ -290,7 +290,7 @@ pub struct DevResidualStream {
     /// B11 stream N: the same two arrays where the kernel wrote them, row-flat
     /// and in coset row order, kept alive for `devacc::residual_stream_bind`. The `Uint32Vec`
     /// owns the allocation; the bindings read it as `i32`, which is how
-    /// `b65_witness_gen_residual_stream` wrote it.
+    /// `zk_witness_gen_residual_stream` wrote it.
     pub d_in_nat: Uint32Vec,
     pub d_out_nat: Uint32Vec,
     /// the two arrays' row widths, which are the bindings' strides
@@ -419,7 +419,7 @@ pub fn residual_stream_component_dev(w: &ResidualStreamWitness, prog: &Prog, rou
 
     let t_k = std::time::Instant::now();
     unsafe {
-        b65_witness_gen_residual_stream(
+        zk_witness_gen_residual_stream(
             d_wit.device_ptr,
             d_groups.device_ptr as *const FGroup,
             d_slots.device_ptr as *const FSlot,

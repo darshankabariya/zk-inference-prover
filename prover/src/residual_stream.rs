@@ -722,7 +722,7 @@ impl FrameworkEval for ResidualStreamEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_residual_stream_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_residual_stream_eval" }
 
     fn log_size(&self) -> u32 {
         self.log_rows
@@ -1941,7 +1941,7 @@ fn src_cols_any(prog: &Prog, s: &Src, round: Round) -> (usize, usize) {
 ///
 /// B11 stream N. The host reads a binding through `binding_vals`, which hands back the
 /// one regrouped vector for that group or output. The device has no regrouped
-/// vectors -- `b65_witness_gen_residual_stream` writes one array per kind, `n_leaves` or `out_w`
+/// vectors -- `zk_witness_gen_residual_stream` writes one array per kind, `n_leaves` or `out_w`
 /// `(sm, ef)` pairs to a row -- so a binding is named by where its sequence starts
 /// in a row and how wide it is. Both offsets are the same running sums the witness generation
 /// itself uses: `FGroup::flat` for the leaves, and `out_slot`'s concatenation
@@ -1992,7 +1992,7 @@ fn binding_specs(r: &ResidualStreamComponent, t: &Binding)
 /// LogUp half now goes through `devfrac::frac_cols` like every other family's.
 /// The residual stream was the last component with no device route at all -- not for want
 /// of a kernel, which stream K's split emitter has compiled and installed since
-/// `b65_residual_stream_eval` fit under the cap, but because nothing ever called the
+/// `zk_residual_stream_eval` fit under the cap, but because nothing ever called the
 /// router. The bindings stay on the host: they are a serial Horner fold over the
 /// component's own values, which is `devacc`'s shape and not this stream's.
 pub fn residual_stream_interaction(r: &ResidualStreamComponent, rels: &ResidualStreamRels,
@@ -2217,7 +2217,7 @@ impl FrameworkEval for GTableEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_residual_stream_table_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_residual_stream_table_eval" }
 
     fn log_size(&self) -> u32 {
         self.log_rows

@@ -128,7 +128,7 @@ pub const QNZ_COLS: [&str; 2] = ["b6_qnz_q", "b6_qnz_nz"];
 /// Selectors of the composed dequant component's Freivalds claimed side.
 pub const DEQ_SEL: [&str; 5] = ["nofirst", "last", "m1", "m2", "end"];
 pub fn deq_sel(tag: &str, name: &str) -> PreProcessedColumnId {
-    id(format!("b65_deq{tag}_{name}"))
+    id(format!("zk_deq{tag}_{name}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -592,7 +592,7 @@ impl FrameworkEval for DequantEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_dequant_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_dequant_eval" }
 
     fn log_size(&self) -> u32 {
         self.log_rows
@@ -999,7 +999,7 @@ impl FrameworkEval for TableEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_table_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "zk_table_eval" }
 
     fn log_size(&self) -> u32 {
         self.log_rows

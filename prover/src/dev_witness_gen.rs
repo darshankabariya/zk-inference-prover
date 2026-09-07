@@ -39,7 +39,7 @@ use crate::layer::{AoLayout, AttnOut, FreivaldsLayout, Layer, Tables};
 
 // ---------------------------------------------------------------- the FFI shapes --
 
-/// Mirrors `B65Grid` in `b65_witness_gen.cuh`, field for field.
+/// Mirrors `ZkGrid` in `zk_witness_gen.cuh`, field for field.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FGrid {
@@ -64,7 +64,7 @@ impl FGrid {
     }
 }
 
-/// Mirrors `B65Mult`: one counter array with its length. A null pointer is the
+/// Mirrors `ZkMult`: one counter array with its length. A null pointer is the
 /// host's "this witness generation does not bump that table at all", and the kernel skips the
 /// call rather than counting an off-table bump.
 #[repr(C)]
@@ -149,7 +149,7 @@ pub struct FKeyTileCfg {
 }
 
 unsafe extern "C" {
-    fn b65_witness_gen_freivalds(
+    fn zk_witness_gen_freivalds(
         qx: *const i8,
         qw: *const *const i8,
         n_out: *const u32,
@@ -161,7 +161,7 @@ unsafe extern "C" {
         counts: *mut u32,
         cfg: FFreivaldsCfg,
     );
-    fn b65_witness_gen_attnout(
+    fn zk_witness_gen_attnout(
         acc: *const u32,
         den: *const u32,
         jo: *const i32,
@@ -179,7 +179,7 @@ unsafe extern "C" {
         counts: *mut u32,
         cfg: FAoCfg,
     );
-    fn b65_witness_gen_key_tile_chan(
+    fn zk_witness_gen_key_tile_chan(
         kk: *const i32,
         qq: *const i32,
         cols: *const *mut u32,
@@ -188,7 +188,7 @@ unsafe extern "C" {
         counts: *mut u32,
         cfg: FKeyTileCfg,
     );
-    fn b65_witness_gen_key_tile_grid(
+    fn zk_witness_gen_key_tile_grid(
         dd: *const i32,
         num: *const u16,
         xx: *const u16,
@@ -204,13 +204,13 @@ unsafe extern "C" {
         counts: *mut u32,
         cfg: FKeyTileCfg,
     );
-    fn b65_witness_gen_key_tile_out(
+    fn zk_witness_gen_key_tile_out(
         out: *const u32,
         cols: *const *mut u32,
         counts: *mut u32,
         cfg: FKeyTileCfg,
     );
-    fn b65_witness_gen_key_tile_tok(
+    fn zk_witness_gen_key_tile_tok(
         mm: *const u32,
         zz: *const u32,
         cols: *const *mut u32,
@@ -764,7 +764,7 @@ pub fn freivalds_component_dev(
 
     let t_k = std::time::Instant::now();
     unsafe {
-        b65_witness_gen_freivalds(
+        zk_witness_gen_freivalds(
             d_qx.device_ptr as *const i8,
             qw_ptrs.as_ptr(),
             n_out.as_ptr(),
@@ -874,7 +874,7 @@ pub fn ao_component_dev(
 
     let t_k = std::time::Instant::now();
     unsafe {
-        b65_witness_gen_attnout(
+        zk_witness_gen_attnout(
             d_acc.device_ptr,
             d_den.device_ptr,
             d_jo.device_ptr as *const i32,
@@ -945,13 +945,13 @@ pub struct DevKeyTile {
     pub logs: Vec<u32>,
     pub at: Vec<usize>,
     /// B7a milestone 4 (section 3 row 1): this key tile's exp-table counter, left
-    /// where the scatter-add put it. `b65_table_witness_gen` sums one per key tile into
+    /// where the scatter-add put it. `zk_table_witness_gen` sums one per key tile into
     /// the `m_exp` column, so with `ZK_DEVICE_TABLES=1` the 33.5 MB download and
     /// the parallel merge below never happen.
     pub m_exp: Uint32Vec,
     /// B7a milestone 4 (section 3 row 1): the five range counters this key tile's
     /// three witness generations bumped -- the key, query, value and the two `z` limbs -- and
-    /// `intsplit`'s auxiliary one where the variant has it. `b65_pre_witness_gen` sums
+    /// `intsplit`'s auxiliary one where the variant has it. `zk_pre_witness_gen` sums
     /// one per key tile into each range table's multiplicity column.
     pub m_k: Uint32Vec,
     pub m_q: Uint32Vec,
@@ -1113,7 +1113,7 @@ pub fn commit_base_dev(
 
     let t_k = std::time::Instant::now();
     unsafe {
-        b65_witness_gen_key_tile_chan(
+        zk_witness_gen_key_tile_chan(
             d_kk.device_ptr as *const i32,
             d_qq.device_ptr as *const i32,
             chan_p.as_ptr(),
@@ -1137,7 +1137,7 @@ pub fn commit_base_dev(
     };
     let m_v = zeroes(mult_r[ridx(8)].len());
     unsafe {
-        b65_witness_gen_key_tile_grid(
+        zk_witness_gen_key_tile_grid(
             d_dd.device_ptr as *const i32,
             d_num.device_ptr as *const u16,
             d_xx.as_ref().map(|d| d.device_ptr as *const u16).unwrap_or(std::ptr::null()),
@@ -1163,7 +1163,7 @@ pub fn commit_base_dev(
         let outc = uninit(lo.q, lo.g.rows);
         let out_p = ptrs(&outc);
         unsafe {
-            b65_witness_gen_key_tile_out(
+            zk_witness_gen_key_tile_out(
                 d_out.as_ref().unwrap().device_ptr,
                 out_p.as_ptr(),
                 counts.device_ptr as *mut u32,
@@ -1187,7 +1187,7 @@ pub fn commit_base_dev(
         let m_lo = zeroes(mult_r[ridx(cfg.z_lo_bits)].len());
         let m_hi = zeroes(mult_r[ridx(cfg.z_hi_bits)].len());
         unsafe {
-            b65_witness_gen_key_tile_tok(
+            zk_witness_gen_key_tile_tok(
                 d_mm.as_ref().unwrap().device_ptr,
                 d_zz.as_ref().unwrap().device_ptr,
                 tok_p.as_ptr(),
@@ -1204,7 +1204,7 @@ pub fn commit_base_dev(
     } else {
         // The two `z` range counters this component would have bumped, at their
         // real width and all zero. A diagonal block key tile makes no `z` lookups at all,
-        // but `b65_pre_witness_gen` sums one counter *per key tile* into each range
+        // but `zk_pre_witness_gen` sums one counter *per key tile* into each range
         // table's multiplicity column and asserts every one of them is the
         // table's width -- so the shape has to be there even when the content
         // is nothing.

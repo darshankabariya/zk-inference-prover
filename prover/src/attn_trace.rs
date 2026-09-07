@@ -259,7 +259,7 @@ pub fn commit_pre(a: &Attn, l: &Layouts, with_out: bool, with_rows: bool)
     // committed only when the grid has such rows.  Placed after the mask columns
     // so `msk0` -- `CHAN_SEL.len() + DIAGONAL_BLOCK_SEL.len()`, in two other files -- is
     // the index it always was.  On a prefix key tile there are no mask columns, so it
-    // lands at slot 8 of the key group, which is where `devpre`'s `b65p_sel`
+    // lands at slot 8 of the key group, which is where `devpre`'s `zk_pre_sel`
     // writes it.
     if crate::attn_air::act_id(0, a.diagonal_block, lk.g.lead).is_some() {
         // Stream JJ (E11), `witness-slack.md` section 7 item 7: `KeyEval` reads
@@ -752,7 +752,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     let m4g = air.and_then(|x| x.dev).filter(|_| crate::devacc::mode() >= 1);
     let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
     // B7a milestone 4 (section 3 row 1): the per-row layout flags, written once
-    // at witness-generation time by `b65_flags_key_tile` and read here. Before this row each of
+    // at witness-generation time by `zk_flags_key_tile` and read here. Before this row each of
     // the three kernels below recomputed them; now the AIR's selector columns
     // and this segmentation are the same array.
     let m4g_flags = air.and_then(|x| x.pre);
@@ -914,11 +914,11 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
 
     // ---- grid component -------------------------------------------------------
     // Stream CC (E11): the host backend's aimed corruption for the inert-lead-row
-    // guard, the twin of `b65_acc.cu`'s `nomask:grid` on the backend that has no
+    // guard, the twin of `zk_acc.cu`'s `nomask:grid` on the backend that has no
     // card.  See the inert-row branch of `grid_inner` below.  Off unless
     // `ZK_MUT_GRID=padnf`.
     //
-    // This replaces `B65_PAD_NF=1`, which was the same branch pointing the other
+    // This replaces `ZK_PAD_NF=1`, which was the same branch pointing the other
     // way: before the AIR carried `act` it made a padded shape *accept*, and it
     // is recorded that way in `briefs/cc-maskgrid.md` and in
     // `notes/design-notes.md`.  It now makes a padded shape *reject*, so it does

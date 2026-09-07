@@ -12,9 +12,9 @@
 //    `mul_table` are all closed forms of the *row index* -- integer bit surgery
 //    and one exact float conversion, no `exp`, no libm, nothing uploaded.
 //  * **48 key tile selectors, 0.004 GB.** `commit_pre`'s per-key-tile ACTIVE / NOFIRST
-//    / LAST / ISTART predicates, which `b65_acc.cu` has computed since 24.1 --
+//    / LAST / ISTART predicates, which `zk_acc.cu` has computed since 24.1 --
 //    at the wrong time, because `commit_pre` runs before the challenges are
-//    drawn and the accumulators run after. `b65_flags_key_tile` is that computation
+//    drawn and the accumulators run after. `zk_flags_key_tile` is that computation
 //    lifted into a kernel of its own; this file turns its array into columns.
 //
 // **What each of the three tables is, as a function of its row.**
@@ -48,60 +48,60 @@
 // The multiplicities are the other side of the same coin: they are counted from
 // the witness, and they are counted *by the witness generations*, so a probe that corrupts a
 // witness is carried into the counter it bumps before it reaches this file.
-#ifndef B65_PRE_WITNESS_GEN_CUH
-#define B65_PRE_WITNESS_GEN_CUH
+#ifndef ZK_PRE_WITNESS_GEN_CUH
+#define ZK_PRE_WITNESS_GEN_CUH
 #include "fields.cuh"
-#include "b65_acc.cuh"
+#include "zk_acc.cuh"
 
-// Which shared table a `b65_witness_gen_pre_table` call is building.
-#define B65P_KIND_NORM 0u
-#define B65P_KIND_FRAC 1u
-#define B65P_KIND_MUL 2u
-#define B65P_KIND_QNZ 3u
-#define B65P_KIND_RANGE 4u
+// Which shared table a `zk_witness_gen_pre_table` call is building.
+#define ZK_PRE_KIND_NORM 0u
+#define ZK_PRE_KIND_FRAC 1u
+#define ZK_PRE_KIND_MUL 2u
+#define ZK_PRE_KIND_QNZ 3u
+#define ZK_PRE_KIND_RANGE 4u
 
 // `bf16::Round`.
-#define B65P_ROUND_EVEN 0u
-#define B65P_ROUND_AWAY 1u
-#define B65P_ROUND_ZERO 2u
+#define ZK_PRE_ROUND_EVEN 0u
+#define ZK_PRE_ROUND_AWAY 1u
+#define ZK_PRE_ROUND_ZERO 2u
 
 // `[128, 256)` scaled by `2^a` has biased exponent `a + EXP_BIAS` (`bf16.rs`).
-#define B65P_EXP_BIAS 134u
+#define ZK_PRE_EXP_BIAS 134u
 
 // The negative controls (`ZK_MUT_PREPROCESSED`), each a way this design could
 // plausibly be wrong. Section 5 rule 5: each takes a `:target` suffix, because
 // unaimed every one of them shows at the first column compared and the run then
 // says nothing about the other seven targets.
-#define B65P_MUT_NONE 0u
-#define B65P_MUT_NOPERM 1u      // write at the coset row, not the committed one
-#define B65P_MUT_NOSTICKY 2u    // norm, frac: drop the sticky bit
-#define B65P_MUT_NOROUND 3u     // norm, mul: truncate instead of round-to-nearest-even
-#define B65P_MUT_NORENORM 4u    // norm, mul: skip the `m + up == 256` renormalisation
-#define B65P_MUT_NOPAD 5u       // norm, frac: give a row past the table's end a value
-#define B65P_MUT_NOKWIN 6u      // frac: `k = log2(d)`, off by one window
-#define B65P_MUT_ONECOUNTER 7u  // sum one component's counter instead of every component's
-#define B65P_MUT_NOLAST 8u      // chan, key: LAST from `chunk + 1 == chunks`
-#define B65P_MUT_NOFIRSTROW 9u  // chan, key, row: drop a selector's `j > 0` guard
-#define B65P_MUT_NOACTIVE 10u   // chan, key: an inert lead row reads as in-group
-#define B65P_MUT_NOISTART 11u   // chan, key, row: the instance start is never marked
-#define B65P_MUT_NOINV 12u      // key: the scale column carries `delta`, not `1/delta`
-#define B65P_MUT_NOIDENT 13u    // key: an inert row's scale is `1/delta[0]`, not 1
-#define B65P_MUT_NOPATCH 14u    // skip the rows where this run's table is not the closed form
+#define ZK_PRE_MUT_NONE 0u
+#define ZK_PRE_MUT_NOPERM 1u      // write at the coset row, not the committed one
+#define ZK_PRE_MUT_NOSTICKY 2u    // norm, frac: drop the sticky bit
+#define ZK_PRE_MUT_NOROUND 3u     // norm, mul: truncate instead of round-to-nearest-even
+#define ZK_PRE_MUT_NORENORM 4u    // norm, mul: skip the `m + up == 256` renormalisation
+#define ZK_PRE_MUT_NOPAD 5u       // norm, frac: give a row past the table's end a value
+#define ZK_PRE_MUT_NOKWIN 6u      // frac: `k = log2(d)`, off by one window
+#define ZK_PRE_MUT_ONECOUNTER 7u  // sum one component's counter instead of every component's
+#define ZK_PRE_MUT_NOLAST 8u      // chan, key: LAST from `chunk + 1 == chunks`
+#define ZK_PRE_MUT_NOFIRSTROW 9u  // chan, key, row: drop a selector's `j > 0` guard
+#define ZK_PRE_MUT_NOACTIVE 10u   // chan, key: an inert lead row reads as in-group
+#define ZK_PRE_MUT_NOISTART 11u   // chan, key, row: the instance start is never marked
+#define ZK_PRE_MUT_NOINV 12u      // key: the scale column carries `delta`, not `1/delta`
+#define ZK_PRE_MUT_NOIDENT 13u    // key: an inert row's scale is `1/delta[0]`, not 1
+#define ZK_PRE_MUT_NOPATCH 14u    // skip the rows where this run's table is not the closed form
 
 // Which family a defect is aimed at. `norm`/`frac`/`mul`/`qnz`/`range` are the
 // shared tables (each covering that table's own multiplicity column too), and
 // `chan`/`key`/`row` are the key tile's three sub-components.
-#define B65P_AT_NORM 0u
-#define B65P_AT_FRAC 1u
-#define B65P_AT_MUL 2u
-#define B65P_AT_QNZ 3u
-#define B65P_AT_RANGE 4u
-#define B65P_AT_CHAN 5u
-#define B65P_AT_KEY 6u
-#define B65P_AT_ROW 7u
-#define B65P_AT_ALL 8u
+#define ZK_PRE_AT_NORM 0u
+#define ZK_PRE_AT_FRAC 1u
+#define ZK_PRE_AT_MUL 2u
+#define ZK_PRE_AT_QNZ 3u
+#define ZK_PRE_AT_RANGE 4u
+#define ZK_PRE_AT_CHAN 5u
+#define ZK_PRE_AT_KEY 6u
+#define ZK_PRE_AT_ROW 7u
+#define ZK_PRE_AT_ALL 8u
 
-struct B65PreCfg {
+struct ZkPreCfg {
     unsigned kind;
     unsigned log_rows;   // the committed height, a power of two
     unsigned rows;       // `1 << log_rows`
@@ -115,14 +115,14 @@ struct B65PreCfg {
     unsigned at;         // which family the defect is aimed at
 };
 
-struct B65SelCfg {
-    unsigned shape;      // `B65A_SHAPE_CHAN` / `_KEY` / `_TOK`
-    B65AccGrid g;        // the sub-component's grid; `rows`/`log_rows` only for tok
+struct ZkSelCfg {
+    unsigned shape;      // `ZK_ACC_SHAPE_CHAN` / `_KEY` / `_TOK`
+    ZkAccGrid g;        // the sub-component's grid; `rows`/`log_rows` only for tok
     unsigned ctx;        // `C`, for `split(g, C).0` -- the key component only
     unsigned n_insts;
     unsigned with_scale; // the key component's scale column: 0 for `bf16x`
     unsigned n_cols;     // 5, 8 or 3
-    unsigned fam;        // `B65P_AT_CHAN` / `_KEY` / `_ROW`: this call's family
+    unsigned fam;        // `ZK_PRE_AT_CHAN` / `_KEY` / `_ROW`: this call's family
     unsigned mutate;
     unsigned at;         // the family the defect is aimed at
 };
@@ -135,15 +135,15 @@ struct B65SelCfg {
 // witness generations bumped, each `cfg.rows` wide. `patch_idx` / `patch_val` are the rows
 // where this run's own table is not the closed form -- `n_patch` rows of
 // `cfg.n_cols` values each, row-major, and empty on an honest run.
-extern "C" void b65_witness_gen_pre_table(const unsigned *const *counters,
+extern "C" void zk_witness_gen_pre_table(const unsigned *const *counters,
                                    const unsigned *patch_idx, const unsigned *patch_val,
                                    unsigned n_patch, m31 *const *cols, m31 *m_col,
-                                   B65PreCfg cfg);
+                                   ZkPreCfg cfg);
 
-// One key tile sub-component's selector columns, out of the flags `b65_flags_key_tile`
+// One key tile sub-component's selector columns, out of the flags `zk_flags_key_tile`
 // wrote for exactly those rows. `inv_delta` is the master exp table's key
 // scale, inverted, per instance -- null unless the key component wants it.
-extern "C" void b65_witness_gen_sel(const unsigned *flags, m31 *const *cols,
-                             const m31 *inv_delta, B65SelCfg cfg);
+extern "C" void zk_witness_gen_sel(const unsigned *flags, m31 *const *cols,
+                             const m31 *inv_delta, ZkSelCfg cfg);
 
 #endif

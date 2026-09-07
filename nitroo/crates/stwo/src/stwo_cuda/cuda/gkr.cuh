@@ -68,7 +68,7 @@ void gkr_read_partials(const qm31 *dev, uint32_t n_pairs, qm31 *out_host);
 // B11 stream T: the link's coefficient column, `konst + sum_j w_j * col_j`,
 // folded over device-resident base columns.
 extern "C"
-void b65_link_coeff(m31 **cols, const qm31 *w_host, unsigned n_cols, qm31 k,
+void zk_link_coeff(m31 **cols, const qm31 *w_host, unsigned n_cols, qm31 k,
                     qm31 *out, unsigned n_rows);
 
 // B11 stream U: the rest of the link's committed columns, built beside the
@@ -77,25 +77,25 @@ void b65_link_coeff(m31 **cols, const qm31 *w_host, unsigned n_cols, qm31 k,
 
 // One qm31 column into the four M31 coordinate columns the tree commits.
 extern "C"
-void b65_link_split(const qm31 *src, m31 *o0, m31 *o1, m31 *o2, m31 *o3,
+void zk_link_split(const qm31 *src, m31 *o0, m31 *o1, m31 *o2, m31 *o3,
                     unsigned n_rows);
 
 // `out[row] = coeff[row] * eq[row] - shift`, and the unshifted products' total
 // as per-block partials for the host to add into the claim check. A null `out`
 // asks for the total alone.
 extern "C"
-void b65_link_terms(const qm31 *coeff, const qm31 *eq, qm31 shift, qm31 *out,
+void zk_link_terms(const qm31 *coeff, const qm31 *eq, qm31 shift, qm31 *out,
                     qm31 *partials_host, unsigned n_blocks, unsigned n_rows);
 
 // The succinct carry-quotient column, from its two per-half-coset tables.
 extern "C"
-void b65_link_carry(const qm31 *half0_host, const qm31 *half1_host, unsigned n_vars,
+void zk_link_carry(const qm31 *half0_host, const qm31 *half1_host, unsigned n_vars,
                     unsigned log_size, m31 *o0, m31 *o1, m31 *o2, m31 *o3);
 
 // The inclusive prefix sum in coset order of a qm31 column held in bit-reversed
 // CircleDomain order, into the four coordinate columns.
 extern "C"
-void b65_link_prefix(const qm31 *src, m31 *o0, m31 *o1, m31 *o2, m31 *o3,
+void zk_link_prefix(const qm31 *src, m31 *o0, m31 *o1, m31 *o2, m31 *o3,
                      unsigned log_size);
 
 #endif // GKR_H

@@ -1,26 +1,26 @@
 // B7a milestone 4 (section 3 row 1): 4a's last 79 columns.
 #include "fields.cuh"
 #include "utils.cuh"
-#include "b65_pre_witness_gen.cuh"
+#include "zk_pre_witness_gen.cuh"
 
-#define B65P_BLOCK 256u
+#define ZK_PRE_BLOCK 256u
 
 // Is this defect aimed at this family?
-__device__ __forceinline__ bool b65p_hit(unsigned mutate, unsigned at, unsigned mut,
+__device__ __forceinline__ bool zk_pre_hit(unsigned mutate, unsigned at, unsigned mut,
                                          unsigned fam) {
-    return mutate == mut && (at == fam || at == B65P_AT_ALL);
+    return mutate == mut && (at == fam || at == ZK_PRE_AT_ALL);
 }
 
 // ============================================================ the four tables ==
 
 // `Round::carry`: given the 8-bit significand, the round bit and the sticky
 // flag, does the significand step up? `bf16.rs`, arm for arm.
-__device__ __forceinline__ unsigned b65p_carry(unsigned round, unsigned m, unsigned rb,
+__device__ __forceinline__ unsigned zk_pre_carry(unsigned round, unsigned m, unsigned rb,
                                                unsigned st) {
-    if (round == B65P_ROUND_AWAY) {
+    if (round == ZK_PRE_ROUND_AWAY) {
         return rb;
     }
-    if (round == B65P_ROUND_ZERO) {
+    if (round == ZK_PRE_ROUND_ZERO) {
         return 0u;
     }
     return rb & (st | (m & 1u));
@@ -32,7 +32,7 @@ __device__ __forceinline__ unsigned b65p_carry(unsigned round, unsigned m, unsig
 // sixteen zero low bits and the round-to-nearest-even step is the identity --
 // the conversion is exact and this is the same bit surgery the host runs, not
 // an approximation of it.
-__device__ __forceinline__ unsigned short b65p_bf16_small(unsigned m2) {
+__device__ __forceinline__ unsigned short zk_pre_bf16_small(unsigned m2) {
     const unsigned u = __float_as_uint((float)m2);
     const unsigned bias = 0x7fffu + ((u >> 16) & 1u);
     return (unsigned short)((u + bias) >> 16);
@@ -40,15 +40,15 @@ __device__ __forceinline__ unsigned short b65p_bf16_small(unsigned m2) {
 
 // `bf16::norm_table`'s row `d`, into `o[0..6]` = `(m2, ph, st, m7, expfield, nz)`
 // -- the order `compose.rs`'s `get` array reads the struct in.
-__device__ __forceinline__ void b65p_norm_row(const B65PreCfg &cfg, unsigned d,
+__device__ __forceinline__ void zk_pre_norm_row(const ZkPreCfg &cfg, unsigned d,
                                               unsigned *o) {
-    const bool nopad = b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOPAD, B65P_AT_NORM);
+    const bool nopad = zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOPAD, ZK_PRE_AT_NORM);
     if (d == 0u || (d >= cfg.real_rows && !nopad)) {
         return;  // the zero row, and every row past the table's own length
     }
     if (d < 256u) {
         // the exactly-representable small magnitudes: `mag = M2 < 256`, `ph = 1`
-        const unsigned short b = b65p_bf16_small(d);
+        const unsigned short b = zk_pre_bf16_small(d);
         o[0] = d;
         o[1] = 1u;
         o[3] = b & 0x7fu;
@@ -65,17 +65,17 @@ __device__ __forceinline__ void b65p_norm_row(const B65PreCfg &cfg, unsigned d,
     const unsigned rem = idx % per_k;
     const unsigned m2 = 256u + (cfg.sticky ? (rem >> 1) : rem);
     unsigned st = cfg.sticky ? (rem & 1u) : 0u;
-    if (b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOSTICKY, B65P_AT_NORM)) {
+    if (zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOSTICKY, ZK_PRE_AT_NORM)) {
         st = 0u;
     }
     // `m` in [128, 256); `m + up` reaches 256 only from `m = 255, rb = 1`, which
     // renormalises to significand 128 one binade up.
     const unsigned m = m2 >> 1, rb = m2 & 1u;
-    const unsigned up = b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOROUND, B65P_AT_NORM)
+    const unsigned up = zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOROUND, ZK_PRE_AT_NORM)
                             ? 0u
-                            : b65p_carry(cfg.round, m, rb, st);
+                            : zk_pre_carry(cfg.round, m, rb, st);
     unsigned msig = m + up, extra = 0u;
-    if (msig == 256u && !b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NORENORM, B65P_AT_NORM)) {
+    if (msig == 256u && !zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NORENORM, ZK_PRE_AT_NORM)) {
         msig = 128u;
         extra = 1u;
     }
@@ -83,7 +83,7 @@ __device__ __forceinline__ void b65p_norm_row(const B65PreCfg &cfg, unsigned d,
     o[1] = 1u << k;
     o[2] = st;
     o[3] = msig - 128u;
-    o[4] = k + 1u + extra + B65P_EXP_BIAS;
+    o[4] = k + 1u + extra + ZK_PRE_EXP_BIAS;
     o[5] = 1u;
 }
 
@@ -92,14 +92,14 @@ __device__ __forceinline__ void b65p_norm_row(const B65PreCfg &cfg, unsigned d,
 // The rows are `(2^k, r, ..)` for `k = 0..=kmax` and `r = 0..2^k`, one zero row
 // first, so `d` and `k` are related by `2^k <= d < 2^(k+1)`: the window is a
 // leading-zero count and `r` is what is left of `d` below it.
-__device__ __forceinline__ void b65p_frac_row(const B65PreCfg &cfg, unsigned d,
+__device__ __forceinline__ void zk_pre_frac_row(const ZkPreCfg &cfg, unsigned d,
                                               unsigned *o) {
-    const bool nopad = b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOPAD, B65P_AT_FRAC);
+    const bool nopad = zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOPAD, ZK_PRE_AT_FRAC);
     if (d == 0u || (d >= cfg.real_rows && !nopad)) {
         return;
     }
     unsigned w = d;
-    if (b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOKWIN, B65P_AT_FRAC)) {
+    if (zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOKWIN, ZK_PRE_AT_FRAC)) {
         w = d - 1u;  // the window boundary, off by one
     }
     const unsigned k = w == 0u ? 0u : (31u - __clz(w));
@@ -107,7 +107,7 @@ __device__ __forceinline__ void b65p_frac_row(const B65PreCfg &cfg, unsigned d,
     o[0] = 1u << k;
     o[1] = r;
     o[2] = (cfg.sticky && r != 0u &&
-            !b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOSTICKY, B65P_AT_FRAC))
+            !zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOSTICKY, ZK_PRE_AT_FRAC))
                ? 1u
                : 0u;
 }
@@ -117,7 +117,7 @@ __device__ __forceinline__ void b65p_frac_row(const B65PreCfg &cfg, unsigned d,
 // `(128 + a)(128 + b)` is a 16-bit integer in `[2^14, 2^16)`, so the product's
 // significand is the top 8 bits and the binade shift is its 16th bit. The table
 // has exactly `2^14` rows, so there is no padded arm here.
-__device__ __forceinline__ void b65p_mul_row(const B65PreCfg &cfg, unsigned d,
+__device__ __forceinline__ void zk_pre_mul_row(const ZkPreCfg &cfg, unsigned d,
                                              unsigned *o) {
     if (d >= cfg.real_rows) {
         return;
@@ -129,11 +129,11 @@ __device__ __forceinline__ void b65p_mul_row(const B65PreCfg &cfg, unsigned d,
     const unsigned m = p >> shift;
     const unsigned rb = (p >> (shift - 1u)) & 1u;
     const unsigned st = (p & ((1u << (shift - 1u)) - 1u)) != 0u ? 1u : 0u;
-    const unsigned up = b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOROUND, B65P_AT_MUL)
+    const unsigned up = zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOROUND, ZK_PRE_AT_MUL)
                             ? 0u
-                            : b65p_carry(cfg.round, m, rb, st);
+                            : zk_pre_carry(cfg.round, m, rb, st);
     unsigned msig = m + up, extra = 0u;
-    if (msig == 256u && !b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NORENORM, B65P_AT_MUL)) {
+    if (msig == 256u && !zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NORENORM, ZK_PRE_AT_MUL)) {
         msig = 128u;
         extra = 1u;
     }
@@ -147,36 +147,36 @@ __device__ __forceinline__ void b65p_mul_row(const B65PreCfg &cfg, unsigned d,
 //
 // The cells are written raw, not reduced: `common.rs`'s `m31_u32` is
 // `M31::from_u32_unchecked` and every value here is already a field element.
-__global__ void b65p_table(const unsigned *const *__restrict__ counters,
+__global__ void zk_pre_table(const unsigned *const *__restrict__ counters,
                            m31 *const *__restrict__ cols, m31 *__restrict__ m_col,
-                           const B65PreCfg cfg) {
+                           const ZkPreCfg cfg) {
     const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= cfg.rows) {
         return;
     }
-    const unsigned fam = cfg.kind == B65P_KIND_NORM    ? B65P_AT_NORM
-                         : cfg.kind == B65P_KIND_FRAC  ? B65P_AT_FRAC
-                         : cfg.kind == B65P_KIND_MUL   ? B65P_AT_MUL
-                         : cfg.kind == B65P_KIND_QNZ   ? B65P_AT_QNZ
-                                                       : B65P_AT_RANGE;
+    const unsigned fam = cfg.kind == ZK_PRE_KIND_NORM    ? ZK_PRE_AT_NORM
+                         : cfg.kind == ZK_PRE_KIND_FRAC  ? ZK_PRE_AT_FRAC
+                         : cfg.kind == ZK_PRE_KIND_MUL   ? ZK_PRE_AT_MUL
+                         : cfg.kind == ZK_PRE_KIND_QNZ   ? ZK_PRE_AT_QNZ
+                                                       : ZK_PRE_AT_RANGE;
     // the coset row this committed row holds; `noperm` is the control that says
     // the permutation is load-bearing, and `eval_of` is exactly what it replaces
-    const unsigned d = b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOPERM, fam)
+    const unsigned d = zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOPERM, fam)
                            ? i
-                           : b65a_perm(i, cfg.log_rows);
+                           : zk_acc_perm(i, cfg.log_rows);
 
     unsigned o[6] = {0u, 0u, 0u, 0u, 0u, 0u};
     switch (cfg.kind) {
-        case B65P_KIND_NORM:
-            b65p_norm_row(cfg, d, o);
+        case ZK_PRE_KIND_NORM:
+            zk_pre_norm_row(cfg, d, o);
             break;
-        case B65P_KIND_FRAC:
-            b65p_frac_row(cfg, d, o);
+        case ZK_PRE_KIND_FRAC:
+            zk_pre_frac_row(cfg, d, o);
             break;
-        case B65P_KIND_MUL:
-            b65p_mul_row(cfg, d, o);
+        case ZK_PRE_KIND_MUL:
+            zk_pre_mul_row(cfg, d, o);
             break;
-        case B65P_KIND_QNZ:
+        case ZK_PRE_KIND_QNZ:
             o[0] = d;
             o[1] = d != 0u ? 1u : 0u;
             break;
@@ -194,7 +194,7 @@ __global__ void b65p_table(const unsigned *const *__restrict__ counters,
     // table ran on the device", so the host keeps it and it stays a 4a upload.
     if (m_col != nullptr) {
         unsigned n = cfg.n_counters;
-        if (b65p_hit(cfg.mutate, cfg.at, B65P_MUT_ONECOUNTER, fam) && n > 1u) {
+        if (zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_ONECOUNTER, fam) && n > 1u) {
             n = 1u;
         }
         unsigned s = 0u;
@@ -212,48 +212,48 @@ __global__ void b65p_table(const unsigned *const *__restrict__ counters,
 // normalisation table and rebuilds the witness to match so that only the pinned
 // preprocessed root gives it away. Section 5 rule 8: a kernel that computed the
 // closed form and stopped there would repair the probe silently.
-__global__ void b65p_patch(const unsigned *__restrict__ idx,
+__global__ void zk_pre_patch(const unsigned *__restrict__ idx,
                            const unsigned *__restrict__ val, const unsigned n,
-                           m31 *const *__restrict__ cols, const B65PreCfg cfg) {
+                           m31 *const *__restrict__ cols, const ZkPreCfg cfg) {
     const unsigned t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= n) {
         return;
     }
-    const unsigned i = b65a_perm(idx[t], cfg.log_rows);
+    const unsigned i = zk_acc_perm(idx[t], cfg.log_rows);
     for (unsigned c = 0; c < cfg.n_cols; ++c) {
         cols[c][i] = (m31)val[t * cfg.n_cols + c];
     }
 }
 
 // The family a table's `kind` belongs to, on the host side of the call.
-static unsigned b65p_fam_of(unsigned kind) {
+static unsigned zk_pre_fam_of(unsigned kind) {
     switch (kind) {
-        case B65P_KIND_NORM: return B65P_AT_NORM;
-        case B65P_KIND_FRAC: return B65P_AT_FRAC;
-        case B65P_KIND_MUL: return B65P_AT_MUL;
-        case B65P_KIND_QNZ: return B65P_AT_QNZ;
-        default: return B65P_AT_RANGE;
+        case ZK_PRE_KIND_NORM: return ZK_PRE_AT_NORM;
+        case ZK_PRE_KIND_FRAC: return ZK_PRE_AT_FRAC;
+        case ZK_PRE_KIND_MUL: return ZK_PRE_AT_MUL;
+        case ZK_PRE_KIND_QNZ: return ZK_PRE_AT_QNZ;
+        default: return ZK_PRE_AT_RANGE;
     }
 }
 
-extern "C" void b65_witness_gen_pre_table(const unsigned *const *counters,
+extern "C" void zk_witness_gen_pre_table(const unsigned *const *counters,
                                    const unsigned *patch_idx, const unsigned *patch_val,
                                    unsigned n_patch, m31 *const *cols, m31 *m_col,
-                                   B65PreCfg cfg) {
+                                   ZkPreCfg cfg) {
     unsigned **d_cnt = nullptr;
     if (cfg.n_counters > 0u) {
         d_cnt = clone_to_device<unsigned *>(const_cast<unsigned **>(counters),
                                             cfg.n_counters);
     }
     m31 **d_cols = clone_to_device<m31 *>(const_cast<m31 **>(cols), cfg.n_cols);
-    const unsigned gb = (cfg.rows + B65P_BLOCK - 1u) / B65P_BLOCK;
-    b65p_table<<<gb, B65P_BLOCK>>>(d_cnt, d_cols, m_col, cfg);
-    const unsigned fam = b65p_fam_of(cfg.kind);
+    const unsigned gb = (cfg.rows + ZK_PRE_BLOCK - 1u) / ZK_PRE_BLOCK;
+    zk_pre_table<<<gb, ZK_PRE_BLOCK>>>(d_cnt, d_cols, m_col, cfg);
+    const unsigned fam = zk_pre_fam_of(cfg.kind);
     const bool nopatch =
-        cfg.mutate == B65P_MUT_NOPATCH && (cfg.at == fam || cfg.at == B65P_AT_ALL);
+        cfg.mutate == ZK_PRE_MUT_NOPATCH && (cfg.at == fam || cfg.at == ZK_PRE_AT_ALL);
     if (n_patch > 0u && !nopatch) {
-        const unsigned pb = (n_patch + B65P_BLOCK - 1u) / B65P_BLOCK;
-        b65p_patch<<<pb, B65P_BLOCK>>>(patch_idx, patch_val, n_patch, d_cols, cfg);
+        const unsigned pb = (n_patch + ZK_PRE_BLOCK - 1u) / ZK_PRE_BLOCK;
+        zk_pre_patch<<<pb, ZK_PRE_BLOCK>>>(patch_idx, patch_val, n_patch, d_cols, cfg);
     }
     ASSERT_CUDA_SUCCESS(cudaDeviceSynchronize());
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
@@ -267,7 +267,7 @@ extern "C" void b65_witness_gen_pre_table(const unsigned *const *counters,
 
 // One thread, one committed row, one key tile sub-component's selector columns.
 //
-// Every one of them is a predicate of the flags `b65_flags_key_tile` wrote for that
+// Every one of them is a predicate of the flags `zk_flags_key_tile` wrote for that
 // coset row -- which is the point: `attn_trace.rs` spells the predicates once,
 // the accumulators segment on them and the AIR reads them out of tree 0, and
 // after this row all three are the same array rather than three transcriptions
@@ -285,42 +285,42 @@ extern "C" void b65_witness_gen_pre_table(const unsigned *const *counters,
 // Stream CC (E11) adds a ninth key column, `ACTIVE` itself, when the grid leaves
 // inert lead rows -- `cfg.n_cols == 9` is how this side is told.  It is the
 // AIR's numerator-fold guard, and it is `act` unmodified, which is the whole
-// point: the accumulator in `b65_acc.cu` has gated `nf` on the same bit since it
+// point: the accumulator in `zk_acc.cu` has gated `nf` on the same bit since it
 // was written, so what lands in tree 0 is the predicate the fold already used.
 // | 6 | | ISTART | |
 // | 7 | | the key scale, inverted, per instance | |
-__global__ void b65p_sel(const unsigned *__restrict__ flags,
+__global__ void zk_pre_sel(const unsigned *__restrict__ flags,
                          m31 *const *__restrict__ cols,
-                         const m31 *__restrict__ scale, const B65SelCfg cfg) {
+                         const m31 *__restrict__ scale, const ZkSelCfg cfg) {
     const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= cfg.g.rows) {
         return;
     }
-    const unsigned j = b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOPERM, cfg.fam)
+    const unsigned j = zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOPERM, cfg.fam)
                            ? i
-                           : b65a_perm(i, cfg.g.log_rows);
+                           : zk_acc_perm(i, cfg.g.log_rows);
     const unsigned f = flags[j];
-    const bool act = (f & B65A_ACTIVE) != 0u;
-    const bool nofirst = (f & B65A_NOFIRST) != 0u;
+    const bool act = (f & ZK_ACC_ACTIVE) != 0u;
+    const bool nofirst = (f & ZK_ACC_NOFIRST) != 0u;
     // `nolast`: the group's *first* row, not its last -- `chunk + 1 == chunks`
     // where the host writes `chunk == 0`.
-    bool last = b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOLAST, cfg.fam)
+    bool last = zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOLAST, cfg.fam)
                     ? (act && !nofirst)
-                    : (f & B65A_LAST) != 0u;
+                    : (f & ZK_ACC_LAST) != 0u;
     // `noactive`: an inert lead row reads as the end of a group -- the `None`
     // arm of `matches!(row(j), Some(0))`, forgotten.
-    if (b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOACTIVE, cfg.fam) && !act) {
+    if (zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOACTIVE, cfg.fam) && !act) {
         last = true;
     }
     const bool istart =
-        b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOISTART, cfg.fam) ? false
-                                                                : (f & B65A_ISTART) != 0u;
+        zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOISTART, cfg.fam) ? false
+                                                                : (f & ZK_ACC_ISTART) != 0u;
     // every `j > 0` the host writes, in one place
     const bool pos =
-        b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOFIRSTROW, cfg.fam) ? true : (j > 0u);
+        zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOFIRSTROW, cfg.fam) ? true : (j > 0u);
     const bool endrow = j + 1u == cfg.g.rows;
 
-    if (cfg.shape == B65A_SHAPE_TOK) {
+    if (cfg.shape == ZK_ACC_SHAPE_TOK) {
         cols[0][i] = (m31)(pos ? 1u : 0u);
         cols[1][i] = (m31)(endrow ? 1u : 0u);
         cols[2][i] = (m31)(istart ? 1u : 0u);
@@ -330,7 +330,7 @@ __global__ void b65p_sel(const unsigned *__restrict__ flags,
     cols[1][i] = (m31)(last ? 1u : 0u);
     cols[2][i] = (m31)(pos ? 1u : 0u);
     cols[3][i] = (m31)(endrow ? 1u : 0u);
-    if (cfg.shape == B65A_SHAPE_CHAN) {
+    if (cfg.shape == ZK_ACC_SHAPE_CHAN) {
         cols[4][i] = (m31)(istart ? 1u : 0u);
         return;
     }
@@ -339,21 +339,21 @@ __global__ void b65p_sel(const unsigned *__restrict__ flags,
     cols[6][i] = (m31)(istart ? 1u : 0u);
 
     // The master exp table's key scale, inverted, per instance: the grid commits
-    // `d delta` and both the AIR and `b65_acc.cu`'s score accumulator divide it
+    // `d delta` and both the AIR and `zk_acc.cu`'s score accumulator divide it
     // back out. `scale` holds `1/delta` in its first `n_insts` entries and
     // `delta` itself in the next, which is what makes `noinv` a control rather
     // than an argument.
     m31 sc = 1u;
     if (cfg.with_scale != 0u) {
         unsigned grp = 0u, chunk = 0u;
-        const bool a2 = b65a_grid_row(cfg.g, j, &grp, &chunk);
+        const bool a2 = zk_acc_grid_row(cfg.g, j, &grp, &chunk);
         unsigned inst = grp / cfg.ctx;
-        if (b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOIDENT, cfg.fam)) {
+        if (zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOIDENT, cfg.fam)) {
             sc = scale[a2 ? inst : 0u];  // an inert row takes instance 0's scale
         } else if (!a2) {
             sc = 1u;
         } else {
-            if (b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOINV, cfg.fam)) {
+            if (zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOINV, cfg.fam)) {
                 inst += cfg.n_insts;  // `delta`, not `1/delta`
             }
             sc = scale[inst];
@@ -368,17 +368,17 @@ __global__ void b65p_sel(const unsigned *__restrict__ flags,
     // guard, so one control covers both faces of it.
     if (cfg.n_cols > 8u) {
         const bool act_col =
-            b65p_hit(cfg.mutate, cfg.at, B65P_MUT_NOACTIVE, cfg.fam) ? true : act;
+            zk_pre_hit(cfg.mutate, cfg.at, ZK_PRE_MUT_NOACTIVE, cfg.fam) ? true : act;
         cols[8][i] = (m31)(act_col ? 1u : 0u);
     }
 }
 
-extern "C" void b65_witness_gen_sel(const unsigned *flags, m31 *const *cols,
-                             const m31 *scale, B65SelCfg cfg) {
+extern "C" void zk_witness_gen_sel(const unsigned *flags, m31 *const *cols,
+                             const m31 *scale, ZkSelCfg cfg) {
     m31 **d_cols = clone_to_device<m31 *>(const_cast<m31 **>(cols), cfg.n_cols);
     const unsigned rows = cfg.g.rows;
-    const unsigned bw = rows < B65P_BLOCK ? rows : B65P_BLOCK;
-    b65p_sel<<<(rows + bw - 1u) / bw, bw>>>(flags, d_cols, scale, cfg);
+    const unsigned bw = rows < ZK_PRE_BLOCK ? rows : ZK_PRE_BLOCK;
+    zk_pre_sel<<<(rows + bw - 1u) / bw, bw>>>(flags, d_cols, scale, cfg);
     ASSERT_CUDA_SUCCESS(cudaDeviceSynchronize());
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
     cuda_free_memory((void *)d_cols);

@@ -613,7 +613,7 @@ impl Lower {
     ///
     ///  * **allocated by occurrence.** Two claims that happen to be equal get
     ///    two slots and two nodes, exactly as two unequal ones do -- which is
-    ///    the half of the class EE's `b65_key_eval 0x18afbca6` was (one slot and
+    ///    the half of the class EE's `zk_key_eval 0x18afbca6` was (one slot and
     ///    one instruction short of its group, because a key tile's two claims
     ///    coincided).
     ///  * **width 4, always.** The width is in the fingerprint, and whether a
@@ -1509,7 +1509,7 @@ pub fn cmd(args: &[String]) {
         for i in 0..b.rq_tabs.len() {
             go!(format!("rq_table{i}"), &b.rq_tabs[i]);
         }
-        // Stream NN, added at its merge: `b65_quant_eval` is dispatched like any
+        // Stream NN, added at its merge: `zk_quant_eval` is dispatched like any
         // other family and was in neither this list nor the two emit walks, so
         // nothing in the tree compared its lowering against the AIR it claims to
         // be.  Same reason stream OO gave for the eight it added here.
@@ -1688,13 +1688,13 @@ impl Ir {
                 Op::MulB(a, b) => format!("mul(v{a}, v{b})"),
                 Op::NegB(a) => format!("neg(v{a})"),
                 // fields.cuh has mul/add/sub for (m31, qm31) but not the mirror,
-                // so commutative ops are ordered and `sub`/`neg` use b65_ops.cuh.
+                // so commutative ops are ordered and `sub`/`neg` use zk_ops.cuh.
                 Op::AddE(a, b) => match (self.width[a], self.width[b]) {
                     (4, 1) => format!("add(v{b}, v{a})"),
                     _ => format!("add(v{a}, v{b})"),
                 },
                 Op::SubE(a, b) => match (self.width[a], self.width[b]) {
-                    (4, 1) => format!("b65_sub(v{a}, v{b})"),
+                    (4, 1) => format!("zk_sub(v{a}, v{b})"),
                     _ => format!("sub(v{a}, v{b})"),
                 },
                 Op::MulE(a, b) => match (self.width[a], self.width[b]) {
@@ -1702,7 +1702,7 @@ impl Ir {
                     _ => format!("mul(v{a}, v{b})"),
                 },
                 Op::NegE(a) => {
-                    if self.width[a] == 1 { format!("neg(v{a})") } else { format!("b65_neg(v{a})") }
+                    if self.width[a] == 1 { format!("neg(v{a})") } else { format!("zk_neg(v{a})") }
                 }
                 Op::Pack(a, b, c, d) => {
                     if self.width[i] == 1 {
@@ -1769,7 +1769,7 @@ impl Ir {
     fn emit_frac_body_for(&self, mask: Option<&[bool]>, cols: std::ops::Range<usize>) -> String {
         let mut out = self.emit_instrs_for(mask);
         let ext = |id: usize| {
-            if self.width[id] == 1 { format!("b65_ext(v{id})") } else { format!("v{id}") }
+            if self.width[id] == 1 { format!("zk_ext(v{id})") } else { format!("v{id}") }
         };
         let n = self.fracs.len();
         for c in cols {
@@ -1807,7 +1807,7 @@ impl Ir {
     fn emit_feed_body_for(&self, mask: Option<&[bool]>, cols: std::ops::Range<usize>) -> String {
         let mut out = self.emit_instrs_for(mask);
         let ext = |id: usize| {
-            if self.width[id] == 1 { format!("b65_ext(v{id})") } else { format!("v{id}") }
+            if self.width[id] == 1 { format!("zk_ext(v{id})") } else { format!("v{id}") }
         };
         let n = self.fracs.len();
         for i in (2 * cols.start)..(2 * cols.end).min(n) {
@@ -1995,7 +1995,7 @@ pub fn emit_family(family: &str, shapes: &[(String, Ir)], launch: Launch, seg_ca
          // dispatch stays keyed on `cuda_eval_name()` alone.\n\
          #include \"fields.cuh\"\n\
          #include \"utils.cuh\"\n\
-         #include \"b65_ops.cuh\"\n\
+         #include \"zk_ops.cuh\"\n\
          #include \"{fname}.cuh\"\n\n"
     );
     for (id, (name, ir)) in shapes.iter().enumerate() {
@@ -2076,11 +2076,11 @@ pub fn emit_family(family: &str, shapes: &[(String, Ir)], launch: Launch, seg_ca
          \x20   cudaStream_t stream\n\
          ) {{\n\
          \x20   cudaGetLastError();\n\
-         \x20   const B65Blob *blob = b65_blob(eval, \"{fname}\");\n\
+         \x20   const ZkBlob *blob = zk_blob(eval, \"{fname}\");\n\
          \x20   const unsigned shape = blob->shape;\n\
-         \x20   b65_check(shape < {fname}_n_shapes, \"{fname}: shape id out of range\");\n\
-         \x20   b65_check(blob->n_scalars == {fname}_nsc[shape], \"{fname}: scalar count\");\n\
-         \x20   b65_check(blob->fingerprint == {fname}_fp[shape], \"{fname}: fingerprint\");\n\
+         \x20   zk_check(shape < {fname}_n_shapes, \"{fname}: shape id out of range\");\n\
+         \x20   zk_check(blob->n_scalars == {fname}_nsc[shape], \"{fname}: scalar count\");\n\
+         \x20   zk_check(blob->fingerprint == {fname}_fp[shape], \"{fname}: fingerprint\");\n\
          \x20   const unsigned n = 1u << eval_domain_log_size;\n\
          \x20   m31 **d_t0 = trace0_evaluations_len ? clone_to_device<m31*>(trace0_evaluations, trace0_evaluations_len) : nullptr;\n\
          \x20   m31 **d_t1 = trace1_evaluations_len ? clone_to_device<m31*>(trace1_evaluations, trace1_evaluations_len) : nullptr;\n\
@@ -2088,7 +2088,7 @@ pub fn emit_family(family: &str, shapes: &[(String, Ir)], launch: Launch, seg_ca
          \x20   qm31 *d_sc = nullptr;\n\
          \x20   if (blob->n_scalars) {{\n\
          \x20       d_sc = cuda_malloc<qm31>(blob->n_scalars);\n\
-         \x20       ASSERT_CUDA_SUCCESS(cudaMemcpyAsync(d_sc, b65_scalars(blob),\n\
+         \x20       ASSERT_CUDA_SUCCESS(cudaMemcpyAsync(d_sc, zk_scalars(blob),\n\
          \x20           (size_t)blob->n_scalars * sizeof(qm31), cudaMemcpyHostToDevice, stream));\n\
          \x20   }}\n\
          \x20   const unsigned block = n < {block}u ? n : {block}u;\n\
@@ -2126,7 +2126,7 @@ pub fn emit_family(family: &str, shapes: &[(String, Ir)], launch: Launch, seg_ca
     }
     cu += &format!(
         "\x20   }}\n\
-         \x20   if (b65_launch_sync()) ASSERT_CUDA_SUCCESS(cudaStreamSynchronize(stream));\n\
+         \x20   if (zk_launch_sync()) ASSERT_CUDA_SUCCESS(cudaStreamSynchronize(stream));\n\
          \x20   ASSERT_CUDA_SUCCESS(cudaGetLastError());\n\
          \x20   if (d_t0) cuda_free_memory(d_t0);\n\
          \x20   if (d_t1) cuda_free_memory(d_t1);\n\
@@ -2176,8 +2176,8 @@ pub fn emit_family(family: &str, shapes: &[(String, Ir)], launch: Launch, seg_ca
 /// The one hand-written device header: the three operations `fields.cuh` does
 /// not provide in the direction the emitter needs, and the blob accessors.
 pub const OPS_CUH: &str = r#"// Written by hand (small), included by every generated zk-prover kernel.
-#ifndef B65_OPS_CUH
-#define B65_OPS_CUH
+#ifndef ZK_OPS_CUH
+#define ZK_OPS_CUH
 #include <cstdio>
 #include <cstdlib>
 #include "fields.cuh"
@@ -2185,30 +2185,30 @@ pub const OPS_CUH: &str = r#"// Written by hand (small), included by every gener
 
 // fields.cuh offers mul/add/sub for (m31, qm31) but not (qm31, m31), and no
 // neg(qm31). These are the mirrors the generator needs.
-HOST_DEVICE_FORCEINLINE qm31 b65_neg(qm31 x) {
+HOST_DEVICE_FORCEINLINE qm31 zk_neg(qm31 x) {
     return qm31{{neg(x.a.a), neg(x.a.b)}, {neg(x.b.a), neg(x.b.b)}};
 }
-HOST_DEVICE_FORCEINLINE qm31 b65_sub(qm31 x, m31 y) {
+HOST_DEVICE_FORCEINLINE qm31 zk_sub(qm31 x, m31 y) {
     return qm31{{sub(x.a.a, y), x.a.b}, {x.b.a, x.b.b}};
 }
 // A width-1 node lifted into the extension, for the fraction kernels: a
 // numerator is very often a bare multiplicity column.
-HOST_DEVICE_FORCEINLINE qm31 b65_ext(m31 x) {
+HOST_DEVICE_FORCEINLINE qm31 zk_ext(m31 x) {
     return qm31{{x, 0u}, {0u, 0u}};
 }
 
 // The parameter block a zk-prover eval hands the kernel in place of its raw bytes
 // (see crates/constraint-framework: FrameworkEval::cuda_eval_blob). Laid out by
 // cudagen.rs; `magic` and `fingerprint` make a stale binary a loud failure.
-#define B65_BLOB_MAGIC 0xB65C0DE1u
-struct B65Blob {
+#define ZK_BLOB_MAGIC 0xB65C0DE1u
+struct ZkBlob {
     unsigned magic;
     unsigned shape;
     unsigned n_scalars;
     unsigned fingerprint;
 };
 
-inline void b65_check(bool ok, const char *what) {
+inline void zk_check(bool ok, const char *what) {
     if (!ok) {
         fprintf(stderr, "zk-prover kernel dispatch: %s\n", what);
         fflush(stderr);
@@ -2217,9 +2217,9 @@ inline void b65_check(bool ok, const char *what) {
 }
 
 // The fork prepends a u32 eval_id to the blob (component_prover.rs).
-inline const B65Blob *b65_blob(void *eval, const char *who) {
-    const B65Blob *b = (const B65Blob *)((const unsigned char *)eval + 4);
-    if (b->magic != B65_BLOB_MAGIC) {
+inline const ZkBlob *zk_blob(void *eval, const char *who) {
+    const ZkBlob *b = (const ZkBlob *)((const unsigned char *)eval + 4);
+    if (b->magic != ZK_BLOB_MAGIC) {
         fprintf(stderr, "zk-prover kernel dispatch: %s got a blob with magic %#x\n", who, b->magic);
         fflush(stderr);
         abort();
@@ -2227,8 +2227,8 @@ inline const B65Blob *b65_blob(void *eval, const char *who) {
     return b;
 }
 
-inline const void *b65_scalars(const B65Blob *b) {
-    return (const void *)((const unsigned char *)b + sizeof(B65Blob));
+inline const void *zk_scalars(const ZkBlob *b) {
+    return (const void *)((const unsigned char *)b + sizeof(ZkBlob));
 }
 
 // B7a milestone 3: whether the launcher waits for its own kernel before
@@ -2238,7 +2238,7 @@ inline const void *b65_scalars(const B65Blob *b) {
 // stops the host from queueing the next component while this one runs. 16.5
 // measured that as 85 ms of device idle across 32 components. Default off;
 // ZK_LAUNCH_SYNC=1 restores it.
-inline bool b65_launch_sync() {
+inline bool zk_launch_sync() {
     static const bool on = [] {
         const char *v = getenv("ZK_LAUNCH_SYNC");
         return v != nullptr && v[0] != '0';
@@ -2246,7 +2246,7 @@ inline bool b65_launch_sync() {
     return on;
 }
 
-#endif // B65_OPS_CUH
+#endif // ZK_OPS_CUH
 "#;
 
 // ------------------------------------------------------------------- blob ----
@@ -2510,7 +2510,7 @@ fn fill_binding_claims(plan: &crate::compose::Plan, claims: &mut crate::compose:
     // state stream II's were in -- `nn_in`/`nn_out` are read per quantize
     // component, `key_tile_qkv` per rotated key tile and `key_tile_q` per prefix key tile, all
     // through `.get(..)`, and an unfilled one folds `x - 0` out of
-    // `b65_quant_eval` and of the diagonal block and prefix `b65_chan_eval`s. Found by
+    // `zk_quant_eval` and of the diagonal block and prefix `zk_chan_eval`s. Found by
     // this stream's own guard on its first contact with someone else's work.
     claims.nn_in = plan.quants.iter().map(|_| felt()).collect();
     claims.nn_out = plan.quants.iter().map(|_| felt()).collect();
@@ -2638,7 +2638,7 @@ pub fn emit_cmd(args: &[String]) {
         // Stream QQ (log row 61): the requantize seams and their tables.
         // `BuiltComponents::fp_rows` has walked them since stream EE and
         // `cudacheck` since stream II, but no emitter ever did -- so
-        // `b65_requant_eval` had not one shape in a 208-shape store, and all
+        // `zk_requant_eval` had not one shape in a 208-shape store, and all
         // three seams of the wired C=4K chunk took the scalar route. This is
         // not open item 21's kind: nothing folds, the family was simply never
         // asked for.
@@ -2692,7 +2692,7 @@ pub fn emit_cmd(args: &[String]) {
         // numerator wherever a key's shift is off the exp table, and at a long
         // prefix a whole `S`-key sub-key-tile can be off it for every token of the
         // chunk.  The C=16384 E11 run met exactly that on layer 2 of blocks
-        // 17-32: the prover asked for `b65_key_eval 0x67c40d82` at **744**
+        // 17-32: the prover asked for `zk_key_eval 0x67c40d82` at **744**
         // instructions where every emitted shape of that key tile is **748**, and
         // 16 chunks took the announced scalar fallback.
         //
@@ -2719,7 +2719,7 @@ pub fn emit_cmd(args: &[String]) {
         .flat_map(|(f, ss)| ss.iter().map(move |(n, i)| (f.clone(), n.clone(), i)))
         .collect();
     std::fs::write(&store, serde_json::to_vec(&flat).unwrap()).unwrap();
-    std::fs::write(dir.join("b65_ops.cuh"), OPS_CUH).unwrap();
+    std::fs::write(dir.join("zk_ops.cuh"), OPS_CUH).unwrap();
     let mut manifest = vec![];
     let mut table = String::from(
         "// Generated by `zk-prover cudaemit` (B7a milestone 2b step 3). Do not edit.\n\
@@ -3074,7 +3074,7 @@ pub fn logup_cmd(args: &[String]) {
 /// over-long shape by column range (B11 stream K), exactly as `emit_family`
 /// splits by constraint; at or under the cap the output is byte-identical.
 pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch, seg_cap: usize) -> Emitted {
-    // `cuda_eval_name()` already starts with `b65_`; don't say it twice.
+    // `cuda_eval_name()` already starts with `zk_`; don't say it twice.
     let fname = format!("gen_{family}");
     let segs: Vec<Option<Vec<Seg>>> =
         shapes.iter().map(|(_, ir)| ir.frac_segments(seg_cap)).collect();
@@ -3091,7 +3091,7 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch, s
          // straight-line code the constraint kernel runs; only the output differs.\n\
          #include \"fields.cuh\"\n\
          #include \"utils.cuh\"\n\
-         #include \"b65_ops.cuh\"\n\
+         #include \"zk_ops.cuh\"\n\
          #include \"{fname}.cuh\"\n\n"
     );
     for (id, (name, ir)) in shapes.iter().enumerate() {
@@ -3225,13 +3225,13 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch, s
          \x20   unsigned n_rows, unsigned n_cols\n\
          ) {{\n\
          \x20   cudaGetLastError();\n\
-         \x20   b65_check(shape < {fname}_n_shapes, \"{fname}: shape id out of range\");\n\
-         \x20   b65_check(fingerprint == {fname}_fp[shape], \"{fname}: fingerprint\");\n\
-         \x20   b65_check(n_sc == {fname}_nsc[shape], \"{fname}: scalar count\");\n\
-         \x20   b65_check(n_cols == {fname}_ncols[shape], \"{fname}: column count\");\n\
-         \x20   b65_check(n_pre >= {fname}_npre[shape],\n\
+         \x20   zk_check(shape < {fname}_n_shapes, \"{fname}: shape id out of range\");\n\
+         \x20   zk_check(fingerprint == {fname}_fp[shape], \"{fname}: fingerprint\");\n\
+         \x20   zk_check(n_sc == {fname}_nsc[shape], \"{fname}: scalar count\");\n\
+         \x20   zk_check(n_cols == {fname}_ncols[shape], \"{fname}: column count\");\n\
+         \x20   zk_check(n_pre >= {fname}_npre[shape],\n\
          \x20       \"{fname}: preprocessed column count\");\n\
-         \x20   b65_check(n_base >= {fname}_nbase[shape],\n\
+         \x20   zk_check(n_base >= {fname}_nbase[shape],\n\
          \x20       \"{fname}: base column count\");\n\
          \x20   m31 **d_t0 = n_pre ? clone_to_device<m31*>(pre_cols, n_pre) : nullptr;\n\
          \x20   m31 **d_t1 = n_base ? clone_to_device<m31*>(base_cols, n_base) : nullptr;\n\
@@ -3292,13 +3292,13 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch, s
          \x20   unsigned n_rows, unsigned n_looks\n\
          ) {{\n\
          \x20   cudaGetLastError();\n\
-         \x20   b65_check(shape < {fname}_n_shapes, \"{fname}_feed: shape id out of range\");\n\
-         \x20   b65_check(fingerprint == {fname}_fp[shape], \"{fname}_feed: fingerprint\");\n\
-         \x20   b65_check(n_sc == {fname}_nsc[shape], \"{fname}_feed: scalar count\");\n\
-         \x20   b65_check(n_looks == {fname}_nlooks[shape], \"{fname}_feed: look count\");\n\
-         \x20   b65_check(n_pre >= {fname}_npre[shape],\n\
+         \x20   zk_check(shape < {fname}_n_shapes, \"{fname}_feed: shape id out of range\");\n\
+         \x20   zk_check(fingerprint == {fname}_fp[shape], \"{fname}_feed: fingerprint\");\n\
+         \x20   zk_check(n_sc == {fname}_nsc[shape], \"{fname}_feed: scalar count\");\n\
+         \x20   zk_check(n_looks == {fname}_nlooks[shape], \"{fname}_feed: look count\");\n\
+         \x20   zk_check(n_pre >= {fname}_npre[shape],\n\
          \x20       \"{fname}_feed: preprocessed column count\");\n\
-         \x20   b65_check(n_base >= {fname}_nbase[shape],\n\
+         \x20   zk_check(n_base >= {fname}_nbase[shape],\n\
          \x20       \"{fname}_feed: base column count\");\n\
          \x20   m31 **d_t0 = n_pre ? clone_to_device<m31*>(pre_cols, n_pre) : nullptr;\n\
          \x20   m31 **d_t1 = n_base ? clone_to_device<m31*>(base_cols, n_base) : nullptr;\n\
@@ -3416,7 +3416,7 @@ pub fn gen_emit_cmd(args: &[String]) {
     let plan = crate::compose::Plan::new(&params);
     let out = crate::arg_str(args, "--out").expect("genemit needs --out DIR");
     let want: Vec<String> =
-        crate::arg_strs(args, "--families", &["b65_dequant_eval"]);
+        crate::arg_strs(args, "--families", &["zk_dequant_eval"]);
     let launch = Launch {
         block: crate::arg_scalar(args, "--block", 256u32),
         min_blocks: crate::arg_scalar(args, "--min-blocks", 2u32),
@@ -3549,7 +3549,7 @@ pub fn gen_emit_cmd(args: &[String]) {
             go!(b.freivalds[i], format!("freivalds{i}"));
         }
         // Stream QQ (log row 61): the requantize seams and their tables, so
-        // `--families b65_requant_eval` can reach them at all.
+        // `--families zk_requant_eval` can reach them at all.
         for i in 0..b.rqs.len() {
             go!(b.rqs[i], format!("requant{i}"));
         }
@@ -3568,7 +3568,7 @@ pub fn gen_emit_cmd(args: &[String]) {
         }
         // B11 stream BB: the same two families here. This Freivalds check is the one the
         // argmax is missing from (`$FAMS` names ten families and not
-        // `b65_argmax_eval`), which is why both backends are written in one commit.
+        // `zk_argmax_eval`), which is why both backends are written in one commit.
         if let Some(em) = &b.embed {
             go!(em, "embed".to_string());
         }
@@ -3634,37 +3634,37 @@ pub fn gen_emit_cmd(args: &[String]) {
            \x20       .map(|(_, _, s, l)| (*s, *l))\n\
            }\n";
     std::fs::write(dir.join("gencudakernels.rs"), &rs).unwrap();
-    std::fs::write(dir.join("b65_ops.cuh"), OPS_CUH).unwrap();
+    std::fs::write(dir.join("zk_ops.cuh"), OPS_CUH).unwrap();
 
     // One dispatcher over the generated families, keyed on the same
     // `cuda_eval_name()` the fork's constraint dispatch uses, so the Rust side
     // declares one `extern "C"` symbol however many families are generated.
     let mut disp = String::from(
-        "// Generated by `zk-prover genemit` (B7a milestone 4, 18.7). Do not edit.\n         #include <cstring>\n#include \"b65_ops.cuh\"\n         #include \"gen_b65_dispatch.cuh\"\n",
+        "// Generated by `zk-prover genemit` (B7a milestone 4, 18.7). Do not edit.\n         #include <cstring>\n#include \"zk_ops.cuh\"\n         #include \"gen_zk_dispatch.cuh\"\n",
     );
     for (family, _) in &fams {
         disp += &format!("#include \"gen_{family}.cuh\"\n");
     }
-    disp += "\nextern \"C\" void gen_b65_dispatch(\n                 const char *family, unsigned shape, unsigned fingerprint,\n                 m31 **pre_cols, unsigned n_pre,\n                 m31 **base_cols, unsigned n_base,\n                 const qm31 *sc_host, unsigned n_sc,\n                 qm31 *num, qm31 *den,\n                 unsigned n_rows, unsigned n_cols\n             ) {\n";
+    disp += "\nextern \"C\" void gen_zk_dispatch(\n                 const char *family, unsigned shape, unsigned fingerprint,\n                 m31 **pre_cols, unsigned n_pre,\n                 m31 **base_cols, unsigned n_base,\n                 const qm31 *sc_host, unsigned n_sc,\n                 qm31 *num, qm31 *den,\n                 unsigned n_rows, unsigned n_cols\n             ) {\n";
     for (family, _) in &fams {
         disp += &format!(
             "    if (!strcmp(family, \"{family}\")) {{\n                     gen_{family}(shape, fingerprint, pre_cols, n_pre, base_cols, n_base,\n                         sc_host, n_sc, num, den, n_rows, n_cols);\n                     return;\n    }}\n"
         );
     }
-    disp += "    b65_check(false, \"gen_b65_dispatch: no generation kernel for this family\");\n}\n";
+    disp += "    zk_check(false, \"gen_zk_dispatch: no generation kernel for this family\");\n}\n";
     // B11 stream T: the feed's dispatcher, in the same file and keyed the same
     // way -- one more `extern "C"` symbol for the Rust side, no new source.
-    disp += "\nextern \"C\" void gen_b65_feed_dispatch(\n                 const char *family, unsigned shape, unsigned fingerprint,\n                 m31 **pre_cols, unsigned n_pre,\n                 m31 **base_cols, unsigned n_base,\n                 const qm31 *sc_host, unsigned n_sc,\n                 qm31 **num_at, qm31 **den_at,\n                 unsigned n_rows, unsigned n_looks\n             ) {\n";
+    disp += "\nextern \"C\" void gen_zk_feed_dispatch(\n                 const char *family, unsigned shape, unsigned fingerprint,\n                 m31 **pre_cols, unsigned n_pre,\n                 m31 **base_cols, unsigned n_base,\n                 const qm31 *sc_host, unsigned n_sc,\n                 qm31 **num_at, qm31 **den_at,\n                 unsigned n_rows, unsigned n_looks\n             ) {\n";
     for (family, _) in &fams {
         disp += &format!(
             "    if (!strcmp(family, \"{family}\")) {{\n                     gen_{family}_feed(shape, fingerprint, pre_cols, n_pre, base_cols, n_base,\n                         sc_host, n_sc, num_at, den_at, n_rows, n_looks);\n                     return;\n    }}\n"
         );
     }
-    disp += "    b65_check(false, \"gen_b65_feed_dispatch: no feed kernel for this family\");\n}\n";
-    std::fs::write(dir.join("gen_b65_dispatch.cu"), &disp).unwrap();
+    disp += "    zk_check(false, \"gen_zk_feed_dispatch: no feed kernel for this family\");\n}\n";
+    std::fs::write(dir.join("gen_zk_dispatch.cu"), &disp).unwrap();
     std::fs::write(
-        dir.join("gen_b65_dispatch.cuh"),
-        "// Generated by `zk-prover genemit`. Do not edit.\n         #ifndef GEN_B65_DISPATCH_CUH\n#define GEN_B65_DISPATCH_CUH\n         #include \"fields.cuh\"\n         extern \"C\" void gen_b65_dispatch(\n             const char *family, unsigned shape, unsigned fingerprint,\n             m31 **pre_cols, unsigned n_pre,\n             m31 **base_cols, unsigned n_base,\n             const qm31 *sc_host, unsigned n_sc,\n             qm31 *num, qm31 *den,\n             unsigned n_rows, unsigned n_cols);\n         extern \"C\" void gen_b65_feed_dispatch(\n             const char *family, unsigned shape, unsigned fingerprint,\n             m31 **pre_cols, unsigned n_pre,\n             m31 **base_cols, unsigned n_base,\n             const qm31 *sc_host, unsigned n_sc,\n             qm31 **num_at, qm31 **den_at,\n             unsigned n_rows, unsigned n_looks);\n#endif\n",
+        dir.join("gen_zk_dispatch.cuh"),
+        "// Generated by `zk-prover genemit`. Do not edit.\n         #ifndef GEN_ZK_DISPATCH_CUH\n#define GEN_ZK_DISPATCH_CUH\n         #include \"fields.cuh\"\n         extern \"C\" void gen_zk_dispatch(\n             const char *family, unsigned shape, unsigned fingerprint,\n             m31 **pre_cols, unsigned n_pre,\n             m31 **base_cols, unsigned n_base,\n             const qm31 *sc_host, unsigned n_sc,\n             qm31 *num, qm31 *den,\n             unsigned n_rows, unsigned n_cols);\n         extern \"C\" void gen_zk_feed_dispatch(\n             const char *family, unsigned shape, unsigned fingerprint,\n             m31 **pre_cols, unsigned n_pre,\n             m31 **base_cols, unsigned n_base,\n             const qm31 *sc_host, unsigned n_sc,\n             qm31 **num_at, qm31 **den_at,\n             unsigned n_rows, unsigned n_looks);\n#endif\n",
     )
     .unwrap();
 
@@ -3708,7 +3708,7 @@ mod tests {
 
     impl FrameworkEval for Claims {
         fn cuda_eval_name(&self) -> &'static str {
-            "b65_rr_claim_test"
+            "zk_rr_claim_test"
         }
         fn log_size(&self) -> u32 {
             4
@@ -3735,7 +3735,7 @@ mod tests {
 
     impl FrameworkEval for Consts {
         fn cuda_eval_name(&self) -> &'static str {
-            "b65_rr_const_test"
+            "zk_rr_const_test"
         }
         fn log_size(&self) -> u32 {
             4

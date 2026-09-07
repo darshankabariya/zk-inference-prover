@@ -28,7 +28,7 @@ use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
 use crate::dequant::{Map, Spec, Variant as DeqVariant};
 use crate::layer::{Mat, MatLayout, Tables};
 
-/// Mirrors `B65DequantWitnessGenCfg` in `b65_dequant_witness_gen.cuh`, field for field and in order.
+/// Mirrors `ZkDequantWitnessGenCfg` in `zk_dequant_witness_gen.cuh`, field for field and in order.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WitnessGenCfg {
@@ -82,7 +82,7 @@ fn witness_gen_mut() -> u32 {
 const NONE: u32 = u32::MAX;
 
 unsafe extern "C" {
-    fn b65_witness_gen_dequant(
+    fn zk_witness_gen_dequant(
         acc: *const i32,
         jx: *const i32,
         jw: *const i32,
@@ -165,7 +165,7 @@ pub struct DevDequantWitnessGen {
     pub pre: Vec<BaseFieldVec>,
     pub base: Vec<BaseFieldVec>,
     /// B7a milestone 4 (section 3 row 1): the four multiplicity counters this
-    /// witness generation scatter-added into, left where it left them. `b65_pre_witness_gen` sums
+    /// witness generation scatter-added into, left where it left them. `zk_pre_witness_gen` sums
     /// one per component into the column, so with `ZK_DEVICE_PREPROCESSED=1` the download and
     /// the parallel merge below never happen -- 23.1's `m_exp`, four more times.
     pub m_norm: Uint32Vec,
@@ -194,7 +194,7 @@ pub struct DevDequantWitnessGen {
 /// only o-side matmul -- and every later component's preprocessed indices
 /// shifted by three. The three are functions of the row index alone, so they
 /// are built here on the host and appended in the host's order; nothing about
-/// `b65_witness_gen_dequant` moves, which is what keeps the installed kernel
+/// `zk_witness_gen_dequant` moves, which is what keeps the installed kernel
 /// fingerprints out of it.
 pub fn mat_component_dev(
     m: &Mat,
@@ -210,7 +210,7 @@ pub fn mat_component_dev(
     let sticky = spec.round.needs_sticky();
     let chan_w = if spec.variant == DeqVariant::Chain { 2 } else { 1 };
     // what the kernel writes. The o-side trio is appended after it returns, so
-    // this stays exactly the count `b65_witness_gen_dequant` has always been handed.
+    // this stays exactly the count `zk_witness_gen_dequant` has always been handed.
     let n_pre = chan_w * lay.per_row + 5;
     let do_ref = spec.round == crate::bf16::Round::Even
         && crate::util::m4_switch("ZK_KERNEL_REFERENCE_CHECK");
@@ -325,7 +325,7 @@ pub fn mat_component_dev(
     let t_k = std::time::Instant::now();
     let null32 = std::ptr::null::<u32>();
     unsafe {
-        b65_witness_gen_dequant(
+        zk_witness_gen_dequant(
             d_acc.device_ptr as *const i32,
             d_jx.as_ref().map(|d| d.device_ptr as *const i32).unwrap_or(std::ptr::null()),
             d_jw.as_ref().map(|d| d.device_ptr as *const i32).unwrap_or(std::ptr::null()),

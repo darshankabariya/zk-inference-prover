@@ -27,7 +27,7 @@
 //    the whole `Src` enum disappears. Per-thread state is a few registers.
 //  * **the reads are coalesced.** One thread per committed row means
 //    consecutive threads read consecutive cells of the same column, which is
-//    the same property that makes `b65_dequant_witness_gen.cu` fast.
+//    the same property that makes `zk_dequant_witness_gen.cu` fast.
 //  * **the unary is a table, not a function.** `un_image_parts` is
 //    f64 -> f32 -> bf16 through `rsqrt` and `silu`; reproducing that bit for bit
 //    on device transcendentals would be the one genuinely risky part of the
@@ -39,33 +39,33 @@
 // The six index maps (`pow_at`, `val_at`, `smul_at`, `norm_at`, `frac_at` and
 // the leaf/slot column maps) are all closed forms in `residual_stream.rs`, so they port as
 // written -- 20.1's property again, on a sixth family.
-#ifndef B65_RESIDUAL_STREAM_WITNESS_GEN_CUH
-#define B65_RESIDUAL_STREAM_WITNESS_GEN_CUH
+#ifndef ZK_RESIDUAL_STREAM_WITNESS_GEN_CUH
+#define ZK_RESIDUAL_STREAM_WITNESS_GEN_CUH
 #include "fields.cuh"
 
-#define B65_RESIDUAL_STREAM_WITNESS_GEN_NONE 0xffffffffu
+#define ZK_RESIDUAL_STREAM_WITNESS_GEN_NONE 0xffffffffu
 
 // `residual_stream.rs`'s constants, which the kernel needs as literals.
-#define B65_RESIDUAL_STREAM_DMAX 12u
-#define B65_RESIDUAL_STREAM_UMIN 260
-#define B65_RESIDUAL_STREAM_EXP_BIAS 134
+#define ZK_RESIDUAL_STREAM_DMAX 12u
+#define ZK_RESIDUAL_STREAM_UMIN 260
+#define ZK_RESIDUAL_STREAM_EXP_BIAS 134
 
 // The negative controls (`ZK_MUT_WITNESS_GEN_RESIDUAL_STREAM`). Each is a way this witness generation could
 // plausibly be wrong and mode 2 must catch. Section 5 rule 5: a control that
 // cannot fire on the shape under test is a finding, not a pass, so `nomul` is
 // on the list even though the sequence's four components are all `Add` -- it fires
 // nowhere here, and that is recorded rather than hidden.
-#define B65_RESIDUAL_STREAM_MUT_NONE 0u
-#define B65_RESIDUAL_STREAM_MUT_NOPERM 1u    // write at the coset row, not the committed one
-#define B65_RESIDUAL_STREAM_MUT_ANCHOR 2u    // etop one too high on one slot per 1,024 rows
-#define B65_RESIDUAL_STREAM_MUT_NOBUMP 3u    // drop one multiplicity per 1,024 rows
-#define B65_RESIDUAL_STREAM_MUT_NOSTICKY 4u  // ignore the sticky bit in the normalisation key
-#define B65_RESIDUAL_STREAM_MUT_CLAMP 5u     // feed a slot's unclamped exponent downstream
-#define B65_RESIDUAL_STREAM_MUT_NOMUL 6u     // the multiply's carry, dropped
-#define B65_RESIDUAL_STREAM_MUT_OFFBY 7u     // read a slot operand from the neighbouring row
+#define ZK_RESIDUAL_STREAM_MUT_NONE 0u
+#define ZK_RESIDUAL_STREAM_MUT_NOPERM 1u    // write at the coset row, not the committed one
+#define ZK_RESIDUAL_STREAM_MUT_ANCHOR 2u    // etop one too high on one slot per 1,024 rows
+#define ZK_RESIDUAL_STREAM_MUT_NOBUMP 3u    // drop one multiplicity per 1,024 rows
+#define ZK_RESIDUAL_STREAM_MUT_NOSTICKY 4u  // ignore the sticky bit in the normalisation key
+#define ZK_RESIDUAL_STREAM_MUT_CLAMP 5u     // feed a slot's unclamped exponent downstream
+#define ZK_RESIDUAL_STREAM_MUT_NOMUL 6u     // the multiply's carry, dropped
+#define ZK_RESIDUAL_STREAM_MUT_OFFBY 7u     // read a slot operand from the neighbouring row
 
 // One leaf group: `Prog::groups[g]` plus where its cells and its witness live.
-struct B65ResidualStreamGroup {
+struct ZkResidualStreamGroup {
     unsigned n;         // leaves in this group
     unsigned leaf_col;  // `Prog::leaf_at(g, 0)`
     unsigned width;     // `Prog::leaf_width(g)`: 2, or 4 with a unary
@@ -74,8 +74,8 @@ struct B65ResidualStreamGroup {
 };
 
 // One slot: `Prog::slots[s]` with every `Src` already resolved to the column
-// its `(sm, ef)` lives in. `B65_RESIDUAL_STREAM_WITNESS_GEN_NONE` is `Src::Zero`.
-struct B65ResidualStreamSlot {
+// its `(sm, ef)` lives in. `ZK_RESIDUAL_STREAM_WITNESS_GEN_NONE` is `Src::Zero`.
+struct ZkResidualStreamSlot {
     unsigned a_sm, a_ef;
     unsigned b_sm, b_ef;
     unsigned base;        // `Prog::slot_at(s, round)`
@@ -84,12 +84,12 @@ struct B65ResidualStreamSlot {
 };
 
 // One counter array, as `ResidualStreamTables` holds it.
-struct B65ResidualStreamMult {
+struct ZkResidualStreamMult {
     unsigned *m;
     unsigned n;
 };
 
-struct B65ResidualStreamCfg {
+struct ZkResidualStreamCfg {
     unsigned log_rows;
     unsigned rows;       // 1 << log_rows
     unsigned live;       // `ResidualStreamWitness::rows`; rows past it are inert
@@ -104,11 +104,11 @@ struct B65ResidualStreamCfg {
     unsigned mutate;
 };
 
-extern "C" void b65_witness_gen_residual_stream(
+extern "C" void zk_witness_gen_residual_stream(
     // the witness: `rows * n_leaves` bf16 patterns, widened, in row-flat order
     const unsigned *wit,
-    const B65ResidualStreamGroup *groups,
-    const B65ResidualStreamSlot *slots,
+    const ZkResidualStreamGroup *groups,
+    const ZkResidualStreamSlot *slots,
     // `norm[i]` as (m7, expfield, nz); `smul[i]` as (c_sm, cy, nz), the first
     // already signed the way `sgn_of` reads it
     const unsigned *norm3,
@@ -127,14 +127,14 @@ extern "C" void b65_witness_gen_residual_stream(
     int *out_nat,
     // `rows * n_leaves` pairs, likewise
     int *in_nat,
-    B65ResidualStreamMult m_pow,
-    B65ResidualStreamMult m_norm,
-    B65ResidualStreamMult m_val,
-    B65ResidualStreamMult m_frac,
-    B65ResidualStreamMult m_smul,
-    const B65ResidualStreamMult *m_un,
+    ZkResidualStreamMult m_pow,
+    ZkResidualStreamMult m_norm,
+    ZkResidualStreamMult m_val,
+    ZkResidualStreamMult m_frac,
+    ZkResidualStreamMult m_smul,
+    const ZkResidualStreamMult *m_un,
     // [0] off_table, [1] bad_exp, [2] leaves whose unary image is off the table
     unsigned *counts,
-    B65ResidualStreamCfg cfg);
+    ZkResidualStreamCfg cfg);
 
 #endif
