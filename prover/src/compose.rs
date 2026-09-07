@@ -3207,6 +3207,17 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             "the claims carry {} claimed sums; this plan has {} components that carry \
              lookups (`Plan::n_use`)",
             claims.use_sums.len(), plan.n_use());
+    // One claimed sum per component that carries a table, in `table_sums` order,
+    // which is what `Plan::n_table_sums()` counts and what every index below is
+    // derived from (`Plan::rq_table_at`, `Plan::emb_table_at`).  Said here
+    // rather than discovered as an index panic at whichever table the vector
+    // ran out under: a caller that sizes the vector from anything but the plan
+    // is the defect, and this runs inside `prove_gen` too, after the base tree
+    // is committed and before the prover has a claimed sum of its own.
+    assert!(claims.table_sums.len() >= plan.n_table_sums(),
+            "the claims carry {} table sums; this plan has {} components that carry a \
+             table (`Plan::n_table_sums`)",
+            claims.table_sums.len(), plan.n_table_sums());
     let mut use_k = 0usize;
     let mut next_use = |claims: &Claims| {
         let v = unqm(claims.use_sums[use_k]);
@@ -3900,6 +3911,18 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     assert_eq!(use_k, plan.n_use(),
                "build_components consumed {use_k} claimed sums; `Plan::n_use` counts {}",
                plan.n_use());
+    // function built.  The exponent table, the core tables, the residual
+    // stream's table sides, the requantize and quantize tables and the
+    // embedding gadget's table are the components that carry a table sum, one
+    // each, and `Plan::n_table_sums` is what every caller sizes its claims
+    // vector from and what `verify_composed` rejects a statement on -- so the
+    // two parting company is a defect wherever it happens.
+    assert_eq!(1 + tables.len() + gtables.len() + rq_tabs.len() + usize::from(emb_tab.is_some()),
+               plan.n_table_sums(),
+               "build_components built {} components that carry a table; `Plan::n_table_sums` \
+                counts {}",
+               1 + tables.len() + gtables.len() + rq_tabs.len() + usize::from(emb_tab.is_some()),
+               plan.n_table_sums());
 
     BuiltComponents { chans, keys, rows, links, link_binding, ao, mats, freivalds, residual_stream, exp_t, tables,
                       gtables, argmax, embed, emb_tab, rqs: rq_comps, quants: quant_comps,
@@ -8039,6 +8062,18 @@ mod tests {
                 "each diagonal block carries its group's per-token component");
         let mut ch = stwo::core::channel::Blake2sM31Channel::default();
         Channel::mix_u64(&mut ch, 0x0b65_5900);
+    /// What `Plan::n_table_sums` counts is what `build_components` built, on the
+    /// chunk that has no slack: a layer segment carrying one of every table a
+    /// plan can carry, which is one more than the formula the placeholder used
+    /// to be sized by allowed. The two asserts inside `build_components` are
+    /// what fail if the two part company; here they run on a claims vector that
+    /// is exactly the plan's count, which is the vector the prover, the
+    /// verifier and both emitters hand it.
+    #[test]
+    fn a_chunk_that_carries_every_table_consumes_exactly_the_plans_table_sums() {
+        let plan = Plan::new(&crate::exprprobe::tests::params_every_table());
+        let mut ch = stwo::core::channel::Blake2sM31Channel::default();
+        Channel::mix_u64(&mut ch, 0x0b64_5900);
         let rels = Rels::draw(&mut ch, &plan.widths,
                               plan.residual_stream.as_ref().map(|g| g.uns.as_slice()),
                               plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
@@ -8051,5 +8086,13 @@ mod tests {
         assert_eq!(b.chans.len(), plan.shapes.len());
         assert_eq!(b.rows.len(), plan.shapes.len(),
                    "every key tile of this chunk carries a per-token component");
+        let claims = crate::exprprobe::claims_for(&plan, 0x0b64_5900);
+        assert_eq!(claims.table_sums.len(), plan.n_table_sums(),
+                   "the placeholder is the plan's own count");
+        let b = build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
+        assert_eq!(1 + b.tables.len() + b.gtables.len() + b.rq_tabs.len()
+                       + usize::from(b.emb_tab.is_some()),
+                   plan.n_table_sums(),
+                   "every component that carries a table takes one claimed sum");
     }
 }

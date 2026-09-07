@@ -659,6 +659,16 @@ pub fn probe(a: &BuiltComponents, b: &BuiltComponents) -> Value {
 /// from `Plan::n_use()` -- "the number of components that carry lookups, in
 /// `use_sums` order" -- so the placeholder and the consumer count the same
 /// components.
+/// `table_sums` is the one vector that is not a guess. It used to be sized by a
+/// formula with a margin of 16, which paid for the residual stream's table
+/// sides, the requantize seams' tables, the quantize family's and the embedding
+/// gadget's out of one number nobody widened when a plan gained a table -- and
+/// a shape that carries more of them than the margin allows would index past
+/// the end of the vector, inside `prove_gen` as well as in the two kernel
+/// emitters, after the base tree is committed. It is sized from
+/// `Plan::n_table_sums()` instead, which is the count `build_components`
+/// indexes by and the count `verify_composed` rejects a statement on, so the
+/// placeholder and the consumer count the same components.
 pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Claims {
     let mut x = seed | 1;
     let mut felt = || {
@@ -691,9 +701,9 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         // one per component that carries lookups, in `use_sums` order -- the
         // plan's own count and not a formula with a margin
         use_sums: (0..plan.n_use()).map(|_| felt()).collect(),
-        // exp + norm/frac/mul/qnz + one per range width, and a margin (the
-        // residual stream's table sides come out of the same margin).
-        table_sums: (0..(5 + plan.widths.len() + 16)).map(|_| felt()).collect(),
+        // one per component that carries a table sum, in `table_sums` order --
+        // the plan's own count and not a formula with a margin
+        table_sums: (0..plan.n_table_sums()).map(|_| felt()).collect(),
         // Stream QQ (log rows 61 and 66): every binding claim vector is filled here
         // too, with the same distinct nonzero placeholders `felt()` gives the
         // rest. The comment this replaces said empty placeholders "keep the
@@ -819,6 +829,36 @@ pub(crate) mod tests {
             q_bits: 8, k_bits: 8, nmax: 1, chan_target: 128, grid_target: 64, rw: 16,
             z_lo_bits: 16, z_hi_bits: 6, z_min: 1, mats, deq_target: 16, kmax: 12,
             round: "away".into(), ao_target: 16, ao_q_bits: 7, ao_rem_bits: 8,
+    /// The chunk that runs the formula's margin out: a layer segment carrying
+    /// one of everything a plan can carry a table for -- the wiring family's
+    /// three unary tables and its two ends, both requantize scale variants
+    /// (`q`, `k` and `v` under a power-of-two scale, the SwiGLU's three under a
+    /// bf16 one), the rotation's three quantize widths (`q` at 12 bits, `k` at
+    /// 11, `v`'s int8 side at 8) and the embedding gadget a layer-0 chunk
+    /// carries. Its table sums are one more than `5 + widths + 16` allowed.
+    /// `compose.rs` uses it too, so the two sides of the count are pinned on
+    /// one shape.
+    pub(crate) fn params_every_table() -> crate::compose::Params {
+        let mats: Vec<crate::compose::MatParams> =
+            [("q", "pow2", 128, 128), ("k", "pow2", 128, 64), ("v", "pow2", 128, 64),
+             ("o", "pow2", 128, 128), ("gate", "chain", 128, 128), ("up", "chain", 128, 128),
+             ("down", "chain", 128, 128)]
+                .iter()
+                .map(|(n, v, n_in, n_out)| crate::compose::MatParams {
+                    name: (*n).into(), variant: (*v).into(), n_in: *n_in, n_out: *n_out,
+                    tokens: 32,
+                })
+                .collect();
+        crate::compose::Params {
+            s: 32, c: 128, hd: 32, nh: 4, head_groups: vec![2, 2],
+            variant: "intsplit6".into(), log_table: 16,
+            // the quantize tables are deduplicated by width, so three distinct
+            // widths are three tables -- which is what the margin ran out on
+            q_bits: 12, k_bits: 11, nmax: 1, chan_target: 128, grid_target: 64, rw: 16,
+            z_lo_bits: 16, z_hi_bits: 6, z_min: 1, mats, deq_target: 16, kmax: 12,
+            round: "away".into(), ao_target: 16, ao_q_bits: 7, ao_rem_bits: 8,
+            // this fixture carries no attention-output data, so the two windows
+            // only have to satisfy `Plan::new`'s asserts
             ao_jv_min: -8, ao_jv_max: -6, ao_jo_min: -10, ao_jo_max: -10,
             ao_acc_lo_bits: 16, ao_acc_hi_bits: 4,
             ao_acc_mag: false, ao_denp2: false,
@@ -832,6 +872,13 @@ pub(crate) mod tests {
             diagonal_block: true,
             // the five reductions off, which is the configuration that prices
             // them and the one both refusals were reported under
+                d: 128, a: 4, dff: 128, bind_matmul_outputs: true, head_norm: false,
+                eps: crate::bf16::from_f64(1e-5),
+                inv_d: crate::bf16::from_f64(1.0 / 128.0),
+            }),
+            diagonal_block: true,
+            // the five reductions off, which is the configuration that prices
+            // them and the one every table above is built under
             gkr_key_tiles: false, gkr_dequant: false, gkr_residual_stream: false,
             gkr_freivalds: false, gkr_attnout: false, layer_boundary: false, kv_boundary: false,
             logits_claim: false, prove_argmax: false, prove_argmax_lax: false,
@@ -855,6 +902,29 @@ pub(crate) mod tests {
         assert_eq!(claims.use_sums.len(), plan.n_use(),
                    "the placeholder must carry one claimed sum per component that carries \
                     lookups, which is what `build_components` consumes");
+            rope: Some(crate::compose::RopeParams {
+                nkv: 2, pos0: 0, theta: (10000.0f64).to_bits(),
+                rope_type: "default".into(), rope_scale: vec![],
+            }),
+        }
+    }
+
+    /// The placeholder table sums are the plan's own count and not a formula
+    /// with a margin. Before this, `table_sums` was `5 + widths + 16`; a chunk
+    /// that carries one table more than the margin allows ran it out, and
+    /// `genemit`, `cudaemit` and `prove_gen`'s own lowering would have indexed
+    /// past the end of the vector instead of building the chunk.
+    #[test]
+    fn the_placeholder_table_sums_are_the_plans_own_count() {
+        let plan = crate::compose::Plan::new(&params_every_table());
+        let claims = super::claims_for(&plan, 0x0b64_5700);
+        assert_eq!(claims.table_sums.len(), plan.n_table_sums(),
+                   "the placeholder must carry one claimed sum per component that carries a \
+                    table, which is what `build_components` indexes by");
+        assert!(plan.n_table_sums() > 5 + plan.widths.len() + 16,
+                "this fixture must be a chunk the formula was short on: it carries {} tables \
+                 and the formula allowed {}",
+                plan.n_table_sums(), 5 + plan.widths.len() + 16);
     }
 
     /// And the lowering the emitters run does not stop on that chunk: this is
@@ -865,6 +935,12 @@ pub(crate) mod tests {
         let plan = crate::compose::Plan::new(&params_no_prefix());
         let mut ch = stwo::core::channel::Blake2sM31Channel::default();
         stwo::core::channel::Channel::mix_u64(&mut ch, 0x0b65_5701);
+    /// every component -- on the shape the formula refused.
+    #[test]
+    fn the_chunk_that_carries_every_table_lowers() {
+        let plan = crate::compose::Plan::new(&params_every_table());
+        let mut ch = stwo::core::channel::Blake2sM31Channel::default();
+        stwo::core::channel::Channel::mix_u64(&mut ch, 0x0b64_5701);
         let rels = crate::compose::Rels::draw(
             &mut ch, &plan.widths, plan.residual_stream.as_ref().map(|g| g.uns.as_slice()),
             plan.emb.map(|l| l.arity()), plan.needs_rq_rels(), plan.q_tabs.len());
@@ -873,5 +949,11 @@ pub(crate) mod tests {
         let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4],
                                                  f[5], &claims);
         assert!(b.embed.is_some(), "the embedding gadget is one of the components lowered");
+        let claims = super::claims_for(&plan, 0x0b64_5701);
+        let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4],
+                                                 f[5], &claims);
+        assert!(b.emb_tab.is_some(), "the embedding table is the last table lowered");
+        assert_eq!(b.rq_tabs.len(), plan.n_rq_tables(),
+                   "every requantize and quantize table of this chunk is built");
     }
 }
