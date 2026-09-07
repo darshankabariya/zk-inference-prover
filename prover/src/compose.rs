@@ -304,7 +304,7 @@ pub struct Params {
     /// from bytes.  Needs the wiring family, since the boundary *is* its two
     /// stream bindings; absent, and a chunk composes exactly as it did before.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub bounds: bool,
+    pub layer_boundary: bool,
     /// Stream AA (E11): the chunk's keys and values are committed in boundary
     /// trees of their own, one **out** side and one **in** side per head band
     /// group, so that "the keys chunk `(L, b+1)` attended to are the ones chunk
@@ -319,7 +319,7 @@ pub struct Params {
     /// when false, so every statement written without it is byte identical to
     /// one from a crate that never had the feature.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub kv_bind: bool,
+    pub kv_boundary: bool,
     /// Stream E: publish the head's order-key claim.  It sits here rather than in
     /// `GlueParams` because a head dump carries no wiring columns at all -- the
     /// two features share the binding challenge, not the witness.
@@ -364,7 +364,7 @@ pub struct Params {
 /// `rope(pos)` reads the token's **absolute** position -- `pos0 + t` -- so tree
 /// 0 is a function of the block index as well as of (model, layer, shape,
 /// params).  `pos0` is that dependence, written down: `verify_composed` checks
-/// it against `Fixed::block`, which `bounds::chain_of` already compares along
+/// it against `Fixed::block`, which `boundary::chain_of` already compares along
 /// the token axis, so the block a chunk's angles were built for is the block the
 /// chain puts it at.  Stream LL's tree-0 derivation must take the same
 /// coordinate.
@@ -458,9 +458,9 @@ pub struct Fixed {
     /// Stream KK: which layer of the model this chunk proves, and which token
     /// block.  Declared -- like `pre_root`, and pinned to the model only when
     /// stream LL derives the expected tree-0 root per (layer, shape) -- but
-    /// *compared*: `bounds::chain_of` demands `layer_b == layer_a + 1` on a
+    /// *compared*: `boundary::chain_of` demands `layer_b == layer_a + 1` on a
     /// layer edge and `block_b == block_a + 1` on a token edge, and
-    /// `bounds-grid` takes the grid coordinate from here rather than from the
+    /// `boundary-grid` takes the grid coordinate from here rather than from the
     /// tag.  `None` on a statement written before the field existed, which is
     /// why the comparisons are conditional on both sides declaring one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -470,7 +470,7 @@ pub struct Fixed {
     /// Stream LL (E11), `notes/witness-slack.md` section 5 item 1's last
     /// sentence: the content hash of the model data tree 0 reads
     /// (`Layer::model_hash`).  Declared, like `pre_root` and like `layer` --
-    /// but *compared*: `bounds-grid` refuses a grid whose chunks name two
+    /// but *compared*: `boundary-grid` refuses a grid whose chunks name two
     /// different models, and refuses two chunks at the same layer whose model
     /// hashes differ, so "two blocks of one layer used different weights" is
     /// no longer unseen.  What bindings the hash to the *proof* is the derived
@@ -1146,9 +1146,9 @@ impl GluePlan {
     /// `stream_in` is the residual claim, and **stream UU took the hook**: with
     /// `--bounds` the head chunk commits tree 3 over exactly that claim
     /// (`claims.stream_bindings[0][0]`), which says the residual this chunk normalized
-    /// is the one the last layer's chunk published, and `bounds::chain_of`
+    /// is the one the last layer's chunk published, and `boundary::chain_of`
     /// compares the two roots on the ordinary layer axis.  `stream_out` is the
-    /// norm's output, which no chunk consumes, so `bounds::sides` gives the head
+    /// norm's output, which no chunk consumes, so `boundary::sides` gives the head
     /// the input side alone.
     fn head(p: &Params, gp: &GlueParams) -> Self {
         let t = Tiling::new(p.s, gp.d, gp.a);
@@ -1596,13 +1596,13 @@ pub struct Plan {
     /// boundary and has the wiring family, or it has no boundary at all — the
     /// plan settles that once so the prover and the verifier cannot disagree
     /// about how many trees the transcript has.
-    pub bounds: Vec<crate::bounds::Side>,
+    pub layer_sides: Vec<crate::boundary::Side>,
     /// Stream AA: the K/V boundary sides, or empty.  They follow `bounds` in the
     /// tree order, so turning either feature on does not move the other's tree
     /// indices.
-    pub kv: Vec<crate::bounds::KvSide>,
+    pub kv: Vec<crate::boundary::KvSide>,
     /// Stream AA, per band: which head band group it belongs to.  Without
-    /// `kv_bind` this is the band's own index modulo the prefix count, which is
+    /// `kv_boundary` this is the band's own index modulo the prefix count, which is
     /// exactly the prefix/corner pairing `verify_composed` used to spell as
     /// `b - n_pre`; with it, a group is one prefix *sub-band per key block* plus
     /// the chunk's own corner.
@@ -1634,7 +1634,7 @@ impl Plan {
             z_hi_bits: p.z_hi_bits,
             z_min: p.z_min,
         };
-        // Stream AA (E11), layout design A: with `--kv-bind` the declared
+        // Stream AA (E11), layout design A: with `--kv-boundary` the declared
         // prefix is tiled into `c / s` sub-bands of exactly `S` keys each -- the
         // shape the corner band already has -- instead of one rectangle of `c`
         // keys.  The tiling is not an optimisation, it is the precondition for
@@ -1646,10 +1646,10 @@ impl Plan {
         // the same `Grid`, `LayoutChan` and `LayoutKey` -- as the producer's
         // corner, and the two column lists coincide by construction rather than
         // by argument.  See `briefs/aa-kvbind.md`.
-        assert!(!p.kv_bind || p.corner,
-                "`--kv-bind` tiles the prefix beside the chunk's own block; it needs `--corner`");
-        assert!(!p.kv_bind || p.c % p.s == 0,
-                "`--kv-bind` tiles the prefix in blocks of S: C={} is not a multiple of S={}",
+        assert!(!p.kv_boundary || p.corner,
+                "`--kv-boundary` tiles the prefix beside the chunk's own block; it needs `--corner`");
+        assert!(!p.kv_boundary || p.c % p.s == 0,
+                "`--kv-boundary` tiles the prefix in blocks of S: C={} is not a multiple of S={}",
                 p.c, p.s);
         // with the flag off this is 1, so the loop below builds exactly the one
         // prefix band per head band it always built
@@ -1659,10 +1659,10 @@ impl Plan {
         // `groups = c * insts = 0`.  With `nsub == 0` the loop below builds no
         // prefix band and `rows_band.push(nsub == 0)` hands the group's one
         // per-token region to the solo corner, which is where it belongs.
-        let nsub = if p.c == 0 { 0 } else if p.kv_bind { p.c / p.s } else { 1 };
+        let nsub = if p.c == 0 { 0 } else if p.kv_boundary { p.c / p.s } else { 1 };
         assert!(p.c > 0 || p.corner,
                 "a c = 0 chunk is block 0: it is the solo corner and needs `--corner`");
-        let sub_c = if p.kv_bind { p.s } else { p.c };
+        let sub_c = if p.kv_boundary { p.s } else { p.c };
         let mut head_offsets = vec![];
         let mut off = 0;
         let mut shapes = vec![];
@@ -1706,7 +1706,7 @@ impl Plan {
                 "`--gkr-walks` extends the bands' GKR arm; it needs `--gkr-bands`");
         assert!(!p.gkr_attnout || p.gkr_bands,
                 "`--gkr-attnout` extends the bands' GKR arm; it needs `--gkr-bands`");
-        // Stream AA left `--kv-bind` and `--gkr-bands` asserted apart, because
+        // Stream AA left `--kv-boundary` and `--gkr-bands` asserted apart, because
         // the bands' GKR arm gated the per-token region on `plan.corner` in two
         // places of its own while the composed path had already moved to
         // `plan.rows_band`.  What pairing by `corner` assumed is "every band
@@ -1970,17 +1970,17 @@ impl Plan {
         }
         // Stream H: the boundary is the wiring family's two stream bindings, so it
         // exists exactly when the statement asks for it and the family is there.
-        let bounds = match (&glue, p.bounds) {
-            (Some(g), true) => crate::bounds::sides(g),
+        let layer_sides = match (&glue, p.layer_boundary) {
+            (Some(g), true) => crate::boundary::sides(g),
             _ => vec![],
         };
         // Stream AA: the K/V sides follow stream H's, so the two features'
-        // tree indices are independent of each other.  `bounds::kv_layout`
+        // tree indices are independent of each other.  `boundary::kv_layout`
         // rederives exactly this arithmetic from `Fixed.params` alone, which is
         // how the pair check finds the roots without building a plan.
-        let kv = if p.kv_bind {
-            let kb: Vec<crate::bounds::KvBand> = (0..shapes.len())
-                .map(|b| crate::bounds::KvBand {
+        let kv = if p.kv_boundary {
+            let kb: Vec<crate::boundary::KvBand> = (0..shapes.len())
+                .map(|b| crate::boundary::KvBand {
                     group: group[b],
                     corner: corner[b],
                     pk: lays[b].chan.pk,
@@ -1989,7 +1989,7 @@ impl Plan {
                     key_rows: lays[b].key.g.rows,
                 })
                 .collect();
-            crate::bounds::kv_sides(crate::bounds::FIRST_TREE + bounds.len(), &kb)
+            crate::boundary::kv_sides(crate::boundary::FIRST_TREE + layer_sides.len(), &kb)
         } else {
             vec![]
         };
@@ -2066,7 +2066,7 @@ impl Plan {
                nn_bands, nn_qbands,
                widths, log_norm,
                log_frac, log_mul,
-               glue, bounds,
+               glue, layer_sides,
                kv, group, rows_band, emb }
     }
 
@@ -2074,7 +2074,7 @@ impl Plan {
     /// trees (shape, then model), the base trace and the interaction trace,
     /// plus one per boundary side.
     pub fn n_trees(&self) -> usize {
-        4 + self.bounds.len() + self.kv.len()
+        4 + self.layer_sides.len() + self.kv.len()
     }
 
     /// Tree 0's column ids, in exactly the order the prover commits them.
@@ -2110,7 +2110,7 @@ impl Plan {
     /// Untiled it is the context width `C`, because a prefix band's key Horner
     /// walks exactly `C` keys per instance and so produces `r^C` for free.
     ///
-    /// Stream AA: with `--kv-bind` every band is `c = S`, so the same Horner
+    /// Stream AA: with `--kv-boundary` every band is `c = S`, so the same Horner
     /// produces `r^S` for free, and the global weight moves with it.  That is
     /// what keeps design A free of any new AIR mechanism -- a prefix sub-band
     /// needs no `iend`/`kappa` conversion, its natural instance stride *is* the
@@ -2122,7 +2122,7 @@ impl Plan {
     /// and the verifier's fold on a different weight from the band's own
     /// `Powers::r_c`, and `den_link_ok` was the one verdict field that failed.
     pub fn head_weight_c(&self) -> usize {
-        if self.p.kv_bind || self.p.c == 0 { self.p.s } else { self.p.c }
+        if self.p.kv_boundary || self.p.c == 0 { self.p.s } else { self.p.c }
     }
 
     /// How many secure felts the transcript draws after the relations, and where
@@ -2610,7 +2610,7 @@ impl Plan {
             ids.extend(crate::attn_air::act_id(b, self.corner[b],
                                                self.lays[b].key.g.lead));
             // Stream AA: the predicate is "does this band carry the per-token
-            // region", not "is it a prefix band".  With `--kv-bind` off the two
+            // region", not "is it a prefix band".  With `--kv-boundary` off the two
             // are the same predicate on the same bands, so this id sequence is
             // the one tree 0 always had.
             if self.rows_band[b] {
@@ -2746,7 +2746,7 @@ impl Plan {
             0
         } else {
             // stream AA: three sums for a band that carries the per-token
-            // region, two for one that rides on its group's -- with `--kv-bind`
+            // region, two for one that rides on its group's -- with `--kv-boundary`
             // off, `rows_band` is `!corner` and this is the sum it always was
             self.rows_band.iter().map(|r| if *r { 3 } else { 2 }).sum::<usize>()
         })
@@ -3217,9 +3217,9 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             ChanEval { tag: b, lay: l.chan, pow: pow.clone(), off, claimed: unqm(bc[0]),
                        rel_k: rels.range(p.k_bits).clone(), rel_q: rels.range(p.q_bits).clone(),
                        range_check: true, gkr: p.gkr_bands,
-                       // stream AA: empty unless `--kv-bind`, so the IR, the
+                       // stream AA: empty unless `--kv-boundary`, so the IR, the
                        // fingerprint and the proof are unmoved with it off
-                       bound_k: crate::bounds::kv_bounds_of(&plan.kv, b, l.chan.pk),
+                       boundary_k: crate::boundary::kv_boundaries_of(&plan.kv, b, l.chan.pk),
                        qk_bind: nn.as_ref().map(|(k, q, _)| (k.clone(), q.clone())),
                        q_bind: nn_q.clone() },
             if p.gkr_bands { SecureField::zero() } else { next_use(claims) },
@@ -3234,11 +3234,11 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                           _ => None,
                       },
                       range_check: true, gkr: p.gkr_bands, corner: plan.corner[b],
-                      bound_v: crate::bounds::kv_bounds_of(&plan.kv, b, l.key.pv),
+                      boundary_v: crate::boundary::kv_boundaries_of(&plan.kv, b, l.key.pv),
                       v_bind: nn.as_ref().map(|(_, _, v)| v.clone()) },
             if p.gkr_bands { SecureField::zero() } else { next_use(claims) },
         ));
-        // stream AA: "carries the per-token region", which with `--kv-bind` off
+        // stream AA: "carries the per-token region", which with `--kv-boundary` off
         // is `!corner[b]` on the same bands
         if plan.rows_band[b] {
             rows.push(FrameworkComponent::<RowEval>::new(
@@ -3278,7 +3278,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     let (rv_pow_ao, rv_step_ao) = powers(rv, plan.ao_lay.per_row);
     let (_, rv_hd) = powers(rv, p.hd);
     // stream AA: the global per-head instance weight, `r^C` untiled and `r^S`
-    // under `--kv-bind` -- see `Plan::head_weight_c`
+    // under `--kv-boundary` -- see `Plan::head_weight_c`
     let (_, r_c) = powers(r, plan.head_weight_c());
     let (_, s_span) = powers(s, p.s - 1);
     let ao = FrameworkComponent::<AttnOutEval>::new(
@@ -3474,7 +3474,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     // `stream_out` order and the components in region order, so
                     // the tree a side lands in is the same for prover and
                     // verifier without either being told.
-                    bound: plan.bounds.iter().find(|s| s.region == i).map(|s| s.bound),
+                    bound: plan.layer_sides.iter().find(|s| s.region == i).map(|s| s.bound),
                     // B11 stream V, lever 3: under the flag this region's
                     // lookups are the batched GKR's, so the AIR emits none of
                     // them and the interaction masks they would allocate are
@@ -3924,11 +3924,11 @@ pub struct Composed {
     pub stream_bindings_ok: bool,
     /// Stream H: what the boundary trees cost this chunk, or null when the flag
     /// was off and there are none
-    pub bounds: Value,
+    pub layer_boundary: Value,
     /// Stream AA: the same for the K/V boundary trees -- per side, its tree,
     /// its head band group, whether it is the out or the in side, the bands
-    /// that wrote it, its columns and its cells.  Null without `--kv-bind`.
-    pub kv_bounds: Value,
+    /// that wrote it, its columns and its cells.  Null without `--kv-boundary`.
+    pub kv_boundary: Value,
     /// how many committed values a glue tamper changed; `None` when none was
     /// set.  A probe whose tamper fired nowhere proved the honest witness, and
     /// its verdict says nothing about the tamper -- the caller must not read
@@ -3954,11 +3954,11 @@ pub struct ProverTamper {
     /// reject is that side's equality constraint: the probe that says the root
     /// is bound to the proof and not merely appended to it.
     ///
-    /// Stream AA: the side index runs over `plan.bounds` and then over
-    /// `plan.kv`, so side `plan.bounds.len() + j` is the `j`th K/V side --
+    /// Stream AA: the side index runs over `plan.layer_sides` and then over
+    /// `plan.kv`, so side `plan.layer_sides.len() + j` is the `j`th K/V side --
     /// which for a chunk with a prefix is group `j / 2`'s out side when `j` is
     /// even and its in side when `j` is odd.
-    pub bounds: Option<(usize, usize)>,
+    pub layer_boundary: Option<(usize, usize)>,
     /// Stream E: corrupt the wiring family's own copy of a dequant output --
     /// `(region index, value index)` into `o_out` for `gn1` or `d_out` for
     /// `gn2`.  The region recomputes its add from the corrupted value, so
@@ -4093,7 +4093,7 @@ pub struct Gen {
     pub pre_key: Option<u64>,
     /// Stream H: the boundary tamper, carried across the generate/prove split
     /// because the boundary trees are built where they are committed.
-    pub bounds_tamper: Option<(usize, usize)>,
+    pub layer_boundary_tamper: Option<(usize, usize)>,
     /// how many committed values a `ProverTamper::glue` changed, `None` when
     /// none was set.  `Some(0)` is a probe that measured nothing.
     pub glue_tamper_fired: Option<usize>,
@@ -5131,7 +5131,7 @@ different rotation", inv.len(), 2 * hd * p.s);
     Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
           glue_regions, glue_tcols, glue_mcols, glue_b1, am_region, emb_region, rq_regions,
           q_regions, n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
-          m4e_tabdev, trace_secs, pre_key, bounds_tamper: tamper.bounds, glue_tamper_fired }
+          m4e_tabdev, trace_secs, pre_key, layer_boundary_tamper: tamper.layer_boundary, glue_tamper_fired }
 }
 
 /// B7b (README 26): the second half -- the session, the three commits, the
@@ -5140,7 +5140,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
               glue_regions, glue_tcols, glue_mcols, glue_b1, am_region, emb_region, rq_regions,
               q_regions, n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
-              m4e_tabdev, trace_secs, pre_key, bounds_tamper, glue_tamper_fired } = g;
+              m4e_tabdev, trace_secs, pre_key, layer_boundary_tamper, glue_tamper_fired } = g;
     let p = &plan.p;
     let t0 = std::time::Instant::now();
 
@@ -6650,15 +6650,15 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // between them and nothing reads them but the equality constraints, which
     // is what the note argues makes this position sound.
     let m4_t = std::time::Instant::now();
-    let bounds_report = if plan.bounds.is_empty() {
+    let layer_boundary_report = if plan.layer_sides.is_empty() {
         json!(null)
     } else {
-        for (i, side) in plan.bounds.iter().enumerate() {
-            let tam = bounds_tamper.filter(|(s, _)| *s == i).map(|(_, c)| c);
-            let cols = crate::bounds::cols(&glue_regions[side.region], side, tam);
+        for (i, side) in plan.layer_sides.iter().enumerate() {
+            let tam = layer_boundary_tamper.filter(|(s, _)| *s == i).map(|(_, c)| c);
+            let cols = crate::boundary::cols(&glue_regions[side.region], side, tam);
             sess.commit(cols);
         }
-        crate::bounds::report(&plan.bounds)
+        crate::boundary::report(&plan.layer_sides)
     };
     // Stream AA: the K/V sides, in the same position and for the same reason,
     // right after stream H's.  A side's columns are the *very columns tree 1
@@ -6677,7 +6677,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // every corner band) hands its host columns over exactly as before.  The
     // one reader that needs the cells on the host is the tamper probe, which
     // bumps one cell of one column: that side comes down (`AnyCol::download`)
-    // and commits through the host path, so `bounds::kv_cols` is unchanged.
+    // and commits through the host path, so `boundary::kv_cols` is unchanged.
     let kv_report = if plan.kv.is_empty() {
         json!(null)
     } else {
@@ -6693,7 +6693,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                     Some(d) => cols.extend(kv.map(|j| AnyCol::Dev(&d.base[j], d.logs[j]))),
                     None => {
                         assert!(!com.base.is_empty(),
-                                "--kv-bind: band {b} has its committed columns on neither side \
+                                "--kv-boundary: band {b} has its committed columns on neither side \
                                  of the bus, so the K/V boundary tree has nothing to copy");
                         cols.extend(kv.map(|j| AnyCol::Host(&com.base[j])));
                     }
@@ -6701,22 +6701,22 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             }
             assert_eq!(cols.len(), side.columns, "a K/V side's width disagrees with its plan");
             // the tamper indexes the sides as one list, stream H's first
-            let tam = bounds_tamper
-                .filter(|(s, _)| *s == plan.bounds.len() + i)
+            let tam = layer_boundary_tamper
+                .filter(|(s, _)| *s == plan.layer_sides.len() + i)
                 .map(|(_, c)| c);
             match tam {
                 None => sess.commit_any(cols),
                 Some(_) => {
                     let host: Vec<Eval> = cols.into_iter().map(AnyCol::download).collect();
-                    sess.commit(crate::bounds::kv_cols(host, tam));
+                    sess.commit(crate::boundary::kv_cols(host, tam));
                 }
             }
         }
-        crate::bounds::kv_report(&plan.kv)
+        crate::boundary::kv_report(&plan.kv)
     };
-    crate::util::m4_add("wall/commit_bounds", m4_t.elapsed().as_secs_f64());
+    crate::util::m4_add("wall/commit_boundary", m4_t.elapsed().as_secs_f64());
     // B12 stream GG: the boundary trees, one mark for all of them.
-    sess.mark_bounds();
+    sess.mark_boundary();
     sess.mix(&claims.flat());
 
     // ---- components, prove ----------------------------------------------------
@@ -6822,8 +6822,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         family_cells,
         n_columns,
         stream_bindings_ok,
-        bounds: bounds_report,
-        kv_bounds: kv_report,
+        layer_boundary: layer_boundary_report,
+        kv_boundary: kv_report,
         glue_tamper_fired,
     }
 }
@@ -6926,18 +6926,18 @@ pub struct Verdict {
     pub stream_out: Option<[u32; 4]>,
     /// Stream AA: every boundary tree's root, stream H's two first and then the
     /// K/V sides in `plan.kv`'s order.  A verifier reading one proof alone gets
-    /// them here so it never has to re-derive anything; `bounds::chain_check`
+    /// them here so it never has to re-derive anything; `boundary::chain_check`
     /// reads the same roots straight out of `proof.commitments`.
-    pub bound_roots: Vec<String>,
+    pub boundary_roots: Vec<String>,
     /// Stream EE: the same roots, one entry per boundary side and each labelled
     /// with what the side is -- its tree, its axis, whether it is the in or the
     /// out side, and for a K/V side its head band group.  This replaces stream
-    /// H's `bound_in`/`bound_out`, which named trees 3 and 4 by position and so
+    /// H's `boundary_in`/`boundary_out`, which named trees 3 and 4 by position and so
     /// only made sense while a statement carried exactly one boundary pair.  A
     /// statement now carries as many sides as its plan lists, and a reader asks
     /// for a side by its label (`Verdict::side_root`) rather than by a
     /// hard-coded index.
-    pub bound_sides: Vec<crate::bounds::SideRoot>,
+    pub boundary_sides: Vec<crate::boundary::SideRoot>,
     pub error: Option<String>,
     pub verify_secs: f64,
 }
@@ -6947,9 +6947,9 @@ impl Verdict {
     /// committed one: the residual pair is `(Axis::Layer, "in")` and
     /// `(Axis::Layer, "out")`; a K/V side is `(Axis::Token, "out")` or
     /// `(Axis::Token, "in")` with its group.
-    pub fn side_root(&self, axis: crate::bounds::Axis, role: &str, group: Option<usize>)
+    pub fn side_root(&self, axis: crate::boundary::Axis, role: &str, group: Option<usize>)
         -> Option<&str> {
-        self.bound_sides
+        self.boundary_sides
             .iter()
             .find(|s| s.axis == axis && s.role == role && s.group == group)
             .map(|s| s.root.as_str())
@@ -6980,7 +6980,7 @@ impl Verdict {
                nn_in_ok: vec![false], nn_out_ok: vec![false], nn_pos_ok: false,
                nn_q_ok: vec![false], nn_open: false,
                stream_in: None, stream_out: None,
-               bound_roots: vec![], bound_sides: vec![],
+               boundary_roots: vec![], boundary_sides: vec![],
                error: Some(msg.to_string()), verify_secs: 0.0 }
     }
 }
@@ -7053,7 +7053,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let root_ok = format!("{:?}", proof.commitments[0]) == fixed.pre_root;
     // stream PP: the model tree's root is the second declared one -- a
     // *declaration* here, like `pre_root`; what pins it to a model is
-    // `bounds-grid --expect-model-roots` against the published manifest.
+    // `boundary-grid --expect-model-roots` against the published manifest.
     let model_root_ok = format!("{:?}", proof.commitments[1]) == fixed.model_root;
     vcs.commit(proof.commitments[0], &fixed.sizes[0], &mut ch);
     vcs.commit(proof.commitments[1], &fixed.sizes[1], &mut ch);
@@ -7113,7 +7113,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     if proof.commitments.len() < plan.n_trees() {
         return Verdict::rejected("the proof carries fewer roots than the statement claims");
     }
-    for t in crate::bounds::FIRST_TREE..plan.n_trees() {
+    for t in crate::boundary::FIRST_TREE..plan.n_trees() {
         vcs.commit(proof.commitments[t], &fixed.sizes[t], &mut ch);
     }
     // Stream AA: every boundary tree's root, in the prover's order -- stream H's
@@ -7122,8 +7122,8 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // statement carries or which tree any of them took.  `Verdict` is *output*
     // and not `Fixed`, so neither field touches the digest.
     let root = |t: usize| format!("{:?}", proof.commitments[t]);
-    let bound_roots: Vec<String> = (crate::bounds::FIRST_TREE..plan.n_trees()).map(root).collect();
-    let bound_sides = crate::bounds::side_roots(&plan.bounds, &plan.kv, root);
+    let boundary_roots: Vec<String> = (crate::boundary::FIRST_TREE..plan.n_trees()).map(root).collect();
+    let boundary_sides = crate::boundary::side_roots(&plan.layer_sides, &plan.kv, root);
     ch.mix_felts(&claims.flat());
 
     // ---- components from the parsed statement ----------------------------------
@@ -7160,7 +7160,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // Q.K^T identity is read against the prefix band's `am`, and its numerator sum
     // is added to the prefix band's before the denominator identity is checked.
     // Stream AA: the corner's `b - n_pre` pairing generalises to "which head
-    // band group is this band in", because with `--kv-bind` a group is one
+    // band group is this band in", because with `--kv-boundary` a group is one
     // prefix sub-band *per key block* plus the chunk's own corner, not a pair.
     // `plan.group` and `plan.rows_band` are that generalisation and with the
     // flag off they name exactly the bands the two lines below named.
@@ -7464,7 +7464,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         (a, b)
     };
     // and the block coordinate the angles were built for.  `pos0` is in the
-    // statement, `block` is what `bounds::chain_of` compares along the token
+    // statement, `block` is what `boundary::chain_of` compares along the token
     // axis, and this is the one line that joins them -- without it a chunk could
     // prove block 3's rotation and chain in at block 5.
     let nn_pos_ok = match (&p.rope, fixed.block) {
@@ -7494,7 +7494,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
               deq_out_open, head_binding_ok, embed_ok, embed_tok_ok, head_tok_ok,
               rq_in_ok, rq_out_ok, rq_scale_ok, rq_scale_open, ao_q_open, ao_q_ok,
               nn_in_ok, nn_out_ok, nn_pos_ok, nn_q_ok, nn_open,
-              sizes_ok, glue_ok, stream_in, stream_out, bound_roots, bound_sides, error,
+              sizes_ok, glue_ok, stream_in, stream_out, boundary_roots, boundary_sides, error,
               verify_secs: t0.elapsed().as_secs_f64() }
 }
 
@@ -7715,7 +7715,7 @@ impl Plan {
         if g.is_none() {
             put(13, Unbound, Some("no residual-stream family, so no boundary tree can be \
                                    committed".into()));
-        } else if self.bounds.is_empty() {
+        } else if self.layer_sides.is_empty() {
             put(13, Unbound, Some("the layer boundary trees are off \
                                    (--unsound-skip-layer-boundary): the residual stream \
                                    leaving this segment is compared with nothing".into()));

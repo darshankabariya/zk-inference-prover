@@ -135,7 +135,7 @@ pub fn mode() -> u32 {
 ///
 ///  * `glue::glue_interaction`'s Horner bindings -- the fold, which stream N moves
 ///    to the device (`devacc::gtie`).
-///  * `bounds::cols` (`bounds.rs:130`), which builds the **boundary tree's
+///  * `boundary::cols` (`boundary.rs:130`), which builds the **boundary tree's
 ///    committed columns** out of the same sequence, packed `sm * PACK + ef`
 ///    per (row, slot). That is stream H's chunk-to-chunk chaining, it is on in
 ///    the sequence's pins (`--bounds`), and it is a committed column rather
@@ -149,7 +149,7 @@ pub fn mode() -> u32 {
 ///
 /// So the download stays and this returns true unconditionally. It is kept as
 /// a named predicate rather than deleted because it is where the reasoning
-/// lives, and because the day `bounds::cols` moves to the card it is the one
+/// lives, and because the day `boundary::cols` moves to the card it is the one
 /// line that changes.
 pub fn binding_host() -> bool {
     true

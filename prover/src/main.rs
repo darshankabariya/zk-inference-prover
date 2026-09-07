@@ -9,7 +9,7 @@ mod attn_trace;
 mod argmax;
 mod attn_witness;
 mod bf16;
-mod bounds;
+mod boundary;
 mod common;
 mod device;
 mod compose;
@@ -154,7 +154,7 @@ pub fn src_of(args: &[String]) -> Src {
         // B10 step 3: prove the band as the causal corner instead of the prefix
         // rectangle.  `--ctx` must equal `--s`; the mask is `key <= token`.
         corner: args.iter().any(|a| a == "--corner"),
-        // Stream AA (E11): `--kv-bind` also tiles the declared prefix into
+        // Stream AA (E11): `--kv-boundary` also tiles the declared prefix into
         // blocks of S keys, which is a witness-side decision as much as a plan
         // one -- see `briefs/aa-kvbind.md`.
         // On by default wherever the chunk has its own block (`--corner`): a
@@ -746,7 +746,7 @@ fn embed_probes_cmd(args: &[String]) {
 /// the manifest's own.
 ///
 /// Not a switch on a check: the coordinate goes into the statement either way
-/// and `bounds-grid` compares it either way.  It is an override because one
+/// and `boundary-grid` compares it either way.  It is an override because one
 /// chunk's manifest cannot know where the grid puts it -- the `lm_head` chunk
 /// is extracted at some layer and proved *after* the last one, so its plan
 /// line says `--layer 32` and its block is the block it reads.
@@ -793,11 +793,11 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
                 serde_json::from_value(v.get("params").cloned().unwrap_or(v))
                     .unwrap_or_else(|e| panic!("--params {f}: not a statement's params: {e}"));
             eprintln!("expect-root: model-only load from the statement \
-(variant={} bands={:?} corner={} kv_bind={} log_table={} nmax={})",
-                      p.variant, p.bands, p.corner, p.kv_bind, p.log_table, p.nmax);
+(variant={} bands={:?} corner={} kv_boundary={} log_table={} nmax={})",
+                      p.variant, p.bands, p.corner, p.kv_boundary, p.log_table, p.nmax);
             (attn_witness::Variant::parse(&p.variant), p.variant.clone(), p.bands.clone(),
              attn_witness::Src { log_table: p.log_table, nmax: p.nmax,
-                                 corner: p.corner, tile: p.kv_bind, ..src.clone() })
+                                 corner: p.corner, tile: p.kv_boundary, ..src.clone() })
         } else {
             (variant, vname, bands, src.clone())
         };
@@ -905,8 +905,8 @@ pub fn plan_params(args: &[String]) -> (String, compose::Params) {
         let p = v.get("params").cloned().unwrap_or(v);
         let params: compose::Params = serde_json::from_value(p)
             .unwrap_or_else(|e| panic!("--params {f}: not a statement's params: {e}"));
-        eprintln!("params: {f} (s={} c={} bands={:?} kv_bind={})",
-                  params.s, params.c, params.bands, params.kv_bind);
+        eprintln!("params: {f} (s={} c={} bands={:?} kv_boundary={})",
+                  params.s, params.c, params.bands, params.kv_boundary);
         return (format!("--params {f}"), params);
     }
     let (l, vname) = layer_of(args);
@@ -1188,14 +1188,14 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // Off is what makes the recorded digest the bit-for-bit line.
         // On by default wherever the family is; `--unsound-skip-layer-boundary`
         // turns the trees off, and off is skipped in the serialization.
-        bounds: layer_boundary,
+        layer_boundary,
         // Stream AA (E11): the K/V boundary trees, and the prefix tiling they
         // need.  Opt-in and skipped in the serialization, so a statement
         // written without it is byte identical to one from a crate that never
         // had the feature.
         // On by default wherever the chunk has its own block;
         // `--unsound-skip-kv-boundary` turns the trees off.
-        kv_bind: kv_boundary,
+        kv_boundary: kv_boundary,
         // B11 stream Q: opt in to the LogUp-GKR arm for the bands. A flag and
         // not an env mode, because it changes the proof.
         gkr_bands: flag(args, "--gkr-bands"),
@@ -1261,7 +1261,7 @@ fn compose_once(l: &layer::Layer, params: &compose::Params, tamper: &compose::Pr
 /// Leave one chunk's statement and proof on disk under `tag`.
 ///
 /// Stream O: the chunk loop has to write exactly these two files, per chunk
-/// and under the chunk's own tag, because `bounds-chain` joins two chunks by
+/// and under the chunk's own tag, because `boundary-chain` joins two chunks by
 /// reading them back off disk and nothing else. It was a branch inside
 /// `compose_once` and is a function so that the loop can call it too.
 pub fn ser_write(dir: &str, tag: &str, ser: &Ser) {
@@ -1269,7 +1269,7 @@ pub fn ser_write(dir: &str, tag: &str, ser: &Ser) {
     std::fs::write(format!("{dir}/{tag}.fixed.json"), &ser.fixed_bytes)
         .expect("writing the statement");
     // Stream KK: the claims, which `verify_composed` needs and which nothing
-    // wrote before -- so `bounds-grid --verify` could not have verified a
+    // wrote before -- so `boundary-grid --verify` could not have verified a
     // serialized chunk however hard it tried.  They are small (tens of KB
     // beside a 50 MB proof) and they are a third of the document the verifier
     // reads, so they are written beside the other two.
@@ -1358,18 +1358,18 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
         "stream_bindings_ok": out.stream_bindings_ok,
         // Stream H: the boundary trees' own cells and columns, and the two roots
         // the chain check compares.  Null on a chunk proved with the flag off.
-        "bounds": out.bounds,
+        "layer_boundary": out.layer_boundary,
         // Stream AA: the same for the K/V boundary trees, and every boundary
         // root in the prover's order (stream H's two, then the K/V sides).
-        "kv_bounds": out.kv_bounds,
+        "kv_boundary": out.kv_boundary,
         // Stream EE: the residual pair is found by its label, not by tree index,
         // so this JSON keeps H's shape while the statement may carry any number
         // of sides; `boundary_sides` is every side with its label.
-        "bound_roots": verdict.as_ref().map(|v| json!({
-            "in": v.side_root(bounds::Axis::Layer, "in", None),
-            "out": v.side_root(bounds::Axis::Layer, "out", None)})),
-        "boundary_roots": verdict.as_ref().map(|v| v.bound_roots.clone()),
-        "boundary_sides": verdict.as_ref().map(|v| serde_json::to_value(&v.bound_sides).unwrap()),
+        "boundary_roots": verdict.as_ref().map(|v| json!({
+            "in": v.side_root(boundary::Axis::Layer, "in", None),
+            "out": v.side_root(boundary::Axis::Layer, "out", None)})),
+        "boundary_roots": verdict.as_ref().map(|v| v.boundary_roots.clone()),
+        "boundary_sides": verdict.as_ref().map(|v| serde_json::to_value(&v.boundary_sides).unwrap()),
         "trace_secs": out.trace_secs, "interaction_secs": out.interaction_secs,
         "prove_secs": out.stats.prove_secs,
         "verify_secs": verdict.as_ref().map(|v| v.verify_secs).unwrap_or(0.0),
@@ -1472,7 +1472,7 @@ fn expect_root_cmd(args: &[String]) {
 }
 
 /// Stream LL (E11), deliverable 2: the model manifest KK's
-/// `bounds-grid --expect-pre-roots` consumes.
+/// `boundary-grid --expect-pre-roots` consumes.
 ///
 ///     b65 model-roots --plan PLAN [--pins "..."] [--out FILE] [--limit N]
 ///                     [--weights-only --params-dir DIR]
@@ -1825,7 +1825,7 @@ acc={}+{}",
         eprintln!("compose: attnout accumulator in the magnitude form (log row 73)");
     }
     // Stream I: `--ser-dir DIR [--ser-tag TAG]` leaves this chunk's statement and
-    // proof on disk under that tag, which is what `bounds-chain` reads back.
+    // proof on disk under that tag, which is what `boundary-chain` reads back.
     let ser_dir = arg_str(args, "--ser-dir");
     let ser_tag = arg_str(args, "--ser-tag").unwrap_or_else(|| "chunk".into());
     let (mut j, accepts) = compose_once(&l, &params, &tamper,
@@ -2514,19 +2514,19 @@ synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B
     //     `bounds` probe made this assertion for the pair of sides a layer
     //     chunk carries, but only on real witness dirs; here it runs on every
     //     shape the probe command is given, which is what puts the head chunk's
-    //     single input side (`bounds::sides`, one side, tree 3) under it.
+    //     single input side (`boundary::sides`, one side, tree 3) under it.
     //     Nothing else in the chunk moves, so the only thing that can reject is
     //     the plain equality constraint that binds the tree to the region --
     //     which is the whole statement that the root is bound to the proof and
     //     not merely appended to it.
-    if params.bounds {
-        let n_glue = compose::Plan::new(&params).bounds.len();
+    if params.layer_boundary {
+        let n_glue = compose::Plan::new(&params).layer_sides.len();
         assert!(n_glue > 0,
-                "--bounds produced no residual boundary side: the chunk has no wiring family");
+                "the layer boundary produced no residual side: the chunk has no residual-stream components");
         for k in 0..n_glue {
             assert!(!probe(&format!("residual boundary side {k}, its glue region untouched"),
                            &l,
-                           &compose::ProverTamper { bounds: Some((k, 4321)),
+                           &compose::ProverTamper { layer_boundary: Some((k, 4321)),
                                                     ..Default::default() },
                            "the residual boundary equality constraint"),
                     "a residual boundary column that disagrees with its region accepted");
@@ -2543,14 +2543,14 @@ synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B
     //     Every side is probed, not just the first: an out side and an in side
     //     are written by different sets of bands, and a binding that held on one
     //     and not the other would chain a chunk to a prefix it never proved.
-    if params.kv_bind {
+    if params.kv_boundary {
         let n_sides = compose::Plan::new(&params).kv.len();
-        assert!(n_sides > 0, "--kv-bind produced no K/V boundary sides");
+        assert!(n_sides > 0, "--kv-boundary produced no K/V boundary sides");
         for k in 0..n_sides {
-            let side = compose::Plan::new(&params).bounds.len() + k;
+            let side = compose::Plan::new(&params).layer_sides.len() + k;
             assert!(!probe(&format!("kv: one cell of K/V boundary side {k}, region untouched"),
                            &l,
-                           &compose::ProverTamper { bounds: Some((side, 4321)),
+                           &compose::ProverTamper { layer_boundary: Some((side, 4321)),
                                                     ..Default::default() },
                            "the K/V boundary equality constraint"),
                     "a K/V boundary column that disagrees with its region accepted");
@@ -3153,9 +3153,9 @@ fn main() {
         "embed" => embed_cmd(&args),
         "embed-probes" => embed_probes_cmd(&args),
         "glue" => glue_cmd(&args),
-        "bounds" => bounds::cmd(&args),
-        "bounds-chain" => bounds::chain_cmd(&args),
-        "bounds-grid" => bounds::grid_cmd(&args),
+        "boundary" => boundary::cmd(&args),
+        "boundary-chain" => boundary::chain_cmd(&args),
+        "boundary-grid" => boundary::grid_cmd(&args),
         "glue-probes" => glue_probes_cmd(&args),
         "selftest" => selftest(&args),
         "fpcompare" => fpcompare_cmd(&args),
@@ -3164,7 +3164,7 @@ fn main() {
             eprintln!("unknown subcommand {other:?}; \
                        expected tables|dequant|width|kmax|probes|pack|attn-probes|exprprobe|cudacheck|cudaemit|logupcheck|genemit|\
                        argmax|argmax-probes|embed|embed-probes|\
-                       compose|pre-split|expect-root|model-roots|compose-probes|bounds-chain|bounds-grid|psweep|requant|requant-probes|glue|glue-probes|selftest");
+                       compose|pre-split|expect-root|model-roots|compose-probes|boundary-chain|boundary-grid|psweep|requant|requant-probes|glue|glue-probes|selftest");
             std::process::exit(2);
         }
     }

@@ -168,7 +168,7 @@ pub type PcsB = SimdBackend;
 /// Stream PP (E11): the physical commitment tree indices this crate speaks.
 /// Tree 0 is the shape tree and tree 1 the model tree -- both preprocessed,
 /// both committed before the base trace, because their cells enter the LogUp
-/// numerators.  `bounds::FIRST_TREE` is the first boundary tree.
+/// numerators.  `boundary::FIRST_TREE` is the first boundary tree.
 pub const SHAPE_TREE: usize = 0;
 pub const MODEL_TREE: usize = 1;
 pub const BASE_TREE: usize = 2;
@@ -318,7 +318,7 @@ impl<'a> Session<'a> {
     /// B12 stream GG: one device-memory mark at the end of every commit, so a
     /// tree's bytes are read on their own.  Trees 0, 1 and 2 are marked here;
     /// the boundary trees from 3 up are marked once, together, by
-    /// `mark_bounds` when the caller has committed the last of them.
+    /// `mark_boundary` when the caller has committed the last of them.
     fn mark_tree(&self) {
         let i = self.tree_cols.len() - 1;
         // Stream PP (E11): tree 0 is the shape tree and tree 1 the model tree;
@@ -337,12 +337,12 @@ impl<'a> Session<'a> {
 
     /// The boundary trees (stream PP: 4 and up), as one mark: their columns and
     /// cells summed, their tallest column.  Nothing when there are none.
-    pub fn mark_bounds(&self) {
+    pub fn mark_boundary(&self) {
         if self.tree_cols.len() <= 4 {
             return;
         }
         crate::device::mem_mark_tree(
-            "commit_bounds",
+            "commit_boundary",
             4,
             self.tree_cols[4..].iter().sum(),
             self.tree_cells[4..].iter().sum(),

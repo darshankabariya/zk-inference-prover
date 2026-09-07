@@ -610,7 +610,7 @@ def chunk_memory(mc, fresh, weights, h, measured=None):
         F = fresh + mc["fresh_h_cols"] * (h_cells - 2 ** 23)
         P = mc["pre_per_weight"] * weights + mc["pre_shared_fixed"] \
             + mc["pre_h_cols"] * h_cells
-        base_fixed = mc["base_share"] * (fresh - mc["bounds_cells"]
+        base_fixed = mc["base_share"] * (fresh - mc["boundary_cells"]
                                          - mc["fresh_h_cols"] * 2 ** 23)
         D = base_fixed + mc["base_h_cols"] * h_cells + (P - mc["pre_host_built"])
     fill = mc["fill_fixed"] + mc["fill_h_bytes"] * h_cells
@@ -708,7 +708,7 @@ def hh_point(path):
     return dict(
         h=p["params"]["log_table"], cells=c,
         committed=c["fresh"] + c["preprocessed"],
-        bounds_cells=c["fresh"] - c["base"] - c["interaction"],
+        boundary_cells=c["fresh"] - c["base"] - c["interaction"],
         devcopy_cells=p["upload"]["devcopy_bytes"] // 4,
         fill=marks["after_fill"]["pool_used"], marks=marks,
         peak=peak["pool_used_high"], peak_mark=peak["mark"],
@@ -741,11 +741,11 @@ def _lde_terms(r):
         merkle_check=d_inter - (cell_b * c["interaction"] + merkle * n),
         twiddles=(m["after_twiddles"]["pool_used"] - r["fill"]) / n,
         composition=(m["composition"]["pool_used"]
-                     - m["commit_bounds"]["pool_used"]) / n,
+                     - m["commit_boundary"]["pool_used"]) / n,
         comp_tree=(m["composition_commit"]["pool_used"]
                    - m["composition"]["pool_used"]) / n,
-        bounds_merkle=(m["commit_bounds"]["pool_used"] - m["commit_inter"]["pool_used"]
-                       - cell_b * r["bounds_cells"]),
+        boundary_merkle=(m["commit_boundary"]["pool_used"] - m["commit_inter"]["pool_used"]
+                       - cell_b * r["boundary_cells"]),
         fri=(r["peak"] - m["composition_commit"]["pool_used"]) / n)
 
 
@@ -759,8 +759,8 @@ def _lde_levels(r, co):
                   ("commit_inter", c["interaction"])):
         lv += co["cell_bytes"] * cc + co["merkle"] * n
         out[k] = lv
-    lv += co["cell_bytes"] * r["bounds_cells"] + co["bounds_merkle"]
-    out["commit_bounds"] = lv
+    lv += co["cell_bytes"] * r["boundary_cells"] + co["boundary_merkle"]
+    out["commit_boundary"] = lv
     lv += co["composition"] * n
     out["composition"] = lv
     lv += co["comp_tree"] * n
@@ -822,7 +822,7 @@ def ldeonly_coeffs(mc):
     # shape, and it is what the wide rows are also priced under.
     def X_scaled(h, cells):
         n = 2 ** (h + 1)
-        return (resident_n * n + ta["bounds_merkle"]
+        return (resident_n * n + ta["boundary_merkle"]
                 + max(tb["fri"] * n, 8.0 * grp_share * cells))
 
     struct = {r["h"]: dict(model=X_scaled(r["h"], r["committed"]),
@@ -857,7 +857,7 @@ def ldeonly_memory(mc, lo, part, h):
     fixed = lo["driver_bytes"] + lo["slack_bytes"]
     X = lo["a_bytes"] + lo["b_bytes"] * n
     group = lo["group_share"] * cells
-    resident = lo["resident_n"] * n + lo["terms"]["bounds_merkle"]
+    resident = lo["resident_n"] * n + lo["terms"]["boundary_merkle"]
     transient = max(lo["fri_n"] * n, 8.0 * group)
     # (iii) prices the group in flight explicitly: 4 B of coefficients crossing
     # the bus beside the 8 B of evaluations rebuilt from them.  At the shape and

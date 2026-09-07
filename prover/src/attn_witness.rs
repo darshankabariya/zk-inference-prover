@@ -244,7 +244,7 @@ pub struct Src {
     /// B10 step 3: build the band as the causal corner (`C == S`, key `c` is
     /// decoded token `c`) rather than as the prefix rectangle.
     pub corner: bool,
-    /// Stream AA (E11), from `--kv-bind`: load the declared prefix as `C / S`
+    /// Stream AA (E11), from `--kv-boundary`: load the declared prefix as `C / S`
     /// bands of `S` keys each instead of one rectangle of `C`.  Implies
     /// `corner`.  See `Attn::load_from`'s `key_off`.
     pub tile: bool,
@@ -431,7 +431,7 @@ impl Attn {
     ///
     /// Stream AA (E11): `key_off` is where this band's keys start inside the
     /// dump's context.  Zero everywhere before this stream and on every corner
-    /// band; with `--kv-bind` the declared prefix is loaded as `C / S` bands of
+    /// band; with `--kv-boundary` the declared prefix is loaded as `C / S` bands of
     /// `S` keys each and `key_off` is `k * S`.  It is a window into the same
     /// bytes -- no format change, no re-extraction, and the derived values are
     /// recomputed from the window exactly as they always were from the whole.

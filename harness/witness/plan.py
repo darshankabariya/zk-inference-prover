@@ -23,7 +23,7 @@ reads `D/shapes_B<b>.json` and writes `--witness D/witness_B<b>_L<k>
 does not is **nothing new** -- the prefix length is `Params.c`, which
 `params_of` reads off the witness's own manifest (`main.rs:567`,
 `c: b0.shape.c`), so a block is a directory and a table size and that is all.
-No `Params` field is added, which matters because `bounds.rs:253-257`'s
+No `Params` field is added, which matters because `boundary.rs:253-257`'s
 `shape_ok` compares `params.s`, `params.glue`, the blowup and the two boundary
 trees' sizes and would reject every cross-block link if a block index entered
 the statement.
@@ -109,7 +109,7 @@ def head_line(hdir, htb, tag="head", extra="", layer=None, block=None):
     layer it was *extracted* at (16, for the C=4K set) and carries no block at
     all, but the grid puts the head chunk after the last layer of the block it
     reads.  `--layer` / `--block` declare that, `Fixed` carries it, and
-    `bounds-grid` places the chunk by the statement rather than by the tag --
+    `boundary-grid` places the chunk by the statement rather than by the tag --
     which is what lets the head take a cell at all.
 
     **Stream UU (E11): the residual boundary.**  The head chunk commits the residual its
@@ -163,7 +163,7 @@ def main():
                          "position before the first generated one needs a head chunk too "
                          "-- for the 9-block C=4K sequence (8 prompt blocks + 1 decode "
                          "block) that is block 7, and '--head-blocks 7,8' is what makes "
-                         "`bounds-grid --verify` report no declared generated position")
+                         "`boundary-grid --verify` report no declared generated position")
     ap.add_argument("--emit-out", default="",
                     help="also write the distinct emit shapes, one representative plan line "
                          "each, for `emitset` to walk instead of the plan")
@@ -171,7 +171,7 @@ def main():
     # The E11 grid wants `--round even --corner` on every layer line (the
     # boundaries and the embedding gadget are on by default wherever the dump
     # lets them be) and the head pinned where seq6 ran it.  They go on the LINE,
-    # not the shared command line, because `bounds-grid` reads a chunk's flags
+    # not the shared command line, because `boundary-grid` reads a chunk's flags
     # back off its statement and the head must not inherit `--corner`.  A line's
     # flags are part of its emit key, and so is what the dump lets the defaults
     # turn on: a layer-0 line whose dump carries the embedding rows is a

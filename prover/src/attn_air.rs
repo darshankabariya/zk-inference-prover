@@ -352,10 +352,10 @@ pub struct ChanEval {
     /// Stream AA: the K/V boundary trees this band's committed **keys** are
     /// copied into -- 0, 1 or 2 of them (a declared-prefix sub-band writes both
     /// its group's out and in sides; the chunk's own block writes the out side
-    /// alone).  Empty on a chunk proved with `--kv-bind` off, which is why that
+    /// alone).  Empty on a chunk proved with `--kv-boundary` off, which is why that
     /// chunk's constraint IR, its kernel fingerprint and its proof are
     /// byte-for-byte the old ones.
-    pub bound_k: Vec<crate::bounds::KvBound>,
+    pub boundary_k: Vec<crate::boundary::KvBoundary>,
     /// Stream NN: this band's own K and Q claims, in that order.  `Some` only on
     /// a **corner** band of a chunk that carries the RoPE regions -- the corner's
     /// keys are this block's own tokens, which are the ones the layer's `k`
@@ -411,8 +411,8 @@ impl FrameworkEval for ChanEval {
         // commitment, so a prover who knows the earlier challenges has gained
         // nothing, and `INTERACTION_TRACE_IDX = 2` stays where the vendored
         // framework and every generated kernel expect it.  See
-        // `notes/bounds-design.md` and `bounds.rs`'s stream AA section.
-        for b in &self.bound_k {
+        // `notes/bounds-design.md` and `boundary.rs`'s stream AA section.
+        for b in &self.boundary_k {
             assert_eq!(b.n, self.lay.pk, "a K boundary side's width is not the band's `pk`");
             for kp in ks.iter() {
                 let [c] = eval.next_interaction_mask(b.tree, [0]);
@@ -536,10 +536,10 @@ pub struct KeyEval {
     /// means in the AIR.
     pub corner: bool,
     /// Stream AA: the K/V boundary trees this band's committed **values** are
-    /// copied into -- the V half of `ChanEval::bound_k`, same sides, same
+    /// copied into -- the V half of `ChanEval::boundary_k`, same sides, same
     /// order, so that one tree holds `[band's K][band's V]` per band in
     /// component-registration order.
-    pub bound_v: Vec<crate::bounds::KvBound>,
+    pub boundary_v: Vec<crate::boundary::KvBoundary>,
     /// Stream NN: this band's own V claim, the counterpart of `ChanEval::qk_bind`.
     /// `Some` only on a corner band of a chunk that carries the quantize regions.
     pub v_bind: Option<BandTie>,
@@ -614,7 +614,7 @@ impl FrameworkEval for KeyEval {
         // group per `(instance, key)` and holds head channels on the column
         // axis, so a V column is `lay.pv` wide where a K column is `lay.pk`.
         // Nothing else differs -- same trees, same order, same bare equality.
-        for b in &self.bound_v {
+        for b in &self.boundary_v {
             assert_eq!(b.n, self.lay.pv, "a V boundary side's width is not the band's `pv`");
             for vp in vals.iter() {
                 let [c] = eval.next_interaction_mask(b.tree, [0]);

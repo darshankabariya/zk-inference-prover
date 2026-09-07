@@ -214,7 +214,7 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
         ChanEval { tag: 0, lay: l.chan, pow: pow.clone(), off, claimed: inter.claimed_chan,
                    qk_bind: None, q_bind: None,
                    rel_k: rels[ridx(a.k_bits)].clone(), rel_q: rels[ridx(a.q_bits)].clone(),
-                   range_check: cfg.range_check, gkr: false, bound_k: vec![] },
+                   range_check: cfg.range_check, gkr: false, boundary_k: vec![] },
         if cfg.range_check { next_use() } else { SecureField::zero() },
     );
     let key = FrameworkComponent::<KeyEval>::new(
@@ -229,7 +229,7 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
                       _ => None,
                   },
                   range_check: cfg.range_check, gkr: false, corner: a.corner,
-                  bound_v: vec![] },
+                  boundary_v: vec![] },
         next_use(),
     );
     let out = FrameworkComponent::<OutEval>::new(

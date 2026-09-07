@@ -74,7 +74,7 @@ pub const FIRST_TREE: usize = 4;
 /// region carries it, which of that region's value sequences it is, and the
 /// shape that follows.
 #[derive(Clone, Copy, Debug)]
-pub struct Bound {
+pub struct Boundary {
     pub tree: usize,
     pub kind: BindingKind,
     /// values per row, which is also the tree's column count
@@ -85,7 +85,7 @@ pub struct Bound {
 /// region it is taken from and the row count.
 #[derive(Clone, Copy, Debug)]
 pub struct Side {
-    pub bound: Bound,
+    pub bound: Boundary,
     pub region: usize,
     pub log_rows: u32,
 }
@@ -118,7 +118,7 @@ pub fn sides(gp: &GluePlan) -> Vec<Side> {
                 BindingKind::Out(o) => r.prog.outs[o].len(),
             };
             Side {
-                bound: Bound { tree: FIRST_TREE + i, kind, n },
+                bound: Boundary { tree: FIRST_TREE + i, kind, n },
                 region: *region,
                 log_rows: r.log_rows,
             }
@@ -219,7 +219,7 @@ pub fn report(sides: &[Side]) -> Value {
 ///
 /// * on a **residual** edge it is false structurally, from the statements
 ///   alone.  `kv_shape_ok` carries the adjacency `c_a + S == c_b`, which
-///   `c_a == c_b` cannot satisfy, so with `--kv-bind` on no assignment of roots
+///   `c_a == c_b` cannot satisfy, so with `--kv-boundary` on no assignment of roots
 ///   makes a layer pair chain.
 /// * on a **K/V** edge it is false on the data.  `roots_equal` compares block
 ///   `b`'s residual *output* root against block `b+1`'s residual *input* root
@@ -307,7 +307,7 @@ pub struct ChainVerdict {
     pub out_root: Option<String>,
     pub in_root: Option<String>,
     /// Stream AA: both statements carry the K/V boundary.  `false` on a pair
-    /// proved without `--kv-bind`, where the chain is the layer boundary's
+    /// proved without `--kv-boundary`, where the chain is the layer boundary's
     /// alone and says nothing about which prefix either chunk attended to.
     pub kv_present: bool,
     /// the two statements agree on everything that fixes the K/V layout, the
@@ -343,7 +343,7 @@ impl ChainVerdict {
     ///   pre-AA pair -- and every layer chain stream I and stream O recorded --
     ///   is answered by the same three booleans it always was;
     /// * a **K/V** edge asks for the K/V link and only the K/V link.  It
-    ///   *requires* `kv_present`: a pair proved without `--kv-bind` is not a
+    ///   *requires* `kv_present`: a pair proved without `--kv-boundary` is not a
     ///   K/V edge, so turning the flag off makes a token-block pair unchainable
     ///   rather than vacuously chained;
     /// * anything that is not an edge does not chain.
@@ -360,7 +360,7 @@ impl ChainVerdict {
         let need = |ok: bool, what: &str| (!ok).then(|| what.to_string());
         match axis {
             Axis::Layer => need(v.present, "the residual boundary is absent from one of the \
-                                            statements: `--bounds` was off, or the first chunk \
+                                            statements: the layer boundary was skipped, or the first chunk \
                                             is an `lm_head` chunk, which commits an input side \
                                             and no output side")
                 .or_else(|| need(v.shape_ok, "the two statements disagree about the residual \
@@ -370,7 +370,7 @@ impl ChainVerdict {
                 .or_else(|| need(v.roots_equal, "the first chunk's residual out root is not the \
                                                  second's in root")),
             Axis::Token => need(v.kv_present, "the K/V boundary is absent from one of the \
-                                               statements (`--kv-bind` was off)")
+                                               statements (`--kv-boundary` was off)")
                 .or_else(|| need(v.kv_shape_ok, "the two statements disagree about the K/V \
                                                  boundary's layout"))
                 .or_else(|| need(v.coord_ok, "the two statements' declared (layer, block) \
@@ -439,7 +439,7 @@ impl KvLayout {
 /// derives the tree layout without building a plan.
 fn glue_sides(p: &crate::compose::Params) -> usize {
     match &p.glue {
-        Some(g) if p.bounds => {
+        Some(g) if p.layer_boundary => {
             if g.head_norm { 1 } else { 2 }
         }
         _ => 0,
@@ -489,7 +489,7 @@ fn glue_layout_eq(a: &crate::compose::Params, b: &crate::compose::Params) -> boo
 }
 
 pub fn kv_layout(p: &crate::compose::Params) -> Option<KvLayout> {
-    p.kv_bind.then(|| KvLayout {
+    p.kv_boundary.then(|| KvLayout {
         first: FIRST_TREE + glue_sides(p),
         groups: p.bands.len(),
         with_in: p.c > 0,
@@ -552,7 +552,7 @@ pub fn chain_of(
     let (ga, gb) = (glue_sides(&fa.params), glue_sides(&fb.params));
     // Stream AA: the expected tree count is a function of the statement --
     // three, plus stream H's two when `--bounds` is on, plus one per K/V side.
-    // With `--kv-bind` absent and `--bounds` on this is `FIRST_TREE + 2`
+    // With `--kv-boundary` absent and `--bounds` on this is `FIRST_TREE + 2`
     // exactly as it was, so a pair of pre-AA proofs takes the pre-AA path.
     let want = |n: usize, g: usize, k: &Option<KvLayout>| {
         FIRST_TREE + g + k.as_ref().map(|k| k.n_sides()).unwrap_or(0) == n
@@ -718,7 +718,7 @@ fn prove_one(tag: &str, name: &str, dir: &str, out_dir: &str, args: &[String],
     let a = at(args, dir);
     let (l, vname) = crate::layer_of(&a);
     let mut params = crate::params_of(&l, &a, &vname);
-    params.bounds = true;
+    params.layer_boundary = true;
     assert!(params.glue.is_some(),
             "{name}: the boundary is the wiring family's two stream bindings, and this \
              witness has no glue columns -- extract it with `extract.py --glue`");
@@ -743,8 +743,8 @@ fn chunk_json(c: &Chunk) -> Value {
         "accepts": c.accepts,
         "cells": c.json.get("cells"),
         "columns": c.json.get("columns"),
-        "bounds": c.json.get("bounds"),
-        "bound_roots": c.json.get("bound_roots"),
+        "layer_boundary": c.json.get("layer_boundary"),
+        "boundary_roots": c.json.get("boundary_roots"),
         "proof_bytes": c.json.get("proof_bytes"),
         "proof_ser_bytes": c.json.get("proof_ser_bytes"),
         "statement_bytes": c.json.get("statement_bytes"),
@@ -767,8 +767,8 @@ fn chunk_json(c: &Chunk) -> Value {
 /// boundary column tampered *alone*, because that is the equality constraint's
 /// job.
 pub fn cmd(args: &[String]) {
-    let a_dir = crate::arg_str(args, "--a").expect("bounds needs --a <witness dir>");
-    let b_dir = crate::arg_str(args, "--b").expect("bounds needs --b <witness dir>");
+    let a_dir = crate::arg_str(args, "--a").expect("boundary needs --a <witness dir>");
+    let b_dir = crate::arg_str(args, "--b").expect("boundary needs --b <witness dir>");
     let c_dir = crate::arg_str(args, "--c");
     let a_out = crate::arg_str(args, "--a-out-tampered");
     let b_in = crate::arg_str(args, "--b-in-tampered");
@@ -793,7 +793,7 @@ pub fn cmd(args: &[String]) {
         &a_dir,
         &out_dir,
         args,
-        &crate::compose::ProverTamper { bounds: Some((1, binding_cell)), ..Default::default() },
+        &crate::compose::ProverTamper { layer_boundary: Some((1, binding_cell)), ..Default::default() },
     );
     probes.push(json!({
         "probe": "one cell of the output boundary tree, the region left alone",
@@ -868,7 +868,7 @@ pub fn cmd(args: &[String]) {
 
     assert!(honest.chains(), "the honest pair did not chain");
     crate::util::emit(
-        "bounds",
+        "boundary",
         json!({
             "chunks": [chunk_json(&a), chunk_json(&b)],
             "chain_honest": serde_json::to_value(&honest).unwrap(),
@@ -892,9 +892,9 @@ pub fn cmd(args: &[String]) {
 /// chunk's input and the last chunk's output are declared inputs under the v1
 /// ground rule, so a sequence of `n` chunks has `n - 1` links.
 pub fn chain_cmd(args: &[String]) {
-    let dir = crate::arg_str(args, "--dir").expect("bounds-chain needs --dir <serialized dir>");
+    let dir = crate::arg_str(args, "--dir").expect("boundary-chain needs --dir <serialized dir>");
     let tags = crate::arg_str(args, "--tags")
-        .expect("bounds-chain needs --tags <t0,t1,...> in sequence order");
+        .expect("boundary-chain needs --tags <t0,t1,...> in sequence order");
     let tags: Vec<String> = tags.split(',').map(|t| t.trim().to_string()).collect();
     assert!(tags.len() >= 2, "a chain wants at least two chunks");
 
@@ -945,7 +945,7 @@ pub fn chain_cmd(args: &[String]) {
     }
     let n = links.len();
     crate::util::emit(
-        "bounds-chain",
+        "boundary-chain",
         json!({
             "dir": dir,
             "chunks": tags,
@@ -1043,7 +1043,7 @@ struct GridChunk {
     is_head: bool,
 }
 
-/// `bounds-grid`: every link of the (block, layer) grid, on both axes, from
+/// `boundary-grid`: every link of the (block, layer) grid, on both axes, from
 /// serialized bytes alone.
 ///
 /// ```text
@@ -1085,7 +1085,7 @@ struct GridChunk {
 /// `verify_composed` (`Fixed::tok_in`, `Fixed::tok_out`), so this comparison is
 /// between two proved values and not between two declarations.
 pub fn grid_cmd(args: &[String]) {
-    let dir = crate::arg_str(args, "--dir").expect("bounds-grid needs --dir <serialized dir>");
+    let dir = crate::arg_str(args, "--dir").expect("boundary-grid needs --dir <serialized dir>");
     let allow_gaps = crate::flag(args, "--allow-gaps");
     let expect_layer: Option<usize> = crate::arg_str(args, "--expect-layer-links")
         .map(|s| s.parse().expect("--expect-layer-links takes a count"));
@@ -1235,8 +1235,8 @@ pub fn grid_cmd(args: &[String]) {
             "block_declared": fixed.block,
             "c": c, "s": s,
             "trees": fixed.sizes.len(),
-            "bounds": fixed.params.bounds,
-            "kv_bind": fixed.params.kv_bind,
+            "layer_boundary": fixed.params.layer_boundary,
+            "kv_boundary": fixed.params.kv_boundary,
             "head": is_head,
             "ids": fixed.tok_in.len(),
             "emits": fixed.tok_out.len(),
@@ -1261,7 +1261,7 @@ pub fn grid_cmd(args: &[String]) {
     // stream KK: a `lm_head` chunk takes a cell of the grid -- it is verified,
     // its emitted tokens are read, and its coordinate is compared.
     //
-    // Stream UU: it now also commits the residual **input** side (`bounds::sides`),
+    // Stream UU: it now also commits the residual **input** side (`boundary::sides`),
     // so the edge from the last layer chunk into it is an ordinary layer-axis
     // link and is run below with every other one.  `head_end` is what is left of
     // stream KK's rule: a head chunk that committed no input side -- `--bounds`
@@ -1288,8 +1288,9 @@ pub fn grid_cmd(args: &[String]) {
                     declared.push(json!({
                         "what": "the lm_head chunk's input",
                         "block": b, "from": chunks[i].tag, "to": chunks[j].tag,
-                        "why": "this head chunk committed no residual input side (`--bounds` \
-                                off, or a dump with no final norm and so no wiring family), \
+                        "why": "this head chunk committed no residual input side (the layer boundary \
+                                skipped, or a dump with no final norm and so no residual-stream \
+                                components), \
                                 so the last layer's stream_out joins it by declaration, not \
                                 by a root equality (notes/witness-slack.md section 5 item 3)"}));
                 } else {
@@ -1723,7 +1724,7 @@ pub fn grid_cmd(args: &[String]) {
         eprintln!("grid: FAIL {f}");
     }
     crate::util::emit(
-        "bounds-grid",
+        "boundary-grid",
         json!({
             "dir": dir,
             "source": source,
@@ -1820,7 +1821,7 @@ pub fn grid_cmd(args: &[String]) {
 /// One K/V boundary tree as a band component sees it: which tree, and how many
 /// of that component's columns go into it.
 #[derive(Clone, Copy, Debug)]
-pub struct KvBound {
+pub struct KvBoundary {
     pub tree: usize,
     /// columns this component writes -- `lay.pk` in `ChanEval`, `lay.pv` in
     /// `KeyEval`
@@ -1902,15 +1903,15 @@ pub fn kv_sides(first_tree: usize, bands: &[KvBand]) -> Vec<KvSide> {
 }
 
 /// What band `b` writes into the K/V trees, in the order the AIR must read the
-/// masks: one `KvBound` per side the band participates in, in `plan.kv`'s order.
+/// masks: one `KvBoundary` per side the band participates in, in `plan.kv`'s order.
 ///
 /// `n` is the component's own column count -- `lay.pk` for `ChanEval`, `lay.pv`
 /// for `KeyEval` -- and the AIR asserts it against the mask count it reads.
-pub fn kv_bounds_of(sides: &[KvSide], band: usize, n: usize) -> Vec<KvBound> {
+pub fn kv_boundaries_of(sides: &[KvSide], band: usize, n: usize) -> Vec<KvBoundary> {
     sides
         .iter()
         .filter(|s| s.bands.contains(&band))
-        .map(|s| KvBound { tree: s.tree, n })
+        .map(|s| KvBoundary { tree: s.tree, n })
         .collect()
 }
 
@@ -1967,8 +1968,8 @@ pub fn kv_report(sides: &[KvSide]) -> Value {
 
 /// One boundary side's root as the verifier reports it: which tree, which axis
 /// it binds, whether it is the `in` or the `out` side, and -- for a K/V side --
-/// which head band group.  Stream H named the residual pair `bound_in` and
-/// `bound_out` by tree index (3 and 4), which was right while a statement
+/// which head band group.  Stream H named the residual pair `boundary_in` and
+/// `boundary_out` by tree index (3 and 4), which was right while a statement
 /// carried exactly one boundary pair; a statement now carries the sides its
 /// plan lists, and a reader asks for a side by label.
 #[derive(Debug, Clone, Serialize)]
@@ -1983,7 +1984,7 @@ pub struct SideRoot {
 }
 
 /// Every side's root, off the plan's two side lists and a root-by-tree lookup.
-/// The order is the prover's commit order, so it is also `bound_roots`' order.
+/// The order is the prover's commit order, so it is also `boundary_roots`' order.
 pub fn side_roots(glue: &[Side], kv: &[KvSide], root: impl Fn(usize) -> String) -> Vec<SideRoot> {
     let mut v: Vec<SideRoot> = glue
         .iter()
@@ -2023,7 +2024,7 @@ mod tests {
     use crate::compose::{Fixed, GlueParams, Params};
 
     /// A statement for one chunk: `c` keys of declared prefix, `s` decoded
-    /// tokens, stream H's boundary always on, `--kv-bind` optional.
+    /// tokens, stream H's boundary always on, `--kv-boundary` optional.
     fn fixed(c: usize, s: usize, kv: bool) -> Fixed {
         let params = Params {
             s,
@@ -2033,8 +2034,8 @@ mod tests {
             bands: vec![2, 1],
             variant: "intexp".into(),
             corner: kv,
-            bounds: true,
-            kv_bind: kv,
+            layer_boundary: true,
+            kv_boundary: kv,
             glue: Some(GlueParams { d: 64, a: 4, ..Default::default() }),
             ..Default::default()
         };
@@ -2084,7 +2085,7 @@ mod tests {
     /// Root lists for a pair, with the boundaries the caller asks for made
     /// equal and every other root distinct.
     ///
-    /// Tree layout for `--kv-bind` with two head band groups and `c > 0`
+    /// Tree layout for `--kv-boundary` with two head band groups and `c > 0`
     /// (stream PP: the preprocessed trace is two trees, so the boundary ones
     /// start at 4): `[0 shape][1 model][2 base][3 inter][4 glue in][5 glue out]
     /// [6 g0 out][7 g0 in][8 g1 out][9 g1 in]`.
@@ -2134,8 +2135,8 @@ mod tests {
         // the root of tree `t` is the string `t`
         let root = |t: usize| t.to_string();
         let glue = [
-            Side { bound: Bound { tree: 3, kind: BindingKind::In(0), n: 1 }, region: 0, log_rows: 1 },
-            Side { bound: Bound { tree: 4, kind: BindingKind::Out(1), n: 1 }, region: 0, log_rows: 1 },
+            Side { bound: Boundary { tree: 3, kind: BindingKind::In(0), n: 1 }, region: 0, log_rows: 1 },
+            Side { bound: Boundary { tree: 4, kind: BindingKind::Out(1), n: 1 }, region: 0, log_rows: 1 },
         ];
         let kv = [
             KvSide { tree: 5, group: 0, out: true, bands: vec![], columns: 0, cells: 0 },
@@ -2220,7 +2221,7 @@ mod tests {
 
     #[test]
     fn token_edge_needs_the_flag_on_both_sides() {
-        // the consumer proved without `--kv-bind`: nothing to compare, and
+        // the consumer proved without `--kv-boundary`: nothing to compare, and
         // "nothing to compare" must not read as "it chained"
         let (a, b) = (fixed(512, 512, true), fixed(1024, 512, false));
         let (ra, rb) = roots(&a, &b, true, true);
@@ -2304,7 +2305,7 @@ mod tests {
 
     #[test]
     fn layer_edge_ignores_the_kv_trees() {
-        // with `--kv-bind` on, two layers of one block have unrelated K/V
+        // with `--kv-boundary` on, two layers of one block have unrelated K/V
         // caches; the residual link is the whole question and the pair chains
         let (a, b) = (fixed(1024, 512, true), fixed(1024, 512, true));
         let (ra, rb) = roots(&a, &b, false, true);
@@ -2388,7 +2389,7 @@ mod tests {
     #[test]
     fn the_merged_predicate_failed_structurally_on_a_layer_edge() {
         // `kv_shape_ok` carries the adjacency `c_a + S == c_b`, which a layer
-        // edge cannot satisfy: with `--kv-bind` on, *no* assignment of roots
+        // edge cannot satisfy: with `--kv-boundary` on, *no* assignment of roots
         // makes the old predicate true.
         for kv_equal in [false, true] {
             for residual_equal in [false, true] {

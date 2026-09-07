@@ -206,7 +206,7 @@ pub struct Layer {
     pub band_sizes: Vec<usize>,
     pub head_offsets: Vec<usize>,
     /// Stream AA (E11): how many bands one head band group's declared prefix is
-    /// tiled into.  1 everywhere before this stream and without `--kv-bind`;
+    /// tiled into.  1 everywhere before this stream and without `--kv-boundary`;
     /// `C / S` with it, which is what makes a consumer's sub-band the same
     /// `Shape` as the producer's corner; 0 on block 0 of a sequence, which has
     /// no declared prefix and so no prefix band.  `params_of` reads it back to
@@ -904,15 +904,15 @@ impl Layer {
         let mut head_offsets = vec![];
         let mut sizes = vec![];
         let mut off = 0usize;
-        // Stream AA (E11), layout design A: with `--kv-bind` the declared prefix
+        // Stream AA (E11), layout design A: with `--kv-boundary` the declared prefix
         // is loaded as `c / s` sub-bands of exactly `S` keys each rather than as
         // one rectangle, because that is what makes a consumer's sub-band `b`
         // the same `Shape` -- and so the same `LayoutKey`, and so a column of
         // the same height -- as the producer's corner.  `Attn::load_from` reads
         // the same bytes with a key offset; nothing about the dump changes.
-        assert!(!cfg.tile || cfg.corner, "`--kv-bind` needs a `--corner` dump");
+        assert!(!cfg.tile || cfg.corner, "`--kv-boundary` needs a `--corner` dump");
         assert!(!cfg.tile || c % s == 0,
-                "`--kv-bind` tiles the prefix in blocks of S: C={c} is not a multiple of S={s}");
+                "`--kv-boundary` tiles the prefix in blocks of S: C={c} is not a multiple of S={s}");
         let nsub = if c == 0 { 0 } else if cfg.tile { c / s } else { 1 };
         let sub_c = if cfg.tile { s } else { c };
         {
@@ -1255,9 +1255,9 @@ impl Layer {
         let has_corner = man["corner"].as_bool().unwrap_or(false);
         assert!(c > 0 || has_corner,
                 "a c = 0 dump is block 0: it is the solo corner and needs a `--corner` dump");
-        assert!(!cfg.tile || cfg.corner, "`--kv-bind` needs a `--corner` dump");
+        assert!(!cfg.tile || cfg.corner, "`--kv-boundary` needs a `--corner` dump");
         assert!(!cfg.tile || c % s == 0,
-                "`--kv-bind` tiles the prefix in blocks of S: C={c} is not a multiple of S={s}");
+                "`--kv-boundary` tiles the prefix in blocks of S: C={c} is not a multiple of S={s}");
         let q_bits = man["qk_bits"][0].as_u64().unwrap_or(8) as u32;
         let k_bits = man["qk_bits"][1].as_u64().unwrap_or(8) as u32;
         // the per-head exponents this band's instances take, in `Attn::load_from`'s
@@ -1464,7 +1464,7 @@ impl Layer {
                           -> Option<RopeCols> {
         use crate::glue::{Prog, UnKind, reference};
         let (nh, hd, tokens) = (self.ao.nh, self.ao.hd, self.ao.s);
-        // stream NN-3: a tiled prefix (`--kv-bind`) is rebuilt like any other
+        // stream NN-3: a tiled prefix (`--kv-boundary`) is rebuilt like any other
         // now, so `nsub` is no longer a reason to leave the family off
         // stream NN-3: a shape that leaves the family off says which test it
         // failed.  Silence here cost a session an afternoon of guessing.
@@ -1663,14 +1663,14 @@ exponent(s) small, so B1's clamp fires");
     /// halves share one row maximum and one master exponent, exactly as
     /// `Attn::synthetic_pair` builds them.
     ///
-    /// Stream NN-3: a tiled prefix (`--kv-bind`, `nsub > 1`) is rebuilt too.
+    /// Stream NN-3: a tiled prefix (`--kv-boundary`, `nsub > 1`) is rebuilt too.
     /// Its sub-bands are `nsub` windows of one pair's prefix, so each keeps its
     /// own slice of the cache and takes the new queries, the group's master
     /// exponent is the joint maximum over every sub-band **and** the corner, and
     /// the pair's total denominator -- which the group's per-token region
     /// commits on its first sub-band -- is the sum of all of their `zz`.  Before
     /// this the function asserted `nsub <= 1` and the rotation simply turned
-    /// itself off under `--kv-bind`.
+    /// itself off under `--kv-boundary`.
     ///
     /// `pre_q_bend` is stream NN-2's control: one cell of the **first group's
     /// prefix band's own** copy of Q, moved before that band's attention is
@@ -1911,9 +1911,9 @@ unmoved (a rejection is the pass)");
         // stream, which is what a chain probe needs; that generator is the
         // follow-on this stream's record names, and until it exists a chain is
         // proved on a real dump.
-        assert!(!cfg.tile || cfg.corner, "`--kv-bind` needs `--corner`");
+        assert!(!cfg.tile || cfg.corner, "`--kv-boundary` needs `--corner`");
         assert!(!cfg.tile || c % s == 0,
-                "`--kv-bind` tiles the prefix in blocks of S: C={c} is not a multiple of S={s}");
+                "`--kv-boundary` tiles the prefix in blocks of S: C={c} is not a multiple of S={s}");
         let s_nsub = if cfg.tile { c / s } else { 1 };
         let nh: usize = band_sizes.iter().sum();
         // pass 1: learn the data-derived exponents; pass 2: rebuild every band

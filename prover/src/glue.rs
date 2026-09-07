@@ -707,7 +707,7 @@ pub struct GlueEval {
     /// tree that side is committed in and which of the region's value sequences
     /// it holds.  `None` on every region of a chunk proved with the boundary
     /// flag off, which is why that chunk's proof is byte-for-byte the old one.
-    pub bound: Option<crate::bounds::Bound>,
+    pub bound: Option<crate::boundary::Boundary>,
 }
 
 
@@ -906,7 +906,7 @@ impl FrameworkEval for GlueEval {
                 }
             };
             assert_eq!(members.len(), b.n, "the boundary's width disagrees with its plan");
-            let pack = m31_u32(crate::bounds::PACK as u32);
+            let pack = m31_u32(crate::boundary::PACK as u32);
             for (sm, ef) in members.iter() {
                 let [c] = eval.next_interaction_mask(b.tree, [0]);
                 eval.add_constraint(c - (sm.clone() * E::F::from(pack) + ef.clone()));

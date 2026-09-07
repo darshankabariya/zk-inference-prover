@@ -66,7 +66,7 @@
 //! # What the lookup carries, and why one cell per channel is enough
 //!
 //! The tuple is `(v, cb, y_0 .. y_{pe-1})` with `y_k = PACK sm_k + ef_k` --
-//! `bounds::PACK`'s packing, one preprocessed cell per table entry instead of
+//! `boundary::PACK`'s packing, one preprocessed cell per table entry instead of
 //! two.  The soundness of the halving is the packing's injectivity on the valid
 //! bf16 domain, and the use side buys the domain itself with one 8-bit range
 //! check per channel on `ef`:
@@ -105,7 +105,7 @@ use stwo_constraint_framework::{
 
 use crate::attn_air::{RangeRel, RangeTableEval, tbl_range};
 use crate::attn_trace::m31_of;
-use crate::bounds::PACK;
+use crate::boundary::PACK;
 use crate::common::{Eval, Proven, Session, Sums, eval_of, log_rows_for, m31_u32, twiddles};
 
 /// The exponent's width: `ef` is a bf16 exponent field, so `[0, 256)`, and the
@@ -683,7 +683,7 @@ pub fn region(w: &EWitness, lay: EmbLayout, m_ef: &mut [u32], bad: Option<Tamper
 
 impl ERegion {
     /// Stream KK: the committed id of every position, in position order -- the
-    /// vector the statement publishes and `bounds-grid` compares against the
+    /// vector the statement publishes and `boundary-grid` compares against the
     /// previous block's proved argmax.  Read off the committed column, so it is
     /// the region's own ids and not the witness's.
     pub fn token_ids(&self) -> Vec<u32> {
@@ -1135,7 +1135,7 @@ mod tests {
                 inv_d: crate::bf16::from_f64(1.0 / 64.0),
             }),
             corner: false, gkr_bands: false, gkr_dequant: false, gkr_glue: false,
-            gkr_walks: false, gkr_attnout: false, bounds: false, kv_bind: false,
+            gkr_walks: false, gkr_attnout: false, layer_boundary: false, kv_boundary: false,
             head_key: false, head_argmax: false, head_argmax_lax: false,
             embed_vocab: if embed { 300 } else { 0 },
             embed_per_row: if embed { 32 } else { 0 },

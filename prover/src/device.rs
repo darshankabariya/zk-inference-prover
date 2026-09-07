@@ -550,7 +550,7 @@ impl AnyCol<'_> {
     /// The same, downloading a device column rather than refusing it: for a
     /// reader that needs the cells on this side of the bus and knows it is
     /// paying for them.  Open item 18: the one such reader is the K/V boundary
-    /// tamper (`bounds::kv_cols`), which bumps one cell of a side whose bands
+    /// tamper (`boundary::kv_cols`), which bumps one cell of a side whose bands
     /// filled on the card; the honest commit takes the device references
     /// instead and never comes here.
     ///

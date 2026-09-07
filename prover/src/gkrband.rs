@@ -1918,7 +1918,7 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
         // ---- the per-token region: four denominator limbs per token. There is
         // one per head band *group* -- one row maximum and one denominator per
         // token, not per key block -- so it lives on the group's first band and
-        // every other band of the group rides on it. With `--kv-bind` off that
+        // every other band of the group rides on it. With `--kv-boundary` off that
         // is `!corner`, which is what this read used to say; with it on, a
         // group is `c/s` prefix sub-bands plus a corner and only the first
         // sub-band carries the region. `plan.rows_band` is the plan's own

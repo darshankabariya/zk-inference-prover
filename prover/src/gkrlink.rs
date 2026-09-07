@@ -497,7 +497,7 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
         //
         // Gated on `plan.rows_band[b]` and not on `!corner` for the reason
         // `gkrband::sites_of` gives at the same site: the region belongs to the
-        // head band group, and with `--kv-bind` a group has `c/s` prefix
+        // head band group, and with `--kv-boundary` a group has `c/s` prefix
         // sub-bands of which only the first carries it. `rows_band` is
         // `!corner` with the flag off.
         if plan.rows_band[b] {

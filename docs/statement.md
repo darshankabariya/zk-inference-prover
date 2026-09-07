@@ -3,7 +3,7 @@
 A proof made by this prover is about one **segment**: one transformer layer
 applied to one block of `S` token positions with a context of `C` earlier
 positions, or the language-model head applied to one block. A sequence is
-proved as a grid of such segments, and `bounds-grid` checks that the segments
+proved as a grid of such segments, and `boundary-grid` checks that the segments
 fit together. This page says, edge by edge, what one segment's proof binds and
 what an unbound edge would let a dishonest prover do.
 
@@ -78,7 +78,7 @@ is not a statement about a transformer.
 
 **The boundaries (13, 14).** The residual stream leaving a segment and the
 keys and values a block writes are committed as their own trees, and
-`bounds-grid` compares each such root with the root the consuming segment
+`boundary-grid` compares each such root with the root the consuming segment
 committed for its input. Unbound, the segments could each be honest while
 the sequence they form is not: a layer fed a residual nobody produced, or a
 block attending to a cache nobody wrote.
@@ -87,7 +87,7 @@ block attending to a cache nobody wrote.
 residual stream to the rows of the embedding matrix that its published ids
 select; the argmax binds the token a head segment emits to the maximum of the
 logits it computed. Unbound, the sequence could start from any vector, or emit
-any token, and `bounds-grid --verify --prompt` would have nothing to compare
+any token, and `boundary-grid --verify --prompt` would have nothing to compare
 the published ids with.
 
 ## The unbound configuration

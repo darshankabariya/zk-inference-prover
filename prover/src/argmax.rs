@@ -99,7 +99,7 @@ pub struct ArgmaxBinding {
     /// which is what makes the emitted tokens a *named value* of the head
     /// chunk's statement rather than a committed column nobody outside the
     /// proof can address.  `verify_composed` recomputes this claim from the
-    /// statement's published `tok_out` and compares; `bounds-grid` then reads
+    /// statement's published `tok_out` and compares; `boundary-grid` then reads
     /// the vector, position by position, against the ids the next block's
     /// embedding chunk consumed (`notes/witness-slack.md` §5 item 2).
     pub k_tok: SecureField,

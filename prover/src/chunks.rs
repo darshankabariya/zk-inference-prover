@@ -54,7 +54,7 @@
 //! chunk that uses it last hands it back (`precache::forget`).
 //!
 //! `--ser-dir DIR` writes each chunk's statement and proof under the tag its
-//! plan line gives it, which is what `bounds-chain` reads back to join two
+//! plan line gives it, which is what `boundary-chain` reads back to join two
 //! chunks. It is the same pair of files the one-shot `compose` path writes.
 
 //! # B12 stream DD: the plan grows a token-block axis
