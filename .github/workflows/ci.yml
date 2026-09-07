@@ -4,41 +4,74 @@ on:
   push:
     branches: [main]
 
+# A second push to a branch supersedes the run still queued for the first one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build-test:
-    # The vendored fork links its CUDA library on every Linux build, so even the
-    # SIMD backend needs the toolkit at build time.  No GPU is needed to build
-    # either backend or to run the SIMD tests.
+    # No container.  Pulling nvidia/cuda:12.9.1-devel cost 2 min 8 s of every run;
+    # the runner image already carries cmake, gcc and rustup, so the step below adds
+    # only nvcc and the CUDA libraries the vendored fork links.  No GPU is needed to
+    # build either backend or to run the SIMD tests.
     runs-on: ubuntu-latest
-    container: nvidia/cuda:12.9.1-devel-ubuntu24.04
     env:
       CUDAARCHS: "90"
       CARGO_TERM_COLOR: always
-      RUSTUP_HOME: /opt/rustup
-      CARGO_HOME: /opt/cargo
+      # Release builds are not incremental anyway, and sccache declines incremental units.
+      CARGO_INCREMENTAL: "0"
+      # sccache keys on the preprocessed source, so it survives the fresh mtimes a
+      # checkout stamps on every file -- which is why caching target/ did not help.
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # The fork's build.rs runs cmake over 174 .cu files on every Linux build, the
+      # SIMD one included; that was 27 of the 32 minutes.  These two send nvcc and
+      # g++ through the same cache, so an unchanged nitroo/ recompiles nothing.
+      CMAKE_CUDA_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      # The release profile is fat LTO with one codegen unit: minutes per link, on
+      # one core, three times per run.  The gate is unchanged -- the test step below
+      # still has to reproduce the pinned digests from this build.
+      CARGO_PROFILE_RELEASE_LTO: "thin"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     steps:
       - uses: actions/checkout@v4
-      - name: system packages
+
+      - name: CUDA 12.9 toolkit
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends build-essential cmake curl ca-certificates git python3 pkg-config
-      - name: rust toolchain (pinned by rust-toolchain.toml)
-        run: |
-          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
-          echo "/opt/cargo/bin" >> "$GITHUB_PATH"
+          curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cuda-nvcc-12-9 cuda-cudart-dev-12-9 libcurand-dev-12-9 cuda-cccl-12-9 cuda-driver-dev-12-9
+          # The fork's build.rs names /usr/local/cuda/lib64 literally.
+          sudo ln -sfn /usr/local/cuda-12.9 /usr/local/cuda
+          echo /usr/local/cuda/lib64 | sudo tee /etc/ld.so.conf.d/cuda.conf
+          sudo ldconfig
+          echo /usr/local/cuda/bin >> "$GITHUB_PATH"
+
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      # Only the downloaded crates, not target/: sccache covers the compiling itself.
       - uses: actions/cache@v4
         with:
           path: |
-            /opt/cargo/registry
-            /opt/cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'nitroo/Cargo.lock', 'rust-toolchain.toml') }}
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-${{ hashFiles('Cargo.lock', 'nitroo/Cargo.lock') }}
+          restore-keys: cargo-registry-
+
       - name: build, SIMD backend
         run: cargo build --release --locked
       - name: tests, SIMD backend (pinned synthetic digests)
         run: cargo test --release --locked
       - name: build, CUDA backend
         run: cargo build --release --locked -p zk-prover --features cuda
+
+      - name: compiler cache
+        if: always()
+        run: sccache --show-stats
 
   words:
     runs-on: ubuntu-latest
