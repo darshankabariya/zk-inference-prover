@@ -7498,9 +7498,392 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
               verify_secs: t0.elapsed().as_secs_f64() }
 }
 
+// ----------------------------------------------------------------- binding ----
+
+/// Whether one edge of the forward pass is bound by this statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EdgeState {
+    /// the verifier compares the producer's claim with the consumer's, or the
+    /// two sides are columns of one AIR component
+    Bound,
+    /// the consumer reads a value nothing ties to its producer: the prover
+    /// asserts it and the verifier checks nothing
+    Unbound,
+    /// neither side is in this statement (a head chunk has no attention, a
+    /// layer chunk emits no token)
+    Absent,
+}
+
+/// One row of the binding table.
+#[derive(Debug, Clone, Serialize)]
+pub struct Edge {
+    pub n: u8,
+    pub edge: &'static str,
+    pub state: EdgeState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+/// The edges the binding table reports: the fourteen of one layer segment, in
+/// the order of the move brief's section 11, then the two ends of the
+/// sequence.
+pub const EDGES: [&str; 16] = [
+    "residual stream into the first norm's reduction",
+    "first norm's output into the q, k, v matmul inputs",
+    "q, k, v outputs into the attention block",
+    "attention scores and values into the attention output",
+    "attention output into the o matmul input",
+    "o output into the first residual add",
+    "first residual add into the second norm's reduction",
+    "second norm's output into the gate and up matmul inputs",
+    "gate and up outputs into the SwiGLU product",
+    "SwiGLU output into the down matmul input",
+    "down output into the second residual add",
+    "each matmul's input times the pinned weights into its accumulator",
+    "residual stream out of this segment into the next layer's segment",
+    "keys and values out of this token block into the next block",
+    "embedding row into the first segment's residual stream",
+    "logits into the emitted token",
+];
+
+impl Plan {
+    /// The binding table of this statement: every edge of `EDGES` marked bound,
+    /// unbound or absent, decided from the plan fields `verify_composed` reads
+    /// for the same edge -- the residual-stream equalities (`glue.eqs`), the
+    /// requantize seams (`rqs`), the dequant output ties (`glue.out_ties`), the
+    /// quantize regions and their key tiles (`quants`, `nn_bands`), the `o`
+    /// walk's width, the boundary trees (`bounds`, `kv`), the embedding layout
+    /// (`emb`) and the argmax (`argmax_mat`).  `layer` is the segment's declared
+    /// layer coordinate, which decides whether the embedding edge applies.
+    ///
+    /// The table is a report on the statement and enters nothing: not the
+    /// transcript, not a claim, not the proof.
+    pub fn binding(&self, layer: Option<usize>) -> Vec<Edge> {
+        use EdgeState::*;
+        let p = &self.p;
+        let g = self.glue.as_ref();
+        let head = g.is_some_and(|g| g.head_norm);
+        let layer_family = g.is_some() && !head;
+        let attention = !head && !self.shapes.is_empty();
+        let has_mat = |n: &str| p.mats.iter().any(|m| m.name == n);
+        let seam = |n: &str| self.rqs.iter().any(|r| r.name == n);
+        let tied = |n: &str| {
+            g.is_some_and(|g| g.out_ties.iter().any(|t| t.name == n && t.at.is_some()))
+        };
+        let no_family = || {
+            Some(String::from(
+                "no residual-stream family in this statement: the norms, the residual adds \
+                 and the requantize seams are not proved, so every value between two \
+                 matmuls is the prover's word",
+            ))
+        };
+        let head_only = || Some(String::from("the head chunk has no attention and no MLP"));
+        let mut rows: Vec<Edge> = Vec::with_capacity(EDGES.len());
+        let mut put = |n: usize, state: EdgeState, why: Option<String>| {
+            rows.push(Edge { n: n as u8, edge: EDGES[n - 1], state, why });
+        };
+
+        // 1 and 7: the two norm reductions read the committed residual stream
+        // (`glue_ok`: `nt1.in == gn1.roots`, `gn1.xmid == gn2.in`, ...)
+        if layer_family {
+            put(1, Bound, None);
+            put(7, Bound, None);
+        } else if head {
+            put(1, Bound, Some("the head chunk's final norm reads the residual its \
+                                 statement commits".into()));
+            put(7, Absent, head_only());
+        } else {
+            put(1, Unbound, no_family());
+            put(7, Unbound, no_family());
+        }
+
+        // 2, 8, 10: a requantize seam per consuming matmul group (`rq_in_ok`,
+        // `rq_out_ok`, `rq_scale_ok`)
+        for (n, name) in [(2usize, "qkv"), (8, "gateup"), (10, "down")] {
+            if layer_family {
+                if seam(name) {
+                    put(n, Bound, None);
+                } else {
+                    put(n, Unbound, Some(format!(
+                        "no requantize seam for {name}: the matmul's int8 input is not \
+                         tied to its producer's output")));
+                }
+            } else if head {
+                if n == 2 {
+                    if seam("head") {
+                        put(n, Bound, Some("the final norm's output into the lm_head \
+                                            input".into()));
+                    } else {
+                        put(n, Unbound, Some("no requantize seam for the head".into()));
+                    }
+                } else {
+                    put(n, Absent, head_only());
+                }
+            } else {
+                put(n, Unbound, no_family());
+            }
+        }
+
+        // 3: q, k, v leave their dequant through the rotation and the quantize
+        // into the key tiles' own columns (`deq_out_ok`/`deq_out_open`,
+        // `nn_in_ok`, `nn_out_ok`, `nn_q_ok`)
+        if !attention {
+            put(3, Absent, if head { head_only() } else { Some("no attention".into()) });
+        } else if let Some(g) = g {
+            let open: Vec<&str> = g.out_ties.iter()
+                .filter(|t| matches!(t.name, "q" | "k" | "v")
+                            && t.at.is_none() && t.quant.is_none() && !t.band)
+                .map(|t| t.name)
+                .collect();
+            if p.rope.is_none() {
+                put(3, Unbound, Some("the statement carries no rotation parameters, so q, \
+                                      k and v publish output claims with no counterparty \
+                                      (deq_out_open)".into()));
+            } else if !open.is_empty() {
+                put(3, Unbound, Some(format!(
+                    "dequant outputs with no counterparty: {}", open.join(", "))));
+            } else if self.quants.is_empty() || self.nn_bands.is_empty() {
+                put(3, Unbound, Some("no quantize region ties the rotated q, k, v to the \
+                                      key tiles' columns".into()));
+            } else {
+                put(3, Bound, None);
+            }
+        } else {
+            put(3, Unbound, no_family());
+        }
+
+        // 4: the attention component's own identities (`qk_ok`, `den_ok`,
+        // `av_ok`, `den_link_ok`)
+        if attention {
+            put(4, Bound, None);
+        } else {
+            put(4, Absent, if head { head_only() } else { Some("no attention".into()) });
+        }
+
+        // 5: the attention output's requantize against the `o` walk's
+        // activations (`ao_q_ok`, `ao_q_open`)
+        match self.walks.iter().position(|w| w.name == "o") {
+            None => put(5, Absent, if head { head_only() } else { Some("no o matmul".into()) }),
+            Some(_) if g.is_none() => put(5, Unbound, no_family()),
+            Some(_) if head => put(5, Absent, head_only()),
+            Some(_) => {
+                let n_in = p.mats.iter().find(|m| m.name == "o").map(|m| m.n_in).unwrap_or(0);
+                if n_in == p.nh * p.hd {
+                    put(5, Bound, None);
+                } else {
+                    put(5, Unbound, Some(format!(
+                        "the o matmul reads {n_in} channels and the attention output has \
+                         {} (nh x hd), so the two folds run over different sequences \
+                         (ao_q_open)", p.nh * p.hd)));
+                }
+            }
+        }
+
+        // 6, 9, 11: a dequant output tied to the region that consumes it
+        // (`deq_out_ok`)
+        for (n, names) in [(6usize, &["o"][..]), (9, &["gate", "up"][..]), (11, &["down"][..])] {
+            if !names.iter().all(|m| has_mat(m)) {
+                put(n, Absent, if head { head_only() } else {
+                    Some(format!("no {} matmul", names.join("/")))
+                });
+            } else if head {
+                put(n, Absent, head_only());
+            } else if g.is_none() {
+                put(n, Unbound, no_family());
+            } else if names.iter().all(|m| tied(m))
+                && (n != 9 || g.is_some_and(|g| g.swiglu.is_some()))
+            {
+                put(n, Bound, None);
+            } else {
+                put(n, Unbound, Some(format!(
+                    "the {} dequant publishes no output claim tied to its consumer",
+                    names.join(" and "))));
+            }
+        }
+
+        // 12: every matmul is a Freivalds check over the pinned weights
+        // (`walk_ok`)
+        if self.walks.is_empty() {
+            put(12, Absent, Some("no matmul".into()));
+        } else {
+            put(12, Bound, None);
+        }
+
+        // 13: the residual-stream boundary trees (`bounds`; the link itself is
+        // the grid's root equality between two statements)
+        if g.is_none() {
+            put(13, Unbound, Some("no residual-stream family, so no boundary tree can be \
+                                   committed".into()));
+        } else if self.bounds.is_empty() {
+            put(13, Unbound, Some("the layer boundary trees are off \
+                                   (--unsound-skip-layer-boundary): the residual stream \
+                                   leaving this segment is compared with nothing".into()));
+        } else if head {
+            put(13, Bound, Some("the head commits its residual-in side only; nothing \
+                                 leaves it along the layer axis".into()));
+        } else {
+            put(13, Bound, None);
+        }
+
+        // 14: the K/V boundary trees (`kv`)
+        if !attention {
+            put(14, Absent, if head { head_only() } else { Some("no attention".into()) });
+        } else if !self.kv.is_empty() {
+            put(14, Bound, None);
+        } else if !p.corner {
+            put(14, Unbound, Some("the chunk has no diagonal block (not extracted with \
+                                   --corner), so its own keys and values are not in the \
+                                   statement and no K/V boundary can be committed".into()));
+        } else {
+            put(14, Unbound, Some("the K/V boundary trees are off \
+                                   (--unsound-skip-kv-boundary): the keys and values this \
+                                   block writes are compared with nothing in the next \
+                                   block".into()));
+        }
+
+        // 15: the embedding gadget (`embed_ok`, `embed_tok_ok`), a layer-0 edge
+        if self.emb.is_some() {
+            put(15, Bound, None);
+        } else if layer == Some(0) {
+            put(15, Unbound, Some("a layer-0 segment without the embedding gadget \
+                                   (--unsound-skip-embedding): the residual stream it \
+                                   consumes is not tied to the embedding rows of its \
+                                   ids".into()));
+        } else {
+            put(15, Absent, Some(match layer {
+                Some(l) => format!("layer {l} is not the first"),
+                None => "the segment declares no layer coordinate".into(),
+            }));
+        }
+
+        // 16: the argmax over the head's logits (`head_tie_ok`, `head_tok_ok`)
+        if self.argmax_mat().is_some() {
+            put(16, Bound, None);
+        } else if has_mat("lm_head") {
+            put(16, Unbound, Some("the head chunk publishes no argmax \
+                                   (--unsound-skip-argmax): the emitted token is not tied \
+                                   to the logits".into()));
+        } else {
+            put(16, Absent, Some("no lm_head matmul".into()));
+        }
+
+        rows.sort_by_key(|e| e.n);
+        rows
+    }
+
+    /// `binding` as the JSON the `provenance` block and every chunk report
+    /// carry: the rows, the edge numbers left unbound, and `all_bound`.
+    pub fn binding_json(&self, layer: Option<usize>) -> Value {
+        let rows = self.binding(layer);
+        let of = |st: EdgeState| -> Vec<u8> {
+            rows.iter().filter(|e| e.state == st).map(|e| e.n).collect()
+        };
+        let unbound = of(EdgeState::Unbound);
+        json!({
+            "edges": rows,
+            "all_bound": unbound.is_empty(),
+            "unbound": unbound,
+            "absent": of(EdgeState::Absent),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The binding table, on the synthetic shapes the digest gate pins.
+    fn plan_of(args: Vec<String>) -> Plan {
+        let (l, vname) = crate::layer_of(&args);
+        Plan::new(&crate::params_of(&l, &args, &vname))
+    }
+
+    fn states(plan: &Plan, layer: Option<usize>) -> Vec<(u8, EdgeState)> {
+        plan.binding(layer).iter().map(|e| (e.n, e.state)).collect()
+    }
+
+    const SYN: &[&str] = &["compose", "--round", "away", "--variants", "intsplit6",
+                           "--table-bits", "16", "--s", "32", "--ctx", "128", "--hd", "32"];
+
+    fn argv(extra: &[&str]) -> Vec<String> {
+        SYN.iter().chain(extra.iter()).map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_pinned_wired_shape_reports_its_two_desk_holes() {
+        use EdgeState::*;
+        // `glue_corner` of prover/README.md, with both boundaries on: 64-wide
+        // matmuls under three heads of 32, so the rotation cannot tile (edge 3)
+        // and the `o` matmul does not read the attention output's width (edge 5)
+        let plan = plan_of(argv(&["--bands", "2,1", "--nout", "64", "--glue-a", "32",
+                                   "--kmax", "16", "--synth-glue", "--corner", "--bounds",
+                                   "--kv-bind"]));
+        let want = vec![
+            (1, Bound), (2, Bound), (3, Unbound), (4, Bound), (5, Unbound), (6, Bound),
+            (7, Bound), (8, Bound), (9, Bound), (10, Bound), (11, Bound), (12, Bound),
+            (13, Bound), (14, Bound), (15, Absent), (16, Absent),
+        ];
+        assert_eq!(states(&plan, None), want);
+        let j = plan.binding_json(None);
+        assert_eq!(j["all_bound"], false);
+        assert_eq!(j["unbound"], json!([3, 5]));
+        assert_eq!(j["absent"], json!([15, 16]));
+        // and the same shape at layer 0 owes the embedding edge
+        assert_eq!(states(&plan, Some(0))[14], (15, Unbound));
+    }
+
+    #[test]
+    fn the_aligned_wired_shape_binds_every_layer_edge() {
+        use EdgeState::*;
+        // four heads of 32 over 128-wide matmuls: q/k/v are `nh x hd` wide, the
+        // rotation tiles, and the `o` matmul reads the attention output
+        let plan = plan_of(argv(&["--bands", "2,2", "--nin", "128", "--nout", "128",
+                                   "--glue-a", "32", "--kmax", "16", "--synth-glue",
+                                   "--corner", "--bounds", "--kv-bind"]));
+        let got = states(&plan, Some(3));
+        for (n, st) in &got[..14] {
+            assert_eq!(*st, Bound, "edge {n}: {:?}", plan.binding(Some(3))[*n as usize - 1]);
+        }
+        assert_eq!(got[14], (15, Absent));
+        assert_eq!(got[15], (16, Absent));
+    }
+
+    #[test]
+    fn the_boundaries_off_are_reported_as_unbound_not_absent() {
+        use EdgeState::*;
+        let plan = plan_of(argv(&["--bands", "2,1", "--nout", "64", "--glue-a", "32",
+                                   "--kmax", "16", "--synth-glue", "--corner"]));
+        let got = states(&plan, None);
+        assert_eq!(got[12], (13, Unbound));
+        assert_eq!(got[13], (14, Unbound));
+        // no wiring family at all: every seam and add is the prover's word
+        let bare = plan_of(argv(&["--bands", "2,1", "--corner"]));
+        let got = states(&bare, None);
+        for n in [1u8, 2, 3, 5, 6, 7, 8, 9, 10, 11, 13, 14] {
+            assert_eq!(got[n as usize - 1], (n, Unbound), "edge {n}");
+        }
+        assert_eq!(got[3], (4, Bound));
+        assert_eq!(got[11], (12, Bound));
+    }
+
+    #[test]
+    fn the_head_chunk_reports_its_norm_its_in_side_and_the_argmax() {
+        use EdgeState::*;
+        let plan = plan_of(argv(&["--bands", "2,1", "--nout", "64", "--glue-a", "32",
+                                   "--kmax", "16", "--synth-head", "--synth-vocab", "256",
+                                   "--corner", "--bounds", "--head-argmax"]));
+        let got = states(&plan, Some(32));
+        assert_eq!(got[0], (1, Bound));
+        assert_eq!(got[1], (2, Bound));
+        for n in [3u8, 4, 5, 6, 7, 8, 9, 10, 11, 14] {
+            assert_eq!(got[n as usize - 1], (n, Absent), "edge {n}");
+        }
+        assert_eq!(got[11], (12, Bound));
+        assert_eq!(got[12], (13, Bound));
+        assert_eq!(got[14], (15, Absent));
+        assert_eq!(got[15], (16, Bound));
+    }
 
     /// Stream QQ, at the NN merge (log row 66): the guard itself, gated.
     ///

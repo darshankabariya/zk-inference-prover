@@ -1246,11 +1246,14 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
         _ => (None, 0, json!({"prove_error": out.prove_error})),
     };
     let accepts = verdict.as_ref().map(|v| v.accepts()).unwrap_or(false);
+    // the binding table of this statement, from the plan the verifier rebuilds
+    let binding = compose::Plan::new(&out.fixed.params).binding_json(out.fixed.layer);
     if !proof_sha256.is_empty() {
-        crate::util::prov_note_proof(&proof_sha256, Value::Null);
+        crate::util::prov_note_proof(&proof_sha256, binding.clone());
     }
     let j = json!({
         "accepts": accepts,
+        "binding": binding,
         "verdict": verify_json,
         "prove_error": out.prove_error,
         "proof_bytes": proof_bytes_len,
