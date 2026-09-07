@@ -379,10 +379,10 @@ DEQUANT_POW2_PER_ACC = (B6C or {}).get("pow2") or 0.0
 DEQUANT_POW2_AWAY_PER_ACC = (B6C or {}).get("pow2_away") or DEQUANT_POW2_PER_ACC
 ATTNOUT_CELLS_PER_ACC = (B6C or {}).get("int8") or 0.0
 
-# --- B10 step 2: the residual stream between the regions ---------------------------------
+# --- B10 step 2: the residual stream between the components ---------------------------------
 # B6.5 open gap 1: the composition bindings every matmul's accumulators to its own
-# committed activations, and nothing bindings one region's output to the next
-# region's input.  The wiring is four gadgets, and every one of them is bf16
+# committed activations, and nothing bindings one component's output to the next
+# component's input.  The wiring is four gadgets, and every one of them is bf16
 # elementwise arithmetic:
 #
 #   (a) RMSNorm      square (unary), the sum over `d`, `* 1/d`, `+ eps`,
@@ -514,7 +514,7 @@ ALPHA_V1 = (B5C["bf16x"]["alpha_grid"] if B5C and "bf16x" in B5C else 5.0)
 # of the layout, read off `prover/src/attn_trace.rs:1167-1181` against
 # `prover/src/layout.rs`; nothing here is fitted.
 #
-#   region                        base                     interaction
+#   component                        base                     interaction
 #   channel: keys   `Cells::kv`   pk*rows   = nh*hd*C      2*nh*hd*C  (K range LogUp)
 #                                                          + 12*nh*hd/ct*C (Horner)
 #   channel: queries              pq*rows   = nh*hd*S      2*nh*hd*S  (query range)
@@ -530,7 +530,7 @@ ALPHA_V1 = (B5C["bf16x"]["alpha_grid"] if B5C and "bf16x" in B5C else 5.0)
 # cost-neutral -- 16/8/8 costs what 32 would):
 #   lc.g.rows = hd*insts*C/pk,  pk -> chan_target   (LayoutChan::choose)
 #   lk.g.rows =  C*insts*S/q,   q  -> grid_target   (LayoutKey::choose)
-#   rrows*rw  = nh*S                                (the per-token row region)
+#   rrows*rw  = nh*S                                (the per-token row component)
 #
 # Two things that are NOT derived and would move at another shape:
 #   * `grid_target` / `chan_target` / `rw` are run knobs, not constants.  The
@@ -546,11 +546,11 @@ GRID_TARGET, CHAN_TARGET, ROW_WIDTH = 64, 128, 16
 
 
 def key_tile_cells(nh, hd, s, c, grid_target=GRID_TARGET, chan_target=CHAN_TARGET,
-               rw=ROW_WIDTH, rows_region=True):
+               rw=ROW_WIDTH, rows_component=True):
     """Committed cells of the attention key tile family at (S, C) for `nh` heads of
     width `hd`.  Returns (base, interaction, saturated).
 
-    `rows_region=False` drops the per-token max/denominator region, which is what
+    `rows_component=False` drops the per-token max/denominator component, which is what
     a diagonal block key tile does (`attn_trace.rs`, `with_rows = !a.diagonal_block`): the diagonal block
     shares the prefix key tile's one max and one denominator per token.
 
@@ -569,25 +569,25 @@ def key_tile_cells(nh, hd, s, c, grid_target=GRID_TARGET, chan_target=CHAN_TARGE
     # here at C = 0) is not a saturated layout, it is an absent one
     saturated = bool(s and c) and ((q != grid_target) or (pk != chan_target))
     base = (2 * nh * s * c                       # score + numerator
-            + 2 * nh * hd * c                    # K (channel region) and V (grid)
+            + 2 * nh * hd * c                    # K (channel component) and V (grid)
             + nh * hd * s                        # the queries
-            + (4 * nh * s if rows_region else 0))  # max, denominator, two limbs
+            + (4 * nh * s if rows_component else 0))  # max, denominator, two limbs
     inter = ((24.0 * nh / q) * s * c             # the grid's Horner
              + 2 * nh * s * c                    # exp / numerator LogUp
              + 2 * nh * hd * c                   # V range LogUp
-             + (12.0 * nh * hd / pk) * c         # the channel region's Horner
+             + (12.0 * nh * hd / pk) * c         # the channel component's Horner
              + 2 * nh * hd * c                   # K range LogUp
              + 2 * nh * hd * s                   # query range LogUp
-             + ((8.0 * nh + 8.0 * nh / row_w) * s if rows_region else 0))
+             + ((8.0 * nh + 8.0 * nh / row_w) * s if rows_component else 0))
     return base, inter, saturated
 
 
 def key_tile_fresh(nh, hd, s, c, diagonal_block=True, **kw):
     """The whole key tile family of one composed layer chunk: the prefix key tiles over
-    `c` keys, plus an S x S diagonal block that carries no per-token region."""
+    `c` keys, plus an S x S diagonal block that carries no per-token component."""
     b, i, sat = key_tile_cells(nh, hd, s, c, **kw)
     if diagonal_block:
-        b2, i2, s2 = key_tile_cells(nh, hd, s, s, rows_region=False, **kw)
+        b2, i2, s2 = key_tile_cells(nh, hd, s, s, rows_component=False, **kw)
         b, i, sat = b + b2, i + i2, sat or s2
     return b + i, sat
 
@@ -606,8 +606,8 @@ def key_tile_fresh(nh, hd, s, c, diagonal_block=True, **kw):
 # proving the norm *pins the reduction's order* -- a spec change with a quality
 # row behind it, and B1 already carries the tree (`reduce="bf16-norm"`).  All
 # three candidate orders are the same `n - 1` correctly-rounded adds and so cost
-# the same cells; they differ in how many chained regions the AIR needs and in
-# how far the result can drift from the exact sum.  A chained region is a running
+# the same cells; they differ in how many chained components the AIR needs and in
+# how far the result can drift from the exact sum.  A chained component is a running
 # sum with a reset selector (the requantize's `nofirst`/`last` shape), so every
 # order below is mask-addressed -- no wiring lookup, which is what a general tree
 # would cost (+3 lookups per node).
@@ -617,18 +617,18 @@ def sum_order(n, order):
         # `x + 0` is exact, so the AIR prunes every slot the pad would fill and
         # proves `n - 1` adds however far `pad` reaches past `n` (B10 step 2);
         # the *depth*, and so the drift, is still the padded tree's
-        return dict(adds=n - 1, regions=pad.bit_length() - 1, err_ulps=pad.bit_length() - 1)
+        return dict(adds=n - 1, components=pad.bit_length() - 1, err_ulps=pad.bit_length() - 1)
     if order == "two-level":       # blocks of ~sqrt(n), then the block sums
         b = 1 << ((n - 1).bit_length() // 2)
         c = -(-n // b)
-        return dict(adds=n - 1, regions=2, err_ulps=b + c - 2)
-    if order == "running":         # one region, one chain
-        return dict(adds=n - 1, regions=1, err_ulps=n - 1)
+        return dict(adds=n - 1, components=2, err_ulps=b + c - 2)
+    if order == "running":         # one component, one chain
+        return dict(adds=n - 1, components=1, err_ulps=n - 1)
     raise SystemExit(f"unknown sum order {order}")
 
 
 def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True):
-    """B6.5 open gap 1, per decoded token: what the wiring between the regions
+    """B6.5 open gap 1, per decoded token: what the wiring between the components
     costs, per gadget.  `d`-wide terms are the residual stream's width, `dff`-wide
     the SwiGLU's.
 
@@ -644,7 +644,7 @@ def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True):
     # (one unary table), its share of the reduction, and the two multiplies
     # (`x * r`, then `* w`).  Per token: `* 1/d`, `+ eps`, `rsqrt`.
     # The composed AIR merges the reduction's first levels with the residual add
-    # into one region per `(residue, token)` row, so the stream is committed once
+    # into one component per `(residue, token)` row, so the stream is committed once
     # and read by both -- which is a saving on the *leaves*, not on the ops, and
     # the table below counts ops.
     norms = 2 * L + (1 if final_norm else 0)
@@ -666,7 +666,7 @@ def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True):
     # and the SiLU, plus their lookups' LogUp share
     stub = (L * (2 * dff + 4 * d)
             + (L * (2 * dff + 2 * (2 * d + 1))) * LOGUP_MARGINAL[min(LOGUP_MARGINAL)])
-    return dict(order=order, adds=so["adds"], regions=so["regions"],
+    return dict(order=order, adds=so["adds"], components=so["components"],
                 err_ulps=so["err_ulps"],
                 norm_square=sq, norm_reduce=red, norm_scale=scale,
                 norm_scalars=scalars, norm=sq + red + scale + scalars,
@@ -791,7 +791,7 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     else:
         # both are inside `attn` now: the key tile family's `C` term IS the committed
         # K and V (`Cells::kv`) with their range checks, its `S` term carries the
-        # queries, and its per-token row region carries the max, the denominator
+        # queries, and its per-token row component carries the max, the denominator
         # and their two limbs.
         kv = softmax_rows = 0.0
     # E1 / B9 probe 2: the routing-selection gadget, priced by analogy and built by
@@ -1136,7 +1136,7 @@ def report():
 
     # --- B10 step 2: the residual stream's price table ------------------------
     print()
-    print("B10 step 2 -- the residual stream between the regions (B6.5 open gap 1), priced")
+    print("B10 step 2 -- the residual stream between the components (B6.5 open gap 1), priced")
     SRC = ("b65/out/residual_stream.json, measured" if B10G and B10G.get("add")
            else "from the construction")
     print(f"  bf16 unary (2^16 table)  {UNARY_CELLS:.2f} cells/application  ({SRC}; B4's "
@@ -1152,10 +1152,10 @@ def report():
               "two columns, which is what keeps every constraint degree 2)")
     print()
     print("  the RMSNorm reduction: three orders, the same adds, different shapes")
-    print(f"  {'order':<11} {'adds (d=4096)':>14} {'regions':>8} {'worst drift':>12}")
+    print(f"  {'order':<11} {'adds (d=4096)':>14} {'components':>8} {'worst drift':>12}")
     for o in ("tree", "two-level", "running"):
         so = sum_order(4096, o)
-        print(f"  {o:<11} {so['adds']:>14,} {so['regions']:>8} "
+        print(f"  {o:<11} {so['adds']:>14,} {so['components']:>8} "
               f"{so['err_ulps'] / 512.0:>11.1%}")
     print("  (drift = worst-case relative error of the reduction, err_ulps x 2^-9; B1's")
     print("   `reduce=\"bf16-norm\"` is the tree, and B1 scores it at 22.758 against the")
@@ -1168,7 +1168,7 @@ def report():
               f"{dr['differ']}, by at most")
         print(f"  {dr['worst_ulps']} ulp ({dr['worst_relative']:.2%} relative) -- the whole "
               "numeric content of the spec change;")
-        print(f"  and the composed two-level regions reproduce `tree_sum`'s own root on "
+        print(f"  and the composed two-level components reproduce `tree_sum`'s own root on "
               f"{dr['two_level_matches_tree_sum']} of {dr['two_level_checked']}")
     print()
     CHUNKS = {}

@@ -60,8 +60,8 @@ pub const SCL2_COLS: [&str; 2] = ["b65_scl_pm", "b65_scl_j"];
 pub const SCL3_COLS: [&str; 3] = ["b65_scl_pm", "b65_scl_ms", "b65_scl_es"];
 pub const QNZ_COLS: [&str; 2] = ["b65_rqnz_q", "b65_rqnz_nz"];
 pub const RANGE15: &str = "b65_range_15";
-/// Stream II: the selectors are per region now -- a composed proof carries one
-/// requantize region per seam and their row counts differ -- and there is a
+/// Stream II: the selectors are per component now -- a composed proof carries one
+/// requantize component per seam and their row counts differ -- and there is a
 /// fourth, `gt0`.  `nofirst` is "not this token's first row", so it cannot also
 /// say "not row 0", and the output-side accumulator needs both.
 /// Stream II: `mlast` is `[j > 0 and last]`, the scale binding's row step.  It is
@@ -75,7 +75,7 @@ pub fn rq_sel(tag: &str, name: &str) -> PreProcessedColumnId {
 
 /// Stream II: `(sm, m7, sg)` over every legal signed significand -- 257 rows.
 /// The requantize keys its own lookups on the magnitude pair `(ef, m7)`, but a
-/// binding to a producing region has to speak the wiring family's `(sm, ef)`
+/// binding to a producing component has to speak the wiring family's `(sm, ef)`
 /// language and the Freivalds check's `qX` needs a sign.  One lookup per element pins both
 /// derived fields from one committed `sm`, which is cheaper than a 2^15 pair
 /// table and keeps the binding's folded value degree 1.
@@ -183,7 +183,7 @@ pub struct RqTie {
     pub claimed_in: SecureField,
     pub claimed_out: SecureField,
     /// Stream II (E11): the scale binding's row step, one power per token on the
-    /// region's `last` rows.  Tokens descend in `MatLayout::at`, so token `t`
+    /// component's `last` rows.  Tokens descend in `MatLayout::at`, so token `t`
     /// ends up weighted `mu^t` on both sides and the two claims are directly
     /// comparable.
     pub mu: SecureField,
@@ -286,7 +286,7 @@ pub fn bf16_ceil_f64(v: f64) -> u16 {
 
 #[derive(Clone)]
 pub struct RequantEval {
-    /// Stream II: which region this is, so a composed proof's three seams do
+    /// Stream II: which component this is, so a composed proof's three seams do
     /// not share one set of preprocessed selector ids.
     pub tag: String,
     pub log_rows: u32,
@@ -442,7 +442,7 @@ impl FrameworkEval for RequantEval {
         // for one preprocessed column and no product of two.
         //
         // Allocated before `finalize_logup_in_pairs`, so the interaction order
-        // is bindings then fractions, as the wiring family's regions already are.
+        // is bindings then fractions, as the wiring family's components already are.
         if let Some(t) = &self.binding {
             let step = E::EF::from(nofirst.clone()) * t.k_in
                 + (E::EF::from(gt0.clone()) - E::EF::from(nofirst.clone())) * t.k_bd;
@@ -468,7 +468,7 @@ impl FrameworkEval for RequantEval {
 
             // ---- stream II (E11): the third side, the per-token scale --------
             //
-            // The scale this region pinned to the attained maximum is one field
+            // The scale this component pinned to the attained maximum is one field
             // element per token (`jx[t]`, or `(ms, es)` folded under the same
             // `lam` the input side uses).  It is committed a second time by
             // every matmul that consumes this seam's output -- the x-side of
@@ -540,7 +540,7 @@ impl RWitness {
         let n = am["n_in"].as_u64().ok_or("manifest: n_in")? as usize;
         let mut tokens = am["tokens"].as_u64().ok_or("manifest: tokens")? as usize;
         if n_cap > 0 {
-            // capped runs keep a power-of-two token count so the region tiles
+            // capped runs keep a power-of-two token count so the component tiles
             tokens = tokens.min(n_cap.div_ceil(n).max(1));
             tokens = 1 << tokens.ilog2();
         }
@@ -1139,12 +1139,12 @@ pub fn requant_ref(x: &[u16], tokens: usize, n: usize, v: SVariant)
     (qx, jx, sx)
 }
 
-/// What a probe corrupts on a composed seam.  Each leaves the region internally
+/// What a probe corrupts on a composed seam.  Each leaves the component internally
 /// consistent and aims at one of the two bindings.
 #[derive(Clone, Copy, Debug)]
 pub enum RqTamper {
     /// one committed input value moved to another legal bf16 pattern, with the
-    /// region's own quotient recomputed from it -- only the binding to the producer
+    /// component's own quotient recomputed from it -- only the binding to the producer
     /// can tell
     In(usize),
     /// the committed per-token scale one step up, everything recomputed under
@@ -1161,8 +1161,8 @@ impl RqTamper {
     }
 }
 
-/// One requantize seam, as a composed region.
-pub struct RqRegion {
+/// One requantize seam, as a composed component.
+pub struct RqComponent {
     pub tag: String,
     pub lay: MatLayout,
     pub v: SVariant,
@@ -1190,7 +1190,7 @@ pub struct RqRegion {
     pub fired: usize,
 }
 
-impl RqRegion {
+impl RqComponent {
     pub fn base_cells(&self) -> usize {
         self.base.len() << self.lay.log_rows
     }
@@ -1202,13 +1202,13 @@ impl RqRegion {
 /// Build one seam's columns.  `x` is the producer's bf16 output in
 /// `(token, channel)` order, `qx` the Freivalds check's committed activations, and
 /// `jx`/`sx` the per-token scale the *dequant* already commits -- so the scale
-/// this region pins to the attained maximum is the same field element the
-/// matmul's own region carries, which is what makes the remaining scale seam a
+/// this component pins to the attained maximum is the same field element the
+/// matmul's own component carries, which is what makes the remaining scale seam a
 /// one-constraint job rather than a design question.
 #[allow(clippy::too_many_arguments)]
-pub fn rq_region(tag: &str, x: &[u16], qx: &[i32], jx: &[i64], sx: &[(u32, u32)],
+pub fn rq_component(tag: &str, x: &[u16], qx: &[i32], jx: &[i64], sx: &[(u32, u32)],
                  tokens: usize, n: usize, v: SVariant, lay: MatLayout,
-                 tables: &mut crate::layer::Tables, tamper: Option<RqTamper>) -> RqRegion {
+                 tables: &mut crate::layer::Tables, tamper: Option<RqTamper>) -> RqComponent {
     assert_eq!(lay.lead, 0, "a requantize seam needs an exact tiling ({tag})");
     let pr = lay.per_row;
     let rows = 1usize << lay.log_rows;
@@ -1273,7 +1273,7 @@ pub fn rq_region(tag: &str, x: &[u16], qx: &[i32], jx: &[i64], sx: &[(u32, u32)]
     // the scale probe bends the *committed* scale alone: every quotient, every
     // threshold and every multiplicity stays the one the honest scale derives,
     // so the seam's two bindings are untouched and the only thing that can tell is
-    // the region's own `(pm, scale)` lookup -- the constraint that says the
+    // the component's own `(pm, scale)` lookup -- the constraint that says the
     // scale is the ceil-divide of the attained maximum rather than a choice.
     let (mut jc, mut sc) = (jx.clone(), sx.clone());
     if let Some(RqTamper::Scale(t)) = tamper {
@@ -1392,7 +1392,7 @@ pub fn rq_region(tag: &str, x: &[u16], qx: &[i32], jx: &[i64], sx: &[(u32, u32)]
     tables.off_table += off_table;
 
     // tree 0: the four selectors.  `nofirst` is "not this token's first row",
-    // `last` its final one, `end` the region's final row, `gt0` simply `j > 0`.
+    // `last` its final one, `end` the component's final row, `gt0` simply `j > 0`.
     let sel = |f: &dyn Fn(usize) -> bool| {
         eval_of(lay.log_rows, (0..rows).map(|j| m31_u32(f(j) as u32)).collect())
     };
@@ -1409,13 +1409,13 @@ pub fn rq_region(tag: &str, x: &[u16], qx: &[i32], jx: &[i64], sx: &[(u32, u32)]
         fired += 1;
     }
     if tamper.is_some() && fired == 0 {
-        eprintln!("{tag}: the {} probe did not fire -- this region is the honest one",
+        eprintln!("{tag}: the {} probe did not fire -- this component is the honest one",
                   tamper.unwrap().name());
     }
     // `jc`/`sc`, not `jx`/`sx`: the scale control bends the *committed* column,
     // and this Horner reads that column -- so it follows the bend and the
-    // region stays internally consistent.  What then sees the bend is the
-    // region's own `(pm, scale)` lookup and the binding against the consumer's
+    // component stays internally consistent.  What then sees the bend is the
+    // component's own `(pm, scale)` lookup and the binding against the consumer's
     // dequant, which is what those two checks are for.
     let sc_nat: Vec<(i64, i64)> = (0..tokens)
         .map(|t| match v {
@@ -1423,13 +1423,13 @@ pub fn rq_region(tag: &str, x: &[u16], qx: &[i32], jx: &[i64], sx: &[(u32, u32)]
             SVariant::Bf16 => (sc[t].0 as i64, sc[t].1 as i64),
         })
         .collect();
-    RqRegion { tag: tag.into(), lay, v, tokens, n, pre, base, in_nat, out_nat, sc_nat,
+    RqComponent { tag: tag.into(), lay, v, tokens, n, pre, base, in_nat, out_nat, sc_nat,
                off_table, ref_ok, ref_n, m_rq, m_scl, m_rqv, log_rq, fired }
 }
 
-/// The region's two Horner columns and its LogUp columns, in the AIR's order.
+/// The component's two Horner columns and its LogUp columns, in the AIR's order.
 #[allow(clippy::too_many_arguments)]
-pub fn rq_interaction(r: &RqRegion, binding: &RqTie, qnz: &PairRel, rq3: &FracRel, rq4: &MulRel,
+pub fn rq_interaction(r: &RqComponent, binding: &RqTie, qnz: &PairRel, rq3: &FracRel, rq4: &MulRel,
                       scl2: &PairRel, scl3: &FracRel, r15: &RangeRel, rqv: &FracRel)
                       -> (Vec<Eval>, SecureField, SecureField, SecureField, SecureField) {
     let lay = r.lay;

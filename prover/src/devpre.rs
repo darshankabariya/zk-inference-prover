@@ -6,7 +6,7 @@
 //! | half | columns | bytes at the synthetic point | what they are |
 //! |---|---|---|---|
 //! | the shared tables | 31 | 11,849,728 | 13 rows of host-built table, 8 closed forms of the row index, 10 multiplicities |
-//! | the key tile selectors | 48 | 3,818,752 | `commit_pre`'s ACTIVE / NOFIRST / LAST / ISTART, three sub-regions per key tile |
+//! | the key tile selectors | 48 | 3,818,752 | `commit_pre`'s ACTIVE / NOFIRST / LAST / ISTART, three sub-components per key tile |
 //!
 //! **The 13 that looked like data are closed forms.** 23.1 left the 31 alone
 //! with one sentence -- "their contents are host-built tables ... not closed
@@ -46,7 +46,7 @@
 //!
 //! **The selectors are the flags `b65_acc.cu` already computes.** Since 24.1
 //! every accumulator kernel has derived ACTIVE / NOFIRST / LAST / ISTART per
-//! coset row from the region's layout -- which is exactly what `commit_pre`'s
+//! coset row from the component's layout -- which is exactly what `commit_pre`'s
 //! 48 columns say. What it could not do is compute them at the right time:
 //! `commit_pre` runs before the challenges are drawn and the accumulators run
 //! after. `b65_flags_key_tile` is that computation lifted out into a kernel of its
@@ -202,7 +202,7 @@ pub fn premut() -> (u32, u32) {
 /// which fills on the host whatever `B7_M4_WFILL_KEY_TILE` says because the device
 /// fill has no notion of its layout. `fills_dev` has to know, and it is asked
 /// from inside the fills themselves (`merge_counters` is read by
-/// `mat_region_dev`, `freivalds_region_dev` and `commit_base_dev`), none of which
+/// `mat_component_dev`, `freivalds_component_dev` and `commit_base_dev`), none of which
 /// has the layer in hand. So the layer's answer is recorded once, before the
 /// first fill runs, and read from here.
 ///
@@ -504,7 +504,7 @@ pub fn tables_dev(t: &Tables, log_norm: u32, log_frac: u32, log_mul: u32, q_bits
 
 // ------------------------------------------------------------ the key tile selectors --
 
-/// One key tile's three sub-regions: the flags, and the selector columns built out
+/// One key tile's three sub-components: the flags, and the selector columns built out
 /// of them.
 ///
 /// The flags outlive the challenge draw on purpose. `commit_pre` runs before it
@@ -524,7 +524,7 @@ impl DevPreKeyTile {
     pub fn key(&self) -> &Uint32Vec {
         &self.flags[1]
     }
-    /// B11 stream N: absent on a diagonal block key tile, which has no per-token region.
+    /// B11 stream N: absent on a diagonal block key tile, which has no per-token component.
     /// Every caller is already inside a `with_rows` arm, so reaching this on a
     /// diagonal block is a bug in the caller and says so rather than indexing past the
     /// end.
@@ -561,7 +561,7 @@ pub fn key_tile_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> 
     let (mutate, at) = premut();
     let sh = a.shape;
     let rrows = 1usize << l.log_row;
-    // the per-token region is not a `Grid`, so it borrows the shape for its two
+    // the per-token component is not a `Grid`, so it borrows the shape for its two
     // size fields and nothing else
     let tokg = FGridA { log_rows: l.log_row, rows: rrows as u32, groups: 1, chunks: 1,
                         lead: 0, descending: 0 };
@@ -569,7 +569,7 @@ pub fn key_tile_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> 
     // diagonal block key tile has no rows for it. `commit_pre` has always skipped those
     // three selector columns on a diagonal block (`attn_trace.rs:258`), so a diagonal block
     // key tile's device selectors have to skip them too or the two disagree by
-    // three columns. The *flags* are cut with them: nothing segments a region
+    // three columns. The *flags* are cut with them: nothing segments a component
     // that does not exist.
     // Stream CC (E11): a ninth key selector, `act`, when the grid leaves inert
     // lead rows -- the AIR's numerator-fold guard.  `commit_pre` appends it to

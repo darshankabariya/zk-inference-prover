@@ -8,7 +8,7 @@
 // Slots per block in the y direction, as `B65_FILL_SLOT_TILE` is for the
 // dequant: one thread owns a row and loops its slots, so consecutive threads
 // write consecutive cells of the same column, and splitting the slots across
-// blocks keeps a small region off 32 blocks of a 132-SM device.
+// blocks keeps a small component off 32 blocks of a 132-SM device.
 #define B65W_TILE 4u
 
 // ---------------------------------------------------------------- the permutation --
@@ -148,7 +148,7 @@ __device__ __forceinline__ bool b65w_drop(unsigned mutate, unsigned i) {
 
 // ========================================================= the Freivalds fill ==
 
-// `freivalds_region`'s committed half: `pq` activation columns, every cell bumped
+// `freivalds_component`'s committed half: `pq` activation columns, every cell bumped
 // into the 8-bit range table (padding included -- the host bumps outside the
 // match, and a padded slot commits the offset 128, which is a real table row).
 __global__ void b65w_freivalds_base(const signed char *__restrict__ qx,
@@ -180,7 +180,7 @@ __global__ void b65w_freivalds_base(const signed char *__restrict__ qx,
     }
 }
 
-// `freivalds_region`'s preprocessed half: the weights of every matmul in the group,
+// `freivalds_component`'s preprocessed half: the weights of every matmul in the group,
 // then the four selectors. `chan` is the control for the slot-to-channel map --
 // a consistently misaddressed weight is a consistent witness for the wrong
 // matmul, and the AIR cannot catch it on its own.
@@ -217,7 +217,7 @@ __global__ void b65w_freivalds_pre(const signed char *const *__restrict__ qw,
     }
 
     if (blockIdx.y == 0u) {
-        // the four selectors, in `freivalds_region`'s order
+        // the four selectors, in `freivalds_component`'s order
         pre_cols[n_w + 0u][i] = (live && chunk + 1u < cfg.g.chunks) ? 1u : 0u;
         pre_cols[n_w + 1u][i] = (live && chunk == 0u) ? 1u : 0u;
         pre_cols[n_w + 2u][i] = (j > 0u) ? 1u : 0u;
@@ -252,12 +252,12 @@ extern "C" void b65_fill_freivalds(const signed char *qx,
 
 // =========================================================== the attnout fill ==
 
-// `ao_region`, whose per-row body is the rounding fold: `qm` is the nearest
+// `ao_component`, whose per-row body is the rounding fold: `qm` is the nearest
 // integer to `|a| 2^e / den` with ties away from zero, written as the exact
 // integer division the AIR checks, and `d` is the remainder that division
 // leaves. `counts[2]` carries the host's two `assert!`s -- a non-positive
 // denominator and the no-wrap window -- so the caller can panic with the
-// region's name instead of proving something wrong.
+// component's name instead of proving something wrong.
 __global__ void b65w_ao(const unsigned *__restrict__ acc,
                         const unsigned *__restrict__ den,
                         const int *__restrict__ jo, const int *__restrict__ jv,
@@ -413,7 +413,7 @@ __global__ void b65w_ao(const unsigned *__restrict__ acc,
     }
 
     if (blockIdx.y == 0u) {
-        // the six selectors, in `ao_region`'s order
+        // the six selectors, in `ao_component`'s order
         const bool last = live && b == 0u;
         const bool hfirst = last && t == cfg.s - 1u;
         m31 *const *sel = pre_cols + pr;
@@ -449,7 +449,7 @@ extern "C" void b65_fill_attnout(const unsigned *acc, const unsigned *den,
 
 // ============================================================== the key tile fill ==
 
-// The channel region: `pk` key columns then `pq` query columns, each cell
+// The channel component: `pk` key columns then `pq` query columns, each cell
 // offset into its range table so the committed value is non-negative.
 __global__ void b65w_key_tile_chan(const int *__restrict__ kk, const int *__restrict__ qq,
                                m31 *const *__restrict__ cols,
@@ -530,7 +530,7 @@ __device__ __forceinline__ void b65w_grid_vals(const B65KeyTileCfg &cfg,
     *key = *idx;
 }
 
-// The grid region: the committed index, the numerator, the auxiliary limb the
+// The grid component: the committed index, the numerator, the auxiliary limb the
 // split variant needs, and the packed V values.
 __global__ void b65w_key_tile_grid(const int *__restrict__ dd,
                                const unsigned short *__restrict__ num,
@@ -650,7 +650,7 @@ extern "C" void b65_fill_key_tile_grid(const int *dd, const unsigned short *num,
     cuda_free_memory(d);
 }
 
-// The A.V outputs. The composed proof moves these into the attnout region and
+// The A.V outputs. The composed proof moves these into the attnout component and
 // passes `with_out = false`, so this kernel exists for the standalone path and
 // costs nothing when it is not called.
 __global__ void b65w_key_tile_out(const unsigned *__restrict__ out,
@@ -692,7 +692,7 @@ extern "C" void b65_fill_key_tile_out(const unsigned *out, m31 *const *cols,
     cuda_free_memory(d);
 }
 
-// The per-token region: the row maxima, the denominators, and the denominator's
+// The per-token component: the row maxima, the denominators, and the denominator's
 // low limb taken twice -- once against zero and once against `z_min`, which is
 // the pair the AIR range-checks.
 __global__ void b65w_key_tile_tok(const unsigned *__restrict__ mm,

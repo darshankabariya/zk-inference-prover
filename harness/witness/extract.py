@@ -4,12 +4,12 @@ Forked from `b6/extract.py`.  Re-runs B1's forward pass under the composed
 layout's spec (`b65-design`: power-of-two linear scales on q/k/v/o, the bf16
 chain on gate/up/down, the integer softmax at int12 x int11, and the attention
 output rounded straight to int8 with a power-of-two `s_o`) and writes everything
-the composed proof's regions read:
+the composed proof's components read:
 
   * **the attention block**, in `b5/extract.py`'s format (the S queries of the
     last prefill chunk against the C-key prefix) -- the packed key tiles load a key tile
     of heads from it;
-  * **the matmul accumulators and scales**, as in B6 -- the dequant regions;
+  * **the matmul accumulators and scales**, as in B6 -- the dequant components;
   * **new against B6**: the quantized weights `qw_*.i8` (the preprocessed side of
     the r^T W Freivalds check), the quantized activations `qx_*.i8` (the Freivalds check's committed
     side), the bf16 input patterns `x_*.u16` (the requantize / max-argument
@@ -317,7 +317,7 @@ if __name__ == "__main__":
         # either operand, so the final RMSNorm was proved by nobody (stream KK).
         # The norm scale needs the last layer's committed residual (its input), the
         # model's final-norm weight (preprocessed, tree 0) and B1's own rsqrt
-        # lookup and head input as the two references the region reproduces.
+        # lookup and head input as the two references the component reproduces.
         keep |= {f"L{m.L - 1}.x", "final_norm.rsqrt/in", "final_norm.rsqrt/out",
                  "lm_head/x"}
     m.rec = LastChunk(keep)
@@ -451,7 +451,7 @@ if __name__ == "__main__":
                       digests)
 
             # ---- the attention-output fold's scales ---------------------------------
-            # The composed attnout region proves the *rectangle* sub-computation (the
+            # The composed attnout component proves the *rectangle* sub-computation (the
             # same statement the key tiles prove; the diagonal block stays outside every AIR
             # in the project, B9's job), so its accumulators and denominators are the
             # recomputed `out`/`zz` above.  The V scales are the forward pass's,
@@ -470,7 +470,7 @@ if __name__ == "__main__":
             # GQA group's heads agree before it states a gadget over the kv grid.
             #
             # Absent files are not an error: without `jq.i32` the q scale is the
-            # dynamic per-token one and its region is `requant.rs`'s `with_max`
+            # dynamic per-token one and its component is `requant.rs`'s `with_max`
             # shape, which stream NN designed and did not build; without
             # `inv_freq.f64` the model has per-layer-type frequencies and the
             # statement would have to name which. The prover proves no rotation
@@ -487,7 +487,7 @@ if __name__ == "__main__":
                 write("jq.i32", jq.reshape(-1), digests)
             else:
                 print(f"  NN: q_scale_mode={spec.q_scale_mode!r} -- no jq.i32, so no "
-                      "q quantize region on this dump")
+                      "q quantize component on this dump")
             # The angle table itself is NOT written: the statement carries
             # `rope_theta`, the branch of `inv_freq_of` this model takes and that
             # branch's own constants, and the prover rebuilds `inv_freq` from
@@ -677,7 +677,7 @@ if __name__ == "__main__":
             # ---- B10 step 4: the `lm_head` chunk -------------------------------------
             # The head is a `Linear` like every other matmul, recorded under a bare
             # `lm_head/...` key because it has no layer.  What is new here is the
-            # *token* side: the order key the argmax region compares, and which token
+            # *token* side: the order key the argmax component compares, and which token
             # each row emits.
             head = {}
             if a.head:
@@ -851,7 +851,7 @@ if __name__ == "__main__":
             stats = dict(
                 heads=nh, s=S, c=P, hd=hd, layer=L, spec=a.spec, qk_bits=list(spec.qk_bits),
                 # stream NN: the key/value head count, so the prover sizes the
-                # rotation's regions from the model rather than by dividing a
+                # rotation's components from the model rather than by dividing a
                 # matmul's width by `hd` and guessing which head count it is
                 nkv=int(m.nkv),
                 # stream NN: everything the verifier needs to build the rotation's

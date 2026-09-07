@@ -4,7 +4,7 @@
 // **272 of those columns are the interaction's accumulators** -- 0.050 GB, three
 // quarters of everything -- and they are the last committed columns in the
 // composed proof that are still born on the host. They are not lookups: each
-// one is a first-order linear recurrence down the rows of a region,
+// one is a first-order linear recurrence down the rows of a component,
 //
 //     x[j] = a[j] * x[j-1] + b[j],      x[-1] = 0,
 //
@@ -12,7 +12,7 @@
 // `a[j]` a challenge power the row's position in the layout picks. Every
 // accumulator in the proof has that shape:
 //
-// | region | stage 1 (`a` resets at a group start) | stage 2 (`b` lands on a group's last row) |
+// | component | stage 1 (`a` resets at a group start) | stage 2 (`b` lands on a group's last row) |
 // |---|---|---|
 // | key tile channel | `u` (r), `v` (s) | `acc` = sum of `u v`, folded by `r^C` per instance |
 // | key tile grid | `zs`, `zn` (s), `wv` (rv) | `hs` (Horner in r), `av` = sum `wv zn`, `sn` = sum `zn` |
@@ -28,7 +28,7 @@
 // same element. A reset is `a[j] = 0`, so a segmented recurrence is not a
 // special case either, and a raw (unscanned) lane is `a = 0` for every row.
 // That leaves one scan kernel, one splitter and one stage-2 builder shared by
-// every region, and six small kernels that do nothing but read the region's own
+// every component, and six small kernels that do nothing but read the component's own
 // committed columns and write `(a, b)`.
 //
 // **What is read, and why it is the columns and not the witness.** The host
@@ -41,7 +41,7 @@
 // corrupts a witness corrupts the column, and the accumulator carries it.
 //
 // The committed column is not always the witness value, and the four places it
-// is not are the four the controls are aimed at: the channel region commits
+// is not are the four the controls are aimed at: the channel component commits
 // `kk + off_k` (`nooffset`), the grid commits the shift *scaled* to the master
 // exp table's exponent (`nodelta`) and, at `intsplit`'s design point, *split*
 // across the key and auxiliary columns (`nosplit`), and the grid's numerator
@@ -52,7 +52,7 @@
 #include "fields.cuh"
 
 // The negative controls (`B7_M4_ACCMUT`), each a way this design could
-// plausibly be wrong. Section 5 rule 5: each takes a `:region` suffix, because
+// plausibly be wrong. Section 5 rule 5: each takes a `:component` suffix, because
 // unaimed every one of them panics at `chan key_tile0`, which is checked first.
 #define B65A_MUT_NONE 0u
 #define B65A_MUT_NOPERM 1u     // read the coset row, not the committed one
@@ -71,13 +71,13 @@
 #define B65A_MUT_NOTIEW 11u     // weigh every member of a row's sequence alike
 #define B65A_MUT_NOTIELAM 12u   // drop `ef`'s `lam`, collapsing (sm, ef) to sm
 
-// Per-row layout facts, computed once by the region's own kernel so that the
+// Per-row layout facts, computed once by the component's own kernel so that the
 // stage-2 builder and the scan need to know nothing about the layout.
 #define B65A_ACTIVE 1u
 #define B65A_NOFIRST 2u
 #define B65A_LAST 4u
 // The row where this lane's Horner picks up its per-instance weight. Each
-// region defines it: an instance start for the key tiles and the Freivalds checks, a head
+// component defines it: an instance start for the key tiles and the Freivalds checks, a head
 // start for the attnout, never for the dequant.
 #define B65A_ISTART 8u
 
@@ -128,7 +128,7 @@ __device__ __forceinline__ bool b65a_grid_row(const B65AccGrid &g, unsigned j,
     return true;
 }
 
-// The three flags every grid-shaped region shares.
+// The three flags every grid-shaped component shares.
 __device__ __forceinline__ unsigned b65a_grid_flags(bool act, unsigned chunk,
                                                     unsigned chunks) {
     unsigned f = 0u;
@@ -146,8 +146,8 @@ __device__ __forceinline__ unsigned b65a_grid_flags(bool act, unsigned chunk,
 }
 
 // `chan_istart` / `key_istart`: the first row of an instance in a grid-shaped
-// region, where the outer sum picks up its per-instance weight. `modulus` is
-// `hd` for the channel region and `C` for the key region -- `attn_trace.rs`
+// component, where the outer sum picks up its per-instance weight. `modulus` is
+// `hd` for the channel component and `C` for the key component -- `attn_trace.rs`
 // writes them as one predicate each and this is that predicate.
 __device__ __forceinline__ unsigned b65a_flags_of_grid(const B65AccGrid &g,
                                                        unsigned modulus, unsigned j) {
@@ -160,7 +160,7 @@ __device__ __forceinline__ unsigned b65a_flags_of_grid(const B65AccGrid &g,
     return f;
 }
 
-// `tok_istart`: the per-token region carries no group structure, so an instance
+// `tok_istart`: the per-token component carries no group structure, so an instance
 // starts wherever the row's highest token is `S - 1` mod `S`. Every row is
 // active and there are no chunks, so LAST never fires here.
 __device__ __forceinline__ unsigned b65a_flags_of_tok(unsigned rows, unsigned rw,
@@ -181,12 +181,12 @@ __device__ __forceinline__ unsigned b65a_flags_of_tok(unsigned rows, unsigned rw
 #define B65A_SHAPE_KEY 1u
 #define B65A_SHAPE_TOK 2u
 
-// One key tile sub-region's layout, for the flags kernel alone.
+// One key tile sub-component's layout, for the flags kernel alone.
 struct B65AccFlags {
     unsigned shape;
     B65AccGrid g;      // the chan and key grids; `log_rows`/`rows` only for tok
     unsigned modulus;  // `hd`, `C`, or `S` -- the instance-start modulus
-    unsigned rw;       // the per-token region's row width
+    unsigned rw;       // the per-token component's row width
 };
 
 // One stage-2 lane: `b = last ? V[src0] * V[src1] : 0` and
@@ -264,15 +264,15 @@ struct B65AccAo {
     unsigned mutate;
 };
 
-// B11 stream N: one of the residual-stream region's Horner bindings, which is the seventh
-// region of the table at the top of this file and the plainest of them.
+// B11 stream N: one of the residual-stream component's Horner bindings, which is the seventh
+// component of the table at the top of this file and the plainest of them.
 //
-// A binding folds one of the region's *value sequences* -- a group's committed
+// A binding folds one of the component's *value sequences* -- a group's committed
 // leaves, or the slots one output names -- into a single claim,
 //
 //     h[j] = step * h[j-1] + sum_k w[k] * (sm[j][k] + lam * ef[j][k]),
 //
-// which is the same affine recurrence every other region has, with no
+// which is the same affine recurrence every other component has, with no
 // segmentation at all: no group starts, no instance starts, no last-row term.
 // So a binding needs no flags and no stage 2 -- it is one stage-1 lane and the
 // shared scan, and `a[j]` is the constant `step` everywhere but row 0.
@@ -303,7 +303,7 @@ struct B65AccResidualStreamBind {
 extern "C" void b65_acc_scan(qm31 *a, qm31 *b, unsigned rows, unsigned lanes,
                              unsigned mutate);
 
-// Stage 2's `(a, b)`, from the flags one of the region kernels wrote and the
+// Stage 2's `(a, b)`, from the flags one of the component kernels wrote and the
 // stage-1 lanes the scan has already closed.
 extern "C" void b65_acc_stage2(const unsigned *flags, qm31 *a, qm31 *b,
                                const B65AccS2 *lanes, unsigned n_lanes,
@@ -317,12 +317,12 @@ extern "C" void b65_acc_split(const qm31 *v, m31 **out, const unsigned *lane,
                               unsigned mutate);
 
 // The claimed sums: the last *coset* row of every lane, which is the value the
-// region's Horner leaves behind. A few QM31 back to the host, and the only
+// component's Horner leaves behind. A few QM31 back to the host, and the only
 // thing that comes back at all.
 extern "C" void b65_acc_last(const qm31 *v, qm31 *host, unsigned rows,
                              unsigned lanes);
 
-// ------------------------------------------------------------- the six regions --
+// ------------------------------------------------------------- the six components --
 
 // B7a milestone 4 (section 25): the key tile shapes' flags, written once at fill
 // time. `commit_pre` runs before the challenges are drawn and the accumulators
@@ -361,7 +361,7 @@ extern "C" void b65_acc_ao(const m31 *den_col, const m31 *const *acc_cols,
                            const qm31 *rv_pow, qm31 rv_step, unsigned *flags,
                            qm31 *a, qm31 *b, B65AccAo cfg);
 
-// B11 stream N: every binding of one residual-stream region, one lane each. `specs` and
+// B11 stream N: every binding of one residual-stream component, one lane each. `specs` and
 // `weights` are host arrays and are cloned to the card here; `in_nat` and
 // `out_nat` are already there, where `b65_residual_stream_fill.cu` left them.
 extern "C" void b65_acc_residual_stream_bind(const int *in_nat, const int *out_nat,

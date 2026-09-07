@@ -1,8 +1,8 @@
-//! B10 step 2 — the residual stream between the composed layer's regions.
+//! B10 step 2 — the residual stream between the composed layer's components.
 //!
 //! B6.5's composition bindings every matmul's accumulators to its own committed
-//! activations and weights, and nothing at all bindings one region's output to the
-//! next region's input (open gap 1).  The wiring is four gadgets, and every one
+//! activations and weights, and nothing at all bindings one component's output to the
+//! next component's input (open gap 1).  The wiring is four gadgets, and every one
 //! of them is bf16 elementwise arithmetic:
 //!
 //! ```text
@@ -60,7 +60,7 @@
 //!   nothing wraps mod p and the shared `NORM` table needs only `kmax ≥ 13`.
 //! * **The normalisation is B6's, unchanged.**  `mag` is a non-negative integer
 //!   below `2^(kmax+9)`, which is exactly the domain B6's `NORM`/`FRAC` pair
-//!   already covers — so the add rides the tables the dequant regions commit
+//!   already covers — so the add rides the tables the dequant components commit
 //!   anyway and costs no table row of its own.
 //!
 //! # The reduction's order is a spec decision
@@ -69,24 +69,24 @@
 //! an order no bf16-add gadget reproduces.  Proving the norm therefore *pins*
 //! the order, and B1 already carries the one this AIR implements: `tree_sum`
 //! (`reduce="bf16-norm"`), a balanced binary tree padded to a power of two.
-//! A region here holds a whole balanced tree of `leaves` values **inside one
+//! A component here holds a whole balanced tree of `leaves` values **inside one
 //! row**, so the wiring between its adds is fixed column indices and costs
-//! nothing; chaining two such regions (`leaves`, then `d / leaves`) is the whole
+//! nothing; chaining two such components (`leaves`, then `d / leaves`) is the whole
 //! reduction, and with both widths powers of two it is bit-identical to
-//! `tree_sum`.  Two regions are bound by a **Horner claim** over the values they
+//! `tree_sum`.  Two components are bound by a **Horner claim** over the values they
 //! share — B6.5's `h_m == acc_m` trick, at ~0.5 cells per value — so a value is
 //! never committed twice.
 //!
-//! # What bindings two regions positionwise
+//! # What bindings two components positionwise
 //!
 //! A binding's weights are the verifier's own powers of a drawn challenge, chosen so
 //! that the value at **canonical stream position** `q` weighs `w^(N-1-q)` in
-//! every region that carries it.  The canonical order of a `(tokens x d)`
+//! every component that carries it.  The canonical order of a `(tokens x d)`
 //! activation stream is channel-major, `q = c*tokens + t`, because that is the
 //! order in which `tree_sum`'s own tiling (`Tiling` below) and the residual
 //! add's read it with plain geometric weights.  So `resid.h_out == norm.h_in`
 //! says "the same values in the same positions", however differently the two
-//! regions cut the stream into rows, and the layer's statement becomes
+//! components cut the stream into rows, and the layer's statement becomes
 //! *committed residual stream in -> committed residual stream out*.  A slot's
 //! output also pays a `VAL` lookup — the output range check README 3.7 named:
 //! it says the result is a value bf16 can represent.
@@ -145,8 +145,8 @@ pub const SMUL_COLS: [&str; 5] =
     ["b10_smul_a", "b10_smul_b", "b10_smul_c", "b10_smul_cy", "b10_smul_nz"];
 pub const VAL_COLS: [&str; 2] = ["b10_val_sm", "b10_val_ef"];
 pub const UN_COLS: [&str; 4] = ["b10_un_i_sm", "b10_un_i_ef", "b10_un_o_sm", "b10_un_o_ef"];
-/// A region's own selector: `end` marks the last row, for the Horner bindings.
-/// Stream II: a region's `i`-th preprocessed value, as its two fields.  The
+/// A component's own selector: `end` marks the last row, for the Horner bindings.
+/// Stream II: a component's `i`-th preprocessed value, as its two fields.  The
 /// norm weights are the only user today; they are the model's, so they belong
 /// beside the tables in tree 0 rather than beside the stream in tree 1.
 pub fn residual_stream_pre_col(tag: &str, i: usize, k: usize) -> PreProcessedColumnId {
@@ -281,7 +281,7 @@ pub fn smul_table(round: Round) -> Vec<[M31; 5]> {
     rows
 }
 
-/// Which unary bf16 op a region's leaves apply.  `None` commits the leaf value
+/// Which unary bf16 op a component's leaves apply.  `None` commits the leaf value
 /// itself and validates it against `VAL`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnKind {
@@ -344,7 +344,7 @@ impl UnKind {
 
 /// The unary's image of one bf16 pattern, exactly the row `un_table` tabulates
 /// for it: one f32 evaluation and one rounding, which is B1's own
-/// `store(fn(x))`.  Exposed so a caller can compare a region's unary against
+/// `store(fn(x))`.  Exposed so a caller can compare a component's unary against
 /// B1's column without rebuilding the table.
 pub fn un_image(k: UnKind, pat: u16) -> u16 {
     let (sm, ef) = split(pat);
@@ -397,10 +397,10 @@ pub enum Kind {
     Mul,
 }
 
-/// One committed input group of a region: `n` bf16 values per row, all under the
-/// same unary (or none).  A region has as many groups as it has distinct input
-/// streams -- the norm-and-residual region has two, the residual stream and what
-/// is added to it -- and each group carries its own Horner binding, so two regions
+/// One committed input group of a component: `n` bf16 values per row, all under the
+/// same unary (or none).  A component has as many groups as it has distinct input
+/// streams -- the norm-and-residual component has two, the residual stream and what
+/// is added to it -- and each group carries its own Horner binding, so two components
 /// can be compared positionwise on a stream without committing it twice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Group {
@@ -408,7 +408,7 @@ pub struct Group {
     pub un: UnKind,
 }
 
-/// One region's program: what every row computes.
+/// One component's program: what every row computes.
 #[derive(Clone, Debug)]
 pub struct Prog {
     pub groups: Vec<Group>,
@@ -431,7 +431,7 @@ impl Prog {
 
     /// `tree_sum`'s own order over `pad` positions of which the first `n` are
     /// group 0's committed leaves and the rest are `+0`: `x[..h] + x[h..]`,
-    /// repeatedly.  The zero positions are pruned, so the region proves exactly
+    /// repeatedly.  The zero positions are pruned, so the component proves exactly
     /// `n - 1` adds however far `pad` reaches past `n`.
     pub fn tree(n: usize, pad: usize, un: UnKind) -> Self {
         assert!(pad.is_power_of_two() && pad >= 2, "a tree pads to a power of two");
@@ -476,7 +476,7 @@ impl Prog {
         Self { groups, kind, slots, outs: vec![(0..n).collect()], n_pre: 0 }
     }
 
-    /// The composed layer's wiring region: one row is one `(residue, token)`
+    /// The composed layer's wiring component: one row is one `(residue, token)`
     /// block of the residual stream, and it proves both the RMSNorm reduction's
     /// first `log2(pad)` levels over the squares *and* the residual add against
     /// the block's second operand.  The stream is committed **once** and read by
@@ -561,7 +561,7 @@ impl Prog {
 
     /// Stream NN: the third rounding.  Its leaves are `rope_mul`'s `2 hd`
     /// outputs in the same row order, so the join is one `ResidualStreamEq` between
-    /// `rope_mul.Out(0)` and this region's `In(0)`, and its own `Out(0)` is the
+    /// `rope_mul.Out(0)` and this component's `In(0)`, and its own `Out(0)` is the
     /// rotated value the quantize consumes.
     pub fn rope_add(hd: usize) -> Self {
         assert!(hd >= 2 && hd % 2 == 0, "a rotated head width is even");
@@ -611,8 +611,8 @@ impl Prog {
             Kind::Mul => (b, b + 3),
         }
     }
-    /// Stream II: where the region's `i`-th preprocessed value sits inside
-    /// `ResidualStreamRegion::pre`.  The two selectors come first, as `residual_stream_region` and
+    /// Stream II: where the component's `i`-th preprocessed value sits inside
+    /// `ResidualStreamComponent::pre`.  The two selectors come first, as `residual_stream_component` and
     /// `Plan::pre_ids` both write them.
     pub fn pre_at(&self, i: usize, k: usize) -> usize {
         2 + 2 * i + k
@@ -648,7 +648,7 @@ impl Prog {
 
 // ------------------------------------------------------------------ the AIR ---
 
-/// Which of a region's value sequences a binding accumulates.
+/// Which of a component's value sequences a binding accumulates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BindingKind {
     /// group `g`'s committed leaves, as committed (never the unary image)
@@ -657,12 +657,12 @@ pub enum BindingKind {
     Out(usize),
 }
 
-/// One Horner claim over one of a region's value sequences:
+/// One Horner claim over one of a component's value sequences:
 /// `H = sum_p w_p (sm_p + lam ef_p)`, accumulated a row at a time.  The weights
 /// are the verifier's own powers of a drawn challenge, chosen so that a value at
-/// canonical stream position `q` weighs `w^(N-1-q)` in **every** region that
+/// canonical stream position `q` weighs `w^(N-1-q)` in **every** component that
 /// carries it -- which is what makes `resid.h_out == norm.h_in` mean "the same
-/// values, in the same positions", however differently the two regions tile the
+/// values, in the same positions", however differently the two components tile the
 /// stream into rows.
 #[derive(Clone, Debug)]
 pub struct TieSpec {
@@ -696,16 +696,16 @@ pub struct ResidualStreamEval {
     pub uns: Vec<UnKind>,
     pub val: ValRel,
     pub binding: Option<Binding>,
-    /// B11 stream V, lever 3: this region's lookups are proved by the batched
+    /// B11 stream V, lever 3: this component's lookups are proved by the batched
     /// GKR instead of committed running-sum columns, so the AIR emits neither
     /// the relation entries nor the interaction masks they would allocate. The
     /// trace masks stay exactly where they were -- stream S's lesson is that
     /// the allocator must keep the committed order, and here the order is
     /// `Prog`'s, which the collector reads the same way.
     pub gkr: bool,
-    /// Stream H: when this region carries one side of the layer's boundary, the
-    /// tree that side is committed in and which of the region's value sequences
-    /// it holds.  `None` on every region of a chunk proved with the boundary
+    /// Stream H: when this component carries one side of the layer's boundary, the
+    /// tree that side is committed in and which of the component's value sequences
+    /// it holds.  `None` on every component of a chunk proved with the boundary
     /// flag off, which is why that chunk's proof is byte-for-byte the old one.
     pub bound: Option<crate::boundary::Boundary>,
 }
@@ -739,17 +739,17 @@ impl FrameworkEval for ResidualStreamEval {
         let c127 = m31_u32(127);
         let dmax = m31_u32(DMAX);
 
-        // ---- tree 0, in the region's own column order (stream OO) -------------
+        // ---- tree 0, in the component's own column order (stream OO) -------------
         // The order these are *read* in is the order the lowered IR indexes
-        // tree 0 in, and `devfrac::frac_cols` is handed the region's `pre`
-        // vector by position -- so the read order has to be `residual_stream_region`'s
+        // tree 0 in, and `devfrac::frac_cols` is handed the component's `pre`
+        // vector by position -- so the read order has to be `residual_stream_component`'s
         // build order and `Plan::pre_ids`' registration order, which are both
         // the two selectors and then the `Src::Pre` pairs. Stream II read the
         // pairs first, which made no difference while `n_pre` was zero
         // everywhere and made the generated fraction builder read the `nofirst`
         // selector as a norm-weight mantissa on every chunk with a norm scale.
-        // The selectors are read whether or not this region carries a binding: the
-        // region commits them either way, so a conditional read would leave the
+        // The selectors are read whether or not this component carries a binding: the
+        // component commits them either way, so a conditional read would leave the
         // supplied column list two longer than the IR's.
         let nofirst = eval.get_preprocessed_column(residual_stream_sel(&self.tag, "nofirst"));
         let end = eval.get_preprocessed_column(residual_stream_sel(&self.tag, "end"));
@@ -892,7 +892,7 @@ impl FrameworkEval for ResidualStreamEval {
         // ---- the boundary commitment (stream H) -------------------------------
         // One side of the layer's boundary is committed in its own tree, and the
         // whole of what binds it to the proof is this equality: the column in
-        // that tree holds the packed value the region itself carries, row for
+        // that tree holds the packed value the component itself carries, row for
         // row.  There is no randomness in it, which is the reason the tree may
         // be committed after the interaction tree -- the constraint is checked
         // at the OODS point, drawn after every commitment, so a prover that
@@ -942,7 +942,7 @@ impl FrameworkEval for ResidualStreamEval {
 
 // ------------------------------------------------------------------ witness ---
 
-/// The values a region consumes: one `rows x n` block of bf16 patterns per group.
+/// The values a component consumes: one `rows x n` block of bf16 patterns per group.
 pub struct ResidualStreamWitness {
     pub rows: usize,
     pub groups: Vec<Vec<u16>>,
@@ -1006,7 +1006,7 @@ impl ResidualStreamWitness {
             }
             groups.push(vals);
         }
-        // the preprocessed half of a synthetic region: the same spread, since
+        // the preprocessed half of a synthetic component: the same spread, since
         // the norm weight is an ordinary bf16 value of the model
         let mut pre = vec![0u16; rows * prog.n_pre];
         for v in pre.iter_mut() {
@@ -1085,8 +1085,8 @@ pub fn reference(groups: &[Vec<u16>], pre: &[u16], rows: usize, prog: &Prog, rou
 
 // ------------------------------------------------------------------- tables ---
 
-/// Every table this family reads, with the multiplicity columns the regions fill.
-/// `NORM` and `FRAC` are B6's, shared with the dequant regions in a composed
+/// Every table this family reads, with the multiplicity columns the components fill.
+/// `NORM` and `FRAC` are B6's, shared with the dequant components in a composed
 /// proof -- there the layer's own multiplicity vectors are moved in here and
 /// moved back, so the two families' uses land in one column.  The other four are
 /// the residual stream's own.
@@ -1252,7 +1252,7 @@ pub fn val_at(sm: i64, ef: u32) -> Option<usize> {
     Some(1 + ((ef - 1) as usize * 128 + m7 as usize) * 2 + usize::from(sm < 0))
 }
 
-// -------------------------------------------------------------- the region ----
+// -------------------------------------------------------------- the component ----
 
 /// What a probe corrupts.  Every one is a value the *prover* controls, and each
 /// aims at a different half of the argument.
@@ -1277,12 +1277,12 @@ pub enum Tamper {
     Stream(usize),
     /// Stream II: one row's committed sum of squares, bent by one pattern step.
     /// It is still a legal `(sm, ef)`, so the `UnKind::NormR` lookup finds a row
-    /// and the region's arithmetic stays consistent -- `r` is simply the
+    /// and the component's arithmetic stays consistent -- `r` is simply the
     /// `rsqrt` of a number this token's reduction did not produce.  Only the
     /// binding `nt.In(1) == G gnb.Out(0)` can catch it.
     Ms(usize),
     /// Stream II: one row's committed sum of squares replaced by the *next
-    /// row's*.  Rows of one norm-scale region step through tokens at a fixed
+    /// row's*.  Rows of one norm-scale component step through tokens at a fixed
     /// residue, so this gives two rows of one token two different `r`s, out of
     /// values that are each some token's honest reduction.  Again only the binding
     /// can catch it -- and this is the one the record's "one `r` per token"
@@ -1306,7 +1306,7 @@ impl Tamper {
     }
 }
 
-pub struct ResidualStreamRegion {
+pub struct ResidualStreamComponent {
     pub pre: Vec<Eval>,
     pub base: Vec<Eval>,
     pub log_rows: u32,
@@ -1316,7 +1316,7 @@ pub struct ResidualStreamRegion {
     pub ref_ok: usize,
     pub ref_n: usize,
     /// what each `outs` group holds, as bf16 patterns and in natural row order --
-    /// the next region's leaves
+    /// the next component's leaves
     pub outs: Vec<Vec<u16>>,
     pub prog: Prog,
     pub round: Round,
@@ -1329,7 +1329,7 @@ pub struct ResidualStreamRegion {
     /// natural row order, for the Horner bindings: per group, then per `outs` group
     pub in_nat: Vec<Vec<(i64, i64)>>,
     pub out_nat: Vec<Vec<(i64, i64)>>,
-    /// B11 stream M: the region's columns when the fill left them on the card,
+    /// B11 stream M: the component's columns when the fill left them on the card,
     /// under `B7_M4_RESIDUAL_STREAM_FILL=1`. `pre` and `base` are then empty and this is where
     /// the columns are. The three arrays above are *not* on the card: the bindings
     /// and the boundary sides read them by row, they are a fifth of the
@@ -1338,7 +1338,7 @@ pub struct ResidualStreamRegion {
     pub dev: Option<crate::dev_residual_stream_fill::DevResidualStream>,
 }
 
-impl ResidualStreamRegion {
+impl ResidualStreamComponent {
     /// Committed cells, wherever the columns are.
     pub fn base_cells(&self) -> usize {
         let n = match &self.dev {
@@ -1413,8 +1413,8 @@ const T_FRAC: u8 = 4;
 const T_SMUL: u8 = 6;
 const T_UN: u8 = 8;
 
-/// Build one region's committed columns and bump the shared tables.
-/// The reference count the host loop keeps inline: how many of this region's
+/// Build one component's committed columns and bump the shared tables.
+/// The reference count the host loop keeps inline: how many of this component's
 /// outputs agree with `ResidualStreamWitness::ref_out`, the one f64-rounded evaluation.
 ///
 /// B11 stream M: pulled out so the device path reports the same two numbers
@@ -1435,9 +1435,9 @@ fn ref_count(w: &ResidualStreamWitness, prog: &Prog, outs: &[Vec<u16>]) -> (usiz
     (ok, n)
 }
 
-pub fn residual_stream_region(w: &ResidualStreamWitness, prog: &Prog, round: Round, tag: &str,
+pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: Round, tag: &str,
                               tables: &mut ResidualStreamTables, tamper: Option<Tamper>)
-                              -> ResidualStreamRegion {
+                              -> ResidualStreamComponent {
     let log_rows = log_rows_for(w.rows, 1);
     let rows = 1usize << log_rows;
     // B11 stream M: which fill runs. 1 is the device's alone -- `pre` and
@@ -1452,29 +1452,29 @@ pub fn residual_stream_region(w: &ResidualStreamWitness, prog: &Prog, round: Rou
     let m4g = crate::dev_residual_stream_fill::mode();
     let m4g = if m4g != 0 && tamper.is_some() {
         eprintln!("residual_stream_fill-dev: {tag}: a residual-stream tamper is set, \
-                  so this region fills on the host");
+                  so this component fills on the host");
         0
     } else if m4g != 0 && prog.n_pre > 0 {
         // stream II: `FSlot` has no encoding for a preprocessed operand -- a
         // `Src::Pre` lowers to `(NONE, NONE)`, which the kernel reads as the
-        // constant zero -- so a region with one takes the host fill whatever the
+        // constant zero -- so a component with one takes the host fill whatever the
         // switch says, as a wide Freivalds group already does.  Announced, because a
         // device fill that silently multiplied by zero would look like a bad
         // witness.
-        eprintln!("residual_stream_fill-dev: {tag}: the region reads preprocessed values, \
+        eprintln!("residual_stream_fill-dev: {tag}: the component reads preprocessed values, \
                   so it fills on the host");
         0
     } else {
         m4g
     };
     if m4g == 1 {
-        let dev = crate::dev_residual_stream_fill::residual_stream_region_dev(w, prog, round, tables);
+        let dev = crate::dev_residual_stream_fill::residual_stream_component_dev(w, prog, round, tables);
         let (ref_ok, ref_n) = ref_count(w, prog, &dev.outs);
         let bad_exp = dev.bad_exp;
         let (in_nat, out_nat, outs) =
             (dev.in_nat.clone(), dev.out_nat.clone(), dev.outs.clone());
         crate::dev_residual_stream_fill::merge(tables, &dev);
-        return ResidualStreamRegion {
+        return ResidualStreamComponent {
             pre: vec![], base: vec![], log_rows, rows: w.rows,
             n_ops: w.rows * prog.slots.len(),
             n_leaves: w.rows * prog.n_leaves(),
@@ -1507,7 +1507,7 @@ pub fn residual_stream_region(w: &ResidualStreamWitness, prog: &Prog, round: Rou
             let mut lin: Vec<Vec<(i64, u32)>> = vec![];
             let mut lun: Vec<Vec<(i64, u32)>> = vec![];
             // the *global* leaf index, so a probe aimed at value `t` lands on it
-            // whatever the region's row width (a per-row counter silently missed
+            // whatever the component's row width (a per-row counter silently missed
             // every target past the first row -- and a probe that does not fire
             // reads as a gadget that accepts)
             let mut flat = j * prog.n_leaves();
@@ -1524,7 +1524,7 @@ pub fn residual_stream_region(w: &ResidualStreamWitness, prog: &Prog, round: Rou
                     }
                     // stream II: the two probes the `In(1)` binding exists for.
                     // Both leave a legal bf16 pattern, so the `NormR` lookup
-                    // still finds its row and the region stays self-consistent.
+                    // still finds its row and the component stays self-consistent.
                     if let Some(Tamper::Ms(t)) = tamper {
                         if live && g == 1 && t % w.rows.max(1) == j {
                             pat ^= 1;
@@ -1786,7 +1786,7 @@ pub fn residual_stream_region(w: &ResidualStreamWitness, prog: &Prog, round: Rou
     let (mut ref_ok, mut ref_n, mut bad_exp) = (0usize, 0usize, 0usize);
     let fired: usize = filled.iter().map(|f| f.fired).sum();
     if tamper.is_some() && fired == 0 {
-        eprintln!("{tag}: the {} tamper did not fire -- this region is the honest one",
+        eprintln!("{tag}: the {} tamper did not fire -- this component is the honest one",
                   tamper.unwrap().name());
     }
     let mut outs: Vec<Vec<u16>> = prog.outs.iter().map(|o| vec![0u16; rows * o.len()]).collect();
@@ -1830,7 +1830,7 @@ pub fn residual_stream_region(w: &ResidualStreamWitness, prog: &Prog, round: Rou
     let mut nofirst = vec![M31::one(); rows];
     nofirst[0] = M31::zero();
     let mut pre = vec![eval_of(log_rows, nofirst), eval_of(log_rows, end)];
-    // stream II: the region's own preprocessed values, `(sm, ef)` per slot, in
+    // stream II: the component's own preprocessed values, `(sm, ef)` per slot, in
     // the order `Plan::pre_ids` names them.  A tamper on one of these is a
     // tamper on tree 0 and shows up as `root_ok` false, never as a rejected
     // constraint -- which is the point of moving the norm weights here.
@@ -1868,14 +1868,14 @@ pub fn residual_stream_region(w: &ResidualStreamWitness, prog: &Prog, round: Rou
     if m4g == 2 {
         let after = crate::dev_residual_stream_fill::ResidualStreamSnap::of(tables);
         let after_off = tables.off_table;
-        let dev = crate::dev_residual_stream_fill::residual_stream_region_dev(w, prog, round, tables);
+        let dev = crate::dev_residual_stream_fill::residual_stream_component_dev(w, prog, round, tables);
         crate::dev_residual_stream_fill::check_residual_stream_dev(tag, &base, &pre, &dev,
                                                                    after_off - m4g_off, bad_exp,
                                                                    &in_nat, &out_nat, &outs,
                                                                    &m4g_snap.unwrap(), &after);
         crate::dev_residual_stream_fill::restore(tables, &after, after_off);
     }
-    ResidualStreamRegion {
+    ResidualStreamComponent {
         pre, base, log_rows, rows: w.rows, n_ops, n_leaves: n_leaf_tot,
         ref_ok, ref_n, outs, prog: prog.clone(), round,
         tag: tag.to_string(), bad_exp, fired, in_nat, out_nat, dev: None,
@@ -1893,9 +1893,9 @@ pub struct ResidualStreamRels {
     pub smul: SMulRel,
     pub un: Vec<UnRel>,
     /// the kinds `un` is indexed by.  This is the *plan's* list, the union over
-    /// every region, not any one program's: two regions drawing different
-    /// unaries share one relation vector, and indexing it by a single region's
-    /// `un_kinds()` would point the second region at the first one's table.
+    /// every component, not any one program's: two components drawing different
+    /// unaries share one relation vector, and indexing it by a single component's
+    /// `un_kinds()` would point the second component at the first one's table.
     pub uns: Vec<UnKind>,
     pub val: ValRel,
 }
@@ -1949,7 +1949,7 @@ fn src_cols_any(prog: &Prog, s: &Src, round: Round) -> (usize, usize) {
 ///
 /// The weights of every binding are packed into one array, so the kernel takes one
 /// upload rather than one per lane.
-fn binding_specs(r: &ResidualStreamRegion, t: &Binding)
+fn binding_specs(r: &ResidualStreamComponent, t: &Binding)
                  -> (Vec<crate::devacc::FAccResidualStreamBinding>, Vec<SecureField>) {
     let prog = &r.prog;
     let n_leaves = prog.n_leaves();
@@ -1986,16 +1986,16 @@ fn binding_specs(r: &ResidualStreamRegion, t: &Binding)
     (specs, weights)
 }
 
-/// The region's Horner bindings and its LogUp columns, in the AIR's own order.
+/// The component's Horner bindings and its LogUp columns, in the AIR's own order.
 ///
-/// B11 stream M: `air` is this region's own eval, and it is here because the
+/// B11 stream M: `air` is this component's own eval, and it is here because the
 /// LogUp half now goes through `devfrac::frac_cols` like every other family's.
 /// The residual stream was the last component with no device route at all -- not for want
 /// of a kernel, which stream K's split emitter has compiled and installed since
 /// `b65_residual_stream_eval` fit under the cap, but because nothing ever called the
 /// router. The bindings stay on the host: they are a serial Horner fold over the
-/// region's own values, which is `devacc`'s shape and not this stream's.
-pub fn residual_stream_interaction(r: &ResidualStreamRegion, rels: &ResidualStreamRels,
+/// component's own values, which is `devacc`'s shape and not this stream's.
+pub fn residual_stream_interaction(r: &ResidualStreamComponent, rels: &ResidualStreamRels,
                                    binding: Option<&Binding>, air: &ResidualStreamEval,
                                    gkr: bool) -> ResidualStreamInteraction {
     use stwo::prover::backend::simd::m31::PackedM31;
@@ -2007,7 +2007,7 @@ pub fn residual_stream_interaction(r: &ResidualStreamRegion, rels: &ResidualStre
     let mut claimed: Vec<SecureField> = vec![];
     if let Some(t) = binding {
         // B11 stream N: which side folds the bindings. The device route needs the
-        // fill's own natural arrays, so it exists exactly when this region
+        // fill's own natural arrays, so it exists exactly when this component
         // filled on the card; mode 2 builds both and asserts every cell and
         // every claim.
         let m4t = r.dev.as_ref().filter(|_| crate::devacc::binding_mode() >= 1);
@@ -2140,11 +2140,11 @@ pub fn residual_stream_interaction(r: &ResidualStreamRegion, rels: &ResidualStre
     };
     // B11 stream M: the router, with the hand-written builder as the closure it
     // compares against at modes 2 and 4 and falls back to at mode 0. The
-    // region's columns are the host's today -- `gen/residual_stream` has no device path --
+    // component's columns are the host's today -- `gen/residual_stream` has no device path --
     // so this is `Cols::Host` and the opt-in `B7_M4_LOGUPIR` decides. When
     // `gen/residual_stream` puts them on the card the same call takes the kernel
     // unconditionally, which is how the two levers compose.
-    // B11 stream V, lever 3: under `--gkr-residual-stream` the region's fractions were
+    // B11 stream V, lever 3: under `--gkr-residual-stream` the component's fractions were
     // handed to the collector before the GKR proof ran, in `compose`'s own pass
     // -- see the comment there for why the two are in different places -- so
     // there are no running-sum columns to build and no claimed sum to carry.
@@ -2362,7 +2362,7 @@ pub struct Outcome {
     pub odd: usize,
     pub table_cells_pre: usize,
     pub table_cells_fresh: usize,
-    pub region_cells: usize,
+    pub component_cells: usize,
     /// the residual-stream component's own interaction cells: the Horner bindings and the
     /// LogUp columns its lookups drag along (a pair of lookups is 4 columns)
     pub inter_cells: usize,
@@ -2378,8 +2378,8 @@ impl Outcome {
     }
     /// Cells the gadget adds per op, witness *and* LogUp columns, the way B6 and
     /// B6.5 count.  The tables amortise over a whole layer, so they are reported
-    /// apart; so are the leaves, which in a chained region are the previous
-    /// region's outputs and are committed there (`leaf_width` columns plus the
+    /// apart; so are the leaves, which in a chained component are the previous
+    /// component's outputs and are committed there (`leaf_width` columns plus the
     /// 2 cells the validity or unary lookup costs at pairwise batching).
     pub fn cells_per_op_marginal(&self) -> f64 {
         let leaf: usize = self
@@ -2390,11 +2390,11 @@ impl Outcome {
             .map(|(g, gr)| gr.n * (self.prog.leaf_width(g) + 2))
             .sum();
         let rows = self.n_ops / self.prog.slots.len().max(1);
-        (self.region_cells + self.inter_cells) as f64 / self.n_ops as f64
+        (self.component_cells + self.inter_cells) as f64 / self.n_ops as f64
             - (leaf * rows) as f64 / self.n_ops as f64
     }
     pub fn cells_per_op_total(&self) -> f64 {
-        (self.region_cells + self.inter_cells) as f64 / self.n_ops as f64
+        (self.component_cells + self.inter_cells) as f64 / self.n_ops as f64
     }
     pub fn json(&self, src: &str, gadget: &str) -> Value {
         json!({
@@ -2408,7 +2408,7 @@ impl Outcome {
             "ops": self.n_ops,
             "cells_per_op_marginal": self.cells_per_op_marginal(),
             "cells_per_op_total": self.cells_per_op_total(),
-            "region_cells": self.region_cells,
+            "component_cells": self.component_cells,
             "interaction_cells": self.inter_cells,
             "table_cells_preprocessed": self.table_cells_pre,
             "table_cells_fresh": self.table_cells_fresh,
@@ -2430,9 +2430,9 @@ impl Outcome {
     }
 }
 
-/// The binding specs a standalone region carries: one per input group and one per
+/// The binding specs a standalone component carries: one per input group and one per
 /// `outs` group, with the plain descending weights -- the composed proof picks
-/// its own so that two differently tiled regions line up (see `compose::residual_stream`).
+/// its own so that two differently tiled components line up (see `compose::residual_stream`).
 pub fn plain_bindings(prog: &Prog, log_rows: u32, w: SecureField) -> Vec<TieSpec> {
     let _ = log_rows;
     let mut specs = vec![];
@@ -2453,24 +2453,24 @@ pub fn plain_bindings(prog: &Prog, log_rows: u32, w: SecureField) -> Vec<TieSpec
     specs
 }
 
-/// One region, proved on its own: the measurement and the probes both run here.
+/// One component, proved on its own: the measurement and the probes both run here.
 pub fn run(w: &ResidualStreamWitness, prog: &Prog, round: Round, kmax: u32,
            tamper: Option<Tamper>) -> Outcome {
     let t0 = std::time::Instant::now();
     let uns = prog.un_kinds();
     let mut tables = ResidualStreamTables::new(kmax, round, &uns);
-    let region = residual_stream_region(w, prog, round, "r", &mut tables, tamper);
+    let component = residual_stream_component(w, prog, round, "r", &mut tables, tamper);
 
-    // ---- tree 0: the region's selector, then every table ----------------------
+    // ---- tree 0: the component's selector, then every table ----------------------
     let mut ids = vec![residual_stream_sel("r", "nofirst"), residual_stream_sel("r", "end")];
-    // stream II: and the region's own preprocessed values, in `residual_stream_region`'s
+    // stream II: and the component's own preprocessed values, in `residual_stream_component`'s
     // order -- the standalone rung has to name them too or tree 0 has columns
     // the allocator has never heard of
     for i in 0..prog.n_pre {
         ids.push(residual_stream_pre_col("r", i, 0));
         ids.push(residual_stream_pre_col("r", i, 1));
     }
-    let mut pre: Vec<Eval> = region.pre.clone();
+    let mut pre: Vec<Eval> = component.pre.clone();
     ids.extend(residual_stream_table_ids(&uns));
     pre.extend(residual_stream_table_cols(&tables));
     let pad = |n: u32| 1usize << n;
@@ -2491,11 +2491,11 @@ pub fn run(w: &ResidualStreamWitness, prog: &Prog, round: Round, kmax: u32,
                 }).collect()));
         }
     }
-    let table_cells_pre: usize = pre[region.pre.len()..].iter().map(|e| e.domain.size()).sum();
+    let table_cells_pre: usize = pre[component.pre.len()..].iter().map(|e| e.domain.size()).sum();
 
-    // ---- tree 1: the region, then the multiplicity columns --------------------
-    let mut base: Vec<Eval> = region.base.clone();
-    let region_cells: usize = base.iter().map(|e| e.domain.size()).sum();
+    // ---- tree 1: the component, then the multiplicity columns --------------------
+    let mut base: Vec<Eval> = component.base.clone();
+    let component_cells: usize = base.iter().map(|e| e.domain.size()).sum();
     let mult_start = base.len();
     base.extend(residual_stream_mult_cols(&tables));
     base.push(eval_of(tables.log_norm, tables.m_norm.iter().map(|m| m31_u32(*m)).collect()));
@@ -2521,14 +2521,14 @@ pub fn run(w: &ResidualStreamWitness, prog: &Prog, round: Round, kmax: u32,
     let ch = sess.draw_felts(2);
     let (w_ch, lam) = (ch[0], ch[1]);
     let notie = std::env::var("B10_RESIDUAL_STREAM_NOTIE").is_ok();
-    let specs = plain_bindings(prog, region.log_rows, w_ch);
+    let specs = plain_bindings(prog, component.log_rows, w_ch);
     let tie0 = Binding { lam, specs: specs.clone() };
     // B11 stream M: the eval the LogUp half lowers, built before the claims
     // exist. `compose` does the same thing for the same reason (`claims_for`'s
     // placeholders): a claimed sum enters constraints and never a lookup, so
     // the fraction IR this produces is the one `genemit` compiled.
     let air0 = ResidualStreamEval {
-        log_rows: region.log_rows, tag: "r".into(), prog: prog.clone(), round,
+        log_rows: component.log_rows, tag: "r".into(), prog: prog.clone(), round,
         norm: rels.norm.clone(), frac: rels.frac.clone(), pow: rels.pow.clone(),
         smul: rels.smul.clone(), un: rels.un.clone(), uns: rels.uns.clone(),
         val: rels.val.clone(),
@@ -2536,9 +2536,9 @@ pub fn run(w: &ResidualStreamWitness, prog: &Prog, round: Round, kmax: u32,
         // the standalone gadget has no GKR backend; the flag lives in `compose`
         gkr: false,
     };
-    let it = residual_stream_interaction(&region, &rels, if notie { None } else { Some(&tie0) },
+    let it = residual_stream_interaction(&component, &rels, if notie { None } else { Some(&tie0) },
                                          &air0, false);
-    let inter_cells = it.cols.len() << region.log_rows;
+    let inter_cells = it.cols.len() << component.log_rows;
     let binding = Binding {
         lam,
         specs: specs
@@ -2551,7 +2551,7 @@ pub fn run(w: &ResidualStreamWitness, prog: &Prog, round: Round, kmax: u32,
     // an independent recomputation of every claim, from the witness rather than
     // from the trace: a binding is only worth something if it is checkable
     let binding_ok = notie
-        || binding.specs.iter().all(|s| region.binding_claim(s, lam) == s.claimed);
+        || binding.specs.iter().all(|s| component.binding_claim(s, lam) == s.claimed);
 
     let mut sums = Sums { uses: it.use_sum, tables: SecureField::zero() };
     // B11 stream M: this rung is the SimdBackend probe path and commits through
@@ -2584,7 +2584,7 @@ pub fn run(w: &ResidualStreamWitness, prog: &Prog, round: Round, kmax: u32,
     let alloc = &mut TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let comp = FrameworkComponent::<ResidualStreamEval>::new(
         alloc,
-        ResidualStreamEval { log_rows: region.log_rows, tag: "r".into(), prog: prog.clone(), round,
+        ResidualStreamEval { log_rows: component.log_rows, tag: "r".into(), prog: prog.clone(), round,
                    norm: rels.norm.clone(), frac: rels.frac.clone(), pow: rels.pow.clone(),
                    smul: rels.smul.clone(), un: rels.un.clone(), uns: rels.uns.clone(),
                    val: rels.val.clone(),
@@ -2611,10 +2611,10 @@ pub fn run(w: &ResidualStreamWitness, prog: &Prog, round: Round, kmax: u32,
     let proven = sess.prove(&provers, &comps);
     Outcome {
         proven, sums, prog: prog.clone(), round,
-        n_ops: region.n_ops, n_leaves: region.n_leaves,
-        off_table: tables.off_table, bad_exp: region.bad_exp, fired: region.fired,
-        ref_ok: region.ref_ok, ref_n: region.ref_n, odd: w.odd,
-        table_cells_pre, table_cells_fresh, region_cells, inter_cells,
+        n_ops: component.n_ops, n_leaves: component.n_leaves,
+        off_table: tables.off_table, bad_exp: component.bad_exp, fired: component.fired,
+        ref_ok: component.ref_ok, ref_n: component.ref_n, odd: w.odd,
+        table_cells_pre, table_cells_fresh, component_cells, inter_cells,
         n_columns, binding_ok, trace_secs,
     }
 }
@@ -2680,7 +2680,7 @@ pub fn check_tables(round: Round, samples: usize) -> Value {
 /// contiguous blocks: after those levels position `r` holds the stride tree of
 /// `x[r], x[r+a], ..., x[r+(b-1)a]`.  So a row here is one `(residue, token)`
 /// pair, its `nreal = d/a` committed leaves are the channels `r + j a`, and a
-/// second region over the `a` roots of one token is the rest of the reduction --
+/// second component over the `a` roots of one token is the rest of the reduction --
 /// the composite is *bit-identical* to `tree_sum`.
 ///
 /// The canonical position of channel `c` of token `t` is `c * tokens + t`
@@ -2713,7 +2713,7 @@ impl Tiling {
     pub fn rows1(&self) -> usize {
         self.tokens * self.a
     }
-    /// The natural-order value block a level-1 region's group reads: row
+    /// The natural-order value block a level-1 component's group reads: row
     /// `r * tokens + t`, leaf `j` is channel `r + j a` of token `t`.
     pub fn lay(&self, src: &[u16]) -> Vec<u16> {
         let mut v = vec![0u16; self.rows1() * self.nreal];
@@ -2740,7 +2740,7 @@ impl Tiling {
         }
         out
     }
-    /// The level-1 roots, one per row, as the level-2 region's leaves: row `t`,
+    /// The level-1 roots, one per row, as the level-2 component's leaves: row `t`,
     /// leaf `r`.
     pub fn roots_to_l2(&self, roots: &[u16]) -> Vec<u16> {
         let mut v = vec![0u16; self.tokens * self.a];
@@ -2777,7 +2777,7 @@ pub fn norm_drift(dir: &str, d: usize, tokens_cap: usize, round: Round, which: &
     let tokens = (x.len() / d).min(tokens_cap.max(1)).max(1);
     let pad = d.next_power_of_two();
     let (mut same, mut worst, mut worst_ulp) = (0usize, 0f64, 0i64);
-    let (mut region_same, mut region_n) = (0usize, 0usize);
+    let (mut component_same, mut component_n) = (0usize, 0usize);
     for t in 0..tokens {
         // the tree, exactly as `tree_sum` builds it: pad with +0, halve, round
         let mut lv: Vec<f64> = (0..pad)
@@ -2804,9 +2804,9 @@ pub fn norm_drift(dir: &str, d: usize, tokens_cap: usize, round: Round, which: &
         }
         let root = bf16::from_f64_round(lv[0], round);
         if let Some(rt) = roots {
-            region_n += 1;
+            component_n += 1;
             if canon(rt[t]) == canon(root) {
-                region_same += 1;
+                component_same += 1;
             }
         }
         let (im, ie) = split(inv_d);
@@ -2829,7 +2829,7 @@ pub fn norm_drift(dir: &str, d: usize, tokens_cap: usize, round: Round, which: &
     Ok(json!({"norm": which, "tokens": tokens, "d": d, "identical": same,
               "differ": tokens - same,
               "worst_relative": worst, "worst_ulps": worst_ulp,
-              "two_level_checked": region_n, "two_level_matches_tree_sum": region_same,
+              "two_level_checked": component_n, "two_level_matches_tree_sum": component_same,
               "note": "B1's fp32 reduction against the balanced bf16 tree the AIR proves; \
-                       two_level_* compares the composed regions' root with tree_sum's own"}))
+                       two_level_* compares the composed components' root with tree_sum's own"}))
 }

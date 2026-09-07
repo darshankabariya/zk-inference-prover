@@ -7,7 +7,7 @@
 //! *require* head- and layer-packed columns.
 //!
 //! The packing is cheaper than it looks, and that is B6's first result: it needs
-//! **no extra committed or interaction column at all.**  Extend each region's
+//! **no extra committed or interaction column at all.**  Extend each component's
 //! reduction axis over `(instance, group)` instead of `group` and the existing
 //! Horner does the aggregation for free -- `hs = sum_{gk} r^{gk} zs_{gk}` with
 //! `gk = i*C + c` is exactly `sum_i r^{C i} (sum_c r^c zs)`, i.e. every instance's
@@ -15,10 +15,10 @@
 //! accumulator column, and the verifier recovers per-instance soundness from
 //! Schwartz-Zippel on a polynomial of degree `insts*C` instead of `C`.
 //!
-//! What the packing does need is that the regions whose outer accumulator is a
-//! plain *sum* rather than a Horner (`acc` in the channel region, `av` and `sn` in
+//! What the packing does need is that the components whose outer accumulator is a
+//! plain *sum* rather than a Horner (`acc` in the channel component, `av` and `sn` in
 //! the grid) pick up the same per-instance weight, so the two sides of each
-//! identity stay comparable.  That is one preprocessed selector pair per region and
+//! identity stay comparable.  That is one preprocessed selector pair per component and
 //! zero fresh cells -- see `attn_air.rs`.
 //!
 //! `insts` must be a power of two, because the grid's token axis has to tile
@@ -52,7 +52,7 @@
 //!
 //! which costs one accumulator over `S` values, not one column over `S x C`.
 //!
-//! Every region is chunked over consecutive rows and closed by a Horner
+//! Every component is chunked over consecutive rows and closed by a Horner
 //! recurrence, exactly as B3: a `[-1, 0]` mask, degree <= 3, blowup 2.
 
 use serde_json::{Value, json};
@@ -147,7 +147,7 @@ impl Grid {
     }
 }
 
-/// Q.K^T's inner-product region: one row group per channel.
+/// Q.K^T's inner-product component: one row group per channel.
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutChan {
     pub g: Grid,
@@ -248,7 +248,7 @@ impl LayoutOut {
         // one row group per (instance, output channel), descending, so the rv-Horner
         // assigns `rv^{j + hd i}` and folds instances by `rv^hd`
         let g = Grid::new(sh.chans(), log_rows, sh.s, true)?;
-        // the out region's twin of the same assert (open item 10)
+        // the out component's twin of the same assert (open item 10)
         if sh.s % g.chunks != 0 {
             return None;
         }

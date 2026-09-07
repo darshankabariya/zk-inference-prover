@@ -21,7 +21,7 @@
 //! * **which builder ran.** `B7_M4_LOGUPIR` keeps 19.3's meaning for every
 //!   family: 0 the hand-written builder, 1 the IR on the host, 2 both asserted
 //!   equal, 3 the generated kernel, 4 the kernel against the hand-written one.
-//! * **where the columns end up.** A region whose fill left its columns on the
+//! * **where the columns end up.** A component whose fill left its columns on the
 //!   device has no host columns to build from and no reason to bring its LogUp
 //!   columns back, so it takes the kernel unconditionally and hands the
 //!   commitment `AnyCol::OwnedDev` -- 19.4's "both transfers disappear
@@ -112,7 +112,7 @@ impl Cols<'_> {
 /// A key tile's three components, and its columns when its fill left them on the
 /// device.
 ///
-/// A key tile is one region with three components in it -- the channel grid, the
+/// A key tile is one component with three components in it -- the channel grid, the
 /// score grid and the per-token block -- so what a component owns is the slice
 /// `Committed::at` names, and that slice is the same on both sides of the link
 /// (mode 2 asserts `at == dev.at`).
@@ -207,7 +207,7 @@ fn shape_of(family: &str, ir: &Ir) -> usize {
 
 /// The same lookup, as a question rather than a demand.
 ///
-/// B11 stream M: a *host-filled* region has a hand-written builder to fall back
+/// B11 stream M: a *host-filled* component has a hand-written builder to fall back
 /// to, so a fingerprint the installed store does not carry can decline the
 /// kernel instead of ending the proof -- announced per component, never
 /// silent, on the same `B7_KERNEL_FALLBACK` switch the constraint side has used
@@ -216,7 +216,7 @@ fn shape_of(family: &str, ir: &Ir) -> usize {
 /// the emitted one produces a fingerprint nothing compiled, and the residual stream's bindings
 /// are the only place in the design that can do it.
 ///
-/// A region whose columns are on the *device* has no host builder at all, so
+/// A component whose columns are on the *device* has no host builder at all, so
 /// `frac_cols` still demands `shape_of` there. 19.4's lesson is untouched
 /// either way: this declines a kernel that does not exist; it never accepts one
 /// that computes something else, because the fingerprint has to match.
@@ -256,7 +256,7 @@ fn assert_supplied(family: &str, ir: &Ir, pre: &Cols, base: &Cols) {
 ///
 /// `host` is the hand-written builder for this family: the default, and what
 /// modes 2 and 4 compare against cell for cell. It is never called when the
-/// region's columns are on the device, because then there are no host columns
+/// component's columns are on the device, because then there are no host columns
 /// to build from.
 pub fn frac_cols<E: FrameworkEval>(
     eval: &E,

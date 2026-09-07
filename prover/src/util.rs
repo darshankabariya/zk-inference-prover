@@ -225,7 +225,7 @@ pub fn m4b_mode(name: &str) -> u32 {
 #[cfg(feature = "cuda")]
 fn m4b_default(name: &str) -> u32 {
     match name {
-        // The region fills, the witness fills, the shared tables, the pinned
+        // The component fills, the witness fills, the shared tables, the pinned
         // staging pool, the preprocessed columns, the accumulators and the
         // residual stream's fill: all on.
         "B7_M4_FILL"
@@ -237,7 +237,7 @@ fn m4b_default(name: &str) -> u32 {
         | "B7_M4_RESIDUAL_STREAM_FILL"
         // B11 stream N, lever 3: the residual stream's Horner bindings. Graduated here in the
         // commit that landed its gate -- the mode-2 mirror clean on all four
-        // residual-stream regions (40 columns, 401,408 cells, 10 claims), three aimed
+        // residual-stream components (40 columns, 401,408 cells, 10 claims), three aimed
         // controls each shown to bite, and the gate chunk's digest unmoved.
         | "B7_M4_RESIDUAL_STREAM_BIND" => 1,
         // The two milestone-5 caches. They are in seq4's family env like

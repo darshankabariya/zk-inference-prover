@@ -117,7 +117,7 @@ def key_tiles_per_chunk(nh, hd, s, c, base_slope=2.0):
     sensitivity, not a second model.
     """
     b, i, sat1 = cm.key_tile_cells(nh, hd, s, c)
-    cb, ci, sat2 = cm.key_tile_cells(nh, hd, s, s, rows_region=False)
+    cb, ci, sat2 = cm.key_tile_cells(nh, hd, s, s, rows_component=False)
     extra = (base_slope - 2.0) * nh * (s * c + s * s)
     return b + cb + extra, i + ci, bool(sat1 or sat2)
 

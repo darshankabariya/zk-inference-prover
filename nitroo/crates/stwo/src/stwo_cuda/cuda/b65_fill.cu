@@ -6,7 +6,7 @@
 #define B65_FILL_BLOCK 128u
 // Slots per block in the y direction. One thread owns a row and loops its
 // slots, because consecutive threads then write consecutive cells of the same
-// column; splitting the slots across blocks is what keeps a 2^12-row region
+// column; splitting the slots across blocks is what keeps a 2^12-row component
 // from running on 32 blocks of a 132-SM device.
 #define B65_FILL_SLOT_TILE 4u
 
@@ -104,7 +104,7 @@ __device__ __forceinline__ unsigned bf16_from_f64(double x, unsigned away = 0u) 
 // `bf16::normalise`: `mag = M2 * ph + r`, `0 <= r < ph`. False means the
 // magnitude needs a round-bit weight the table does not carry -- the host
 // panics there, and the device counts it so the caller can panic with the
-// region's name instead of proving something wrong.
+// component's name instead of proving something wrong.
 __device__ __forceinline__ bool b65_normalise(unsigned long long mag, unsigned kmax,
                                               unsigned *m2, unsigned *ph, unsigned *st,
                                               unsigned long long *r) {

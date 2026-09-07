@@ -1,8 +1,8 @@
 //! Trace generation for the attention block, packed over `insts` instances.
 //!
-//! Every region's reduction axis is `(instance, group)`, so the witness accessors
+//! Every component's reduction axis is `(instance, group)`, so the witness accessors
 //! split a global group index into `(instance, local)` and everything else is B5's.
-//! The three regions whose outer accumulator is a plain sum multiply by the
+//! The three components whose outer accumulator is a plain sum multiply by the
 //! per-instance weight at an instance-start row; the two that are Horners already
 //! carry it.
 //!
@@ -125,11 +125,11 @@ pub fn table_col<R: Relation<PackedM31, PackedQM31> + Sync>(
 }
 
 pub struct Cfg {
-    /// target keys per row in the channel region
+    /// target keys per row in the channel component
     pub chan_target: usize,
-    /// target scores per row in the grid region
+    /// target scores per row in the grid component
     pub grid_target: usize,
-    /// query tokens per row in the per-token region
+    /// query tokens per row in the per-token component
     pub rw: usize,
     pub range_check: bool,
     /// low limb width of the denominator range check
@@ -150,13 +150,13 @@ pub struct Layouts {
 
 impl Layouts {
     pub fn choose(sh: &Shape, cfg: &Cfg) -> Self {
-        // The per-token region must tile exactly: pick the tokens per row so the row
+        // The per-token component must tile exactly: pick the tokens per row so the row
         // count lands on the SIMD floor rather than padding up to it.  With S and
         // `insts` powers of two this always divides.
         let floor = 1usize << crate::common::MIN_LOG_ROWS;
         let rw = cfg.rw.min(sh.toks() / floor).max(1);
         let rows = sh.toks().div_ceil(rw).max(floor);
-        assert_eq!(rw * rows, sh.toks(), "per-token region does not tile: rw={rw} rows={rows}");
+        assert_eq!(rw * rows, sh.toks(), "per-token component does not tile: rw={rw} rows={rows}");
         Self {
             chan: LayoutChan::choose(sh, cfg.chan_target),
             key: LayoutKey::choose(sh, cfg.grid_target),
@@ -292,7 +292,7 @@ pub fn commit_pre(a: &Attn, l: &Layouts, with_out: bool, with_rows: bool)
         pre.push(sel(lo.g.log_rows, &|j| j + 1 == lo.g.rows));
     }
 
-    // B10 step 3: a diagonal block key tile has no per-token region.  There is one row maximum
+    // B10 step 3: a diagonal block key tile has no per-token component.  There is one row maximum
     // and one denominator per *token*, not per key tile, so the pair shares the prefix
     // key tile's -- which is also the only column the `Z >= nmax` bound can sit on.
     if with_rows {
@@ -339,12 +339,12 @@ fn bump_slice(m: &mut [u32], v: i64, off: &mut usize) {
 }
 
 /// The witness columns (tree 1), bumping lookup multiplicities into vectors the
-/// caller owns -- shared across every region of a composed proof.
+/// caller owns -- shared across every component of a composed proof.
 pub fn commit_base(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
                    mult_exp: &mut [u32], mult_r: &mut [Vec<u32>], off_table: &mut usize,
                    with_out: bool, with_rows: bool) -> (Vec<Eval>, Vec<usize>) {
     let sh = a.shape;
-    // A padded *token* slot in the grid region would have to commit a numerator
+    // A padded *token* slot in the grid component would have to commit a numerator
     // that is both a table output and zero, and the table's zero row is not the
     // one a zero shift maps to -- so the layout has to tile the token axis
     // exactly (asserted out loud).
@@ -359,7 +359,7 @@ pub fn commit_base(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     let mut base = vec![];
     let mut at = vec![];
 
-    // channel region: keys then queries, offset into the range tables
+    // channel component: keys then queries, offset into the range tables
     at.push(base.len());
     for p in 0..lc.pk {
         let mut col = vec![M31::zero(); lc.g.rows];
@@ -406,7 +406,7 @@ pub fn commit_base(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
         base.push(eval_of(lc.g.log_rows, col));
     }
 
-    // grid region: index, numerator, aux, values
+    // grid component: index, numerator, aux, values
     at.push(base.len());
     let grid_at = |j: usize, i: usize| -> Option<usize> {
         lk.g.row(j).and_then(|(g, chunk)| {
@@ -480,7 +480,7 @@ pub fn commit_base(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
         base.push(eval_of(lk.g.log_rows, col));
     }
 
-    // A.V outputs (the composed proof moves these into the attnout region)
+    // A.V outputs (the composed proof moves these into the attnout component)
     at.push(base.len());
     if with_out {
         for i in 0..lo.q {
@@ -503,7 +503,7 @@ pub fn commit_base(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
         }
     }
 
-    // per-token region: maxima, denominators, and the denominator's low limb.
+    // per-token component: maxima, denominators, and the denominator's low limb.
     // The denominator it commits is `zz_row()`: the pair's total where a diagonal block
     // rides with this key tile, this key tile's own otherwise.
     at.push(base.len());
@@ -555,12 +555,12 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
                        off_table: &mut usize, with_out: bool, with_rows: bool)
                        -> (Vec<Eval>, Vec<usize>, Option<crate::devwfill::DevKeyTile>) {
     // `with_rows` postdates this milestone: it is `!a.diagonal_block`, and it says
-    // whether this key tile commits the per-token region (the row maxima, the
+    // whether this key tile commits the per-token component (the row maxima, the
     // denominator and its low limb).  A *diagonal block* key tile does not -- there is one
     // maximum and one denominator per token, not per key tile, so the diagonal block rides
     // on the prefix key tile's -- and `commit_base_dev` has no notion of any of
     // this: `devwfill.rs` mentions neither `with_rows` nor `diagonal_block`.  A device
-    // fill that always built the per-token region would commit columns the AIR
+    // fill that always built the per-token component would commit columns the AIR
     // does not expect on a diagonal block key tile.
     //
     // So diagonal block key tiles take the host path, whatever the switch says.  That is
@@ -578,23 +578,23 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     // `devwfill::key_tile_fill_mode`, because `devpre::fills_dev` has to reach the
     // same answer before any fill has run.
     // Stream AA: `with_rows` used to *be* `!a.diagonal_block`, because the only key tile
-    // that rode on another's per-token region was the diagonal block.  With
+    // that rode on another's per-token component was the diagonal block.  With
     // `--kv-boundary` the unchecked prefix is tiled into sub-key-tiles of `S` keys and
-    // the group's one region lives on its first sub-key-tile, so a key tile with
+    // the group's one component lives on its first sub-key-tile, so a key tile with
     // `diagonal_block == false` and `with_rows == false` is now a legal and ordinary
     // thing.  The implication that survives is the one that matters here, and
-    // it is asserted instead: a diagonal block never carries the region.
+    // it is asserted instead: a diagonal block never carries the component.
     // Open item 1 / CC deliverable 4: a *solo* diagonal block (block 0, whose group has
-    // no prefix key tile at all) does carry the region, so the old implication
-    // "a diagonal block never carries the region" is no longer true.  What survives is
-    // that a key tile carrying the region is its group's first key tile, and `Plan`
+    // no prefix key tile at all) does carry the component, so the old implication
+    // "a diagonal block never carries the component" is no longer true.  What survives is
+    // that a key tile carrying the component is its group's first key tile, and `Plan`
     // establishes that by construction -- `rows_key_tile` is `k == 0` for a prefix
     // sub-key-tile and `nsub == 0` for a diagonal block.
     debug_assert!(!(a.diagonal_block && with_rows) || a.shape.c == a.shape.s,
-                  "only a diagonal block (c == S) may carry the region");
+                  "only a diagonal block (c == S) may carry the component");
     // ... and the device fill still has no notion of any of this
     // (`devwfill.rs` mentions neither `with_rows` nor `diagonal_block`), so a key tile that
-    // does not carry the region takes the host path whatever the switch says --
+    // does not carry the component takes the host path whatever the switch says --
     // which for a diagonal block key tile is the answer `key_tile_fill_mode` already gives.
     let m4d = if with_rows { crate::devwfill::key_tile_fill_mode(a) } else { 0 };
     if m4d == 1 {
@@ -627,15 +627,15 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     let dev = crate::devwfill::commit_base_dev(a, l, cfg, widths, mult_exp, mult_r,
                                                off_table, with_out, true, with_rows);
     let label = format!("key tile {} 2^{}", a.shape.label(), l.key.g.log_rows);
-    // B11 stream L: the region offsets, printed before the comparison rather
+    // B11 stream L: the component offsets, printed before the comparison rather
     // than after it.  `check_cols` names a column by its index in the whole
-    // base vector, and which *region* that index falls in is the first thing a
+    // base vector, and which *component* that index falls in is the first thing a
     // mismatch has to be attributed to -- but the `at` assert below only runs
     // if the columns already matched, so on a real mismatch the offsets were
     // never printed.  They are four numbers; printing them costs nothing and
-    // turns "column 304" into "the grid region's column 40".
+    // turns "column 304" into "the grid component's column 40".
     eprintln!(
-        "wfill-dev: {label} -- {} base columns, regions at {:?} \
+        "wfill-dev: {label} -- {} base columns, components at {:?} \
 (chan {}+{}, grid 2*{}+{}+{}, out {}, tok {})",
         dev.base.len(), dev.at,
         l.chan.pk, l.chan.pq, l.key.q,
@@ -693,7 +693,7 @@ pub fn commit_phase(a: &Attn, l: &Layouts, cfg: &Cfg) -> Committed {
 
 pub struct Interaction {
     /// B7a milestone 4 (section 3 row 1): the accumulator columns are always
-    /// the host's; a LogUp column is wherever its region's columns were.
+    /// the host's; a LogUp column is wherever its component's columns were.
     pub cols: Vec<crate::device::AnyCol<'static>>,
     pub claimed_chan: SecureField,
     pub claimed_hs: SecureField,
@@ -703,7 +703,7 @@ pub struct Interaction {
     pub claimed_am: SecureField,
     pub claimed_az: SecureField,
     /// Stream NN: this key tile's own K, Q and V claims -- the sums the quantize
-    /// regions are read against.  Empty on a key tile with no `NnBind`.
+    /// components are read against.  Empty on a key tile with no `NnBind`.
     pub claimed_nn: Vec<SecureField>,
     pub use_sums: Vec<SecureField>,
     pub table_sums: Vec<SecureField>,
@@ -712,9 +712,9 @@ pub struct Interaction {
 /// Stream NN: the key-tile-side Horner claims this key tile publishes over its own
 /// committed K, Q and V columns.
 ///
-/// A **diagonal block** key tile of a chunk that carries the quantize regions publishes all
+/// A **diagonal block** key tile of a chunk that carries the quantize components publishes all
 /// three; a **prefix** key tile of the same chunk publishes `q` alone (NN-2), whose
-/// counterparty is its group's diagonal block rather than a quantize region.  `Q` is
+/// counterparty is its group's diagonal block rather than a quantize component.  `Q` is
 /// therefore never optional and `K`/`V` always are.
 pub struct NnBind<'a> {
     pub k: Option<&'a crate::attn_air::KeyTileTie>,
@@ -745,7 +745,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     let gkr_owns = gkr.as_deref().is_some_and(|g| g.replace);
 
     // B7a milestone 4 (section 3 row 1): the accumulators, wherever they are.
-    // The kernels read this region's *own committed columns*, so the device
+    // The kernels read this component's *own committed columns*, so the device
     // route exists exactly when the fill left them there -- and `B7_M4_ACC=2`
     // runs both, which is a check on the whole witness -> fill -> column ->
     // accumulator chain, because the host side reads the witness instead.
@@ -759,11 +759,11 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     assert!(m4g.is_none() || m4g_flags.is_some(),
             "the device accumulators need this key tile's flags: `devpre::key_tile_dev` did not run");
     assert!(m4g.is_none() || !with_out,
-            "the device accumulators have no A.V output region: \
-             the composed proof moves it into the attnout region");
+            "the device accumulators have no A.V output component: \
+             the composed proof moves it into the attnout component");
     let n_chan = if m4g_host { lc.g.rows } else { 0 };
 
-    // ---- channel region ----------------------------------------------------
+    // ---- channel component ----------------------------------------------------
     let (mut u, mut v, mut acc) = (vec![SecureField::zero(); n_chan],
                                    vec![SecureField::zero(); n_chan],
                                    vec![SecureField::zero(); n_chan]);
@@ -835,7 +835,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     // ---- stream NN: the key tile's own K and Q claims --------------------------
     // Built on the host whatever `B7_M4_ACC` says: the values are the witness's
     // `kk` and `qq`, which the host holds either way, and the two columns are
-    // appended after the region's three so the AIR's mask order is the tree's.
+    // appended after the component's three so the AIR's mask order is the tree's.
     let mut claimed_nn: Vec<SecureField> = vec![];
     if let Some(b) = nn {
         // K first where the key tile publishes one (the diagonal block), then Q, which
@@ -912,7 +912,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         }
     }
 
-    // ---- grid region -------------------------------------------------------
+    // ---- grid component -------------------------------------------------------
     // Stream CC (E11): the host backend's aimed corruption for the inert-lead-row
     // guard, the twin of `b65_acc.cu`'s `nomask:grid` on the backend that has no
     // card.  See the inert-row branch of `grid_inner` below.  Off unless
@@ -1129,7 +1129,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         }
     }
 
-    // ---- A.V outputs (absent when the attnout region carries the claim) -----
+    // ---- A.V outputs (absent when the attnout component carries the claim) -----
     let (mut z, mut h) = (vec![SecureField::zero(); if with_out { lo.g.rows } else { 0 }],
                           vec![SecureField::zero(); if with_out { lo.g.rows } else { 0 }]);
     let out_inner: Vec<(SecureField, bool, bool)> = (0..if with_out { lo.g.rows } else { 0 })
@@ -1172,8 +1172,8 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         cols.extend(secure_cols(lo.g.log_rows, &h));
     }
 
-    // ---- per-token region --------------------------------------------------
-    // Absent on a diagonal block key tile: the pair has one per-token region, the prefix
+    // ---- per-token component --------------------------------------------------
+    // Absent on a diagonal block key tile: the pair has one per-token component, the prefix
     // key tile's, and it carries the row maximum both halves shift by and the total
     // denominator both halves sum to.
     let rrows = if with_rows { 1usize << l.log_row } else { 0 };
@@ -1192,13 +1192,13 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             }
         }
         // s^rw inside an instance, mu at an instance start: what turns the token
-        // region's natural per-instance weight s^S into the r^C the rest carries
+        // component's natural per-instance weight s^S into the r^C the rest carries
         let step = if j > 0 && tok_istart(rrows, l.rw, sh.s, j) { pow.mu } else { pow.sr_step };
         am[j] = if j > 0 { am[j - 1] * step } else { SecureField::zero() } + mf;
         az[j] = if j > 0 { az[j - 1] * step } else { SecureField::zero() } + zf;
     }
     let (claimed_am, claimed_az) = if !with_rows {
-        // A diagonal block key tile has no per-token region, so there is nothing to build
+        // A diagonal block key tile has no per-token component, so there is nothing to build
         // on either side of the device link.
         (SecureField::zero(), SecureField::zero())
     } else {
@@ -1306,7 +1306,7 @@ pub fn pre_exp_x(a: &Attn, l: &Layouts) -> usize {
         + crate::attn_air::ROW_SEL.len()
 }
 
-/// Is row `j` the first row of an instance in the channel region?
+/// Is row `j` the first row of an instance in the channel component?
 ///
 /// Groups run descending, so an instance's first *processed* channel is its highest
 /// one, and a group's first row is its highest chunk.
@@ -1319,9 +1319,9 @@ pub fn key_istart(lk: &LayoutKey, ctx: usize, j: usize) -> bool {
     matches!(lk.g.row(j), Some((g, c)) if c + 1 == lk.g.chunks && g % ctx == ctx - 1)
 }
 
-/// Is row `j` the first row of an instance in the per-token region?
+/// Is row `j` the first row of an instance in the per-token component?
 ///
-/// The region carries no group structure: the global token index descends with the
+/// The component carries no group structure: the global token index descends with the
 /// row, so an instance starts wherever the row's highest token is `S - 1` mod `S`.
 pub fn tok_istart(rows: usize, rw: usize, s: usize, j: usize) -> bool {
     ((rows - 1 - j) * rw + rw) % s == 0
@@ -1332,7 +1332,7 @@ pub fn split(g: usize, n: usize) -> (usize, usize) {
     (g / n, g % n)
 }
 
-/// Query token held by slot `i` of row `j` in the per-token region, which lays the
+/// Query token held by slot `i` of row `j` in the per-token component, which lays the
 /// groups out in descending order so a Horner assigns `s^t`.
 pub fn tok_of(rows: usize, rw: usize, s: usize, j: usize, i: usize) -> Option<usize> {
     let t = (rows - 1 - j) * rw + i;
@@ -1392,7 +1392,7 @@ pub fn cells(a: &Attn, l: &Layouts, cfg: &Cfg) -> Cells {
     }
 }
 
-/// Public alias for the region builders outside this module.
+/// Public alias for the component builders outside this module.
 pub fn secure_cols_pub(log_size: u32, vals: &[SecureField]) -> Vec<Eval> {
     secure_cols(log_size, vals)
 }

@@ -4,7 +4,7 @@ H6 says MoE breaks the batching: *confirmed* if the MoE variant's per-proof
 weight cost is x E_experts and/or it needs a routing argument, *falsified* if MoE
 proves as cheaply as dense.
 
-The measurement is the **Freivalds region** of the FFN at the 8B shape, at the
+The measurement is the **Freivalds component** of the FFN at the 8B shape, at the
 token batch a top-k router leaves each expert (S k / E), read out of `compose`
 runs on the SIMD reference (`b9/out/moe_s*.json`).  The question the runs answer
 is not "how much does the Freivalds check cost" -- B3 measured that -- but
@@ -68,7 +68,7 @@ print("=" * 92)
 print("B9 probe 2 -- the MoE negative control (H6), the FFN of the 8B shape")
 print("=" * 92)
 print(f"FFN per expert: gate/up {D}x{DFF} + down {DFF}x{D} = {g(FFN_PARAMS)}weights")
-print(f"the Freivalds region, measured at the per-expert token batch "
+print(f"the Freivalds component, measured at the per-expert token batch "
       f"a top-{TOPK} router leaves:")
 print()
 print(f"  {'tokens':>7} {'= S k/E for E':>14} {'freivalds fresh':>15} {'FFN freivalds pre':>17} "

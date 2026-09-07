@@ -202,48 +202,48 @@ if all(s in by_s for s in INCUMBENT_PAIR):
 # `prover/src/attn_trace.rs:1167-1172` (the committed base columns) and `:1173-1181`
 # (their LogUp/Horner interaction) with the layouts of `prover/src/layout.rs`.
 # With `grid_target = 64`, `chan_target = hd = 128`, `rw = 16` and S, C, hd and
-# `insts` all powers of two, every region tiles exactly (`lead_rows` 0/0/0 in both
+# `insts` all powers of two, every component tiles exactly (`lead_rows` 0/0/0 in both
 # artifacts) and the products are exact -- nothing here is fitted:
 #
-#   region                           committed base           interaction
+#   component                           committed base           interaction
 #   channel: keys     (`Cells::kv`)  pk*rows  = hd*NH*C       2*hd*NH*C + 384*C
 #   channel: queries                 pq*rows  = hd*NH*S       2*hd*NH*S
 #   grid: scores + numerators        2q*rows  = 2*NH*S*C      (12 + 64)*S*C
 #   grid: V values    (`Cells::kv`)  pv*rows  = hd*NH*C       2*hd*NH*C
-#   out (A.V)                        moved to the `attnout` region -- not in `key_tiles`
+#   out (A.V)                        moved to the `attnout` component -- not in `key_tiles`
 #   per-token: max, denom, 2 limbs   4*rw*rrows = 4*NH*S      8.5*rw*rrows = 272*S
 #
 # `key_tiles` in `family_cells` is BASE ONLY -- `compose.rs:3216` sums each key tile
-# region's committed column domains -- which is why the fresh figures below are
+# component's committed column domains -- which is why the fresh figures below are
 # larger than the `grid share` column at the top of this probe.
 if len(rows) < 2:
     raise SystemExit("the structural section needs both the S=512 and S=1024 artifacts")
 NH_HD = NH * HD                      # 4096: one channel column per head, per token
 
 
-def key_tile_base(s, c, rows_region=True):
+def key_tile_base(s, c, rows_component=True):
     """Committed base cells of the key tile family at (S, C).  Exact, not fitted."""
     return (2 * NH * s * c                          #   64 S C  scores + numerators
             + 2 * NH_HD * c                         # 8192 C    K and V = `Cells::kv`
             + NH_HD * s                             # 4096 S    queries
-            + (4 * NH * s if rows_region else 0))   #  128 S    max, denom, two limbs
+            + (4 * NH * s if rows_component else 0))   #  128 S    max, denom, two limbs
 
 
-def key_tile_inter(s, c, rows_region=True):
+def key_tile_inter(s, c, rows_component=True):
     """The same family's LogUp/Horner interaction cells.  Also exact."""
     return (76 * s * c                              # 12 Horner + 64 exp/numerator LogUp
             + (2 * NH_HD + 384 + 8192) * c          # 16,768 C: V range, chan Horner, K range
             + 2 * NH_HD * s                         #  8,192 S: query range LogUp
-            + (272 * s if rows_region else 0))
+            + (272 * s if rows_component else 0))
 
 
-def key_tile_fresh(s, c, rows_region=True):
-    return key_tile_base(s, c, rows_region) + key_tile_inter(s, c, rows_region)
+def key_tile_fresh(s, c, rows_component=True):
+    return key_tile_base(s, c, rows_component) + key_tile_inter(s, c, rows_component)
 
 
 def key_tiles_of(s, c, diagonal_block):
     """A composed chunk's key tiles: the prefix key tiles, plus an S x S diagonal block that
-    carries no per-token region (one max and one denominator per token, not per
+    carries no per-token component (one max and one denominator per token, not per
     key tile -- `attn_trace.rs`'s `with_rows = !a.diagonal_block`)."""
     return (key_tile_base(s, c) + (key_tile_base(s, s, False) if diagonal_block else 0),
             key_tile_inter(s, c) + (key_tile_inter(s, s, False) if diagonal_block else 0))
@@ -272,7 +272,7 @@ print(f"              gamma = {gamma} = 2*NH (alpha = {gamma / NH:.3f} base cell
 print(f"              exactly two columns, the score and its numerator) and")
 print(f"              delta = {delta:,} = 2*hd*NH ({2 * NH_HD:,}: K and V, `Cells::kv`)")
 print(f"                                  + hd*NH ({NH_HD:,}: the query columns)")
-print(f"                                  + 4*NH ({4 * NH}: the per-token region).")
+print(f"                                  + 4*NH ({4 * NH}: the per-token component).")
 print(f"  the incumbent p is {p / gamma - 1:+.1%} against gamma, because it charges delta*S to S^2.")
 print()
 print("  the control -- the closed form against every artifact that records a key tile count:")
@@ -302,14 +302,14 @@ print(f"  {sum(c['ok'] for c in key_tile_checks)}/{len(key_tile_checks)} exact t
 print()
 print("  **The paper should use the structural model, and this is not a choice of fit.**")
 print("  The linear term is the K/V commitment (`Cells::kv`: hd*NH per context key, twice)")
-print("  plus the query columns and the per-token region.  Its C-proportional half and its")
+print("  plus the query columns and the per-token component.  Its C-proportional half and its")
 print("  S-proportional half are indistinguishable at C = S -- and are separated exactly by")
 print("  the composed chunks at C = 4K and 16K above, on the REAL 8B witness.  A model in S")
 print("  alone cannot express chunked prefill at all, where every chunk has its own C.")
 
 # --- the whole chunk, in (S, C) ----------------------------------------------
 # `rest` is everything the key tile family does not cover: the mats, the dequant, the
-# Freivalds checks, the attnout region and the tables.  Every one of them is
+# Freivalds checks, the attnout component and the tables.  Every one of them is
 # per-token or
 # fixed -- none carries a C, because a chunk computes S new keys whatever its
 # prefix -- so a linear fit of `rest` in S is structurally the right shape.  It

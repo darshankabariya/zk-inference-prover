@@ -4,17 +4,17 @@
 //! -- 0.050 GB, three quarters of everything left, and the last committed
 //! columns in the composed proof that are still born on the host:
 //!
-//! | region | columns | what they are |
+//! | component | columns | what they are |
 //! |---|---|---|
 //! | 3 key tiles x channel | `u`, `v`, `acc` | Q.K^T's inner products and their folded sum |
 //! | 3 key tiles x grid | `zs`, `hs`, `zn`, `wv`, `av`, `sn` | the score, numerator and value Horners |
 //! | 3 key tiles x per-token | `am`, `az` | the row maxima and denominators |
-//! | 7 dequant regions | `z`, `h` | the Freivalds claimed side |
+//! | 7 dequant components | `z`, `h` | the Freivalds claimed side |
 //! | attnout | `z`, `h`, `dz` | the output and denominator claims |
 //! | 4 Freivalds groups | `v`, `us[m]`, `accs[m]` | `r^T W` per matmul |
 //!
 //! **They are one primitive, six times.** Every one is `x[j] = a[j] x[j-1] +
-//! b[j]` down the *coset* rows of a region, with `b[j]` an inner Horner over
+//! b[j]` down the *coset* rows of a component, with `b[j]` an inner Horner over
 //! that row's own committed columns and `a[j]` a challenge power the layout
 //! picks. Affine maps compose associatively, so a parallel scan gives the same
 //! field element the host's serial carry gives -- exactly, because M31 is a
@@ -32,7 +32,7 @@
 //! The committed column is not always the witness value, and the four places
 //! where it is not are the four the controls are aimed at:
 //!
-//!  * the channel region commits `kk + off_k` and `qq + off_q` (`nooffset`),
+//!  * the channel component commits `kk + off_k` and `qq + off_q` (`nooffset`),
 //!    the grid commits `vv + 128` and the Freivalds checks `qx + 128`;
 //!  * the grid's key column commits the shift **scaled** to the master exp
 //!    table's exponent, `d delta`, while the score accumulator wants `d`
@@ -114,7 +114,7 @@ pub struct FAccS2 {
     pub m_n: [u32; 4],
 }
 
-/// Mirrors `B65AccResidualStreamBind`: one of the residual-stream region's Horner bindings.
+/// Mirrors `B65AccResidualStreamBind`: one of the residual-stream component's Horner bindings.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FAccResidualStreamBinding {
@@ -241,41 +241,41 @@ pub fn mode() -> u32 {
     crate::util::m4b_mode("B7_M4_ACC")
 }
 
-/// Which region an accumulator belongs to, so a control can be aimed at one.
+/// Which component an accumulator belongs to, so a control can be aimed at one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Reg {
+pub enum Comp {
     Chan,
     Grid,
     Tok,
     Freivalds,
     Deq,
     Ao,
-    /// B11 stream N: the residual-stream region's Horner bindings, the seventh region and the
+    /// B11 stream N: the residual-stream component's Horner bindings, the seventh component and the
     /// only one whose values are not committed columns.
     ResidualStreamBinding,
 }
 
-impl Reg {
+impl Comp {
     fn name(self) -> &'static str {
         match self {
-            Reg::Chan => "chan",
-            Reg::Grid => "grid",
-            Reg::Tok => "tok",
-            Reg::Freivalds => "freivalds",
-            Reg::Deq => "deq",
-            Reg::Ao => "ao",
-            Reg::ResidualStreamBinding => "residual_stream_bind",
+            Comp::Chan => "chan",
+            Comp::Grid => "grid",
+            Comp::Tok => "tok",
+            Comp::Freivalds => "freivalds",
+            Comp::Deq => "deq",
+            Comp::Ao => "ao",
+            Comp::ResidualStreamBinding => "residual_stream_bind",
         }
     }
 }
 
-/// `B7_M4_ACCMUT`, `name` or `name:region`.
+/// `B7_M4_ACCMUT`, `name` or `name:component`.
 ///
 /// **The suffix is section 5 rule 5, again.** The key tiles are built first and the
-/// channel region first of all, so an unaimed defect always panics at `chan
+/// channel component first of all, so an unaimed defect always panics at `chan
 /// key_tile0` and the run says nothing about whether the grid, the per-token block,
 /// the Freivalds checks, the dequant or the attnout would have caught the same thing.
-pub fn accmut(reg: Reg) -> u32 {
+pub fn accmut(reg: Comp) -> u32 {
     let raw = std::env::var("B7_M4_ACCMUT").unwrap_or_default();
     let (name, want) = match raw.split_once(':') {
         Some((n, r)) => (n.to_string(), Some(r.to_string())),
@@ -283,7 +283,7 @@ pub fn accmut(reg: Reg) -> u32 {
     };
     if let Some(r) = want.as_deref() {
         assert!(["chan", "grid", "tok", "freivalds", "deq", "ao", "residual_stream_bind"].contains(&r),
-                "unknown B7_M4_ACCMUT region {r:?}");
+                "unknown B7_M4_ACCMUT component {r:?}");
         if r != reg.name() {
             return 0;
         }
@@ -325,7 +325,7 @@ fn ptrs(cols: &[BaseFieldVec]) -> Vec<*const u32> {
     cols.iter().map(|c| c.device_ptr).collect()
 }
 
-/// One region's lanes: `(a, b)` per lane in coset row order, the per-row layout
+/// One component's lanes: `(a, b)` per lane in coset row order, the per-row layout
 /// flags, and the scan that closes them.
 struct Acc {
     rows: usize,
@@ -334,10 +334,10 @@ struct Acc {
     a: SecureFieldVec,
     b: SecureFieldVec,
     /// B7a milestone 4 (section 3 row 1): the three key tile shapes' flags belong
-    /// to `devpre` now -- one array per sub-region, written by
+    /// to `devpre` now -- one array per sub-component, written by
     /// `b65_flags_key_tile` at fill time, read both by the selector columns
     /// `commit_pre` used to build on the host and by the segmentation here. The
-    /// Freivalds check, dequant and attnout regions have no preprocessed selectors left on
+    /// Freivalds check, dequant and attnout components have no preprocessed selectors left on
     /// the host, so they still own theirs. `own` keeps a borrowed array's owner
     /// honest: it outlives this `Acc` because it is the caller's.
     own: Option<Uint32Vec>,
@@ -363,7 +363,7 @@ impl Acc {
     /// The same, over flags somebody else wrote -- the three key tile shapes.
     fn borrowed(log_rows: u32, lanes: usize, f: &Uint32Vec) -> Self {
         let rows = 1usize << log_rows;
-        assert_eq!(f.size, rows, "the flags array is not this region's height");
+        assert_eq!(f.size, rows, "the flags array is not this component's height");
         Self {
             rows,
             log_rows,
@@ -432,7 +432,7 @@ impl Acc {
     }
 }
 
-/// What one region's accumulators came to: the committed columns in AIR order,
+/// What one component's accumulators came to: the committed columns in AIR order,
 /// and the claims in the order the caller asked for them.
 pub struct DevAccCols {
     pub cols: Vec<BaseFieldVec>,
@@ -449,7 +449,7 @@ impl DevAccCols {
     }
 }
 
-fn note(reg: Reg, tag: &str, n_cols: usize, rows: usize, secs: f64) {
+fn note(reg: Comp, tag: &str, n_cols: usize, rows: usize, secs: f64) {
     crate::util::m4_add("int/acc_kernel", secs);
     if mode() == 2 {
         eprintln!("acc-dev: {} {tag} -- {n_cols} columns, {} cells, kernel {secs:.4} s",
@@ -457,7 +457,7 @@ fn note(reg: Reg, tag: &str, n_cols: usize, rows: usize, secs: f64) {
     }
 }
 
-/// One region's accumulators, on their way into the tree.
+/// One component's accumulators, on their way into the tree.
 ///
 /// `host` is `Some` only in mode 2, and then it is what the device columns are
 /// compared against and what the proof is built from -- so mode 2's digest is
@@ -479,7 +479,7 @@ pub fn place(tag: &str, got: DevAccCols, host: Option<(Vec<Eval>, Vec<SecureFiel
     }
 }
 
-/// Assert one region's device accumulators against the host's, cell for cell,
+/// Assert one component's device accumulators against the host's, cell for cell,
 /// and the claims exactly.
 ///
 /// Not a sample: an accumulator that is wrong on one cell is wrong, and the
@@ -500,15 +500,15 @@ pub fn check(tag: &str, host: &[Eval], want: &[SecureField], got: &DevAccCols) {
 
 /// `u`, `v` and `acc`: Q.K^T's two inner products and the sum of their product.
 ///
-/// `at` is `Committed::at`, so the channel region's columns are
+/// `at` is `Committed::at`, so the channel component's columns are
 /// `base[at[0] .. at[1]]` -- the keys then the queries, exactly as
 /// `commit_base` pushes them.
 pub fn chan(base: &[BaseFieldVec], at: &[usize], lc: &LayoutChan, a: &Attn,
             pow: &Powers, flags: &Uint32Vec) -> DevAccCols {
     let t = std::time::Instant::now();
-    let mutate = accmut(Reg::Chan);
+    let mutate = accmut(Comp::Chan);
     let cols = ptrs(&base[at[0]..at[1]]);
-    assert_eq!(cols.len(), lc.pk + lc.pq, "the channel region's column count");
+    assert_eq!(cols.len(), lc.pk + lc.pq, "the channel component's column count");
     assert_eq!(pow.r_pow.len(), lc.pk, "r_pow width");
     assert_eq!(pow.sq_pow.len(), lc.pq, "sq_pow width");
     let acc = Acc::borrowed(lc.g.log_rows, 3, flags);
@@ -533,7 +533,7 @@ pub fn chan(base: &[BaseFieldVec], at: &[usize], lc: &LayoutChan, a: &Attn,
     acc.scan(2, 1, mutate);
     let claims = acc.last();
     let cols = acc.split(&[0, 1, 2], mutate);
-    note(Reg::Chan, "key_tile", cols.len(), acc.rows, t.elapsed().as_secs_f64());
+    note(Comp::Chan, "key_tile", cols.len(), acc.rows, t.elapsed().as_secs_f64());
     DevAccCols { cols, claims: vec![claims[2]], log_rows: lc.g.log_rows }
 }
 
@@ -548,9 +548,9 @@ pub fn chan(base: &[BaseFieldVec], at: &[usize], lc: &LayoutChan, a: &Attn,
 pub fn grid(base: &[BaseFieldVec], at: &[usize], lk: &LayoutKey, a: &Attn,
             n_aux: usize, pow: &Powers, flags: &Uint32Vec) -> DevAccCols {
     let t = std::time::Instant::now();
-    let mutate = accmut(Reg::Grid);
+    let mutate = accmut(Comp::Grid);
     let b0 = at[1];
-    assert_eq!(at[2] - at[1], 2 * lk.q + n_aux + lk.pv, "the grid region's column count");
+    assert_eq!(at[2] - at[1], 2 * lk.q + n_aux + lk.pv, "the grid component's column count");
     let key = ptrs(&base[b0..b0 + lk.q]);
     let num = ptrs(&base[b0 + lk.q..b0 + 2 * lk.q]);
     // `intsplit(k)` commits `(d delta) >> k` in the key column and the low `k`
@@ -619,7 +619,7 @@ pub fn grid(base: &[BaseFieldVec], at: &[usize], lk: &LayoutKey, a: &Attn,
     acc.scan(3, 3, mutate);
     let claims = acc.last();
     let cols = acc.split(&[0, 3, 1, 2, 4, 5], mutate);
-    note(Reg::Grid, "key_tile", cols.len(), acc.rows, t.elapsed().as_secs_f64());
+    note(Comp::Grid, "key_tile", cols.len(), acc.rows, t.elapsed().as_secs_f64());
     DevAccCols { cols, claims: vec![claims[3], claims[4], claims[5]],
                  log_rows: lk.g.log_rows }
 }
@@ -630,7 +630,7 @@ pub fn grid(base: &[BaseFieldVec], at: &[usize], lk: &LayoutKey, a: &Attn,
 pub fn tok(base: &[BaseFieldVec], at: &[usize], log_row: u32, rw: usize, a: &Attn,
            pow: &Powers, flags: &Uint32Vec) -> DevAccCols {
     let t = std::time::Instant::now();
-    let mutate = accmut(Reg::Tok);
+    let mutate = accmut(Comp::Tok);
     let with_max = a.variant != Variant::Bf16x;
     let b0 = at[3];
     let z0 = b0 + if with_max { rw } else { 0 };
@@ -653,7 +653,7 @@ pub fn tok(base: &[BaseFieldVec], at: &[usize], log_row: u32, rw: usize, a: &Att
     acc.scan(0, 2, mutate);
     let claims = acc.last();
     let cols = acc.split(&[0, 1], mutate);
-    note(Reg::Tok, "key_tile", cols.len(), acc.rows, t.elapsed().as_secs_f64());
+    note(Comp::Tok, "key_tile", cols.len(), acc.rows, t.elapsed().as_secs_f64());
     DevAccCols { cols, claims: vec![claims[0], claims[1]], log_rows: log_row }
 }
 
@@ -665,9 +665,9 @@ pub fn tok(base: &[BaseFieldVec], at: &[usize], log_row: u32, rw: usize, a: &Att
 pub fn freivalds(dev: &crate::devwfill::DevFreivalds, lay: &crate::layer::FreivaldsLayout,
                 n_mats: usize, rv: SecureField, s_ch: SecureField) -> DevAccCols {
     let t = std::time::Instant::now();
-    let mutate = accmut(Reg::Freivalds);
-    assert_eq!(dev.base.len(), lay.pq, "the Freivalds region's committed column count");
-    assert_eq!(dev.pre.len(), n_mats * lay.pk + 4, "the Freivalds region's weight columns");
+    let mutate = accmut(Comp::Freivalds);
+    assert_eq!(dev.base.len(), lay.pq, "the Freivalds component's committed column count");
+    assert_eq!(dev.pre.len(), n_mats * lay.pk + 4, "the Freivalds component's weight columns");
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, lay.pk);
     let (s_pow, s_step) = crate::attn_air::powers(s_ch, lay.pq);
     let base = ptrs(&dev.base);
@@ -703,7 +703,7 @@ pub fn freivalds(dev: &crate::devwfill::DevFreivalds, lay: &crate::layer::Freiva
         order.push((1 + n_mats + m) as u32);
     }
     let cols = acc.split(&order, mutate);
-    note(Reg::Freivalds, "group", cols.len(), acc.rows, t.elapsed().as_secs_f64());
+    note(Comp::Freivalds, "group", cols.len(), acc.rows, t.elapsed().as_secs_f64());
     DevAccCols {
         cols,
         claims: (0..n_mats).map(|m| claims[1 + n_mats + m]).collect(),
@@ -713,13 +713,13 @@ pub fn freivalds(dev: &crate::devwfill::DevFreivalds, lay: &crate::layer::Freiva
 
 // =============================================================== the dequant ==
 
-/// `z` and `h`: the matmul region's Freivalds claimed side, over the same
+/// `z` and `h`: the matmul component's Freivalds claimed side, over the same
 /// committed accumulator columns 20's dequant fill wrote.
 pub fn deq(dev: &crate::devfill::DevFill, lay: &crate::layer::MatLayout,
            map: &crate::dequant::Map, f_acc: usize, rv: SecureField,
            s_ch: SecureField) -> DevAccCols {
     let t = std::time::Instant::now();
-    let mutate = accmut(Reg::Deq);
+    let mutate = accmut(Comp::Deq);
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, lay.per_row);
     let cols: Vec<*const u32> =
         (0..lay.per_row).map(|s| dev.base[map.at(s, f_acc)].device_ptr).collect();
@@ -742,7 +742,7 @@ pub fn deq(dev: &crate::devfill::DevFill, lay: &crate::layer::MatLayout,
     acc.scan(1, 1, mutate);
     let claims = acc.last();
     let cols = acc.split(&[0, 1], mutate);
-    note(Reg::Deq, "region", cols.len(), acc.rows, t.elapsed().as_secs_f64());
+    note(Comp::Deq, "component", cols.len(), acc.rows, t.elapsed().as_secs_f64());
     DevAccCols { cols, claims: vec![claims[1]], log_rows: lay.log_rows }
 }
 
@@ -750,7 +750,7 @@ pub fn deq(dev: &crate::devfill::DevFill, lay: &crate::layer::MatLayout,
 
 /// `z`, `h` and `dz`.
 ///
-/// `den` is the region's shared first column and it is not scanned: a lane with
+/// `den` is the component's shared first column and it is not scanned: a lane with
 /// `a = 0` at every row comes out of the scan holding itself, so stage 2 reads
 /// it exactly like a scanned one and there is no second kind of source.
 #[allow(clippy::too_many_arguments)]
@@ -758,17 +758,17 @@ pub fn ao(dev: &crate::devwfill::DevAo, lay: &crate::layer::AoLayout, nh: usize,
           s: usize, rv: SecureField, s_ch: SecureField, mu_out: SecureField,
           mu_den: SecureField) -> DevAccCols {
     let t = std::time::Instant::now();
-    let mutate = accmut(Reg::Ao);
+    let mutate = accmut(Comp::Ao);
     let pr = lay.per_row;
     // stream JJ (E11): the base layout is `2 + 9 per_row` -- `den`, `joff`,
     // then `acc, sg, qm, nz2, denp, d, num, pj, alo` per slot -- and this fold
     // reads `den` and each slot's `acc`.  It was `1 + 6 per_row`; the two must
-    // move together (`layer::ao_region`, `devwfill::ao_region_dev`,
+    // move together (`layer::ao_component`, `devwfill::ao_component_dev`,
     // `gkrlink`'s `c0`).
     // stream TT (E11), log row 73: the magnitude form's layout is `2 + 10 pr`,
-    // but it never reaches here -- `ao_region` fills it on the host on both
+    // but it never reaches here -- `ao_component` fills it on the host on both
     // backends, so `dev` is `None` and this fold is the host's.
-    assert_eq!(dev.base.len(), 2 + 9 * pr, "the attnout region's column count");
+    assert_eq!(dev.base.len(), 2 + 9 * pr, "the attnout component's column count");
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, pr);
     let cols: Vec<*const u32> =
         (0..pr).map(|k| dev.base[2 + 9 * k].device_ptr).collect();
@@ -801,7 +801,7 @@ pub fn ao(dev: &crate::devwfill::DevAo, lay: &crate::layer::AoLayout, nh: usize,
     acc.scan(2, 2, mutate);
     let claims = acc.last();
     let cols = acc.split(&[0, 2, 3], mutate);
-    note(Reg::Ao, "region", cols.len(), acc.rows, t.elapsed().as_secs_f64());
+    note(Comp::Ao, "component", cols.len(), acc.rows, t.elapsed().as_secs_f64());
     DevAccCols { cols, claims: vec![claims[2], claims[3]], log_rows: lay.log_rows }
 }
 
@@ -816,12 +816,12 @@ pub fn binding_mode() -> u32 {
     crate::util::m4b_mode("B7_M4_RESIDUAL_STREAM_BIND")
 }
 
-/// One residual-stream region's Horner bindings, on their way into the tree.
+/// One residual-stream component's Horner bindings, on their way into the tree.
 ///
-/// The seventh region of `b65_acc.cuh`'s table and the plainest of them: a binding
+/// The seventh component of `b65_acc.cuh`'s table and the plainest of them: a binding
 /// has no segmentation at all, so there are no flags and no stage 2 -- one
 /// stage-1 lane per binding and then the shared affine scan, which is the same
-/// primitive as every other region's and therefore the same field element the
+/// primitive as every other component's and therefore the same field element the
 /// host's serial fold produces.
 ///
 /// `in_nat` and `out_nat` are the arrays `b65_residual_stream_fill.cu` already leaves on the
@@ -835,7 +835,7 @@ pub fn residual_stream_bind(in_nat: *const i32, out_nat: *const i32, log_rows: u
                             specs: &[FAccResidualStreamBinding], weights: &[SecureField], lam: SecureField)
             -> DevAccCols {
     let t = std::time::Instant::now();
-    let mutate = accmut(Reg::ResidualStreamBinding);
+    let mutate = accmut(Comp::ResidualStreamBinding);
     let acc = Acc::new(log_rows, specs.len());
     let w = pows(weights);
     unsafe {
@@ -847,6 +847,6 @@ pub fn residual_stream_bind(in_nat: *const i32, out_nat: *const i32, log_rows: u
     let claims = acc.last();
     let order: Vec<u32> = (0..specs.len() as u32).collect();
     let cols = acc.split(&order, mutate);
-    note(Reg::ResidualStreamBinding, "residual_stream", cols.len(), acc.rows, t.elapsed().as_secs_f64());
+    note(Comp::ResidualStreamBinding, "residual_stream", cols.len(), acc.rows, t.elapsed().as_secs_f64());
     DevAccCols { cols, claims, log_rows }
 }

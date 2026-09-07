@@ -685,7 +685,7 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         // Stream QQ (log rows 61 and 66): every binding claim vector is filled here
         // too, with the same distinct nonzero placeholders `felt()` gives the
         // rest. The comment this replaces said empty placeholders "keep the
-        // IR's shape" and it was wrong three times over: a region reads a
+        // IR's shape" and it was wrong three times over: a component reads a
         // missing claim as `SecureField::zero()`, `Lower::ext` folds `x - 0`
         // and `Ir::schedule` drops the slot with it, so an empty vector lowers
         // to a shape two instructions and one slot short of the one every real
@@ -696,7 +696,7 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         stream_bindings: plan
             .residual_stream
             .as_ref()
-            .map(|g| g.regions.iter().map(|r| r.bindings.iter().map(|_| felt()).collect()).collect())
+            .map(|g| g.components.iter().map(|r| r.bindings.iter().map(|_| felt()).collect()).collect())
             .unwrap_or_default(),
         deq_out: plan
             .residual_stream
@@ -713,7 +713,7 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         rq_sc: (0..plan.rqs.len()).map(|_| felt()).collect(),
         freivalds_qx: (0..nw).map(|_| felt()).collect(),
         deq_sc: (0..nm).map(|_| felt()).collect(),
-        // stream NN: the rotation's quantize regions and the key tiles' own K/Q/V
+        // stream NN: the rotation's quantize components and the key tiles' own K/Q/V
         nn_in: (0..plan.quants.len()).map(|_| felt()).collect(),
         nn_out: (0..plan.quants.len()).map(|_| felt()).collect(),
         key_tile_qkv: (0..plan.nn_key_tiles.len()).map(|_| std::array::from_fn(|_| felt())).collect(),

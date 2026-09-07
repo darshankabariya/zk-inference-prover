@@ -420,7 +420,7 @@ def _key_tile_family_check(nh, hd):
                                 grid_target=pr["grid_target"], chan_target=pr["chan_target"],
                                 rw=pr["rw"])
         if pr.get("diagonal_block"):
-            b2, _, _ = cm.key_tile_cells(nh, hd, pr["s"], pr["s"], rows_region=False,
+            b2, _, _ = cm.key_tile_cells(nh, hd, pr["s"], pr["s"], rows_component=False,
                                      grid_target=pr["grid_target"],
                                      chan_target=pr["chan_target"], rw=pr["rw"])
             b += b2
@@ -577,7 +577,7 @@ def memory_coeffs():
         pre_per_weight=a["freivalds_pre"] / a["freivalds_weights"],
         b3_pre_per_weight=cm.PREPROCESSED_PER_WEIGHT,
         # everything in tree 0 that is not the Freivalds check: the shared lookup
-        # tables and the per-region preprocessed columns
+        # tables and the per-component preprocessed columns
         pre_shared_fixed=pre_a - a["freivalds_pre"] - pre_cols * 2 ** a["h"],
         pre_host_built=pre_a - (dev_a - a["cells"]["base"]),
         # base's share of the height-independent trace, used to split a modelled
@@ -1163,9 +1163,9 @@ def main(argv=None):
     print("      C, hd and `insts` are powers of two and the target divides; `Grid::new`")
     print("      also caps q at min(S, hd) and pk at min(C, S).  Where a shape saturates a")
     print("      cap the table says so.")
-    print("   3. **The out (A.V) region is not in the key tile family.**  It is the `attnout`")
+    print("   3. **The out (A.V) component is not in the key tile family.**  It is the `attnout`")
     print("      family and `cells_per_token` charges it separately, so there is no double")
-    print("      count -- but it is also the one attention region whose price here is a")
+    print("      count -- but it is also the one attention component whose price here is a")
     print("      measured per-element constant rather than a derived column count.")
     sat = [r["name"] for r in
            [dict(name=s["name"], c=model_cells(s, 16384, seq=args.seq, batch=batch))
@@ -1519,7 +1519,7 @@ def main(argv=None):
               "Freivalds check pads each group to a power-of-two row count).")
         print(f"  Held constant when the shape changes, all read at 8B: "
               f"{g(mc['pre_shared_fixed'])} shared")
-        print(f"  preprocessed cells (the lookup tables and the per-region columns), "
+        print(f"  preprocessed cells (the lookup tables and the per-component columns), "
               f"{g(mc['pre_host_built'])} of")
         print(f"  them host-built, and base = {mc['base_share']:.4f} of the "
               "height-independent trace.")

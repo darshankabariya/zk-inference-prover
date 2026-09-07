@@ -297,7 +297,7 @@ pub enum Op {
 /// upload alongside it.
 ///
 /// Serialisable, because the generated kernel set is the *union* over every
-/// design point we prove: the constraint shape of a `dequant` region depends on
+/// design point we prove: the constraint shape of a `dequant` component depends on
 /// its matmul, so the synthetic layer and the real layer-12 witness do not
 /// produce the same shapes. `cudaemit` accumulates into `$GEN/shapes.json` and
 /// re-emits every kernel it has ever seen, so one `libstwo_cuda.a` serves all of
@@ -2476,7 +2476,7 @@ fn fill_binding_claims(plan: &crate::compose::Plan, claims: &mut crate::compose:
     };
     if let Some(g) = plan.residual_stream.as_ref() {
         claims.stream_bindings =
-            g.regions.iter().map(|r| r.bindings.iter().map(|_| felt()).collect()).collect();
+            g.components.iter().map(|r| r.bindings.iter().map(|_| felt()).collect()).collect();
         claims.deq_out = g.output_bindings.iter().map(|_| felt()).collect();
     }
     claims.logits_claim = vec![felt()];
@@ -2486,9 +2486,9 @@ fn fill_binding_claims(plan: &crate::compose::Plan, claims: &mut crate::compose:
     // the emitted kernel would not match the proved one.
     claims.embed_out = vec![felt()];
     claims.embed_tok = vec![felt()];
-    // stream JJ: the attnout region's output claim, the same shape of binding
+    // stream JJ: the attnout component's output claim, the same shape of binding
     claims.ao_q = vec![felt()];
-    // stream KK: the argmax region's token claim
+    // stream KK: the argmax component's token claim
     claims.head_tok = vec![felt()];
     // Stream QQ (log row 61): stream II's four claim vectors. Leaving them
     // empty is what cost the wired C=4K chunk ten of its thirteen `kernel
@@ -2499,7 +2499,7 @@ fn fill_binding_claims(plan: &crate::compose::Plan, claims: &mut crate::compose:
     //
     // A vector is filled here whether or not this design point reads it: an
     // unread placeholder changes nothing, and the rule "every claim vector is
-    // filled" is one a later stream can keep without knowing which regions
+    // filled" is one a later stream can keep without knowing which components
     // read which claim. `compose::claim_at` is the backstop that says so.
     claims.freivalds_qx = plan.freivalds.iter().map(|_| felt()).collect();
     claims.deq_sc = plan.mat_lays.iter().map(|_| felt()).collect();
@@ -2508,7 +2508,7 @@ fn fill_binding_claims(plan: &crate::compose::Plan, claims: &mut crate::compose:
     claims.rq_sc = plan.rqs.iter().map(|_| felt()).collect();
     // Stream QQ at the NN merge (log row 66): stream NN's four, in the same
     // state stream II's were in -- `nn_in`/`nn_out` are read per quantize
-    // region, `key_tile_qkv` per rotated key tile and `key_tile_q` per prefix key tile, all
+    // component, `key_tile_qkv` per rotated key tile and `key_tile_q` per prefix key tile, all
     // through `.get(..)`, and an unfilled one folds `x - 0` out of
     // `b65_quant_eval` and of the diagonal block and prefix `b65_chan_eval`s. Found by
     // this stream's own guard on its first contact with someone else's work.
@@ -2652,14 +2652,14 @@ pub fn emit_cmd(args: &[String]) {
         for i in 0..b.tables.len() {
             go!(b.tables[i], format!("table{i}"));
         }
-        // Stream NN, added at its merge: the q/k/v quantize regions.  Without
+        // Stream NN, added at its merge: the q/k/v quantize components.  Without
         // this the family has no shape in the store at all, so the cuda backend
         // falls back to `accumulate_pointwise_cpu` for all three on every
         // chunk that carries the rotation and no emit can ever change that.
         for i in 0..b.quants.len() {
             go!(b.quants[i], format!("quant{i}"));
         }
-        // B11 stream K: the head's argmax region was never emitted -- 10,079
+        // B11 stream K: the head's argmax component was never emitted -- 10,079
         // instructions on the CPU per `lm_head` chunk until now.
         if let Some(am) = &b.argmax {
             go!(am, "argmax".to_string());
@@ -2684,7 +2684,7 @@ pub fn emit_cmd(args: &[String]) {
         // hands out four nonzero limbs per claim, and `fill_binding_claims` is the
         // same hazard already found on the binding claims.
         //
-        // The grid region has one such pair.  `KeyEval`'s `claimed_av` and
+        // The grid component has one such pair.  `KeyEval`'s `claimed_av` and
         // `claimed_sn` are both folds of the numerator accumulator `zn`
         // (`attn_air.rs`'s `av`/`sn` constraints), so both are exactly zero on
         // a key tile whose numerator column is identically zero -- and that is an
@@ -3179,9 +3179,9 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch, s
     // kernel handed the same columns in the same order reads the same cells.
     // What it does not pin is how many columns the component around that
     // computation names, and two components that share a shape may name
-    // different totals -- the three `qkv`/`o`/`gateup` Freivalds regions lower to
+    // different totals -- the three `qkv`/`o`/`gateup` Freivalds components lower to
     // one shape and carry 412, 140 and 276 preprocessed weight columns, none
-    // of which the fractions read, and a dequant region's fraction evaluator
+    // of which the fractions read, and a dequant component's fraction evaluator
     // leaves off the output and scale sides, whose selectors it carries but
     // never reads. An equality here read that difference as a stale library
     // and ended the proof. The caller-side `devfrac::assert_supplied` is what
@@ -3441,7 +3441,7 @@ pub fn gen_emit_cmd(args: &[String]) {
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
 
     // Same accumulate-across-design-points store as `cudaemit`, in its own file:
-    // a dequant region's *fraction* shape follows its matmul just as its
+    // a dequant component's *fraction* shape follows its matmul just as its
     // constraint shape does.
     let store = dir.join("gen_shapes.json");
     let mut fams: Vec<(String, Vec<(String, Ir)>)> = if store.exists() {
@@ -3560,7 +3560,7 @@ pub fn gen_emit_cmd(args: &[String]) {
         for i in 0..b.tables.len() {
             go!(b.tables[i], format!("table{i}"));
         }
-        // Stream NN, added at its merge: the quantize regions' fraction half,
+        // Stream NN, added at its merge: the quantize components' fraction half,
         // in the same commit as the constraint half above -- adding a family to
         // one Freivalds check alone is exactly the gap stream BB's comment below names.
         for i in 0..b.quants.len() {

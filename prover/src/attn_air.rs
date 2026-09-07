@@ -7,11 +7,11 @@
 //! * the two accumulators that are already *Horners* fold instances for free.
 //!   `hs = sum_{gk} r^{gk} zs_{gk}` over the packed key axis `gk = i C + c` is
 //!   exactly `sum_i r^{C i} (sum_c r^c zs)`, and `h` likewise gives `rv^{hd i}`.
-//! * the three that are plain *sums* -- `acc` in the channel region, `av` and `sn`
+//! * the three that are plain *sums* -- `acc` in the channel component, `av` and `sn`
 //!   in the grid -- have to pick up the same per-instance weight, or the two sides
 //!   of an identity are no longer comparable.  Each gets one preprocessed
 //!   instance-start selector and multiplies by `r^C` (or `rv^hd`) there.
-//! * the per-token region's Horner runs in `s`, so its natural instance weight is
+//! * the per-token component's Horner runs in `s`, so its natural instance weight is
 //!   `s^S`; the boundary multiplier `mu = r^C s^{-(S-rw)}` converts it to `r^C`.
 //!   `mu` is a public constant the verifier computes from `r` and `s`.
 //!
@@ -84,14 +84,14 @@ pub fn key_tile_id(tag: usize, s: &str) -> PreProcessedColumnId {
 }
 pub const CHAN_SEL: [&str; 5] =
     ["b6_c_nofirst", "b6_c_last", "b6_c_notzero", "b6_c_end", "b6_c_istart"];
-/// The grid region's preprocessed columns.  The last is not a selector: it is
+/// The grid component's preprocessed columns.  The last is not a selector: it is
 /// `2^-(F - frac_i)`, the constant that turns the committed *scaled* shift back into
 /// the shift itself, so one master exp table can serve every head in the key tile.
 pub const KEY_SEL: [&str; 8] =
     ["b6_k_nofirst", "b6_k_last", "b6_k_notzero", "b6_k_end", "b6_k_m1", "b6_k_m2",
      "b6_k_istart", "b6_k_dinv"];
 /// The *diagonal block* grid's preprocessed columns (B10 step 3).  The same eight the
-/// prefix grid reads -- under their own ids, because the two regions are two
+/// prefix grid reads -- under their own ids, because the two components are two
 /// components with two tilings -- plus `iend`, the row that completes an
 /// instance's key block.  The diagonal block's key Horner runs in an independent
 /// challenge `r'`, so its natural per-instance weight is `r'^S`; the identity it
@@ -110,7 +110,7 @@ pub const DIAGONAL_BLOCK_SEL: [&str; 9] =
 /// were.  `lead` is a function of the shape, which is public, so this is not a
 /// prover choice.
 ///
-/// Why the grid needs it and no other region does: `commit_base` pads the
+/// Why the grid needs it and no other component does: `commit_base` pads the
 /// numerator column with `a.table[0]` rather than zero, because the exp lookup
 /// reads `(idx, num)` on every row and index 0 has to stay a real table row for
 /// the multiplicities to balance.  Every other padded column cancels on its own
@@ -142,27 +142,27 @@ pub fn tbl_range(bits: u32) -> PreProcessedColumnId {
     id(format!("b6_range_{bits}"))
 }
 
-/// Challenge powers, precomputed per region width.
+/// Challenge powers, precomputed per component width.
 #[derive(Clone, Debug)]
 pub struct Powers {
     pub r: SecureField,
     pub rv: SecureField,
-    /// r^0..r^{pk-1} and r^pk, for the key chunk of the channel region
+    /// r^0..r^{pk-1} and r^pk, for the key chunk of the channel component
     pub r_pow: Vec<SecureField>,
     pub r_step: SecureField,
-    /// s^0..s^{pq-1} and s^pq, for the query chunk of the channel region
+    /// s^0..s^{pq-1} and s^pq, for the query chunk of the channel component
     pub sq_pow: Vec<SecureField>,
     pub sq_step: SecureField,
-    /// s^0..s^{q-1} and s^q, for the grid region
+    /// s^0..s^{q-1} and s^q, for the grid component
     pub sg_pow: Vec<SecureField>,
     pub sg_step: SecureField,
-    /// rv^0..rv^{pv-1} and rv^pv, for the value chunk of the grid region
+    /// rv^0..rv^{pv-1} and rv^pv, for the value chunk of the grid component
     pub rv_pow: Vec<SecureField>,
     pub rv_step: SecureField,
-    /// s^0..s^{qo-1} and s^qo, for the A.V output region
+    /// s^0..s^{qo-1} and s^qo, for the A.V output component
     pub so_pow: Vec<SecureField>,
     pub so_step: SecureField,
-    /// s^0..s^{rw-1} and s^rw, for the per-token region
+    /// s^0..s^{rw-1} and s^rw, for the per-token component
     pub sr_pow: Vec<SecureField>,
     pub sr_step: SecureField,
     /// sum_{c<C} r^c, the coefficient the shift is folded through.  Per *instance*:
@@ -172,9 +172,9 @@ pub struct Powers {
     pub r_c: SecureField,
     /// rv^hd -- the per-instance weight of the A.V identity
     pub rv_hd: SecureField,
-    /// the per-token region's instance-start multiplier, `r^C s^{-(S-rw)}`: its
+    /// the per-token component's instance-start multiplier, `r^C s^{-(S-rw)}`: its
     /// Horner runs in `s`, so this is what converts its natural weight `s^S` into
-    /// the `r^C` every other region carries
+    /// the `r^C` every other component carries
     pub mu: SecureField,
     /// the per-instance weight of the *denominator* sum `sn`.  `sn` is a plain sum
     /// over keys with an explicit multiplier, so the constant is a free choice --
@@ -209,7 +209,7 @@ impl Powers {
         let (all_r, r_c) = powers(r, sh.c);
         let r_sum = all_r.iter().fold(SecureField::zero(), |a, b| a + *b);
         let (_, rv_hd) = powers(rv, sh.hd);
-        // s^{S-rw}, inverted: the per-token region multiplies by s^rw on every row
+        // s^{S-rw}, inverted: the per-token component multiplies by s^rw on every row
         // after the first of an instance, so `mu s^{S-rw} = r^C`.
         let (_, s_span) = powers(s, sh.s - rw);
         let mu = r_c * s_span.inverse();
@@ -221,11 +221,11 @@ impl Powers {
     /// The diagonal block grid's powers: built on the diagonal block's own shape (`c = S`) and its
     /// own key challenge `r'`, then told the two constants it shares with the
     /// prefix -- the denominator's per-instance weight and the per-instance
-    /// weight of the channel region.
+    /// weight of the channel component.
     ///
     /// `mu` is deliberately *not* among them: it is read only by `RowEval`'s
     /// step and the per-token trace loop, and a diagonal block key tile has neither -- the
-    /// pair's one per-token region is the prefix key tile's (B10 step 3), and the
+    /// pair's one per-token component is the prefix key tile's (B10 step 3), and the
     /// row maximum both halves shift by is *its* `am`, checked against the
     /// diagonal block's Q.K^T by `verify_composed`'s claim equality.  (An earlier
     /// version overrode `self.mu` here with a docstring claiming that override
@@ -235,9 +235,9 @@ impl Powers {
         let (_, rp_span) = powers(self.r, s_keys - 1);
         self.sn_c = prefix_r_c;
         self.kappa = prefix_r_c * rp_span.inverse();
-        // and the channel region's own per-instance weight: `chan` is the side the
+        // and the channel component's own per-instance weight: `chan` is the side the
         // diagonal block's Q.K^T identity is read against, and the other two terms of that
-        // identity -- `am` (the prefix's per-token region) and `hs` (via `kappa`)
+        // identity -- `am` (the prefix's per-token component) and `hs` (via `kappa`)
         // -- both carry `r^C`.  Its natural `r'^S` would be a third weight.
         self.r_c = prefix_r_c;
         self
@@ -245,15 +245,15 @@ impl Powers {
 
     /// The **solo** diagonal block's powers: block 0 of a sequence has no unchecked
     /// prefix, so its diagonal block is its head key tile group's only key tile and it carries
-    /// the per-token region itself (CC deliverable 4, option A).
+    /// the per-token component itself (CC deliverable 4, option A).
     ///
     /// That is `as_diagonal_block` plus one thing.  `as_diagonal_block` deliberately drops `mu`
-    /// because a *paired* diagonal block has no per-token region and rides on the
+    /// because a *paired* diagonal block has no per-token component and rides on the
     /// prefix key tile's; a solo one has one and needs its own.  `Powers::new`
     /// already built `mu = r_c s^{-(S-rw)}` from **this** grid's `r_c`
     /// (`r_diagonal_block^S`), so the `s` factor is recoverable as `mu / r_c` without
     /// re-deriving `s` or `rw`, and rebasing it onto the borrowed global `r^C`
-    /// gives the region the same instance weight every other region carries.
+    /// gives the component the same instance weight every other component carries.
     pub fn as_solo_diagonal_block(self, prefix_r_c: SecureField, s_keys: usize) -> Self {
         let s_span_inv = self.mu * self.r_c.inverse();
         let mut p = self.as_diagonal_block(prefix_r_c, s_keys);
@@ -288,7 +288,7 @@ fn sum_pow(p: &[SecureField]) -> SecureField {
 /// against (`notes/witness-slack.md` section 1e).  This is that missing sum: one
 /// extension accumulator per column set, weighting the cell at (query head
 /// `hq`, channel `ch`, token `t`) by `w^(N - 1 - (t nh hd + hq hd + ch))` --
-/// the **token-major** canonical position the quantize region folds under, so
+/// the **token-major** canonical position the quantize component folds under, so
 /// the two claims are directly comparable.
 ///
 /// The offset every key tile commits (`off_k`, `off_q`, 128) is subtracted here for
@@ -304,7 +304,7 @@ pub struct KeyTileTie {
     /// the row step at a group boundary
     pub s_bd: SecureField,
     /// the row step at an *instance* boundary; `None` where the group index is
-    /// affine in the position (the channel region) and one boundary constant
+    /// affine in the position (the channel component) and one boundary constant
     /// serves
     pub s_ib: Option<SecureField>,
     /// the offset the key tile's cells carry
@@ -331,7 +331,7 @@ impl KeyTileTie {
     }
 }
 
-// ------------------------------------------------------------ Q.K^T region ---
+// ------------------------------------------------------------ Q.K^T component ---
 
 /// One row group per channel: the two inner sums of `Q.K^T`, multiplied per
 /// channel and accumulated.
@@ -345,7 +345,7 @@ pub struct ChanEval {
     pub rel_k: RangeRel,
     pub rel_q: RangeRel,
     pub range_check: bool,
-    /// B11 stream S, lever 1: the region's lookups are proved by the batched
+    /// B11 stream S, lever 1: the component's lookups are proved by the batched
     /// GKR instead of committed running-sum columns, so the AIR emits neither
     /// the relation entries nor the interaction masks they would allocate.
     pub gkr: bool,
@@ -357,7 +357,7 @@ pub struct ChanEval {
     /// byte-for-byte the old ones.
     pub boundary_k: Vec<crate::boundary::KvBoundary>,
     /// Stream NN: this key tile's own K and Q claims, in that order.  `Some` only on
-    /// a **diagonal block** key tile of a chunk that carries the RoPE regions -- the diagonal block's
+    /// a **diagonal block** key tile of a chunk that carries the RoPE components -- the diagonal block's
     /// keys are this block's own tokens, which are the ones the layer's `k`
     /// matmul produced; a prefix key tile's keys are the cache and are bound across
     /// blocks by root equality instead (stream AA/EE).  `None` everywhere else,
@@ -450,10 +450,10 @@ impl FrameworkEval for ChanEval {
 
         // ---- stream NN: the K and Q claims -----------------------------------
         // `u` and `v` above are inner sums of one row group and are consumed by
-        // the bilinear `acc`; these two run over the whole region under the
-        // quantize region's own weights, so an equality against it says the
+        // the bilinear `acc`; these two run over the whole component under the
+        // quantize component's own weights, so an equality against it says the
         // key tile's columns are the values the layer's matmuls produced.  Both
-        // steps are built from selectors the region already reads.
+        // steps are built from selectors the component already reads.
         if let Some((kt, qt)) = &self.qk_bind {
             for (t, vals) in [(kt, &ks), (qt, &qs)] {
                 let [h_prev, h] =
@@ -505,7 +505,7 @@ impl FrameworkEval for ChanEval {
     }
 }
 
-// -------------------------------------------------------------- grid region ---
+// -------------------------------------------------------------- grid component ---
 
 /// One row group per key: the whole `(t, c)` grid, and A.V's inner sums.
 #[derive(Clone)]
@@ -515,7 +515,7 @@ pub struct KeyEval {
     pub pow: Powers,
     pub off: Offsets,
     pub variant: Variant,
-    /// end-of-trace values of the three accumulators this region claims
+    /// end-of-trace values of the three accumulators this component claims
     pub claimed_hs: SecureField,
     pub claimed_av: SecureField,
     pub claimed_sn: SecureField,
@@ -524,7 +524,7 @@ pub struct KeyEval {
     /// the split variant's remainder table
     pub rel_split: Option<RangeRel>,
     pub range_check: bool,
-    /// B11 stream S, lever 1: the region's lookups are proved by the batched
+    /// B11 stream S, lever 1: the component's lookups are proved by the batched
     /// GKR instead of committed running-sum columns (see `ChanEval::gkr`).
     pub gkr: bool,
     /// B10 step 3: this is the *diagonal block*, the S x S grid of the decoded
@@ -541,7 +541,7 @@ pub struct KeyEval {
     /// component-registration order.
     pub boundary_v: Vec<crate::boundary::KvBoundary>,
     /// Stream NN: this key tile's own V claim, the counterpart of `ChanEval::qk_bind`.
-    /// `Some` only on a diagonal block key tile of a chunk that carries the quantize regions.
+    /// `Some` only on a diagonal block key tile of a chunk that carries the quantize components.
     pub v_bind: Option<KeyTileTie>,
 }
 
@@ -610,7 +610,7 @@ impl FrameworkEval for KeyEval {
         let aux: Vec<E::F> = (0..self.n_aux()).map(|_| eval.next_trace_mask()).collect();
         let vals: Vec<E::F> = (0..self.lay.pv).map(|_| eval.next_trace_mask()).collect();
         // ---- the V half of the K/V boundary (stream AA) ----------------------
-        // `ChanEval`'s block, on the other geometry: the key region has one row
+        // `ChanEval`'s block, on the other geometry: the key component has one row
         // group per `(instance, key)` and holds head channels on the column
         // axis, so a V column is `lay.pv` wide where a K column is `lay.pk`.
         // Nothing else differs -- same trees, same order, same bare equality.
@@ -673,13 +673,13 @@ impl FrameworkEval for KeyEval {
 
         // sum over keys of wv * zn, closed on each key's last chunk row, times
         // rv^hd at each instance start (the A.V identity's per-instance weight,
-        // which the output region's rv-Horner produces on its own side)
+        // which the output component's rv-Horner produces on its own side)
         let mut av_mult: E::EF = E::EF::from(notzero.clone() - istart.clone());
         av_mult += istart.clone() * self.pow.rv_hd;
         eval.add_constraint(av.clone() - av_prev * av_mult
             - (wv * zn.clone()) * last.clone());
         // sum over keys of zn: the denominator statement, weighted by r^C to match
-        // the per-token region's `az`
+        // the per-token component's `az`
         let mut sn_mult: E::EF = E::EF::from(notzero.clone() - istart.clone());
         sn_mult += istart * self.pow.sn_c;
         eval.add_constraint(sn.clone() - sn_prev * sn_mult - zn.clone() * last);
@@ -703,10 +703,10 @@ impl FrameworkEval for KeyEval {
 
         // ---- stream NN: the V claim ------------------------------------------
         // `wv` above is one key row's inner sum and is consumed by the bilinear
-        // `av`; this runs over the whole region under the quantize region's own
-        // weights.  The key region groups by (instance, key), and the position
+        // `av`; this runs over the whole component under the quantize component's own
+        // weights.  The key component groups by (instance, key), and the position
         // is not affine in that group index -- an instance boundary jumps a whole
-        // context -- so this fold takes a third row step, on the region's own
+        // context -- so this fold takes a third row step, on the component's own
         // `istart` selector.
         if let Some(t) = &self.v_bind {
             let [h_prev, h] =
@@ -820,7 +820,7 @@ impl FrameworkEval for OutEval {
     }
 }
 
-// ------------------------------------------------------- per-token region ---
+// ------------------------------------------------------- per-token component ---
 
 /// One row per `rw` query tokens: the committed maxima and denominators, and the
 /// two-limb range check that makes the A.V window explicit.
@@ -842,7 +842,7 @@ pub struct RowEval {
     pub z_min: u32,
     pub rel_lo: RangeRel,
     pub rel_hi: RangeRel,
-    /// B11 stream S, lever 1: the region's lookups are proved by the batched
+    /// B11 stream S, lever 1: the component's lookups are proved by the batched
     /// GKR instead of committed running-sum columns (see `ChanEval::gkr`).
     pub gkr: bool,
 }

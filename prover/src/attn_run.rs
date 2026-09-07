@@ -2,7 +2,7 @@
 //! report what it cost.
 //!
 //! The three application-level checks are *identical* to B5's even though the proof
-//! now covers many instances, because every region carries the same per-instance
+//! now covers many instances, because every component carries the same per-instance
 //! weight (`attn_air`'s module doc): one claimed value per identity, whatever the
 //! key tile size.
 //!
@@ -143,7 +143,7 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
 
     // The composition polynomial's degree bound is `max(log_size) + 1` over
     // *every* component, so the twiddle tree has to cover the widest column in
-    // the proof -- which is not always a region or the exp table: a 2^16 range
+    // the proof -- which is not always a component or the exp table: a 2^16 range
     // table outgrows both whenever the shift is split finely enough.  Getting
     // this wrong surfaces as "Not enough twiddles!" from inside the prover.
     let widest = l.max_log().max(a.log_table).max(widths.iter().copied().max().unwrap_or(0));

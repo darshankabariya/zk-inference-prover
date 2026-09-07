@@ -18,11 +18,11 @@
 //! that side's values and nothing else:
 //!
 //! ```text
-//!   tree 3   bin    the residual-stream input   (region `gn1`, group 0's leaves)
-//!   tree 4   bout   the residual-stream output  (region `gn2`, the add's outputs)
+//!   tree 3   bin    the residual-stream input   (component `gn1`, group 0's leaves)
+//!   tree 4   bout   the residual-stream output  (component `gn2`, the add's outputs)
 //! ```
 //!
-//! The AIR bindings each boundary column to the region column the rest of the layer
+//! The AIR bindings each boundary column to the component column the rest of the layer
 //! statement already binds, by a **plain equality constraint** — no lookup, no
 //! challenge, no accumulator. That is what lets the two trees be committed
 //! *after* the interaction tree: an equality constraint is checked at the OODS
@@ -51,11 +51,11 @@ use stwo::prover::backend::Column;
 
 use crate::common::{Eval, eval_of};
 use crate::compose::{Fixed, ResidualStreamPlan};
-use crate::residual_stream::{ResidualStreamRegion, BindingKind};
+use crate::residual_stream::{ResidualStreamComponent, BindingKind};
 
 /// The multiplier that folds a value's `(sm, ef)` pair into one cell.
 ///
-/// A bf16 value is carried in the region as a signed significand and an
+/// A bf16 value is carried in the component as a signed significand and an
 /// exponent. Packing them as `PACK * sm + ef` keeps the binding constraint degree 1
 /// and is injective on the representation: `sm` spans only `{0} ∪ ±[128, 255]`
 /// and `ef` only `[0, 255]`, so two distinct pairs differ by at least `PACK` in
@@ -71,7 +71,7 @@ pub const PACK: i64 = 512;
 pub const FIRST_TREE: usize = 4;
 
 /// One side of a chunk's boundary: which tree it is committed in, which
-/// residual-stream region carries it, which of that region's value sequences
+/// residual-stream component carries it, which of that component's value sequences
 /// it is, and the shape that follows.
 #[derive(Clone, Copy, Debug)]
 pub struct Boundary {
@@ -82,11 +82,11 @@ pub struct Boundary {
 }
 
 /// A boundary side as the prover needs it: the `Bound` the AIR reads, plus the
-/// region it is taken from and the row count.
+/// component it is taken from and the row count.
 #[derive(Clone, Copy, Debug)]
 pub struct Side {
     pub bound: Boundary,
-    pub region: usize,
+    pub component: usize,
     pub log_rows: u32,
 }
 
@@ -110,8 +110,8 @@ pub fn sides(gp: &ResidualStreamPlan) -> Vec<Side> {
     }
     want.iter()
         .enumerate()
-        .map(|(i, (region, binding))| {
-            let r = &gp.regions[*region];
+        .map(|(i, (component, binding))| {
+            let r = &gp.components[*component];
             let kind = r.bindings[*binding].0;
             let n = match kind {
                 BindingKind::In(g) => r.prog.groups[g].n,
@@ -119,7 +119,7 @@ pub fn sides(gp: &ResidualStreamPlan) -> Vec<Side> {
             };
             Side {
                 bound: Boundary { tree: FIRST_TREE + i, kind, n },
-                region: *region,
+                component: *component,
                 log_rows: r.log_rows,
             }
         })
@@ -129,7 +129,7 @@ pub fn sides(gp: &ResidualStreamPlan) -> Vec<Side> {
 /// One side's committed columns: `n` columns of `2^log_rows` rows, column `j`
 /// holding the packed value at slot `j` of each row.
 ///
-/// The values come from `ResidualStreamRegion::binding_vals`, which is the same sequence in
+/// The values come from `ResidualStreamComponent::binding_vals`, which is the same sequence in
 /// the same natural row order that the Horner binding accumulates — so the boundary
 /// tree and the binding are two views of one thing, and the layout question reduces
 /// to the one the residual-stream family already answered. `gn1`'s input binding and `gn2`'s
@@ -140,13 +140,13 @@ pub fn sides(gp: &ResidualStreamPlan) -> Vec<Side> {
 ///
 /// `tamper` flips one cell, by flat index over `(row, slot)`. It exists for the
 /// probe that has to show the binding bites: a boundary column that disagrees with
-/// the region must take its own chunk's proof down.
-pub fn cols(region: &ResidualStreamRegion, side: &Side, tamper: Option<usize>) -> Vec<Eval> {
-    let vals = region.binding_vals(side.bound.kind);
-    let w = region.binding_width(side.bound.kind);
+/// the component must take its own chunk's proof down.
+pub fn cols(component: &ResidualStreamComponent, side: &Side, tamper: Option<usize>) -> Vec<Eval> {
+    let vals = component.binding_vals(side.bound.kind);
+    let w = component.binding_width(side.bound.kind);
     assert_eq!(w, side.bound.n, "the boundary's width disagrees with its plan");
     let rows = 1usize << side.log_rows;
-    assert_eq!(vals.len(), rows * w, "the binding's values do not fill the region");
+    assert_eq!(vals.len(), rows * w, "the binding's values do not fill the component");
     (0..w)
         .map(|j| {
             let mut v: Vec<M31> = (0..rows)
@@ -796,7 +796,7 @@ pub fn cmd(args: &[String]) {
         &crate::compose::ProverTamper { layer_boundary: Some((1, binding_cell)), ..Default::default() },
     );
     probes.push(json!({
-        "probe": "one cell of the output boundary tree, the region left alone",
+        "probe": "one cell of the output boundary tree, the component left alone",
         "tampered_cell": binding_cell,
         "expects": "its own chunk's proof rejects (the equality constraint)",
         "accepts": t.accepts,
@@ -804,7 +804,7 @@ pub fn cmd(args: &[String]) {
         "verdict": t.json.get("verdict"),
         "passed": !t.accepts,
     }));
-    assert!(!t.accepts, "a boundary column that disagrees with its region accepted");
+    assert!(!t.accepts, "a boundary column that disagrees with its component accepted");
 
     // 2. the wrong neighbour: two chunks that are both entirely honest and both
     //    accept, and are simply not consecutive.  This is the asymmetry in its
@@ -1798,7 +1798,7 @@ pub fn grid_cmd(args: &[String]) {
 //
 //  * K and V are single integers, not bf16 `(sm, ef)` pairs, so there is no
 //    `PACK` and no degree-1 packing question -- one cell per value.
-//  * a side is not one region's values but a *head key tile group's*, spread over
+//  * a side is not one component's values but a *head key tile group's*, spread over
 //    the group's key tile components; the tree's column order is therefore the
 //    component-registration order, `[key_tile's K][key_tile's V]` key tile by key tile.
 //  * a chunk commits an **out** side over its whole key set and an **in** side
@@ -1925,7 +1925,7 @@ pub fn kv_boundaries_of(sides: &[KvSide], key_tile: usize, n: usize) -> Vec<KvBo
 ///
 /// `cols` is handed in already assembled by the caller, which **clones the very
 /// `Eval`s tree 1 committed** rather than re-deriving them from the witness.
-/// That is deliberate, and it is the whole of why byte-for-byte with the region
+/// That is deliberate, and it is the whole of why byte-for-byte with the component
 /// holds: a second copy of `attn_trace`'s index map (`c = chunk * pk + p` for K,
 /// `ch = chunk * pv + p` for V) would agree with the first on every shape
 /// anyone tests and could disagree on the one that matters.  Here there is one
@@ -1934,7 +1934,7 @@ pub fn kv_boundaries_of(sides: &[KvSide], key_tile: usize, n: usize) -> Vec<KvBo
 ///
 /// `tamper` bumps one cell by 1, by flat index over `(column, row)` in the
 /// side's own committed order.  It exists for the probe that has to show the
-/// equality constraint bites: a boundary column that disagrees with the region
+/// equality constraint bites: a boundary column that disagrees with the component
 /// must take its **own chunk's** proof down, which is the statement that the
 /// root is bound to the proof and not merely appended to it.
 pub fn kv_cols(mut cols: Vec<Eval>, tamper: Option<usize>) -> Vec<Eval> {
@@ -2143,8 +2143,8 @@ mod tests {
         // the root of tree `t` is the string `t`
         let root = |t: usize| t.to_string();
         let residual_stream = [
-            Side { bound: Boundary { tree: 3, kind: BindingKind::In(0), n: 1 }, region: 0, log_rows: 1 },
-            Side { bound: Boundary { tree: 4, kind: BindingKind::Out(1), n: 1 }, region: 0, log_rows: 1 },
+            Side { bound: Boundary { tree: 3, kind: BindingKind::In(0), n: 1 }, component: 0, log_rows: 1 },
+            Side { bound: Boundary { tree: 4, kind: BindingKind::Out(1), n: 1 }, component: 0, log_rows: 1 },
         ];
         let kv = [
             KvSide { tree: 5, group: 0, out: true, key_tiles: vec![], columns: 0, cells: 0 },

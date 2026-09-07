@@ -38,7 +38,7 @@ static WITNESS_BYTES: AtomicU64 = AtomicU64::new(0);
 static WITNESS_UPS: AtomicU64 = AtomicU64::new(0);
 
 /// B7a milestone 4 (section 3 row 1): the download that hands a device-filled
-/// region's columns back to its *interaction*, which still runs on the host.
+/// component's columns back to its *interaction*, which still runs on the host.
 /// Section 3's row 2 -- the other ten families' LogUp kernels -- is what
 /// deletes this, and until then it is reported and not hidden.
 static MIRROR_NS: AtomicU64 = AtomicU64::new(0);

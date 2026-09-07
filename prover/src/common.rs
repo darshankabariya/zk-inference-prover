@@ -241,7 +241,7 @@ impl<'a> Session<'a> {
     }
 
     /// B7a milestone 4 (18.5): commit a tree whose columns the caller still
-    /// needs. The flat list is a list of references into the regions, so
+    /// needs. The flat list is a list of references into the components, so
     /// building it costs nothing; see gpu/m4_refs.py.
     /// B7a milestone 4 (19.6): commit one tree whose columns may be on the
     /// host, on the device, or both. `Op::Tree`'s column order is part of the

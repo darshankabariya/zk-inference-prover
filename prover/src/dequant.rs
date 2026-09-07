@@ -98,7 +98,7 @@ impl MulRel {
         (self.0.z, &self.0.alpha_powers)
     }
 }
-// B11 stream V, lever 4: the attention-output region's `(qm, nz2)` pair check
+// B11 stream V, lever 4: the attention-output component's `(qm, nz2)` pair check
 // is the first lookup any family's link has needed from this relation.
 impl PairRel {
     pub fn parts(&self) -> (SecureField, &[SecureField]) {
@@ -106,7 +106,7 @@ impl PairRel {
     }
 }
 // one range-relation type across the whole crate, so a composed proof's range
-// tables serve the attention key tiles and the dequant regions alike
+// tables serve the attention key tiles and the dequant components alike
 pub use crate::attn_air::RangeRel;
 
 pub fn id(s: impl Into<String>) -> PreProcessedColumnId {
@@ -125,7 +125,7 @@ pub fn chan_col(tag: &str, kind: &str, slot: usize) -> PreProcessedColumnId {
     id(format!("b6_chan{tag}_{kind}{slot:04}"))
 }
 pub const QNZ_COLS: [&str; 2] = ["b6_qnz_q", "b6_qnz_nz"];
-/// Selectors of the composed dequant region's Freivalds claimed side.
+/// Selectors of the composed dequant component's Freivalds claimed side.
 pub const DEQ_SEL: [&str; 5] = ["nofirst", "last", "m1", "m2", "end"];
 pub fn deq_sel(tag: &str, name: &str) -> PreProcessedColumnId {
     id(format!("b65_deq{tag}_{name}"))
@@ -257,7 +257,7 @@ impl Spec {
     }
 }
 
-/// B11 stream U, lever 3: the numerator kind of every lookup this region's
+/// B11 stream U, lever 3: the numerator kind of every lookup this component's
 /// evaluator emits, in `add_to_relation` order -- which is the order
 /// `plogup::paired` batches them in and therefore the order the GKR's input
 /// layer holds them in.
@@ -452,7 +452,7 @@ impl Map {
 
 // ------------------------------------------------------------------- the AIR --
 
-/// The composed region's Freivalds claimed side: a Horner over the committed
+/// The composed component's Freivalds claimed side: a Horner over the committed
 /// accumulators, `h = sum_{t,i} s^t rv^i acc[t,i]`, which the verifier compares
 /// against the r^T W Freivalds check's `acc` claim.  Rows are (token, channel-chunk), chunks
 /// and tokens descending, exactly tiled -- so `z` closes each token's inner sum
@@ -466,12 +466,12 @@ pub struct YSide {
     pub claimed_h: SecureField,
 }
 
-/// Stream E: the output side.  One Horner claim over this region's *bf16
+/// Stream E: the output side.  One Horner claim over this component's *bf16
 /// outputs*, written in the residual stream's `(sm, ef)` language, so that a consumer's own
 /// claim over the same values can be compared with it -- which is what stops the
-/// dequant's output being a column some other region commits a second time.
+/// dequant's output being a column some other component commits a second time.
 ///
-/// The row weights need two constants where `YSide` needs one.  This region
+/// The row weights need two constants where `YSide` needs one.  This component
 /// tiles `(token, channel-chunk)` with the chunks descending, so the canonical
 /// channel-major exponent `N - 1 - (c tokens + t)` falls by `per_row * tokens`
 /// from one chunk to the next inside a token and jumps by
@@ -491,9 +491,9 @@ pub enum OKind {
     /// never becomes a column, it is read off the dequant's own output.
     Key,
     /// Stream SS: the signed **integer** `qc (1 - 2 sg)`, the only output a
-    /// `Variant::Fold` region has.  The fold's single rounding *is* B1's
+    /// `Variant::Fold` component has.  The fold's single rounding *is* B1's
     /// `quantize(v, s_v)` -- there is no bf16 waypoint to publish -- so what a
-    /// consumer reads off this region is the int8 cell the key tile commits, and
+    /// consumer reads off this component is the int8 cell the key tile commits, and
     /// the claim is a Horner over those integers rather than over `(sm, ef)`
     /// pairs.  Degree 2, like `Pair` and `Key`: one `qc sg` product.
     Int,
@@ -519,16 +519,16 @@ pub struct OutputClaim {
     pub kind: OKind,
 }
 
-/// Stream II (E11): the x-side scale's claim.  One Horner over the region's
+/// Stream II (E11): the x-side scale's claim.  One Horner over the component's
 /// shared per-token scale columns on its `last` rows, under the same weights
-/// the producing requantize region folds its own committed scale under -- so
+/// the producing requantize component folds its own committed scale under -- so
 /// the equality says "the matmul dequantized by the scale its input was
 /// quantized with", which was the last thing left open between a producer and
 /// its consumer.
 ///
 /// `lam` folds the bf16 variant's `(ms, es)` into one field element, exactly as
-/// the output side folds `(sm, ef)`.  `None` on a region whose Freivalds group has
-/// no requantize seam, and on every region of a chunk with no wiring family.
+/// the output side folds `(sm, ef)`.  `None` on a component whose Freivalds group has
+/// no requantize seam, and on every component of a chunk with no wiring family.
 #[derive(Clone)]
 pub struct SSide {
     pub mu: SecureField,
@@ -551,7 +551,7 @@ pub const DEQ_OSEL: [&str; 3] = ["oin", "obd", "oact"];
 pub struct DequantEval {
     pub log_rows: u32,
     pub sp: Spec,
-    /// distinguishes this region's per-matmul preprocessed columns in a composed
+    /// distinguishes this component's per-matmul preprocessed columns in a composed
     /// proof; empty for the standalone gadget
     pub tag: String,
     pub norm: NormRel,
@@ -562,12 +562,12 @@ pub struct DequantEval {
     pub rels: Vec<RangeRel>,
     /// the composed proof's claimed side; `None` for the standalone gadget
     pub yside: Option<YSide>,
-    /// stream E: the output-side claim, when this region publishes one
+    /// stream E: the output-side claim, when this component publishes one
     pub output_claim: Option<OutputClaim>,
     /// stream II (E11): the x-side scale's claim, when a requantize seam feeds
     /// this matmul
     pub sside: Option<SSide>,
-    /// B11 stream U, lever 3: this region's lookups are proved by the batched
+    /// B11 stream U, lever 3: this component's lookups are proved by the batched
     /// GKR instead of committed running-sum columns, so the AIR emits neither
     /// the relation entries nor the interaction masks they would allocate. The
     /// trace masks stay exactly where they were -- the committed order is the
@@ -679,7 +679,7 @@ impl FrameworkEval for DequantEval {
                 );
                 let fep = fdp * two - E::F::one() - fe.clone();
                 let qd = qm.clone() - qc.clone();
-                // stream SS: this region's output, for the output side.  `qc` is
+                // stream SS: this component's output, for the output side.  `qc` is
                 // the clamped quotient and `sg` its sign, and `qc (1 - 2 sg)` is
                 // cell for cell what `experiments/b1`'s `quantize(v, s_v)`
                 // returns -- the value the key tile commits as `vv.i8`.  The two
@@ -896,7 +896,7 @@ impl FrameworkEval for DequantEval {
                         // the residual stream's encoding: a signed significand carrying the
                         // implicit 128, and the biased exponent.  `nz` makes a
                         // zero result the pair `(0, 0)`, which is what `canon`
-                        // gives it on the other side, and the region's own
+                        // gives it on the other side, and the component's own
                         // `sg - sg nz = 0` already forbids a signed zero -- so
                         // the two sides cannot disagree about -0.
                         let sm = (nz.clone() * E::F::from(m31_u32(128)) + m7.clone())

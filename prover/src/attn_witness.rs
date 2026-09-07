@@ -1,4 +1,4 @@
-//! The data the packed attention region proves: `insts` heads' quantized Q, K, V
+//! The data the packed attention component proves: `insts` heads' quantized Q, K, V
 //! and everything the integer softmax derives from them.
 //!
 //! Every array is `(instance, ...)` row-major, and every derived value is
@@ -295,8 +295,8 @@ pub struct Attn {
     /// half still commits its score (Freivalds is over the whole rectangle) and
     /// nothing else: no numerator, no denominator term, no table row.
     pub diagonal_block: bool,
-    /// B10 step 3: the denominator the *per-token region* commits, when it is not
-    /// this key tile's own `zz`.  With the diagonal block there is one per-token region for
+    /// B10 step 3: the denominator the *per-token component* commits, when it is not
+    /// this key tile's own `zz`.  With the diagonal block there is one per-token component for
     /// the pair and it carries the total `Z_prefix + Z_diagonal_block` -- which is the
     /// only quantity the `Z >= nmax` lower bound holds for, since the key whose
     /// shift is zero may be in either half.
@@ -320,7 +320,7 @@ impl Attn {
     pub fn delta_of(&self, g: usize) -> i64 {
         self.delta[self.inst_of(g)]
     }
-    /// The value the grid region's first committed column holds.
+    /// The value the grid component's first committed column holds.
     ///
     /// For the integer variants this is the shift *scaled to the master table's
     /// exponent*, so one table serves every head in the key tile; the AIR divides it
@@ -332,7 +332,7 @@ impl Attn {
             Variant::IntSplit(k) => (self.dd[g] * self.delta_of(g)) >> k,
         }
     }
-    /// The value the grid region's auxiliary column holds, if it has one.
+    /// The value the grid component's auxiliary column holds, if it has one.
     ///
     /// The split has to be taken on the *scaled* shift, not the raw one: the AIR
     /// reconstructs `d = (idx 2^k + aux) 2^-(F - frac_i)`, so `idx` and `aux` must be
@@ -373,7 +373,7 @@ impl Attn {
             g % c <= (g / c) % s
         }
     }
-    /// The denominator column the per-token region commits: the pair's total where
+    /// The denominator column the per-token component commits: the pair's total where
     /// there is one, this key tile's own otherwise.
     pub fn zz_row(&self) -> &[i64] {
         self.zz_total.as_deref().unwrap_or(&self.zz)

@@ -5,9 +5,9 @@
 //!
 //! | | host today | here |
 //! |---|---|---|
-//! | Freivalds checks | `freivalds_region` over 2^15-2^16 rows, 0.532 s | two kernels, one thread per committed row |
+//! | Freivalds checks | `freivalds_component` over 2^15-2^16 rows, 0.532 s | two kernels, one thread per committed row |
 //! | key tiles | `commit_base` over three grids and a token block, 0.401 s | four kernels per key tile |
-//! | attnout | `ao_region`, 0.042 s | one kernel |
+//! | attnout | `ao_component`, 0.042 s | one kernel |
 //! | all three | `eval_of` on 59 M cells | nothing: the thread owns the output index |
 //!
 //! **What is uploaded is the witness, and for two of the three it is much
@@ -18,7 +18,7 @@
 //! -- 46 MB of shift and numerator against 68 MB of columns -- and that is
 //! written down rather than averaged away.
 //!
-//! **The one thing that is not a transcription.** The grid region's numerator
+//! **The one thing that is not a transcription.** The grid component's numerator
 //! column commits `num[g]`, which on an honest witness equals `table[key(g)]`;
 //! a kernel that recomputed it from the table would be smaller and would
 //! silently repair `Corrupt::Numerator`, turning a rung-3 rejection into an
@@ -274,7 +274,7 @@ pub fn wfill_mut(fam: Fam) -> u32 {
         // B11 stream N, lever 2: the two ways a diagonal block key tile's fill could be
         // wrong that no earlier control reaches. `nomask` is the kernel's (a
         // masked slot bumping the exp table); `notok` is this side's (a diagonal block
-        // key tile building the per-token region it does not own).
+        // key tile building the per-token component it does not own).
         "nomask" => 7,
         "notok" => 8,
         other => panic!("unknown B7_M4_WFILLMUT {other:?}"),
@@ -284,10 +284,10 @@ pub fn wfill_mut(fam: Fam) -> u32 {
 /// B11 stream L: the key tile fill's own switch, defaulting to `B7_M4_WFILL`.
 ///
 /// `B7_M4_WFILL` turns on three device generation paths at once -- the Freivalds check
-/// regions, the attnout, and every non-diagonal block key tile. Stream L measured them
+/// components, the attnout, and every non-diagonal block key tile. Stream L measured them
 /// apart on the sequence's own witness and they are not in the same state: the
 /// Freivalds check and attnout fills reproduce the host cell for cell, while the key tile fill
-/// disagrees with the host on the grid region and the proof is then rejected
+/// disagrees with the host on the grid component and the proof is then rejected
 /// (`off_table` bumps that the host never makes). One switch cannot express
 /// that, so the key tile gate becomes its own three-value variable which falls back
 /// to `B7_M4_WFILL` when it is not set. `B7_M4_WFILL=1 B7_M4_WFILL_KEY_TILE=0` is
@@ -302,7 +302,7 @@ pub fn key_tile_mode() -> u32 {
 
 /// B11 stream M: which fill *this* key tile takes, switch and layout together.
 ///
-/// A diagonal block key tile commits no per-token region and `commit_base_dev` has no
+/// A diagonal block key tile commits no per-token component and `commit_base_dev` has no
 /// notion of that layout, so it fills on the host whatever the switch says
 /// (`attn_trace::commit_base_any`). That override used to live inline at the
 /// one place that picked the path, and the consequence -- that a diagonal-block-bearing
@@ -319,7 +319,7 @@ pub fn key_tile_fill_mode(a: &Attn) -> u32 {
 ///
 /// B11 stream N, lever 2. Until this stream a diagonal block key tile filled on the host
 /// whatever any switch said, because `commit_base_dev` had no notion of a
-/// layout with no per-token region and would have committed columns the AIR
+/// layout with no per-token component and would have committed columns the AIR
 /// does not expect. It has that notion now (`commit_base_dev` takes
 /// `with_rows`, `devpre::key_tile_dev` with it), but a path is born off and
 /// graduates on its gate: this is the switch that opens it, and the mirror
@@ -339,7 +339,7 @@ pub fn diagonal_block_mode() -> u32 {
 /// `B7_M4_TABDEV=1` builds `m_exp` on the card, by summing the per-key-tile exp
 /// counters `commit_base_dev` left there. That is right exactly when *every*
 /// key tile's bumps are on the card -- and a diagonal block key tile always fills on the host,
-/// because it commits no per-token region and the device fill has no notion of
+/// because it commits no per-token component and the device fill has no notion of
 /// its layout. So on a diagonal-block-bearing witness the bumps are split across the
 /// two sides and neither half alone is the column.
 ///
@@ -705,13 +705,13 @@ pub struct DevFreivalds {
     pub m_r8: Uint32Vec,
 }
 
-/// Build one Freivalds group's region on the device.
+/// Build one Freivalds group's component on the device.
 ///
 /// `tables` is read for the 8-bit range table's length and *written* for its
 /// multiplicities: the counters come back and are added in, which is the same
 /// arithmetic the host's serial bumps do and in an order that cannot matter,
 /// because counting is commutative.
-pub fn freivalds_region_dev(
+pub fn freivalds_component_dev(
     layer: &Layer,
     mat_idx: &[usize],
     lay: &FreivaldsLayout,
@@ -809,7 +809,7 @@ pub struct DevAo {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn ao_region_dev(
+pub fn ao_component_dev(
     ao: &AttnOut,
     lay: &AoLayout,
     q_bits: u32,
@@ -858,7 +858,7 @@ pub fn ao_region_dev(
         chunks: lay.chunks as u32,
         log_rows: lay.log_rows,
         lead: lay.lead as u32,
-        // `ao_region` has no switch for its f64 reference: it computes it on
+        // `ao_component` has no switch for its f64 reference: it computes it on
         // every active site, and so does this.
         do_ref: 1,
         mutate: wfill_mut(Fam::Ao),
@@ -938,7 +938,7 @@ pub fn ao_region_dev(
 // ================================================================= the key tiles ==
 
 /// One key tile's committed columns, on the device, with the log size of each --
-/// a key tile is four sub-regions on three grids plus a token block, so unlike the
+/// a key tile is four sub-components on three grids plus a token block, so unlike the
 /// other two families its columns are not all the same height.
 pub struct DevKeyTile {
     pub base: Vec<BaseFieldVec>,
@@ -969,12 +969,12 @@ pub struct DevKeyTile {
 /// One key tile's committed base columns, filled on the device.
 ///
 /// B11 stream N, lever 2 (a): `with_rows` is `!a.diagonal_block`, and it says whether
-/// this key tile commits the **per-token region** -- the row maxima, the
+/// this key tile commits the **per-token component** -- the row maxima, the
 /// denominator and its low limb. A diagonal block key tile does not: there is one maximum
 /// and one denominator per *token*, not per key tile, so the diagonal block rides on the
 /// prefix key tile's. That distinction was the whole of why a diagonal block key tile could
 /// not fill on the card. The fill had no notion of it and would have committed
-/// a per-token region the AIR does not expect there, so `commit_base_any` sent
+/// a per-token component the AIR does not expect there, so `commit_base_any` sent
 /// every diagonal block to the host whatever the switch said; now the fill knows, and
 /// `devwfill::diagonal_block_mode` is what opens the path.
 pub fn commit_base_dev(
@@ -1010,10 +1010,10 @@ pub fn commit_base_dev(
     key_tile_dump(a, with_out);
 
     // B11 stream N, lever 2: `notok` is this lever's own negative control -- a
-    // diagonal block key tile that builds the per-token region anyway, which is precisely
+    // diagonal block key tile that builds the per-token component anyway, which is precisely
     // what `commit_base_any` used to send every diagonal block to the host to avoid.
     // It has to be decided here, before the uploads, because the two arrays
-    // that region reads are skipped with it.
+    // that component reads are skipped with it.
     let with_rows = with_rows || wfill_mut(Fam::KeyTile) == 8;
 
     let t_up = std::time::Instant::now();
@@ -1040,7 +1040,7 @@ pub fn commit_base_dev(
     // This is the whole of what b-port called the prefix key tiles' fill kernels
     // "predating the diagonal block's key discipline", and it is on this side of the
     // link rather than in the kernel. When a diagonal block key tile rides with this one the
-    // per-token region belongs to the *pair*, and the denominator it commits is
+    // per-token component belongs to the *pair*, and the denominator it commits is
     // the pair's total -- `Z >= nmax` holds of the sum and of neither half,
     // because the key whose shift is zero may be in either (`layer.rs:352`).
     // `commit_base` has always read `a.zz_row()` for it; `commit_base_dev`
@@ -1050,7 +1050,7 @@ pub fn commit_base_dev(
     // `off_table` bumps the host never makes, hence the rejection. Rectangles
     // have no diagonal block, `zz_row()` is `zz` there, and that is why stream G's
     // switch matrix and stream F's whole loop saw nothing.
-    // B11 stream N: both of these feed the per-token region alone, so a diagonal block
+    // B11 stream N: both of these feed the per-token component alone, so a diagonal block
     // key tile uploads neither.
     let d_zz = with_rows.then(|| key_tile_up("key_tile/zz", || pack_i64(a.zz_row())));
     // only the bf16x variant reads these two, and only it pays for them
@@ -1100,7 +1100,7 @@ pub fn commit_base_dev(
     let mut at = vec![];
     let counts = zeroes(3);
 
-    // ---- the channel region ------------------------------------------------
+    // ---- the channel component ------------------------------------------------
     at.push(base.len());
     let chan = uninit(lc.pk + lc.pq, lc.g.rows);
     let chan_p = ptrs(&chan);
@@ -1126,7 +1126,7 @@ pub fn commit_base_dev(
     logs.extend(vec![lc.g.log_rows; chan.len()]);
     base.extend(chan);
 
-    // ---- the grid region ---------------------------------------------------
+    // ---- the grid component ---------------------------------------------------
     at.push(base.len());
     let grid = uninit(2 * lk.q + n_aux + lk.pv, lk.g.rows);
     let grid_p = ptrs(&grid);
@@ -1174,7 +1174,7 @@ pub fn commit_base_dev(
         base.extend(outc);
     }
 
-    // ---- the per-token region ----------------------------------------------
+    // ---- the per-token component ----------------------------------------------
     // B11 stream N, lever 2 (a): absent on a diagonal block key tile. `at` still gains both
     // ends of it, so `at[3] == at[4]` there and every index after the outputs
     // keeps its meaning -- the host's `commit_base` pushes the same empty span
@@ -1202,7 +1202,7 @@ pub fn commit_base_dev(
         base.extend(tok);
         (m_lo, m_hi)
     } else {
-        // The two `z` range counters this region would have bumped, at their
+        // The two `z` range counters this component would have bumped, at their
         // real width and all zero. A diagonal block key tile makes no `z` lookups at all,
         // but `b65_pre_fill` sums one counter *per key tile* into each range
         // table's multiplicity column and asserts every one of them is the
@@ -1231,7 +1231,7 @@ pub fn commit_base_dev(
         if let Variant::IntSplit(k) = a.variant {
             add_into(&mut mult_r[ridx(k)], &m_aux.to_vec());
         }
-        // B11 stream N: a diagonal block key tile has no per-token region, so it made no
+        // B11 stream N: a diagonal block key tile has no per-token component, so it made no
         // `z` range bumps to merge.
         if with_rows {
             add_into(&mut mult_r[ridx(cfg.z_lo_bits)], &m_lo.to_vec());
@@ -1258,7 +1258,7 @@ pub fn commit_base_dev(
 /// The default is right for a control -- a fill that is wrong anywhere is
 /// wrong, and stopping at the first cell keeps the panic short. But when the
 /// mirror does bite, the *shape* of the disagreement is the diagnosis: one
-/// column or every column, one row or all of them, a whole region or a single
+/// column or every column, one row or all of them, a whole component or a single
 /// slot. Under the variable every column is compared and a compact table is
 /// printed before the panic, so one run answers that instead of one bisect per
 /// column.

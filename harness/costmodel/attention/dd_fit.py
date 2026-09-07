@@ -79,7 +79,7 @@ def lay_chan(s, c, hd, insts, target=CHAN_TARGET):
 
 def lay_key(s, c, hd, insts, target=GRID_TARGET):
     """`LayoutKey`: one row group per (instance, key), `q` scores per row.  This
-    is the (t, c) grid -- the region the S^2 term lives in."""
+    is the (t, c) grid -- the component the S^2 term lives in."""
     def make(lr):
         g = grid(c * insts, lr, min(s, hd))
         if g is None:
@@ -98,38 +98,38 @@ def lay_out(s, c, hd, insts, target=GRID_TARGET):
     return pick(make, lambda l: l["q"], min(target, s))
 
 
-def row_region(s, insts, rw_cfg=16):
-    """The per-token region, `attn_trace.rs:155-165`: `rw` tokens per row over
+def row_component(s, insts, rw_cfg=16):
+    """The per-token component, `attn_trace.rs:155-165`: `rw` tokens per row over
     `insts * S` of them, then padded up to a power of two.  It is the third
     place a shape can fail to tile, and the one `key_tile_leads` does not report."""
     floor = 1 << MIN_LOG_ROWS
     toks = s * insts
     rw = max(min(rw_cfg, toks // floor), 1)
     rows = max(-(-toks // rw), floor)
-    assert rw * rows == toks, f"per-token region does not tile: rw={rw} rows={rows}"
+    assert rw * rows == toks, f"per-token component does not tile: rw={rw} rows={rows}"
     log_row = max((rows - 1).bit_length(), MIN_LOG_ROWS)
     return dict(rw=rw, rows=rows, log_row=log_row, rrows=1 << log_row,
                 lead=(1 << log_row) - rows)
 
 
-def key_tile_base_geom(s, c, hd=HD, key_tiles=KEY_TILES, rows_region=True, rw_cfg=16):
+def key_tile_base_geom(s, c, hd=HD, key_tiles=KEY_TILES, rows_component=True, rw_cfg=16):
     """The key tile family's committed BASE cells read off the realised layouts --
-    the same three region sums the closed form below collapses to when every
+    the same three component sums the closed form below collapses to when every
     grid tiles exactly, but valid when they do not.  `attn_trace.rs:1170-1174`:
-    the channel region's `(pk + pq)`, the key region's `(2q + pv)`, and the
-    per-token region's `4 * rw`; the `out` region is billed to `attnout`."""
+    the channel component's `(pk + pq)`, the key component's `(2q + pv)`, and the
+    per-token component's `4 * rw`; the `out` component is billed to `attnout`."""
     tot = 0
     for i in key_tiles:
         lc, lk = lay_chan(s, c, hd, i), lay_key(s, c, hd, i)
         tot += (lc["pk"] + lc["pq"]) * lc["rows"] + (2 * lk["q"] + lk["pv"]) * lk["rows"]
-        if rows_region:
-            r = row_region(s, i, rw_cfg)
+        if rows_component:
+            r = row_component(s, i, rw_cfg)
             tot += 4 * r["rw"] * r["rrows"]
     return tot
 
 
 def geometry(s, c, hd=HD, key_tiles=KEY_TILES):
-    """The three regions of every key tile, as the composition lays them out."""
+    """The three components of every key tile, as the composition lays them out."""
     return [dict(insts=i,
                  chan=lay_chan(s, c, hd, i),
                  key=lay_key(s, c, hd, i),
@@ -147,14 +147,14 @@ def tiles_exactly(s, c=None, hd=HD, key_tiles=KEY_TILES):
 
 def composable(s, c=None, hd=HD, key_tiles=KEY_TILES, rw_cfg=16):
     """Will the AIR build this shape at all?  `attn_trace.rs:320-326` asserts the
-    grid's and the output region's TOKEN axes tile exactly --
+    grid's and the output component's TOKEN axes tile exactly --
 
         assert_eq!(l.key.q * l.key.g.chunks, sh.s,
                    "grid layout leaves padded token slots")
 
     -- because a padded token slot would have to commit a numerator that is both
     a table output and zero, and the table's zero row is not the one a zero shift
-    maps to.  `attn_trace.rs:159` asserts the per-token region tiles too.  This is
+    maps to.  `attn_trace.rs:159` asserts the per-token component tiles too.  This is
     a stronger condition than `Grid::lead == 0`, which is about the row-group
     (key) axis; a shape can fail this and still report `lead 0` everywhere."""
     c = c if c else s
@@ -163,7 +163,7 @@ def composable(s, c=None, hd=HD, key_tiles=KEY_TILES, rw_cfg=16):
         if lk["q"] * lk["chunks"] != s or lo["q"] * lo["chunks"] != s:
             return False
         try:
-            row_region(s, i, rw_cfg)
+            row_component(s, i, rw_cfg)
         except AssertionError:
             return False
     return True
@@ -172,23 +172,23 @@ def composable(s, c=None, hd=HD, key_tiles=KEY_TILES, rw_cfg=16):
 # -------------------------------------------------------- the key tile closed form -
 # `prefill.py`'s structural model, verified exact against 8 artifacts across two
 # harnesses and three contexts.  Zero free parameters; every coefficient is read
-# off `attn_trace.rs:1167-1181` with `layout.rs`.  Valid only where the regions
+# off `attn_trace.rs:1167-1181` with `layout.rs`.  Valid only where the components
 # tile exactly -- which is the point of `--geom`.
 NH_HD = NH * HD                                    # 4,096
 
 
-def key_tile_base(s, c, rows_region=True):
+def key_tile_base(s, c, rows_component=True):
     return (2 * NH * s * c + 2 * NH_HD * c + NH_HD * s
-            + (4 * NH * s if rows_region else 0))
+            + (4 * NH * s if rows_component else 0))
 
 
-def key_tile_inter(s, c, rows_region=True):
+def key_tile_inter(s, c, rows_component=True):
     return (76 * s * c + (2 * NH_HD + 384 + 8192) * c + 2 * NH_HD * s
-            + (272 * s if rows_region else 0))
+            + (272 * s if rows_component else 0))
 
 
-def key_tile_fresh(s, c, rows_region=True):
-    return key_tile_base(s, c, rows_region) + key_tile_inter(s, c, rows_region)
+def key_tile_fresh(s, c, rows_component=True):
+    return key_tile_base(s, c, rows_component) + key_tile_inter(s, c, rows_component)
 
 
 GAMMA = 2 * NH                                     # 64  = the S*C base coefficient
@@ -269,7 +269,7 @@ def geom_report():
                        key_tiles_base_closed=key_tile_base(s, s))
         for b in geometry(s, s):
             k, ch, ou = b["key"], b["chan"], b["out"]
-            rr = row_region(s, b["insts"])
+            rr = row_component(s, b["insts"])
             rows[s]["key_tiles"].append(dict(
                 insts=b["insts"], key_log_rows=k["log_rows"], key_chunks=k["chunks"],
                 scores_per_row=k["q"], key_lead=k["lead"],
@@ -407,7 +407,7 @@ def report():
     # -- the one confound §5.1 named: `ao_rem_bits` is data-derived and moved
     #    17 -> 18 -> 20 across the family.  Pinning it at one value above every
     #    point's own makes the family parameter identical.  It widens the
-    #    attnout region and the `o` Freivalds table, so `fresh` must move and `key_tiles`
+    #    attnout component and the `o` Freivalds table, so `fresh` must move and `key_tiles`
     #    must NOT -- which is the check.
     pinned, pinned_fit = [], None
     if got["ddpin"]:
@@ -428,7 +428,7 @@ def report():
                   f"{a['fresh']:>15,} {b['fresh']:>15,} "
                   f"{b['fresh'] / a['fresh'] - 1:>+8.3%}")
         print("  `key_tiles` unmoved at every point is the confound shown to be outside the")
-        print("  key tile family; what moves is the attention-output region alone.")
+        print("  key tile family; what moves is the attention-output component alone.")
         pin_ex = {s: got["ddpin"][s] for s in sorted(got["ddpin"])
                   if tiles_exactly(s) and got["ddpin"][s]["accepts"]}
         if len(pin_ex) >= 3:
@@ -644,7 +644,7 @@ def report():
                   f"{r['key_tiles'] - ex:>12,} {(r['key_tiles'] / ex - 1) * 100:>8.3f}%")
         print("  §5.1 priced the bias at the 1.5625% inert row fraction.  It is larger,")
         print("  because the realised `scores_per_row` also steps (64 -> 74) and the")
-        print("  per-token region pads separately -- `key_tile_leads` reports neither.")
+        print("  per-token component pads separately -- `key_tile_leads` reports neither.")
 
     blob = dict(
         sets={t: {str(s): r for s, r in v.items()} for t, v in got.items()},

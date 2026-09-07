@@ -29,7 +29,7 @@
 #define B65_FILL_CUH
 #include "fields.cuh"
 
-// Everything about the region's shape that `Map`, `MatLayout` and `Spec` fix.
+// Everything about the component's shape that `Map`, `MatLayout` and `Spec` fix.
 // Mirrored by `#[repr(C)] struct FillCfg` in `devfill.rs`; the column indices
 // are passed rather than recomputed so the kernel and `Map::at` agree by
 // construction, exactly as the host builders do.
@@ -75,13 +75,13 @@ struct B65FillCfg {
 #define B65_MUT_REF32 4u
 #define B65_MUT_REFAWAY 5u
 
-// One matmul dequant region: every committed and preprocessed column, in
-// committed order, plus this region's table multiplicities.
+// One matmul dequant component: every committed and preprocessed column, in
+// committed order, plus this component's table multiplicities.
 //
-// `acc` is the region's own witness -- `int32_t` because `kmax <= 21` bounds
+// `acc` is the component's own witness -- `int32_t` because `kmax <= 21` bounds
 // every magnitude the normalisation table can describe by `2^30`, which the
 // caller asserts before it uploads. `norm3` is `(m7, expfield, nz)` per row and
-// `mul2` is `(m7, carry)` per row, both shared across regions.
+// `mul2` is `(m7, carry)` per row, both shared across components.
 //
 // `want_out`, when non-null, receives the f64 cross-check's bf16 pattern per
 // (natural row, slot) -- the check's, never the prover's.

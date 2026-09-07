@@ -37,14 +37,14 @@
 //! proves the weaker statement so the two can be measured against each other
 //! rather than argued about.
 //!
-//! # What this region does *not* do
+//! # What this component does *not* do
 //!
 //! `k_i` is the committed **order key** of the logit: bf16 magnitude order is
 //! pattern order, but logits are signed, so the key is the sign-flipped pattern
 //! (`k = s ? 0x7FFF - mag : 0x8000 + mag`), which is a total order matching the
 //! float order.  Pinning `k` to the `lm_head` dequant's own output is a
 //! positionwise binding of the kind B10 step 2 built for the residual stream, and it is the
-//! composition's job, not this region's.  Standalone, `k` is the statement's
+//! composition's job, not this component's.  Standalone, `k` is the statement's
 //! input.
 
 use num_traits::{One, Zero};
@@ -82,11 +82,11 @@ pub fn order_key(pat: u16) -> u32 {
 // -------------------------------------------------------------------- the AIR --
 
 /// Stream E: the argmax's side of the head binding.  One Horner claim over the
-/// region's committed keys, with the *mirror* of the dequant's weights -- this
-/// region's index map ascends the vocabulary where the dequant's chunks descend,
+/// component's committed keys, with the *mirror* of the dequant's weights -- this
+/// component's index map ascends the vocabulary where the dequant's chunks descend,
 /// so its row step is the inverse of the output side's.
 ///
-/// `tag` names whose selectors to read: the head dequant's, because both regions
+/// `tag` names whose selectors to read: the head dequant's, because both components
 /// walk the same `(token, chunk)` rows and sharing the columns is what makes it
 /// impossible for the two sides to disagree about which row is which.
 #[derive(Clone)]
@@ -114,7 +114,7 @@ pub struct ArgmaxEval {
     /// prove only "the token attains the maximum" -- B6.5's argument unchanged
     pub lax: bool,
     pub rk: RangeRel,
-    /// stream E: the binding to the head's dequant output, when this region is
+    /// stream E: the binding to the head's dequant output, when this component is
     /// composed rather than proved on its own
     pub binding: Option<ArgmaxBinding>,
 }
@@ -230,7 +230,7 @@ impl FrameworkEval for ArgmaxEval {
         // Stream E: the binding.  `end` was committed from the start and unused; it
         // is exactly the selector a Horner claim closes on, so the binding needs no
         // new column of its own beyond the step selectors it borrows from the
-        // head dequant's region.
+        // head dequant's component.
         if let Some(t) = &self.binding {
             let oin = eval.get_preprocessed_column(
                 crate::dequant::deq_sel(&t.tag, crate::dequant::DEQ_OSEL[0]));
@@ -254,7 +254,7 @@ impl FrameworkEval for ArgmaxEval {
             // token instead of one per row -- `oin` carries the accumulator
             // unchanged inside a token, `obd` multiplies by `w` at the row that
             // begins one, and the id is added exactly there.  The committed
-            // `tk` is the one the region's own closing sum pins to the
+            // `tk` is the one the component's own closing sum pins to the
             // lowest-indexed maximum, so this claim is a Horner image of the
             // proved argmax and of nothing else.
             let kmult: E::EF = E::EF::from(oin.clone()) + E::EF::from(obd) * t.k_tok;
@@ -292,8 +292,8 @@ pub enum Tamper {
     /// strict chain and closing sum both accepted before the final-slot close
     TokVocab(usize),
     /// Stream E: one committed key changed, with `pm` and `tok` recomputed from
-    /// the changed keys so the region stays internally consistent.  Every
-    /// constraint here still holds -- what this region proves is a statement
+    /// the changed keys so the component stays internally consistent.  Every
+    /// constraint here still holds -- what this component proves is a statement
     /// *about* its keys -- and only the binding to the head's dequant output can
     /// tell that they are not the logits the layer computed.
     Key(usize),
@@ -351,10 +351,10 @@ impl AWitness {
     }
 
     /// The real head's own keys and tokens, from an `extract.py --head` dump:
-    /// `key_head.u16` is `(tokens, vocab)` of the order key this region compares
+    /// `key_head.u16` is `(tokens, vocab)` of the order key this component compares
     /// and `tok_head.i32` is the token each row emits.  `pm` is not dumped --
     /// it is the row maximum, which is a fact about `key`, so it is derived here
-    /// and the region's own constraints are what check that the prover derived
+    /// and the component's own constraints are what check that the prover derived
     /// it honestly.
     ///
     /// This is the statement's *input*: what pins `key` to the head's dequant is
@@ -412,7 +412,7 @@ impl AWitness {
             }
             // B1 decoded greedily with torch's lowest-index rule, so the dump's
             // token has to *be* the first maximum; a dump that disagrees is a
-            // spec mismatch, not something for the region to prove around
+            // spec mismatch, not something for the component to prove around
             let first = row.iter().position(|v| *v == mx).expect("the maximum") as u32;
             if tok[t] != first {
                 return Err(format!(
@@ -446,7 +446,7 @@ impl AWitness {
                 pm[t] = pm[t].saturating_sub(1);
             }
             Some(Tamper::TokVocab(t)) => tok[t % self.tokens] = self.vocab as u32,
-            // stream E's key tamper is applied in `region`, which owns the keys
+            // stream E's key tamper is applied in `component`, which owns the keys
             Some(Tamper::Key(_)) | None => {}
         }
         (tok, pm)
@@ -495,13 +495,13 @@ impl Outcome {
     }
 }
 
-/// The region's committed columns and its table uses, with no transcript of its
+/// The component's committed columns and its table uses, with no transcript of its
 /// own -- what a composed proof needs, and what `run` now builds its standalone
 /// proof out of so the two cannot drift apart.
 ///
 /// The layout is *given*, not chosen: a binding to the head's dequant is
-/// positionwise, so both regions have to walk the same `(token, chunk)` rows.
-pub struct ARegion {
+/// positionwise, so both components have to walk the same `(token, chunk)` rows.
+pub struct AComponent {
     pub lay: MatLayout,
     pub pre: Vec<Eval>,
     pub base: Vec<Eval>,
@@ -516,7 +516,7 @@ pub struct ARegion {
     pub b0: usize,
 }
 
-impl ARegion {
+impl AComponent {
     /// Stream KK: the emitted token of every position, in position order.  The
     /// rows walk the tokens descending, so this reads them back off the
     /// committed column rather than assuming an order.
@@ -531,15 +531,15 @@ impl ARegion {
     }
 }
 
-pub fn region(w: &AWitness, lax: bool, lay: MatLayout, m_rk: &mut [u32],
-              bad: Option<Tamper>) -> ARegion {
+pub fn component(w: &AWitness, lax: bool, lay: MatLayout, m_rk: &mut [u32],
+              bad: Option<Tamper>) -> AComponent {
     let pr = lay.per_row;
     let rows = 1usize << lay.log_rows;
     let mut keys = vec![0u32; rows * pr];
     let mut toks = vec![0u32; rows];
     let (mut tok, mut pm) = w.tampered(bad);
     // stream E: a key changed, and the row's own maximum and token move with it,
-    // so nothing inside the region notices
+    // so nothing inside the component notices
     let mut kcol = std::borrow::Cow::Borrowed(&w.key);
     if let Some(Tamper::Key(i)) = bad {
         let q = i % w.key.len();
@@ -566,7 +566,7 @@ pub fn region(w: &AWitness, lax: bool, lay: MatLayout, m_rk: &mut [u32],
     let mut ss_carry = 0i64;
     for j in 0..rows {
         let Some((t, b)) = lay.at_opt(w.tokens, j) else {
-            // An inert lead row, filled the way `ao_region` fills its own: values
+            // An inert lead row, filled the way `ao_component` fills its own: values
             // that satisfy every constraint and whose lookups land on real table
             // rows.  `pm = k = b = 0` gives `pm - k - b = 0`, which is in range;
             // the indicator is 0 so the monotone and selector constraints hold;
@@ -612,7 +612,7 @@ pub fn region(w: &AWitness, lax: bool, lay: MatLayout, m_rk: &mut [u32],
         eval_of(lay.log_rows, (0..rows).map(|j| m31_u32(f(j) as u32)).collect())
     };
     // `nofirst` and `last` are false on an inert row, so its accumulator neither
-    // carries nor closes -- the same shape `ao_region`'s selectors have.
+    // carries nor closes -- the same shape `ao_component`'s selectors have.
     let first = |j: usize| matches!(lay.at_opt(w.tokens, j), Some((_, b)) if b == lay.chunks - 1);
     let active = |j: usize| lay.at_opt(w.tokens, j).is_some();
     let pre = vec![
@@ -622,12 +622,12 @@ pub fn region(w: &AWitness, lax: bool, lay: MatLayout, m_rk: &mut [u32],
     ];
 
     let base: Vec<Eval> = cols.into_iter().map(|c| eval_of(lay.log_rows, c)).collect();
-    ARegion { lay, pre, base, off_table, keys, toks, col_pm, k0, b0 }
+    AComponent { lay, pre, base, off_table, keys, toks, col_pm, k0, b0 }
 }
 
-/// The region's LogUp columns and its use sum, in the order the AIR adds the
+/// The component's LogUp columns and its use sum, in the order the AIR adds the
 /// lookups.  Split out of `run` so the composed path builds the same fractions.
-pub fn logup(r: &ARegion, lax: bool, rk: &RangeRel) -> (Vec<Eval>, SecureField) {
+pub fn logup(r: &AComponent, lax: bool, rk: &RangeRel) -> (Vec<Eval>, SecureField) {
     let one = stwo::prover::backend::simd::qm31::PackedQM31::broadcast(SecureField::one());
     let (n, f) = crate::plogup::paired(r.lay.per_row, |i, vr| {
         let pmv = r.base[r.col_pm].data[vr];
@@ -642,7 +642,7 @@ pub fn logup(r: &ARegion, lax: bool, rk: &RangeRel) -> (Vec<Eval>, SecureField) 
 /// Stream E: the binding's accumulator column, and the value it closes on.  The
 /// weights are the mirror of the head dequant's output side, and an inert row
 /// contributes nothing on either side.
-pub fn binding_col(r: &ARegion, tokens: usize, t: &ArgmaxBinding) -> (Vec<Eval>, SecureField, SecureField) {
+pub fn binding_col(r: &AComponent, tokens: usize, t: &ArgmaxBinding) -> (Vec<Eval>, SecureField, SecureField) {
     let rows = 1usize << r.lay.log_rows;
     let mut u = vec![SecureField::zero(); rows];
     // stream KK: the second accumulator, one step per token over the committed
@@ -691,7 +691,7 @@ pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
     let pr = lay.per_row;
     let rows = 1usize << lay.log_rows;
     let mut m_rk = vec![0u32; 1 << KEY_BITS];
-    let r = region(w, lax, lay, &mut m_rk, bad);
+    let r = component(w, lax, lay, &mut m_rk, bad);
     let (pre, base, off_table) = (r.pre.clone(), r.base.clone(), r.off_table);
     let (col_pm, k0, b0) = (r.col_pm, r.k0, r.b0);
     let mult = eval_of(KEY_BITS, m_rk.iter().map(|v| m31_u32(*v)).collect());
@@ -755,7 +755,7 @@ mod tests {
 
     /// Stream KK (`notes/witness-slack.md` section 5 item 2): the sum
     /// `verify_composed` recomputes from the statement's published `tok_out` is
-    /// the claim the region publishes.  The argmax's rows walk the positions
+    /// the claim the component publishes.  The argmax's rows walk the positions
     /// *descending*, so the exponents are the mirror of the embedding's and
     /// this is where that is checked rather than argued.
     #[test]
@@ -766,7 +766,7 @@ mod tests {
             let w = AWitness::synthetic(tokens, vocab, 0.25, 5);
             let lay = MatLayout::choose_padded(vocab, tokens, target);
             let mut m_rk = vec![0u32; 1 << KEY_BITS];
-            let r = region(&w, false, lay, &mut m_rk, None);
+            let r = component(&w, false, lay, &mut m_rk, None);
             let ch = SecureField::from_m31_array(
                 [m31_u32(61), m31_u32(67), m31_u32(71), m31_u32(73)]);
             let binding = ArgmaxBinding { w: vec![SecureField::zero(); lay.per_row],
@@ -775,7 +775,7 @@ mod tests {
                              claimed_tok: SecureField::zero(), tag: String::new() };
             let (_, _, claimed) = binding_col(&r, tokens, &binding);
             let toks = r.token_ids(tokens);
-            assert_eq!(toks, w.tok, "the published tokens are the region's");
+            assert_eq!(toks, w.tok, "the published tokens are the component's");
             // exactly `verify_composed`'s `horner(.., false)`
             let mut acc = SecureField::zero();
             for v in toks.iter().rev() {

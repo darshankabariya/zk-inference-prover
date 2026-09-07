@@ -1,15 +1,15 @@
-//! The two region evals B6.5 adds to compose a layer proof.
+//! The two component evals B6.5 adds to compose a layer proof.
 //!
 //! `FreivaldsEval` is B3's r^T W Freivalds check, on B6's ChanEval skeleton: one row group per
 //! *input* channel `k`, chunked; `pk` preprocessed weights and `pq` committed
 //! activation bytes per row; `v = sum_t s^t qX[k, t]` shared by every matmul of
 //! the group (q/k/v share one input, so do gate/up), one `u_m = sum_i rv^i W_m[i, k]`
 //! and one `acc_m = sum_k u_m v` per matmul.  The verifier compares each `acc_m`
-//! against the dequant region's claimed side `h_m = sum_{t,i} s^t rv^i acc[t, i]`
+//! against the dequant component's claimed side `h_m = sum_{t,i} s^t rv^i acc[t, i]`
 //! over the *same committed accumulator cells* the dequant rounds — that equality
 //! is the Freivalds identity `acc = qX qW` (mod p), with nothing committed twice.
 //!
-//! `AttnOutEval` replaces the key tiles' A.V output region *and* rounds the output:
+//! `AttnOutEval` replaces the key tiles' A.V output component *and* rounds the output:
 //! one row per (head, token, channel-chunk), the A.V outputs committed here as
 //! `acc`, the int8 fold (`q = round(acc * 2^e / Z)`, B6's `int8` variant with the
 //! review's two edge fixes) applied slot-wise, and two Horner accumulators that
@@ -63,14 +63,14 @@ pub const EPOW_COLS: [&str; 3] = ["b65_epow_e", "b65_epow_n", "b65_epow_p"];
 
 /// Stream II: the Freivalds check's own Horner claim over its committed activations, in
 /// the canonical channel-major stream order `q = c * tokens + t`, so that a
-/// producing region's claim over the same sequence is comparable to it value
+/// producing component's claim over the same sequence is comparable to it value
 /// for value.
 ///
 /// The Freivalds check's grid runs `(input channel, token chunk)` down the rows with the
 /// tokens in the slots, so the row step takes two values -- `m_in` inside one
 /// channel's chunks and `m_bd` at a channel boundary -- which is the shape
 /// `dequant::OutputClaim` already runs at.  Both selectors it needs are ones this
-/// region already commits: `nofirst` is `[chunk + 1 < chunks]`, which is true
+/// component already commits: `nofirst` is `[chunk + 1 < chunks]`, which is true
 /// only away from a channel's first row, and `notzero` is `[j > 0]`, so
 /// `notzero - nofirst` is exactly "this row begins a channel and is not row 0".
 /// No new preprocessed column.
@@ -108,7 +108,7 @@ pub struct FreivaldsEval {
     /// cell in `[1, 2^12)` against a 12-bit range table rather than two limbs.
     pub act_off: u32,
     pub range_check: bool,
-    /// B11 stream V, lever 4: this region's range checks are proved by the
+    /// B11 stream V, lever 4: this component's range checks are proved by the
     /// batched GKR instead of committed running-sum columns, so the AIR emits
     /// neither the relation entries nor the interaction masks they would
     /// allocate. `range_check` still says whether the checks exist at all; this
@@ -178,7 +178,7 @@ impl FrameworkEval for FreivaldsEval {
         }
         // stream II: the activation claim, allocated before the LogUp columns
         // so that the interaction order is bindings-then-fractions, as the wiring
-        // family's regions already are.  The value folded is `a - act_off`, the
+        // family's components already are.  The value folded is `a - act_off`, the
         // signed activation, which is what a producer's requantize publishes.
         if let Some(q) = &self.qx {
             let [x_prev, x] =
@@ -205,7 +205,7 @@ impl FrameworkEval for FreivaldsEval {
     }
 }
 
-// -------------------------------------------------- the attention-output region --
+// -------------------------------------------------- the attention-output component --
 
 #[derive(Clone)]
 pub struct AttnOutEval {
@@ -222,11 +222,11 @@ pub struct AttnOutEval {
     pub mu_den: SecureField,
     pub claimed_out: SecureField,
     pub claimed_den: SecureField,
-    /// Stream JJ (E11), for stream II: the region's *own output* -- the signed
+    /// Stream JJ (E11), for stream II: the component's *own output* -- the signed
     /// requantized attention output `q = qm (1 - 2 sg)`, folded under exactly
     /// the weights `claimed_out` uses.  `AttnOutEval` is the requantization of
     /// the attention output, so this is what the `o` Freivalds check's `qX` has to equal
-    /// and there is no requant region between them; the `eqs` entry that says
+    /// and there is no requant component between them; the `eqs` entry that says
     /// so is II's.
     pub claimed_q: SecureField,
     pub qnz: PairRel,
@@ -280,7 +280,7 @@ impl FrameworkEval for AttnOutEval {
         // Stream JJ (E11): the per-slot `jvp` comes first, because a lowered
         // evaluator numbers its preprocessed loads in `get_preprocessed_column`
         // call order (`cudagen::Ir::pre_ids`) and the GKR backend's `fam_site`
-        // indexes the region's own `pre` vector with that number.  `ao_region`
+        // indexes the component's own `pre` vector with that number.  `ao_component`
         // builds `pre` as the slots' `jvp` then `AO_SEL`, so the reads have to
         // run in that order or the backend's fractions read a selector for a `jv`.
         let jvps: Vec<E::F> = (0..self.per_row)
@@ -315,7 +315,7 @@ impl FrameworkEval for AttnOutEval {
         // window at the key `jvp + joff`, which is `e - e_min`.  Tree 0 is then
         // a function of the model, the shape and the params alone.
         // The offsets are `[0, -1]` and not `den`'s `[-1, 0]`, and that order is
-        // load-bearing: `joff` is the first column of this region a *lookup*
+        // load-bearing: `joff` is the first column of this component a *lookup*
         // reads at a mask, and `gkrlink::LinkTie` resolves a referenced column
         // as `mask[tree][col][0]` -- the value at the column's *first* sampled
         // offset.  With `[-1, 0]` the GKR backend's binding would read the previous
@@ -368,7 +368,7 @@ impl FrameworkEval for AttnOutEval {
                 d.clone() - (mag.clone() * num.clone()) * two
                     + (qm.clone() * two - E::F::one()) * denp.clone(),
             );
-            // stream JJ: the region's output value, degree 2, never a column
+            // stream JJ: the component's output value, degree 2, never a column
             qouts.push(qm.clone() - (qm.clone() * sg.clone()) * two);
             let dp = denp.clone() * two - E::F::one() - d.clone();
             if !self.gkr {
@@ -400,7 +400,7 @@ impl FrameworkEval for AttnOutEval {
                 // bit length of `max 2 denp` (`AttnOut::rem_bits`), so honest
                 // `denp < 2^(rem_bits-1)` -- and makes the error identity an
                 // integer identity.  Before it, the only guard was the host-side
-                // assert at `layer.rs`'s `ao_region`.
+                // assert at `layer.rs`'s `ao_component`.
                 let denp_look = if self.denp2 { denp.clone() * two } else { denp.clone() };
                 eval.add_to_relation(RelationEntry::new(
                     &self.rel_rem, E::EF::one(), core::slice::from_ref(&denp_look)));
@@ -455,7 +455,7 @@ impl FrameworkEval for AttnOutEval {
         eval.add_constraint((h - claim_out) * end.clone());
         let claim_den = eval.claim(self.claimed_den);
         eval.add_constraint((dz - claim_den) * end.clone());
-        // stream JJ: the fourth claim, `z`/`h`'s shape over the region's own
+        // stream JJ: the fourth claim, `z`/`h`'s shape over the component's own
         // output instead of over `acc`.  Same slot weights, same row step, same
         // token and head boundaries, so a consumer that folds the attention
         // output under `claimed_out`'s convention compares against this one.

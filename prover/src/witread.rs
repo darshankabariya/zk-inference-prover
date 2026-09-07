@@ -3,7 +3,7 @@
 //! `build_secs` (`chunks.rs`) is the wall of turning one chunk's witness
 //! directory into a `Layer`. Four different kinds of work happen in there --
 //! the files are read, their bytes are decoded into arrays, some of what they
-//! carry is recomputed and compared against them, and the objects every region
+//! carry is recomputed and compared against them, and the objects every component
 //! reads are built -- and on the sequence that one number is 86% of the
 //! generation thread's own time, a term no boundary this program reports has
 //! ever counted (`briefs/o-overlap.md` section 5). Which of the four dominates
@@ -17,16 +17,16 @@
 //!
 //! Time is charged **exclusively**: a scope charges its own elapsed time less
 //! whatever the scopes that opened and closed inside it charged, so a site may
-//! wrap a region that contains other sites and still report only its own part.
+//! wrap a component that contains other sites and still report only its own part.
 //! The bookkeeping for that is per thread, which is what the loaders are
 //! today: one thread builds one chunk's layer, and the parallel loops inside
-//! `Attn::build` open no scopes of their own. A region that is *made* parallel
+//! `Attn::build` open no scopes of their own. A component that is *made* parallel
 //! has to keep its scope on the thread that opens it and open none inside the
 //! workers, or the outer scope will count the workers' wall and the workers
 //! will charge the same time again.
 //!
 //! The counters are process-wide and a caller reads them by difference:
-//! `snapshot()` before a region and `since(&snap)` after it. That is how
+//! `snapshot()` before a component and `since(&snap)` after it. That is how
 //! `chunks.rs` attributes the work to a chunk, and it is why nothing here
 //! needs to know what a chunk is.
 
@@ -50,7 +50,7 @@ pub enum Kind {
     /// dump claims. These are load-bearing -- they are what catches an
     /// extractor/AIR disagreement -- and they may only get faster.
     Check,
-    /// Building the objects the regions read: the scores, the exp table, the
+    /// Building the objects the components read: the scores, the exp table, the
     /// numerators, the denominators, the A.V outputs, the per-key-tile tables.
     Construct,
     /// Stream W: getting and giving back the memory the four above run in.
@@ -129,7 +129,7 @@ pub enum Site {
     KeyTiles,
     /// the seven matmuls and the head, assembled
     Mats,
-    /// the attnout region's accumulation over the key tiles
+    /// the attnout component's accumulation over the key tiles
     AttnOut,
 }
 
@@ -248,7 +248,7 @@ pub fn read_json(path: &str) -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
-/// The counters as they stand. A caller times a region by taking one of these
+/// The counters as they stand. A caller times a component by taking one of these
 /// before it and calling `since` after it.
 #[derive(Clone)]
 pub struct Snapshot {
@@ -265,7 +265,7 @@ pub fn snapshot() -> Snapshot {
     }
 }
 
-/// What one region cost, split by site and summed by kind.
+/// What one component cost, split by site and summed by kind.
 #[derive(Clone)]
 pub struct Split {
     secs: [f64; Site::ALL.len()],

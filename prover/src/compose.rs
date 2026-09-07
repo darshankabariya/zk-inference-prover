@@ -1,5 +1,5 @@
 //! B6.5 — the composed layer proof: one FS transcript over the attention key tiles,
-//! the seven matmuls' dequant regions, the attention-output fold and the r^T W
+//! the seven matmuls' dequant components, the attention-output fold and the r^T W
 //! Freivalds checks, with the shared tables committed once — and the trust boundary closed.
 //!
 //! The **statement** is two serialized documents:
@@ -58,7 +58,7 @@ use crate::dequant::{
 };
 use crate::layer::{
     AoLayout, FREIVALDS_GROUPS, FreivaldsLayout, Layer, MatLayout, Tables, ao_interaction,
-    ao_region, freivalds_interaction, freivalds_region, mat_interaction, mat_region,
+    ao_component, freivalds_interaction, freivalds_component, mat_interaction, mat_component,
 };
 use crate::residual_stream::{self, Binding, BindingKind, GKind, GTableEval, Kind, Prog,
                   ResidualStreamEval, ResidualStreamRels, ResidualStreamTables, TieSpec, Tiling,
@@ -82,7 +82,7 @@ pub struct Rels {
     pub ranges: Vec<RangeRel>,
     /// B10 step 2: `POW`, `SMUL`, `VAL` and one unary table per kind.  `NORM` and
     /// `FRAC` are *not* redrawn -- the residual stream reads the very relations the dequant
-    /// regions do, which is what makes the two families share one multiplicity
+    /// components do, which is what makes the two families share one multiplicity
     /// column per shared table.  Absent when the layer carries no residual stream, so a
     /// proof without it draws exactly what B6.5 drew.
     pub residual_stream: Option<ResidualStreamRels>,
@@ -97,13 +97,13 @@ pub struct Rels {
     /// order a function of "are there seams" alone.
     pub rq: Option<RqRels>,
     /// Stream NN-3: the quantize family's own tables, drawn after the seams'
-    /// and only when the chunk carries a quantize region -- so a proof without
+    /// and only when the chunk carries a quantize component -- so a proof without
     /// the rotation draws exactly what it always drew.
     pub qq: Option<QuantRels>,
 }
 
 /// Stream NN-3: one division relation per side width, in `Plan::q_tabs` order,
-/// and the family's own `(q, nz)` pair relation.  The regions keep reading the
+/// and the family's own `(q, nz)` pair relation.  The components keep reading the
 /// layer's 15-bit range and `requant.rs`'s sign table, which are width-free.
 #[derive(Clone)]
 pub struct QuantRels {
@@ -235,7 +235,7 @@ pub struct Params {
     /// Stream TT (E11), log row 73.  The **magnitude form** of the same window.
     /// With it on, the slot commits `mag = |acc|` beside `acc` and the two
     /// limbs range-check *`mag`*, not `acc + 2^(lo+hi-1)`; the sign is carried
-    /// by the `sg` column the region already has, so the limbs cover
+    /// by the `sg` column the component already has, so the limbs cover
     /// `AttnOut::acc_bits()` rather than `acc_bits() + 1` and the same
     /// `1 + lo + hi + max(e_hi, 0) <= 31` window admits one more bit of
     /// exponent.  It costs one committed column per slot and no lookup.
@@ -248,7 +248,7 @@ pub struct Params {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ao_acc_mag: bool,
     /// Stream TT (E11), log row 73, the sibling bound's half.  With it on the
-    /// region looks up `2 denp` in the `ao_rem_bits` table rather than `denp`,
+    /// component looks up `2 denp` in the `ao_rem_bits` table rather than `denp`,
     /// which states `denp <= 2^(rem-1) - 1` -- the width an honest `denp`
     /// actually has, since `AttnOut::rem_bits` is the bit length of `max
     /// 2 denp`.  It costs no table, no column and no lookup, and it moves
@@ -296,7 +296,7 @@ pub struct Params {
     /// dequant's, is a loud configuration error without it.
     pub gkr_residual_stream: bool,
     /// B11 stream V, lever 4: the Freivalds checks' 8-bit activation range checks, and the
-    /// attention-output region's three lookups per slot, under `--gkr-freivalds`
+    /// attention-output component's three lookups per slot, under `--gkr-freivalds`
     /// and `--gkr-attnout`. Both compose with `--gkr-key-tiles`.
     pub gkr_freivalds: bool,
     pub gkr_attnout: bool,
@@ -326,7 +326,7 @@ pub struct Params {
     /// two features share the binding challenge, not the witness.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub logits_claim: bool,
-    /// Stream E: compose the argmax region into this proof, bound to the head's
+    /// Stream E: compose the argmax component into this proof, bound to the head's
     /// key claim.  Implies `logits_claim` -- that claim is its counterparty.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub prove_argmax: bool,
@@ -335,7 +335,7 @@ pub struct Params {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub prove_argmax_lax: bool,
     /// Stream BB (E11): the embedding gadget's vocabulary, and zero when the
-    /// gadget is off -- which is what the plan reads as "no embedding region".
+    /// gadget is off -- which is what the plan reads as "no embedding component".
     /// The gadget proves that the layer's committed residual-stream input is
     /// row `tok[t]` of an embedding matrix pinned in tree 0, so it needs the
     /// wiring family (its binding's counterparty is `stream_bindings[stream_in]`) and it
@@ -344,7 +344,7 @@ pub struct Params {
     /// never had the feature.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub embed_vocab: usize,
-    /// Channels per row of both embedding regions.  It is the lookup tuple's
+    /// Channels per row of both embedding components.  It is the lookup tuple's
     /// arity minus two, so it is the one number in the gadget the generated
     /// kernel's per-row width depends on; `EmbLayout::choose` rounds it down to
     /// `d` over a power of two.
@@ -361,7 +361,7 @@ pub struct Params {
 
 /// Stream NN: what the verifier needs to rebuild the rotation's own table.
 ///
-/// `cos` and `sin` are preprocessed operands of the RoPE regions, and
+/// `cos` and `sin` are preprocessed operands of the RoPE components, and
 /// `rope(pos)` reads the token's **absolute** position -- `pos0 + t` -- so tree
 /// 0 is a function of the block index as well as of (model, layer, shape,
 /// params).  `pos0` is that dependence, written down: `verify_composed` checks
@@ -407,7 +407,7 @@ impl RopeParams {
 pub struct ResidualStreamParams {
     pub d: usize,
     pub a: usize,
-    /// The FFN width, for the SwiGLU's own tiling.  Stream II made the region
+    /// The FFN width, for the SwiGLU's own tiling.  Stream II made the component
     /// unconditional, so a dump whose manifest predates `dff` no longer composes
     /// with the wiring family at all -- and says so rather than proving less.
     pub dff: usize,
@@ -417,7 +417,7 @@ pub struct ResidualStreamParams {
     /// pinned as the parameters the verifier builds it from.
     pub eps: u16,
     pub inv_d: u16,
-    /// Stream E: make `o_out` and `d_out` the `o` and `down` dequant regions'
+    /// Stream E: make `o_out` and `d_out` the `o` and `down` dequant components'
     /// own published outputs, bound to the copies the wiring family commits.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bind_matmul_outputs: bool,
@@ -481,14 +481,14 @@ pub struct Fixed {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Stream KK (`notes/witness-slack.md` §1b): the token ids the embedding
-    /// region committed, one per position of this block, in position order.
+    /// component committed, one per position of this block, in position order.
     /// `verify_composed` recomputes the Horner claim over them under the
     /// chunk's own replayed `w` and compares it against `claims.embed_tok`, so
     /// this vector is the proof's ids and not a second, free-standing
-    /// declaration.  Empty on a chunk with no embedding region.
+    /// declaration.  Empty on a chunk with no embedding component.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tok_in: Vec<u32>,
-    /// Stream KK (§5 item 2): the tokens the `lm_head` chunk's argmax region
+    /// Stream KK (§5 item 2): the tokens the `lm_head` chunk's argmax component
     /// emitted, one per position, pinned the same way against
     /// `claims.head_tok`.  Empty on a chunk that proves no argmax.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -502,7 +502,7 @@ pub struct Claims {
     pub key_tiles: Vec<[[u32; 4]; 6]>,
     pub ao_out: [u32; 4],
     pub ao_den: [u32; 4],
-    /// Stream JJ (E11): the attention-output region's claim over its *own
+    /// Stream JJ (E11): the attention-output component's claim over its *own
     /// output* -- the signed requantized value `qm (1 - 2 sg)`, folded under
     /// exactly `ao_out`'s weights.  `AttnOutEval` is the requantization of the
     /// attention output, so this is the value the `o` Freivalds check's committed
@@ -510,7 +510,7 @@ pub struct Claims {
     /// `Vec` so a statement written before this stream still parses.
     #[serde(default)]
     pub ao_q: Vec<[u32; 4]>,
-    /// per matmul: the dequant region's Freivalds side
+    /// per matmul: the dequant component's Freivalds side
     pub mat_h: Vec<[u32; 4]>,
     /// per Freivalds group, per matmul: the Freivalds check's side
     pub freivalds_acc: Vec<Vec<[u32; 4]>>,
@@ -518,17 +518,17 @@ pub struct Claims {
     pub use_sums: Vec<[u32; 4]>,
     /// per table component, in table order
     pub table_sums: Vec<[u32; 4]>,
-    /// B10 step 2: per residual-stream region, per binding, the Horner claim over the values it
+    /// B10 step 2: per residual-stream component, per binding, the Horner claim over the values it
     /// carries.  The verifier's equalities between them are what say the residual
     /// stream is threaded; `residual_stream.stream_in` and `residual_stream.stream_out` name the two
     /// that are the layer's boundary.
     #[serde(default)]
     pub stream_bindings: Vec<Vec<[u32; 4]>>,
     /// stream E: one per dequant output binding, in `ResidualStreamPlan::output_bindings` order --
-    /// the value the `o` and `down` regions publish for their own bf16 outputs
+    /// the value the `o` and `down` components publish for their own bf16 outputs
     #[serde(default)]
     pub deq_out: Vec<[u32; 4]>,
-    /// Stream NN: per quantize region, the bf16 side it consumed and the
+    /// Stream NN: per quantize component, the bf16 side it consumed and the
     /// integer side it produced.  `nn_in` is compared against the rotation's
     /// `Out(0)` (for q and k) or against `deq_out` (for v); `nn_out` against the
     /// sum of the diagonal block key tiles' own claims over their committed columns.
@@ -541,35 +541,35 @@ pub struct Claims {
     pub key_tile_qkv: Vec<[[u32; 4]; 3]>,
     /// Stream NN (NN-2): per key tile of `Plan::nn_q_key_tiles`, that **prefix** key tile's
     /// own Q claim.  Its counterparty is its group's diagonal block, not a quantize
-    /// region: `nn_q_ok` says the two folds agree, and the diagonal block's is already
+    /// component: `nn_q_ok` says the two folds agree, and the diagonal block's is already
     /// bound to the rotated query, so the prefix's is too.
     #[serde(default)]
     pub key_tile_q: Vec<[u32; 4]>,
     /// stream E: the head's order-key claim, when it is published
     #[serde(default)]
     pub logits_claim: Vec<[u32; 4]>,
-    /// stream E: the argmax region's claim over the keys it compared -- equal to
+    /// stream E: the argmax component's claim over the keys it compared -- equal to
     /// `logits_claim` is what says it compared the head's own output
     #[serde(default)]
     pub am_key: Vec<[u32; 4]>,
-    /// stream KK: the argmax region's claim over the tokens it emitted, under
+    /// stream KK: the argmax component's claim over the tokens it emitted, under
     /// the same `w` its key claim uses.  The counterparty is not another claim
     /// inside this proof but the statement's own `tok_out`, which the verifier
     /// recomputes it from.
     #[serde(default)]
     pub head_tok: Vec<[u32; 4]>,
-    /// stream BB: the embedding region's Horner claim over the residual stream
+    /// stream BB: the embedding component's Horner claim over the residual stream
     /// it proved.  Equal to `stream_bindings[stream_in]` is what says the row it
     /// proved is the row the layer consumed.
     #[serde(default)]
     pub embed_out: Vec<[u32; 4]>,
-    /// stream BB: the same region's claim over the committed token ids, so the
+    /// stream BB: the same component's claim over the committed token ids, so the
     /// ids are a named value of the statement and a transcript anchor has
     /// something to bind to.  Nothing inside this proof compares it.
     #[serde(default)]
     pub embed_tok: Vec<[u32; 4]>,
     /// stream II: per requantize seam, its claim over the bf16 values it
-    /// consumed -- equal to the producing region's `Out(0)` is what says the
+    /// consumed -- equal to the producing component's `Out(0)` is what says the
     /// matmul's input is the producer's output.
     #[serde(default)]
     pub rq_in: Vec<[u32; 4]>,
@@ -607,7 +607,7 @@ pub fn qm(v: SecureField) -> [u32; 4] {
 /// Stream QQ (log row 61): at emit time a claim the placeholder set does not
 /// supply is a defect, not a zero.
 ///
-/// Every region reads its binding claims through `.get(..)`, and the missing case
+/// Every component reads its binding claims through `.get(..)`, and the missing case
 /// used to be `SecureField::zero()`. That zero is not neutral: `Lower::ext`
 /// folds `x - 0` and `Ir::schedule` drops the dead slot with it, so the emitter
 /// installs a shape two instructions and one slot shorter than the one every
@@ -700,14 +700,14 @@ impl Claims {
     }
 }
 
-/// Stream II: one requantize seam's Horner weights.  The region tiles by
+/// Stream II: one requantize seam's Horner weights.  The component tiles by
 /// `MatLayout` -- row `j` is `(token, chunk)` with both descending, slot `sl`
 /// holding channel `chunk * per_row + sl` -- which is the dequant's own map, so
 /// these are `output_claim_w`'s constants: within a row the weight falls by `tokens`
 /// per slot, and the row step takes `k_in` inside a token and `k_bd` at its
 /// boundary.  Multiplying the accumulated steps out from row `(t, b)` to the
 /// last row gives `w^(N - 1 - c*tokens - t)` per value, which is the canonical
-/// stream weight the producing region's `Out(0)` binding already carries.
+/// stream weight the producing component's `Out(0)` binding already carries.
 fn rq_binding_w(w: SecureField, lam: SecureField, rp: &RqPlan,
             claimed_in: SecureField, claimed_out: SecureField,
             claimed_sc: SecureField) -> crate::requant::RqTie {
@@ -728,7 +728,7 @@ fn rq_binding_w(w: SecureField, lam: SecureField, rp: &RqPlan,
     }
 }
 
-/// Stream NN: one quantize region's two Horner weight sets.
+/// Stream NN: one quantize component's two Horner weight sets.
 fn q_binding_w(w: SecureField, lam: SecureField, qp: &QuantPlan, nh: usize,
            claimed_in: SecureField, claimed_out: SecureField) -> crate::rope::QTie {
     let m_in = (qp.tokens * qp.n) as i128;
@@ -750,7 +750,7 @@ fn q_binding_w(w: SecureField, lam: SecureField, qp: &QuantPlan, nh: usize,
 }
 
 /// Stream NN: the diagonal block key tiles' own committed Q, K and V, gathered onto the
-/// `(token, query head, channel)` grid the quantize regions are read against.
+/// `(token, query head, channel)` grid the quantize components are read against.
 /// A reference for the record, not an input to any constraint.
 fn nn_key_tile_cols(plan: &Plan, layer: &Layer) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
     let (nh, hd, s) = (plan.p.nh, plan.p.hd, plan.p.s);
@@ -780,7 +780,7 @@ fn nn_key_tile_cols(plan: &Plan, layer: &Layer) -> (Vec<i64>, Vec<i64>, Vec<i64>
 ///
 /// Every weight is `w^(N - 1 - (t nh hd + hq hd + ch))` -- the token-major
 /// position on the **query-head** grid, which is the grid the key tiles hold and
-/// which the quantize region's `w_out` reaches through its replication sum.
+/// which the quantize component's `w_out` reaches through its replication sum.
 fn nn_key_tile_bindings(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
                 -> Option<(crate::attn_air::KeyTileTie, crate::attn_air::KeyTileTie,
                            crate::attn_air::KeyTileTie)> {
@@ -800,7 +800,7 @@ fn nn_key_tile_bindings(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
     let cl = |j: usize| claim_at(cl.map(|c| c[j]), "key_tile_qkv");
     let (pk, pq, pv) = (l.chan.pk as i128, l.chan.pq as i128, l.key.pv as i128);
     let (cc, kc) = (l.chan.g.chunks as i128, l.key.g.chunks as i128);
-    // the channel region's group index is `inst hd + ch`, which is affine in the
+    // the channel component's group index is `inst hd + ch`, which is affine in the
     // position, so one boundary constant serves
     let kt = crate::attn_air::KeyTileTie {
         w: (0..l.chan.pk).map(|q| wpow(w, base - q as i128 * nh * hd)).collect(),
@@ -818,7 +818,7 @@ fn nn_key_tile_bindings(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
         off: off.q,
         claimed: cl(1),
     };
-    // the key region's group index is `inst C + key`, which is not: crossing an
+    // the key component's group index is `inst C + key`, which is not: crossing an
     // instance moves the head by one and the key by a whole context
     let vt = crate::attn_air::KeyTileTie {
         w: (0..l.key.pv).map(|q| wpow(w, base - q as i128)).collect(),
@@ -948,7 +948,7 @@ fn output_claim_w_tok(w: SecureField, lam: SecureField, tokens: usize, n_out: us
 /// Stream NN: one quantize gadget -- the bf16 stream a rotation (or the `v`
 /// dequant) produced, and the integers a key tile committed.
 pub struct QuantPlan {
-    /// `"q"`, `"k"` or `"v"`; also the region's tag
+    /// `"q"`, `"k"` or `"v"`; also the component's tag
     pub name: &'static str,
     /// index into `Params::mats`
     pub mat: usize,
@@ -962,30 +962,30 @@ pub struct QuantPlan {
     pub tokens: usize,
     pub lay: MatLayout,
     /// Stream NN-3: this side's integer width, `Params::q_bits` for `q`,
-    /// `Params::k_bits` for `k` and `V_BITS` for `v`.  It sizes the region's own
+    /// `Params::k_bits` for `k` and `V_BITS` for `v`.  It sizes the component's own
     /// division table, and `rope::qmax_of` reads B1's clamp off it.
     pub bits: u32,
-    /// `(residual-stream region, binding)` publishing the bf16 side -- a rotation's `Out(0)`.
-    /// `None` for `v`, whose bf16 side is the `v` dequant region's own published
+    /// `(residual-stream component, binding)` publishing the bf16 side -- a rotation's `Out(0)`.
+    /// `None` for `v`, whose bf16 side is the `v` dequant component's own published
     /// output and is compared against `claims.deq_out` instead.
     pub producer: Option<(usize, usize)>,
 }
 
-/// Stream II: one requantize seam -- a producing region's bf16 output, the
-/// integers a Freivalds group multiplies, and the region that proves one is the
+/// Stream II: one requantize seam -- a producing component's bf16 output, the
+/// integers a Freivalds group multiplies, and the component that proves one is the
 /// requantize of the other.
 ///
 /// There are three: `norm1`'s norm scale feeds the q/k/v group, `norm2`'s feeds
 /// gate/up, and the SwiGLU's product feeds `down`.  The fourth matmul input,
-/// `o`'s, has no region here because `AttnOutEval` **is** its requantize -- it
+/// `o`'s, has no component here because `AttnOutEval` **is** its requantize -- it
 /// commits `qm` and `sg` and pins them by the exact-rounding identity -- so
-/// what `o` needs is a claim on that region and not a second gadget.
+/// what `o` needs is a claim on that component and not a second gadget.
 pub struct RqPlan {
-    /// the Freivalds group's name, which is also the region's tag
+    /// the Freivalds group's name, which is also the component's tag
     pub name: String,
     /// index into `Plan::freivalds`
     pub freivalds: usize,
-    /// `(residual-stream region, binding)` publishing the bf16 side
+    /// `(residual-stream component, binding)` publishing the bf16 side
     pub producer: (usize, usize),
     pub n: usize,
     pub tokens: usize,
@@ -1004,8 +1004,8 @@ pub struct FreivaldsPlan {
 
 // ------------------------------------------------------------ the residual-stream plan ----
 
-/// One region of the wiring family, as both sides derive it from `Params`.
-pub struct ResidualStreamRegionPlan {
+/// One component of the wiring family, as both sides derive it from `Params`.
+pub struct ResidualStreamComponentPlan {
     pub tag: String,
     pub prog: Prog,
     pub log_rows: u32,
@@ -1015,7 +1015,7 @@ pub struct ResidualStreamRegionPlan {
     pub bindings: Vec<(BindingKind, Vec<u128>, u128)>,
 }
 
-/// B6.5 open gap 1, as four regions and three equalities.
+/// B6.5 open gap 1, as four components and three equalities.
 ///
 /// ```text
 ///   gn1   xin, o_out  ->  norm1's level-1 roots, and xmid
@@ -1029,8 +1029,8 @@ pub struct ResidualStreamRegionPlan {
 /// the three equalities are `gn1.roots == gn1b.in`, `gn1.xmid == gn2.in` and
 /// `gn2.roots == gn2b.in`.  What is left open is named in the record: the two
 /// norms' norm scales (`* r`, `* w`), the SwiGLU, and the bindings from `o`'s and `down`'s
-/// dequant regions into `o_out` and `d_out`.
-/// One equality the verifier checks between two regions' Horner claims.
+/// dequant components into `o_out` and `d_out`.
+/// One equality the verifier checks between two components' Horner claims.
 ///
 /// Stream II added `scale`, because one of the new bindings compares sequences of
 /// different *lengths*: the norm scale carries one committed sum of squares per
@@ -1063,34 +1063,34 @@ pub struct ResidualStreamPlan {
     pub t: Tiling,
     /// the SwiGLU's own tiling, over `dff` instead of `d`
     pub tff: Option<Tiling>,
-    pub regions: Vec<ResidualStreamRegionPlan>,
+    pub components: Vec<ResidualStreamComponentPlan>,
     /// what the verifier compares, `a == factor * b`
     pub eqs: Vec<ResidualStreamEq>,
     pub uns: Vec<UnKind>,
     /// the layer's committed residual-stream input and output claims
     pub stream_in: (usize, usize),
     pub stream_out: (usize, usize),
-    /// stream E: the region index of each norm's scale, and of the SwiGLU, so the
+    /// stream E: the component index of each norm's scale, and of the SwiGLU, so the
     /// accounting can name their cells apart from the reduction's
     pub norm_scales: Vec<usize>,
     pub swiglu: Option<usize>,
-    /// stream E: `((region, binding), name)` per dequant output binding -- the wiring
-    /// side's claim over `o_out` and over `d_out`, and the matmul whose region
+    /// stream E: `((component, binding), name)` per dequant output binding -- the wiring
+    /// side's claim over `o_out` and over `d_out`, and the matmul whose component
     /// has to publish the same value
     pub output_bindings: Vec<OutputBinding>,
     /// stream II: the head chunk's family (`gnf`, `gnfb`, `ntf`) instead of the
-    /// layer's seven regions.  The witness build and the seam list both branch
+    /// layer's seven components.  The witness build and the seam list both branch
     /// on it, and nothing else does.
     pub head_norm: bool,
-    /// Stream NN: the rotation, as `(Mul region, Add region)` per rotated side,
+    /// Stream NN: the rotation, as `(Mul component, Add component)` per rotated side,
     /// in `["q", "k"]` order.  Empty on a chunk without `Params::rope`.
-    pub ropes: Vec<RopeRegions>,
+    pub ropes: Vec<RopeComponents>,
 }
 
-/// Stream NN: one side's rotation, as two residual-stream regions and the shapes both
+/// Stream NN: one side's rotation, as two residual-stream components and the shapes both
 /// halves are built from.
 #[derive(Clone, Debug)]
-pub struct RopeRegions {
+pub struct RopeComponents {
     pub name: &'static str,
     /// index into `Params::mats` / `Plan::specs`
     pub mat: usize,
@@ -1098,30 +1098,30 @@ pub struct RopeRegions {
     pub heads: usize,
     pub hd: usize,
     pub tokens: usize,
-    /// region indices inside `ResidualStreamPlan::regions`
+    /// component indices inside `ResidualStreamPlan::components`
     pub mul: usize,
     pub add: usize,
 }
 
 /// Stream E, generalised by stream JJ: one matmul's dequant output side.
 ///
-/// `at` is the wiring-family binding the output is compared against -- region index
+/// `at` is the wiring-family binding the output is compared against -- component index
 /// and binding index -- and it is `None` for the three whose consumer is not in the
 /// statement at all.  `q` and `k` feed the attention through RoPE, which no
-/// region proves, and `v` through a per-channel power-of-two requantize which no
-/// region proves either; those three publish their claim and the verifier has
+/// component proves, and `v` through a per-channel power-of-two requantize which no
+/// component proves either; those three publish their claim and the verifier has
 /// nothing to read it against yet (`briefs/jj-layerwire-out.md`'s record).
 pub struct OutputBinding {
     pub name: &'static str,
     pub at: Option<(usize, usize)>,
-    /// Stream NN: the counterparty is a quantize region's *input* claim rather
+    /// Stream NN: the counterparty is a quantize component's *input* claim rather
     /// than a wiring-family binding -- `v`, whose dequant output is rounded straight
     /// into the key tile's V column with no rotation between.  An index into
     /// `Plan::quants`.
     pub quant: Option<usize>,
     /// Stream SS: the counterparty is the diagonal block key tiles' own V fold -- a folded
     /// `v`, whose dequant output already *is* the integer the key tile commits, so
-    /// there is no quantize region between the two and the claim is compared
+    /// there is no quantize component between the two and the claim is compared
     /// against `sum_b key_tile_qkv[b][2]` directly.  Set by `Plan::new`, which is
     /// where the key tiles and the layouts are known.
     pub key_tile: bool,
@@ -1174,14 +1174,14 @@ impl ResidualStreamPlan {
         let g_scale: Vec<i128> = (0..a)
             .map(|res| (rows1 as i128) - (rows2 as i128) - (res * tok) as i128)
             .collect();
-        let regions = vec![
-            ResidualStreamRegionPlan { tag: "gnf".into(), prog: l1, log_rows: lr1,
+        let components = vec![
+            ResidualStreamComponentPlan { tag: "gnf".into(), prog: l1, log_rows: lr1,
                              bindings: vec![(BindingKind::In(0), stream.clone(), 1),
                                         (BindingKind::Out(0), one.clone(), 1)] },
-            ResidualStreamRegionPlan { tag: "gnfb".into(), prog: l2, log_rows: lr2,
+            ResidualStreamComponentPlan { tag: "gnfb".into(), prog: l2, log_rows: lr2,
                              bindings: vec![(BindingKind::In(0), l2_in, 1),
                                         (BindingKind::Out(0), one.clone(), 1)] },
-            ResidualStreamRegionPlan { tag: "ntf".into(), prog: norm_scale, log_rows: lr1,
+            ResidualStreamComponentPlan { tag: "ntf".into(), prog: norm_scale, log_rows: lr1,
                              bindings: vec![(BindingKind::In(0), stream.clone(), 1),
                                         (BindingKind::In(1), one, 1),
                                         (BindingKind::Out(0), stream, 1)] },
@@ -1189,7 +1189,7 @@ impl ResidualStreamPlan {
         let eqs = vec![ResidualStreamEq::plain((0, 1), (1, 0)),
                        ResidualStreamEq::plain((2, 0), (0, 0)),
                        ResidualStreamEq { a: (2, 1), b: (1, 1), scale: g_scale }];
-        Self { t, tff: None, regions, eqs, uns, stream_in: (0, 0), stream_out: (2, 2),
+        Self { t, tff: None, components, eqs, uns, stream_in: (0, 0), stream_out: (2, 2),
                norm_scales: vec![2], swiglu: None, output_bindings: vec![], head_norm: true,
                ropes: vec![] }
     }
@@ -1211,9 +1211,9 @@ impl ResidualStreamPlan {
         let l2 = Prog::tree(a, a, UnKind::None);
         let lr1 = crate::common::log_rows_for(t.rows1(), 1);
         let lr2 = crate::common::log_rows_for(tok, 1);
-        let mut regions = vec![];
+        let mut components = vec![];
         for (n1, n2) in [("gn1", "gn1b"), ("gn2", "gn2b")] {
-            regions.push(ResidualStreamRegionPlan {
+            components.push(ResidualStreamComponentPlan {
                 tag: n1.into(),
                 prog: l1.clone(),
                 log_rows: lr1,
@@ -1223,7 +1223,7 @@ impl ResidualStreamPlan {
                     (BindingKind::Out(1), stream.clone(), 1),
                 ],
             });
-            regions.push(ResidualStreamRegionPlan {
+            components.push(ResidualStreamComponentPlan {
                 tag: n2.into(),
                 prog: l2.clone(),
                 log_rows: lr2,
@@ -1240,19 +1240,19 @@ impl ResidualStreamPlan {
         // ever carried a Horner claim -- the wiring family committed those
         // columns and only a `VAL` lookup pinned them.  One claim each, on the
         // same channel-major weights the stream uses, and the `o` and `down`
-        // dequant regions publish the same value from their own outputs.
+        // dequant components publish the same value from their own outputs.
         //
         // Stream JJ (E11): unconditional, and all seven.  `o` and `down` keep
-        // E's `In(1)` binding on the two reduction regions; `gate` and `up` are
-        // read against the SwiGLU region's own `In(0)`/`In(1)`, which need no
-        // new binding because the region already publishes them; `q`, `k` and `v`
+        // E's `In(1)` binding on the two reduction components; `gate` and `up` are
+        // read against the SwiGLU component's own `In(0)`/`In(1)`, which need no
+        // new binding because the component already publishes them; `q`, `k` and `v`
         // publish a claim with no counterparty (see `OutputBinding`).  The list ends
         // up in `MAT_NAMES` order because `claims.deq_out` is pushed in matmul
         // order and the verifier reads the two side by side.
         let mut output_claim_at: Vec<(&'static str, Option<(usize, usize)>)> = vec![];
         for (ri, name) in [(0usize, "o"), (2usize, "down")] {
-            regions[ri].bindings.push((BindingKind::In(1), stream.clone(), 1));
-            output_claim_at.push((name, Some((ri, regions[ri].bindings.len() - 1))));
+            components[ri].bindings.push((BindingKind::In(1), stream.clone(), 1));
+            output_claim_at.push((name, Some((ri, components[ri].bindings.len() - 1))));
         }
         // ---- stream E: the two norm scales ------------------------------------
         //
@@ -1261,9 +1261,9 @@ impl ResidualStreamPlan {
         // weights, so the binding `nt.In(0) == gn.In(0)` says the norm scale scaled the
         // very values the reduction squared -- which is the half of "the norm
         // computed its own output" a committed column cannot fake.  `Out(0)` is
-        // published for the requantize region that will read it.
+        // published for the requantize component that will read it.
         //
-        // Stream II made the region unconditional and closed both of the gaps
+        // Stream II made the component unconditional and closed both of the gaps
         // the first build left.  `r` is no longer a committed leaf: group 1
         // commits the reduction's *answer* and `UnKind::NormR`'s lookup is
         // `r = rsqrt(ms inv_d + eps)`, so the binding `nt.In(1) == G gnb.Out(0)`
@@ -1278,9 +1278,9 @@ impl ResidualStreamPlan {
             let rows1 = 1usize << lr1;
             let rows2 = 1usize << lr2;
             assert_eq!(rows1, a * tok,
-                       "the norm scale's binding needs the level-1 region to tile exactly");
+                       "the norm scale's binding needs the level-1 component to tile exactly");
             assert_eq!(rows2, tok,
-                       "the norm scale's binding needs the level-2 region to tile exactly");
+                       "the norm scale's binding needs the level-2 component to tile exactly");
             let un_r = UnKind::NormR { inv_d: gp.inv_d, eps: gp.eps };
             if !uns.contains(&un_r) {
                 uns.push(un_r);
@@ -1291,8 +1291,8 @@ impl ResidualStreamPlan {
             let g_scale: Vec<i128> =
                 (0..a).map(|res| (rows1 as i128) - (rows2 as i128) - (res * tok) as i128).collect();
             for (gn, gnb, tag) in [(0usize, 1usize, "nt1"), (2usize, 3usize, "nt2")] {
-                let i = regions.len();
-                regions.push(ResidualStreamRegionPlan {
+                let i = components.len();
+                components.push(ResidualStreamComponentPlan {
                     tag: tag.into(),
                     prog: norm_scale.clone(),
                     log_rows: lr1,
@@ -1327,9 +1327,9 @@ impl ResidualStreamPlan {
                     uns.push(k);
                 }
             }
-            swiglu = Some(regions.len());
-            let i = regions.len();
-            regions.push(ResidualStreamRegionPlan {
+            swiglu = Some(components.len());
+            let i = components.len();
+            components.push(ResidualStreamComponentPlan {
                 tag: "gsw".into(),
                 prog,
                 log_rows: crate::common::log_rows_for(t2.rows1(), 1),
@@ -1346,7 +1346,7 @@ impl ResidualStreamPlan {
         }
         // ---- stream NN: the rotation ------------------------------------------
         //
-        // Two regions per rotated side, because a `Prog` carries one `Kind` and
+        // Two components per rotated side, because a `Prog` carries one `Kind` and
         // `rotate` is two multiplies and an add: `rpqm`/`rpqa` for q,
         // `rpkm`/`rpka` for k.  A row is one (token, head), its `hd` committed
         // leaves are that head's dequant output and `cos`/`sgnsin` are
@@ -1356,9 +1356,9 @@ impl ResidualStreamPlan {
         // The weights are the **token-major** canonical position `t n_out + c`
         // and not the channel-major one every earlier binding uses.  That is the
         // whole reason a single row step serves here: a (token, head) row's
-        // leaves are `hd` consecutive positions, so a region's rows walk the
+        // leaves are `hd` consecutive positions, so a component's rows walk the
         // stream in order and the Horner is the flat one.  `output_claim_w_tok` puts
-        // the q/k/v dequant regions' own output claims on the same convention,
+        // the q/k/v dequant components' own output claims on the same convention,
         // which is free -- those three claims had no counterparty before this
         // stream and nothing else reads them.
         let mut ropes = vec![];
@@ -1379,15 +1379,15 @@ impl ResidualStreamPlan {
                 // over the stream, rows ascending in (token, head)
                 let win: Vec<u128> = (0..hd).map(|c| (hd - 1 - c) as u128).collect();
                 let wmid: Vec<u128> = (0..2 * hd).map(|c| (2 * hd - 1 - c) as u128).collect();
-                let (mul, add) = (regions.len(), regions.len() + 1);
-                regions.push(ResidualStreamRegionPlan {
+                let (mul, add) = (components.len(), components.len() + 1);
+                components.push(ResidualStreamComponentPlan {
                     tag: format!("rp{name}m"),
                     prog: Prog::rope_mul(hd),
                     log_rows: lr,
                     bindings: vec![(BindingKind::In(0), win.clone(), hd as u128),
                                (BindingKind::Out(0), wmid.clone(), (2 * hd) as u128)],
                 });
-                regions.push(ResidualStreamRegionPlan {
+                components.push(ResidualStreamComponentPlan {
                     tag: format!("rp{name}a"),
                     prog: Prog::rope_add(hd),
                     log_rows: lr,
@@ -1401,7 +1401,7 @@ impl ResidualStreamPlan {
                 // dequant output, which is what shrinks `deq_out_open`
                 output_claim_at.push((name, Some((mul, 0))));
                 let _ = n_all;
-                ropes.push(RopeRegions { name, mat: mi, heads, hd, tokens: m.tokens,
+                ropes.push(RopeComponents { name, mat: mi, heads, hd, tokens: m.tokens,
                                          mul, add });
             }
             // v is not rotated: its dequant output goes straight into the
@@ -1421,7 +1421,7 @@ impl ResidualStreamPlan {
             .map(|(name, at)| OutputBinding {
                 name,
                 at: *at,
-                // filled in by `Plan::new`, which is where the quantize regions
+                // filled in by `Plan::new`, which is where the quantize components
                 // are laid out; the wiring plan does not know their order
                 quant: None,
                 key_tile: false,
@@ -1430,7 +1430,7 @@ impl ResidualStreamPlan {
         Self {
             t,
             tff,
-            regions,
+            components,
             eqs,
             uns,
             stream_in: (0, 0),
@@ -1445,7 +1445,7 @@ impl ResidualStreamPlan {
 
     /// The binding specs, with the claims the statement carries filled in.
     pub fn bindings(&self, w: SecureField, lam: SecureField, claims: &Claims) -> Vec<Binding> {
-        self.regions
+        self.components
             .iter()
             .enumerate()
             .map(|(i, r)| Binding {
@@ -1563,16 +1563,16 @@ pub struct Plan {
     /// the scale variants those seams use, deduplicated and in a fixed order --
     /// one division table and one scale table per variant
     pub rq_vars: Vec<crate::requant::SVariant>,
-    /// Stream NN: the three quantize regions -- `q`, `k`, `v` -- in that order.
+    /// Stream NN: the three quantize components -- `q`, `k`, `v` -- in that order.
     /// Empty on a chunk without `Params::rope`.
     pub quants: Vec<QuantPlan>,
-    /// Stream NN-3: the widths the quantize regions' own division tables are
+    /// Stream NN-3: the widths the quantize components' own division tables are
     /// built at -- the distinct `QuantPlan::bits`, ascending, one table each.
-    /// Empty when the chunk carries no quantize region.
+    /// Empty when the chunk carries no quantize component.
     pub q_tabs: Vec<u32>,
     /// and the width of their shared `(q, nz)` pair table: the widest side's,
     /// because the division table is what fixes the admissible quotient and this
-    /// one only pins `nz = [q != 0]`.  Zero when there are no regions.
+    /// one only pins `nz = [q != 0]`.  Zero when there are no components.
     pub q_nz_bits: u32,
     /// Stream NN: the key tiles that publish a K/Q/V claim over their own committed
     /// columns.  Exactly the **diagonal block** key tiles: their keys are this block's own
@@ -1608,16 +1608,16 @@ pub struct Plan {
     /// `b - n_pre`; with it, a group is one prefix *sub-key-tile per key block* plus
     /// the chunk's own diagonal block.
     pub group: Vec<usize>,
-    /// Stream AA, per key tile: does it carry the group's per-token region (the row
-    /// maxima and the denominator)?  There is one such region per head key tile
+    /// Stream AA, per key tile: does it carry the group's per-token component (the row
+    /// maxima and the denominator)?  There is one such component per head key tile
     /// group -- one row maximum and one denominator per *token*, not per key
     /// block -- so with the prefix tiled it is the group's first sub-key-tile's, and
     /// every other key tile of the group rides on it exactly as a diagonal block key tile
     /// always has.
     pub rows_key_tile: Vec<bool>,
     /// Stream BB: the embedding gadget's two row counts and its block width, or
-    /// `None`.  Both sides derive it from `Params` alone, so the use region, the
-    /// table region, the preprocessed id list and the verifier cannot disagree
+    /// `None`.  Both sides derive it from `Params` alone, so the use component, the
+    /// table component, the preprocessed id list and the verifier cannot disagree
     /// about the gadget's shape.
     pub emb: Option<crate::embed::EmbLayout>,
 }
@@ -1659,7 +1659,7 @@ impl Plan {
         // this the `else` arm built one anyway and `Grid::new` divided by
         // `groups = c * insts = 0`.  With `nsub == 0` the loop below builds no
         // prefix key tile and `rows_key_tile.push(nsub == 0)` hands the group's one
-        // per-token region to the diagonal block, which is where it belongs.
+        // per-token component to the diagonal block, which is where it belongs.
         let nsub = if p.c == 0 { 0 } else if p.kv_boundary { p.c / p.s } else { 1 };
         assert!(p.c > 0 || p.diagonal_block,
                 "a c = 0 chunk is block 0: it is the diagonal block and needs `--diagonal-block`");
@@ -1674,7 +1674,7 @@ impl Plan {
                 head_offsets.push(off);
                 shapes.push(Shape { s: p.s, c: sub_c, hd: p.hd, insts: *insts });
                 group.push(g);
-                // one per-token region per head key tile group, on its first key tile
+                // one per-token component per head key tile group, on its first key tile
                 rows_key_tile.push(k == 0);
             }
             off += insts;
@@ -1690,7 +1690,7 @@ impl Plan {
                 diagonal_block.push(true);
                 group.push(g);
                 // block 0 of a sequence has no unchecked prefix at all, so its
-                // diagonal block is the group's only key tile and carries the region
+                // diagonal block is the group's only key tile and carries the component
                 rows_key_tile.push(nsub == 0);
             }
         }
@@ -1708,12 +1708,12 @@ impl Plan {
         assert!(!p.gkr_attnout || p.gkr_key_tiles,
                 "`--gkr-attnout` extends the key tiles' GKR backend; it needs `--gkr-key-tiles`");
         // Stream AA left `--kv-boundary` and `--gkr-key-tiles` asserted apart, because
-        // the key tiles' GKR backend gated the per-token region on `plan.diagonal_block` in two
+        // the key tiles' GKR backend gated the per-token component on `plan.diagonal_block` in two
         // places of its own while the composed path had already moved to
         // `plan.rows_key_tile`.  What pairing by `diagonal_block` assumed is "every key tile
-        // that is not the diagonal block carries the group's per-token region", and
+        // that is not the diagonal block carries the group's per-token component", and
         // design A breaks exactly that: a group is now `c/s` prefix sub-key-tiles
-        // plus a diagonal block, and the region lives on the *first* sub-key-tile only.
+        // plus a diagonal block, and the component lives on the *first* sub-key-tile only.
         // Both derivations now read `plan.rows_key_tile[b]`, which is `!diagonal_block[b]`
         // whenever the flag is off, so the two flags compose and the backend's
         // flag-off digests do not move.  See `briefs/aa-kvbind.md`, item 4.
@@ -1875,7 +1875,7 @@ impl Plan {
         let log_frac = crate::common::log_rows_for(frac_rows, 1);
         let log_mul = 14;
         let residual_stream = p.residual_stream.as_ref().map(|g| ResidualStreamPlan::new(p, g));
-        // Stream II: the three requantize seams.  Each names the region whose
+        // Stream II: the three requantize seams.  Each names the component whose
         // `Out(0)` it consumes, so the producer index comes from the plan and is
         // never counted by hand; the layout is the dequant's own `MatLayout`
         // map, which is what makes `output_claim_w`'s weights apply unchanged.
@@ -1892,7 +1892,7 @@ impl Plan {
                 vec![
                     ("qkv", (g.norm_scales[0], 2), g.t.d),
                     ("gateup", (g.norm_scales[1], 2), g.t.d),
-                    ("down", (g.swiglu.expect("the SwiGLU region is unconditional"), 2),
+                    ("down", (g.swiglu.expect("the SwiGLU component is unconditional"), 2),
                      g.tff.expect("the SwiGLU's tiling").d),
                 ]
             };
@@ -1920,12 +1920,12 @@ impl Plan {
             }
             rq_vars.sort_by_key(|v| *v == crate::requant::SVariant::Bf16);
         }
-        // ---- stream NN: the three quantize regions ---------------------------
+        // ---- stream NN: the three quantize components ---------------------------
         //
         // `b1/model.py` quantizes q, k and v by scales that are per (head,
         // channel) and constant down the tokens -- the transpose of the
         // per-token scale `requant.rs` pins -- so the exponent is a preprocessed
-        // per-slot column and the region is `rope::QuantEval`.  The tables are
+        // per-slot column and the component is `rope::QuantEval`.  The tables are
         // `requant.rs`'s own, so the power-of-two division table has to be
         // registered whether or not a *seam* asked for it.
         let mut quants = vec![];
@@ -1941,11 +1941,11 @@ impl Plan {
             {
                 let mi = p.mats.iter().position(|m| m.name == name)
                     .unwrap_or_else(|| panic!("--rope needs the {name} matmul"));
-                // Stream SS: a folded `v` has no quantize region, because the
+                // Stream SS: a folded `v` has no quantize component, because the
                 // fold *is* the quantize -- `y-delay-v` states
                 // `round_hafz(acc s_x s_w / s_v)` in one rounding, so there is
                 // no bf16 stream for `rope::QuantEval` to round and nothing for
-                // it to prove.  The dequant region publishes the integer
+                // it to prove.  The dequant component publishes the integer
                 // instead, and the key tiles' own V is what reads it
                 // (`Plan::output_claim_key_tile`).
                 if name == "v" && specs[mi].variant == DeqVariant::Fold {
@@ -2013,7 +2013,7 @@ impl Plan {
         // stream NN (NN-2): every prefix key tile publishes its own Q, against its
         // group's diagonal block.  A group with no diagonal block publishes nothing -- there is
         // nothing to compare against -- and `--diagonal-block` is already required by
-        // the quantize regions, so that case does not arise on a rope chunk.
+        // the quantize components, so that case does not arise on a rope chunk.
         let nn_q_key_tiles: Vec<usize> = if quants.is_empty() {
             vec![]
         } else {
@@ -2024,7 +2024,7 @@ impl Plan {
         };
         let mut residual_stream = residual_stream;
         if !quants.is_empty() {
-            let g = residual_stream.as_mut().expect("the quantize regions need the wiring family");
+            let g = residual_stream.as_mut().expect("the quantize components need the wiring family");
             for (qi, q) in quants.iter().enumerate() {
                 if q.producer.is_none() {
                     if let Some(t) = g.output_bindings.iter_mut().find(|t| t.name == q.name) {
@@ -2037,7 +2037,7 @@ impl Plan {
         // V.  Three conditions, each of which the key tile weights need: the key tiles
         // are in the statement (`nn_key_tiles`, i.e. the rotation is on), the
         // rotation says how many query heads a kv head is replicated into, and
-        // the region's rows sit inside one kv head so that the step is the two
+        // the component's rows sit inside one kv head so that the step is the two
         // constants `output_claim_w_key_tile` derives.  Without them the fold still
         // publishes its integer and the verdict names it open.
         if let (Some(g), true) = (residual_stream.as_mut(), p.rope.is_some()) {
@@ -2051,7 +2051,7 @@ impl Plan {
                 }
             }
         }
-        // stream NN-3: the tables the quantize regions own, deduplicated by
+        // stream NN-3: the tables the quantize components own, deduplicated by
         // width.  One per distinct side width, so `q` at 12 bits and `k` at 11
         // get their own and `v`'s int8 side keeps the eight-bit window; the
         // shared `(q, nz)` table is the widest of them.
@@ -2091,7 +2091,7 @@ impl Plan {
             let l0 = &self.lays[0];
             let pre0 = Powers::new(r, s, rv, &self.shapes[0], &l0.chan, &l0.key, &l0.out, l0.rw);
             let cp = Powers::new(r_diagonal_block, s, rv, sh, &l.chan, &l.key, &l.out, l.rw);
-            // A diagonal block that carries the region is block 0's, a solo one, and
+            // A diagonal block that carries the component is block 0's, a solo one, and
             // needs its own `mu`; a paired one rides on the prefix key tile's.
             if self.rows_key_tile[b] {
                 cp.as_solo_diagonal_block(pre0.r_c, sh.c)
@@ -2105,9 +2105,9 @@ impl Plan {
 
     /// The exponent of the global per-head instance weight `r^{·}`.
     ///
-    /// Every region that packs heads has to carry the same one: the key tiles'
-    /// `Powers::r_c` and `sn_c`, the per-token region's `mu`, the attention
-    /// output region's `mu_den`, and `verify_composed`'s own `r_c^{head}` fold.
+    /// Every component that packs heads has to carry the same one: the key tiles'
+    /// `Powers::r_c` and `sn_c`, the per-token component's `mu`, the attention
+    /// output component's `mu_den`, and `verify_composed`'s own `r_c^{head}` fold.
     /// Untiled it is the context width `C`, because a prefix key tile's key Horner
     /// walks exactly `C` keys per instance and so produces `r^C` for free.
     ///
@@ -2119,7 +2119,7 @@ impl Plan {
     ///
     /// Block 0 (open item 1) has `c = 0` and no prefix key tile: its only key tile is
     /// the diagonal block, whose key Horner walks `S` keys, so the weight is `r^S`
-    /// with the flag off too.  `r^0 = 1` here left the attention output region
+    /// with the flag off too.  `r^0 = 1` here left the attention output component
     /// and the verifier's fold on a different weight from the key tile's own
     /// `Powers::r_c`, and `den_link_ok` was the one verdict field that failed.
     pub fn head_weight_c(&self) -> usize {
@@ -2135,7 +2135,7 @@ impl Plan {
         self.residual_stream.is_some() || self.p.logits_claim
     }
 
-    /// Stream E: the index of the matmul the argmax region is bound to, when it
+    /// Stream E: the index of the matmul the argmax component is bound to, when it
     /// is composed.  Its layout is that matmul's, so the binding is positionwise.
     pub fn argmax_mat(&self) -> Option<usize> {
         self.p.prove_argmax
@@ -2149,8 +2149,8 @@ impl Plan {
         3 + if self.has_bindings() { 2 } else { 0 }
     }
 
-    /// Stream E: does this matmul's dequant region publish an output-side claim?
-    /// Both sides ask the plan, so the preprocessed list, the region, the AIR and
+    /// Stream E: does this matmul's dequant component publish an output-side claim?
+    /// Both sides ask the plan, so the preprocessed list, the component, the AIR and
     /// the verifier cannot disagree about it.
     pub fn has_output_claim(&self, name: &str) -> bool {
         self.residual_stream.as_ref().is_some_and(|g| g.output_bindings.iter().any(|t| t.name == name))
@@ -2323,15 +2323,15 @@ impl Plan {
             }
         }
         if let Some(g) = &self.residual_stream {
-            // Stream NN: a rotation's Mul region carries the angle table, which
+            // Stream NN: a rotation's Mul component carries the angle table, which
             // is a pure function of `Fixed.params` -- `theta`, the rope branch
             // and that branch's own constants -- and of the block, because
             // `RopeParams::pos0` is this chunk's absolute position offset.  So
-            // it is `Params`/`Block`, never `Model`.  Every other region's
+            // it is `Params`/`Block`, never `Model`.  Every other component's
             // `Src::Pre` pair is a norm weight off the dump.
             let rope_mul: std::collections::BTreeSet<usize> =
                 g.ropes.iter().map(|r| r.mul).collect();
-            for (ri, r) in g.regions.iter().enumerate() {
+            for (ri, r) in g.components.iter().enumerate() {
                 put(crate::residual_stream::residual_stream_sel(&r.tag, "nofirst"),
                     "residual_stream/sel", r.log_rows, PreNeeds::Params, PreVaries::Layer);
                 put(crate::residual_stream::residual_stream_sel(&r.tag, "end"),
@@ -2399,7 +2399,7 @@ impl Plan {
                     PreNeeds::Params, PreVaries::Layer);
             }
         }
-        // Stream NN: the q/k/v quantize regions, in `Plan::pre_ids`' order --
+        // Stream NN: the q/k/v quantize components, in `Plan::pre_ids`' order --
         // three selectors off the shape, then one scale exponent per slot.  The
         // exponents are B1's own `s_q`/`s_k`/`s_v`, model constants of exactly
         // the kind the attention output's `jv` already was.
@@ -2611,7 +2611,7 @@ impl Plan {
             ids.extend(crate::attn_air::act_id(b, self.diagonal_block[b],
                                                self.lays[b].key.g.lead));
             // Stream AA: the predicate is "does this key tile carry the per-token
-            // region", not "is it a prefix key tile".  With `--kv-boundary` off the two
+            // component", not "is it a prefix key tile".  With `--kv-boundary` off the two
             // are the same predicate on the same key tiles, so this id sequence is
             // the one tree 0 always had.
             if self.rows_key_tile[b] {
@@ -2631,7 +2631,7 @@ impl Plan {
                         ids.push(chan_col(&m.name, "e", s));
                     }
                     // stream Z: the weight-scale mantissa and the channel half
-                    // of the divisor, `mat_region`'s order
+                    // of the divisor, `mat_component`'s order
                     DeqVariant::Fold => {
                         ids.push(chan_col(&m.name, "m", s));
                         ids.push(chan_col(&m.name, "p", s));
@@ -2653,11 +2653,11 @@ impl Plan {
             ids.extend(FREIVALDS_SEL.iter().map(|n| freivalds_sel(&w.name, n)));
         }
         if let Some(g) = &self.residual_stream {
-            for r in &g.regions {
+            for r in &g.components {
                 ids.push(crate::residual_stream::residual_stream_sel(&r.tag, "nofirst"));
                 ids.push(crate::residual_stream::residual_stream_sel(&r.tag, "end"));
-                // stream II: then the region's own preprocessed values, in the
-                // order `residual_stream_region` appends their columns
+                // stream II: then the component's own preprocessed values, in the
+                // order `residual_stream_component` appends their columns
                 for i in 0..r.prog.n_pre {
                     ids.push(crate::residual_stream::residual_stream_pre_col(&r.tag, i, 0));
                     ids.push(crate::residual_stream::residual_stream_pre_col(&r.tag, i, 1));
@@ -2685,8 +2685,8 @@ impl Plan {
             ids.extend(crate::requant::RQ_SEL.iter()
                        .map(|n| crate::requant::rq_sel(&r.name, n)));
         }
-        // stream NN: and the quantize regions -- three selectors, then one
-        // preprocessed scale exponent per slot, in `rope::q_region`'s own order
+        // stream NN: and the quantize components -- three selectors, then one
+        // preprocessed scale exponent per slot, in `rope::q_component`'s own order
         for q in &self.quants {
             ids.extend(crate::rope::Q_SEL.iter().map(|n| crate::rope::q_sel(q.name, n)));
             ids.extend((0..q.lay.per_row).map(|sl| crate::rope::q_scale_col(q.name, sl)));
@@ -2709,12 +2709,12 @@ impl Plan {
         if !self.quants.is_empty() {
             ids.extend((0..2).map(|k| crate::rope::qnz_col(self.q_nz_bits, k)));
         }
-        // stream E: the argmax region's own three selectors, last, so that no
+        // stream E: the argmax component's own three selectors, last, so that no
         // family before it moves an index
         if self.argmax_mat().is_some() {
             ids.extend(crate::argmax::AM_SEL.iter().map(|n| crate::argmax::id(n)));
         }
-        // stream BB: the embedding gadget's own columns -- the use region's four
+        // stream BB: the embedding gadget's own columns -- the use component's four
         // selectors and its block index, then the table's index pair and its
         // `pe` value columns.  After the argmax and before the GKR backend's, so no
         // family that exists today moves an index.
@@ -2740,14 +2740,14 @@ impl Plan {
     /// The number of components that carry lookups, in `use_sums` order.
     pub fn n_use(&self) -> usize {
         // chan + grid + per-token per prefix key tile; a diagonal block key tile has no per-token
-        // region (the pair shares the prefix key tile's), so it contributes two.
+        // component (the pair shares the prefix key tile's), so it contributes two.
         // B11 stream S, lever 1: on the GKR backend the key tiles' sums are proved by
         // the GKR and never enter `use_sums`.
         (if self.p.gkr_key_tiles {
             0
         } else {
             // stream AA: three sums for a key tile that carries the per-token
-            // region, two for one that rides on its group's -- with `--kv-boundary`
+            // component, two for one that rides on its group's -- with `--kv-boundary`
             // off, `rows_key_tile` is `!diagonal_block` and this is the sum it always was
             self.rows_key_tile.iter().map(|r| if *r { 3 } else { 2 }).sum::<usize>()
         })
@@ -2757,14 +2757,14 @@ impl Plan {
             + if self.p.gkr_freivalds { 0 } else { self.freivalds.len() }
             // B11 stream V, levers 3 and 4: and the same for residual stream and attnout
             + if self.p.gkr_residual_stream { 0 }
-              else { self.residual_stream.as_ref().map(|g| g.regions.len()).unwrap_or(0) }
+              else { self.residual_stream.as_ref().map(|g| g.components.len()).unwrap_or(0) }
             - usize::from(self.p.gkr_attnout)
             // stream II: one per requantize seam, before the two ends
             + self.rqs.len()
-            // stream NN: and one per quantize region
+            // stream NN: and one per quantize component
             + self.quants.len()
             + usize::from(self.argmax_mat().is_some())
-            // stream BB: the embedding gadget's use region, last of all
+            // stream BB: the embedding gadget's use component, last of all
             + usize::from(self.emb.is_some())
     }
     /// Stream JJ (E11): the `EPOW` window's domain and height.  Derived from
@@ -2783,7 +2783,7 @@ impl Plan {
     /// components are the last thing any plan adds, and a family appended past
     /// it would make that false.  The 6 is stream JJ's `EPOW` counted in.
     /// Stream II's five relations are drawn for the requantize seams *and* for
-    /// stream NN's quantize regions, which read the sign table and (before
+    /// stream NN's quantize components, which read the sign table and (before
     /// NN-3) the division table.  One predicate, so the prover, the emitter and
     /// the probes cannot disagree about whether they exist.
     pub fn needs_rq_rels(&self) -> bool {
@@ -2838,7 +2838,7 @@ pub struct BuiltComponents {
     pub exp_t: FrameworkComponent<ExpTableEval>,
     pub tables: Vec<FrameworkComponent<TableEval>>,
     pub gtables: Vec<FrameworkComponent<GTableEval>>,
-    /// stream E: the argmax region, last of all, so adding it moves nothing
+    /// stream E: the argmax component, last of all, so adding it moves nothing
     pub argmax: Option<FrameworkComponent<crate::argmax::ArgmaxEval>>,
     /// stream BB: the embedding gadget's two components, after the argmax and
     /// after everything else, in this order -- the use side then the table side
@@ -2846,11 +2846,11 @@ pub struct BuiltComponents {
     pub emb_tab: Option<FrameworkComponent<crate::embed::EmbTableEval>>,
     /// stream II: the requantize seams and their tables, after everything else
     pub rqs: Vec<FrameworkComponent<crate::requant::RequantEval>>,
-    /// stream NN: the q/k/v quantize regions, in `Plan::quants` order
+    /// stream NN: the q/k/v quantize components, in `Plan::quants` order
     pub quants: Vec<FrameworkComponent<crate::rope::QuantEval>>,
     pub rq_tabs: Vec<FrameworkComponent<TableEval>>,
     pub pows: Vec<Powers>,
-    /// per key tile, in `chans`/`keys` order: does it have a per-token region?  A
+    /// per key tile, in `chans`/`keys` order: does it have a per-token component?  A
     /// diagonal block key tile does not (B10 step 3), so `rows` is shorter than `chans` and
     /// the component order has to be walked, not indexed.
     pub has_rows: Vec<bool>,
@@ -3066,7 +3066,7 @@ impl BuiltComponents {
         for r in &self.rqs {
             v.push(r);
         }
-        // stream NN: the quantize regions sit between the seams and their shared
+        // stream NN: the quantize components sit between the seams and their shared
         // tables, which is where `Plan::pre_ids` puts their selectors too
         for r in &self.quants {
             v.push(r);
@@ -3124,7 +3124,7 @@ impl BuiltComponents {
         for r in &self.rqs {
             v.push(r);
         }
-        // stream NN: the quantize regions sit between the seams and their shared
+        // stream NN: the quantize components sit between the seams and their shared
         // tables, which is where `Plan::pre_ids` puts their selectors too
         for r in &self.quants {
             v.push(r);
@@ -3147,7 +3147,7 @@ impl BuiltComponents {
 
 /// B11 stream F step 3: what one `.extend(...)` added to the interaction set.
 ///
-/// Called after each region appends its columns, with the running (columns,
+/// Called after each component appends its columns, with the running (columns,
 /// cells) pair the previous call left behind. The answer c-rider 5.1b wants —
 /// what share of the interaction cells a scoped GKR over `key_tiles` alone would
 /// cover — is this table, and it also gives `family_cells` the `tables` field
@@ -3161,7 +3161,7 @@ fn inter_mark(
     let cols = all.len();
     let cells: usize = all.iter().map(|c| c.size()).sum();
     out.push(json!({
-        "region": what,
+        "component": what,
         "columns": cols - seen.0,
         "cells": cells - seen.1,
     }));
@@ -3239,7 +3239,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                       v_bind: nn.as_ref().map(|(_, _, v)| v.clone()) },
             if p.gkr_key_tiles { SecureField::zero() } else { next_use(claims) },
         ));
-        // stream AA: "carries the per-token region", which with `--kv-boundary` off
+        // stream AA: "carries the per-token component", which with `--kv-boundary` off
         // is `!diagonal_block[b]` on the same key tiles
         if plan.rows_key_tile[b] {
             rows.push(FrameworkComponent::<RowEval>::new(
@@ -3260,8 +3260,8 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     // key tiles, matching where the prover commits their columns.
     //
     // B11 stream U, lever 3: the *binding* is built lower down, after the dequant
-    // components exist, because a dequant region's folded weights name columns
-    // in that region's own span. The allocation order -- what the statement
+    // components exist, because a dequant component's folded weights name columns
+    // in that component's own span. The allocation order -- what the statement
     // depends on -- is unchanged; only where the binding reads the spans back moves.
     let mut links = vec![];
     if let Some(hl) = link {
@@ -3358,7 +3358,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 // and `lam` its `lam`, the same two the seam's own fold uses,
                 // so the two claims are comparable with no scale factor.
                 //
-                // Stream SS: never on a `Variant::Fold` region -- its second
+                // Stream SS: never on a `Variant::Fold` component -- its second
                 // shared column is the divisor's token half, not the scale's
                 // exponent, so there is no claim to state (see `mat_interaction`'s
                 // caller and `rq_scale_open`).  The predicate is the same one
@@ -3372,14 +3372,14 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         lam: lam_residual_stream,
                         claimed: claim_at(claims.deq_sc.get(mi).copied(), "deq_sc"),
                     }),
-                // B11 stream U, lever 3: under the flag this region's lookups
+                // B11 stream U, lever 3: under the flag this component's lookups
                 // are the batched GKR's, so the AIR emits none of them and the
                 // interaction masks they would allocate are not there to claim.
                 gkr: p.gkr_dequant,
             },
             // the use sum belongs to whoever owns the lookups: with the
             // collector owning them there is no claimed sum in `use_sums` for
-            // this region at all, exactly as stream S did for the key tiles
+            // this component at all, exactly as stream S did for the key tiles
             if p.gkr_dequant { SecureField::zero() } else { next_use(claims) },
         ));
     }
@@ -3415,11 +3415,11 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     let nn = (m0.tokens * m0.n_in) as i128;
                     let claimed = claim_at(claims.freivalds_qx.get(wi).copied(), "freivalds_qx");
                     // Stream II (E11), at the JJ merge: the `o` group folds
-                    // under the *attnout* region's weights, not the wiring
+                    // under the *attnout* component's weights, not the wiring
                     // family's.  Every other group's counterparty is a
-                    // requantize region on the dequant's `MatLayout` map, whose
+                    // requantize component on the dequant's `MatLayout` map, whose
                     // canonical weight is `w_residual_stream^(N-1-k tokens-t)`; `o` has no
-                    // requantize region (`AttnOutEval` is its requantize) and
+                    // requantize component (`AttnOutEval` is its requantize) and
                     // its only counterparty is `claims.ao_q`, which weights
                     // element `(channel k, token t)` by `rv^k s^t`.  Both
                     // conventions factorize as (channel power)(token power), so
@@ -3455,7 +3455,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     let mut residual_stream = vec![];
     if let (Some(gp), Some(gr)) = (&plan.residual_stream, &rels.residual_stream) {
         let bindings = gp.bindings(w_residual_stream, lam_residual_stream, claims);
-        for (i, r) in gp.regions.iter().enumerate() {
+        for (i, r) in gp.components.iter().enumerate() {
             residual_stream.push(FrameworkComponent::<ResidualStreamEval>::new(
                 alloc,
                 ResidualStreamEval {
@@ -3471,13 +3471,13 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     uns: gr.uns.clone(),
                     val: gr.val.clone(),
                     binding: Some(bindings[i].clone()),
-                    // Stream H: a region carries a boundary side when the plan
+                    // Stream H: a component carries a boundary side when the plan
                     // named it one.  The sides are registered in `stream_in`,
-                    // `stream_out` order and the components in region order, so
+                    // `stream_out` order and the components in component order, so
                     // the tree a side lands in is the same for prover and
                     // verifier without either being told.
-                    bound: plan.layer_sides.iter().find(|s| s.region == i).map(|s| s.bound),
-                    // B11 stream V, lever 3: under the flag this region's
+                    bound: plan.layer_sides.iter().find(|s| s.component == i).map(|s| s.bound),
+                    // B11 stream V, lever 3: under the flag this component's
                     // lookups are the batched GKR's, so the AIR emits none of
                     // them and the interaction masks they would allocate are
                     // not there to claim.
@@ -3485,7 +3485,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 },
                 // the use sum belongs to whoever owns the lookups: with the
                 // collector owning them there is no claimed sum in `use_sums`
-                // for this region at all, exactly as stream U did for dequant
+                // for this component at all, exactly as stream U did for dequant
                 if p.gkr_residual_stream { SecureField::zero() } else { next_use(claims) },
             ));
         }
@@ -3500,7 +3500,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 .map(|sp| sp.col_start)
                 .expect("a component with no span in the tree the binding reads")
         };
-        // key tile -> index into `rows` (the key tiles that carry a per-token region)
+        // key tile -> index into `rows` (the key tiles that carry a per-token component)
         let mut row_of = vec![usize::MAX; plan.rows_key_tile.len()];
         let mut ri = 0usize;
         for (b, has) in plan.rows_key_tile.iter().enumerate() {
@@ -3529,25 +3529,25 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             let t2 = span_of(comp.trace_locations(), crate::common::INTER_TREE);
             let mut terms = vec![];
             for (reg, c, w) in &l.weights {
-                use crate::gkrlink::{RCol, Reg};
+                use crate::gkrlink::{RCol, Comp};
                 let key_tile = match reg {
-                    Reg::KeyTile(b) => *b,
-                    // B11 stream V, lever 3: a residual-stream region is one component, so
+                    Comp::KeyTile(b) => *b,
+                    // B11 stream V, lever 3: a residual-stream component is one component, so
                     // its own span is the whole resolution -- the mask index
                     // *is* the column index within it, which is `Prog`'s order.
-                    Reg::ResidualStream(g) => {
+                    Comp::ResidualStream(g) => {
                         let (tree, gi) = match c {
                             RCol::ResidualStream(i) =>
                                 (crate::common::BASE_TREE,
                                  span_of(residual_stream[*g].trace_locations(),
                                          crate::common::BASE_TREE) + i),
                             // stream OO: the norm weight is the statement's, so
-                            // it is a tree-0 column of the same region and the
+                            // it is a tree-0 column of the same component and the
                             // link names it by its preprocessed id
                             RCol::ResidualStreamPre(i, k) => {
                                 let tag = &plan.residual_stream.as_ref()
                                     .expect("a residual-stream column with no residual-stream plan")
-                                    .regions[*g].tag;
+                                    .components[*g].tag;
                                 let want = crate::residual_stream::residual_stream_pre_col(tag, *i, *k).id;
                                 let gi = pre_ids_all.iter().position(|x| x.id == want)
                                     .expect("a residual-stream preprocessed column missing \
@@ -3555,20 +3555,20 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                                 pre_idx.push(gi);
                                 pre_loc(gi)
                             }
-                            _ => panic!("a non-residual-stream column named on a residual-stream region"),
+                            _ => panic!("a non-residual-stream column named on a residual-stream component"),
                         };
                         terms.push((tree, gi, *w));
                         continue;
                     }
-                    Reg::Freivalds(k) => {
+                    Comp::Freivalds(k) => {
                         let RCol::Freivalds(i) = c else {
-                            panic!("a non-Freivalds column named on a Freivalds region")
+                            panic!("a non-Freivalds column named on a Freivalds component")
                         };
                         terms.push((crate::common::BASE_TREE,
                                     span_of(freivalds[*k].trace_locations(), crate::common::BASE_TREE) + i, *w));
                         continue;
                     }
-                    Reg::Ao => {
+                    Comp::Ao => {
                         let (tree, g) = match c {
                             RCol::Ao(i) => (crate::common::BASE_TREE,
                                              span_of(ao.trace_locations(), crate::common::BASE_TREE) + i),
@@ -3582,15 +3582,15 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                                 pre_loc(g)
                             }
                             _ => panic!("a non-attnout column named on the \
-                                         attnout region"),
+                                         attnout component"),
                         };
                         terms.push((tree, g, *w));
                         continue;
                     }
-                    // B11 stream U, lever 3: a dequant region is one component,
+                    // B11 stream U, lever 3: a dequant component is one component,
                     // so its own span is the whole resolution -- the mask index
                     // *is* the column index within it (`dequant::Map`).
-                    Reg::Deq(m) => {
+                    Comp::Deq(m) => {
                         let (tree, g) = match c {
                             RCol::Deq(i) =>
                                 (crate::common::BASE_TREE,
@@ -3604,7 +3604,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                                 pre_idx.push(g);
                                 pre_loc(g)
                             }
-                            _ => panic!("a key tile column named on a dequant region"),
+                            _ => panic!("a key tile column named on a dequant component"),
                         };
                         terms.push((tree, g, *w));
                         continue;
@@ -3728,7 +3728,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 next_use(claims),
             ));
         }
-        // stream NN: the quantize regions, between the seams and their shared
+        // stream NN: the quantize components, between the seams and their shared
         // tables -- the same order `Plan::pre_ids` and the component lists use
         for (k, qp) in plan.quants.iter().enumerate() {
             let binding = q_binding_w(w_residual_stream, lam_residual_stream, qp, p.nh,
@@ -3736,7 +3736,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                                       claim_at(claims.nn_out.get(k).copied(), "nn_out"));
             // stream NN-3: this side's own division table, and the family's own
             // `(q, nz)` table rather than the attention output's
-            let qr = rels.qq.as_ref().expect("the quantize regions draw their own tables");
+            let qr = rels.qq.as_ref().expect("the quantize components draw their own tables");
             quant_comps.push(FrameworkComponent::<crate::rope::QuantEval>::new(
                 alloc,
                 crate::rope::QuantEval {
@@ -3847,8 +3847,8 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     });
 
     // stream BB: the embedding gadget, after the argmax and after everything
-    // else.  The use region takes the last `use_sums` cursor position and the
-    // table region the last `table_sums` slot, which is what keeps both lists
+    // else.  The use component takes the last `use_sums` cursor position and the
+    // table component the last `table_sums` slot, which is what keeps both lists
     // append-only.  Its binding reads the wiring family's own `w` and `lam`, so it
     // draws no challenge of its own.
     let (embed, emb_tab) = match (&plan.emb, &rels.emb) {
@@ -3923,7 +3923,7 @@ pub struct Composed {
     /// fresh cells by family: key tiles, attnout, dequant, freivalds, residual stream, tables
     pub family_cells: Value,
     pub n_columns: [usize; 3],
-    /// B10 step 2: the residual-stream regions' own reference and B1 comparisons, and the
+    /// B10 step 2: the residual-stream components' own reference and B1 comparisons, and the
     /// binding claims each of them recomputed from the witness rather than the trace
     pub stream_bindings_ok: bool,
     /// Stream H: what the boundary trees cost this chunk, or null when the flag
@@ -3946,13 +3946,13 @@ pub struct Composed {
 pub struct ProverTamper {
     /// flip one row of the shared normalisation table, witness rebuilt to match
     pub norm_row: Option<usize>,
-    /// B10 step 2: corrupt one residual-stream region's own copy of the stream it shares
-    /// with another region -- `(region index, value index)`.  Everything inside
-    /// the region stays consistent, so what has to reject is the binding.
+    /// B10 step 2: corrupt one residual-stream component's own copy of the stream it shares
+    /// with another component -- `(component index, value index)`.  Everything inside
+    /// the component stays consistent, so what has to reject is the binding.
     pub residual_stream_copy: Option<(usize, usize)>,
-    /// a tamper inside one residual-stream region's arithmetic, by region index
+    /// a tamper inside one residual-stream component's arithmetic, by component index
     pub residual_stream: Option<(usize, crate::residual_stream::Tamper)>,
-    /// Stream H: corrupt one cell of *one* boundary tree, leaving the region it
+    /// Stream H: corrupt one cell of *one* boundary tree, leaving the component it
     /// is bound to alone -- `(which side, which cell)`, side 0 being the input
     /// and side 1 the output.  Nothing else in the chunk changes, so what has to
     /// reject is that side's equality constraint: the probe that says the root
@@ -3964,17 +3964,17 @@ pub struct ProverTamper {
     /// even and its in side when `j` is odd.
     pub layer_boundary: Option<(usize, usize)>,
     /// Stream E: corrupt the wiring family's own copy of a dequant output --
-    /// `(region index, value index)` into `o_out` for `gn1` or `d_out` for
-    /// `gn2`.  The region recomputes its add from the corrupted value, so
+    /// `(component index, value index)` into `o_out` for `gn1` or `d_out` for
+    /// `gn2`.  The component recomputes its add from the corrupted value, so
     /// everything inside the residual stream stays consistent and the only thing that can
     /// catch it is the dequant output binding.
     pub residual_stream_add: Option<(usize, usize)>,
     /// Stream II: a probe inside one requantize seam -- `(seam index, what)`.
-    /// Each leaves the region internally consistent and aims at one of its two
+    /// Each leaves the component internally consistent and aims at one of its two
     /// bindings, or at the scale lookup.
     pub rq: Option<(usize, crate::requant::RqTamper)>,
     /// Stream II, control 3: bend one cell of a norm scale's *preprocessed*
-    /// weight block.  The region recomputes `h` from the bent weight, so every
+    /// weight block.  The component recomputes `h` from the bent weight, so every
     /// constraint holds and the tree-0 root is what moves -- `root_ok` against
     /// the statement's `pre_root` is the rejection, and it is a different kind
     /// of rejection from every other control here.
@@ -3985,20 +3985,20 @@ pub struct ProverTamper {
     /// shape stream II's `residual_stream_w` has, under its own field so the two controls
     /// cannot fire together and the probe stays a one-field rejection.
     pub rope_w: Option<usize>,
-    /// Stream NN: a probe inside one quantize region -- `(region index, what)`.
-    /// Each leaves the region internally consistent and aims at one of its two
+    /// Stream NN: a probe inside one quantize component -- `(component index, what)`.
+    /// Each leaves the component internally consistent and aims at one of its two
     /// bindings, at the division table, or at `pre_root`.
     pub quant: Option<(usize, crate::rope::QTamper)>,
     /// Stream NN: bend one cell of a **key tile's** own committed K, Q or V and
     /// rebuild the key tile around it, so the attention it proves is honest and the
     /// only thing that can see it is the key tile's new claim against the quantize
-    /// region's output.  `(which of K/Q/V, which cell)`.
+    /// component's output.  `(which of K/Q/V, which cell)`.
     pub key_tile_qkv: Option<(usize, usize)>,
-    /// Stream E: a tamper inside the composed argmax region
+    /// Stream E: a tamper inside the composed argmax component
     pub argmax: Option<crate::argmax::Tamper>,
-    /// Stream BB: a tamper inside the composed embedding region.  `TokRow` is
+    /// Stream BB: a tamper inside the composed embedding component.  `TokRow` is
     /// the aimed one -- the id moved to another valid entry with the committed
-    /// row recomputed to match, so every constraint inside the region holds and
+    /// row recomputed to match, so every constraint inside the component holds and
     /// only the binding to the layer's `bin` rejects.
     pub embed: Option<crate::embed::Tamper>,
     /// Stream Z, the four wired-site bends.  Each bends exactly one committed
@@ -4034,14 +4034,14 @@ pub struct ProverTamper {
     /// its own two range lookups can reject it.
     pub ao_acc: Option<usize>,
     /// One *token*'s `jo` moved by one, on every row of it, with the whole
-    /// region rederived.  This one must be **accepted**: `jo` is the prover's
+    /// component rederived.  This one must be **accepted**: `jo` is the prover's
     /// choice inside the window and nothing in this statement reads the
     /// attention output's scale.  It is the honest limit of what section 1f
     /// buys, and the probe that says so.  The index is a token.
     pub ao_jo_tok: Option<usize>,
     /// Stream TT (E11), log row 73: one slot's committed magnitude replaced by
     /// `-|acc|` -- the other root of the pin `(amag - acc)(amag + acc) = 0`,
-    /// so every constraint of the region still holds and every other lookup
+    /// so every constraint of the component still holds and every other lookup
     /// lands.  As a field element it is about `2^31`, which is exactly the
     /// forgery `2 mag num < p` exists to stop, and the only reader of it is
     /// the high accumulator limb's range check.  The magnitude form only; the
@@ -4066,23 +4066,23 @@ pub struct Gen {
     pub key_tile_committed: Vec<Committed>,
     pub key_tile_dev: Vec<Option<crate::devwfill::DevKeyTile>>,
     pub key_tile_pre: Vec<Option<crate::devpre::DevPreKeyTile>>,
-    pub aor: crate::layer::AoRegion,
-    pub mat_regions: Vec<crate::layer::MatRegion>,
-    pub freivalds_regions: Vec<crate::layer::FreivaldsRegion>,
-    // The residual-stream family, which postdates the split: its regions, the owned
+    pub aor: crate::layer::AoComponent,
+    pub mat_components: Vec<crate::layer::MatComponent>,
+    pub freivalds_components: Vec<crate::layer::FreivaldsComponent>,
+    // The residual-stream family, which postdates the split: its components, the owned
     // columns of its shared tables, and its against-B1 summary.
-    pub residual_stream_regions: Vec<crate::residual_stream::ResidualStreamRegion>,
+    pub residual_stream_components: Vec<crate::residual_stream::ResidualStreamComponent>,
     pub residual_stream_tcols: Vec<Eval>,
     pub residual_stream_mcols: Vec<Eval>,
     pub residual_stream_b1: Value,
-    /// stream E: the argmax region, when it is composed
-    pub am_region: Option<crate::argmax::ARegion>,
-    /// stream BB: the embedding gadget's two regions, when it is composed
-    pub emb_region: Option<crate::embed::ERegion>,
+    /// stream E: the argmax component, when it is composed
+    pub am_component: Option<crate::argmax::AComponent>,
+    /// stream BB: the embedding gadget's two components, when it is composed
+    pub emb_component: Option<crate::embed::EComponent>,
     /// stream II: the requantize seams, in `Plan::rqs` order
-    pub rq_regions: Vec<crate::requant::RqRegion>,
-    /// stream NN: the quantize regions, in `Plan::quants` order
-    pub q_regions: Vec<crate::rope::QRegion>,
+    pub rq_components: Vec<crate::requant::RqComponent>,
+    /// stream NN: the quantize components, in `Plan::quants` order
+    pub q_components: Vec<crate::rope::QComponent>,
     pub n_deq_base: usize,
     pub pre_tables: Vec<Option<Eval>>,
     pub base_mults: Vec<Option<Eval>>,
@@ -4133,10 +4133,10 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         tables.norm[i].m7 = (tables.norm[i].m7 + 1) % 128;
     }
 
-    // ---- region traces -------------------------------------------------------
-    // B7a milestone 4 (18.5): the regions keep their columns and the two flat
+    // ---- component traces -------------------------------------------------------
+    // B7a milestone 4 (18.5): the components keep their columns and the two flat
     // lists are built from references once generation is done. `pre_tables`
-    // and `base_mults` are the only columns with no region of their own -- and
+    // and `base_mults` are the only columns with no component of their own -- and
     // they are exactly the ones the interaction's table sides read.
     // B7a milestone 4 (section 3 row 1): a slot with no host column is one the
     // device builds -- `x`, `y` and `m_exp`. The log sizes travel beside the
@@ -4164,7 +4164,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     //    `B7_M4_WFILL_KEY_TILE` says because the device fill has no notion of its
     //    layout (`devwfill::key_tile_fill_mode`, the one place that decision
     //    lives);
-    //  * the **argmax region**, which has no device fill at all and whose range
+    //  * the **argmax component**, which has no device fill at all and whose range
     //    lookups go on the layer's 16-bit table -- the block below takes
     //    `tables.m_r[ri]` and bumps it on the host.
     //
@@ -4174,7 +4174,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // and the proof is rejected by `sums_cancel` with every other check green.
     crate::devpre::note_host_fill(
         layer.key_tiles.iter().any(|a| crate::devwfill::key_tile_fill_mode(a) != 1)
-            // stream AA: a key tile that does not carry the per-token region fills
+            // stream AA: a key tile that does not carry the per-token component fills
             // on the host too (`commit_base_any`), and `key_tile_fill_mode` has no
             // way to know that -- it is told the `Attn`, not the plan
             || plan.rows_key_tile.iter().any(|r| !*r)
@@ -4182,11 +4182,11 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // stream BB: the embedding gadget has no device fill either, and
             // its `ef` range checks bump the layer's own 8-bit table on the host
             || plan.emb.is_some()
-            // stream Z: the fold region and the widened attention output's Freivalds check
+            // stream Z: the fold component and the widened attention output's Freivalds check
             // both fill on the host, whatever the switches say
             || plan.specs.iter().any(|s| s.variant == DeqVariant::Fold)
             || plan.freivalds.iter().any(|w| w.act_bits != 8)
-            // stream JJ (E11): an armed attnout tamper does too -- `ao_region`
+            // stream JJ (E11): an armed attnout tamper does too -- `ao_component`
             // sets its own mode to 0 because the device fill has no `corrupt`
             // path -- so its counters are the host's and the shared
             // multiplicity columns have to be as well.  Without this the
@@ -4197,7 +4197,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             || tamper.ao_acc.is_some() || tamper.ao_jo_tok.is_some()
             || tamper.ao_mag.is_some()
             // stream TT (E11), log row 73: and the magnitude form, whose tenth
-            // column the fork's `b65_fill_attnout` does not write -- `ao_region`
+            // column the fork's `b65_fill_attnout` does not write -- `ao_component`
             // sets its own mode to 0 for it on both backends
             || p.ao_acc_mag || p.ao_denp2,
     );
@@ -4266,7 +4266,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     crate::util::m4_add("gen/pre_key_tiles", m4_t.elapsed().as_secs_f64());
 
     let m4_t = std::time::Instant::now();
-    let aor = ao_region(&layer.ao, p.ao_target, p.ao_q_bits, p.ao_rem_bits,
+    let aor = ao_component(&layer.ao, p.ao_target, p.ao_q_bits, p.ao_rem_bits,
                         (p.ao_acc_lo_bits, p.ao_acc_hi_bits), p.ao_acc_mag, p.ao_denp2,
                         p.ao_jv_min, p.ao_jo_max,
                         &mut tables, None, tamper.ao_clamp, tamper.ao_den, tamper.ao_jo,
@@ -4275,27 +4275,27 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     crate::util::m4_add("gen/attnout", m4_t.elapsed().as_secs_f64());
 
     let m4_t = std::time::Instant::now();
-    let mut mat_regions = vec![];
+    let mut mat_components = vec![];
     for (mi, (m, sp)) in layer.mats.iter().zip(&plan.specs).enumerate() {
-        let r = mat_region(m, sp, &mut tables, plan.has_output_claim(&m.name),
+        let r = mat_component(m, sp, &mut tables, plan.has_output_claim(&m.name),
                            plan.output_claim_key_tile(&m.name)
                                .then(|| plan.p.hd / plan.mat_lays[mi].per_row),
                            (tamper.fold_qm, tamper.fold_dent));
-        mat_regions.push(r);
+        mat_components.push(r);
     }
-    let n_deq_base: usize = mat_regions
+    let n_deq_base: usize = mat_components
         .iter()
         .map(|r| r.base_cells())
         .sum();
 
     crate::util::m4_add("gen/dequant", m4_t.elapsed().as_secs_f64());
 
-    // Stream E: the argmax region, on the head dequant's own layout so the binding
+    // Stream E: the argmax component, on the head dequant's own layout so the binding
     // is positionwise.  Its range lookups go on the layer's 16-bit table, so its
     // multiplicities are bumped into that table's vector the way the wiring
     // family's go into `NORM` and `FRAC`.
     let m4_t = std::time::Instant::now();
-    let am_region = plan.argmax_mat().map(|mi| {
+    let am_component = plan.argmax_mat().map(|mi| {
         let m = &plan.p.mats[mi];
         let keys = layer.head_keys.as_ref().expect("the argmax needs key_head.u16");
         let tok = layer.head_tok.as_ref().expect("the argmax needs tok_head.i32");
@@ -4305,7 +4305,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         let ri = tables.widths.iter().position(|w| *w == crate::argmax::KEY_BITS)
             .expect("the argmax needs the layer's 16-bit range table (--z-lo-bits 16)");
         let mut m_rk = std::mem::take(&mut tables.m_r[ri]);
-        let r = crate::argmax::region(&w, plan.p.prove_argmax_lax, plan.mat_lays[mi],
+        let r = crate::argmax::component(&w, plan.p.prove_argmax_lax, plan.mat_lays[mi],
                                       &mut m_rk, tamper.argmax);
         tables.m_r[ri] = m_rk;
         tables.off_table += r.off_table;
@@ -4320,7 +4320,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // go on the layer's 8-bit table, exactly as the argmax's go on the 16-bit
     // one.
     let m4_t = std::time::Instant::now();
-    let emb_region = plan.emb.map(|l| {
+    let emb_component = plan.emb.map(|l| {
         let gc = layer.residual_stream.as_ref()
             .expect("`--embed` bindings to the wiring family; extract with `--residual-stream`");
         let tab = layer.embed_tab.as_ref()
@@ -4332,7 +4332,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         let ri = tables.widths.iter().position(|w| *w == crate::embed::EF_BITS)
             .expect("the embedding gadget needs the layer's 8-bit range table");
         let mut m_ef = std::mem::take(&mut tables.m_r[ri]);
-        let r = crate::embed::region(&w, l, &mut m_ef, tamper.embed);
+        let r = crate::embed::component(&w, l, &mut m_ef, tamper.embed);
         tables.m_r[ri] = m_ef;
         tables.off_table += r.off_table;
         r
@@ -4340,11 +4340,11 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     crate::util::m4_add("gen/embed", m4_t.elapsed().as_secs_f64());
 
     let m4_t = std::time::Instant::now();
-    let mut freivalds_regions = vec![];
+    let mut freivalds_components = vec![];
     for w in &plan.freivalds {
-        let r = freivalds_region(layer, &w.name, &w.mats, p.freivalds_p, w.act_bits, &mut tables,
+        let r = freivalds_component(layer, &w.name, &w.mats, p.freivalds_p, w.act_bits, &mut tables,
                                  None, tamper.freivalds_over.filter(|_| w.act_bits != 8));
-        freivalds_regions.push(r);
+        freivalds_components.push(r);
     }
     crate::util::m4_add("gen/freivalds", m4_t.elapsed().as_secs_f64());
 
@@ -4354,7 +4354,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // vectors and moved back, so the two families' lookups land in one column
     // apiece -- which is the real integration test: the shared tables' sums only
     // cancel if both families agree on every row they read.
-    let mut residual_stream_regions: Vec<crate::residual_stream::ResidualStreamRegion> = vec![];
+    let mut residual_stream_components: Vec<crate::residual_stream::ResidualStreamComponent> = vec![];
     let mut gtables: Option<ResidualStreamTables> = None;
     let mut residual_stream_b1: Value = json!(null);
     if let Some(gp) = &plan.residual_stream {
@@ -4372,8 +4372,8 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         let t = gp.t;
         let rows1 = t.rows1();
         let mut mismatch = vec![];
-        // what the two reduction regions read as their stream, kept so a norm scale
-        // region reads the identical block -- the binding compares those, and B1's
+        // what the two reduction components read as their stream, kept so a norm scale
+        // component reads the identical block -- the binding compares those, and B1's
         // own column is the separate check
         let mut norm_scale_in: Vec<Vec<u16>> = vec![];
         // stream II: and each norm's own sum of squares, one per token, which is
@@ -4385,7 +4385,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         // Stream II, the head chunk: one reduction and no add.  `xin` is the
         // last layer's committed residual, level 1 is the squares' tree alone,
         // and there is no second stream to thread -- so the loop runs once,
-        // over an empty second operand, and the region's output group 1 (the
+        // over an empty second operand, and the component's output group 1 (the
         // add) does not exist to be compared.
         let empty: Vec<u16> = vec![];
         let sources: Vec<(&Vec<u16>, &Vec<u16>, &str)> = if gp.head_norm {
@@ -4396,9 +4396,9 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         let mut stream = t.lay(&gc.xin);
         for (k, (add, want, wname)) in sources.iter().enumerate() {
             let i1 = 2 * k;
-            let (prog1, tag1) = (gp.regions[i1].prog.clone(), gp.regions[i1].tag.clone());
+            let (prog1, tag1) = (gp.components[i1].prog.clone(), gp.components[i1].tag.clone());
             let (prog2, tag2) =
-                (gp.regions[i1 + 1].prog.clone(), gp.regions[i1 + 1].tag.clone());
+                (gp.components[i1 + 1].prog.clone(), gp.components[i1 + 1].tag.clone());
             if let Some((ri, vi)) = tamper.residual_stream_copy {
                 if ri == i1 {
                     let n = stream.len();
@@ -4423,9 +4423,9 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 format!("B1 residual stream [{} x {}]", t.tokens, t.d));
             let tam1 = tamper.residual_stream.filter(|(ri, _)| *ri == i1).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
-            let r1 = crate::residual_stream::residual_stream_region(&w1, &prog1, plan.round, &tag1, &mut gt, tam1);
-            crate::util::m4_add("gen/residual_stream_region", t_gr.elapsed().as_secs_f64());
-            // what the region computed is what the next one reads: that is what
+            let r1 = crate::residual_stream::residual_stream_component(&w1, &prog1, plan.round, &tag1, &mut gt, tam1);
+            crate::util::m4_add("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
+            // what the component computed is what the next one reads: that is what
             // the binding says, and it is checked against B1's own column here.
             // The head chunk's level 1 has no add, so there is no second output
             // group and nothing to compare -- its own reference is the norm scale's.
@@ -4452,14 +4452,14 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // token -- `r` is its `UnKind::NormR` image and nothing else
             let tam2 = tamper.residual_stream.filter(|(ri, _)| *ri == i1 + 1).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
-            let r2 = crate::residual_stream::residual_stream_region(&w2, &prog2, plan.round, &tag2, &mut gt, tam2);
-            crate::util::m4_add("gen/residual_stream_region", t_gr.elapsed().as_secs_f64());
+            let r2 = crate::residual_stream::residual_stream_component(&w2, &prog2, plan.round, &tag2, &mut gt, tam2);
+            crate::util::m4_add("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
             ms_out.push(r2.outs[0][..t.tokens].to_vec());
             if !gp.head_norm {
                 stream = t.lay(&got);
             }
-            residual_stream_regions.push(r1);
-            residual_stream_regions.push(r2);
+            residual_stream_components.push(r1);
+            residual_stream_components.push(r2);
         }
         // ---- stream E: h = (x * r) * w, once per norm -------------------------
         for (k, i) in gp.norm_scales.iter().copied().enumerate() {
@@ -4471,8 +4471,8 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 (&gc.r2, &gc.w2, &gc.h2, "x_gate", "n2_out")
             };
             let un_r = crate::residual_stream::UnKind::NormR { inv_d: gc.inv_d, eps: gc.eps };
-            let prog = gp.regions[i].prog.clone();
-            let tag = gp.regions[i].tag.clone();
+            let prog = gp.components[i].prog.clone();
+            let tag = gp.components[i].tag.clone();
             // stream II: a row is one `(residue, token)` pair, so its single
             // group-1 leaf is its own token's sum of squares -- the reduction's
             // published answer, not a committed `r`.  `w` is per channel and
@@ -4506,8 +4506,8 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 format!("B1 norm{} scale [{} x {}]", k + 1, t.tokens, t.d));
             let tam = tamper.residual_stream.filter(|(ri, _)| *ri == i).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
-            let r = crate::residual_stream::residual_stream_region(&w, &prog, plan.round, &tag, &mut gt, tam);
-            crate::util::m4_add("gen/residual_stream_region", t_gr.elapsed().as_secs_f64());
+            let r = crate::residual_stream::residual_stream_component(&w, &prog, plan.round, &tag, &mut gt, tam);
+            crate::util::m4_add("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
             // the norm scale's output is the q/k/v (resp. gate/up) matmuls' own bf16
             // input column, so B1 has already written down what it must be
             let t_b1 = std::time::Instant::now();
@@ -4545,7 +4545,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                                      "note": "the dump does not carry this column"}));
             }
             crate::util::m4_add("gen/residual_stream_b1", t_b1.elapsed().as_secs_f64());
-            residual_stream_regions.push(r);
+            residual_stream_components.push(r);
         }
         // ---- stream E: silu(gate) * up --------------------------------------
         if let (Some(i), Some(tf)) = (gp.swiglu, gp.tff) {
@@ -4557,8 +4557,8 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             assert_eq!(layer.mats[gi].n_out, tf.d,
                        "the gate matmul's width is not the SwiGLU's dff");
             // The two matmuls' dequantized outputs, read through the dequant
-            // region's own reference so this region consumes exactly what that
-            // region proves.  What is *not* here is the binding pinning them to it:
+            // component's own reference so this component consumes exactly what that
+            // component proves.  What is *not* here is the binding pinning them to it:
             // that is the open dequant binding, and until it lands these leaves are
             // pinned only by their VAL lookups.
             // B11 stream L, anatomy: this is `tokens * d` calls to `deq_ref`,
@@ -4581,10 +4581,10 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                     }
                 });
             crate::util::m4_add("gen/residual_stream_deqref", t_dq.elapsed().as_secs_f64());
-            // Stream JJ (E11): the SwiGLU seam's control.  One of the region's
+            // Stream JJ (E11): the SwiGLU seam's control.  One of the component's
             // two committed input copies is bent and the product is recomputed
-            // from it, so every constraint inside the region still holds and
-            // only the binding against the gate (or up) dequant region's published
+            // from it, so every constraint inside the component still holds and
+            // only the binding against the gate (or up) dequant component's published
             // output can reject.  `vi` past `n` aims at `up`.
             if let Some((ri, vi)) = tamper.residual_stream_add {
                 if ri == i {
@@ -4592,15 +4592,15 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                     if vi < n2 { gate_out[vi] ^= 1 } else { up_out[(vi - n2) % n2] ^= 1 }
                 }
             }
-            let prog = gp.regions[i].prog.clone();
-            let tag = gp.regions[i].tag.clone();
+            let prog = gp.components[i].prog.clone();
+            let tag = gp.components[i].tag.clone();
             let w = crate::residual_stream::ResidualStreamWitness::new(
                 tf.rows1(), vec![tf.lay(&gate_out), tf.lay(&up_out)], &prog, plan.round,
                 format!("the gate and up dequant outputs [{} x {}]", tf.tokens, tf.d));
             let tam = tamper.residual_stream.filter(|(ri, _)| *ri == i).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
-            let r = crate::residual_stream::residual_stream_region(&w, &prog, plan.round, &tag, &mut gt, tam);
-            crate::util::m4_add("gen/residual_stream_region", t_gr.elapsed().as_secs_f64());
+            let r = crate::residual_stream::residual_stream_component(&w, &prog, plan.round, &tag, &mut gt, tam);
+            crate::util::m4_add("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
             let n = tf.tokens * tf.d;
             let cmp = |got: &[u16], want: &[u16]| -> usize {
                 (0..n)
@@ -4609,7 +4609,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                     .count()
             };
             // three columns B1 wrote for this gadget: the gate's dequantized
-            // output (the silu's input), the silu image the region's table
+            // output (the silu's input), the silu image the component's table
             // supplies, and the product `down` reads
             // B11 stream L, anatomy: everything from here to the end of the
             // block is a *check* against B1's dumped columns, not a committed
@@ -4631,11 +4631,11 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                                      "mismatch": cmp(&tf.unlay(&r.outs[0]), v)}));
             }
             crate::util::m4_add("gen/residual_stream_b1", t_b1.elapsed().as_secs_f64());
-            residual_stream_regions.push(r);
+            residual_stream_components.push(r);
         }
         // ---- stream NN: the rotation ----------------------------------------
         //
-        // Two regions per side, in the plan's own order.  A row is one
+        // Two components per side, in the plan's own order.  A row is one
         // (token, head) and its `hd` leaves are that head's slice of the
         // matmul's dequant output, so the row walks `hd` consecutive
         // token-major positions and the binding is a flat Horner.  `cos` and
@@ -4662,7 +4662,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 // What tree 0 holds is `rope_at`'s bf16 `cos` and `sgnsin` at
                 // this chunk's own positions.  So the f64 gap is *reported*
                 // (`rope_inv_vs_b1`, which is what NN session 1 section 6 said
-                // it was), and the bf16 table the region actually commits is
+                // it was), and the bf16 table the component actually commits is
                 // *asserted* -- every cell, at every position this chunk uses.
                 let bad = inv.iter().zip(refv).filter(|(a, b)| a != b).count();
                 let t_iv = std::time::Instant::now();
@@ -4692,7 +4692,7 @@ different rotation", inv.len(), 2 * hd * p.s);
                     .unwrap_or_else(|| panic!("--rope needs the {} matmul", rr.name));
                 let n_out = rr.heads * hd;
                 let rows = rr.tokens * rr.heads;
-                // the dequant region's own reference, which is exactly what its
+                // the dequant component's own reference, which is exactly what its
                 // `Out(0)` claim folds -- so the binding below is between two folds
                 // of one sequence and not between two computations of it
                 let t_dq = std::time::Instant::now();
@@ -4705,7 +4705,7 @@ different rotation", inv.len(), 2 * hd * p.s);
                 crate::util::m4_add("gen/rope_deqref", t_dq.elapsed().as_secs_f64());
                 // the control on the producer side: one dequant output copy
                 // bent, the whole rotation recomputed around it, so every
-                // constraint inside both regions still holds and only the binding
+                // constraint inside both components still holds and only the binding
                 // against the matmul's own published output can reject
                 if let Some((ri, vi)) = tamper.residual_stream_add {
                     if ri == rr.mul {
@@ -4718,7 +4718,7 @@ different rotation", inv.len(), 2 * hd * p.s);
                     row.copy_from_slice(&crate::rope::pre_row(&inv, hd, rp.pos0 + j / rr.heads));
                 });
                 // stream NN's control 3: one preprocessed angle bent.  The
-                // region stays satisfiable with the products recomputed around
+                // component stays satisfiable with the products recomputed around
                 // it, so `root_ok` against the statement's `pre_root` is the
                 // only thing that can reject -- the same shape stream II's
                 // norm-weight control has.
@@ -4731,24 +4731,24 @@ different rotation", inv.len(), 2 * hd * p.s);
                     eprintln!("compose: rope angle cell {at} of rp{}m bent {was:#06x} -> \
 {:#06x} (a rejection is the pass)", rr.name, pre[at]);
                 }
-                let mprog = gp.regions[rr.mul].prog.clone();
-                let mtag = gp.regions[rr.mul].tag.clone();
+                let mprog = gp.components[rr.mul].prog.clone();
+                let mtag = gp.components[rr.mul].tag.clone();
                 let wm = crate::residual_stream::ResidualStreamWitness::with_pre(
                     rows, vec![deq], pre, &mprog, plan.round,
                     format!("the {} dequant output [{} x {}]", rr.name, rr.tokens, n_out));
                 let tam = tamper.residual_stream.filter(|(ri, _)| *ri == rr.mul).map(|(_, x)| x);
-                let rm = crate::residual_stream::residual_stream_region(
+                let rm = crate::residual_stream::residual_stream_component(
                     &wm, &mprog, plan.round, &mtag, &mut gt, tam);
-                let aprog = gp.regions[rr.add].prog.clone();
-                let atag = gp.regions[rr.add].tag.clone();
+                let aprog = gp.components[rr.add].prog.clone();
+                let atag = gp.components[rr.add].tag.clone();
                 let wa = crate::residual_stream::ResidualStreamWitness::new(
                     rows, vec![rm.outs[0].clone()], &aprog, plan.round,
                     format!("the {} rotation's products [{} x {}]", rr.name, rows, 2 * hd));
                 let tam = tamper.residual_stream.filter(|(ri, _)| *ri == rr.add).map(|(_, x)| x);
-                let ra = crate::residual_stream::residual_stream_region(
+                let ra = crate::residual_stream::residual_stream_component(
                     &wa, &aprog, plan.round, &atag, &mut gt, tam);
-                residual_stream_regions.push(rm);
-                residual_stream_regions.push(ra);
+                residual_stream_components.push(rm);
+                residual_stream_components.push(ra);
             }
         }
         tables.m_norm = std::mem::take(&mut gt.m_norm);
@@ -4756,56 +4756,56 @@ different rotation", inv.len(), 2 * hd * p.s);
         tables.off_table += gt.off_table;
         gt.off_table = 0;
         residual_stream_b1 = json!({"against_b1": mismatch,
-                                    "reference_mismatch": residual_stream_regions.iter()
+                                    "reference_mismatch": residual_stream_components.iter()
                                         .map(|r| r.ref_n - r.ref_ok).sum::<usize>(),
                                     "exponent_out_of_range":
-                                        residual_stream_regions.iter().map(|r| r.bad_exp).sum::<usize>()});
+                                        residual_stream_components.iter().map(|r| r.bad_exp).sum::<usize>()});
         gtables = Some(gt);
     }
     crate::util::m4_add("gen/residual_stream", m4_t.elapsed().as_secs_f64());
 
     // ---- stream II: the requantize seams ------------------------------------
     //
-    // Each reads its producing region's *computed* output -- not a column of
+    // Each reads its producing component's *computed* output -- not a column of
     // the dump -- so what the seam requantizes is what the wiring family just
     // proved, and the binding is what says the Freivalds check multiplied the result.  The
     // per-token scale is the dump's own `jx`/`sx`, i.e. the same field element
-    // the matmul's dequant region commits, which is what leaves the remaining
+    // the matmul's dequant component commits, which is what leaves the remaining
     // scale seam a one-constraint job.
     let m4_t = std::time::Instant::now();
-    let mut rq_regions: Vec<crate::requant::RqRegion> = vec![];
+    let mut rq_components: Vec<crate::requant::RqComponent> = vec![];
     for (k, rp) in plan.rqs.iter().enumerate() {
         let g = plan.residual_stream.as_ref().expect("a requantize seam needs the wiring family");
-        let reg = &residual_stream_regions[rp.producer.0];
+        let reg = &residual_stream_components[rp.producer.0];
         let x = if rp.producer.0 == g.swiglu.unwrap_or(usize::MAX) {
             g.tff.expect("the SwiGLU's tiling").unlay(&reg.outs[0])
         } else {
             g.t.unlay(&reg.outs[0])
         };
         let m0 = &layer.mats[plan.freivalds[rp.freivalds].mats[0]];
-        let r = crate::requant::rq_region(
+        let r = crate::requant::rq_component(
             &rp.name, &x, &m0.qx, &m0.jx.iter().map(|v| *v as i64).collect::<Vec<_>>(),
             &m0.sx, rp.tokens, rp.n, rp.v, rp.lay, &mut tables,
             tamper.rq.filter(|(i, _)| *i == k).map(|(_, t)| t));
-        rq_regions.push(r);
+        rq_components.push(r);
     }
     crate::util::m4_add("gen/requant", m4_t.elapsed().as_secs_f64());
 
-    // ---- stream NN: the three quantize regions -------------------------------
+    // ---- stream NN: the three quantize components -------------------------------
     //
     // q and k read the rotation's own output, v its matmul's dequant reference:
-    // in both cases the region consumes what another region *proved*, not a
+    // in both cases the component consumes what another component *proved*, not a
     // column of the dump, so the input binding compares two folds of one sequence.
     // `want` is the key tiles' own committed integers, gathered onto the query-head
     // grid -- a reference count and nothing the AIR reads.
     let m4_t = std::time::Instant::now();
-    let mut q_regions: Vec<crate::rope::QRegion> = vec![];
+    let mut q_components: Vec<crate::rope::QComponent> = vec![];
     let nn_cols = (!plan.quants.is_empty()).then(|| nn_key_tile_cols(&plan, layer));
     for (k, qp) in plan.quants.iter().enumerate() {
         let mi = layer.mats.iter().position(|m| m.name == qp.name)
             .unwrap_or_else(|| panic!("--rope needs the {} matmul", qp.name));
         let x: Vec<u16> = match qp.producer {
-            Some((ri, _)) => residual_stream_regions[ri].outs[0].clone(),
+            Some((ri, _)) => residual_stream_components[ri].outs[0].clone(),
             None => {
                 let mut v = vec![0u16; qp.tokens * qp.n];
                 let n_out = qp.n;
@@ -4831,11 +4831,11 @@ different rotation", inv.len(), 2 * hd * p.s);
                 })
                 .collect()
         }).unwrap_or_default();
-        let r = crate::rope::q_region(
+        let r = crate::rope::q_component(
             qp.name, &x, &jj, Some(&want), qp.tokens, qp.n, qp.hd, qp.bits, plan.q_nz_bits,
             qp.lay, &mut tables,
             tamper.quant.filter(|(i, _)| *i == k).map(|(_, t)| t));
-        q_regions.push(r);
+        q_components.push(r);
     }
     crate::util::m4_add("gen/quant", m4_t.elapsed().as_secs_f64());
 
@@ -4989,8 +4989,8 @@ different rotation", inv.len(), 2 * hd * p.s);
             base_mults.push(None);
         }
     }
-    // and its multiplicity, bumped by `ao_region` (and, on the device backend, by
-    // the host loop `ao_region_dev` runs beside the kernel -- `e = jv - jo` is
+    // and its multiplicity, bumped by `ao_component` (and, on the device backend, by
+    // the host loop `ao_component_dev` runs beside the kernel -- `e = jv - jo` is
     // a function of `ao.jv`, `ao.jo` and the layout alone, so no counter has to
     // come back off the card for it)
     mult_logs.push(log_epow);
@@ -5031,14 +5031,14 @@ different rotation", inv.len(), 2 * hd * p.s);
     if mult_dev {
         let ri = |w: u32| 4 + plan.widths.iter().position(|x| *x == w).unwrap();
         let r8 = ri(8);
-        for r in &mat_regions {
-            let d = r.dev.as_ref().expect("B7_M4_FILL=1 but a dequant region is host-built");
+        for r in &mat_components {
+            let d = r.dev.as_ref().expect("B7_M4_FILL=1 but a dequant component is host-built");
             pre_counters[0].push(&d.m_norm);
             pre_counters[1].push(&d.m_frac);
             pre_counters[2].push(&d.m_mul);
             pre_counters[r8].push(&d.m_r8);
         }
-        for r in &freivalds_regions {
+        for r in &freivalds_components {
             let d = r.dev.as_ref().expect("B7_M4_WFILL=1 but a Freivalds group is host-built");
             pre_counters[r8].push(&d.m_r8);
         }
@@ -5060,7 +5060,7 @@ different rotation", inv.len(), 2 * hd * p.s);
             // reach the table through the patch rows -- no device counter to sum.
             let Some(d) = key_tile_dev[b].as_ref() else {
                 assert!(a.diagonal_block || !plan.rows_key_tile[b],
-                        "B7_M4_WFILL=1 but a key_tile that carries the per-token region is \
+                        "B7_M4_WFILL=1 but a key_tile that carries the per-token component is \
                          host-built");
                 continue;
             };
@@ -5133,11 +5133,11 @@ different rotation", inv.len(), 2 * hd * p.s);
     crate::util::m4_add("gen/tables_up", m4_t.elapsed().as_secs_f64());
     let trace_secs = t0.elapsed().as_secs_f64();
     let residual_stream_tamper_fired = tamper.residual_stream
-        .map(|_| residual_stream_regions.iter().map(|r| r.fired).sum::<usize>());
-    Gen { plan, tables, key_tile_committed, key_tile_dev, key_tile_pre, aor, mat_regions, freivalds_regions,
-          residual_stream_regions, residual_stream_tcols, residual_stream_mcols,
-          residual_stream_b1, am_region, emb_region, rq_regions,
-          q_regions, n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
+        .map(|_| residual_stream_components.iter().map(|r| r.fired).sum::<usize>());
+    Gen { plan, tables, key_tile_committed, key_tile_dev, key_tile_pre, aor, mat_components, freivalds_components,
+          residual_stream_components, residual_stream_tcols, residual_stream_mcols,
+          residual_stream_b1, am_component, emb_component, rq_components,
+          q_components, n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
           m4e_tabdev, trace_secs, pre_key, layer_boundary_tamper: tamper.layer_boundary,
           residual_stream_tamper_fired }
 }
@@ -5145,10 +5145,10 @@ different rotation", inv.len(), 2 * hd * p.s);
 /// B7b (README 26): the second half -- the session, the three commits, the
 /// interaction, the components and the proof.
 pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
-    let Gen { plan, tables, key_tile_committed, key_tile_dev, key_tile_pre, aor, mat_regions, freivalds_regions,
-              residual_stream_regions, residual_stream_tcols, residual_stream_mcols,
-              residual_stream_b1, am_region, emb_region, rq_regions,
-              q_regions, n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
+    let Gen { plan, tables, key_tile_committed, key_tile_dev, key_tile_pre, aor, mat_components, freivalds_components,
+              residual_stream_components, residual_stream_tcols, residual_stream_mcols,
+              residual_stream_b1, am_component, emb_component, rq_components,
+              q_components, n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
               m4e_tabdev, trace_secs, pre_key, layer_boundary_tamper,
               residual_stream_tamper_fired } = g;
     let p = &plan.p;
@@ -5189,8 +5189,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             base_all.extend(aor.base.iter().map(AnyCol::Host));
         }
     }
-    for r in &mat_regions {
-        // B7a milestone 4 (19.6): under `B7_M4_FILL=1` this region's columns
+    for r in &mat_components {
+        // B7a milestone 4 (19.6): under `B7_M4_FILL=1` this component's columns
         // are already on the device, in committed order, and this is where
         // they join the tree without an upload.
         match &r.dev {
@@ -5205,7 +5205,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             }
         }
     }
-    for r in &freivalds_regions {
+    for r in &freivalds_components {
         match &r.dev {
             Some(d) => {
                 let l = r.lay.g.log_rows;
@@ -5218,10 +5218,10 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             }
         }
     }
-    // The residual-stream regions' columns follow the Freivalds checks, as they did when the lists
+    // The residual-stream components' columns follow the Freivalds checks, as they did when the lists
     // were built by value. B11 stream M: and they are on the card under
     // `B7_M4_RESIDUAL_STREAM_FILL=1`, where the fill left them.
-    for r in &residual_stream_regions {
+    for r in &residual_stream_components {
         match &r.dev {
             Some(d) => {
                 pre_all.extend(d.pre.iter().map(|c| AnyCol::Dev(c, r.log_rows)));
@@ -5253,7 +5253,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             c.extend(crate::requant::scl_tab_cols(*v));
             c
         })
-        .chain(if rq_regions.is_empty() && q_regions.is_empty() { vec![] }
+        .chain(if rq_components.is_empty() && q_components.is_empty() { vec![] }
                else { crate::requant::rqv_tab_cols() })
         // stream NN-3: and the quantize family's own two, last
         .chain(plan.q_tabs.iter().flat_map(|w| crate::rope::qdiv_tab_cols(*w)))
@@ -5267,7 +5267,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             let lr = crate::requant::rq_log_rows(*v);
             let mut m = vec![0u32; 1usize << lr];
             let mut ms = vec![0u32; 1usize << 15];
-            for r in rq_regions.iter().filter(|r| r.v == *v) {
+            for r in rq_components.iter().filter(|r| r.v == *v) {
                 for (a, b) in m.iter_mut().zip(&r.m_rq) {
                     *a += *b;
                 }
@@ -5278,14 +5278,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             out.push(crate::common::eval_of(lr, m.iter().map(|x| m31_u32(*x)).collect()));
             out.push(crate::common::eval_of(15, ms.iter().map(|x| m31_u32(*x)).collect()));
         }
-        if !rq_regions.is_empty() || !q_regions.is_empty() {
+        if !rq_components.is_empty() || !q_components.is_empty() {
             let mut m = vec![0u32; 512];
-            for r in &rq_regions {
+            for r in &rq_components {
                 for (a, b) in m.iter_mut().zip(&r.m_rqv) {
                     *a += *b;
                 }
             }
-            for r in &q_regions {
+            for r in &q_components {
                 for (a, b) in m.iter_mut().zip(&r.m_rqv) {
                     *a += *b;
                 }
@@ -5294,11 +5294,11 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
         // stream NN-3: the quantize family's own two, in `Plan::pre_ids`' order.
         // A division table is shared by every side of its width; the `(q, nz)`
-        // table by all three regions.
+        // table by all three components.
         for w in &plan.q_tabs {
             let lr = crate::rope::qdiv_log_rows(*w);
             let mut m = vec![0u32; 1usize << lr];
-            for r in q_regions.iter().filter(|r| r.bits == *w) {
+            for r in q_components.iter().filter(|r| r.bits == *w) {
                 for (a, b) in m.iter_mut().zip(&r.m_rq) {
                     *a += *b;
                 }
@@ -5308,7 +5308,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         if !plan.quants.is_empty() {
             let lr = crate::rope::qnz_log_rows(plan.q_nz_bits);
             let mut m = vec![0u32; 1usize << lr];
-            for r in &q_regions {
+            for r in &q_components {
                 for (a, b) in m.iter_mut().zip(&r.m_qnz) {
                     *a += *b;
                 }
@@ -5317,27 +5317,27 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
         out
     };
-    for r in &rq_regions {
+    for r in &rq_components {
         pre_all.extend(r.pre.iter().map(AnyCol::Host));
         base_all.extend(r.base.iter().map(AnyCol::Host));
     }
-    // stream NN: the quantize regions, between the seams and the shared tables
-    for r in &q_regions {
+    // stream NN: the quantize components, between the seams and the shared tables
+    for r in &q_components {
         pre_all.extend(r.pre.iter().map(AnyCol::Host));
         base_all.extend(r.base.iter().map(AnyCol::Host));
     }
     pre_all.extend(rq_tab_pre.iter().map(AnyCol::Host));
     base_all.extend(rq_tab_mult.iter().map(AnyCol::Host));
-    // stream E: the argmax region closes both trees, matching `pre_ids` and the
+    // stream E: the argmax component closes both trees, matching `pre_ids` and the
     // component order -- appending it moves no family before it
-    if let Some(r) = am_region.as_ref() {
+    if let Some(r) = am_component.as_ref() {
         pre_all.extend(r.pre.iter().map(AnyCol::Host));
         base_all.extend(r.base.iter().map(AnyCol::Host));
     }
     // stream BB: the embedding gadget closes both trees after the argmax, in
     // the order `pre_ids` writes its ids and the order `components()` places
     // its two components -- the use side, then the table side
-    if let Some(r) = emb_region.as_ref() {
+    if let Some(r) = emb_component.as_ref() {
         pre_all.extend(r.pre.iter().map(AnyCol::Host));
         pre_all.extend(r.tab_pre.iter().map(AnyCol::Host));
         base_all.extend(r.base.iter().map(AnyCol::Host));
@@ -5563,7 +5563,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // The model in `key_tile_split.py --families` counted columns; the backend needs the
     // *looks*, and memo section 4's collapse is a property of the fraction. So
     // this lowers every family's evaluator -- the un-ablated one, the shape the
-    // feed asks for -- and reports, per region, whether every denominator is
+    // feed asks for -- and reports, per component, whether every denominator is
     // affine in committed base masks and preprocessed columns at this row, and
     // which numerators are the literal one. It is the family's own `look_units`
     // list, derived rather than written down, and a family that fails here gets
@@ -5591,18 +5591,18 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     } else {
         let m4a_t = std::time::Instant::now();
         let mut out = vec![];
-        for (m, reg) in layer.mats.iter().zip(&mat_regions) {
+        for (m, reg) in layer.mats.iter().zip(&mat_components) {
             let ev = crate::layer::deq_logup_eval(m, reg, rv, s, &rels);
             let ir = crate::devfrac::ir_of(&ev, reg.lay.log_rows);
             out.push(crate::gkrlink::affinity_of(
                 "dequant", &format!("dequant/{}", m.name), &ir));
         }
-        for (i, reg) in residual_stream_regions.iter().enumerate() {
+        for (i, reg) in residual_stream_components.iter().enumerate() {
             let ir = crate::devfrac::ir_of(&m4e_air.residual_stream[i].eval, reg.log_rows);
             out.push(crate::gkrlink::affinity_of(
                 "residual_stream", &format!("residual_stream/{}", reg.tag), &ir));
         }
-        for (wi, reg) in freivalds_regions.iter().enumerate() {
+        for (wi, reg) in freivalds_components.iter().enumerate() {
             let ir = crate::devfrac::ir_of(&m4e_air.freivalds[wi].eval, reg.lay.g.log_rows);
             out.push(crate::gkrlink::affinity_of(
                 "freivalds", &format!("freivalds/{}", reg.name), &ir));
@@ -5629,10 +5629,10 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // ---- interaction ----------------------------------------------------------
     let t1 = std::time::Instant::now();
     let mut inter_all: Vec<crate::device::AnyCol<'static>> = vec![];
-    // B11 stream F step 3 (c-rider 5.1b): `inter_all` is built region by region
+    // B11 stream F step 3 (c-rider 5.1b): `inter_all` is built component by component
     // in discrete `.extend(...)` calls, and the question "could a scoped GKR
-    // cover the key tiles alone" is a per-region cell count. `mark` records what
-    // each region added; purely additive, ~30 O(n) sums against a 3.5k-column
+    // cover the key tiles alone" is a per-component cell count. `mark` records what
+    // each component added; purely additive, ~30 O(n) sums against a 3.5k-column
     // vector.
     let mut inter_split: Vec<serde_json::Value> = vec![];
     let mut inter_seen = (0usize, 0usize);
@@ -5660,7 +5660,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // and the row index counts prefix key tiles only.
         //
         // Open item 1 (E11, 2026-09-02): block 0's solo diagonal block carries the
-        // region and so has a row component, but it is still a diagonal block -- its
+        // component and so has a row component, but it is still a diagonal block -- its
         // `KeyEval` reads the causal mask (tree 0, `msk_id`) for the exp
         // lookups' multiplicities, which the device fraction route never
         // supplies (`devfrac::key_tile_cols` hands the key tiles `Cols::Unread`, 19.2's
@@ -5686,7 +5686,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // `int/key_tiles` minus `int/key_tiles_build` comes to is the accounting.
         let t_ib = std::time::Instant::now();
         if let Some(g) = gkr.as_mut() {
-            g.reg = crate::gkrlink::Reg::KeyTile(b);
+            g.reg = crate::gkrlink::Comp::KeyTile(b);
         }
         // stream NN: the diagonal block key tiles' own K, Q and V claims.  The weights are
         // the verifier's own; the claims are what this pass computes, so the
@@ -5726,8 +5726,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     //
     // The GKR proof lands at a fixed transcript position -- after tree 1 and the
     // relation challenges, before the interaction tree's own commit -- and the
-    // dequant regions' interaction columns come *after* that position in the
-    // tree's column order. Their fractions do not: a region's fractions are a
+    // dequant components' interaction columns come *after* that position in the
+    // tree's column order. Their fractions do not: a component's fractions are a
     // function of its committed base and preprocessed columns alone, and those
     // have existed since tree 1. So the collection runs here, in the plan's
     // matmul order, which is `sites_of`'s order and the order the interaction
@@ -5739,7 +5739,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     if p.gkr_dequant {
         let g = gkr.as_mut().expect("--gkr-dequant needs --gkr-key-tiles");
         let m4_t = std::time::Instant::now();
-        for (mi, (m, reg)) in layer.mats.iter().zip(&mat_regions).enumerate() {
+        for (mi, (m, reg)) in layer.mats.iter().zip(&mat_components).enumerate() {
             let eval = crate::layer::deq_logup_eval(m, reg, rv, s, &rels);
             crate::gkr_key_tile::deq_site(g, mi, &eval, reg);
         }
@@ -5747,10 +5747,10 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     // B11 stream V, lever 3: the residual-stream family's sites, collected here for the
     // same reason -- the GKR proof lands before the interaction tree's own
-    // commit and the residual-stream regions' interaction columns come after that position
+    // commit and the residual-stream components' interaction columns come after that position
     // in the tree's column order, while their *fractions* are a function of
     // committed base columns that have existed since tree 1. The order is the
-    // plan's region order, which is `sites_of`'s and the order the interaction
+    // plan's component order, which is `sites_of`'s and the order the interaction
     // loop below reaches them in.
     //
     // The evaluator is the component's own with the ablation undone. Stream U
@@ -5760,7 +5760,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     if p.gkr_residual_stream {
         let g = gkr.as_mut().expect("--gkr-residual-stream needs --gkr-key-tiles");
         let m4_t = std::time::Instant::now();
-        for (i, reg) in residual_stream_regions.iter().enumerate() {
+        for (i, reg) in residual_stream_components.iter().enumerate() {
             let mut ev = m4e_air.residual_stream[i].eval.clone();
             ev.gkr = false;
             crate::gkr_key_tile::residual_stream_site(g, i, &ev, reg);
@@ -5774,7 +5774,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     if p.gkr_freivalds {
         let g = gkr.as_mut().expect("--gkr-freivalds needs --gkr-key-tiles");
         let m4_t = std::time::Instant::now();
-        for (wi, reg) in freivalds_regions.iter().enumerate() {
+        for (wi, reg) in freivalds_components.iter().enumerate() {
             let mut ev = m4e_air.freivalds[wi].eval.clone();
             ev.gkr = false;
             crate::gkr_key_tile::freivalds_site(g, wi, &ev, reg);
@@ -5843,61 +5843,61 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // host mirror to fold, so the fold reaches them where they are. The
         // causal-mask columns are preprocessed and always host-built, and a
         // diagonal block key tile is always host-filled, so one height can mix the two.
-        let src_of = |reg: crate::gkrlink::Reg, c: &crate::gkrlink::RCol| {
-            use crate::gkrlink::{RCol, Reg, Src};
+        let src_of = |reg: crate::gkrlink::Comp, c: &crate::gkrlink::RCol| {
+            use crate::gkrlink::{RCol, Comp, Src};
             // B11 stream U, lever 3: the same resolution for the second family.
-            // A dequant region's own `base` and `pre` are the columns its masks
+            // A dequant component's own `base` and `pre` are the columns its masks
             // name, in committed order, and under a device fill they live where
             // the fill left them -- so this is `key_tile_committed`'s two lines with
-            // the region's own vectors in place of the key tile's spans.
+            // the component's own vectors in place of the key tile's spans.
             // B11 stream V, lever 3: the same resolution for the residual-stream family.
-            // A residual-stream region's own `base` and `pre` are the columns its masks
+            // A residual-stream component's own `base` and `pre` are the columns its masks
             // name, in committed order, and under a device fill they live where
             // the fill left them.
-            if let Reg::ResidualStream(g) = reg {
-                let r = &residual_stream_regions[g];
+            if let Comp::ResidualStream(g) = reg {
+                let r = &residual_stream_components[g];
                 return match (c, &r.dev) {
                     (RCol::ResidualStream(i), Some(d)) => Src::Dev(d.base[*i].device_ptr),
                     (RCol::ResidualStream(i), None) => Src::Host(&r.base[*i]),
                     // stream OO: `Prog::pre_at` is where the pair sits in the
-                    // region's own preprocessed list, the same index the fill
+                    // component's own preprocessed list, the same index the fill
                     // reads through `residual_stream::src_cols_any`'s `PRE_TAG`
                     (RCol::ResidualStreamPre(i, k), Some(d)) =>
                         Src::Dev(d.pre[r.prog.pre_at(*i, *k)].device_ptr),
                     (RCol::ResidualStreamPre(i, k), None) =>
                         Src::Host(&r.pre[r.prog.pre_at(*i, *k)]),
-                    _ => panic!("a non-residual-stream column named on a residual-stream region"),
+                    _ => panic!("a non-residual-stream column named on a residual-stream component"),
                 };
             }
-            if let Reg::Freivalds(w) = reg {
-                let r = &freivalds_regions[w];
+            if let Comp::Freivalds(w) = reg {
+                let r = &freivalds_components[w];
                 return match (c, &r.dev) {
                     (RCol::Freivalds(i), Some(d)) => Src::Dev(d.base[*i].device_ptr),
                     (RCol::Freivalds(i), None) => Src::Host(&r.base[*i]),
-                    _ => panic!("a non-Freivalds column named on a Freivalds region"),
+                    _ => panic!("a non-Freivalds column named on a Freivalds component"),
                 };
             }
-            if let Reg::Ao = reg {
+            if let Comp::Ao = reg {
                 return match (c, &aor.dev) {
                     (RCol::Ao(i), Some(d)) => Src::Dev(d.base[*i].device_ptr),
                     (RCol::Ao(i), None) => Src::Host(&aor.base[*i]),
                     (RCol::AoPre(sl), Some(d)) => Src::Dev(d.pre[*sl].device_ptr),
                     (RCol::AoPre(sl), None) => Src::Host(&aor.pre[*sl]),
-                    _ => panic!("a non-attnout column named on the attnout region"),
+                    _ => panic!("a non-attnout column named on the attnout component"),
                 };
             }
-            if let Reg::Deq(m) = reg {
-                let r = &mat_regions[m];
+            if let Comp::Deq(m) = reg {
+                let r = &mat_components[m];
                 let chan_w = if r.spec.variant == DeqVariant::Chain { 2 } else { 1 };
                 return match (c, &r.dev) {
                     (RCol::Deq(i), Some(d)) => Src::Dev(d.base[*i].device_ptr),
                     (RCol::Deq(i), None) => Src::Host(&r.base[*i]),
                     (RCol::DeqPre(sl), Some(d)) => Src::Dev(d.pre[chan_w * sl].device_ptr),
                     (RCol::DeqPre(sl), None) => Src::Host(&r.pre[chan_w * sl]),
-                    _ => panic!("a key tile column named on a dequant region"),
+                    _ => panic!("a key tile column named on a dequant component"),
                 };
             }
-            let Reg::KeyTile(key_tile) = reg else { unreachable!() };
+            let Comp::KeyTile(key_tile) = reg else { unreachable!() };
             let com = &key_tile_committed[key_tile];
             let dev = key_tile_dev[key_tile].as_ref();
             let base = |i: usize| match dev {
@@ -5920,27 +5920,27 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         if let Ok(spec) = std::env::var("B11_LINKMUT") {
             // B11 stream U, lever 3: `<k>` bends height `k`'s first folded
             // weight, as stream S wrote it; `<k>:deq` bends the first weight on
-            // that height that belongs to a *dequant* region instead. The
-            // weights are keyed by `(region, column)` and `Reg::KeyTile` sorts
-            // before `Reg::Deq`, so at a height both families share the plain
+            // that height that belongs to a *dequant* component instead. The
+            // weights are keyed by `(component, column)` and `Comp::KeyTile` sorts
+            // before `Comp::Deq`, so at a height both families share the plain
             // form always lands on a key tile -- and a control that cannot be aimed
             // at the new family would not be a control for it.
-            let is_deq = |w: &(crate::gkrlink::Reg, crate::gkrlink::RCol, SecureField)| {
-                matches!(w.0, crate::gkrlink::Reg::Deq(_))
+            let is_deq = |w: &(crate::gkrlink::Comp, crate::gkrlink::RCol, SecureField)| {
+                matches!(w.0, crate::gkrlink::Comp::Deq(_))
             };
             // B11 stream V, lever 3: and the same self-aim for the residual-stream family.
-            // `Reg::KeyTile` sorts before `Reg::Deq` before `Reg::ResidualStream`, so at a
+            // `Comp::KeyTile` sorts before `Comp::Deq` before `Comp::ResidualStream`, so at a
             // height that several families share the plain form always lands on
             // a key tile and a control that cannot be aimed at the new family would
             // not be a control for it.
-            let is_residual_stream = |w: &(crate::gkrlink::Reg, crate::gkrlink::RCol, SecureField)| {
-                matches!(w.0, crate::gkrlink::Reg::ResidualStream(_))
+            let is_residual_stream = |w: &(crate::gkrlink::Comp, crate::gkrlink::RCol, SecureField)| {
+                matches!(w.0, crate::gkrlink::Comp::ResidualStream(_))
             };
-            let is_freivalds = |w: &(crate::gkrlink::Reg, crate::gkrlink::RCol, SecureField)| {
-                matches!(w.0, crate::gkrlink::Reg::Freivalds(_))
+            let is_freivalds = |w: &(crate::gkrlink::Comp, crate::gkrlink::RCol, SecureField)| {
+                matches!(w.0, crate::gkrlink::Comp::Freivalds(_))
             };
-            let is_ao = |w: &(crate::gkrlink::Reg, crate::gkrlink::RCol, SecureField)| {
-                matches!(w.0, crate::gkrlink::Reg::Ao)
+            let is_ao = |w: &(crate::gkrlink::Comp, crate::gkrlink::RCol, SecureField)| {
+                matches!(w.0, crate::gkrlink::Comp::Ao)
             };
             let (at, w) = if spec == "freivalds" {
                 let at = hl.iter().position(|h| h.weights.iter().any(is_freivalds))
@@ -5956,8 +5956,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 (at, hl[at].weights.iter().position(is_residual_stream).unwrap())
             } else if spec == "deq" {
                 // self-aiming: the first dequant weight anywhere in the fold. A
-                // height's weights are keyed by `(region, column)` and
-                // `Reg::KeyTile` sorts first, so this finds the family without the
+                // height's weights are keyed by `(component, column)` and
+                // `Comp::KeyTile` sorts first, so this finds the family without the
                 // caller having to know which heights it landed on.
                 let at = hl.iter().position(|h| h.weights.iter().any(is_deq))
                     .expect("linkmut: the fold carries no dequant column to bend");
@@ -6011,7 +6011,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     crate::util::m4_add("int/attnout", m4_t.elapsed().as_secs_f64());
     let m4_t = std::time::Instant::now();
     claims.deq_sc = vec![[0u32; 4]; if plan.rqs.is_empty() { 0 } else { layer.mats.len() }];
-    for (mi, (m, reg)) in layer.mats.iter().zip(&mat_regions).enumerate() {
+    for (mi, (m, reg)) in layer.mats.iter().zip(&mat_components).enumerate() {
         // stream E: the output side rides on the wiring family's binding challenge,
         // so it exists exactly when that family does and the plan says this
         // matmul publishes one
@@ -6021,9 +6021,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         });
         // stream II (E11): the x-side scale's fold, on the matmuls a seam feeds.
         //
-        // Stream SS: not on a folded one.  This claim folds the region's *shared*
+        // Stream SS: not on a folded one.  This claim folds the component's *shared*
         // columns as `(ms, es)`, the language the seam's own scale claim is in,
-        // and a fold region's second shared column is not `es` -- it is
+        // and a fold component's second shared column is not `es` -- it is
         // `dent = 2^(G_t - alpha)`, the token half of the divisor.  Folding it
         // would compare two different quantities and the honest proof would not
         // prove.  The binding is named open instead (`rq_scale_open`); closing it
@@ -6038,7 +6038,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         inter_mark(&format!("dequant/{}", m.name), &inter_all, &mut inter_seen,
                    &mut inter_split);
         claims.mat_h.push(qm(it.claimed_h));
-        // B11 stream U, lever 3: with the collector owning this region's
+        // B11 stream U, lever 3: with the collector owning this component's
         // lookups there is no claimed sum to carry -- the GKR's per-site sum
         // stands exactly where it stood, in `sums_cancel`.
         if !p.gkr_dequant {
@@ -6097,7 +6097,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     crate::util::m4_add("int/dequant", m4_t.elapsed().as_secs_f64());
     let m4_t = std::time::Instant::now();
-    for (wi, reg) in freivalds_regions.iter().enumerate() {
+    for (wi, reg) in freivalds_components.iter().enumerate() {
         let t_iw = std::time::Instant::now();
         let it = freivalds_interaction(layer, reg, rv, s, &rels, true,
                                        &m4e_air.freivalds[wi].eval, p.gkr_freivalds);
@@ -6119,11 +6119,11 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     crate::util::m4_add("int/freivalds", m4_t.elapsed().as_secs_f64());
     let m4_t = std::time::Instant::now();
-    // the residual-stream regions' bindings and lookups, in component order
+    // the residual-stream components' bindings and lookups, in component order
     if let (Some(gp), Some(gr)) = (&plan.residual_stream, &rels.residual_stream) {
         let blank = Claims::default();
         let specs = gp.bindings(w_residual_stream, lam_residual_stream, &blank);
-        for (i, reg) in residual_stream_regions.iter().enumerate() {
+        for (i, reg) in residual_stream_components.iter().enumerate() {
             let t_ig = std::time::Instant::now();
             let it = crate::residual_stream::residual_stream_interaction(
                 reg, gr, Some(&specs[i]), &m4e_air.residual_stream[i].eval,
@@ -6133,7 +6133,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             inter_mark(&format!("residual_stream/{}", reg.tag), &inter_all, &mut inter_seen,
                        &mut inter_split);
             claims.stream_bindings.push(it.claimed.iter().map(|v| qm(*v)).collect());
-            // B11 stream V, lever 3: with the collector owning this region's
+            // B11 stream V, lever 3: with the collector owning this component's
             // lookups there is no claimed sum to carry -- the GKR's per-site
             // sum stands exactly where it stood, in `sums_cancel`.
             if !p.gkr_residual_stream {
@@ -6143,15 +6143,15 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     crate::util::m4_add("int/residual_stream", m4_t.elapsed().as_secs_f64());
 
-    // B11 stream X, lever 2: one entry per table region, in the order the
+    // B11 stream X, lever 2: one entry per table component, in the order the
     // interaction pass emits them. `interaction_split` already records what
-    // each region *cost*; this records what it *is* -- the height, which
+    // each component *cost*; this records what it *is* -- the height, which
     // decides both what a backend could remove and whether the link already pays
     // for that height, and how many committed key columns the relation
     // combines, which is the read set a link would have to name. It is the
     // block `key_tile_split.py`'s family model needs and the only one the tables
     // did not have, and it is metadata: nothing reads it back.
-    let mut table_regions: Vec<Value> = vec![];
+    let mut table_components: Vec<Value> = vec![];
     let m4_t = std::time::Instant::now();
     // the tables' own sides, in table order
     {
@@ -6169,7 +6169,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                          htab(&base_mults, 0)));
         inter_all.extend(c);
         inter_mark("table/exp", &inter_all, &mut inter_seen, &mut inter_split);
-        table_regions.push(json!({"region": "table/exp", "log_rows": p.log_table,
+        table_components.push(json!({"component": "table/exp", "log_rows": p.log_table,
                                   "key_cols": 2, "looks": 1}));
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
@@ -6181,7 +6181,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             });
         inter_all.extend(c);
         inter_mark("table/norm", &inter_all, &mut inter_seen, &mut inter_split);
-        table_regions.push(json!({"region": "table/norm", "log_rows": plan.log_norm,
+        table_components.push(json!({"component": "table/norm", "log_rows": plan.log_norm,
                                   "key_cols": 6, "looks": 1}));
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
@@ -6193,7 +6193,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             });
         inter_all.extend(c);
         inter_mark("table/frac", &inter_all, &mut inter_seen, &mut inter_split);
-        table_regions.push(json!({"region": "table/frac", "log_rows": plan.log_frac,
+        table_components.push(json!({"component": "table/frac", "log_rows": plan.log_frac,
                                   "key_cols": 3, "looks": 1}));
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
@@ -6205,7 +6205,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             });
         inter_all.extend(c);
         inter_mark("table/mul", &inter_all, &mut inter_seen, &mut inter_split);
-        table_regions.push(json!({"region": "table/mul", "log_rows": plan.log_mul,
+        table_components.push(json!({"component": "table/mul", "log_rows": plan.log_mul,
                                   "key_cols": 4, "looks": 1}));
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
@@ -6217,7 +6217,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             });
         inter_all.extend(c);
         inter_mark("table/qnz", &inter_all, &mut inter_seen, &mut inter_split);
-        table_regions.push(json!({"region": "table/qnz", "log_rows": p.ao_q_bits,
+        table_components.push(json!({"component": "table/qnz", "log_rows": p.ao_q_bits,
                                   "key_cols": 2, "looks": 1}));
         claims.table_sums.push(qm(sum));
         for (t, w) in plan.widths.iter().enumerate() {
@@ -6230,7 +6230,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             inter_all.extend(c);
             inter_mark(&format!("table/range{w}"), &inter_all, &mut inter_seen,
                        &mut inter_split);
-            table_regions.push(json!({"region": format!("table/range{w}"),
+            table_components.push(json!({"component": format!("table/range{w}"),
                                       "log_rows": *w, "key_cols": 1, "looks": 1}));
             claims.table_sums.push(qm(sum));
         }
@@ -6249,7 +6249,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 });
             inter_all.extend(c);
             inter_mark("table/epow", &inter_all, &mut inter_seen, &mut inter_split);
-            table_regions.push(json!({"region": "table/epow", "log_rows": lj,
+            table_components.push(json!({"component": "table/epow", "log_rows": lj,
                                       "key_cols": 3, "looks": 1}));
             claims.table_sums.push(qm(sum));
         }
@@ -6272,7 +6272,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 inter_all.extend(crate::device::host_cols(c));
                 inter_mark(&format!("table/residual_stream{t}"), &inter_all, &mut inter_seen,
                            &mut inter_split);
-                table_regions.push(json!({"region": format!("table/residual_stream{t}"),
+                table_components.push(json!({"component": format!("table/residual_stream{t}"),
                                           "log_rows": lr, "key_cols": refs.len(),
                                           "looks": 1}));
                 claims.table_sums.push(qm(sum));
@@ -6287,7 +6287,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // seams' shared tables follow, in `Plan::pre_ids`' order.
     let m4_t = std::time::Instant::now();
     if let Some(rr) = rels.rq.as_ref() {
-        for (k, reg) in rq_regions.iter().enumerate() {
+        for (k, reg) in rq_components.iter().enumerate() {
             let binding = rq_binding_w(w_residual_stream, lam_residual_stream, &plan.rqs[k],
                                        SecureField::zero(), SecureField::zero(),
                                        SecureField::zero());
@@ -6302,13 +6302,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             inter_mark(&format!("requant/{}", reg.tag), &inter_all, &mut inter_seen,
                        &mut inter_split);
         }
-        // stream NN: and the quantize regions, in the same place the components
+        // stream NN: and the quantize components, in the same place the components
         // and the preprocessed ids put them
-        for (k, reg) in q_regions.iter().enumerate() {
+        for (k, reg) in q_components.iter().enumerate() {
             let qp = &plan.quants[k];
             let binding = q_binding_w(w_residual_stream, lam_residual_stream, qp, p.nh,
                                       SecureField::zero(), SecureField::zero());
-            let qr = rels.qq.as_ref().expect("the quantize regions draw their own tables");
+            let qr = rels.qq.as_ref().expect("the quantize components draw their own tables");
             let (cols, use_sum, cin, cout) = crate::rope::q_interaction(
                 reg, &binding, qp.hd, &qr.qnz, &qr.div[plan.q_tab_at(qp.bits)],
                 rels.range(15), &rr.rqv);
@@ -6395,7 +6395,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // stream E: the argmax's binding column then its lookups, the order the AIR
     // reads them, and its use sum last of all -- the component is last too
     let m4_t = std::time::Instant::now();
-    if let (Some(r), Some(mi)) = (am_region.as_ref(), plan.argmax_mat()) {
+    if let (Some(r), Some(mi)) = (am_component.as_ref(), plan.argmax_mat()) {
         let m = &plan.p.mats[mi];
         let binding = crate::argmax::ArgmaxBinding {
             claimed: SecureField::zero(),
@@ -6417,12 +6417,12 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     crate::util::m4_add("int/argmax", m4_t.elapsed().as_secs_f64());
 
     // stream BB: the embedding gadget's interaction columns, last of all,
-    // because its two components are last of all.  Within the use region the
+    // because its two components are last of all.  Within the use component the
     // AIR reads the two Horner accumulators before it finalizes its LogUp, so
     // the binding columns come before the fraction columns here too; the table
-    // region's single column follows, matching the component order.
+    // component's single column follows, matching the component order.
     let m4_t = std::time::Instant::now();
-    if let (Some(r), Some(er)) = (emb_region.as_ref(), rels.emb.as_ref()) {
+    if let (Some(r), Some(er)) = (emb_component.as_ref(), rels.emb.as_ref()) {
         let mut binding = crate::embed::binding_w(w_residual_stream, lam_residual_stream, r.d, r.tokens, &r.lay);
         let (tcols, hc, gc) = crate::embed::binding_cols(r, &binding);
         binding.claimed = hc;
@@ -6441,12 +6441,12 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     crate::util::m4_add("int/embed", m4_t.elapsed().as_secs_f64());
 
-    // an independent recomputation of every binding claim, from the region's witness
+    // an independent recomputation of every binding claim, from the component's witness
     // rather than from its trace: a binding is only worth something if it is checkable
     let stream_bindings_ok = match (&plan.residual_stream, &rels.residual_stream) {
         (Some(gp), Some(_)) => {
             let specs = gp.bindings(w_residual_stream, lam_residual_stream, &claims);
-            residual_stream_regions.iter().zip(&specs).all(|(reg, binding)| {
+            residual_stream_components.iter().zip(&specs).all(|(reg, binding)| {
                 binding.specs.iter().all(|sp| reg.binding_claim(sp, lam_residual_stream) == sp.claimed)
             })
         }
@@ -6454,12 +6454,12 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     };
     let interaction_secs = t1.elapsed().as_secs_f64();
     let n_inter = inter_all.len();
-    // B11 stream F step 3: the per-region deltas rolled up by family, so the
+    // B11 stream F step 3: the per-component deltas rolled up by family, so the
     // "could a scoped GKR cover the key tiles alone" share is one division.
     let inter_by_family = {
         let mut by: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
         for e in &inter_split {
-            let r = e["region"].as_str().unwrap_or("");
+            let r = e["component"].as_str().unwrap_or("");
             let head = r.split('/').next().unwrap_or(r);
             let fam = if head.starts_with("key_tile") { "key_tiles" } else { head };
             let v = by.entry(fam.to_string()).or_default();
@@ -6480,9 +6480,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }).sum::<usize>(),
         "attnout": aor.base_cells(),
         "dequant": n_deq_base,
-        "freivalds": freivalds_regions.iter().map(|w| w.base_cells()).sum::<usize>(),
-        "residual_stream": residual_stream_regions.iter().map(|g| g.base_cells()).sum::<usize>(),
-        "residual_stream_regions": residual_stream_regions.iter().map(|g| json!({
+        "freivalds": freivalds_components.iter().map(|w| w.base_cells()).sum::<usize>(),
+        "residual_stream": residual_stream_components.iter().map(|g| g.base_cells()).sum::<usize>(),
+        "residual_stream_components": residual_stream_components.iter().map(|g| json!({
             "tag": g.tag, "rows": g.rows, "log_rows": g.log_rows,
             "leaves": g.n_leaves, "ops": g.n_ops,
             "columns": match &g.dev { Some(d) => d.base.len(), None => g.base.len() },
@@ -6499,7 +6499,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             (Some(rp), Some(refv)) => {
                 let inv = rp.inv(p.hd);
                 // `mismatch` is the f64 vector's; `cell_mismatch` is the bf16
-                // table the region commits, which is the one that is asserted.
+                // table the component commits, which is the one that is asserted.
                 let cells: usize = (0..p.s)
                     .into_par_iter()
                     .map(|t| {
@@ -6519,14 +6519,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // commits to tree 0 and the attention output rescales by `jv - jo` off
         // its own tree-0 column; in B1 both are one `s_v`.  The two columns tile
         // the grid differently -- the attention output's rows are
-        // (head, token, chunk) and the region's are (token, channel block) --
+        // (head, token, chunk) and the component's are (token, channel block) --
         // so the equality is per (head, channel) and not per row, and a GQA
         // group's `rep` query heads all read the kv head's one exponent.  It
         // costs **no proof cells**: both sides are preprocessed, so a prover who
         // rescales by one scale and quantizes by another commits a tree 0 that
         // is not the statement's and `root_ok` rejects it.  `mismatch` is the
         // count of (head, channel) sites where the two disagree.
-        "sv_binding": match q_regions.iter().zip(&plan.quants).find(|(_, qp)| qp.name == "v") {
+        "sv_binding": match q_components.iter().zip(&plan.quants).find(|(_, qp)| qp.name == "v") {
             Some((r, qp)) => {
                 let (nh, hd) = (layer.ao.nh, layer.ao.hd);
                 let mut bad = 0usize;
@@ -6551,7 +6551,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // stream BB: what the embedding gadget costs this chunk, or null with
         // the flag off.  Reported per position and per block so E1 folds it into
         // the frontier table without re-deriving the layout.
-        "embed": emb_region.as_ref().map(|r| {
+        "embed": emb_component.as_ref().map(|r| {
             let (ur, tr) = (1usize << r.lay.log_use, 1usize << r.lay.log_tab);
             let base = r.base.len() * ur + tr;
             json!({
@@ -6564,17 +6564,17 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 "off_table": r.off_table,
             })
         }),
-        // stream NN: what each quantize region costs, and the number that
+        // stream NN: what each quantize component costs, and the number that
         // matters -- how many of the integers it derived from the rotation's
         // output equal the value the *key tile* committed.  A nonzero `clamped` is
         // an incompleteness and not a disagreement: B1 clamps at this side's own
-        // `qmax` and the region's division table has no row past it, so a
+        // `qmax` and the component's division table has no row past it, so a
         // clamped site has no honest witness here at all.  Stream NN-3: the
         // table is the side's own, so `clamped` counts B1's clamp and nothing
-        // else -- before it, at `qk_bits (12, 11)`, it counted "the region is
+        // else -- before it, at `qk_bits (12, 11)`, it counted "the component is
         // narrower than the model" as well.
-        "quant": q_regions.iter().zip(&plan.quants).map(|(r, qp)| json!({
-            "region": r.tag,
+        "quant": q_components.iter().zip(&plan.quants).map(|(r, qp)| json!({
+            "component": r.tag,
             "bits": r.bits, "qmax": crate::rope::qmax_of(r.bits),
             "div_rows": crate::rope::qdiv_table(r.bits).len(),
             "heads": qp.heads, "rep": qp.rep, "n": qp.n, "tokens": qp.tokens,
@@ -6592,9 +6592,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // output equal the activation the Freivalds check actually committed.  On a real
         // dump that is a B1 reference check: a non-zero count is the two sides
         // disagreeing about the forward pass, which the binding then rejects.
-        "requant": rq_regions.iter().zip(&plan.rqs).map(|(r, rp)| json!({
+        "requant": rq_components.iter().zip(&plan.rqs).map(|(r, rp)| json!({
             "seam": r.tag,
-            "producer": {"region": plan.residual_stream.as_ref().map(|g| g.regions[rp.producer.0].tag.clone()),
+            "producer": {"component": plan.residual_stream.as_ref().map(|g| g.components[rp.producer.0].tag.clone()),
                          "binding": rp.producer.1},
             "variant": r.v.name(),
             "n": r.n, "tokens": r.tokens,
@@ -6612,7 +6612,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             "multiplicity": rq_tab_mult.iter().map(|e| e.domain.size()).sum::<usize>(),
         },
         "interaction": inter_all.iter().map(|c| c.size()).sum::<usize>(),
-        // B11 stream F step 3: the interaction set region by region, in the
+        // B11 stream F step 3: the interaction set component by component, in the
         // order `inter_all` is built, plus the rollup by family. `tables` is the
         // field `family_cells` was missing, and `key_tiles` here is the interaction
         // share a scoped GKR over the key tiles alone would cover.
@@ -6624,9 +6624,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // decision: a family joins a height the link already carries for
         // nothing, and pays 16 committed columns over 2^h for a height it
         // brings with it.
-        "tables": table_regions,
+        "tables": table_components,
         "link_heights": crate::gkrlink::link_heights(&plan),
-        // B11 stream V, lever 2: the affinity verdict per region, or an empty
+        // B11 stream V, lever 2: the affinity verdict per component, or an empty
         // list when `B11_GKR_AFFINE` did not ask for it.
         "affinity": affinity,
         // B11 stream Q: what the GKR backend proved and what it cost, or null with
@@ -6634,12 +6634,12 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // are the same question from the two sides.
         "gkr": gkr_proved.as_ref().map(|p| p.cost.json()),
         "preprocessed": m4_pre_cells,
-        "freivalds_weights": freivalds_regions.iter().map(|w| json!({
+        "freivalds_weights": freivalds_components.iter().map(|w| json!({
             "group": w.name, "weights": w.n_weights, "lead": w.lay.g.lead,
             "pk": w.lay.pk, "pq": w.lay.pq, "log_rows": w.lay.g.log_rows,
             "pre_cells": w.pre_cells(),
         })).collect::<Vec<_>>(),
-        "mats": layer.mats.iter().zip(&mat_regions).map(|(m, r)| json!({
+        "mats": layer.mats.iter().zip(&mat_components).map(|(m, r)| json!({
             "name": m.name, "variant": m.variant.name(), "n": r.n,
             "per_row": r.lay.per_row, "log_rows": r.lay.log_rows,
             "kmax_needed": m.kmax_needed(), "kmax_blind": m.kmax_blind(),
@@ -6667,7 +6667,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     } else {
         for (i, side) in plan.layer_sides.iter().enumerate() {
             let tam = layer_boundary_tamper.filter(|(s, _)| *s == i).map(|(_, c)| c);
-            let cols = crate::boundary::cols(&residual_stream_regions[side.region], side, tam);
+            let cols = crate::boundary::cols(&residual_stream_components[side.component], side, tam);
             sess.commit(cols);
         }
         crate::boundary::report(&plan.layer_sides)
@@ -6675,7 +6675,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // Stream AA: the K/V sides, in the same position and for the same reason,
     // right after stream H's.  A side's columns are the *very columns tree 1
     // committed*, cloned key tile by key tile in component-registration order --
-    // `[key_tile's K][key_tile's V]` -- so byte-for-byte with the region is by
+    // `[key_tile's K][key_tile's V]` -- so byte-for-byte with the component is by
     // construction and not by a second copy of `attn_trace`'s index map.
     //
     // Open item 18: the columns are wherever the key tile's fill left them.  Under
@@ -6800,12 +6800,12 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // stream LL: the content hash of this chunk's model half, so a grid can
         // compare "which model" as well as "which layer".
         model: Some(layer.model_hash()),
-        // stream KK: the ids the embedding region committed, one per position,
-        // and the tokens the argmax region emitted -- published so that a
+        // stream KK: the ids the embedding component committed, one per position,
+        // and the tokens the argmax component emitted -- published so that a
         // reader of two chunks can compare them position by position.  Each is
         // pinned inside its own proof by the Horner claim beside it.
-        tok_in: emb_region.as_ref().map(|r| r.token_ids()).unwrap_or_default(),
-        tok_out: am_region.as_ref()
+        tok_in: emb_component.as_ref().map(|r| r.token_ids()).unwrap_or_default(),
+        tok_out: am_component.as_ref()
             .map(|r| r.token_ids(p.mats[plan.argmax_mat().expect("the head matmul")].tokens))
             .unwrap_or_default(),
     };
@@ -6817,7 +6817,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         claims,
         trace_secs,
         interaction_secs,
-        ref_bad: mat_regions.iter().map(|r| r.ref_bad).sum::<usize>() + aor.ref_bad,
+        ref_bad: mat_components.iter().map(|r| r.ref_bad).sum::<usize>() + aor.ref_bad,
         off_table: {
             if tables.off_table > 0 {
                 use std::sync::atomic::Ordering::Relaxed;
@@ -6860,19 +6860,19 @@ pub struct Verdict {
     /// `gn1.xmid == gn2.in`, `gn2.roots == gn2b.in` -- the residual stream is
     /// threaded, from serialized bytes alone
     pub residual_stream_ok: Vec<bool>,
-    /// stream E, one per dequant output binding: the region's own output claim equals
+    /// stream E, one per dequant output binding: the component's own output claim equals
     /// the wiring family's claim over the same values
     pub deq_out_ok: Vec<bool>,
     /// Stream JJ: the dequant outputs that publish a claim with no counterparty
     /// in this statement -- `q`, `k` and `v`, whose consumers reach the
-    /// attention through RoPE and a per-channel requantize that no region
+    /// attention through RoPE and a per-channel requantize that no component
     /// proves.  Reported so a reader cannot mistake seven published claims for
     /// seven checked bindings; it is not part of `accepts`.
     pub deq_out_open: Vec<String>,
     /// stream E: the argmax's key claim equals the head dequant's -- "the token
     /// this row emits is the maximum of the logits *this layer computed*"
     pub head_binding_ok: bool,
-    /// stream BB: the embedding region's claim equals the wiring family's
+    /// stream BB: the embedding component's claim equals the wiring family's
     /// `stream_in` claim -- "the residual stream this layer consumed is row
     /// `tok[t]` of the pinned embedding matrix".  True when the gadget is off.
     pub embed_ok: bool,
@@ -6896,12 +6896,12 @@ pub struct Verdict {
     /// its input's attained maximum".  Empty on a chunk with no seams.
     pub rq_scale_ok: Vec<bool>,
     /// Stream SS: the `(seam, matmul)` pairs whose consumer is a `Variant::Fold`
-    /// region.  The fold's second shared column is the divisor's token half and
+    /// component.  The fold's second shared column is the divisor's token half and
     /// not the scale's exponent, so the claim cannot be stated in the seam's
     /// language; these are named rather than counted.
     pub rq_scale_open: Vec<String>,
     /// Stream II (E11): true when this chunk publishes both the attnout
-    /// region's `ao_q` and the `o` Freivalds check's `qX` but its `o` matmul does not read
+    /// component's `ao_q` and the `o` Freivalds check's `qX` but its `o` matmul does not read
     /// `nh * hd` channels -- so the two folds are over different sequences and
     /// `ao_q_ok` says nothing.  A desk shape, never a real layer; reported so a
     /// reader cannot mistake a vacuous `ao_q_ok` for a checked seam.
@@ -6910,11 +6910,11 @@ pub struct Verdict {
     /// that claim is absent -- an equality nobody can state yet is not a
     /// failure, and the record says so rather than the verdict pretending.
     pub ao_q_ok: bool,
-    /// Stream NN, per quantize region in `q`, `k`, `v` order: "the value this
-    /// region rounded is the value the rotation produced" (or, for `v`, the
+    /// Stream NN, per quantize component in `q`, `k`, `v` order: "the value this
+    /// component rounded is the value the rotation produced" (or, for `v`, the
     /// value the matmul's dequant published).
     pub nn_in_ok: Vec<bool>,
-    /// and per region: "the integers this region produced are the columns the
+    /// and per component: "the integers this component produced are the columns the
     /// key tiles committed" -- the sum of the diagonal block key tiles' own claims, which is
     /// what closes `witness-slack.md` section 1e inside one chunk.
     pub nn_out_ok: Vec<bool>,
@@ -7015,7 +7015,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let plan = Plan::new(&fixed.params);
     let p = &plan.p;
     // the claims' shape must match the plan before anything indexes into them
-    let n_residual_stream = plan.residual_stream.as_ref().map(|g| g.regions.len()).unwrap_or(0);
+    let n_residual_stream = plan.residual_stream.as_ref().map(|g| g.components.len()).unwrap_or(0);
     if claims.key_tiles.len() != plan.shapes.len() || claims.mat_h.len() != p.mats.len()
         || claims.freivalds_acc.len() != plan.freivalds.len()
         || claims.freivalds_acc.iter().zip(&plan.freivalds).any(|(c, w)| c.len() != w.mats.len())
@@ -7023,7 +7023,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         || claims.table_sums.len() != plan.n_table_sums()
         || claims.stream_bindings.len() != n_residual_stream
         || plan.residual_stream.as_ref().is_some_and(|g| {
-            g.regions.iter().zip(&claims.stream_bindings).any(|(r, c)| r.bindings.len() != c.len())
+            g.components.iter().zip(&claims.stream_bindings).any(|(r, c)| r.bindings.len() != c.len())
         })
         || fixed.sizes.len() != plan.n_trees()
         // stream BB: one claim each, or none at all
@@ -7041,7 +7041,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         // chunk carries any seam at all
         || claims.rq_sc.len() != plan.rqs.len()
         || claims.deq_sc.len() != if plan.rqs.is_empty() { 0 } else { p.mats.len() }
-        // stream NN: one claim per quantize region per side, and three per key tile
+        // stream NN: one claim per quantize component per side, and three per key tile
         // that publishes its own columns
         || claims.nn_in.len() != plan.quants.len()
         || claims.nn_out.len() != plan.quants.len()
@@ -7168,7 +7168,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let mut av_sum = SecureField::zero();
     let mut az_sum = SecureField::zero();
     // B10 step 3: the diagonal block key tiles come after the prefix key tiles, one for one.  A
-    // diagonal block key tile has no per-token region of its own -- there is one row maximum
+    // diagonal block key tile has no per-token component of its own -- there is one row maximum
     // and one denominator per *token*, and both live on the prefix key tile -- so its
     // Q.K^T identity is read against the prefix key tile's `am`, and its numerator sum
     // is added to the prefix key tile's before the denominator identity is checked.
@@ -7181,7 +7181,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         .map(|g| {
             (0..plan.shapes.len())
                 .find(|b| plan.group[*b] == g && plan.rows_key_tile[*b])
-                .expect("every head key tile group carries one per-token region")
+                .expect("every head key tile group carries one per-token component")
         })
         .collect();
     let (_, rv_hd) = powers(rv, p.hd);
@@ -7189,7 +7189,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     for (b, bc) in claims.key_tiles.iter().enumerate() {
         let pow = &built.pows[b];
         let (chan, hs, av) = (unqm(bc[0]), unqm(bc[1]), unqm(bc[2]));
-        // a key tile without a per-token region reads its group's row maximum, by
+        // a key tile without a per-token component reads its group's row maximum, by
         // construction: it has no `am` of its own to disagree with
         let am = unqm(claims.key_tiles[row_of[plan.group[b]]][4]);
         qk_ok.push(pow.r_sum * am - hs == chan);
@@ -7244,7 +7244,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         ),
         None => (vec![], None, None),
     };
-    // stream E: and one per dequant output binding -- the `o` and `down` regions'
+    // stream E: and one per dequant output binding -- the `o` and `down` components'
     // own published outputs against the copies the wiring family committed.
     // This is what makes `o_out` and `d_out` the dequant's results rather than
     // two columns that merely happen to agree.
@@ -7262,15 +7262,15 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
                         claims.deq_out.get(k).copied() == Some(claims.stream_bindings[ra][ta])),
                     // stream NN: `v` has no rotation between its dequant and
                     // its key tile column, so its counterparty is the quantize
-                    // region's input claim and `nn_in_ok` is where it is read
+                    // component's input claim and `nn_in_ok` is where it is read
                     (None, Some(qi)) => ok.push(
                         claims.deq_out.get(k).copied() == claims.nn_in.get(qi).copied()),
-                    // stream SS: a *folded* `v` has no quantize region either --
+                    // stream SS: a *folded* `v` has no quantize component either --
                     // the fold is the quantize -- so the published output is the
                     // int8 cell itself and the counterparty is the diagonal block key tiles'
                     // own V fold, the sum `nn_out_ok` compares the other two
                     // against.  Under the same weights, so the equality says the
-                    // key tiles attended over the very integers this region rounded.
+                    // key tiles attended over the very integers this component rounded.
                     (None, None) if t.key_tile => {
                         let sum = claims.key_tile_qkv.iter()
                             .fold(SecureField::zero(), |acc, c| acc + unqm(c[2]));
@@ -7295,7 +7295,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
 
     // stream II: the requantize seams.  Two equalities each, both between
     // claims the statement already carries: the seam's input claim against the
-    // producing region's `Out(0)`, which says the matmul's input is the bf16
+    // producing component's `Out(0)`, which says the matmul's input is the bf16
     // value the wiring family proved; and the seam's output claim against the
     // Freivalds group's own claim over its committed activations, which says the
     // Freivalds check multiplied *those* integers.  With the requantize's own constraints
@@ -7322,15 +7322,15 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         .collect();
     // Stream II (E11): the scale binding.  The per-token activation scale is
     // committed twice and, before this, never compared: once by the requantize
-    // region, where `with_max` pins it to the ceil-divide of the attained
+    // component, where `with_max` pins it to the ceil-divide of the attained
     // maximum of the seam's own input, and once as the x-side scale of every
     // consuming matmul's dequant.  A prover could requantize under one scale
     // and dequantize under another; these equalities say it did not.
     //
     // One entry per (seam, consumer) pair -- three for `qkv` (q, k and v share
-    // the seam's input, each has its own dequant region), two for `gateup`, one
+    // the seam's input, each has its own dequant component), two for `gateup`, one
     // for `down`, one for the head.  `o` is not here and cannot be: its
-    // producer's scale is the attnout region's preprocessed `num`/`pj`, so that
+    // producer's scale is the attnout component's preprocessed `num`/`pj`, so that
     // comparison is preprocessed against committed and not a claim pair.
     let mut rq_scale_ok: Vec<bool> = vec![];
     let mut rq_scale_open: Vec<String> = vec![];
@@ -7348,24 +7348,24 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         }
     }
     // Stream II, the `o` seam.  `AttnOutEval` is the attention output's own
-    // requantize, so what closes it is one claim on that region -- stream JJ's
+    // requantize, so what closes it is one claim on that component -- stream JJ's
     // `claims.ao_q`, a Horner fold over the signed `qm (1 - 2 sg)` -- against
     // the `o` Freivalds check's activation claim.  Both now fold the same values in the
     // same order under the same weights: the Freivalds check's `FreivaldsQx` for the `o` group
     // carries `rv^k s^t` (see `build_components`), and its fold is over
-    // `a - act_off`, which is the signed value the attnout region publishes.
+    // `a - act_off`, which is the signed value the attnout component publishes.
     //
     // Live on every chunk that publishes both claims.  A chunk with no wiring
     // family publishes no `freivalds_qx` at all and there is nothing to compare; a
     // chunk with **no attention** -- the `lm_head` chunk, whose only matmul is
-    // the head -- has no `o` Freivalds check, so the attnout region is absent, `ao_q` is
+    // the head -- has no `o` Freivalds check, so the attnout component is absent, `ao_q` is
     // empty and the seam is vacuous.  Both report `true`, and neither is a
     // skipped check: in both cases the statement contains no `o` matmul whose
     // input could be wrong.
     //
     // The third case is a shape, not a statement: a *synthetic* layer whose `o`
     // Freivalds check is not `nh * hd` channels wide folds a different sequence from the
-    // attnout region's, and the equality is not statable there.  The witness
+    // attnout component's, and the equality is not statable there.  The witness
     // builder wires `o` from `AttnOut::q_ref` exactly when the widths line up
     // (`Layer::synth_residual_stream`), so on any shape a gate proves this is either live
     // or structurally absent -- it is never a mismatched comparison read as a
@@ -7406,7 +7406,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // Both are Horner images under `w_residual_stream`, which is drawn after tree 1 -- so
     // the ids were fixed before the challenge existed and a second vector with
     // the same image is a collision, not a choice (`notes/witness-slack.md`
-    // §0's probabilistic binding).  The conventions are each region's own: the
+    // §0's probabilistic binding).  The conventions are each component's own: the
     // embedding walks its positions ascending, the argmax's rows walk them
     // descending, so the two exponents are mirrored and this is where that is
     // written down.
@@ -7461,7 +7461,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
                 Some((ri, ti)) => Some(claims.stream_bindings[ri][ti]),
                 None => {
                     // `v`: the counterparty is the dequant output binding the plan
-                    // marked with this region's index
+                    // marked with this component's index
                     plan.residual_stream.as_ref().and_then(|g| {
                         g.output_bindings.iter().position(|t| t.quant == Some(k))
                             .and_then(|j| claims.deq_out.get(j).copied())
@@ -7565,7 +7565,7 @@ impl Plan {
     /// unbound or absent, decided from the plan fields `verify_composed` reads
     /// for the same edge -- the residual-stream equalities (`residual_stream.eqs`), the
     /// requantize seams (`rqs`), the dequant output bindings (`residual_stream.output_bindings`), the
-    /// quantize regions and their key tiles (`quants`, `nn_key_tiles`), the `o`
+    /// quantize components and their key tiles (`quants`, `nn_key_tiles`), the `o`
     /// Freivalds check's width, the boundary trees (`bounds`, `kv`), the
     /// embedding layout (`emb`) and the argmax (`argmax_mat`).  `layer` is the
     /// segment's unchecked layer coordinate, which decides whether the embedding
@@ -7658,7 +7658,7 @@ impl Plan {
                 put(3, Unbound, Some(format!(
                     "dequant outputs with no counterparty: {}", open.join(", "))));
             } else if self.quants.is_empty() || self.nn_key_tiles.is_empty() {
-                put(3, Unbound, Some("no quantize region bindings the rotated q, k, v to the \
+                put(3, Unbound, Some("no quantize component bindings the rotated q, k, v to the \
                                       key tiles' columns".into()));
             } else {
                 put(3, Bound, None);
@@ -7694,7 +7694,7 @@ impl Plan {
             }
         }
 
-        // 6, 9, 11: a dequant output bound to the region that consumes it
+        // 6, 9, 11: a dequant output bound to the component that consumes it
         // (`deq_out_ok`)
         for (n, names) in [(6usize, &["o"][..]), (9, &["gate", "up"][..]), (11, &["down"][..])] {
             if !names.iter().all(|m| has_mat(m)) {

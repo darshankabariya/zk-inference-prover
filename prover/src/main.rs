@@ -240,7 +240,7 @@ fn dequant_cmd(args: &[String]) {
 }
 
 // ------------------------------------------------------------------- width ----
-/// What a wider row buys, B3's trade-off on a third region.
+/// What a wider row buys, B3's trade-off on a third component.
 fn width_cmd(args: &[String]) {
     let dir = arg_str(args, "--witness");
     let n: usize = arg_scalar(args, "--n", 1 << 20);
@@ -700,7 +700,7 @@ fn embed_probes_cmd(args: &[String]) {
     // Stream KK, `notes/witness-slack.md` section 1a, both arms of the same
     // witness: a position whose committed id is a *padded* one, outside the
     // vocabulary and inside the table, with the all-zero stream row that padded
-    // table row held.  Nothing here is corrupted -- every constraint the region
+    // table row held.  Nothing here is corrupted -- every constraint the component
     // carries holds -- so before the sentinel this accepted, and that is the
     // whole item.  Both runs are made, because "it rejects now" is only half
     // the claim.
@@ -812,7 +812,7 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
                 // Stream LL: the one stand-in the statement has to choose.
                 // `jo` is the attention output's per-token scale exponent --
                 // committed data, not model data, so the model-only load has
-                // none -- and the AO region admits it only inside the stated
+                // none -- and the AO component admits it only inside the stated
                 // window (`joff = jo_max - jo >= 0`, `layer.rs`'s "attnout: jo
                 // above the window's top").  The window's *floor* is the safe
                 // end: it makes `e = jv - jo` non-negative, so the fold's `pj`
@@ -1047,7 +1047,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
     // Stream TT (E11), log row 73: and the magnitude form is the same split one
     // bit narrower.  There the limbs range-check the committed `mag = |acc|`
     // rather than `acc + 2^(lo+hi-1)`, so they need `acc_bits()` and not
-    // `acc_bits() + 1` -- the sign is read off the `sg` column the region
+    // `acc_bits() + 1` -- the sign is read off the `sg` column the component
     // already commits.  The wider form is kept wherever it fits, so that every
     // chunk that composed before this existed keeps its columns and its digest;
     // the narrow one is taken only when `Plan::new`'s window would refuse.
@@ -1161,7 +1161,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // wrote, and on nothing else -- a dump without those columns composes
         // exactly as it did before.  `--residual-stream-a` is how many rows one token's
         // stream takes at the reduction's first level; it has to divide `d`.
-        // Stream E's two regions are opt-in: `--norm-tails` wires `h = (x r) w`
+        // Stream E's two components are opt-in: `--norm-tails` wires `h = (x r) w`
         // and `--swiglu` the `silu(gate) * up` product.  Off, the composition is
         // the pre-change one cell for cell, which is what the bit-for-bit control
         // checks.
@@ -1171,7 +1171,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
             compose::ResidualStreamParams {
                 d: g.d,
                 a: arg_scalar(args, "--residual-stream-a", 32usize),
-                // Stream II: the two additive regions are unconditional, so
+                // Stream II: the two additive components are unconditional, so
                 // `dff` is always carried.
                 dff: g.dff,
                 eps: g.eps,
@@ -1908,7 +1908,7 @@ fn psweep_cmd(args: &[String]) {
 /// Stream II, the requantize seams' output-side control.  One committed
 /// activation of a Freivalds group is moved to another legal value and the layer's
 /// exact accumulators move with it, so the chunk proves an honest matmul of
-/// the changed input: no tamper, no inconsistent region, just a prover that
+/// the changed input: no tamper, no inconsistent component, just a prover that
 /// multiplied activations of its own choosing -- which is what
 /// `witness-slack.md` section 1d says the Freivalds check used to allow.
 ///
@@ -2072,7 +2072,7 @@ fn compose_probes_cmd(args: &[String]) {
     // the six of them were held for the whole run and the 8B suite was
     // OOM-killed on the box at probe 31 of 46 (log row 57, rc 137).  Nothing
     // about what a probe proves changes.
-    // 1. a corrupted accumulator: the dequant region stays self-consistent and the
+    // 1. a corrupted accumulator: the dequant component stays self-consistent and the
     //    Y = W X identity is what rejects
     let mut l2 = layer_clone(&l);
     let dn = l2.mats.iter().position(|m| m.name == "down").unwrap();
@@ -2119,7 +2119,7 @@ fn compose_probes_cmd(args: &[String]) {
     drop(l2);
 
     // 5b. B10 step 3: a token that attends to a key the causal mask removes.  The
-    //     diagonal block's `sn` and the prefix's `sn` are what the per-token region's `az`
+    //     diagonal block's `sn` and the prefix's `sn` are what the per-token component's `az`
     //     is read against, and the AIR's fold drops the masked slot, so the two no
     //     longer add up to the denominator the witness claims.
     if l.key_tiles.iter().any(|b| b.diagonal_block) {
@@ -2150,14 +2150,14 @@ fn compose_probes_cmd(args: &[String]) {
                    "the pinned preprocessed root"), "corrupted norm table accepted");
 
     // 9-11. B10 step 2, rule 13: the wiring family's own probes, inside the
-    //    composed path.  The first is the one the bindings exist for -- a region's
+    //    composed path.  The first is the one the bindings exist for -- a component's
     //    copy of the residual stream is changed and everything *inside* that
-    //    region stays consistent, so only the equality between two regions'
+    //    component stays consistent, so only the equality between two components'
     //    claims can catch it.  The other two are the add's own argument, run
     //    here rather than only in `residual-stream-probes`, on the real layer's columns.
     if l.residual_stream.is_some() {
         // stream II: the head chunk's family has one reduction and no add, so
-        // there is no second region's copy of the stream to break -- that probe
+        // there is no second component's copy of the stream to break -- that probe
         // is the layer's, and the head chunk's equivalent is the norm scale's own
         // copy, which probe 12 below runs on whichever family this chunk has.
         if !l.residual_stream.as_ref().is_some_and(|g| g.head) {
@@ -2187,9 +2187,9 @@ fn compose_probes_cmd(args: &[String]) {
                 "an illegal residual-stream leaf accepted");
     }
 
-    // 12-15. stream E's regions, on whichever of them this invocation built.
+    // 12-15. stream E's components, on whichever of them this invocation built.
     //    The indices come from the plan rather than being counted by hand, so a
-    //    later region cannot silently shift what these probes point at.
+    //    later component cannot silently shift what these probes point at.
     {
         let gplan = compose::Plan::new(&params);
         if let Some(g) = gplan.residual_stream.as_ref() {
@@ -2199,16 +2199,16 @@ fn compose_probes_cmd(args: &[String]) {
             // stream II moved the weight into tree 0, and anything at or past
             // `nreal` corrupts nothing at all.
             let in0 = g.t.nreal / 2;
-            // stream JJ: how far into the SwiGLU region's value list `up` starts
+            // stream JJ: how far into the SwiGLU component's value list `up` starts
             let swiglu_n = g.tff.map(|t| t.tokens * t.d).unwrap_or(0);
             for (k, i) in g.norm_scales.iter().copied().enumerate() {
-                // stream II: the region's own tag, so a head chunk's single
+                // stream II: the component's own tag, so a head chunk's single
                 // norm scale is named `ntf` and the layer's two keep the names the
                 // record already carries
-                let n = g.regions[i].tag.clone();
+                let n = g.components[i].tag.clone();
                 let _ = k;
                 // the binding is the whole point of the norm scale: its copy of the
-                // stream is changed and the region stays internally consistent,
+                // stream is changed and the component stays internally consistent,
                 // so only `nt.In(0) == gn.In(0)` can catch it
                 assert!(!probe(&format!("norm_scale {n}: its own copy of the stream"), &l,
                                &compose::ProverTamper {
@@ -2224,7 +2224,7 @@ fn compose_probes_cmd(args: &[String]) {
                         "a corrupted norm_scale result accepted");
                 // stream II's three controls on the norm scale.  The first two
                 // change what `r` is without breaking anything inside the
-                // region: the `NormR` lookup still finds a row and the two
+                // component: the `NormR` lookup still finds a row and the two
                 // multiplies still hold, so the only thing that can reject is
                 // the binding to the reduction's published sum of squares.
                 assert!(!probe(&format!("norm_scale {n}: a wrong r on one row"), &l,
@@ -2244,21 +2244,21 @@ fn compose_probes_cmd(args: &[String]) {
             // now, so every constraint still holds and the *root* is what
             // moves -- a different kind of rejection from every probe above,
             // and the one that says `w` is the model's and not the prover's.
-            let wtag = g.regions[g.norm_scales[0]].tag.clone();
+            let wtag = g.components[g.norm_scales[0]].tag.clone();
             assert!(!probe(&format!("norm_scale {wtag}: one norm-weight cell"), &l,
                            &compose::ProverTamper { residual_stream_w: Some(4321),
                                                     ..Default::default() },
                            "the pinned preprocessed root"),
                     "a bent norm weight accepted");
             // the dequant output bindings: the wiring family's copy of `o_out` (and
-            // of `d_out`) is changed, the region's own add is recomputed from it,
-            // and only the binding against the dequant region's published output can
+            // of `d_out`) is changed, the component's own add is recomputed from it,
+            // and only the binding against the dequant component's published output can
             // tell.  This is the probe those bindings exist for.
             // Stream JJ (E11): one per binding that has a counterparty.  For the
             // SwiGLU seam the bent value is `gate`'s copy or `up`'s -- the
-            // region recomputes `silu(g) * u` from it either way, so nothing
-            // inside the region can tell and only the binding against the gate (or
-            // up) dequant region's published output rejects.
+            // component recomputes `silu(g) * u` from it either way, so nothing
+            // inside the component can tell and only the binding against the gate (or
+            // up) dequant component's published output rejects.
             for t in g.output_bindings.iter() {
                 let Some((ri, ti)) = t.at else { continue };
                 let name = t.name;
@@ -2267,7 +2267,7 @@ fn compose_probes_cmd(args: &[String]) {
                 assert!(!probe(&format!("deq binding: the wiring copy of {name}'s output"), &l,
                                &compose::ProverTamper {
                                    residual_stream_add: Some((ri, vi)), ..Default::default() },
-                               &format!("the binding {name}_out == the {name} region's output")),
+                               &format!("the binding {name}_out == the {name} component's output")),
                         "a corrupted dequant output copy accepted");
             }
             if let Some(i) = g.swiglu {
@@ -2326,8 +2326,8 @@ fn compose_probes_cmd(args: &[String]) {
                     "a scale that is not the ceil-divide of the attained max accepted");
         }
         // Stream II (E11), the scale binding.  A *consumer's* per-token scale moved
-        // by one, with its dequant region rederived under it, so every
-        // constraint that region carries still holds -- an honest dequant by a
+        // by one, with its dequant component rederived under it, so every
+        // constraint that component carries still holds -- an honest dequant by a
         // scale the requantize did not pin.  The bend has to be on a matmul
         // that is not its group's first, because the seam reads its scale off
         // that one and moving it would move both sides together; `down`'s group
@@ -2352,7 +2352,7 @@ fn compose_probes_cmd(args: &[String]) {
             let _ = base + at;
         }
 
-        // Stream II (E11), the `o` seam.  `o` has no requantize region --
+        // Stream II (E11), the `o` seam.  `o` has no requantize component --
         // `AttnOutEval` is its requantize -- so its control is the same shape as
         // the three above's output side and no tamper either: one `o`
         // activation the attention output did not produce, with the `o` matmul's
@@ -2371,7 +2371,7 @@ fn compose_probes_cmd(args: &[String]) {
                     assert!(!probe("o seam: one activation the attention output did not produce",
                                    &lb, &Default::default(),
                                    &format!("the binding ao_q == freivalds_qx[{wi}]")),
-                            "an o activation the attnout region did not requantize accepted");
+                            "an o activation the attnout component did not requantize accepted");
                 }
                 None => eprintln!("  o seam: SKIP -- this shape has no wiring family, or its o \
 Freivalds check is not nh*hd wide, so the two folds are over different sequences and `ao_q_ok` is not \
@@ -2392,12 +2392,12 @@ statable here"),
         //   the quantize's table     one scale exponent           root_ok
         //   the division table       one quotient                 sums_cancel
         if !rplan.quants.is_empty() {
-            let g = rplan.residual_stream.as_ref().expect("the quantize regions need the wiring family");
+            let g = rplan.residual_stream.as_ref().expect("the quantize components need the wiring family");
             let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
             let (seed, ga) = (src_of(args).seed, arg_scalar(args, "--residual-stream-a", 32usize));
             // the input side of each rotation: one copy of the matmul's dequant
             // output bent, the whole rotation and the quantize recomputed from
-            // it, so every constraint in three regions still holds and only the
+            // it, so every constraint in three components still holds and only the
             // binding against the matmul's own published output can tell
             for rr in &g.ropes {
                 assert!(!probe(&format!("rope {}: one dequant output copy", rr.name), &l,
@@ -2443,7 +2443,7 @@ statable here"),
             // the consumer side: one *key tile* cell moved and the key tiles rebuilt
             // around it, so the attention this chunk proves is an honest
             // attention over the bent column and nothing but the key tile's own
-            // claim against the quantize region's output can see it.  The
+            // claim against the quantize component's output can see it.  The
             // generator is the witness's, so this needs a synthetic layer.
             for (which, name) in [(0usize, "Q"), (1, "K"), (2, "V")] {
                 // the generator rebuilds the whole layer, so it only makes
@@ -2461,7 +2461,7 @@ synthetic generator (Layer::synth_residual_stream_key_tile_bent); on a dump the 
                     continue;
                 }
                 lb.synth_residual_stream_key_tile_bent(seed, ga, round, which, 41);
-                // stream SS: with a folded `v` there is no quantize region on
+                // stream SS: with a folded `v` there is no quantize component on
                 // that side, so the falsified field is the dequant output binding
                 // and not `nn_out_ok` -- the fold publishes the int8 cell
                 // itself and the key tiles' V is what reads it
@@ -2475,7 +2475,7 @@ synthetic generator (Layer::synth_residual_stream_key_tile_bent); on a dump the 
                         "a key tile column the layer's matmuls did not produce accepted");
             }
             // stream NN (NN-2): and the prefix key tile's own copy of Q, whose
-            // counterparty is its group's diagonal block rather than a quantize region.
+            // counterparty is its group's diagonal block rather than a quantize component.
             // The bend moves one prefix cell and the key tile's whole attention is
             // rebuilt around it, so the chunk is an honest attention over the
             // cache with queries the `q` matmul did not produce -- and only
@@ -2500,8 +2500,8 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
         }
     }
 
-    // 16. stream E: the head binding.  One committed key of the argmax region is
-    //     changed and the region is made consistent with it, so every constraint
+    // 16. stream E: the head binding.  One committed key of the argmax component is
+    //     changed and the component is made consistent with it, so every constraint
     //     it carries still holds and only the equality with the head dequant's
     //     own key claim can reject.
     if compose::Plan::new(&params).argmax_mat().is_some() {
@@ -2514,13 +2514,13 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
     }
 
     // 11c. Stream UU (E11): one cell of a *residual* boundary tree moved alone,
-    //     the residual-stream region it is bound to left exactly as it was.  Stream H's
+    //     the residual-stream component it is bound to left exactly as it was.  Stream H's
     //     `bounds` probe made this assertion for the pair of sides a layer
     //     chunk carries, but only on real witness dirs; here it runs on every
     //     shape the probe command is given, which is what puts the head chunk's
     //     single input side (`boundary::sides`, one side, tree 3) under it.
     //     Nothing else in the chunk moves, so the only thing that can reject is
-    //     the plain equality constraint that binds the tree to the region --
+    //     the plain equality constraint that binds the tree to the component --
     //     which is the whole statement that the root is bound to the proof and
     //     not merely appended to it.
     if params.layer_boundary {
@@ -2528,17 +2528,17 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
         assert!(n_residual_stream > 0,
                 "the layer boundary produced no residual side: the chunk has no residual-stream components");
         for k in 0..n_residual_stream {
-            assert!(!probe(&format!("residual boundary side {k}, its residual-stream region untouched"),
+            assert!(!probe(&format!("residual boundary side {k}, its residual-stream component untouched"),
                            &l,
                            &compose::ProverTamper { layer_boundary: Some((k, 4321)),
                                                     ..Default::default() },
                            "the residual boundary equality constraint"),
-                    "a residual boundary column that disagrees with its region accepted");
+                    "a residual boundary column that disagrees with its component accepted");
         }
     }
 
     // 12. Stream AA (E11): one cell of a K/V boundary tree moved *alone*, the
-    //     region it is bound to left exactly as it was.  Nothing else in the
+    //     component it is bound to left exactly as it was.  Nothing else in the
     //     chunk changes, so the only thing that can reject is `ChanEval`'s /
     //     `KeyEval`'s equality constraint -- and that is precisely the statement
     //     that the boundary root is *bound to the proof* and not merely appended
@@ -2552,17 +2552,17 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
         assert!(n_sides > 0, "--kv-boundary produced no K/V boundary sides");
         for k in 0..n_sides {
             let side = compose::Plan::new(&params).layer_sides.len() + k;
-            assert!(!probe(&format!("kv: one cell of K/V boundary side {k}, region untouched"),
+            assert!(!probe(&format!("kv: one cell of K/V boundary side {k}, component untouched"),
                            &l,
                            &compose::ProverTamper { layer_boundary: Some((side, 4321)),
                                                     ..Default::default() },
                            "the K/V boundary equality constraint"),
-                    "a K/V boundary column that disagrees with its region accepted");
+                    "a K/V boundary column that disagrees with its component accepted");
         }
     }
     // 7b. Stream BB: the embedding gadget's three probes, when the run asked for
     //     it.  The second is the aimed corruption -- the id moved to a different
-    //     valid entry with the committed row recomputed to match, so the region
+    //     valid entry with the committed row recomputed to match, so the component
     //     is internally consistent and every constraint inside it holds; the binding
     //     to the layer's residual-stream input is the only thing that can see it.
     if params.embed_vocab > 0 {
@@ -2580,7 +2580,7 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
                            expect),
                     "{name} accepted");
         }
-        // and the table probe, which is the pinned-root probe: the region
+        // and the table probe, which is the pinned-root probe: the component
         // rebuilds the stream from the corrupted table, so every internal check
         // passes and only tree 0's root disagrees
         assert!(!probe("embedding: one cell of the committed table changed, witness rebuilt",
@@ -2659,7 +2659,7 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
                 "an unbounded accumulator accepted");
         // Stream TT (E11), log row 73: the magnitude form's own.  `amag` is
         // pinned by `(amag - acc)(amag + acc) = 0`, which has two roots; this
-        // commits the other one.  Every constraint of the region holds and
+        // commits the other one.  Every constraint of the component holds and
         // every other lookup lands, and the committed magnitude is about
         // `2^31`, so `2 mag num` would run past the field -- which is the
         // forgery the window exists to refuse.  Only the range check on the
@@ -2676,14 +2676,14 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
                        the offset form (--ao-acc-mag forces the other)");
         }
         // And the counterpart, whose verdict is now the *chunk's* to decide.  A
-        // whole token's `jo` moved by one inside the window, with the region
+        // whole token's `jo` moved by one inside the window, with the component
         // rederived, changes every one of that token's requantized outputs.
         //
         // Stream JJ ran this and it accepted, and its record said what would
         // pin it: the consumer-side binding on `claims.ao_q`, which was stream II's
         // to add.  With that binding live it *does* pin it -- the `o` Freivalds check's
         // committed activations are the pre-bend integers and the attnout
-        // region's fold is over the post-bend ones, so `ao_q_ok` alone rejects.
+        // component's fold is over the post-bend ones, so `ao_q_ok` alone rejects.
         //
         // On a chunk with no wiring family the `o` Freivalds check publishes no `qX` at
         // all, so there is no consumer and this still accepts.  That is not a
@@ -2840,7 +2840,7 @@ fn requant_probes_cmd(args: &[String]) {
 }
 
 // ------------------------------------------------------------- B10 residual stream ----
-// The wiring between the composed layer's regions (B6.5 open gap 1), priced per
+// The wiring between the composed layer's components (B6.5 open gap 1), priced per
 // gadget and checked against B1's own committed columns where there is one.
 fn residual_stream_cmd(args: &[String]) {
     use residual_stream::{ResidualStreamWitness, Kind, Prog, Tiling, UnKind};
@@ -2874,7 +2874,7 @@ fn residual_stream_cmd(args: &[String]) {
         // Stream II: the norm scale as it is composed -- the reduction's answer
         // through `UnKind::NormR` and a preprocessed weight.  Here it runs on
         // synthetic values, which is the isolation the composed rung has not
-        // got: a failure in this case is the region, never the wiring.
+        // got: a failure in this case is the component, never the wiring.
         ("normscale", Prog::norm_scale(per_row, UnKind::NormR {
             inv_d: bf16::from_f64(1.0 / per_row as f64), eps: bf16::from_f64(1e-5) }), 19),
     ];
@@ -2885,7 +2885,7 @@ fn residual_stream_cmd(args: &[String]) {
         points.push(o.json(&w.source, name));
     }
 
-    // the composed layer's own four regions, on B1's own committed columns:
+    // the composed layer's own four components, on B1's own committed columns:
     // `xin + o_out` has to reproduce `xmid` and `xmid + d_out` has to reproduce
     // `xout`, and the two levels of each norm have to be `tree_sum`'s own order
     let mut drift = vec![];
@@ -2911,9 +2911,9 @@ fn residual_stream_cmd(args: &[String]) {
             let o1 = residual_stream::run(&w1, &l1, round, kmax, None);
             check(&o1, wname);
             let mut j = o1.json(&w1.source, &format!("norm{}+resid{}", k + 1, k + 1));
-            // the region's own outputs, value by value, against B1's column
+            // the component's own outputs, value by value, against B1's column
             let mut tab = residual_stream::ResidualStreamTables::new(kmax, round, &l1.un_kinds());
-            let r1 = residual_stream::residual_stream_region(&w1, &l1, round, "r", &mut tab, None);
+            let r1 = residual_stream::residual_stream_component(&w1, &l1, round, "r", &mut tab, None);
             let got = t.unlay(&r1.outs[1]);
             let wv = rd(want);
             let bad = (0..tokens * dm)
@@ -2933,7 +2933,7 @@ fn residual_stream_cmd(args: &[String]) {
             check(&o2, &format!("{wname} level 2"));
             points.push(o2.json(&w2.source, &format!("norm{}-l2", k + 1)));
             let mut tab2 = residual_stream::ResidualStreamTables::new(kmax, round, &[]);
-            let r2 = residual_stream::residual_stream_region(&w2, &l2, round, "r", &mut tab2, None);
+            let r2 = residual_stream::residual_stream_component(&w2, &l2, round, "r", &mut tab2, None);
             drift.push(residual_stream::norm_drift(d, dm, tokens, round, wname, Some(&r2.outs[0]))
                        .expect("norm drift"));
             stream = t.lay(&got);
@@ -2949,7 +2949,7 @@ fn residual_stream_cmd(args: &[String]) {
     };
     let prim = json!({
         "add": pick("add"), "mul": pick("mul"), "unary": 4.0, "value": 2.0,
-        "note": "add and mul measured on a power-of-two tiled region, each output range-checked against VAL; unary is its two output columns plus the lookup's 2 cells; a committed bf16 value is 2 cells",
+        "note": "add and mul measured on a power-of-two tiled component, each output range-checked against VAL; unary is its two output columns plus the lookup's 2 cells; a committed bf16 value is 2 cells",
     });
     emit("residual_stream", json!({"points": points, "primitives": prim,
                                    "tables": residual_stream::check_tables(round, 20000),
@@ -2979,7 +2979,7 @@ fn residual_stream_probes_cmd(args: &[String]) {
         }
         assert!(honest.accepts(), "honest {label} rejected");
         assert_eq!(honest.ref_n - honest.ref_ok, 0, "{label}: reference mismatch");
-        out.push(json!({"region": label, "probe": "honest",
+        out.push(json!({"component": label, "probe": "honest",
                         "accepted": honest.accepts(),
                         "result": honest.json(&w.source, label)}));
         let tampers: Vec<Tamper> = if prog.kind == Kind::Mul {
@@ -2993,7 +2993,7 @@ fn residual_stream_probes_cmd(args: &[String]) {
             let o = residual_stream::run(&w, &prog, round, kmax, Some(t));
             assert!(o.fired > 0, "{label}: {} did not fire, so nothing was measured", t.name());
             assert!(!o.accepts(), "{label}: {} must be rejected", t.name());
-            out.push(json!({"region": label, "probe": t.name(),
+            out.push(json!({"component": label, "probe": t.name(),
                             "accepted": o.accepts(),
                             "tamper_fired": o.fired,
                             "stark_ok": o.proven.stark_ok,

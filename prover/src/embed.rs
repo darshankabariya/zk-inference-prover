@@ -31,14 +31,14 @@
 //! `5 V d / pe` cells at `pe` channels per row, plus the use side's own copy of
 //! the stream.
 //!
-//! # The two regions
+//! # The two components
 //!
 //! **The use side** (`EmbedEval`), one row per `(token, channel block)`:
 //! commits the token id and the block's `pe` channels as `(sm, ef)` pairs, and
 //! carries two Horner claims -- one over the stream values, one over the ids.
 //! The stream claim uses the wiring family's own binding challenge and weight
 //! convention, so the verifier compares it against `stream_bindings[stream_in]` by
-//! equality.  That comparison is the binding: it says the row this region proved is
+//! equality.  That comparison is the binding: it says the row this component proved is
 //! the row the layer consumed.
 //!
 //! **The table side** (`EmbTableEval`), one row per `(vocabulary entry, channel
@@ -56,7 +56,7 @@
 //!
 //! The fix is one preprocessed value: a padded row's block index is `k`, which
 //! is **out of the use side's range**.  `cb` on the use side is preprocessed
-//! (`j % k`, one of the region's five preprocessed columns), so no use row can
+//! (`j % k`, one of the component's five preprocessed columns), so no use row can
 //! ever present `k` in that slot, so a padded row is not the tuple of any use
 //! row, so its multiplicity must be zero for the LogUp sums to cancel.  That
 //! confines `tk` to `[0, vocab)` at zero marginal cost: no column, no
@@ -82,7 +82,7 @@
 //!
 //! # Where the values are committed, and why the order matters
 //!
-//! Both regions' columns are base columns (tree 1), committed before the
+//! Both components' columns are base columns (tree 1), committed before the
 //! relation challenges are drawn.  The two Horner accumulators are interaction
 //! columns (tree 2), built after the binding challenge `w` and its companion `lam`
 //! are drawn -- exactly where the wiring family builds its own.  Nothing this
@@ -112,7 +112,7 @@ use crate::common::{Eval, Proven, Session, Sums, eval_of, log_rows_for, m31_u32,
 /// packing argument above needs exactly this check and no other.
 pub const EF_BITS: u32 = 8;
 
-/// The use region's preprocessed columns, in the order `pre_ids` writes them.
+/// The use component's preprocessed columns, in the order `pre_ids` writes them.
 /// `act`, `in` and `bd` are selectors; `cb` is the channel-block index, which
 /// the lookup tuple carries so that two blocks of one token cannot be swapped.
 pub const EMB_SEL: [&str; 4] = ["b11_emb_act", "b11_emb_in", "b11_emb_bd", "b11_emb_end"];
@@ -138,7 +138,7 @@ pub fn tab_e_id(k: usize) -> PreProcessedColumnId {
 /// How the stream and the vocabulary are cut into rows.
 ///
 /// `k` blocks of `pe = d / k` channels; `k` is the smallest power of two that
-/// brings a block at or under the target, so the use region's row count
+/// brings a block at or under the target, so the use component's row count
 /// `tokens * k` stays a power of two and the table's row count is the padded
 /// vocabulary times `k`.  The target is a knob because the block width is the
 /// lookup tuple's arity and therefore the generated kernel's per-row width --
@@ -172,7 +172,7 @@ impl EmbLayout {
             vpad: 1usize << log_v,
         }
     }
-    /// `(token, block)` at use-region row `j`, or `None` on a padded row.
+    /// `(token, block)` at use-component row `j`, or `None` on a padded row.
     pub fn at(&self, tokens: usize, j: usize) -> Option<(usize, usize)> {
         let (t, cb) = (j / self.k, j % self.k);
         (t < tokens).then_some((t, cb))
@@ -248,7 +248,7 @@ impl<F: Clone, EF: RelationEFTraitBound<F>> Relation<F, EF> for EmbRel {
 /// claims are comparable by equality and nothing else has to be arranged.
 #[derive(Clone, Debug)]
 pub struct ETie {
-    /// one weight per channel slot, at the region's last row
+    /// one weight per channel slot, at the component's last row
     pub w: Vec<SecureField>,
     pub lam: SecureField,
     /// the row step inside a token, and across a token boundary
@@ -419,14 +419,14 @@ pub enum Tamper {
     /// lookup's sums do not cancel
     Tok(usize),
     /// **the aimed corruption.**  The id moved *and* the committed row
-    /// recomputed from the table to match it, so the region is internally
+    /// recomputed from the table to match it, so the component is internally
     /// consistent and every constraint inside it still holds.  Only the binding to
     /// the layer's `bin` can tell that this is not the row the layer consumed.
     /// This is the shape of `argmax::Tamper::Key`.
     TokRow(usize),
     /// one committed channel of the stream changed: the lookup rejects
     Val(usize),
-    /// one cell of the committed *table* changed, with the region rebuilt to
+    /// one cell of the committed *table* changed, with the component rebuilt to
     /// match it -- every internal check passes and the pinned preprocessed root
     /// is what rejects
     Table(usize),
@@ -488,7 +488,7 @@ impl EWitness {
     /// row `residual_stream::split(0)` gives and the row the padded table entry held.
     /// Every other position is honest.
     ///
-    /// This is not a corruption: every constraint the region carries holds on
+    /// This is not a corruption: every constraint the component carries holds on
     /// it, and before the sentinel the lookup cancelled.  It is a legal witness
     /// for a false statement, which is why it is built here rather than in
     /// `Tamper`.
@@ -506,7 +506,7 @@ impl EWitness {
 
     /// The real columns a `Layer` holds.  The check is the statement's own
     /// premise, so a witness that fails it is a spec mismatch and not something
-    /// for the region to prove around -- exactly as `AWitness::from_cols` treats
+    /// for the component to prove around -- exactly as `AWitness::from_cols` treats
     /// a dump whose token is not the first maximum.
     pub fn from_cols(tokens: usize, d: usize, vocab: usize, tab: Vec<u16>, tok: Vec<u32>,
                      xin: Vec<u16>) -> Result<Self, String> {
@@ -539,12 +539,12 @@ impl EWitness {
     }
 }
 
-// ------------------------------------------------------------------ region ----
+// ------------------------------------------------------------------ component ----
 
 /// The gadget's committed and preprocessed columns, with no transcript of its
 /// own -- what the composed proof needs, and what `run` builds its standalone
 /// proof out of so the two cannot drift apart.
-pub struct ERegion {
+pub struct EComponent {
     pub lay: EmbLayout,
     pub tokens: usize,
     pub d: usize,
@@ -566,8 +566,8 @@ pub struct ERegion {
     pub off_table: usize,
 }
 
-/// Build both regions, and bump the 8-bit range table's multiplicities.
-pub fn region(w: &EWitness, lay: EmbLayout, m_ef: &mut [u32], bad: Option<Tamper>) -> ERegion {
+/// Build both components, and bump the 8-bit range table's multiplicities.
+pub fn component(w: &EWitness, lay: EmbLayout, m_ef: &mut [u32], bad: Option<Tamper>) -> EComponent {
     let (pe, k) = (lay.pe, lay.k);
     let rows = 1usize << lay.log_use;
     let d = w.d;
@@ -677,15 +677,15 @@ pub fn region(w: &EWitness, lay: EmbLayout, m_ef: &mut [u32], bad: Option<Tamper
     let tab_pre: Vec<Eval> = tcols.into_iter().map(|c| eval_of(lay.log_tab, c)).collect();
     let tab_mult = eval_of(lay.log_tab, mult.into_iter().map(m31_u32).collect());
 
-    ERegion { lay, tokens: w.tokens, d, vocab: w.vocab, pre, base, tab_pre, tab_mult, vals, ids,
+    EComponent { lay, tokens: w.tokens, d, vocab: w.vocab, pre, base, tab_pre, tab_mult, vals, ids,
               off_table }
 }
 
-impl ERegion {
+impl EComponent {
     /// Stream KK: the committed id of every position, in position order -- the
     /// vector the statement publishes and `boundary-grid` compares against the
     /// previous block's proved argmax.  Read off the committed column, so it is
-    /// the region's own ids and not the witness's.
+    /// the component's own ids and not the witness's.
     pub fn token_ids(&self) -> Vec<u32> {
         (0..self.tokens).map(|t| self.ids[t * self.lay.k]).collect()
     }
@@ -697,15 +697,15 @@ impl ERegion {
         self.pre.len() * (1usize << self.lay.log_use)
             + self.tab_pre.len() * (1usize << self.lay.log_tab)
     }
-    /// How many lookups the use region's AIR adds, in `add_to_relation` order.
+    /// How many lookups the use component's AIR adds, in `add_to_relation` order.
     pub fn n_looks(&self) -> usize {
         1 + self.lay.pe
     }
 }
 
-/// The use region's LogUp columns and its use sum, in the order the AIR adds
+/// The use component's LogUp columns and its use sum, in the order the AIR adds
 /// the lookups: the embedding entry first, then one `ef` range check per slot.
-pub fn logup(r: &ERegion, rel: &EmbRel, rel_ef: &RangeRel) -> (Vec<Eval>, SecureField) {
+pub fn logup(r: &EComponent, rel: &EmbRel, rel_ef: &RangeRel) -> (Vec<Eval>, SecureField) {
     let pe = r.lay.pe;
     let pack = PackedM31::broadcast(m31_u32(PACK as u32));
     let one = PackedQM31::broadcast(SecureField::one());
@@ -727,14 +727,14 @@ pub fn logup(r: &ERegion, rel: &EmbRel, rel_ef: &RangeRel) -> (Vec<Eval>, Secure
 }
 
 /// The table side's one LogUp column and its claimed sum.
-pub fn table_side(r: &ERegion, rel: &EmbRel) -> (Vec<Eval>, SecureField) {
+pub fn table_side(r: &EComponent, rel: &EmbRel) -> (Vec<Eval>, SecureField) {
     let refs: Vec<&Eval> = r.tab_pre.iter().collect();
     crate::attn_trace::table_col(r.lay.log_tab, rel, &refs, &r.tab_mult)
 }
 
 /// The two Horner columns and the two claims they close on: the stream binding and
 /// the id claim, in the order the AIR reads them.
-pub fn binding_cols(r: &ERegion, t: &ETie) -> (Vec<Eval>, SecureField, SecureField) {
+pub fn binding_cols(r: &EComponent, t: &ETie) -> (Vec<Eval>, SecureField, SecureField) {
     let rows = 1usize << r.lay.log_use;
     let (pe, k) = (r.lay.pe, r.lay.k);
     let n_use = r.tokens * k;
@@ -817,7 +817,7 @@ impl Outcome {
     }
 }
 
-/// The standalone proof: the two regions, the 8-bit range table, one transcript.
+/// The standalone proof: the two components, the 8-bit range table, one transcript.
 ///
 /// The binding has no counterparty here -- there is no wiring family in a standalone
 /// run -- so the claim is recomputed from the witness's own `xin` and compared,
@@ -826,7 +826,7 @@ impl Outcome {
 pub fn run(w: &EWitness, target: usize, bad: Option<Tamper>) -> (Outcome, EmbLayout) {
     let lay = EmbLayout::choose(w.d, w.tokens, w.vocab, target);
     let mut m_ef = vec![0u32; 1 << EF_BITS];
-    let r = region(w, lay, &mut m_ef, bad);
+    let r = component(w, lay, &mut m_ef, bad);
 
     let mult_ef = eval_of(EF_BITS, m_ef.iter().map(|v| m31_u32(*v)).collect());
     let tbl_ef = eval_of(EF_BITS, (0..1u32 << EF_BITS).map(m31_u32).collect());
@@ -987,7 +987,7 @@ mod tests {
             let w = EWitness::synthetic(tokens, d, vocab, 3);
             let lay = EmbLayout::choose(d, tokens, vocab, target);
             let mut m_ef = vec![0u32; 1 << EF_BITS];
-            let r = region(&w, lay, &mut m_ef, None);
+            let r = component(&w, lay, &mut m_ef, None);
             let ch = SecureField::from_m31_array(
                 [m31_u32(7), m31_u32(11), m31_u32(13), m31_u32(17)]);
             let lam = SecureField::from_m31_array(
@@ -1006,7 +1006,7 @@ mod tests {
         let w = EWitness::synthetic(tokens, d, vocab, 5);
         let lay = EmbLayout::choose(d, tokens, vocab, 24);
         let mut m_ef = vec![0u32; 1 << EF_BITS];
-        let r = region(&w, lay, &mut m_ef, None);
+        let r = component(&w, lay, &mut m_ef, None);
         let ch = SecureField::from_m31_array(
             [m31_u32(29), m31_u32(31), m31_u32(37), m31_u32(41)]);
         let t = binding_w(ch, SecureField::one(), d, tokens, &lay);
@@ -1039,7 +1039,7 @@ mod tests {
         };
         for legacy in [true, false] {
             let mut m_ef = vec![0u32; 1 << EF_BITS];
-            let r = region(&w, lay, &mut m_ef, legacy.then_some(Tamper::LegacyPad));
+            let r = component(&w, lay, &mut m_ef, legacy.then_some(Tamper::LegacyPad));
             let (ur, tr) = (1usize << lay.log_use, 1usize << lay.log_tab);
             let (tk, cb) = (cells(&r.base[0]), cells(&r.pre[4]));
             let act = cells(&r.pre[0]);
@@ -1071,7 +1071,7 @@ mod tests {
 
     /// Stream KK, `notes/witness-slack.md` section 1b: the sum
     /// `verify_composed` recomputes from the statement's published ids is the
-    /// claim the region publishes, at four shapes.  One line in the verifier
+    /// claim the component publishes, at four shapes.  One line in the verifier
     /// rests on this; if the two conventions ever drift, it fails here rather
     /// than on a box, and a chunk that is honest reads as one that is not.
     #[test]
@@ -1083,7 +1083,7 @@ mod tests {
             let w = EWitness::synthetic(tokens, d, vocab, 17);
             let lay = EmbLayout::choose(d, tokens, vocab, target);
             let mut m_ef = vec![0u32; 1 << EF_BITS];
-            let r = region(&w, lay, &mut m_ef, None);
+            let r = component(&w, lay, &mut m_ef, None);
             let ch = SecureField::from_m31_array(
                 [m31_u32(43), m31_u32(47), m31_u32(53), m31_u32(59)]);
             let t = binding_w(ch, SecureField::one(), d, tokens, &lay);
@@ -1126,7 +1126,7 @@ mod tests {
             ao_acc_mag: false, ao_denp2: false,
             fold_rem_bits: 0, fold_alpha: 0, freivalds_p: 136,
             residual_stream: Some(crate::compose::ResidualStreamParams {
-                // stream II: the two additive regions are unconditional, so this
+                // stream II: the two additive components are unconditional, so this
                 // fixture carries a real `dff` and the model's two norm
                 // constants.  A mechanical update, not a change of what the
                 // test asserts -- both plans it compares gain the same columns.
@@ -1209,9 +1209,9 @@ mod tests {
                 // stream PP: the base trace is tree 2 -- the shape tree and the
                 // model tree are 0 and 1.
                 let base = crate::common::BASE_TREE;
-                assert_eq!(last[base].len(), 1, "the table region commits one column");
+                assert_eq!(last[base].len(), 1, "the table component commits one column");
                 assert_eq!(prev[base].len(), 1 + 2 * plan.emb.unwrap().pe,
-                           "the use region commits `tk` and two cells per channel");
+                           "the use component commits `tk` and two cells per channel");
             }
         }
     }

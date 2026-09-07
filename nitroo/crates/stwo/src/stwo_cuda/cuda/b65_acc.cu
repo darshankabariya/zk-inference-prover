@@ -68,10 +68,10 @@ __device__ __forceinline__ qm31 b65a_step(bool nofirst, qm31 step, unsigned muta
 
 // =============================================================== the flags ==
 
-// One key tile sub-region's per-row layout facts, and nothing else.
+// One key tile sub-component's per-row layout facts, and nothing else.
 //
 // B7a milestone 4 (section 25): this used to be the first six lines of each of
-// the three region kernels below. It is a kernel of its own because the 48
+// the three component kernels below. It is a kernel of its own because the 48
 // preprocessed selector columns `commit_pre` builds are *these bits* -- and
 // they are needed before the challenges are drawn, where the accumulators run
 // after. One array, written once at fill time, read by both.
@@ -139,7 +139,7 @@ __global__ void b65a_scan_local(qm31 *__restrict__ a, qm31 *__restrict__ b,
 }
 
 // Phase 2: the block totals, scanned serially -- one thread per lane over at
-// most `rows / 256` blocks, which at the widest region here is 512 steps.
+// most `rows / 256` blocks, which at the widest component here is 512 steps.
 __global__ void b65a_scan_carry(const qm31 *__restrict__ blk_a,
                                 const qm31 *__restrict__ blk_x,
                                 qm31 *__restrict__ carry, unsigned n_blocks,

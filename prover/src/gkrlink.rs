@@ -279,98 +279,98 @@ pub fn eval_is_first(coset: Coset, p: CirclePoint<SecureField>) -> SecureField {
 // ------------------------------------------------------------------------
 
 /// One committed (or preprocessed) column, named the way the AIR reads it:
-/// by its mask index within the region's component. The committed order and
+/// by its mask index within the component's component. The committed order and
 /// the mask order are the same order -- that is what lets the prover resolve
 /// these against `com.base[at[which] + i]` and the verifier against the
 /// component's trace location span, and the two cannot disagree without the
 /// binding constraint rejecting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RCol {
-    /// the channel region's `i`-th trace mask (`ks` then `qs`)
+    /// the channel component's `i`-th trace mask (`ks` then `qs`)
     Chan(usize),
-    /// the grid region's `i`-th trace mask (`idx`, `num`, `aux`, `vals`)
+    /// the grid component's `i`-th trace mask (`idx`, `num`, `aux`, `vals`)
     Key(usize),
-    /// the per-token region's `i`-th trace mask (`ms`, `zs`, `los`, `los2`)
+    /// the per-token component's `i`-th trace mask (`ms`, `zs`, `los`, `los2`)
     Row(usize),
     /// the diagonal block's `i`-th causal-mask column, preprocessed tree
     Msk(usize),
-    /// B11 stream U: a dequant region's `i`-th trace mask. The index is
+    /// B11 stream U: a dequant component's `i`-th trace mask. The index is
     /// `dequant::Map`'s column index, which *is* the mask index -- the map
     /// exists so that "the AIR, the trace generator and the LogUp generator
     /// agree by construction instead of by inspection", and this is a fourth
     /// reader of the same agreement.
     Deq(usize),
-    /// B11 stream U: a dequant region's weight-scale mantissa column for slot
+    /// B11 stream U: a dequant component's weight-scale mantissa column for slot
     /// `i` (`chan_col(tag, "m", i)`), preprocessed tree. The only preprocessed
     /// column any dequant lookup reads: the `chain` variant's second scale is
     /// offline, so its mantissa enters the `mul` lookup from the preprocessed
     /// side while everything else in the lookup is committed.
     DeqPre(usize),
-    /// B11 stream V: a residual-stream region's `i`-th trace mask. The index is the
-    /// region's own committed column index, which *is* the mask index: the
+    /// B11 stream V: a residual-stream component's `i`-th trace mask. The index is the
+    /// component's own committed column index, which *is* the mask index: the
     /// evaluator reads its masks in `Prog` order and the fill writes the
     /// columns in the same order, which is what lets `residual_stream_interaction`'s
     /// builder index `r.base` by what `Prog` returns.
     ResidualStream(usize),
-    /// Stream OO (E11): a residual-stream region's preprocessed value `i`, half `k` --
+    /// Stream OO (E11): a residual-stream component's preprocessed value `i`, half `k` --
     /// the `(sm, ef)` pair of a `Src::Pre` operand. Stream II's norm scales read
     /// the model's norm weight, which is the statement's and so lives in tree 0
-    /// under `pre_root`; the pair sits at `Prog::pre_at(i, k)` in the region's
+    /// under `pre_root`; the pair sits at `Prog::pre_at(i, k)` in the component's
     /// own `pre` list and is named by `residual_stream::residual_stream_pre_col(tag, i, k)`. The only
     /// preprocessed column a residual-stream lookup reads.
     ResidualStreamPre(usize, usize),
     /// B11 stream V: a Freivalds group's `i`-th trace mask. The activations are the
-    /// region's first `pq` committed columns, which is the slice
+    /// component's first `pq` committed columns, which is the slice
     /// `freivalds_interaction`'s builder range-checks.
     Freivalds(usize),
-    /// B11 stream V: the attention-output region's `i`-th trace mask.
+    /// B11 stream V: the attention-output component's `i`-th trace mask.
     Ao(usize),
-    /// Stream JJ (E11): the attention-output region's slot-`i` preprocessed
+    /// Stream JJ (E11): the attention-output component's slot-`i` preprocessed
     /// column, `jvp = jv - jv_min`.  The only preprocessed column an attnout
     /// lookup reads: `jv` is a model constant, so the exponent window's key is
     /// half preprocessed and half committed.
     AoPre(usize),
 }
 
-/// Which region a site's looks and a folded weight's column belong to: the
-/// family, and the region's index within it.
+/// Which component a site's looks and a folded weight's column belong to: the
+/// family, and the component's index within it.
 ///
 /// B11 stream U, lever 3: stream S keyed the fold's weights by key tile index
 /// alone, because the key tiles were the only family with a backend. The dequant
-/// family's regions index into the plan's matmul list, and the two index spaces
+/// family's components index into the plan's matmul list, and the two index spaces
 /// are unrelated -- so the key is the pair, and `link_params`' `BTreeMap` is
 /// keyed by it. Nothing else about the fold changes: a weight is still one
-/// `(region, column)` pair's coefficient in one height's affine combination.
+/// `(component, column)` pair's coefficient in one height's affine combination.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Reg {
+pub enum Comp {
     /// key tile `b`, in `Plan::diagonal_block`'s order (the prefix key tiles, then the diagonal blocks)
     KeyTile(usize),
-    /// dequant region `m`, in the plan's matmul order
+    /// dequant component `m`, in the plan's matmul order
     Deq(usize),
-    /// B11 stream V: residual-stream region `g`, in the plan's region order
+    /// B11 stream V: residual-stream component `g`, in the plan's component order
     ResidualStream(usize),
     /// B11 stream V: Freivalds group `w`, in the plan's Freivalds order
     Freivalds(usize),
-    /// B11 stream V: the attention-output region, of which there is one
+    /// B11 stream V: the attention-output component, of which there is one
     Ao,
 }
 
-impl Default for Reg {
+impl Default for Comp {
     /// the collector's field needs one; key tile 0 is what stream S's single-family
     /// collector always meant
     fn default() -> Self {
-        Reg::KeyTile(0)
+        Comp::KeyTile(0)
     }
 }
 
-impl Reg {
+impl Comp {
     pub fn tag(&self) -> String {
         match self {
-            Reg::KeyTile(b) => format!("key_tile{b}"),
-            Reg::Deq(m) => format!("deq{m}"),
-            Reg::ResidualStream(g) => format!("residual_stream{g}"),
-            Reg::Freivalds(w) => format!("freivalds{w}"),
-            Reg::Ao => "attnout".to_string(),
+            Comp::KeyTile(b) => format!("key_tile{b}"),
+            Comp::Deq(m) => format!("deq{m}"),
+            Comp::ResidualStream(g) => format!("residual_stream{g}"),
+            Comp::Freivalds(w) => format!("freivalds{w}"),
+            Comp::Ao => "attnout".to_string(),
         }
     }
 }
@@ -397,7 +397,7 @@ pub struct LinkLook {
 
 /// One site's looks, in the exact order the interaction pass pushes them.
 pub struct SiteLooks {
-    pub reg: Reg,
+    pub reg: Comp,
     pub which: usize,
     pub log_rows: u32,
     pub looks: Vec<LinkLook>,
@@ -426,7 +426,7 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
         let l = &plan.lays[b];
         let (lc, lk) = (&l.chan, &l.key);
 
-        // ---- channel region: the key and query range checks, all unit
+        // ---- channel component: the key and query range checks, all unit
         if cfg.range_check {
             let mut looks = vec![];
             for pp in 0..lc.pk {
@@ -443,10 +443,10 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
                                    Affine::col(RCol::Chan(lc.pk + pp), SecureField::one())),
                 });
             }
-            out.push(SiteLooks { reg: Reg::KeyTile(b), which: 0, log_rows: lc.g.log_rows, looks });
+            out.push(SiteLooks { reg: Comp::KeyTile(b), which: 0, log_rows: lc.g.log_rows, looks });
         }
 
-        // ---- grid region: exp lookups, the variant's remainder checks, the
+        // ---- grid component: exp lookups, the variant's remainder checks, the
         // V range checks
         let n_aux = match plan.attn_variant {
             AttnVariant::IntExp => 0,
@@ -488,15 +488,15 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
                 });
             }
         }
-        out.push(SiteLooks { reg: Reg::KeyTile(b), which: 1, log_rows: lk.g.log_rows, looks });
+        out.push(SiteLooks { reg: Comp::KeyTile(b), which: 1, log_rows: lk.g.log_rows, looks });
 
-        // ---- per-token region: the two denominator bounds' limbs. The high
+        // ---- per-token component: the two denominator bounds' limbs. The high
         // limbs are not committed -- `hi = (Z - lo) * 2^-z_lo_bits` -- so they
         // fold into weights on the committed `zs` and `los` columns, which is
         // memo section 4's first consequence.
         //
         // Gated on `plan.rows_key_tile[b]` and not on `!diagonal_block` for the reason
-        // `gkr_key_tile::sites_of` gives at the same site: the region belongs to the
+        // `gkr_key_tile::sites_of` gives at the same site: the component belongs to the
         // head key tile group, and with `--kv-boundary` a group has `c/s` prefix
         // sub-key-tiles of which only the first carries it. `rows_key_tile` is
         // `!diagonal_block` with the flag off.
@@ -535,7 +535,7 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
                     }),
                 });
             }
-            out.push(SiteLooks { reg: Reg::KeyTile(b), which: 3, log_rows: l.log_row, looks });
+            out.push(SiteLooks { reg: Comp::KeyTile(b), which: 3, log_rows: l.log_row, looks });
         }
     }
     if plan.p.gkr_dequant {
@@ -669,7 +669,7 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
             }
         }
         out.push(SiteLooks {
-            reg: Reg::Deq(m),
+            reg: Comp::Deq(m),
             which: 0,
             log_rows: plan.mat_lays[m].log_rows,
             looks,
@@ -684,7 +684,7 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
 /// look for look and column for column -- that closure is the ground truth for
 /// the *order*, because `plogup::paired` batches in it and the generated kernel
 /// lowers `ResidualStreamEval::evaluate` in it, so all three agree or `B7_M4_LOGUPIR=2`
-/// fails. Every value a residual-stream lookup reads is one of the region's own committed
+/// fails. Every value a residual-stream lookup reads is one of the component's own committed
 /// trace masks or the constant zero -- `usize::MAX` is the `+0` operand, which
 /// contributes no term at all -- so every denominator is affine in committed
 /// columns exactly as memo section 4 needs, and every numerator is the literal
@@ -693,7 +693,7 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
 /// Three of the six kinds read a *pair* of masks two apart (`c(a + 2)` is the
 /// unary's output beside its input) and one reads an affine combination rather
 /// than a bare column (`Pow`'s first slot is `ef - etop + DMAX`, the same shape
-/// the per-token region's high limbs take). Neither is new: the fold has
+/// the per-token component's high limbs take). Neither is new: the fold has
 /// carried weighted combinations since stream S.
 ///
 /// `gkrlink::ir_looks` derives the same forms from the fraction IR, and
@@ -708,10 +708,10 @@ pub fn residual_stream_looks(plan: &crate::compose::Plan, rels: &crate::compose:
     let one = SecureField::one();
     let dmax = SecureField::from(M31::from_u32_unchecked(crate::residual_stream::DMAX));
     let mut out = vec![];
-    for (g, r) in gp.regions.iter().enumerate() {
+    for (g, r) in gp.components.iter().enumerate() {
         let prog = &r.prog;
         // `combine(v) = sum alpha_i v_i - z` over the slots, where a slot is
-        // itself an affine form over the region's masks. `None` is the constant
+        // itself an affine form over the component's masks. `None` is the constant
         // zero the `+0` operand passes, and `alpha_i * 0` is not a term.
         let rel = |z: SecureField, al: &[SecureField], slots: &[Option<Affine>]| {
             let mut den = Affine { terms: vec![], k: -z };
@@ -725,7 +725,7 @@ pub fn residual_stream_looks(plan: &crate::compose::Plan, rels: &crate::compose:
             den.terms.retain(|(_, w)| !w.is_zero());
             den
         };
-        // one of the region's committed masks, or the constant zero
+        // one of the component's committed masks, or the constant zero
         let col = |x: usize| -> Option<Affine> {
             (x != usize::MAX).then(|| Affine::col(RCol::ResidualStream(x), one))
         };
@@ -736,7 +736,7 @@ pub fn residual_stream_looks(plan: &crate::compose::Plan, rels: &crate::compose:
         // `None` for the constant zero dropped the operand's term from the
         // affine form -- so a tail's slots folded under a form missing one
         // column and `gkrlink`'s own assert fired at the first tail height.
-        // A preprocessed operand is a tree-0 column of the same region: the
+        // A preprocessed operand is a tree-0 column of the same component: the
         // look is the same shape, at a different tree index.
         let src = |s: &Src, k: usize| -> Option<Affine> {
             match s {
@@ -815,7 +815,7 @@ pub fn residual_stream_looks(plan: &crate::compose::Plan, rels: &crate::compose:
             }
         }
         out.push(SiteLooks {
-            reg: Reg::ResidualStream(g),
+            reg: Comp::ResidualStream(g),
             which: 0,
             log_rows: r.log_rows,
             looks,
@@ -827,7 +827,7 @@ pub fn residual_stream_looks(plan: &crate::compose::Plan, rels: &crate::compose:
 /// The Freivalds checks' lookup sites as affine forms.
 ///
 /// B11 stream V, lever 4. One 8-bit range check per query slot, over the
-/// region's first `pq` committed columns -- which is exactly what
+/// component's first `pq` committed columns -- which is exactly what
 /// `layer::freivalds_interaction`'s `fr` reads and what `FreivaldsEval::evaluate` adds.
 /// Every numerator is the literal one, so every Freivalds instance is
 /// `Layer::LogUpSingles`. This is the whole family: the `v`, `u` and `acc`
@@ -840,7 +840,7 @@ pub fn freivalds_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
         .iter()
         .enumerate()
         .map(|(w, wp)| SiteLooks {
-            reg: Reg::Freivalds(w),
+            reg: Comp::Freivalds(w),
             which: 0,
             log_rows: wp.lay.g.log_rows,
             looks: (0..wp.lay.pq)
@@ -855,14 +855,14 @@ pub fn freivalds_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
         .collect()
 }
 
-/// The attention-output region's lookup sites as affine forms.
+/// The attention-output component's lookup sites as affine forms.
 ///
 /// B11 stream V, lever 4. Four looks per channel slot in the AIR's order --
 /// the `(qm, nz2)` pair check, then the error `d`, then the excluded bound
 /// `dp = 2 denp - 1 - d`, then (stream JJ, `witness-slack.md` section 7 item 1)
 /// `denp` itself. The third is the one worth naming: `dp` is not a
 /// committed column at all, it is an *affine form* over two of them, which is
-/// the same shape the per-token region's high limbs take and the reason memo
+/// the same shape the per-token component's high limbs take and the reason memo
 /// section 4's collapse does not care. Every numerator is the literal one.
 pub fn ao_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
                 -> Vec<SiteLooks> {
@@ -936,10 +936,10 @@ pub fn ao_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
             }),
         });
     }
-    vec![SiteLooks { reg: Reg::Ao, which: 0, log_rows: lay.log_rows, looks }]
+    vec![SiteLooks { reg: Comp::Ao, which: 0, log_rows: lay.log_rows, looks }]
 }
 
-/// How many looks a residual-stream region has, from its program alone.
+/// How many looks a residual-stream component has, from its program alone.
 ///
 /// The verifier's `sites_of` needs the look count and the numerator kinds
 /// without an evaluator to lower, and this is the count `residual_stream_looks` produces:
@@ -1148,7 +1148,7 @@ pub fn ir_units(ir: &crate::cudagen::Ir) -> Vec<bool> {
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Affinity {
     pub family: String,
-    pub region: String,
+    pub component: String,
     pub n_looks: usize,
     /// the numerator kinds, in `add_to_relation` order
     pub units: Vec<bool>,
@@ -1163,7 +1163,7 @@ pub struct Affinity {
 }
 
 /// Decide one lowered evaluator's looks, for the record.
-pub fn affinity_of(family: &str, region: &str, ir: &crate::cudagen::Ir) -> Affinity {
+pub fn affinity_of(family: &str, component: &str, ir: &crate::cudagen::Ir) -> Affinity {
     let looks = aff_looks(ir);
     let mut bad = vec![];
     let mut reads: Vec<(usize, usize)> = vec![];
@@ -1190,7 +1190,7 @@ pub fn affinity_of(family: &str, region: &str, ir: &crate::cudagen::Ir) -> Affin
     reads.sort_unstable();
     Affinity {
         family: family.to_string(),
-        region: region.to_string(),
+        component: component.to_string(),
         n_looks: looks.len(),
         units,
         ok: bad.is_empty(),
@@ -1201,7 +1201,7 @@ pub fn affinity_of(family: &str, region: &str, ir: &crate::cudagen::Ir) -> Affin
 }
 
 // ------------------------------------------------------------------------
-// Per-height parameters: one folded mle_eval instance per distinct region
+// Per-height parameters: one folded mle_eval instance per distinct component
 // height, derived identically by the prover and the verifier.
 // ------------------------------------------------------------------------
 
@@ -1215,7 +1215,7 @@ pub struct HeightLink {
     pub claim: SecureField,
     pub shift: SecureField,
     /// folded weights per referenced column, and the folded constant
-    pub weights: Vec<(Reg, RCol, SecureField)>,
+    pub weights: Vec<(Comp, RCol, SecureField)>,
     pub konst: SecureField,
 }
 
@@ -1263,7 +1263,7 @@ pub fn link_params(
     struct Acc {
         point: Vec<SecureField>,
         claim: SecureField,
-        weights: BTreeMap<(Reg, RCol), SecureField>,
+        weights: BTreeMap<(Comp, RCol), SecureField>,
         konst: SecureField,
         n: usize,
     }
@@ -1297,7 +1297,7 @@ pub fn link_params(
         });
         debug_assert_eq!(acc.point.as_slice(), x_row);
 
-        fn push(acc: &mut Acc, alpha: SecureField, reg: Reg, claim: SecureField,
+        fn push(acc: &mut Acc, alpha: SecureField, reg: Comp, claim: SecureField,
                 parts: &mut dyn Iterator<Item = (SecureField, Affine)>) {
             let a = alpha.pow(acc.n as u128);
             acc.n += 1;
@@ -1407,7 +1407,7 @@ pub enum Src<'a> {
 /// The device-resident terms are combined by one kernel launch and brought
 /// back; the host-resident ones are added on the host. With every column on the
 /// host this is exactly the loop `build_height_cols` used to open with.
-pub fn fold_coeff<'a, F: Fn(Reg, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
+pub fn fold_coeff<'a, F: Fn(Comp, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
                                                       -> SecureColumn {
     let h = hl.h;
     assert!(h >= LOG_N_LANES, "a link height below the SIMD lane count");
@@ -1794,7 +1794,7 @@ pub fn dev_link() -> bool {
 
 /// One height's sixteen committed columns, built wherever the prover can build
 /// them, ready for the interaction tree.
-pub fn height_cols<'a, F: Fn(Reg, &RCol) -> Src<'a>>(
+pub fn height_cols<'a, F: Fn(Comp, &RCol) -> Src<'a>>(
     hl: &HeightLink,
     src_of: &F,
 ) -> Vec<crate::device::AnyCol<'static>> {
@@ -1816,7 +1816,7 @@ pub fn height_cols<'a, F: Fn(Reg, &RCol) -> Src<'a>>(
 /// The eq-weighted total of one height's folded coefficient column, taken
 /// wherever the fold ran. This is what `B11_LINKMUT` re-derives its claim from,
 /// so it has to exist on both paths or the control would only be armed on one.
-pub fn fold_total<'a, F: Fn(Reg, &RCol) -> Src<'a>>(
+pub fn fold_total<'a, F: Fn(Comp, &RCol) -> Src<'a>>(
     hl: &HeightLink,
     src_of: &F,
 ) -> SecureField {
@@ -1880,7 +1880,7 @@ pub mod dev {
     /// the whole affine combine is one launch. The accumulation order is the
     /// weight order either way and field addition is exact, so it is the same
     /// column.
-    fn fold<'a, F: Fn(Reg, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
+    fn fold<'a, F: Fn(Comp, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
                                                 -> SecureFieldVec {
         let n = 1usize << hl.h;
         let mut keep: Vec<BaseFieldVec> = vec![];
@@ -1933,7 +1933,7 @@ pub mod dev {
         CudaBackend::gen_eq_evals(&hl.point, SecureField::one()).into_evals()
     }
 
-    pub fn fold_total<'a, F: Fn(Reg, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
+    pub fn fold_total<'a, F: Fn(Comp, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
                                                           -> SecureField {
         let n = 1usize << hl.h;
         let coeff = fold(hl, src_of);
@@ -1941,7 +1941,7 @@ pub mod dev {
         terms_of(&coeff, &eq, hl.shift, None, n)
     }
 
-    pub fn height_cols<'a, F: Fn(Reg, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
+    pub fn height_cols<'a, F: Fn(Comp, &RCol) -> Src<'a>>(hl: &HeightLink, src_of: &F)
                                                            -> Vec<AnyCol<'static>> {
         let h = hl.h;
         let n = 1usize << h;
@@ -2015,7 +2015,7 @@ pub mod dev {
     /// builder's, cell for cell -- stream T's `B11_FEEDCHECK` for this lever.
     /// It pays a download and a second, host build of the same height, so it is
     /// a control and never a measurement.
-    pub fn col_check<'a, F: Fn(Reg, &RCol) -> Src<'a>>(
+    pub fn col_check<'a, F: Fn(Comp, &RCol) -> Src<'a>>(
         hl: &HeightLink, src_of: &F, cols: &[AnyCol<'static>],
     ) {
         if std::env::var("B11_LINKCOLCHECK").map(|v| v != "1").unwrap_or(true) {

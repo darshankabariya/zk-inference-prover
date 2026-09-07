@@ -1,6 +1,6 @@
 //! Stream NN: what stands between the q/k/v projections and the attention.
 //!
-//! `b1/model.py` does two things after the projections that no region proved:
+//! `b1/model.py` does two things after the projections that no component proved:
 //!
 //!   q = rotate(q, cos, sin)   k = rotate(k, cos, sin)      # RoPE, bf16
 //!   qq = quantize(q, s_q)     qk = quantize(k, s_k)        # round-half-away
@@ -24,7 +24,7 @@
 //! `requant.rs`'s own, so the identity proved here is the identity stream II
 //! already measured on a different scale geometry; the division table and the
 //! `(q, nz)` pair table are **this family's**, one per side and sized by that
-//! side's `qk_bits` (stream NN-3 -- see "the region's tables" below).
+//! side's `qk_bits` (stream NN-3 -- see "the component's tables" below).
 
 use num_traits::{One, Zero};
 use stwo::core::fields::m31::M31;
@@ -100,7 +100,7 @@ pub fn bend_pat(p: u16) -> u16 {
 }
 
 /// The `Prog::rope_mul` leaf a slot's second operand reads: `2 j` is
-/// `cos[j]`, `2 j + 1` is `sgnsin[j]`.  One row of the region's preprocessed
+/// `cos[j]`, `2 j + 1` is `sgnsin[j]`.  One row of the component's preprocessed
 /// block, for the token at absolute position `pos`.
 pub fn pre_row(inv: &[f64], hd: usize, pos: usize) -> Vec<u16> {
     let (cos, sin) = rope_at(inv, hd, pos);
@@ -165,14 +165,14 @@ pub fn inv_freq_of(hd: usize, theta: f64, kind: &str, scale: &[f64]) -> Vec<f64>
 }
 
 
-// ------------------------------------------------------ the region's tables ---
+// ------------------------------------------------------ the component's tables ---
 //
-// Stream NN-3.  The quantize regions used to borrow the attention output's
+// Stream NN-3.  The quantize components used to borrow the attention output's
 // `(q, nz)` pair table and `requant.rs`'s power-of-two division table, both of
 // which stop at 127: `rq_table(Pow2)` keeps only quotients in `[1, 127]` and the
 // shared `qnz` table is `Params::ao_q_bits` tall.  This model's `qk_bits` are
 // `(12, 11)`, so on a real 8B chunk 35.9% of the `q` sites and 20.7% of the `k`
-// sites had no row and the chunk did not prove.  The regions now own their
+// sites had no row and the chunk did not prove.  The components now own their
 // tables and each side's is filtered to **that side's own domain**, which is the
 // part that matters: a table wider than the side's `qmax` would silently prove
 // the unclamped quotient at a site B1 clamps, turning an incompleteness into a
@@ -283,7 +283,7 @@ pub fn qdiv_tab_cols(bits: u32) -> Vec<Eval> {
 /// move `b65_attn_out_eval`'s fingerprint and every digest this repo has
 /// recorded.  Its width is not load-bearing for soundness -- the division table
 /// is what fixes the admissible `q` -- so one table at the maximum serves all
-/// three regions.
+/// three components.
 pub fn qnz_log_rows(bits: u32) -> u32 {
     bits - 1
 }
@@ -311,11 +311,11 @@ pub fn q_scale_col(tag: &str, sl: usize) -> PreProcessedColumnId {
     id(format!("nn_q_scale{sl}_{tag}"))
 }
 
-/// The two Horner claims one quantize region publishes.
+/// The two Horner claims one quantize component publishes.
 ///
-/// Both fold the region's own rows under the **token-major** canonical position
+/// Both fold the component's own rows under the **token-major** canonical position
 /// `p = t n + c`, which is the order `MatLayout` walks its rows in -- so a
-/// single row step serves, and the producing region's `Out(0)` binding and the
+/// single row step serves, and the producing component's `Out(0)` binding and the
 /// consuming key tile's fold are two sums over the same positions.
 #[derive(Clone)]
 pub struct QTie {
@@ -497,7 +497,7 @@ impl QTamper {
     }
 }
 
-pub struct QRegion {
+pub struct QComponent {
     pub tag: String,
     pub lay: MatLayout,
     pub tokens: usize,
@@ -513,16 +513,16 @@ pub struct QRegion {
     pub ref_ok: usize,
     pub ref_n: usize,
     /// Stream NN-3: sites whose true quotient is past **this side's own**
-    /// `qmax` -- B1 clamps them and the region has no row for them, so a nonzero
+    /// `qmax` -- B1 clamps them and the component has no row for them, so a nonzero
     /// count is an incompleteness and not a disagreement.  Before NN-3 the
     /// counter read "past the shared table's window", which at `qk_bits (12,
-    /// 11)` was overwhelmingly "the region is narrower than the model" instead.
+    /// 11)` was overwhelmingly "the component is narrower than the model" instead.
     pub clamped: usize,
     /// this side's integer width, and the two tables it owns
     pub bits: u32,
-    /// Stream NN-3: the per-channel scale exponents this region *committed* to
+    /// Stream NN-3: the per-channel scale exponents this component *committed* to
     /// tree 0 -- the plan's own, or the bent copy under a `Scale` probe.  The
-    /// `s_v` binding compares the `v` region's against the attention output's.
+    /// `s_v` binding compares the `v` component's against the attention output's.
     pub je: Vec<i64>,
     pub m_rq: Vec<u32>,
     pub m_qnz: Vec<u32>,
@@ -531,7 +531,7 @@ pub struct QRegion {
     pub fired: usize,
 }
 
-impl QRegion {
+impl QComponent {
     pub fn base_cells(&self) -> usize {
         self.base.len() << self.lay.log_rows
     }
@@ -542,15 +542,15 @@ impl QRegion {
 
 pub const Q_PER_SLOT: usize = 7; // ef, m7, q, nz, sm, sg, cl
 
-/// Build one quantize region.  `x` is the bf16 stream in `(token, channel)`
+/// Build one quantize component.  `x` is the bf16 stream in `(token, channel)`
 /// order -- the rotation's output for q and k, the dequant's for v -- `jj` the
 /// per-channel exponent (`n` of them, constant down the tokens) and `want` the
-/// integers the key tile committed, which the region only *checks* against.
+/// integers the key tile committed, which the component only *checks* against.
 #[allow(clippy::too_many_arguments)]
-pub fn q_region(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, tokens: usize,
+pub fn q_component(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, tokens: usize,
                 n: usize, hd: usize, bits: u32, nz_bits: u32, lay: MatLayout,
-                tables: &mut crate::layer::Tables, tamper: Option<QTamper>) -> QRegion {
-    assert_eq!(lay.lead, 0, "a quantize region needs an exact tiling ({tag})");
+                tables: &mut crate::layer::Tables, tamper: Option<QTamper>) -> QComponent {
+    assert_eq!(lay.lead, 0, "a quantize component needs an exact tiling ({tag})");
     assert_eq!(jj.len(), n, "{tag}: one exponent per channel");
     assert_eq!(hd % lay.per_row, 0,
                "{tag}: a quantize row must sit inside one head ({} does not divide {hd})",
@@ -578,7 +578,7 @@ pub fn q_region(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, tokens: 
     let (mut ref_ok, mut ref_n) = (0usize, 0usize);
 
     // the committed exponents, bent by the `Scale` probe.  It moves a
-    // *preprocessed* cell, so every constraint in the region still holds with
+    // *preprocessed* cell, so every constraint in the component still holds with
     // the quotients rebuilt around it and only `pre_root` can reject.
     let mut je = jj.to_vec();
     if let Some(QTamper::Scale(t)) = tamper {
@@ -587,7 +587,7 @@ pub fn q_region(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, tokens: 
         fired += 1;
     }
     // The input probe has to be *quiet on the output*: it moves the bf16 value
-    // this region rounded and must leave the integer it produced alone, or
+    // this component rounded and must leave the integer it produced alone, or
     // `nn_out_ok` sees it too and the control has not isolated the input binding it
     // was written for.  A one-ulp move of the mantissa usually rounds to the
     // same quotient; this scans forward from the asked-for site for one that
@@ -655,7 +655,7 @@ the probe would move the output too");
                         // past `qmax`: either `tt` is past the window (where the
                         // smallest quotient is already 2^(bits-1)) or it is the
                         // window's top row.  Such a site is B1's clamp, and the
-                        // region proves it by the pattern comparison rather than
+                        // component proves it by the pattern comparison rather than
                         // by a table row it does not have.
                         if tt >= tt_top || qdiv_ref(tt, m7).is_some_and(|t| t > qmax) {
                             let d = pat - (je[c] * 128 + cpat);
@@ -734,17 +734,17 @@ the probe would move the output too");
         fired += 1;
     }
     if tamper.is_some() && fired == 0 {
-        eprintln!("{tag}: the {} probe did not fire -- this region is the honest one",
+        eprintln!("{tag}: the {} probe did not fire -- this component is the honest one",
                   tamper.unwrap().name());
     }
     let base: Vec<Eval> = cols.into_iter().map(|c| eval_of(lay.log_rows, c)).collect();
-    QRegion { tag: tag.to_string(), lay, tokens, n, pre, base, in_nat, out_nat,
+    QComponent { tag: tag.to_string(), lay, tokens, n, pre, base, in_nat, out_nat,
               off_table, ref_ok, ref_n, clamped, bits, je, m_rq, m_qnz, m_rqv, log_rq, fired }
 }
 
-/// One quantize region's interaction columns: the two binding accumulators, then
+/// One quantize component's interaction columns: the two binding accumulators, then
 /// the LogUp fractions in the AIR's own lookup order.
-pub fn q_interaction(r: &QRegion, binding: &QTie, hd: usize, qnz: &PairRel, rq3: &FracRel,
+pub fn q_interaction(r: &QComponent, binding: &QTie, hd: usize, qnz: &PairRel, rq3: &FracRel,
                      r15: &RangeRel, rqv: &FracRel)
                      -> (Vec<Eval>, SecureField, SecureField, SecureField) {
     use stwo::prover::backend::simd::m31::PackedM31;
@@ -816,7 +816,7 @@ pub fn q_interaction(r: &QRegion, binding: &QTie, hd: usize, qnz: &PairRel, rq3:
     (cols, use_sum, claims[0], claims[1])
 }
 
-/// The quantize region's tiling.  `per_row` must divide `hd`, so that a row
+/// The quantize component's tiling.  `per_row` must divide `hd`, so that a row
 /// never straddles two heads and the GQA replication weight is a per-slot
 /// constant; and the tiling must be exact, because a padded row would commit a
 /// bf16 pattern nobody produced and the input binding would carry it.
@@ -842,7 +842,7 @@ pub fn q_layout(n: usize, hd: usize, tokens: usize, target: usize) -> MatLayout 
     best.unwrap_or_else(|| panic!("no exact quantize tiling for n={n} hd={hd} tokens={tokens}"))
 }
 
-/// NN-2: does a quantize region tile this shape at all?  `q_layout` panics when
+/// NN-2: does a quantize component tile this shape at all?  `q_layout` panics when
 /// it does not, and the witness generator has to ask before it turns the family
 /// on -- a shape whose widths line up but whose rows do not tile leaves the
 /// rotation off and reports `nn_open`, exactly as a shape whose widths do not.
@@ -900,7 +900,7 @@ mod tests {
 
     /// Stream NN-3: at eight bits the side's own division table **is**
     /// `requant.rs`'s power-of-two table, row for row.  If this ever fails, an
-    /// eight-bit quantize region has changed what it proves, and every recorded
+    /// eight-bit quantize component has changed what it proves, and every recorded
     /// rope digest moved for a reason nobody wrote down.
     #[test]
     fn qdiv_at_eight_bits_is_the_shared_table() {

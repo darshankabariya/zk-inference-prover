@@ -1,9 +1,9 @@
 //! Stream Q: the attention key tiles' lookups proved by LogUp-GKR.
 //!
-//! Today a key tile region's lookups are proved by committing running-sum columns:
-//! `attn_trace::logup_cols` pairs the region's lookups, builds the pointwise
+//! Today a key tile component's lookups are proved by committing running-sum columns:
+//! `attn_trace::logup_cols` pairs the component's lookups, builds the pointwise
 //! partial sums, and the AIR's `finalize_logup_in_pairs` asserts the recurrence
-//! while a boundary constraint bindings the last row to the region's entry in
+//! while a boundary constraint bindings the last row to the component's entry in
 //! `claims.use_sums`. Those columns are 88% of the key tiles' interaction cells and
 //! the key tiles are two thirds of the interaction tree at long context, so they are
 //! the largest single thing being committed that does not have to be.
@@ -16,8 +16,8 @@
 //!
 //! ## The shape of the argument
 //!
-//! A region's fractions are indexed by `(look, row)`. Laid out that way, a
-//! region is a natural GKR instance: its input layer is an MLE over
+//! A component's fractions are indexed by `(look, row)`. Laid out that way, a
+//! component is a natural GKR instance: its input layer is an MLE over
 //! `log2(n_looks) + log_rows` variables. Two details decide the layout.
 //!
 //! *The lookups reach the circuit unpaired* (B11 stream S, lever 3; it undoes
@@ -31,14 +31,14 @@
 //! of precomputed outside it. That first layer is the price of soundness, and
 //! it is measured, not assumed.
 //!
-//! *The entry axis wants a power of two.* Padding a 66-look channel region up
-//! to 128 would nearly double its sumcheck. Instead a region is split along the
+//! *The entry axis wants a power of two.* Padding a 66-look channel component up
+//! to 128 would nearly double its sumcheck. Instead a component is split along the
 //! binary decomposition of its look count -- 66 becomes a 64-look instance
 //! and a 2-look one -- which pads nothing and costs only instance bookkeeping.
 //!
 //! *The numerators come in two kinds.* A unit look stores no numerators at all
 //! (`Layer::LogUpSingles`); a diagonal block grid's exp looks carry `1 - mask` and
-//! live in `Layer::LogUpGeneric` instances. A region therefore contributes up
+//! live in `Layer::LogUpGeneric` instances. A component therefore contributes up
 //! to two groups of instances, and the split is by numerator kind first,
 //! binary decomposition second.
 //!
@@ -46,7 +46,7 @@
 //!
 //! Every instance from every key tile goes into a single `prove_batch` call. This is
 //! not an optimisation to add later: a sumcheck's domain halves every round, so
-//! a per-region GKR would pay per-round launch overhead across dozens of small
+//! a per-component GKR would pay per-round launch overhead across dozens of small
 //! trees, which stream C named as the likeliest way the sumcheck's cost model
 //! turns out optimistic. `prove_batch` already draws one challenge pair per
 //! layer and runs one batched sumcheck per layer across all instances, starting
@@ -73,17 +73,17 @@ use stwo_constraint_framework::FrameworkEval;
 
 use crate::attn_witness::Variant as AttnVariant;
 
-/// One key tile region's lookup site, as `interaction_phase` reaches it.
+/// One key tile component's lookup site, as `interaction_phase` reaches it.
 ///
 /// `which` is the component index `devfrac::key_tile_cols` uses -- 0 for the channel
-/// region, 1 for the grid, 3 for the per-token -- so a site names the same thing
+/// component, 1 for the grid, 3 for the per-token -- so a site names the same thing
 /// the existing code names.
 #[derive(Clone, Debug)]
 pub struct Site {
-    /// B11 stream U, lever 3: which family and which region within it. Stream S
-    /// carried a key tile index alone; the dequant family's regions index into the
+    /// B11 stream U, lever 3: which family and which component within it. Stream S
+    /// carried a key tile index alone; the dequant family's components index into the
     /// plan's matmul list, and the two spaces are unrelated.
-    pub reg: crate::gkrlink::Reg,
+    pub reg: crate::gkrlink::Comp,
     pub which: usize,
     pub log_rows: u32,
     /// numerator kind per lookup, in `add_to_relation` order: true when the
@@ -94,12 +94,12 @@ pub struct Site {
 impl Site {
     pub fn tag(&self) -> String {
         match self.reg {
-            crate::gkrlink::Reg::KeyTile(b) =>
+            crate::gkrlink::Comp::KeyTile(b) =>
                 format!("key_tile{b}/{}", ["chan", "key", "out", "row"][self.which]),
-            crate::gkrlink::Reg::Deq(m) => format!("deq{m}"),
-            crate::gkrlink::Reg::ResidualStream(g) => format!("residual_stream{g}"),
-            crate::gkrlink::Reg::Freivalds(w) => format!("freivalds{w}"),
-            crate::gkrlink::Reg::Ao => "attnout".to_string(),
+            crate::gkrlink::Comp::Deq(m) => format!("deq{m}"),
+            crate::gkrlink::Comp::ResidualStream(g) => format!("residual_stream{g}"),
+            crate::gkrlink::Comp::Freivalds(w) => format!("freivalds{w}"),
+            crate::gkrlink::Comp::Ao => "attnout".to_string(),
         }
     }
     pub fn n_looks(&self) -> usize {
@@ -220,7 +220,7 @@ where
 
 /// The sites and input layers gathered from a pass over the key tiles.
 ///
-/// `interaction_phase` builds each region's lookup list already, and that list
+/// `interaction_phase` builds each component's lookup list already, and that list
 /// plus the column slice it indexes is only in scope right there. Rather than
 /// reconstruct either outside -- two definitions of the same thing is how the
 /// two backends drift apart -- the interaction pass hands them to this collector at
@@ -229,10 +229,10 @@ where
 /// path can see.
 #[derive(Default)]
 pub struct Collect {
-    /// the region whose lookups are arriving; the caller sets it before each
-    /// region's interaction pass, because a diagonal block key tile reaches
+    /// the component whose lookups are arriving; the caller sets it before each
+    /// component's interaction pass, because a diagonal block key tile reaches
     /// `interaction_phase` with no `KeyTileAir` to carry its index
-    pub reg: crate::gkrlink::Reg,
+    pub reg: crate::gkrlink::Comp,
     pub sites: Vec<Site>,
     /// the host-built input layers, in the order the host sites arrived
     pub layers: Vec<Layer<SimdBackend>>,
@@ -273,7 +273,7 @@ impl Collect {
         Self { want_direct, ..Default::default() }
     }
 
-    /// Take one region's lookups and build its instances' input layers.
+    /// Take one component's lookups and build its instances' input layers.
     pub fn push(
         &mut self,
         which: usize,
@@ -315,7 +315,7 @@ impl Collect {
         self.layers_secs += t0.elapsed().as_secs_f64();
     }
 
-    /// B11 stream U, lever 3: one region's input layers from a fraction table
+    /// B11 stream U, lever 3: one component's input layers from a fraction table
     /// the caller has already built.
     ///
     /// `Collect::push` above is the key tiles' path, and it is key-tile-shaped:
@@ -461,15 +461,15 @@ pub fn feed_site(
     }
 }
 
-/// B11 stream U, lever 3: one dequant region's lookups, wherever its columns
+/// B11 stream U, lever 3: one dequant component's lookups, wherever its columns
 /// are.
 ///
 /// This is `feed_site`'s shape for the second family. `mat_interaction` calls it
-/// in place of `mat_logup` under `--gkr-dequant`: the region's fractions become
+/// in place of `mat_logup` under `--gkr-dequant`: the component's fractions become
 /// GKR input layers instead of committed running-sum columns, and its claimed
 /// sum leaves `use_sums` for `sums_cancel`.
 ///
-/// The fractions come from the region's own fraction IR, which is the lowering
+/// The fractions come from the component's own fraction IR, which is the lowering
 /// of the *un-ablated* `DequantEval` -- stream T's precedent, and the reason the
 /// kernel store already carries this fingerprint: under the flag the evaluator
 /// emits no lookups at all and its IR would be empty. One definition of the
@@ -479,10 +479,10 @@ pub fn deq_site(
     c: &mut Collect,
     reg: usize,
     eval: &crate::dequant::DequantEval,
-    r: &crate::layer::MatRegion,
+    r: &crate::layer::MatComponent,
 ) {
     fam_site(c, FamSite {
-        reg: crate::gkrlink::Reg::Deq(reg),
+        reg: crate::gkrlink::Comp::Deq(reg),
         tag: format!("deq{reg}"),
         mut_env: "B11_DEQMUT",
         mut_key: reg,
@@ -495,7 +495,7 @@ pub fn deq_site(
     }, eval);
 }
 
-/// B11 stream V, lever 3: one residual-stream region's lookups, wherever its columns are.
+/// B11 stream V, lever 3: one residual-stream component's lookups, wherever its columns are.
 ///
 /// `residual_stream_interaction` stops building running-sum columns under `--gkr-residual-stream` and
 /// `compose` calls this in the collection pass instead. Every residual-stream look is unit
@@ -508,7 +508,7 @@ pub fn residual_stream_site(
     c: &mut Collect,
     reg: usize,
     eval: &crate::residual_stream::ResidualStreamEval,
-    r: &crate::residual_stream::ResidualStreamRegion,
+    r: &crate::residual_stream::ResidualStreamComponent,
 ) {
     let log_rows = r.log_rows;
     let ir = crate::scalars::cached_ir(eval, log_rows, log_rows, true, || {
@@ -523,7 +523,7 @@ pub fn residual_stream_site(
             "residual_stream/{}: a lookup's numerator is not the constant one, so the \
              site's instance split is not the one `sites_of` derives", r.tag);
     fam_site(c, FamSite {
-        reg: crate::gkrlink::Reg::ResidualStream(reg),
+        reg: crate::gkrlink::Comp::ResidualStream(reg),
         tag: format!("residual_stream/{}", r.tag),
         mut_env: "B11_RESIDUAL_STREAM_MUT",
         mut_key: reg,
@@ -541,10 +541,10 @@ pub fn freivalds_site(
     c: &mut Collect,
     reg: usize,
     eval: &crate::freivalds::FreivaldsEval,
-    r: &crate::layer::FreivaldsRegion,
+    r: &crate::layer::FreivaldsComponent,
 ) {
     fam_site(c, FamSite {
-        reg: crate::gkrlink::Reg::Freivalds(reg),
+        reg: crate::gkrlink::Comp::Freivalds(reg),
         tag: format!("freivalds/{}", r.name),
         mut_env: "B11_FREIVALDSMUT",
         mut_key: reg,
@@ -557,16 +557,16 @@ pub fn freivalds_site(
     }, eval);
 }
 
-/// B11 stream V, lever 4: the attention-output region's looks -- seven per
+/// B11 stream V, lever 4: the attention-output component's looks -- seven per
 /// slot since stream JJ (E11) added the exponent window and the accumulator's
 /// two limbs to `denp`'s own range check.
 pub fn ao_site(
     c: &mut Collect,
     eval: &crate::freivalds::AttnOutEval,
-    r: &crate::layer::AoRegion,
+    r: &crate::layer::AoComponent,
 ) {
     fam_site(c, FamSite {
-        reg: crate::gkrlink::Reg::Ao,
+        reg: crate::gkrlink::Comp::Ao,
         tag: "attnout".to_string(),
         mut_env: "B11_AOMUT",
         mut_key: 0,
@@ -579,7 +579,7 @@ pub fn ao_site(
     }, eval);
 }
 
-/// One family region's column sources, as `fam_site` needs them.
+/// One family component's column sources, as `fam_site` needs them.
 ///
 /// B11 stream V, lever 3: stream U wrote this resolution once, for dequant. The
 /// three families this stream adds want it unchanged -- the same prefix rule,
@@ -588,12 +588,12 @@ pub fn ao_site(
 /// first caller and its recorded digests are what say the extraction moved
 /// nothing.
 pub struct FamSite<'a> {
-    pub reg: crate::gkrlink::Reg,
-    /// what a control's message calls this region
+    pub reg: crate::gkrlink::Comp,
+    /// what a control's message calls this component
     pub tag: String,
     /// the environment variable that bends one of this family's fractions
     pub mut_env: &'static str,
-    /// the region index that variable names
+    /// the component index that variable names
     pub mut_key: usize,
     pub log_rows: u32,
     pub unit: Vec<bool>,
@@ -605,15 +605,15 @@ pub struct FamSite<'a> {
                      &'a [stwo::stwo_cuda::base_field_vec::BaseFieldVec])>,
 }
 
-/// One family region's lookups, wherever its columns are.
+/// One family component's lookups, wherever its columns are.
 ///
 /// This is `feed_site`'s shape for a family that is not the key tiles. A family's
 /// interaction builder calls it in place of its own LogUp build under that
-/// family's flag: the region's fractions become GKR input layers instead of
+/// family's flag: the component's fractions become GKR input layers instead of
 /// committed running-sum columns, and its claimed sum leaves `use_sums` for
 /// `sums_cancel`.
 ///
-/// The fractions come from the region's own fraction IR, which is the lowering
+/// The fractions come from the component's own fraction IR, which is the lowering
 /// of the *un-ablated* evaluator -- stream T's precedent, and the reason the
 /// kernel store already carries these fingerprints: under the flag the
 /// evaluator emits no lookups at all and its IR would be empty. One definition
@@ -628,19 +628,19 @@ pub fn fam_site<E: FrameworkEval>(c: &mut Collect, s: FamSite<'_>, eval: &E) {
         crate::devfrac::ir_of(eval, log_rows)
     });
     // `mat_logup_ir`'s prefix rule, asserted the same way: an o-side dequant
-    // region commits three extra preprocessed selectors that belong to the
+    // component commits three extra preprocessed selectors that belong to the
     // *argmax* component, its evaluator never reads them, and they sit after
     // the ones the IR loads -- so the prefix is exactly what to supply. A
-    // family whose regions carry no spare preprocessed columns passes it
+    // family whose components carry no spare preprocessed columns passes it
     // unchanged.
     let np = ir.cols[0];
     let prefix = |n: usize| {
         assert!(n >= np,
-                "{tag}: the region has {n} preprocessed columns, fewer than the \
+                "{tag}: the component has {n} preprocessed columns, fewer than the \
                  {np} its fraction IR loads");
         np
     };
-    // The family's own control bends one of *this region's* fractions, which is
+    // The family's own control bends one of *this component's* fractions, which is
     // a statement about the host builder's values, so it takes the host path
     // even where the fill left the columns on the card. Nothing else moves.
     let mutating = std::env::var(s.mut_env).ok()
@@ -650,7 +650,7 @@ pub fn fam_site<E: FrameworkEval>(c: &mut Collect, s: FamSite<'_>, eval: &E) {
         // The prover's path: the columns are on the card and so are the
         // fractions. The two controls below both need the host builder's values
         // -- one to bend them, one to compare against -- so each takes the
-        // region off the feed and neither is on the prover's path.
+        // component off the feed and neither is on the prover's path.
         if !mutating && !feedcheck_on() {
             let pp: Vec<*const u32> =
                 dpre[..prefix(dpre.len())].iter().map(|x| x.device_ptr).collect();
@@ -660,7 +660,7 @@ pub fn fam_site<E: FrameworkEval>(c: &mut Collect, s: FamSite<'_>, eval: &E) {
         }
         eprintln!("{tag}: off the feed for a control, columns downloaded");
     }
-    // The host builder's inputs: the region's own columns. Only the controls
+    // The host builder's inputs: the component's own columns. Only the controls
     // reach here with a device fill, and the download they need is theirs.
     #[cfg(feature = "cuda")]
     let down = s.dev.map(|(dpre, dbase)| {
@@ -704,7 +704,7 @@ pub fn fam_site<E: FrameworkEval>(c: &mut Collect, s: FamSite<'_>, eval: &E) {
     }
     // B11 stream U, lever 3: the family's own instance-aimed control.
     //
-    // `<FAM>MUT=<k>` bends one denominator of this family's region `k`'s input
+    // `<FAM>MUT=<k>` bends one denominator of this family's component `k`'s input
     // layer -- one fraction of one look of one row -- and changes nothing else.
     // The GKR then proves the bent layer honestly, so its sumcheck is internally
     // consistent and every claim it yields is the claim of the layer it saw; the
@@ -721,7 +721,7 @@ pub fn fam_site<E: FrameworkEval>(c: &mut Collect, s: FamSite<'_>, eval: &E) {
     c.push_flat(0, log_rows, unit, &flat);
 }
 
-/// One region's fractions, every look at every packed row, laid out
+/// One component's fractions, every look at every packed row, laid out
 /// `[look][vec_row]`.
 ///
 /// `cudagen::frac_at` runs the whole straight-line IR once per packed row and
@@ -1134,7 +1134,7 @@ mod feedimpl {
         }
 
         /// The same check for a family whose fractions arrive as a table
-        /// (B11 stream U, lever 3: the dequant regions).
+        /// (B11 stream U, lever 3: the dequant components).
         pub fn check_fed_flat(
             &self,
             first: usize,
@@ -1670,7 +1670,7 @@ pub fn mix_shape(channel: &mut impl Channel, sites: &[Site]) {
     let mut felts = vec![SecureField::from_u32_unchecked(0x51, 0x47, 0x4b, 0x52)];
     for s in sites {
         // B11 stream U, lever 3: the family joins the separator, because two
-        // families' region indices are unrelated and a transcript that could
+        // families' component indices are unrelated and a transcript that could
         // not tell `key_tile0/chan` from `deq0` would be mixing the same felt for
         // two different shapes.
         // B11 stream V, lever 3: the residual-stream family takes the next code, 2. Key tiles
@@ -1678,11 +1678,11 @@ pub fn mix_shape(channel: &mut impl Channel, sites: &[Site]) {
         // mixes exactly the felts stream U's did -- which is what the four
         // key tiles and two dequant wall digests gate.
         let (fam, reg) = match s.reg {
-            crate::gkrlink::Reg::KeyTile(b) => (0u32, b as u32),
-            crate::gkrlink::Reg::Deq(m) => (1u32, m as u32),
-            crate::gkrlink::Reg::ResidualStream(g) => (2u32, g as u32),
-            crate::gkrlink::Reg::Freivalds(w) => (3u32, w as u32),
-            crate::gkrlink::Reg::Ao => (4u32, 0u32),
+            crate::gkrlink::Comp::KeyTile(b) => (0u32, b as u32),
+            crate::gkrlink::Comp::Deq(m) => (1u32, m as u32),
+            crate::gkrlink::Comp::ResidualStream(g) => (2u32, g as u32),
+            crate::gkrlink::Comp::Freivalds(w) => (3u32, w as u32),
+            crate::gkrlink::Comp::Ao => (4u32, 0u32),
         };
         felts.push(SecureField::from_u32_unchecked(
             reg,
@@ -1703,7 +1703,7 @@ const _: () = assert!(N_LANES == 1usize << LOG_N_LANES);
 ///
 /// What it establishes, in the order the record reports it:
 ///
-/// 1. **The sums agree.** For every key tile region, the fractional sum the batched
+/// 1. **The sums agree.** For every key tile component, the fractional sum the batched
 ///    GKR yields from its output claims equals, exactly, the claimed sum
 ///    `interaction_phase` pushes onto `use_sums` from the committed running-sum
 ///    columns. This is the strongest correctness statement available without the
@@ -1753,7 +1753,7 @@ pub fn cmd(args: &[String]) {
     let pow = crate::attn_air::Powers::new(f[0], f[1], f[2], &sh, &l.chan, &l.key, &l.out, l.rw);
 
     let mut collect = Collect::with_direct(true);
-    collect.reg = crate::gkrlink::Reg::KeyTile(0);
+    collect.reg = crate::gkrlink::Comp::KeyTile(0);
     let t0 = Instant::now();
     let inter = crate::attn_trace::interaction_phase(
         &a, &l, &cfg, &pow, &rel_exp, &rels, &com, &widths, true, !a.diagonal_block,
@@ -1892,17 +1892,17 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
         let (lc, lk) = (&l.chan, &l.key);
         let cfg = &plan.cfg;
 
-        // ---- the channel region: the key and query range checks, all unit
+        // ---- the channel component: the key and query range checks, all unit
         if cfg.range_check {
             out.push(Site {
-                reg: crate::gkrlink::Reg::KeyTile(b),
+                reg: crate::gkrlink::Comp::KeyTile(b),
                 which: 0,
                 log_rows: lc.g.log_rows,
                 unit: vec![true; lc.pk + lc.pq],
             });
         }
 
-        // ---- the grid region: one exp lookup per score slot, then the
+        // ---- the grid component: one exp lookup per score slot, then the
         // variant's remainder checks, then the V range checks. On a diagonal block key tile
         // the exp lookups carry `1 - mask` and are the only non-unit lookups in
         // the whole set.
@@ -1913,35 +1913,35 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
         if cfg.range_check {
             unit.extend(vec![true; lk.pv]);
         }
-        out.push(Site { reg: crate::gkrlink::Reg::KeyTile(b), which: 1,
+        out.push(Site { reg: crate::gkrlink::Comp::KeyTile(b), which: 1,
                         log_rows: lk.g.log_rows, unit });
 
-        // ---- the per-token region: four denominator limbs per token. There is
+        // ---- the per-token component: four denominator limbs per token. There is
         // one per head key tile *group* -- one row maximum and one denominator per
         // token, not per key block -- so it lives on the group's first key tile and
         // every other key tile of the group rides on it. With `--kv-boundary` off that
         // is `!diagonal_block`, which is what this read used to say; with it on, a
         // group is `c/s` prefix sub-key-tiles plus a diagonal block and only the first
-        // sub-key-tile carries the region. `plan.rows_key_tile` is the plan's own
+        // sub-key-tile carries the component. `plan.rows_key_tile` is the plan's own
         // answer and `attn_trace::interaction_phase`'s `with_rows` argument is
         // fed from it, so this is the derivation the collector actually saw.
         if plan.rows_key_tile[b] {
             out.push(Site {
-                reg: crate::gkrlink::Reg::KeyTile(b),
+                reg: crate::gkrlink::Comp::KeyTile(b),
                 which: 3,
                 log_rows: l.log_row,
                 unit: vec![true; 4 * l.rw],
             });
         }
     }
-    // ---- B11 stream U, lever 3: the dequant family, one site per region, in
+    // ---- B11 stream U, lever 3: the dequant family, one site per component, in
     // the plan's matmul order -- which is the order `interaction_phase` reaches
     // them in, so the collector's arrival order is this order and `same_sites`
     // is what says so.
     if plan.p.gkr_dequant {
         for (m, sp) in plan.specs.iter().enumerate() {
             out.push(Site {
-                reg: crate::gkrlink::Reg::Deq(m),
+                reg: crate::gkrlink::Comp::Deq(m),
                 which: 0,
                 log_rows: plan.mat_lays[m].log_rows,
                 unit: crate::dequant::look_units(sp),
@@ -1950,13 +1950,13 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
     }
     // ---- B11 stream V, lever 3: the residual-stream family, after dequant -- memo
     // section 8's order, which is the order the interaction pass collects in.
-    // Every residual-stream look is unit, and the count comes from the region's program,
+    // Every residual-stream look is unit, and the count comes from the component's program,
     // which is what the verifier has; `residual_stream_site` asserts the fractions agree.
     if plan.p.gkr_residual_stream {
         if let Some(gp) = plan.residual_stream.as_ref() {
-            for (g, r) in gp.regions.iter().enumerate() {
+            for (g, r) in gp.components.iter().enumerate() {
                 out.push(Site {
-                    reg: crate::gkrlink::Reg::ResidualStream(g),
+                    reg: crate::gkrlink::Comp::ResidualStream(g),
                     which: 0,
                     log_rows: r.log_rows,
                     unit: vec![true; crate::gkrlink::residual_stream_look_count(&r.prog)],
@@ -1969,7 +1969,7 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
     if plan.p.gkr_freivalds {
         for (w, wp) in plan.freivalds.iter().enumerate() {
             out.push(Site {
-                reg: crate::gkrlink::Reg::Freivalds(w),
+                reg: crate::gkrlink::Comp::Freivalds(w),
                 which: 0,
                 log_rows: wp.lay.g.log_rows,
                 unit: vec![true; wp.lay.pq],
@@ -1978,7 +1978,7 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
     }
     if plan.p.gkr_attnout {
         out.push(Site {
-            reg: crate::gkrlink::Reg::Ao,
+            reg: crate::gkrlink::Comp::Ao,
             which: 0,
             log_rows: plan.ao_lay.log_rows,
             // stream JJ (E11): seven per slot -- the exponent window, (qm, nz2),

@@ -9,17 +9,17 @@
 //
 // What is different from `b65_fill.cu`, and why this is its own file:
 //
-//  * **a region is several grids, not one.** The dequant region is one
-//    `MatLayout`; a key tile is four sub-regions on three different `Grid`s plus a
+//  * **a component is several grids, not one.** The dequant component is one
+//    `MatLayout`; a key tile is four sub-components on three different `Grid`s plus a
 //    per-token block that is not a `Grid` at all. So the unit here is the
-//    sub-region and there are seven kernels, not one templated pair.
+//    sub-component and there are seven kernels, not one templated pair.
 //  * **the counters are an array of arrays.** `commit_base` threads `mult_exp`
 //    and `mult_r` through by `&mut` across every key tile, and `mult_r` is one
 //    vector per range width. The kernels take the counter arrays they bump with
 //    their lengths and one shared off-table counter, which is what makes the
 //    key tiles' "awkward" part (20.6) ordinary.
 //  * **nothing here is recomputed that the probes can corrupt away.** The grid
-//    region's numerator column is `num[g]`, not `table[key(g)]`, even though an
+//    component's numerator column is `num[g]`, not `table[key(g)]`, even though an
 //    honest witness makes those equal: `Corrupt::Numerator` replaces one
 //    numerator with a different *legal* table output, and a kernel that
 //    recomputed it from the table would silently repair the probe and turn a
@@ -68,7 +68,7 @@ struct B65Mult {
 
 // ------------------------------------------------------- Freivalds check --
 
-// `freivalds_region`: activations committed with the +128 offset, weights
+// `freivalds_component`: activations committed with the +128 offset, weights
 // preprocessed, one 8-bit range bump per committed cell.
 struct B65FreivaldsCfg {
     B65Grid g;
@@ -89,7 +89,7 @@ extern "C" void b65_fill_freivalds(const signed char *qx,
 
 // --------------------------------------------------------------- attnout --
 
-// `ao_region`: the rounding fold, its two range bumps and its `qm`
+// `ao_component`: the rounding fold, its two range bumps and its `qm`
 // multiplicity, plus the f64 reference the host computes alongside.
 struct B65AoCfg {
     unsigned nh, s, hd;
@@ -118,7 +118,7 @@ extern "C" void b65_fill_attnout(const unsigned *acc, const unsigned *den,
 
 // ----------------------------------------------------------------- key tiles --
 
-// `attn_trace::commit_base`, whose four sub-regions are four kernels sharing
+// `attn_trace::commit_base`, whose four sub-components are four kernels sharing
 // one config. `variant` is `Variant`: 0 bf16x, 1 intexp, 2 intsplit(k).
 #define B65W_VAR_BF16X 0u
 #define B65W_VAR_INTEXP 1u
@@ -129,7 +129,7 @@ struct B65KeyTileCfg {
     unsigned pk, pq;      // LayoutChan: keys and queries per row
     unsigned kq, pv;      // LayoutKey: scores per row, values per row
     unsigned oq;          // LayoutOut: outputs per row
-    unsigned log_row;     // the per-token region
+    unsigned log_row;     // the per-token component
     unsigned rows_tok;
     unsigned rw;
     unsigned s, c, hd, insts, toks;

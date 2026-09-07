@@ -1,13 +1,13 @@
 // B11 stream M: the residual stream's *generation*, on the device.
 //
 // `gen/residual_stream` was the one named host term with no device path at all -- 49.8 s
-// of seq3's 190.9 s wall at C=4K, 97% of it inside four `residual_stream::residual_stream_region`
+// of seq3's 190.9 s wall at C=4K, 97% of it inside four `residual_stream::residual_stream_component`
 // calls per chunk. This is that fill.
 //
 // **Interpreted, not emitted, and the measurement is why.** The alternative was
-// a new `genemit` target compiling each region's straight-line `Prog` to CUDA,
+// a new `genemit` target compiling each component's straight-line `Prog` to CUDA,
 // the way the constraint emitter already compiles far bigger programs. Against
-// that: a residual-stream region's program is *tiny and uniform* -- the sequence's `gn1`
+// that: a residual-stream component's program is *tiny and uniform* -- the sequence's `gn1`
 // and `gn2` are 255 add slots over 256 leaves, `gn1b`/`gn2b` 31 over 32 -- and
 // the rows are many (16,384 and 512). One thread owns a row and walks the
 // program from a descriptor array that fits in L1; the per-slot dispatch is a
@@ -53,7 +53,7 @@
 // The negative controls (`B7_M4_RESIDUAL_STREAM_FILLMUT`). Each is a way this fill could
 // plausibly be wrong and mode 2 must catch. Section 5 rule 5: a control that
 // cannot fire on the shape under test is a finding, not a pass, so `nomul` is
-// on the list even though the sequence's four regions are all `Add` -- it fires
+// on the list even though the sequence's four components are all `Add` -- it fires
 // nowhere here, and that is recorded rather than hidden.
 #define B65_RESIDUAL_STREAM_MUT_NONE 0u
 #define B65_RESIDUAL_STREAM_MUT_NOPERM 1u    // write at the coset row, not the committed one

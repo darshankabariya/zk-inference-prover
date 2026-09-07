@@ -2,13 +2,13 @@
 //!
 //! `gen/residual_stream` was the last named host term with no device path at all: 49.784 s
 //! of seq3's 190.94 s wall at C=4K and 49.28 s of 241.40 at C=16K, 97% of it
-//! inside four `residual_stream::residual_stream_region` calls per chunk. The context-independence is
-//! the tell -- the residual stream's regions are sized by the model's hidden dimension and
+//! inside four `residual_stream::residual_stream_component` calls per chunk. The context-independence is
+//! the tell -- the residual stream's components are sized by the model's hidden dimension and
 //! not by the context -- and it is why this term dominates at C=4K.
 //!
 //! **Interpreted, not emitted.** The route was a choice and the measurement
-//! made it. A `genemit` target compiling each region's straight-line `Prog` to
-//! CUDA would have been the other one; against it, a residual-stream region's program is
+//! made it. A `genemit` target compiling each component's straight-line `Prog` to
+//! CUDA would have been the other one; against it, a residual-stream component's program is
 //! tiny and uniform (255 add slots over 256 leaves on `gn1`/`gn2`, 31 over 32
 //! on `gn1b`/`gn2b`) while the rows are many, so the per-slot interpretive
 //! overhead sits against a normalisation and four table lookups and disappears.
@@ -141,7 +141,7 @@ pub fn mode() -> u32 {
 ///    the sequence's pins (`--bounds`), and it is a committed column rather
 ///    than a check -- so it cannot simply be dropped, and a device path for it
 ///    is its own lever with its own gate.
-///  * `ResidualStreamRegion::binding_claim`, the independent recomputation of every claim
+///  * `ResidualStreamComponent::binding_claim`, the independent recomputation of every claim
 ///    from the witness rather than from the trace (`compose.rs:2447`,
 ///    `residual_stream.rs:2165`). The bar keeps checks, and with the fold on the card
 ///    this one gains teeth: it now cross-checks the *device's* claim against a
@@ -176,7 +176,7 @@ fn residual_stream_fill_mut() -> u32 {
 /// The two value tables the kernel reads, and the unary images, resident.
 ///
 /// They are a function of the round and `kmax` alone -- the same for every
-/// region of a run and, for the unaries, of the plan's kind list -- so they are
+/// component of a run and, for the unaries, of the plan's kind list -- so they are
 /// uploaded once and keyed on exactly what generates them.
 pub struct DevGTables {
     norm3: Uint32Vec,
@@ -263,10 +263,10 @@ fn up_u32(v: Vec<u32>) -> Uint32Vec {
     d
 }
 
-// --------------------------------------------------------------------- the region --
+// --------------------------------------------------------------------- the component --
 
-/// One residual-stream region's columns, on the device, plus the host-side arrays the
-/// bindings, the next region and the reference check read back.
+/// One residual-stream component's columns, on the device, plus the host-side arrays the
+/// bindings, the next component and the reference check read back.
 pub struct DevResidualStream {
     pub pre: Vec<BaseFieldVec>,
     pub base: Vec<BaseFieldVec>,
@@ -281,7 +281,7 @@ pub struct DevResidualStream {
     pub off_table: usize,
     pub bad_exp: usize,
     /// `(sm, ef)` per leaf and per output, in row order, regrouped the way
-    /// `ResidualStreamRegion` holds them. **Empty when the bindings fold on the device**
+    /// `ResidualStreamComponent` holds them. **Empty when the bindings fold on the device**
     /// (`B7_M4_RESIDUAL_STREAM_BIND=1`): nothing on the host reads them then, and bringing them
     /// back is all `gen/residual_stream_fill_d2h` ever was.
     pub in_nat: Vec<Vec<(i64, i64)>>,
@@ -298,12 +298,12 @@ pub struct DevResidualStream {
     pub out_w: usize,
 }
 
-/// Build one residual-stream region on the device.
+/// Build one residual-stream component on the device.
 ///
 /// `tables` is read for the value tables and *not* written: the counters come
 /// back in `DevResidualStream` and the caller merges them, because mode 2 has to compare
 /// the device's delta against the host's before either is used.
-pub fn residual_stream_region_dev(w: &ResidualStreamWitness, prog: &Prog, round: crate::bf16::Round,
+pub fn residual_stream_component_dev(w: &ResidualStreamWitness, prog: &Prog, round: crate::bf16::Round,
                                   tables: &ResidualStreamTables) -> DevResidualStream {
     let log_rows = log_rows_for(w.rows, 1);
     let rows = 1usize << log_rows;
@@ -474,7 +474,7 @@ pub fn residual_stream_region_dev(w: &ResidualStreamWitness, prog: &Prog, round:
     let flat_in = if host_nat { d_in_nat.to_vec() } else { vec![] };
     let flat_on = if host_nat { d_out_nat.to_vec() } else { vec![] };
     let flat_op = d_out_pat.to_vec();
-    // regroup: the kernel writes one row-flat array, `ResidualStreamRegion` holds one
+    // regroup: the kernel writes one row-flat array, `ResidualStreamComponent` holds one
     // vector per group and per output
     let mut in_nat: Vec<Vec<(i64, i64)>> = if host_nat {
         prog.groups.iter().map(|g| Vec::with_capacity(rows * g.n)).collect()
@@ -658,7 +658,7 @@ impl ResidualStreamSnap {
 /// Add the device's counters into the host's tables.
 ///
 /// Counting is commutative, so the order the kernel's scatter-add left them in
-/// cannot matter -- the same argument `mat_region_dev` makes.
+/// cannot matter -- the same argument `mat_component_dev` makes.
 pub fn merge(t: &mut ResidualStreamTables, dev: &DevResidualStream) {
     let add = |h: &mut Vec<u32>, d: Vec<u32>| {
         for (a, b) in h.iter_mut().zip(d) {

@@ -79,7 +79,7 @@
 #define B65P_MUT_NORENORM 4u    // norm, mul: skip the `m + up == 256` renormalisation
 #define B65P_MUT_NOPAD 5u       // norm, frac: give a row past the table's end a value
 #define B65P_MUT_NOKWIN 6u      // frac: `k = log2(d)`, off by one window
-#define B65P_MUT_ONECOUNTER 7u  // sum one region's counter instead of every region's
+#define B65P_MUT_ONECOUNTER 7u  // sum one component's counter instead of every component's
 #define B65P_MUT_NOLAST 8u      // chan, key: LAST from `chunk + 1 == chunks`
 #define B65P_MUT_NOFIRSTROW 9u  // chan, key, row: drop a selector's `j > 0` guard
 #define B65P_MUT_NOACTIVE 10u   // chan, key: an inert lead row reads as in-group
@@ -90,7 +90,7 @@
 
 // Which family a defect is aimed at. `norm`/`frac`/`mul`/`qnz`/`range` are the
 // shared tables (each covering that table's own multiplicity column too), and
-// `chan`/`key`/`row` are the key tile's three sub-regions.
+// `chan`/`key`/`row` are the key tile's three sub-components.
 #define B65P_AT_NORM 0u
 #define B65P_AT_FRAC 1u
 #define B65P_AT_MUL 2u
@@ -110,17 +110,17 @@ struct B65PreCfg {
     unsigned round;
     unsigned sticky;     // `round.needs_sticky()`
     unsigned n_cols;     // the preprocessed columns this table has
-    unsigned n_counters; // one per region whose fill bumped this table
+    unsigned n_counters; // one per component whose fill bumped this table
     unsigned mutate;
     unsigned at;         // which family the defect is aimed at
 };
 
 struct B65SelCfg {
     unsigned shape;      // `B65A_SHAPE_CHAN` / `_KEY` / `_TOK`
-    B65AccGrid g;        // the sub-region's grid; `rows`/`log_rows` only for tok
-    unsigned ctx;        // `C`, for `split(g, C).0` -- the key region only
+    B65AccGrid g;        // the sub-component's grid; `rows`/`log_rows` only for tok
+    unsigned ctx;        // `C`, for `split(g, C).0` -- the key component only
     unsigned n_insts;
-    unsigned with_scale; // the key region's scale column: 0 for `bf16x`
+    unsigned with_scale; // the key component's scale column: 0 for `bf16x`
     unsigned n_cols;     // 5, 8 or 3
     unsigned fam;        // `B65P_AT_CHAN` / `_KEY` / `_ROW`: this call's family
     unsigned mutate;
@@ -140,9 +140,9 @@ extern "C" void b65_fill_pre_table(const unsigned *const *counters,
                                    unsigned n_patch, m31 *const *cols, m31 *m_col,
                                    B65PreCfg cfg);
 
-// One key tile sub-region's selector columns, out of the flags `b65_flags_key_tile`
+// One key tile sub-component's selector columns, out of the flags `b65_flags_key_tile`
 // wrote for exactly those rows. `inv_delta` is the master exp table's key
-// scale, inverted, per instance -- null unless the key region wants it.
+// scale, inverted, per instance -- null unless the key component wants it.
 extern "C" void b65_fill_sel(const unsigned *flags, m31 *const *cols,
                              const m31 *inv_delta, B65SelCfg cfg);
 

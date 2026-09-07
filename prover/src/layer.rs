@@ -1,20 +1,20 @@
 //! The layer witness B6.5 composes into one proof, and the trace builders for
-//! the regions B6 did not have: the per-matmul dequant regions (with the
+//! the components B6 did not have: the per-matmul dequant components (with the
 //! Freivalds claimed side riding on the same committed accumulators), the
-//! attention-output region, and the r^T W Freivalds regions.
+//! attention-output component, and the r^T W Freivalds components.
 //!
 //! Layouts, once, because every builder and every selector has to agree:
 //!
-//! * **matmul dequant region** (one per matmul): rows = (token, channel-chunk),
-//!   `per_row` channels per row with `per_row | n_out`, so the region tiles
+//! * **matmul dequant component** (one per matmul): rows = (token, channel-chunk),
+//!   `per_row` channels per row with `per_row | n_out`, so the component tiles
 //!   *exactly* (no padded slots, no gating).  Tokens and chunks descend, slots
 //!   ascend: row `j` holds token `T-1 - j/chunks`, chunk `b = chunks-1 - j%chunks`,
 //!   channel `c = b*per_row + slot`.
-//! * **attnout region**: rows = (head, token, channel-chunk), heads and tokens and
+//! * **attnout component**: rows = (head, token, channel-chunk), heads and tokens and
 //!   chunks descending, with `lead` inert rows *first* (nh*S*chunks is not a power
 //!   of two); inert rows commit `den = 1` and zeros, which satisfies every
 //!   constraint and looks up real table rows.
-//! * **Freivalds region** (one per input): `layout::Grid` over input channels, `pk`
+//! * **Freivalds component** (one per input): `layout::Grid` over input channels, `pk`
 //!   preprocessed weights per row per matmul and `pq` committed activation bytes.
 
 use rand::rngs::SmallRng;
@@ -143,14 +143,14 @@ impl AttnOut {
     }
     /// Stream II (E11), at the JJ merge: the attention output's requantized
     /// integers, `sign(acc) * round(|acc| 2^(jv - jo) / den)` per
-    /// `(head, token, channel)` in that order -- exactly what `ao_region`
+    /// `(head, token, channel)` in that order -- exactly what `ao_component`
     /// commits as `q_out` and what `AttnOutEval`'s `claimed_q` folds.
     ///
     /// It lives here, off `AttnOut` alone, so a witness builder can produce the
-    /// `o` matmul's committed input without running the region: on a real dump
-    /// B1 wrote that input and the region recomputes it, but a *synthetic*
+    /// `o` matmul's committed input without running the component: on a real dump
+    /// B1 wrote that input and the component recomputes it, but a *synthetic*
     /// layer draws its `o` activations at random and the `o` seam could not be
-    /// honest on any desk shape.  `ao_region` asserts its own `q_out` against
+    /// honest on any desk shape.  `ao_component` asserts its own `q_out` against
     /// this on every untampered run, so the two cannot drift apart.
     pub fn q_ref(&self) -> Vec<i64> {
         let mut out = vec![0i64; self.nh * self.s * self.hd];
@@ -226,7 +226,7 @@ pub struct Layer {
     /// an input: the proof derives its keys from the head's dequant output, and
     /// this is what says the two agree.
     pub head_keys: Option<Vec<u16>>,
-    /// stream E: `tok_head.i32`, the token each row emits.  The argmax region's
+    /// stream E: `tok_head.i32`, the token each row emits.  The argmax component's
     /// own input when it is composed; `None` unless the dump has a head.
     pub head_tok: Option<Vec<u32>>,
     /// Stream Z: the attention-output fold's target width, from the manifest;
@@ -410,7 +410,7 @@ pub struct ResidualStreamCols {
     pub xout: Vec<u16>,
     /// `n1_out` and `n2_out`: each norm's `r = rsqrt(mean of squares + eps)`,
     /// one value per token.  The norm scales multiply the stream by it, so a row of
-    /// the norm scale region reads it once and every channel of that row shares it.
+    /// the norm scale component reads it once and every channel of that row shares it.
     pub r1: Vec<u16>,
     pub r2: Vec<u16>,
     pub w1: Vec<u16>,
@@ -418,7 +418,7 @@ pub struct ResidualStreamCols {
     /// B1's own norm outputs, which are what the norm scales have to reproduce:
     /// `x_q` is norm1's (q, k and v all read the same column, and the dump's
     /// digests say so) and `x_gate` is norm2's.  `None` on a dump that did not
-    /// write them, in which case the norm scale region runs without its reference.
+    /// write them, in which case the norm scale component runs without its reference.
     pub h1: Option<Vec<u16>>,
     pub h2: Option<Vec<u16>>,
     /// The SwiGLU's B1 columns, over `dff`: the gate matmul's dequantized
@@ -468,7 +468,7 @@ impl ResidualStreamCols {
         let dff = g["dff"].as_u64().unwrap_or(0) as usize;
         // A column the norm scales and the SwiGLU only *check* against is optional:
         // an older dump that does not carry it costs the reference, not the
-        // region, and the record says which of the two happened.
+        // component, and the record says which of the two happened.
         let opt = |n: &str, w: usize| -> Option<Vec<u16>> {
             read_u16(&format!("{dir}/{n}.u16"))
                 .ok()
@@ -639,8 +639,8 @@ impl ResidualStreamCols {
     /// Stream II: the wiring family on a synthetic layer, so the desk can run
     /// the whole composed statement -- bindings, norm scales, SwiGLU and all -- at a
     /// shape that proves in seconds and without a dump.  Only the columns the
-    /// regions *consume* are built: `xmid`, `xout` and the five reference
-    /// columns are what the regions compute, and a synthetic layer has no B1 to
+    /// components *consume* are built: `xmid`, `xout` and the five reference
+    /// columns are what the components compute, and a synthetic layer has no B1 to
     /// compare against, so they are absent and the run reports them as absent.
     ///
     /// The exponent spread is deliberately narrow.  A residual stream of wildly
@@ -780,7 +780,7 @@ fn read_i32_narrow(path: &str) -> Result<Vec<i32>, String> {
     Ok(v.par_iter().map(|x| *x as i32).collect())
 }
 
-/// The seven layer matmuls, in the order every region and every selector reads
+/// The seven layer matmuls, in the order every component and every selector reads
 /// them.  Which dequant gadget each takes is *not* fixed here: it is a property
 /// of the spec the witness was extracted under, and the two differ.
 pub const MAT_NAMES: [&str; 7] = ["q", "k", "v", "o", "gate", "up", "down"];
@@ -893,7 +893,7 @@ impl Layer {
         // Open item 1: block 0 of a sequence has no unchecked prefix, so `c == 0`,
         // `kk.i16` is empty and there is no prefix half to read and no prefix
         // key tile to build -- the diagonal block is the group's only key tile and carries its
-        // per-token region (`compose.rs`'s `rows_key_tile`, `Powers::as_solo_diagonal_block`).
+        // per-token component (`compose.rs`'s `rows_key_tile`, `Powers::as_solo_diagonal_block`).
         assert!(c > 0 || has_diagonal_block,
                 "a c = 0 dump is block 0: it is the diagonal block and needs a `--diagonal-block` dump");
         let raw = {
@@ -943,16 +943,16 @@ impl Layer {
                     off += insts;
                 }
             }
-            // the per-token region belongs to the pair, and the denominator it
+            // the per-token component belongs to the pair, and the denominator it
             // commits is the total: `Z >= nmax` is true of the sum and of neither
             // half, because the key whose shift is zero may be in either
             //
             // Stream AA: with the prefix tiled, "the pair" is a head key tile
             // group -- `nsub` sub-key-tiles and the diagonal block -- and the total is over
-            // all of them.  The region lives on the group's *first* sub-key-tile,
+            // all of them.  The component lives on the group's *first* sub-key-tile,
             // which is `plan.rows_key_tile`'s choice on the other side of the wall.
             let n_pre = key_tile_sizes.len() * nsub;
-            // the key tile that carries group `g`'s region: its first prefix
+            // the key tile that carries group `g`'s component: its first prefix
             // sub-key-tile, or -- block 0, no prefix at all -- its diagonal block.
             // `g * nsub` alone is key tile 0 for every group when `nsub == 0`, and
             // that read as "the extractor and the AIR disagree about the mask
@@ -1110,7 +1110,7 @@ impl Layer {
 
         drop(mats_scope);
 
-        // the attnout region proves what the key tiles prove -- which with the diagonal block
+        // the attnout component proves what the key tiles prove -- which with the diagonal block
         // is two key tiles per head, so a head's totals accumulate
         let (mut acc, mut den) = (vec![0i64; nh * s * hd], vec![0i64; nh * s]);
         {
@@ -1299,7 +1299,7 @@ impl Layer {
                 off += insts;
             }
             // `Layer::load`'s own accumulation, over the stand-in denominators:
-            // the group's region commits the total, so the total has to be the
+            // the group's component commits the total, so the total has to be the
             // sum of the parts here too or the AO fold divides by the wrong one
             let n_pre = key_tile_sizes.len() * nsub;
             let first = |g: usize| if nsub > 0 { g * nsub } else { n_pre + g };
@@ -1384,7 +1384,7 @@ impl Layer {
             assert!(rep >= 1 && m.n_out % hd == 0, "fold: v shape vs heads");
             m.jv2 = (0..m.n_out).map(|ch| jv[((ch / hd) * rep) * hd + ch % hd]).collect();
         }
-        // the AO region's denominators are the key tiles' stand-ins, summed exactly
+        // the AO component's denominators are the key tiles' stand-ins, summed exactly
         // as `Layer::load` sums the real ones
         let (acc, mut den) = (vec![0i64; nh * s * hd], vec![0i64; nh * s]);
         for (bi, b) in key_tiles.iter().enumerate() {
@@ -1430,7 +1430,7 @@ impl Layer {
             residual_stream,
             // stream E's order key is a *committed* column and carries an
             // argmax claim, so the stand-in has to have a unique maximum per
-            // row or the head chunk's argmax region has no answer to give.
+            // row or the head chunk's argmax component has no answer to give.
             // Column 0 wins on every row, and `head_tok` says so.
             head_keys: vocab.map(|v| {
                 let mut k = vec![1u16; s * v];
@@ -1459,7 +1459,7 @@ impl Layer {
     /// `bend` moves one *key tile* value after the derivation and rebuilds the
     /// key tiles around it: the attention it proves is then honest, the matmuls are
     /// untouched, and the only thing in the chunk that can see it is the key tile's
-    /// own claim against the quantize region's output.  `(which of q/k/v, cell)`.
+    /// own claim against the quantize component's output.  `(which of q/k/v, cell)`.
     pub fn rope_from_mats(&mut self, round: bf16::Round, bend: Option<(usize, usize)>)
                           -> Option<RopeCols> {
         use crate::residual_stream::{Prog, UnKind, reference};
@@ -1488,20 +1488,20 @@ impl Layer {
         }
         let nkv = nk / hd;
         let rep = nh / nkv;
-        // NN-2: and the regions have to *tile* the shape, not only fit its
-        // widths.  A rotation region's rows are `tokens * heads` and a quantize
-        // region's are `q_layout`'s, and both must be an exact power of two --
+        // NN-2: and the components have to *tile* the shape, not only fit its
+        // widths.  A rotation component's rows are `tokens * heads` and a quantize
+        // component's are `q_layout`'s, and both must be an exact power of two --
         // `ResidualStreamPlan::new` and `q_layout` assert it.  Stream II's synthetic gate
         // shape is `nh = nkv = 3` at `hd = 32`, so `nq = nk = nv = 96` passes
         // the width test above and `tokens * nh = 96` fails the tiling one:
         // before this the family turned on where nobody meant it to and the run
-        // panicked.  A shape the regions cannot tile leaves the family off and
+        // panicked.  A shape the components cannot tile leaves the family off and
         // reports `nn_open`, which is what the width test already does.
         if !(tokens * nh).is_power_of_two() || !(tokens * nkv).is_power_of_two() {
             return off(&format!("the rotation's rows do not tile: tokens={tokens} nh={nh} nkv={nkv}"));
         }
         if !crate::rope::q_tiles(nq, hd, tokens) || !crate::rope::q_tiles(nk, hd, tokens) {
-            return off("a quantize region cannot tile this shape");
+            return off("a quantize component cannot tile this shape");
         }
         let b0 = &self.key_tiles[0];
         let (q_bits, k_bits) = (b0.q_bits, b0.k_bits);
@@ -1529,7 +1529,7 @@ impl Layer {
             });
             v
         };
-        // the rotation, through the regions' own programs: one row per
+        // the rotation, through the components' own programs: one row per
         // (token, head), `hd` leaves, `cos`/`sgnsin` preprocessed
         let rotate = |x: &[u16], heads: usize| -> Vec<u16> {
             let rows = tokens * heads;
@@ -1544,7 +1544,7 @@ impl Layer {
         let qrot = rotate(&deq(self, "q", nq), nh);
         let krot = rotate(&deq(self, "k", nk), nkv);
         // Stream SS: a folded `v` has no bf16 stream to quantize -- the fold's
-        // one rounding *is* the quantize -- so the region below is not built for
+        // one rounding *is* the quantize -- so the component below is not built for
         // it and `vv` comes off `fold_out` directly.  `deq` would panic here
         // (`deq_ref` answers for `pow2` and `chain` only), which is why a
         // `--layout zfold` shape could not carry the wiring family at all.
@@ -1554,7 +1554,7 @@ impl Layer {
         // the scales.  B1 calibrates them offline; a synthetic layer picks the
         // smallest power of two that leaves every value inside the domain, so
         // the desk's witness is complete (`quantize`'s clamp has no honest
-        // witness in this region -- the table has no row past 127).
+        // witness in this component -- the table has no row past 127).
         let scale = |x: &[u16], n: usize, qmax: i64| -> Vec<i32> {
             (0..n)
                 .map(|c| {
@@ -1667,7 +1667,7 @@ exponent(s) small, so B1's clamp fires");
     /// Its sub-key-tiles are `nsub` windows of one pair's prefix, so each keeps its
     /// own slice of the cache and takes the new queries, the group's master
     /// exponent is the joint maximum over every sub-key-tile **and** the diagonal block, and
-    /// the pair's total denominator -- which the group's per-token region
+    /// the pair's total denominator -- which the group's per-token component
     /// commits on its first sub-key-tile -- is the sum of all of their `zz`.  Before
     /// this the function asserted `nsub <= 1` and the rotation simply turned
     /// itself off under `--kv-boundary`.
@@ -1780,7 +1780,7 @@ unmoved (a rejection is the pass)");
             }
             // the group's denominator: the pair's total, which every sub-key-tile's
             // `zz` is a partial sum of.  It lives on the key tile that carries the
-            // per-token region -- the first sub-key-tile when there is a prefix, and
+            // per-token component -- the first sub-key-tile when there is a prefix, and
             // the diagonal block itself when there is none.
             let total: Vec<i64> = idx.iter().skip(1)
                 .fold(self.key_tiles[idx[0]].zz.clone(), |acc, b| {
@@ -1835,7 +1835,7 @@ unmoved (a rejection is the pass)");
     /// exactly that for `s_v` and this asserts it for all three, rather than
     /// picking the group's first head quietly.
     pub fn qkv_j(&self, name: &str, heads: usize, hd: usize, rep: usize) -> Vec<i64> {
-        let r = self.rope.as_ref().expect("the quantize regions need the rope columns");
+        let r = self.rope.as_ref().expect("the quantize components need the rope columns");
         let src = match name {
             "q" => &r.jq,
             "k" => &r.jk,
@@ -1977,7 +1977,7 @@ unmoved (a rejection is the pass)");
                     for k in 0..s_nsub {
                         key_tiles.push(p.key_slice(k * s, s));
                     }
-                    // the group's per-token region lives on its first sub-key-tile,
+                    // the group's per-token component lives on its first sub-key-tile,
                     // and the denominator it commits is the pair's total -- the
                     // slices' own `zz` are the partial sums that make it up
                     let first = key_tiles.len() - s_nsub;
@@ -2133,7 +2133,7 @@ impl Layer {
     /// producer's output under the token's own scale, or the seam's own scale
     /// lookup goes off-table before any binding is reached.  So this runs the
     /// wiring family's own reference forward -- `residual_stream::reference` on the very
-    /// programs the regions prove, so the two cannot disagree -- and rebuilds
+    /// programs the components prove, so the two cannot disagree -- and rebuilds
     /// each group's input, scale and accumulator from it.
     ///
     /// `o`'s input is deliberately left alone: `AttnOutEval` is that matmul's
@@ -2147,7 +2147,7 @@ impl Layer {
     /// cell moved and the key tiles rebuilt around it: the attention is an honest
     /// attention over the bent K (or Q, or V), the matmuls are untouched, and
     /// the only thing that can see it is that key tile's claim against the
-    /// quantize region's output.  `which` picks Q, K or V.
+    /// quantize component's output.  `which` picks Q, K or V.
     pub fn synth_residual_stream_key_tile_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
                                            which: usize, idx: usize) {
         self.synth_family(seed, a, round, 0, None, Some((which, idx)));
@@ -2170,7 +2170,7 @@ impl Layer {
     /// `xmid`, norm2, the gate/up inputs, the SwiGLU and `down`.  So every
     /// constraint and every other equality in the chunk still holds -- this is
     /// an honest proof of a layer whose attention output is not the one the
-    /// attnout region requantized, and only `ao_q_ok` can see it.
+    /// attnout component requantized, and only `ao_q_ok` can see it.
     ///
     /// Returns `None` when this shape's `o` Freivalds check is not `nh * hd` wide, which
     /// is the shape on which the seam is not statable at all.
@@ -2242,7 +2242,7 @@ impl Layer {
         let tff = Tiling::new(tokens, dff, a);
 
         // `h = (x r) w` for one norm, through the same three programs the
-        // regions carry: the squares' two levels, then the norm scale.
+        // components carry: the squares' two levels, then the norm scale.
         let norm_scale = |stream: &[u16], wcol: &[u16], t: &Tiling| -> Vec<u16> {
             let laid = t.lay(stream);
             let roots = reference(&[laid.clone()], &[], t.rows1(),
@@ -2330,7 +2330,7 @@ impl Layer {
         // could prove carried a positionwise q/k/v binding
         // (`briefs/jj-layerwire-out.md` section 11.4 item 2).  Here the layer's
         // own `q`/`k`/`v` dequant outputs are rotated and quantized -- through
-        // `residual_stream::reference` on the very programs the regions prove, so the two
+        // `residual_stream::reference` on the very programs the components prove, so the two
         // cannot disagree -- and the key tiles are rebuilt from the result.
         //
         // Wired exactly when the widths line up, the way `o` is: `q` must be
@@ -2404,7 +2404,7 @@ impl Layer {
             self.residual_stream = Some(gc);
             return;
         }
-        // Stream JJ's dequant output bindings: `o_out` is the `o` region's own
+        // Stream JJ's dequant output bindings: `o_out` is the `o` component's own
         // dequant reference, so an honest run bindings and a bent copy does not.
         // `o`'s input is not rewired (its requantize is `AttnOutEval`'s), so
         // its accumulator is final by here.
@@ -2415,7 +2415,7 @@ impl Layer {
         let h2 = norm_scale(&xmid, &gc.w2, &t1);
         wire(self, &["gate", "up"], &h2, d);
 
-        // the SwiGLU reads the gate and up regions' *dequantized* outputs, so
+        // the SwiGLU reads the gate and up components' *dequantized* outputs, so
         // its input is a function of the accumulators `wire` just rebuilt
         let gi = self.mats.iter().position(|m| m.name == "gate").unwrap();
         let ui = self.mats.iter().position(|m| m.name == "up").unwrap();
@@ -2440,12 +2440,12 @@ impl Layer {
     }
 }
 
-// -------------------------------------------------------------- region layouts --
+// -------------------------------------------------------------- component layouts --
 
 /// SIMD lane floor, as `layout.rs`'s `MIN_LOG_ROWS`.
 pub const MIN_MAT_LOG_ROWS: u32 = 4;
 
-/// The matmul dequant region's tiling: `per_row | n_out`, with `tokens * chunks`
+/// The matmul dequant component's tiling: `per_row | n_out`, with `tokens * chunks`
 /// a power of two exactly (`choose`) or padded up to one (`choose_padded`).
 #[derive(Clone, Copy, Debug)]
 pub struct MatLayout {
@@ -2453,7 +2453,7 @@ pub struct MatLayout {
     pub chunks: usize,
     pub log_rows: u32,
     /// B10 step 4: inert lead rows, as `AoLayout` and `Grid` have always had.
-    /// Zero for every region that existed before the `lm_head` chunk, because a
+    /// Zero for every component that existed before the `lm_head` chunk, because a
     /// layer matmul's output width is a power of two and `tokens * chunks` lands
     /// on one exactly.  A *vocabulary* does not: 8B's 128,256 is `2^8 x 501` and
     /// Qwen's 151,936 is `2^7 x 1187`.
@@ -2558,7 +2558,7 @@ impl MatLayout {
     }
 }
 
-/// The attnout region: rows = (head, token, chunk) descending, inert lead first.
+/// The attnout component: rows = (head, token, chunk) descending, inert lead first.
 #[derive(Clone, Copy, Debug)]
 pub struct AoLayout {
     pub per_row: usize,
@@ -2591,7 +2591,7 @@ impl AoLayout {
     }
 }
 
-/// One Freivalds region's layout: `Grid` over input channels.
+/// One Freivalds component's layout: `Grid` over input channels.
 #[derive(Clone, Copy, Debug)]
 pub struct FreivaldsLayout {
     pub g: Grid,
@@ -2629,7 +2629,7 @@ impl FreivaldsLayout {
 
 // -------------------------------------------------------- shared table registry --
 
-/// Every shared table's contents and multiplicities, accumulated across regions.
+/// Every shared table's contents and multiplicities, accumulated across components.
 pub struct Tables {
     pub log_exp: u32,
     pub exp: Vec<u32>,
@@ -2846,7 +2846,7 @@ impl Layer {
     /// key tile's numerator gets a legal table output, and `Z`, `A.V` and the attnout
     /// witness are rebuilt from it.  The AIR reads neither -- its numerator fold
     /// and its exp lookup drop the slot -- so the diagonal block's `sn` no longer joins
-    /// the prefix's to make the denominator the per-token region claims.
+    /// the prefix's to make the denominator the per-token component claims.
     pub fn unmask_diagonal_block(&mut self, i: usize) {
         let n_pre = self.key_tiles.iter().filter(|b| !b.diagonal_block).count();
         let ci = self.key_tiles.iter().position(|b| b.diagonal_block).expect("no diagonal block key tile");
@@ -2867,7 +2867,7 @@ impl Layer {
             self.key_tiles[ci].out[(inst * ns + t) * nhd + j] += nmax * v;
         }
         let _ = ni;
-        // and the total the paired prefix key tile's per-token region commits
+        // and the total the paired prefix key tile's per-token component commits
         let pi = ci - n_pre;
         let add = self.key_tiles[ci].zz[inst * ns + t];
         let own = self.key_tiles[pi].zz[inst * ns + t];
@@ -2926,11 +2926,11 @@ pub fn bump(m: &mut [u32], v: i64, off: &mut usize) {
     }
 }
 
-// -------------------------------------------------- matmul dequant region traces --
+// -------------------------------------------------- matmul dequant component traces --
 
-/// A region's committed and preprocessed columns, and what its interaction
+/// A component's committed and preprocessed columns, and what its interaction
 /// builder needs to remember.
-pub struct MatRegion {
+pub struct MatComponent {
     pub lay: MatLayout,
     pub spec: Spec,
     pub map: Map,
@@ -2942,11 +2942,11 @@ pub struct MatRegion {
     pub n: usize,
     /// B7a milestone 4 (19.6): the same columns, born on the device. `Some`
     /// only under `B7_M4_FILL=1`, where `pre` and `base` are empty and this is
-    /// the region.
+    /// the component.
     pub dev: Option<crate::devfill::DevFill>,
 }
 
-impl MatRegion {
+impl MatComponent {
     /// Committed cells, wherever the columns are.
     pub fn base_cells(&self) -> usize {
         let n = match &self.dev {
@@ -2957,17 +2957,17 @@ impl MatRegion {
     }
 }
 
-/// Build one matmul's dequant region: witness columns in the compose layout,
+/// Build one matmul's dequant component: witness columns in the compose layout,
 /// multiplicities bumped into the shared tables.  Mirrors `dequant::run`'s
 /// witness loop without the tampers (compose probes corrupt the layer witness).
-/// Stream SS: `ohead` is `Some(rows per kv head)` on the one region whose output
+/// Stream SS: `ohead` is `Some(rows per kv head)` on the one component whose output
 /// side folds under the *key tile* grid -- a folded `v`, whose published output is an
 /// integer and whose counterparty is the key tiles' own V (`dequant::OKind::Int`).
 /// It changes nothing but which rows the `oin`/`obd` step selectors mark, so no
-/// preprocessed column is added and no other region moves.
-pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bool,
+/// preprocessed column is added and no other component moves.
+pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bool,
                   ohead: Option<usize>,
-                  fold_bend: (Option<usize>, Option<usize>)) -> MatRegion {
+                  fold_bend: (Option<usize>, Option<usize>)) -> MatComponent {
     assert!(spec.sound(), "unsound spec for {}", m.name);
     let lay = MatLayout::choose_or_padded(m.n_out, m.tokens, spec.per_row);
     let mut spec = spec.clone();
@@ -2979,10 +2979,10 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bool,
     let n = m.tokens * m.n_out;
 
     // B7a milestone 4 (19.6): which fill runs. 1 is the device's alone -- the
-    // region has no host columns at all and `pre`/`base` stay empty -- and 2
+    // component has no host columns at all and `pre`/`base` stay empty -- and 2
     // builds both and asserts every cell equal before either is used.
     //
-    // Stream Z: the fold has no device fill; its region takes the host path
+    // Stream Z: the fold has no device fill; its component takes the host path
     // whatever the switch says (the diagonal block key tiles' pattern), and
     // `devpre::note_host_fill` is told in `generate`.
     let m4c = if spec.variant == DeqVariant::Fold {
@@ -2992,13 +2992,13 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bool,
     };
     let m4c_want = m4c == 2;
     if m4c == 1 {
-        // B11 stream M: `output_claim` is the region's, not `with_want`'s. The two
+        // B11 stream M: `output_claim` is the component's, not `with_want`'s. The two
         // parameters sit next to each other and the o-side one was missing
         // entirely, so the head's device fill built 506 preprocessed columns
         // where the host builds 510.
-        let dev = crate::devfill::mat_region_dev(m, &spec, &lay, &map, tables, false, output_claim);
+        let dev = crate::devfill::mat_component_dev(m, &spec, &lay, &map, tables, false, output_claim);
         let ref_bad = dev.ref_bad;
-        return MatRegion { lay, spec, map, pre: vec![], base: vec![], ref_bad, n,
+        return MatComponent { lay, spec, map, pre: vec![], base: vec![], ref_bad, n,
                            dev: Some(dev) };
     }
     let m4c_snap = |t: &Tables| -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, usize) {
@@ -3208,7 +3208,7 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bool,
             want_host[start * lay.per_row..start * lay.per_row + w.len()]
                 .copy_from_slice(w);
         }
-        let dev = crate::devfill::mat_region_dev(m, &spec, &lay, &map, tables, true, output_claim);
+        let dev = crate::devfill::mat_component_dev(m, &spec, &lay, &map, tables, true, output_claim);
         check_fill_dev(m, &lay, &base, &pre, ref_bad, &want_host, &dev, tables,
                        &before, &after);
         // the device's own bumps are the check's, not the proof's: put the
@@ -3220,7 +3220,7 @@ pub fn mat_region(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bool,
         tables.m_r[r8].copy_from_slice(&after.3);
         tables.off_table = after.4;
     }
-    MatRegion { lay, spec, map, pre, base, ref_bad, n, dev: None }
+    MatComponent { lay, spec, map, pre, base, ref_bad, n, dev: None }
 }
 
 /// `B7_M4_FILL=2`: the device fill against the host fill, everything at once.
@@ -3288,8 +3288,8 @@ multiplicity tables and the f64 cross-check all match",
 /// B1's own answer for one dequantized accumulator: the `Round::Even` reference
 /// `fill_mat_row` cross-checks its committed columns against.  It lives here as
 /// one function so that a consumer of a matmul's bf16 output -- the residual stream's
-/// SwiGLU reads the `gate` and `up` regions' -- reads exactly the value the
-/// dequant region proves, rather than a second implementation of the rung.
+/// SwiGLU reads the `gate` and `up` components' -- reads exactly the value the
+/// dequant component proves, rather than a second implementation of the rung.
 pub fn deq_ref(m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
     deq_ref_a(m.acc[t * m.n_out + c], m, spec, t, c)
 }
@@ -3302,7 +3302,7 @@ pub fn deq_ref_a(a: i64, m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
     // Stream JJ (E11): every rounding here is `spec.round`'s, not `from_f64`'s.
     // `from_f64` is round-to-nearest-even and this reference is what the output
     // bindings' claim is built from, so under `--round away` an exact tie made the
-    // claim disagree with the region's own committed cells by one ulp and the
+    // claim disagree with the component's own committed cells by one ulp and the
     // *honest* proof failed to prove.  It cost ~1% of slots on a synthetic
     // layer; on a witness with no bindings it costs nothing, which is why stream E
     // never saw it.
@@ -3319,15 +3319,15 @@ pub fn deq_ref_a(a: i64, m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
             let t1 = bf16::to_f32(rd(y0 * sxv)) as f64;
             rd(t1 * swv) | (u16::from(a < 0) << 15)
         }
-        _ => unreachable!("matmul regions are pow2 or chain"),
+        _ => unreachable!("matmul components are pow2 or chain"),
     }
 }
 
-/// Stream SS: a `Variant::Fold` region's **output**, as an integer.
+/// Stream SS: a `Variant::Fold` component's **output**, as an integer.
 ///
 /// `deq_ref` cannot answer for the fold: the whole point of `y-delay-v` is that
 /// there is no bf16 waypoint between the accumulator and the int8 cell, so this
-/// region's output is not a bf16 pattern at all.  What it publishes is
+/// component's output is not a bf16 pattern at all.  What it publishes is
 /// `qc (1 - 2 sg)` -- the clamped quotient with its sign -- which is
 /// `experiments/b1`'s `quantize(v, s_v)` cell for cell, and which
 /// `experiments/b65/extract.py` byte-compares against the recorder's own `vvc`
@@ -3355,9 +3355,9 @@ pub fn fold_out_a(a: i64, m: &Mat, t: usize, c: usize) -> i64 {
     if a < 0 { -qc } else { qc }
 }
 
-/// One row of a matmul dequant region: the witness fields of `per_row`
+/// One row of a matmul dequant component: the witness fields of `per_row`
 /// accumulators, written into a block-local column slice, with table
-/// multiplicities accumulated block-locally (merged by `mat_region`).
+/// multiplicities accumulated block-locally (merged by `mat_component`).
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Tables,
@@ -3375,7 +3375,7 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
     // An inert lead row is filled as a row of *zero* accumulators against token 0's
     // scale: a zero accumulator is an ordinary case this gadget already proves
     // (real dumps carry them), so every constraint holds and every lookup lands
-    // on a real table row -- `ao_region`'s pattern, and the reason no lookup here
+    // on a real table row -- `ao_component`'s pattern, and the reason no lookup here
     // needs an activity multiplier.
     let (t, b, inert) = match lay.at_opt(m.tokens, j) {
         Some((t, b)) => (t, b, false),
@@ -3465,7 +3465,7 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
             local[map.shared[0]][jj] = m31_u32(m.sx[t].0);
             local[map.shared[1]][jj] = m31_u32(m.sx[t].1);
         }
-        _ => unreachable!("matmul regions are pow2 or chain"),
+        _ => unreachable!("matmul components are pow2 or chain"),
     }
     for s in 0..lay.per_row {
         let c = b * lay.per_row + s;
@@ -3548,12 +3548,12 @@ fn fill_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables: &Table
     }
 }
 
-/// The matmul region's Freivalds claimed side and LogUp columns.
+/// The matmul component's Freivalds claimed side and LogUp columns.
 pub struct MatInteraction {
     pub cols: Vec<crate::device::AnyCol<'static>>,
     pub claimed_h: SecureField,
     pub use_sum: SecureField,
-    /// stream E: the output side's closing value, when this region carries one
+    /// stream E: the output side's closing value, when this component carries one
     pub claimed_out: Option<SecureField>,
     /// stream II (E11): the x-side scale's, when a requantize seam feeds this
     /// matmul
@@ -3572,7 +3572,7 @@ pub struct OutputClaimW {
     /// Stream SS: rows per kv head, on the one output side that folds under the
     /// key tile grid (a folded `v`).  `None` everywhere else, and then `k_bd` is
     /// taken at a token boundary exactly as stream E wrote it.  Whatever this
-    /// says, `mat_region` marks the same rows -- the two have to agree or the
+    /// says, `mat_component` marks the same rows -- the two have to agree or the
     /// interaction column and its AIR read different steps.
     pub head: Option<usize>,
 }
@@ -3580,30 +3580,30 @@ pub struct OutputClaimW {
 /// B11 stream U, lever 3: `gkr` is `--gkr-dequant`, and it is the one thing in
 /// this file the second GKR family changes.
 ///
-/// The region's Horner accumulators (`z`, `h`, and stream E's output side) are
+/// The component's Horner accumulators (`z`, `h`, and stream E's output side) are
 /// untouched -- they are what stays in the tree. What the flag removes is the
 /// LogUp half: instead of `mat_logup`'s committed running-sum columns, the
-/// region's fractions become GKR input layers (collected in `compose`, before
+/// component's fractions become GKR input layers (collected in `compose`, before
 /// the proof's transcript position) and its claimed sum leaves `use_sums` for
 /// `sums_cancel`. This is the same shape stream S gave the key tiles in
 /// `attn_trace::interaction_phase`.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
-pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
+pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
                        rels: &crate::compose::Rels, out: Option<&OutputClaimW>, gkr: bool,
                        sc: Option<(SecureField, SecureField)>)
                        -> MatInteraction {
     let lay = r.lay;
     let rows = 1usize << lay.log_rows;
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, lay.per_row);
-    // B7a milestone 4 (section 3 row 1): `z` and `h` where the region's own
+    // B7a milestone 4 (section 3 row 1): `z` and `h` where the component's own
     // accumulator columns are. `B7_M4_ACC=2` runs both and asserts every cell.
     let m4g = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
     let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
-    // B11 stream M: the region's real height, kept before `rows` is shadowed to
+    // B11 stream M: the component's real height, kept before `rows` is shadowed to
     // zero. `devacc` builds `z` and `h`; it does *not* build stream E's output
     // side, which is a third accumulator over the *witness* rather than over
-    // this region's columns and so has nothing to do with where the fill went.
+    // this component's columns and so has nothing to do with where the fill went.
     // Suppressing it with the other two left `u[rows - 1]` indexing an empty
     // vector -- reachable only on an o-side matmul with `B7_M4_ACC` on, which
     // is `lm_head` and only `lm_head`, and `ACC` had never been on.
@@ -3719,7 +3719,7 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
                             (SecureField::from(m31_of(sm))
                              + SecureField::from(m31_u32(ef)) * o.lam) * o.w[s]
                         }
-                        // the same key the argmax region compares, off the same
+                        // the same key the argmax component compares, off the same
                         // host function the extractor's column was built with
                         // taken above, off `fold_out`, before `deq_ref` is asked
                         crate::dequant::OKind::Int => unreachable!(),
@@ -3731,7 +3731,7 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
             // the multiplier is the step *into* this row: an ordinary chunk step
             // inside a token, the boundary jump on a row that begins one --
             // and, with `o.head`, the key tile grid's jump on the row after one that
-            // begins a kv head.  The same predicate `mat_region` marked.
+            // begins a kv head.  The same predicate `mat_component` marked.
             let mult = if j == 0 {
                 SecureField::zero()
             } else if let Some(mh) = o.head {
@@ -3753,7 +3753,7 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
 
     // Stream II (E11): the x-side scale, between the output side's column and
     // the LogUp columns -- the order the AIR reads them in.  One value per
-    // token on the `last` rows, the same field elements this region's shared
+    // token on the `last` rows, the same field elements this component's shared
     // columns commit, so the producing seam's own fold is comparable to it.
     let claimed_sc = sc.map(|(mu, lam)| {
         let mut v = vec![SecureField::zero(); n_rows];
@@ -3802,7 +3802,7 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
 ///
 /// `DequantEval` is the component the verifier checks; lowering it with
 /// `cudagen::lower_logup` gives every lookup's numerator and denominator as a
-/// straight-line IR over this region's own columns, in `add_to_relation`
+/// straight-line IR over this component's own columns, in `add_to_relation`
 /// order -- which is the order `finalize_logup_in_pairs` batches them in and
 /// therefore the order `paired` needs. Nothing below is dequant-specific:
 /// swap the eval and it builds another family's LogUp columns.
@@ -3811,7 +3811,7 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
 /// which does not exist yet at generation time. Only `yside.claimed_h` is
 /// unavailable, and it enters constraints alone -- never a lookup -- so a
 /// placeholder is correct. `B7_M4_LOGUPIR=2` is what says the two agree.
-/// The evaluator whose fraction IR *is* this region's lookups.
+/// The evaluator whose fraction IR *is* this component's lookups.
 ///
 /// B11 stream U, lever 3: the GKR backend needs the same evaluator, so it is built
 /// here once and both callers take it. `gkr` is false in both -- the fractions
@@ -3819,7 +3819,7 @@ pub fn mat_interaction(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureFiel
 /// lowering is of the *un-ablated* evaluator and asks for the flag-off shape,
 /// which is stream T's precedent for the key tiles and is why the kernel store
 /// already carries this fingerprint.
-pub fn deq_logup_eval(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
+pub fn deq_logup_eval(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
                       rels: &crate::compose::Rels) -> crate::dequant::DequantEval {
     let sub: Vec<crate::attn_air::RangeRel> = crate::dequant::range_widths(&r.spec)
         .iter()
@@ -3850,7 +3850,7 @@ pub fn deq_logup_eval(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField
     }
 }
 
-fn mat_logup_ir(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
+fn mat_logup_ir(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
                 rels: &crate::compose::Rels, on_device: bool)
                 -> (Vec<crate::device::AnyCol<'static>>, SecureField) {
     use stwo::prover::backend::simd::m31::PackedM31;
@@ -3873,27 +3873,27 @@ fn mat_logup_ir(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
                    ir.fracs.len())
         });
         assert_eq!(looks, ir.fracs.len(), "{family}: lookup count disagrees with the kernel");
-        // B11 stream M: the region's preprocessed slice is wider than this
+        // B11 stream M: the component's preprocessed slice is wider than this
         // eval's on an o-side matmul.
         //
-        // `mat_region` commits three extra selectors for a region that
+        // `mat_component` commits three extra selectors for a component that
         // publishes an output-side claim, and they are the *argmax*
         // component's -- it "shares the head dequant's step selectors"
         // (`compose.rs`, where it is built). `DequantEval` never reads them, so
         // its fraction IR declares the 506 columns it does read while the
-        // region carries 509, and handing the kernel all of them fails
+        // component carries 509, and handing the kernel all of them fails
         // `logup_cols_dev_ptrs`' count check. The three sit *after* the ones
         // the IR loads, so the prefix is exactly what to supply -- and the
         // assert says so rather than trusting it.
         let np = ir.cols[0];
         let npre = |n: usize| {
             assert!(n >= np,
-                    "{family}: the region has {n} preprocessed columns, fewer than \
+                    "{family}: the component has {n} preprocessed columns, fewer than \
                      the {np} its fraction IR loads");
             np
         };
         if let Some(d) = &r.dev {
-            // B7a milestone 4 (19.6): the fill left this region's columns on
+            // B7a milestone 4 (19.6): the fill left this component's columns on
             // the device, so the fractions read them where they are and the
             // LogUp columns never come back. 19.4 measured both transfers and
             // said they disappear together; this is the together.
@@ -3918,7 +3918,7 @@ fn mat_logup_ir(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
     (crate::device::host_cols(cols), sum)
 }
 
-fn mat_logup(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
+fn mat_logup(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
              rels: &crate::compose::Rels)
              -> (Vec<crate::device::AnyCol<'static>>, SecureField) {
     // B7a milestone 4 (19.6): with the fill on the device there is no host
@@ -4058,11 +4058,11 @@ fn mat_logup(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
     (crate::device::host_cols(host.0), host.1)
 }
 
-// ------------------------------------------------------------- attnout region --
+// ------------------------------------------------------------- attnout component --
 
-pub struct AoRegion {
+pub struct AoComponent {
     pub lay: AoLayout,
-    /// as `FreivaldsRegion`'s: the mirror under `B7_M4_WFILL=1`
+    /// as `FreivaldsComponent`'s: the mirror under `B7_M4_WFILL=1`
     pub pre: Vec<Eval>,
     pub base: Vec<Eval>,
     /// B7a milestone 4 (section 3 row 1): the same columns, born on the device.
@@ -4087,7 +4087,7 @@ pub struct AoRegion {
     pub denp2: bool,
 }
 
-impl AoRegion {
+impl AoComponent {
     /// `2^(acc_lo_bits + acc_hi_bits - 1)`: what a committed `acc` is shifted by
     /// so its two limbs are a range check on `|acc|`.  Zero in the magnitude
     /// form, where the limbs read the committed magnitude directly.
@@ -4101,7 +4101,7 @@ impl AoRegion {
     }
 }
 
-impl AoRegion {
+impl AoComponent {
     /// Committed cells, wherever the columns are.
     pub fn base_cells(&self) -> usize {
         let n = match &self.dev { Some(d) => d.base.len(), None => self.base.len() };
@@ -4126,14 +4126,14 @@ impl AoRegion {
 /// accumulator's.  `acc` stays where it was, so the `z` fold, the device
 /// accumulator and `gkrlink`'s binding read the same column they always did.
 #[allow(clippy::too_many_arguments)]
-pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32,
+pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32,
                  acc_bits: (u32, u32), acc_mag: bool, denp2: bool,
                  jv_min: i32, jo_max: i32,
                  tables: &mut Tables, corrupt: Option<usize>,
                  corrupt_q: Option<usize>, corrupt_den: Option<usize>,
                  corrupt_jo: Option<usize>, corrupt_num: Option<usize>,
                  corrupt_acc: Option<usize>, corrupt_jo_tok: Option<usize>,
-                 corrupt_mag: Option<usize>) -> AoRegion {
+                 corrupt_mag: Option<usize>) -> AoComponent {
     let lay = AoLayout::choose(ao.nh, ao.s, ao.hd, per_row_target);
     let rows = 1usize << lay.log_rows;
     let pr = lay.per_row;
@@ -4142,7 +4142,7 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
     // Stream TT: the magnitude form fills on the host on both backends.  The
     // fork's `b65_fill_attnout` writes the nine-column layout and bumps the
     // limbs at `acc + acc_off`; it has no tenth column and no `mag`, so a
-    // device fill here would write the wrong region rather than a slow one.
+    // device fill here would write the wrong component rather than a slow one.
     // `compose::note_host_fill` knows, which is what keeps the shared
     // multiplicity columns on the host with it.
     let m4d = if corrupt_q.is_some() || corrupt_den.is_some() || corrupt_jo.is_some()
@@ -4242,19 +4242,19 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
         j
     });
     if m4d == 1 {
-        let dev = crate::devwfill::ao_region_dev(ao, &lay, q_bits, rem_bits, acc_bits,
+        let dev = crate::devwfill::ao_component_dev(ao, &lay, q_bits, rem_bits, acc_bits,
                                                  jv_min, jo_max, tables, false);
         let (ref_bad, q_out) = (dev.ref_bad, dev.q_out.clone());
-        return AoRegion { lay, pre: vec![], base: vec![], dev: Some(dev), ref_bad, q_out,
+        return AoComponent { lay, pre: vec![], base: vec![], dev: Some(dev), ref_bad, q_out,
                           n: ao.nh * ao.s * ao.hd, rem_bits, q_bits,
                           acc_lo_bits, acc_hi_bits, acc_mag, denp2 };
     }
-    // `B7_M4_WFILL=2` builds this region twice -- host here, device below --
+    // `B7_M4_WFILL=2` builds this component twice -- host here, device below --
     // and the device call bumps the same counters a second time, so every
     // counter this fill touches has to be snapshotted before, compared as a
     // delta, and restored after.  Stream JJ (E11) added three: the two
     // accumulator limb tables and `m_epow` (whose bumps are a host loop on
-    // *both* sides, `devwfill::ao_region_dev`).  A counter left out of this
+    // *both* sides, `devwfill::ao_component_dev`).  A counter left out of this
     // tuple is counted twice and the honest proof is then rejected with
     // `sums_cancel: false` -- which is what it did on the H200's reference
     // chunk, and what no desk shape shows, because the desk never runs mode 2.
@@ -4465,7 +4465,7 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
     if m4d == 2 {
         let after = m4d_snap(tables);
         let before = m4d_before.unwrap();
-        let dev = crate::devwfill::ao_region_dev(ao, &lay, q_bits, rem_bits, acc_bits,
+        let dev = crate::devwfill::ao_component_dev(ao, &lay, q_bits, rem_bits, acc_bits,
                                                  jv_min, jo_max, tables, true);
         crate::devwfill::check_cols("attnout base", &base, &dev.base);
         crate::devwfill::check_cols("attnout pre", &pre, &dev.pre);
@@ -4508,7 +4508,7 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
 all five multiplicity tables and the f64 reference all match",
                   base.len(), pre.len(), (base.len() + pre.len()) << lay.log_rows);
     }
-    // Stream II (E11): the witness-side reference and the region's own
+    // Stream II (E11): the witness-side reference and the component's own
     // committed output are the same function of `AttnOut`, and a synthetic
     // layer's `o` input is built from the former -- so an untampered run
     // asserts they agree rather than trusting that they do.  Every tamper index
@@ -4519,7 +4519,7 @@ all five multiplicity tables and the f64 reference all match",
     {
         debug_assert_eq!(q_out, ao.q_ref(), "attnout: q_out and AttnOut::q_ref disagree");
     }
-    AoRegion { lay, pre, base, dev: None, ref_bad, q_out, n: ao.nh * ao.s * ao.hd,
+    AoComponent { lay, pre, base, dev: None, ref_bad, q_out, n: ao.nh * ao.s * ao.hd,
                rem_bits, q_bits, acc_lo_bits, acc_hi_bits, acc_mag, denp2 }
 }
 
@@ -4527,14 +4527,14 @@ pub struct AoInteraction {
     pub cols: Vec<crate::device::AnyCol<'static>>,
     pub claimed_out: SecureField,
     pub claimed_den: SecureField,
-    /// Stream JJ (E11): the region's own requantized output, folded under
+    /// Stream JJ (E11): the component's own requantized output, folded under
     /// `claimed_out`'s weights -- what the `o` Freivalds check's `qX` equals.
     pub claimed_q: SecureField,
     pub use_sum: SecureField,
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureField,
+pub fn ao_interaction(ao: &AttnOut, r: &AoComponent, rr: SecureField, s_ch: SecureField,
                       rv: SecureField, c_ctx: usize, rels: &crate::compose::Rels,
                       air: &crate::freivalds::AttnOutEval, gkr: bool) -> AoInteraction {
     use stwo::prover::backend::simd::qm31::PackedQM31;
@@ -4621,7 +4621,7 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
         }
     };
 
-    // ---- stream JJ (E11): the region's own output, published --------------
+    // ---- stream JJ (E11): the component's own output, published --------------
     //
     // `z`/`h`'s shape exactly, over `q = qm (1 - 2 sg)` instead of over `acc`.
     // `AttnOutEval` *is* the requantization of the attention output, so this
@@ -4737,9 +4737,9 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
     AoInteraction { cols: cols.into_inner(), claimed_out, claimed_den, claimed_q, use_sum }
 }
 
-// ------------------------------------------------------------- Freivalds regions --
+// ------------------------------------------------------------- Freivalds components --
 
-pub struct FreivaldsRegion {
+pub struct FreivaldsComponent {
     pub name: String,
     pub lay: FreivaldsLayout,
     pub mats: Vec<usize>,
@@ -4756,7 +4756,7 @@ pub struct FreivaldsRegion {
     pub dev: Option<crate::devwfill::DevFreivalds>,
 }
 
-impl FreivaldsRegion {
+impl FreivaldsComponent {
     pub fn base_cells(&self) -> usize {
         let n = match &self.dev { Some(d) => d.base.len(), None => self.base.len() };
         n << self.lay.g.log_rows
@@ -4767,12 +4767,12 @@ impl FreivaldsRegion {
     }
 }
 
-/// Build one Freivalds group's region: activations committed (offset
+/// Build one Freivalds group's component: activations committed (offset
 /// `2^(act_bits-1)`), weights preprocessed, range multiplicities bumped at
 /// `act_bits` -- 8 everywhere but the widened attention output's group.
-pub fn freivalds_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: usize,
+pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_target: usize,
                         act_bits: u32, tables: &mut Tables,
-                        corrupt_qx: Option<usize>, oversize_qx: Option<usize>) -> FreivaldsRegion {
+                        corrupt_qx: Option<usize>, oversize_qx: Option<usize>) -> FreivaldsComponent {
     let m0 = &layer.mats[mat_idx[0]];
     let n_in = m0.n_in;
     let tokens = m0.tokens;
@@ -4799,11 +4799,11 @@ pub fn freivalds_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: 
     assert!(m4d == 0 || corrupt_qx.is_none(),
             "{name}: the device Freivalds fill has no `corrupt_qx` path");
     if m4d == 1 {
-        let dev = crate::devwfill::freivalds_region_dev(layer, mat_idx, &lay, tables);
+        let dev = crate::devwfill::freivalds_component_dev(layer, mat_idx, &lay, tables);
         // B7a milestone 4 (section 3 row 1): no mirror. `freivalds_interaction` reads
-        // the device columns now, and nothing else reads a device region's host
+        // the device columns now, and nothing else reads a device component's host
         // columns -- `base_cells` counts them off `dev`.
-        return FreivaldsRegion { name: name.into(), lay, mats: mat_idx.to_vec(), act_bits,
+        return FreivaldsComponent { name: name.into(), lay, mats: mat_idx.to_vec(), act_bits,
                             pre: vec![], base: vec![],
                             n_weights: mat_idx.iter().map(|i| layer.mats[*i].qw.len()).sum(),
                             dev: Some(dev) };
@@ -4871,7 +4871,7 @@ pub fn freivalds_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: 
         // the check with teeth, before any column has changed hands
         let after = m4d_snap(tables);
         let before = m4d_before.unwrap();
-        let dev = crate::devwfill::freivalds_region_dev(layer, mat_idx, &lay, tables);
+        let dev = crate::devwfill::freivalds_component_dev(layer, mat_idx, &lay, tables);
         crate::devwfill::check_cols(&format!("freivalds {name} base"), &base, &dev.base);
         crate::devwfill::check_cols(&format!("freivalds {name} pre"), &pre, &dev.pre);
         let r8 = tables.ridx(8);
@@ -4886,7 +4886,7 @@ pub fn freivalds_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: 
 the 8-bit range multiplicities all match",
                   base.len(), pre.len(), (base.len() + pre.len()) << lay.g.log_rows);
     }
-    FreivaldsRegion { name: name.into(), lay, mats: mat_idx.to_vec(), act_bits, pre, base,
+    FreivaldsComponent { name: name.into(), lay, mats: mat_idx.to_vec(), act_bits, pre, base,
                  n_weights: mat_idx.iter().map(|i| layer.mats[*i].qw.len()).sum(),
                  dev: None }
 }
@@ -4906,7 +4906,7 @@ pub struct FreivaldsInteraction {
     pub qx_claim: SecureField,
 }
 
-pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsRegion, rv: SecureField, s_ch: SecureField,
+pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureField, s_ch: SecureField,
                              rels: &crate::compose::Rels, range_check: bool,
                              air: &crate::freivalds::FreivaldsEval, gkr: bool) -> FreivaldsInteraction {
     use stwo::prover::backend::simd::qm31::PackedQM31;
@@ -4999,7 +4999,7 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsRegion, rv: SecureField
     // stream II: the activation claim, in the AIR's own mask order -- after the
     // per-matmul accumulators and before the LogUp columns.  It is built from
     // `m0.qx` and not from `r.base`, so it is the same column whether the fill
-    // left the region on the host or on the card, and it does not depend on
+    // left the component on the host or on the card, and it does not depend on
     // `rows` having been zeroed for the device accumulator path above.
     let mut qx_claim = SecureField::zero();
     if let Some(q) = air.qx.as_ref() {

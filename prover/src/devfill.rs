@@ -4,7 +4,7 @@
 //! row with no shortcut". This is the first of the four, and what it moves is
 //! not only the arithmetic:
 //!
-//! | what the host does per region | what happens here |
+//! | what the host does per component | what happens here |
 //! |---|---|
 //! | `fill_mat_row` over 2^17 rows x `per_row` slots | one kernel, one thread per committed row |
 //! | `eval_of` -- the coset shuffle and the SIMD repack, 37% of trace generation | nothing: the thread owns the output index and reads `m4_perm(i)` |
@@ -14,7 +14,7 @@
 //! What *is* uploaded is the witness, not the trace: `acc` as `i32` (which
 //! `kmax <= 21` makes lossless -- every magnitude the normalisation table can
 //! describe is below `2^30`, asserted below), the per-token and per-channel
-//! scales, and the two shared tables, which are cached across regions.
+//! scales, and the two shared tables, which are cached across components.
 //!
 //! `B7_M4_FILL` says which path runs, on the same three-value pattern
 //! `B7_M4_LOGUPIR` uses: 0 the host fill, 1 the device fill, 2 both with every
@@ -104,7 +104,7 @@ unsafe extern "C" {
     );
 }
 
-/// The two shared tables, resident. They are the same for every region of a
+/// The two shared tables, resident. They are the same for every component of a
 /// run -- `kmax` and the rounding mode fix them -- so they are uploaded once
 /// and keyed on exactly what generates them.
 pub struct DevTables {
@@ -160,13 +160,13 @@ fn up_u32(v: Vec<u32>) -> Uint32Vec {
     d
 }
 
-/// One region's columns, on the device, in committed order.
+/// One component's columns, on the device, in committed order.
 pub struct DevFill {
     pub pre: Vec<BaseFieldVec>,
     pub base: Vec<BaseFieldVec>,
     /// B7a milestone 4 (section 3 row 1): the four multiplicity counters this
     /// fill scatter-added into, left where it left them. `b65_pre_fill` sums
-    /// one per region into the column, so with `B7_M4_PRE=1` the download and
+    /// one per component into the column, so with `B7_M4_PRE=1` the download and
     /// the parallel merge below never happen -- 23.1's `m_exp`, four more times.
     pub m_norm: Uint32Vec,
     pub m_frac: Uint32Vec,
@@ -178,7 +178,7 @@ pub struct DevFill {
     pub want: Option<Vec<u32>>,
 }
 
-/// Build one matmul dequant region on the device.
+/// Build one matmul dequant component on the device.
 ///
 /// `tables` is read for the shared tables and *written* for the
 /// multiplicities: the counters come back and are added in, which is the same
@@ -187,7 +187,7 @@ pub struct DevFill {
 ///
 /// `output_claim` is the plan's `has_output_claim` for this matmul, and it is the whole of
 /// stream M's head fix. The kernel's preprocessed list is the per-channel
-/// scale columns and five selectors; a region that publishes an output-side
+/// scale columns and five selectors; a component that publishes an output-side
 /// claim commits three more (`layer.rs`, the `if output_claim` block), and until this
 /// parameter existed the device fill was never told. It sized `n_pre` three
 /// columns short -- 506 against the host's 509 on `lm_head`, the sequence's
@@ -196,7 +196,7 @@ pub struct DevFill {
 /// are built here on the host and appended in the host's order; nothing about
 /// `b65_fill_dequant` moves, which is what keeps the installed kernel
 /// fingerprints out of it.
-pub fn mat_region_dev(
+pub fn mat_component_dev(
     m: &Mat,
     spec: &Spec,
     lay: &MatLayout,
@@ -227,7 +227,7 @@ pub fn mat_region_dev(
     // -- and checked, because a witness that broke it would otherwise be
     // silently truncated instead of loudly out of the table's window. One
     // parallel pass does the narrowing and the check together: at the design
-    // point this is 2.5 M accumulators per region and two serial passes over
+    // point this is 2.5 M accumulators per component and two serial passes over
     // them cost more than the kernel does.
     use rayon::prelude::*;
     let wide = std::sync::atomic::AtomicBool::new(false);
@@ -261,7 +261,7 @@ pub fn mat_region_dev(
             Some(up_u32(m.sx.iter().flat_map(|(a, b)| [*a, *b]).collect())),
             Some(up_u32(m.sw.iter().flat_map(|(a, b)| [*a, *b]).collect())),
         ),
-        _ => unreachable!("matmul regions are pow2 or chain"),
+        _ => unreachable!("matmul components are pow2 or chain"),
     };
 
     crate::util::m4_add("gen/deq_dev_h2d", t_h2d.elapsed().as_secs_f64());

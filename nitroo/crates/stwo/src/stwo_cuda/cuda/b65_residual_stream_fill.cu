@@ -48,7 +48,7 @@ __device__ __forceinline__ void g_bump(unsigned *m, unsigned idx) {
     }
 }
 
-// `residual_stream_region`'s `match ... { Some(i) => look.push(..), None => off += 1 }`,
+// `residual_stream_component`'s `match ... { Some(i) => look.push(..), None => off += 1 }`,
 // as one call: the index is `B65_RESIDUAL_STREAM_FILL_NONE` when the host's lookup is `None`.
 __device__ __forceinline__ void g_bump_or_off(B65ResidualStreamMult t, unsigned idx,
                                               unsigned *off, unsigned drop) {
@@ -162,7 +162,7 @@ __device__ __forceinline__ bool g_normalise(unsigned long long mag, unsigned kma
 // `ResidualStreamTables::norm_at`. Note this is the *residual stream's* row order, which differs
 // from `layer::Tables::norm_at` only in how it treats `st` on a non-sticky
 // round: the residual stream masks `st` to zero in the key, the dequant rejects it. The
-// caller masks before calling, exactly as `residual_stream_region` does.
+// caller masks before calling, exactly as `residual_stream_component` does.
 __device__ __forceinline__ unsigned g_norm_at(unsigned m2, unsigned ph, unsigned st,
                                               unsigned kmax, unsigned sticky) {
     if (m2 == 0u && ph == 0u) {
@@ -416,7 +416,7 @@ __global__ __launch_bounds__(B65_RESIDUAL_STREAM_FILL_BLOCK) void b65_residual_s
         g_bump_or_off(m_val, vo, &off, drop);
     }
 
-    // ---- the outputs the bindings and the next region read --------------------
+    // ---- the outputs the bindings and the next component read --------------------
     for (unsigned k = 0; k < cfg.out_w; ++k) {
         const B65ResidualStreamSlot sl = slots[out_slot[k]];
         const long long sm = g_sgn_of(cols[sl.o_sm][i]);
