@@ -100,9 +100,21 @@ pub struct Side {
 /// name the two ties that are the layer's boundary, so this is only turning that
 /// naming into a tree assignment — the input side first, so tree 3 is always the
 /// input and tree 4 always the output, in every chunk of every shape.
+///
+/// **Stream UU: the `lm_head` chunk takes the input side and only the input
+/// side.**  Its `stream_in` is the residual its final norm consumed, which is
+/// the last layer chunk's `stream_out` and is bound to it by the ordinary
+/// layer-axis pair check.  Its `stream_out` is that norm's *output*, which no
+/// chunk consumes -- there is no layer 33 -- so committing it would be a tree
+/// whose root nothing ever compares, at the price of one more `nreal` x
+/// `2^log_rows` tree per head chunk.  One side, and the head chunk is therefore
+/// structurally never the producer of a residual edge.
 pub fn sides(gp: &GluePlan) -> Vec<Side> {
-    [gp.stream_in, gp.stream_out]
-        .iter()
+    let mut want = vec![gp.stream_in];
+    if !gp.head_norm {
+        want.push(gp.stream_out);
+    }
+    want.iter()
         .enumerate()
         .map(|(i, (region, tie))| {
             let r = &gp.regions[*region];
@@ -288,6 +300,14 @@ pub struct ChainVerdict {
     pub present: bool,
     /// the two statements agree on everything that fixes the boundary layout
     pub shape_ok: bool,
+    /// Stream KK: the two statements' declared coordinates are the ones the
+    /// pair's own axis implies -- `layer_b == layer_a + 1` and one block on a
+    /// layer edge, one layer and `block_b == block_a + 1` on a token edge.
+    /// True when neither statement declares a coordinate (every proof written
+    /// before the field existed), false when only one does: a pair where one
+    /// side says where it is and the other does not is not a pair whose
+    /// coordinates were checked.
+    pub coord_ok: bool,
     /// the first chunk's output root equals the second's input root
     pub roots_equal: bool,
     pub out_root: Option<String>,
@@ -346,15 +366,21 @@ impl ChainVerdict {
         let need = |ok: bool, what: &str| (!ok).then(|| what.to_string());
         match axis {
             Axis::Layer => need(v.present, "the residual boundary is absent from one of the \
-                                            statements (`--bounds` was off)")
+                                            statements: `--bounds` was off, or the first chunk \
+                                            is an `lm_head` chunk, which commits an input side \
+                                            and no output side")
                 .or_else(|| need(v.shape_ok, "the two statements disagree about the residual \
                                               boundary's layout"))
+                .or_else(|| need(v.coord_ok, "the two statements' declared (layer, block) \
+                                              coordinates are not a layer edge"))
                 .or_else(|| need(v.roots_equal, "the first chunk's residual out root is not the \
                                                  second's in root")),
             Axis::Token => need(v.kv_present, "the K/V boundary is absent from one of the \
                                                statements (`--kv-bind` was off)")
                 .or_else(|| need(v.kv_shape_ok, "the two statements disagree about the K/V \
                                                  boundary's layout"))
+                .or_else(|| need(v.coord_ok, "the two statements' declared (layer, block) \
+                                              coordinates are not a token edge"))
                 .or_else(|| need(v.kv_roots_equal, "a head band group's out root is not its \
                                                     successor's in root")),
             Axis::None => Some(
@@ -370,6 +396,7 @@ impl ChainVerdict {
             axis: Axis::None,
             present: false,
             shape_ok: false,
+            coord_ok: false,
             roots_equal: false,
             out_root: None,
             in_root: None,
@@ -410,10 +437,61 @@ impl KvLayout {
     }
 }
 
-/// How many glue boundary sides a statement's parameters imply (stream H's two,
-/// or none).
+/// How many glue boundary sides a statement's parameters imply: stream H's two
+/// on a layer chunk, stream UU's one on an `lm_head` chunk (the input side
+/// only, see `sides`), or none.
+///
+/// Arithmetic on `Fixed.params` alone, like `kv_layout`'s, so the pair check
+/// derives the tree layout without building a plan.
 fn glue_sides(p: &crate::compose::Params) -> usize {
-    if p.bounds && p.glue.is_some() { 2 } else { 0 }
+    match &p.glue {
+        Some(g) if p.bounds => {
+            if g.head_norm { 1 } else { 2 }
+        }
+        _ => 0,
+    }
+}
+
+/// Stream UU: does this statement commit a residual **input** side at all?
+///
+/// This is what says whether the edge into a chunk is a link or a declared end,
+/// and it is deliberately a fact about the statement and not about the flag: a
+/// head chunk proved with `--bounds` from a dump that carries no final norm has
+/// `glue: None`, commits nothing, and must still be reported as a declared end
+/// rather than as a link that failed.
+pub fn has_in_side(p: &crate::compose::Params) -> bool {
+    glue_sides(p) >= 1
+}
+
+/// Everything about two chunks' wiring parameters that has to agree for their
+/// boundary trees to be comparable.
+///
+/// Two fields are exempt on a layer -> head edge, and both for the same reason:
+/// they describe parts of the wiring family a head chunk has not got.
+///
+///  * `head_norm` says which family this is. Both families take the input side
+///    from the same claim over the same residual in the same canonical
+///    channel-major order (`GluePlan::head`), which is why the head needed a
+///    side and not a shape.
+///  * `dff` is the SwiGLU's own tiling width. A head chunk has no FFN, so its
+///    `dff` is 0 by construction, and it fixes nothing about the residual
+///    boundary -- the boundary's layout is `d`, `a` and `s`, and the two trees'
+///    own column sizes are compared directly besides.
+///
+/// Between two layer chunks `dff` is still compared, so nothing that used to be
+/// checked on the recorded path stopped being checked.
+fn glue_layout_eq(a: &crate::compose::Params, b: &crate::compose::Params) -> bool {
+    match (&a.glue, &b.glue) {
+        (Some(ga), Some(gb)) => {
+            ga.d == gb.d
+                && ga.a == gb.a
+                && ga.eps == gb.eps
+                && ga.inv_d == gb.inv_d
+                && ga.deq_ties == gb.deq_ties
+                && (gb.head_norm || ga.dff == gb.dff)
+        }
+        _ => false,
+    }
 }
 
 pub fn kv_layout(p: &crate::compose::Params) -> Option<KvLayout> {
@@ -499,17 +577,27 @@ pub fn chain_of(
             "neither chunk carries a boundary: there is nothing to compare",
         );
     }
-    // The residual boundary exists only when *both* chunks committed stream H's
-    // two trees; without them there is no `FIRST_TREE + 1` to read.
-    let glue_present = ga == 2 && gb == 2;
-    // everything the boundary layout depends on: the token count, the two
-    // wiring shape numbers, the blowup, and the two trees' own column sizes
+    // The residual edge exists only when the producer committed an *out* side
+    // and the consumer an *in* side.  A layer chunk has both (`ga == 2`); an
+    // `lm_head` chunk has the input side alone (`gb == 1`), which is why it can
+    // be the second of a pair and never the first -- there is no layer 33.
+    let glue_present = ga == 2 && gb >= 1;
+    // Stream UU: the consumer is a head chunk, so it has no tree 4 and the
+    // conjuncts over one are not asked.
+    let head_b = gb == 1;
+    // everything the boundary layout depends on: the token count, the wiring
+    // shape numbers, the blowup, and the column sizes of the two trees the link
+    // actually compares -- the producer's out tree against the consumer's in
+    // tree.  On a layer -> layer pair the old pairwise comparison is still made
+    // as well, so nothing that used to be checked stopped being checked.
     let shape_ok = glue_present
         && fa.params.s == fb.params.s
-        && fa.params.glue == fb.params.glue
+        && glue_layout_eq(&fa.params, &fb.params)
         && fa.log_blowup == fb.log_blowup
-        && fa.sizes[FIRST_TREE] == fb.sizes[FIRST_TREE]
-        && fa.sizes[FIRST_TREE + 1] == fb.sizes[FIRST_TREE + 1];
+        && fa.sizes[FIRST_TREE + 1] == fb.sizes[FIRST_TREE]
+        && (head_b
+            || (fa.sizes[FIRST_TREE] == fb.sizes[FIRST_TREE]
+                && fa.sizes[FIRST_TREE + 1] == fb.sizes[FIRST_TREE + 1]));
     let out_root = glue_present.then(|| roots_a[FIRST_TREE + 1].clone());
     let in_root = glue_present.then(|| roots_b[FIRST_TREE].clone());
     // ---- stream AA: the K/V link ------------------------------------------
@@ -559,10 +647,25 @@ pub fn chain_of(
         _ => (false, false, vec![]),
     };
     let axis = axis_of(&fa.params, &fb.params);
+    // Stream KK: the coordinate the statement declares, compared on the pair's
+    // own axis.  `pre_root` is what would tie a declared layer to the model
+    // (stream LL); until then this says the two chunks agree about which edge
+    // they are, which is what the tag used to say on its own.
+    let step = |a: Option<usize>, b: Option<usize>, d: usize| match (a, b) {
+        (Some(a), Some(b)) => b == a + d,
+        (None, None) => true,
+        _ => false,
+    };
+    let coord_ok = match axis {
+        Axis::Layer => step(fa.layer, fb.layer, 1) && step(fa.block, fb.block, 0),
+        Axis::Token => step(fa.layer, fb.layer, 0) && step(fa.block, fb.block, 1),
+        Axis::None => false,
+    };
     let mut v = ChainVerdict {
         axis,
         present: glue_present,
         shape_ok,
+        coord_ok,
         roots_equal: glue_present && out_root == in_root,
         out_root,
         in_root,
@@ -938,6 +1041,12 @@ struct GridChunk {
     layer: usize,
     fixed: Fixed,
     roots: Vec<String>,
+    /// stream KK: the `lm_head` chunk of its block.  It is on the grid -- it
+    /// has a coordinate and it is verified like every other chunk -- but it
+    /// carries no residual boundary today, so the link into it is a declared
+    /// end and not a link that failed (`notes/witness-slack.md` section 5 item
+    /// 3).
+    is_head: bool,
 }
 
 /// `bounds-grid`: every link of the (block, layer) grid, on both axes, from
@@ -951,11 +1060,35 @@ struct GridChunk {
 ///   --allow-gaps                a missing block or layer only shrinks the implied count
 ///   --expect-layer-links N      pin the implied count from outside
 ///   --expect-token-links N
+///   --verify                    also run `verify_composed` on every chunk proof
+///   --prompt FILE               the declared prompt's ids (a JSON list, or an `ids` field)
+///   --expect-pre-roots FILE     the tree-0 root each (layer, prefix) must declare
 /// ```
 ///
 /// Exit status 0 only when every implied link ran and chained on its own
-/// axis, every tag sits where its statement says it sits, and the pinned
-/// counts (if given) are met; 1 otherwise, after the JSON is written.
+/// axis, every tag sits where its statement says it sits, every position's id
+/// is the declared prompt's or the previous position's proved argmax, the
+/// pinned counts (if given) are met, and -- under `--verify` -- every chunk
+/// proof verifies; 1 otherwise, after the JSON is written.
+///
+/// **Stream KK.**  Before `--verify` this command answered "the roots line up",
+/// which is not "the sequence is proved" (`notes/witness-slack.md` section 6):
+/// it never called `verify_composed`, so a chunk whose proof had been corrupted
+/// below its roots chained exactly as an honest one did.  `--verify` runs the
+/// verifier on every chunk of the plan and needs the third document
+/// `--ser-dir` writes, `<tag>.claims.json`; a directory serialized before
+/// stream KK does not have it, and the run says so per chunk rather than
+/// passing.
+///
+/// The token axis of the *sequence* -- as distinct from the K/V axis of the
+/// grid -- is checked here too, and unconditionally: every position of every
+/// block whose layer-0 chunk carries the embedding gadget is either a prompt
+/// position, whose id must equal the declared prompt's, or a generated one,
+/// whose id must equal the token the `lm_head` chunk proved for the position
+/// before it (within a block, and across the block seam at `t = 0`).  Both
+/// vectors are published in the statements and pinned there by
+/// `verify_composed` (`Fixed::tok_in`, `Fixed::tok_out`), so this comparison is
+/// between two proved values and not between two declarations.
 pub fn grid_cmd(args: &[String]) {
     let dir = crate::arg_str(args, "--dir").expect("bounds-grid needs --dir <serialized dir>");
     let allow_gaps = crate::flag(args, "--allow-gaps");
@@ -963,6 +1096,38 @@ pub fn grid_cmd(args: &[String]) {
         .map(|s| s.parse().expect("--expect-layer-links takes a count"));
     let expect_token: Option<usize> = crate::arg_str(args, "--expect-token-links")
         .map(|s| s.parse().expect("--expect-token-links takes a count"));
+    // stream KK: the verifier, and the one declaration the sequence still needs
+    let verify = crate::flag(args, "--verify");
+    let prompt: Option<Vec<u32>> = crate::arg_str(args, "--prompt").map(|f| {
+        let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--prompt {f}: {e}"));
+        let v: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("--prompt {f}: not JSON: {e}"));
+        let a = v.get("ids").unwrap_or(&v).as_array()
+            .unwrap_or_else(|| panic!("--prompt {f}: want a list of ids, or an `ids` field"))
+            .clone();
+        a.iter().map(|x| x.as_u64().expect("--prompt: an id is not a number") as u32).collect()
+    });
+    // Stream KK, the hook stream LL fills: a table of the tree-0 root each
+    // (layer, prefix width) is expected to declare.  `root_ok` compares a
+    // proof's commitment 0 against its *own* statement, so the statement's
+    // `pre_root` is a declaration; deriving it from the model for that chunk's
+    // shape is LL's, and this is where the derived table is compared.  The file
+    // is a list of `{"layer": k, "c": n, "pre_root": "..."}`.
+    let expect_pre: Option<Vec<Value>> = crate::arg_str(args, "--expect-pre-roots").map(|f| {
+        let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--expect-pre-roots {f}: {e}"));
+        let v: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("--expect-pre-roots {f}: not JSON: {e}"));
+        v.get("roots").unwrap_or(&v).as_array()
+            .unwrap_or_else(|| panic!("--expect-pre-roots {f}: want a list of \
+                                       {{layer, c, pre_root}}"))
+            .clone()
+    });
+    if verify && prompt.is_none() {
+        eprintln!("grid: --verify needs --prompt <file>: without the declared prompt no \
+                   position's id can be checked against anything, and a run that skipped \
+                   the check would read as one that made it");
+        std::process::exit(1);
+    }
 
     // ---- which tags make up the grid ------------------------------------
     let (source, tags): (Value, Vec<String>) = if let Some(p) = crate::arg_str(args, "--plan") {
@@ -987,10 +1152,11 @@ pub fn grid_cmd(args: &[String]) {
 
     // ---- read every chunk once: statement, and the proof's roots ---------
     for tag in &tags {
-        let Some((tagged_block, layer)) = grid_tag(tag) else {
-            off_grid.push(tag.clone());
-            continue;
-        };
+        // stream KK: the tag is the plan's claim about where a chunk sits; the
+        // statement is the chunk's own.  A tag that is not on the grid is no
+        // longer off it if the statement declares a coordinate -- which is how
+        // the `lm_head` chunk, whose tag is `head`, takes its cell.
+        let tagged = grid_tag(tag);
         let fpath = format!("{dir}/{tag}.fixed.json");
         let ppath = format!("{dir}/{tag}.proof.json");
         let (Ok(fb), Ok(pb)) = (std::fs::read(&fpath), std::fs::read(&ppath)) else {
@@ -1005,6 +1171,26 @@ pub fn grid_cmd(args: &[String]) {
             Ok(p) => p.commitments.iter().map(|c| format!("{c:?}")).collect(),
             Err(e) => { failures.push(format!("{tag}: unparseable proof: {e}")); continue; }
         };
+        let (tagged_block, tagged_layer) = match tagged {
+            Some((b, l)) => (b, Some(l)),
+            None => (None, None),
+        };
+        let Some(layer) = fixed.layer.or(tagged_layer) else {
+            off_grid.push(tag.clone());
+            continue;
+        };
+        if let (Some(d), Some(t)) = (fixed.layer, tagged_layer) {
+            if d != t {
+                failures.push(format!("{tag}: the tag names layer {t} but the statement \
+                                       declares layer {d}"));
+            }
+        }
+        if let (Some(d), Some(t)) = (fixed.block, tagged_block) {
+            if d != t {
+                failures.push(format!("{tag}: the tag names block {t} but the statement \
+                                       declares block {d}"));
+            }
+        }
         let (c, s) = (fixed.params.c, fixed.params.s);
         // The block a statement declares is its prefix width in blocks.  A tag
         // that names another block is a chunk filed on the wrong cell: that is
@@ -1022,7 +1208,12 @@ pub fn grid_cmd(args: &[String]) {
             failures.push(format!("{tag}: the tag names block {b} but the statement declares \
                                    block {declared} (c = {c} = {declared} x {s})"));
         }
-        let block = tagged_block.unwrap_or(declared);
+        if let Some(b) = fixed.block.filter(|b| *b != declared) {
+            failures.push(format!("{tag}: the statement's declared block {b} is not the block \
+                                   its own prefix implies (c = {c} = {declared} x {s})"));
+        }
+        let block = tagged_block.or(fixed.block).unwrap_or(declared);
+        let is_head = fixed.params.head_argmax;
         chunk_rows.push(json!({
             "tag": tag,
             "block": block,
@@ -1030,14 +1221,19 @@ pub fn grid_cmd(args: &[String]) {
             "block_declared": declared,
             "block_tag_ok": block == declared,
             "layer": layer,
+            "layer_declared": fixed.layer,
+            "block_declared": fixed.block,
             "c": c, "s": s,
             "trees": fixed.sizes.len(),
             "bounds": fixed.params.bounds,
             "kv_bind": fixed.params.kv_bind,
+            "head": is_head,
+            "ids": fixed.tok_in.len(),
+            "emits": fixed.tok_out.len(),
             "statement_bytes": fb.len(),
             "proof_bytes": pb.len(),
         }));
-        chunks.push(GridChunk { tag: tag.clone(), block, layer, fixed, roots });
+        chunks.push(GridChunk { tag: tag.clone(), block, layer, fixed, roots, is_head });
     }
     for m in &missing {
         failures.push(format!("{m}: named by the plan, but {dir}/{m}.{{fixed,proof}}.json is not there"));
@@ -1052,6 +1248,24 @@ pub fn grid_cmd(args: &[String]) {
                                   chunks[j].tag, ch.tag, ch.block, ch.layer));
         }
     }
+    // stream KK: a `lm_head` chunk takes a cell of the grid -- it is verified,
+    // its emitted tokens are read, and its coordinate is compared.
+    //
+    // Stream UU: it now also commits the residual **input** side (`bounds::sides`),
+    // so the edge from the last layer chunk into it is an ordinary layer-axis
+    // link and is run below with every other one.  `head_end` is what is left of
+    // stream KK's rule: a head chunk that committed no input side -- `--bounds`
+    // off, or a dump too old to carry the final norm, so `glue` is null -- is
+    // still a declared end and not a link that ran and failed.
+    let head_end = |i: &usize| {
+        chunks[*i].is_head && !has_in_side(&chunks[*i].fixed.params)
+    };
+    let mut declared: Vec<Value> = vec![];
+    // Stream UU: edges the grid's shape suggests and the statement does not
+    // imply.  Distinct from `declared_ends`: a declared end is a boundary that
+    // exists and is taken on trust, and this is a pair with no boundary between
+    // them to take on trust in the first place.
+    let mut not_implied: Vec<Value> = vec![];
     let mut gaps: Vec<Value> = vec![];
     // layer links: inside every block, consecutive layers
     let mut layer_links: Vec<(usize, usize)> = vec![];
@@ -1059,7 +1273,18 @@ pub fn grid_cmd(args: &[String]) {
         let ks: Vec<usize> = layers.keys().copied().collect();
         for w in ks.windows(2) {
             if w[1] == w[0] + 1 {
-                layer_links.push((layers[&w[0]], layers[&w[1]]));
+                let (i, j) = (layers[&w[0]], layers[&w[1]]);
+                if head_end(&j) {
+                    declared.push(json!({
+                        "what": "the lm_head chunk's input",
+                        "block": b, "from": chunks[i].tag, "to": chunks[j].tag,
+                        "why": "this head chunk committed no residual input side (`--bounds` \
+                                off, or a dump with no final norm and so no wiring family), \
+                                so the last layer's stream_out joins it by declaration, not \
+                                by a root equality (notes/witness-slack.md section 5 item 3)"}));
+                } else {
+                    layer_links.push((i, j));
+                }
             } else {
                 gaps.push(json!({"axis": "layer", "block": b, "from": w[0], "to": w[1]}));
             }
@@ -1077,7 +1302,26 @@ pub fn grid_cmd(args: &[String]) {
         let bs: Vec<usize> = blocks.keys().copied().collect();
         for w in bs.windows(2) {
             if w[1] == w[0] + 1 {
-                token_links.push((blocks[&w[0]], blocks[&w[1]]));
+                let (i, j) = (blocks[&w[0]], blocks[&w[1]]);
+                if chunks[i].is_head || chunks[j].is_head {
+                    // Stream UU: not a declared end.  A head chunk attends to
+                    // nothing, so it holds no K/V cache and there is no state
+                    // for two blocks' heads to hand over: its input is the
+                    // block's own residual (bound on the layer axis above) and
+                    // its output is the block's ids (compared by the emitted ->
+                    // consumed check below).  The grid's shape puts them side by
+                    // side; the statement implies no edge between them.
+                    not_implied.push(json!({
+                        "what": "two lm_head chunks are not a K/V edge",
+                        "layer": k, "from": chunks[i].tag, "to": chunks[j].tag,
+                        "why": "the head chunk performs no attention and commits no K/V \
+                                boundary, so there is no cache to hand over: its input is \
+                                its own block's residual, tied on the layer axis, and its \
+                                output is its own block's ids, tied by the emitted -> \
+                                consumed check"}));
+                } else {
+                    token_links.push((i, j));
+                }
             } else {
                 gaps.push(json!({"axis": "token", "layer": k, "from": w[0], "to": w[1]}));
             }
@@ -1094,7 +1338,10 @@ pub fn grid_cmd(args: &[String]) {
     if let Some(n) = expect_token.filter(|n| *n != want_token) {
         failures.push(format!("the grid implies {want_token} token link(s); --expect-token-links {n}"));
     }
-    if want_layer + want_token == 0 {
+    // Stream KK: with `--verify` a grid of one chunk is still a question worth
+    // asking -- does it verify, and are its ids what the prompt declares -- so
+    // "no link" is only a failure for the pair check on its own.
+    if want_layer + want_token == 0 && !verify {
         failures.push("the grid implies no link at all: nothing to chain".to_string());
     }
 
@@ -1131,18 +1378,274 @@ pub fn grid_cmd(args: &[String]) {
             }));
         }
     }
+    // ---- stream KK: the chunk proofs themselves ---------------------------
+    //
+    // The pair check above reads four byte strings and compares roots.  This
+    // reads the three documents a chunk *is* and asks the only question that
+    // makes a chain a proof: does this chunk verify?
+    let mut verified: Vec<Value> = vec![];
+    let mut n_accept = 0usize;
+    if verify {
+        for ch in &chunks {
+            let t0 = std::time::Instant::now();
+            let f = format!("{dir}/{}.fixed.json", ch.tag);
+            let c = format!("{dir}/{}.claims.json", ch.tag);
+            let pp = format!("{dir}/{}.proof.json", ch.tag);
+            let (fb, cb, pb) = (std::fs::read(&f), std::fs::read(&c), std::fs::read(&pp));
+            let (accepts, secs, err) = match (fb, cb, pb) {
+                (Ok(fb), Ok(cb), Ok(pb)) => {
+                    let v = crate::compose::verify_composed(&fb, &cb, &pb);
+                    let why = (!v.accepts()).then(|| {
+                        serde_json::to_string(&json!({
+                            "stark": v.stark_ok, "root": v.root_ok, "sums": v.sums_cancel,
+                            "embed": v.embed_ok, "embed_tok": v.embed_tok_ok,
+                            "head_tie": v.head_tie_ok, "head_tok": v.head_tok_ok,
+                            "error": v.error})).unwrap()
+                    });
+                    (v.accepts(), v.verify_secs, why)
+                }
+                (_, Err(e), _) => (false, 0.0,
+                    Some(format!("{c}: {e} -- a directory serialized before stream KK carries the \
+                        statement and the proof but not the claims, and the verifier needs all \
+                        three"))),
+                (Err(e), _, _) | (_, _, Err(e)) => (false, 0.0, format!("{e}").into()),
+            };
+            if accepts {
+                n_accept += 1;
+            } else {
+                failures.push(format!("{}: the chunk proof does not verify: {}", ch.tag,
+                                      err.clone().unwrap_or_default()));
+            }
+            eprintln!("grid verify {}: {} ({:.2} s)", ch.tag,
+                      if accepts { "accepts" } else { "REJECTED" }, secs);
+            verified.push(json!({"tag": ch.tag, "accepts": accepts, "verify_secs": secs,
+                                 "wall_secs": t0.elapsed().as_secs_f64(), "why": err}));
+        }
+    }
+
+    // ---- stream KK: emitted -> consumed, along the sequence ---------------
+    //
+    // `notes/witness-slack.md` section 5 item 2.  The ids a block consumed are
+    // its layer-0 chunk's `tok_in`; the tokens a block emitted are its
+    // `lm_head` chunk's `tok_out`; both are pinned to their own proof by
+    // `verify_composed`.  What is unchecked before this is the join: that the
+    // sequence's own output at position `t` is what it read at position
+    // `t + 1`.
+    let mut ids: BTreeMap<usize, (&str, &Vec<u32>)> = BTreeMap::new();
+    let mut emits: BTreeMap<usize, (&str, &Vec<u32>)> = BTreeMap::new();
+    for ch in &chunks {
+        if !ch.fixed.tok_in.is_empty() {
+            if let Some((other, _)) = ids.insert(ch.block, (&ch.tag, &ch.fixed.tok_in)) {
+                failures.push(format!("{} and {other} both publish block {}'s ids", ch.tag,
+                                      ch.block));
+            }
+        }
+        if !ch.fixed.tok_out.is_empty() {
+            if let Some((other, _)) = emits.insert(ch.block, (&ch.tag, &ch.fixed.tok_out)) {
+                failures.push(format!("{} and {other} both publish block {}'s emitted tokens",
+                                      ch.tag, ch.block));
+            }
+        }
+    }
+    let mut n_prompt = 0usize;
+    let mut n_generated = 0usize;
+    let mut bad_ids: Vec<Value> = vec![];
+    let mut unbacked: Vec<Value> = vec![];
+    for (b, (tag, tin)) in &ids {
+        let s_blk = chunks.iter().find(|c| c.tag == **tag).map(|c| c.fixed.params.s).unwrap_or(0);
+        for (t, got) in tin.iter().enumerate() {
+            let pos = b * s_blk + t;
+            let declared_id = prompt.as_ref().and_then(|p| p.get(pos).copied());
+            if let Some(want) = declared_id {
+                n_prompt += 1;
+                if want != *got {
+                    bad_ids.push(json!({"kind": "prompt", "block": b, "t": t, "pos": pos,
+                                        "want": want, "got": got, "tag": tag}));
+                }
+                continue;
+            }
+            // a generated position: the previous position's proved argmax, in
+            // this block for `t > 0` and in the previous one at the seam
+            let src = if t > 0 {
+                emits.get(b).and_then(|(ht, e)| e.get(t - 1).map(|v| (*ht, *v, *b, t - 1)))
+            } else {
+                b.checked_sub(1).and_then(|pb| {
+                    emits.get(&pb).and_then(|(ht, e)| {
+                        e.last().map(|v| (*ht, *v, pb, e.len() - 1))
+                    })
+                })
+            };
+            match src {
+                Some((ht, want, sb, st)) => {
+                    n_generated += 1;
+                    if want != *got {
+                        bad_ids.push(json!({"kind": "generated", "block": b, "t": t, "pos": pos,
+                                            "want": want, "got": got, "tag": tag,
+                                            "from": {"tag": ht, "block": sb, "t": st}}));
+                    }
+                }
+                None => unbacked.push(json!({"block": b, "t": t, "pos": pos, "tag": tag,
+                                             "why": "no lm_head chunk on this grid \
+                                                     proves the argmax at the position \
+                                                     before it, and the declared prompt \
+                                                     does not reach it"})),
+            }
+        }
+    }
+    for e in &bad_ids {
+        failures.push(format!("the id at position {} is not the one that reaches it: {e}",
+                              e["pos"]));
+    }
+    // Without a declared prompt nothing says where the prompt ends, so a
+    // position with no argmax behind it is reported as declared rather than
+    // failed; `--verify` demands the prompt and then it is a hole.
+    if prompt.is_some() {
+        for u in &unbacked {
+            failures.push(format!("position {} is generated and unbacked: {u}", u["pos"]));
+        }
+    } else if !unbacked.is_empty() {
+        declared.push(json!({"what": "the ids of positions with no argmax behind them",
+                             "positions": unbacked.len(),
+                             "why": "no --prompt was given, so these are declared"}));
+    }
+    if prompt.is_none() && !ids.is_empty() {
+        declared.push(json!({"what": "the prompt",
+                             "why": "no --prompt was given: every published id was \
+                                     compared only against an argmax, where one exists"}));
+    }
+    // Stream LL: declared only where no derived table was handed in.  With
+    // `--expect-pre-roots` the grid compares every chunk's `pre_root` against a
+    // root derived from the model and the chunk's own coordinates, so the roots
+    // stop being an input the verifier takes on trust and become a check --
+    // which is the whole of `notes/witness-slack.md` section 5 item 1.
+    if expect_pre.is_none() {
+        declared.push(json!({"what": "one tree-0 root per chunk", "chunks": chunks.len(),
+                             "why": "root_ok compares the proof's commitment 0 against its \
+                                     own statement's pre_root; that the root is the model's, \
+                                     for this layer and this shape, is the verifier's \
+                                     declaration"}));
+    }
+    let ids_ok = bad_ids.is_empty() && (prompt.is_none() || unbacked.is_empty());
+
+    // ---- stream LL: the model, per layer and across the grid ---------------
+    //
+    // `notes/witness-slack.md` section 5 item 1's last sentence: the token-axis
+    // chain compares K/V sides, not tree 0, so nothing said that two blocks of
+    // one layer used the same weights.  `Fixed.model` is the content hash of
+    // exactly the model data tree 0 reads (`Layer::model_hash`), and it is
+    // shape-independent, so the comparison is possible on the statements alone
+    // and needs no table.  Unconditional: a grid whose chunks name two models,
+    // or whose one layer carries two model hashes, is a named rejection.
+    let mut models: BTreeMap<usize, (String, String)> = BTreeMap::new();
+    let mut all_models: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut undeclared_model: Vec<String> = vec![];
+    for ch in &chunks {
+        let Some(m) = ch.fixed.model.clone() else {
+            undeclared_model.push(ch.tag.clone());
+            continue;
+        };
+        all_models.entry(m.clone()).or_default().push(ch.tag.clone());
+        match models.get(&ch.layer) {
+            Some((first, tag)) if *first != m => failures.push(format!(
+                "{}: layer {} names model {m}, and {tag} names {first} for the same layer",
+                ch.tag, ch.layer)),
+            Some(_) => {}
+            None => {
+                models.insert(ch.layer, (m, ch.tag.clone()));
+            }
+        }
+    }
+    // Deliberately *not* a failure: a grid of 32 layers has 32 model hashes,
+    // because a layer's weights are its own.  What ties the 32 into one model
+    // is the manifest `b65 model-roots` writes, which asserts one hash per
+    // layer and names them all; the grid's own check is the per-layer one
+    // above, which is what section 5 item 1's last sentence asks for.
+    if !undeclared_model.is_empty() {
+        declared.push(json!({"what": "which model these chunks used",
+                             "chunks": undeclared_model.len(),
+                             "why": "their statements predate Fixed.model, so nothing \
+                                     compares their weights against the rest of the grid"}));
+    }
+
+    // ---- stream KK: the declared tree-0 roots, against a derived table ------
+    //
+    // Stream LL fills the table: `b65 model-roots --plan PLAN` runs
+    // `b65 expect-root` per plan line and writes one row per `(layer, c)`.  A
+    // row also carries the model hash it was derived under, and that is
+    // compared too -- a table derived from one model against a grid proved
+    // under another is the case the root comparison alone would only catch by
+    // accident.
+    let mut pre_rows: Vec<Value> = vec![];
+    if let Some(table) = &expect_pre {
+        for ch in &chunks {
+            let want = table.iter().find(|r| {
+                r["layer"].as_u64() == Some(ch.layer as u64)
+                    && r["c"].as_u64() == Some(ch.fixed.params.c as u64)
+            });
+            let got = &ch.fixed.pre_root;
+            let ok = want.and_then(|r| r["pre_root"].as_str()) == Some(got.as_str());
+            if !ok {
+                failures.push(format!(
+                    "{}: the statement declares pre_root {got} for (layer {}, c {}), and \
+                     the table says {}", ch.tag, ch.layer, ch.fixed.params.c,
+                    want.map(|r| r["pre_root"].to_string())
+                        .unwrap_or_else(|| "nothing at all".into())));
+            }
+            // the table's own model, against the statement's
+            let want_model = want.and_then(|r| r["model"].as_str());
+            let model_ok = match (want_model, ch.fixed.model.as_deref()) {
+                (Some(a), Some(b)) => a == b,
+                // a row or a statement written without one: the root comparison
+                // above is what stands, and the gap is declared below
+                _ => true,
+            };
+            if !model_ok {
+                failures.push(format!(
+                    "{}: the statement names model {} and the pre-root table's row for \
+                     (layer {}, c {}) was derived from {}", ch.tag,
+                    ch.fixed.model.clone().unwrap_or_default(), ch.layer,
+                    ch.fixed.params.c, want_model.unwrap_or("nothing")));
+            }
+            pre_rows.push(json!({"tag": ch.tag, "layer": ch.layer, "c": ch.fixed.params.c,
+                                 "pre_root": got, "ok": ok, "model_ok": model_ok}));
+        }
+        // every cell the grid uses must be in the table: a table that simply
+        // omits a layer would otherwise be a table that checks nothing there
+        let missing: Vec<String> = chunks.iter()
+            .filter(|ch| !table.iter().any(|r| {
+                r["layer"].as_u64() == Some(ch.layer as u64)
+                    && r["c"].as_u64() == Some(ch.fixed.params.c as u64)
+            }))
+            .map(|ch| ch.tag.clone())
+            .collect();
+        if !missing.is_empty() {
+            failures.push(format!(
+                "the pre-root table has no row for {} chunk(s): {}",
+                missing.len(), missing.join(", ")));
+        }
+    } else {
+        declared.push(json!({"what": "which model each chunk's tree-0 root is",
+                             "why": "no --expect-pre-roots table was given, so every \
+                                     chunk's pre_root is compared only against its own \
+                                     proof; `b65 model-roots --plan PLAN` derives the \
+                                     table from the model"}));
+    }
+
     let all_layer = run[0] == want_layer && passed[0] == run[0];
     let all_token = run[1] == want_token && passed[1] == run[1];
-    let all_chain = failures.is_empty() && all_layer && all_token;
+    let all_verified = !verify || n_accept == chunks.len();
+    let all_chain = failures.is_empty() && all_layer && all_token && ids_ok && all_verified;
     let blocks: Vec<usize> = grid.keys().copied().collect();
     let layers: BTreeMap<String, Vec<usize>> = grid
         .iter()
         .map(|(b, l)| (b.to_string(), l.keys().copied().collect()))
         .collect();
     eprintln!("grid: {} block(s), {} chunk(s) on the grid, {} off it; layer {}/{} of {} implied, \
-               token {}/{} of {} implied{}",
+               token {}/{} of {} implied; verified {}/{}; ids prompt {} + generated {} \
+               ({} bad, {} unbacked){}",
               blocks.len(), chunks.len(), off_grid.len(),
               passed[0], run[0], want_layer, passed[1], run[1], want_token,
+              n_accept, verified.len(), n_prompt, n_generated, bad_ids.len(), unbacked.len(),
               if all_chain { "" } else { " -- FAILED" });
     for f in &failures {
         eprintln!("grid: FAIL {f}");
@@ -1167,6 +1670,29 @@ pub fn grid_cmd(args: &[String]) {
             "links_expected": want_layer + want_token,
             "links_run": run[0] + run[1],
             "links_passed": passed[0] + passed[1],
+            // stream KK
+            "verify": verify,
+            "verified": {"run": verified.len(), "accepted": n_accept,
+                         "all": all_verified, "chunks": verified},
+            "tokens": {"prompt_file": crate::arg_str(args, "--prompt"),
+                       "prompt_len": prompt.as_ref().map(|p| p.len()),
+                       "blocks_with_ids": ids.len(), "blocks_with_emits": emits.len(),
+                       "prompt_positions": n_prompt, "generated_positions": n_generated,
+                       "mismatches": bad_ids, "unbacked": unbacked, "all": ids_ok},
+            "pre_roots": {"table": crate::arg_str(args, "--expect-pre-roots"),
+                          "chunks": pre_rows},
+            // stream LL: which model each chunk named, and how many the grid
+            // used -- one is the only answer that is not a failure
+            "models": {"distinct": all_models.len(),
+                       "per_layer": models.iter()
+                           .map(|(l, (m, _))| json!({"layer": l, "model": m}))
+                           .collect::<Vec<_>>(),
+                       "undeclared": undeclared_model},
+            "declared_ends": declared,
+            // stream UU: pairs the grid's shape puts next to each other and the
+            // statements imply no edge between -- not slack, and not counted as
+            // a declared end
+            "not_implied": not_implied,
             "failures": failures,
             "all_chain": all_chain,
             "links": links,
@@ -1445,7 +1971,34 @@ mod tests {
             pow_bits: 0,
             sizes: vec![vec![4]; n],
             pre_root: "pre".into(),
+            // stream KK: the tests below drive the coordinate comparison
+            // through `at`, which sets these; undeclared is the pre-KK case and
+            // the default here so every existing test keeps asking what it asked
+            layer: None,
+            block: None,
+            model: None,
+            tok_in: vec![],
+            tok_out: vec![],
         }
+    }
+
+    /// Stream KK: the same statement with a declared coordinate.
+    fn at(mut f: Fixed, layer: usize, block: usize) -> Fixed {
+        f.layer = Some(layer);
+        f.block = Some(block);
+        f
+    }
+
+    /// Stream UU: an `lm_head` chunk's statement -- the head's wiring family,
+    /// the residual input side and no output side, no K/V boundary, and the
+    /// argmax composed.  Four trees, not five.
+    fn head_fixed(c: usize, s: usize) -> Fixed {
+        let mut f = fixed(c, s, false);
+        f.params.head_argmax = true;
+        f.params.corner = false;
+        f.params.glue = Some(GlueParams { d: 64, a: 4, head_norm: true, ..Default::default() });
+        f.sizes = vec![vec![4]; 3 + glue_sides(&f.params)];
+        f
     }
 
     /// Root lists for a pair, with the boundaries the caller asks for made
@@ -1459,7 +2012,10 @@ mod tests {
         let (na, nb) = (fa.sizes.len(), fb.sizes.len());
         let a: Vec<String> = (0..na).map(|i| format!("a{i}")).collect();
         let mut b: Vec<String> = (0..nb).map(|i| format!("b{i}")).collect();
-        if residual_equal {
+        // stream UU: a head chunk has no tree 4, so there is no out root on it
+        // to hand over -- the caller asking for one gets the honest answer that
+        // the two lists simply differ there
+        if residual_equal && a.len() > FIRST_TREE + 1 && b.len() > FIRST_TREE {
             b[FIRST_TREE] = a[FIRST_TREE + 1].clone();
         }
         if let (Some(ka), Some(kb)) = (kv_layout(&fa.params), kv_layout(&fb.params)) {
@@ -1613,6 +2169,48 @@ mod tests {
         assert!(v.chains(), "reason: {:?}", v.reason);
     }
 
+    /// Stream KK: two honest, accepted, root-equal chunks whose *declared*
+    /// coordinates are not a layer edge.  Before the coordinate went into the
+    /// statement, the layer index lived in the plan tag alone and this pair
+    /// chained.
+    #[test]
+    fn layer_edge_rejects_declared_coordinates_that_do_not_step() {
+        let (a, b) = (fixed(1024, 512, false), fixed(1024, 512, false));
+        let (ra, rb) = roots(&a, &b, false, true);
+        // the honest pair: layer 8 -> layer 9 of block 2
+        let (a8, b9) = (at(a.clone(), 8, 2), at(b.clone(), 9, 2));
+        let v = chain_of(&a8, &ra, &b9, &rb);
+        assert!(v.coord_ok && v.chains(), "reason: {:?}", v.reason);
+        // the same two proofs filed as layer 8 -> layer 12
+        let b12 = at(b.clone(), 12, 2);
+        let v = chain_of(&a8, &ra, &b12, &rb);
+        assert!(v.roots_equal && !v.coord_ok && !v.chains());
+        // and as two chunks of different blocks at consecutive layers
+        let b9b3 = at(b.clone(), 9, 3);
+        let v = chain_of(&a8, &ra, &b9b3, &rb);
+        assert!(!v.coord_ok && !v.chains());
+        // one side declaring and the other not is not a checked pair
+        let v = chain_of(&a8, &ra, &b, &rb);
+        assert!(!v.coord_ok && !v.chains());
+        // neither declaring is every proof written before the field existed
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert!(v.coord_ok && v.chains());
+    }
+
+    /// The same on the token axis: the block steps, the layer does not.
+    #[test]
+    fn token_edge_rejects_declared_coordinates_that_do_not_step() {
+        let (a, b) = (fixed(1024, 512, true), fixed(1536, 512, true));
+        let (ra, rb) = roots(&a, &b, true, false);
+        let v = chain_of(&at(a.clone(), 8, 2), &ra, &at(b.clone(), 8, 3), &rb);
+        assert_eq!(v.axis, Axis::Token);
+        assert!(v.coord_ok && v.chains(), "reason: {:?}", v.reason);
+        let v = chain_of(&at(a.clone(), 8, 2), &ra, &at(b.clone(), 9, 3), &rb);
+        assert!(!v.coord_ok && !v.chains());
+        let v = chain_of(&at(a, 8, 2), &ra, &at(b, 8, 7), &rb);
+        assert!(!v.coord_ok && !v.chains());
+    }
+
     #[test]
     fn layer_edge_rejects_a_moved_residual_root() {
         let (a, b) = (fixed(1024, 512, false), fixed(1024, 512, false));
@@ -1633,6 +2231,68 @@ mod tests {
         assert_eq!(v.axis, Axis::Layer);
         assert!(!v.kv_roots_equal, "the K/V roots differ, and that is expected here");
         assert!(v.chains(), "reason: {:?}", v.reason);
+    }
+
+    // ---- stream UU: the last layer -> `lm_head` edge ------------------------
+
+    #[test]
+    fn head_chunk_commits_the_input_side_only() {
+        let h = head_fixed(1024, 512);
+        assert_eq!(glue_sides(&h.params), 1, "the head takes tree 3 and no tree 4");
+        assert!(has_in_side(&h.params));
+        assert_eq!(h.sizes.len(), 4);
+        let l = fixed(1024, 512, true);
+        assert_eq!(glue_sides(&l.params), 2, "a layer chunk still takes both");
+    }
+
+    #[test]
+    fn layer_edge_into_the_head_chunk_chains() {
+        // L31 -> head, one block: the layer's residual out root is the head's
+        // residual in root, and the head's `head_norm` is the one wiring field
+        // the two statements are allowed to differ in
+        let a = at(fixed(1024, 512, true), 31, 2);
+        let b = at(head_fixed(1024, 512), 32, 2);
+        let (ra, rb) = roots(&a, &b, false, true);
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert_eq!(v.axis, Axis::Layer);
+        assert!(v.present && v.shape_ok && v.coord_ok && v.roots_equal);
+        assert!(v.chains(), "reason: {:?}", v.reason);
+    }
+
+    #[test]
+    fn layer_edge_into_the_head_chunk_rejects_a_moved_residual_root() {
+        let a = at(fixed(1024, 512, true), 31, 2);
+        let b = at(head_fixed(1024, 512), 32, 2);
+        let (ra, rb) = roots(&a, &b, false, false);
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert_eq!(v.axis, Axis::Layer);
+        assert!(!v.roots_equal);
+        assert!(!v.chains());
+        assert!(v.reason.as_deref().unwrap().contains("residual out root"),
+                "the refusal names the side: {:?}", v.reason);
+    }
+
+    #[test]
+    fn a_head_chunk_is_never_the_producer_of_a_residual_edge() {
+        // it has no out side, so an edge *out* of it cannot be compared at all
+        let a = at(head_fixed(1024, 512), 32, 2);
+        let b = at(fixed(1024, 512, true), 33, 2);
+        let (ra, rb) = roots(&a, &b, false, true);
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert!(!v.present);
+        assert!(!v.chains());
+        assert!(v.reason.as_deref().unwrap().contains("lm_head"),
+                "the refusal names the case: {:?}", v.reason);
+    }
+
+    #[test]
+    fn a_head_chunk_without_a_wiring_family_is_still_a_declared_end() {
+        // a dump too old to carry the final norm: `glue` is null, so no input
+        // side exists however the flag was set
+        let mut h = head_fixed(1024, 512);
+        h.params.glue = None;
+        h.sizes = vec![vec![4]; 3];
+        assert!(!has_in_side(&h.params));
     }
 
     // ---- what the merged predicate did, kept as a regression ---------------
@@ -1670,5 +2330,25 @@ mod tests {
         assert!(v.kv_roots_equal && !v.roots_equal);
         assert!(!merged(&v));
         assert!(v.chains(), "the new predicate asks only for the K/V link here");
+    }
+
+    /// Stream LL (E11), log row 58: the precondition tree 0 depends on.
+    ///
+    /// With `frac_shared_per_head` false the master exponent is derived from
+    /// the chunk's own scores, so the bands' `dinv` and the exp table -- both
+    /// preprocessed -- become functions of the witness and no derived root
+    /// could check anything.  Both loaders refuse on this predicate; the test
+    /// is here so `cargo test bounds` covers it.
+    #[test]
+    fn a_dump_without_a_shared_master_exponent_is_refused_by_name() {
+        use serde_json::json;
+        assert!(crate::layer::frac_shared_refusal(
+            &json!({"frac_shared_per_head": true})).is_none());
+        for m in [json!({"frac_shared_per_head": false}), json!({})] {
+            let why = crate::layer::frac_shared_refusal(&m)
+                .expect("a dump without a shared master exponent must be refused");
+            assert!(why.contains("frac_shared_per_head"), "the refusal names the key: {why}");
+            assert!(why.contains("pre_root"), "the refusal says what it costs: {why}");
+        }
     }
 }

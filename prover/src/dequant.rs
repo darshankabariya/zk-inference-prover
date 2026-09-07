@@ -490,8 +490,24 @@ pub enum OKind {
     /// product), which is the whole reason the head's tie is cheap: the key
     /// never becomes a column, it is read off the dequant's own output.
     Key,
+    /// Stream SS: the signed **integer** `qc (1 - 2 sg)`, the only output a
+    /// `Variant::Fold` region has.  The fold's single rounding *is* B1's
+    /// `quantize(v, s_v)` -- there is no bf16 waypoint to publish -- so what a
+    /// consumer reads off this region is the int8 cell the band commits, and
+    /// the claim is a Horner over those integers rather than over `(sm, ef)`
+    /// pairs.  Degree 2, like `Pair` and `Key`: one `qc sg` product.
+    Int,
 }
 
+/// Stream SS: `k_in`/`k_bd` are a two-valued row step and the `oin`/`obd`
+/// selectors say which row takes which -- the AIR does not care what the two
+/// mean.  For `Pair` and `Key` they are stream E's: the ordinary chunk step
+/// inside a token, and the jump at the row that begins one.  For `Int` they are
+/// the *band grid*'s: the ordinary step, and the jump on the row after one that
+/// begins a kv head (`rope::QTie::step_out` and `step_out_h`), which is what
+/// makes the claim comparable with the bands' own V fold under grouped-query
+/// attention.  A token boundary is a head start, so one pair of constants
+/// serves both.
 #[derive(Clone)]
 pub struct OSide {
     /// the within-row weight per slot
@@ -501,6 +517,23 @@ pub struct OSide {
     pub k_bd: SecureField,
     pub claimed: SecureField,
     pub kind: OKind,
+}
+
+/// Stream II (E11): the x-side scale's claim.  One Horner over the region's
+/// shared per-token scale columns on its `last` rows, under the same weights
+/// the producing requantize region folds its own committed scale under -- so
+/// the equality says "the matmul dequantized by the scale its input was
+/// quantized with", which was the last thing left open between a producer and
+/// its consumer.
+///
+/// `lam` folds the bf16 variant's `(ms, es)` into one field element, exactly as
+/// the output side folds `(sm, ef)`.  `None` on a region whose walk group has
+/// no requantize seam, and on every region of a chunk with no wiring family.
+#[derive(Clone)]
+pub struct SSide {
+    pub mu: SecureField,
+    pub lam: SecureField,
+    pub claimed: SecureField,
 }
 
 /// The preprocessed selectors an output side adds, in this order: the ordinary
@@ -531,6 +564,9 @@ pub struct DequantEval {
     pub yside: Option<YSide>,
     /// stream E: the output-side claim, when this region publishes one
     pub oside: Option<OSide>,
+    /// stream II (E11): the x-side scale's claim, when a requantize seam feeds
+    /// this matmul
+    pub sside: Option<SSide>,
     /// B11 stream U, lever 3: this region's lookups are proved by the batched
     /// GKR instead of committed running-sum columns, so the AIR emits neither
     /// the relation entries nor the interaction masks they would allocate. The
@@ -576,7 +612,13 @@ impl FrameworkEval for DequantEval {
         let mut accs: Vec<E::F> = Vec::with_capacity(sp.per_row);
         // stream E: `(sg, nz, m7, eo)` per slot, from whichever rung ran, so the
         // output side can read the result as an expression rather than as a
-        // column nobody committed
+        // column nobody committed.
+        //
+        // Stream SS: the `Fold` arm has no bf16 rung and so no `(nz, m7, eo)`.
+        // It pushes `(sg, 0, qc, 0)` and its output side is `OKind::Int`, which
+        // reads the pair `(sg, qc)` and ignores the two zeros -- so every
+        // variant fills this vector and the `assert_eq!` below is a statement
+        // about the plan and not about which rung ran.
         let mut outs: Vec<(E::F, E::F, E::F, E::F)> = vec![];
         for slot in 0..sp.per_row {
             // ---- stream Z: the delayed requantize, one rounding, in limbs.
@@ -637,6 +679,13 @@ impl FrameworkEval for DequantEval {
                 );
                 let fep = fdp * two - E::F::one() - fe.clone();
                 let qd = qm.clone() - qc.clone();
+                // stream SS: this region's output, for the output side.  `qc` is
+                // the clamped quotient and `sg` its sign, and `qc (1 - 2 sg)` is
+                // cell for cell what `experiments/b1`'s `quantize(v, s_v)`
+                // returns -- the value the band commits as `vv.i8`.  The two
+                // zeros stand where a bf16 rung's `nz` and `eo` would; `OKind`
+                // says which pair is read.
+                outs.push((sg.clone(), E::F::zero(), qc.clone(), E::F::zero()));
                 if !self.gkr {
                     eval.add_to_relation(RelationEntry::new(
                         self.rel(sp.q_bits), E::EF::one(), core::slice::from_ref(&qm)));
@@ -828,7 +877,8 @@ impl FrameworkEval for DequantEval {
             let mut mult: E::EF = E::EF::from(m1);
             mult += m2 * y.s;
             eval.add_constraint(h.clone() - h_prev * mult - z * last);
-            eval.add_constraint((h - y.claimed_h) * end);
+            let claim_h = eval.claim(y.claimed_h);
+            eval.add_constraint((h - claim_h) * end);
         }
         // stream E: the output side.  One accumulator, a two-valued row step,
         // and the same `end` the claimed side closes on.
@@ -862,11 +912,42 @@ impl FrameworkEval for DequantEval {
                             - sg.clone() * (mag * two + E::F::one());
                         f += key * o.w[i];
                     }
+                    // stream SS: the fold's integer.  `m7` holds `qc` here and
+                    // `nz`/`eo` are zero (see the `Fold` arm), so this is
+                    // `qc (1 - 2 sg)` and nothing else -- the same signed
+                    // integer `rope::QuantEval`'s output side folds and the
+                    // band's V column commits.
+                    OKind::Int => {
+                        f += (m7.clone() * (E::F::one() - sg.clone() * two)) * o.w[i];
+                    }
                 }
             }
             let mult: E::EF = E::EF::from(oin) * o.k_in + E::EF::from(obd) * o.k_bd;
             eval.add_constraint(u.clone() - u_prev * mult - f * oact);
-            eval.add_constraint((u - o.claimed) * oend);
+            let claim = eval.claim(o.claimed);
+            eval.add_constraint((u - claim) * oend);
+        }
+        // Stream II (E11): the x-side scale, folded on the `last` rows.  `m1`
+        // and `m2` are `[j > 0 and not last]` and `[j > 0 and last]`, so the
+        // step is `m1 + m2 mu` -- degree 1, as the claimed side's already is --
+        // and an inert lead row is neither `last` nor `m2`, so it carries the
+        // (still zero) accumulator and folds nothing.
+        if let Some(sc) = &self.sside {
+            let sel: Vec<E::F> = DEQ_SEL
+                .iter()
+                .map(|n| eval.get_preprocessed_column(deq_sel(&self.tag, n)))
+                .collect();
+            let (last, m1, m2, end) =
+                (sel[1].clone(), sel[2].clone(), sel[3].clone(), sel[4].clone());
+            let [v_prev, v] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
+            let mut f = E::EF::from(shared[0].clone());
+            if shared.len() > 1 {
+                f += E::EF::from(shared[1].clone()) * sc.lam;
+            }
+            let mult: E::EF = E::EF::from(m1) + E::EF::from(m2) * sc.mu;
+            eval.add_constraint(v.clone() - v_prev * mult - f * E::EF::from(last));
+            let claim = eval.claim(sc.claimed);
+            eval.add_constraint((v - claim) * end);
         }
         if !self.gkr {
             eval.finalize_logup_in_pairs();
@@ -1700,7 +1781,7 @@ pub fn run(w: &Witness, sp: &Spec, tamper: Option<Tamper>) -> Outcome {
             mul: mul_rel.clone(),
             qnz: qnz_rel.clone(),
             rels: rels.clone(),
-            yside: None, oside: None,
+            yside: None, oside: None, sside: None,
             // the standalone dequant probe has no GKR arm to hand its lookups to
             gkr: false,
         },

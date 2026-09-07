@@ -37,6 +37,7 @@ mod layer;
 mod layout;
 mod plogup;
 mod requant;
+mod rope;
 mod walk_air;
 mod witread;
 mod spans;
@@ -635,15 +636,54 @@ fn embed_probes_cmd(args: &[String]) {
     // The table probe is the pinned-root probe and the standalone harness has no
     // pinned root to check against, so it is *expected to accept here* and the
     // composed run is where it bites. Running it anyway is what says so.
-    let (o, lay) = embed::run(&w, target, Some(embed::Tamper::Table(4321)));
+    // Stream KK: the cell is chosen in a row *no token uses*, so the rebuilt
+    // witness is the honest one value for value and the pinned root is the only
+    // thing that can see the change.  A cell in a used row makes the stream
+    // differ from the layer's, which the tie catches first -- a rejection for
+    // the wrong reason, and one that came and went with the witness's draw.
+    let unused = (0..w.vocab as u32).find(|v| !w.tok.contains(v)).unwrap_or(0) as usize;
+    let (o, lay) = embed::run(&w, target, Some(embed::Tamper::Table(unused * w.d + 1)));
     out.push(json!({"probe": "one cell of the committed table changed, witness rebuilt",
                     "expect_reject_by": "the pinned preprocessed root (composed only)",
                     "rejected": !o.accepts(), "accepts_standalone": o.accepts(),
                     "result": o.json(&w, &lay)}));
     assert!(o.accepts(),
             "the table probe must be internally consistent -- only the pinned root sees it");
+    // Stream KK, `notes/witness-slack.md` section 1a, both arms of the same
+    // witness: a position whose committed id is a *padded* one, outside the
+    // vocabulary and inside the table, with the all-zero stream row that padded
+    // table row held.  Nothing here is corrupted -- every constraint the region
+    // carries holds -- so before the sentinel this accepted, and that is the
+    // whole item.  Both runs are made, because "it rejects now" is only half
+    // the claim.
+    let lay0 = embed::EmbLayout::choose(w.d, w.tokens, w.vocab, target);
+    if lay0.vpad == w.vocab {
+        out.push(json!({"probe": "a token id outside the vocabulary",
+                        "expect_reject_by": "the embedding lookup",
+                        "skipped": "this vocabulary is a power of two, so the table \
+                                    has no padded row and section 1a is vacuous here"}));
+        emit("embed_probes", json!({"probes": out, "tokens": w.tokens, "d": w.d,
+                                    "vocab": w.vocab, "vocab_padded": lay0.vpad}));
+        return;
+    }
+    let wp = embed::EWitness::padded(w.tokens, w.d, w.vocab, target, 23, 3);
+    let (o_open, lay) = embed::run(&wp, target, Some(embed::Tamper::LegacyPad));
+    out.push(json!({"probe": "a token id outside the vocabulary, with a zero stream \
+                              row, against the pre-KK table",
+                    "expect_reject_by": "nothing -- this is the open statement, and it accepts",
+                    "rejected": !o_open.accepts(), "accepts_before_the_fix": o_open.accepts(),
+                    "result": o_open.json(&wp, &lay)}));
+    let (o_shut, lay) = embed::run(&wp, target, None);
+    out.push(json!({"probe": "the same witness against the table this crate builds",
+                    "expect_reject_by": "the embedding lookup: a padded row carries the \
+                                         out-of-range block index k, is the tuple of no use \
+                                         row, and its multiplicity cannot cancel",
+                    "rejected": !o_shut.accepts(), "result": o_shut.json(&wp, &lay)}));
+    assert!(o_open.accepts(),
+            "the pre-KK table must accept the padded id -- that is what section 1a records");
+    assert!(!o_shut.accepts(), "the padded id must be rejected now");
     emit("embed_probes", json!({"probes": out, "tokens": w.tokens, "d": w.d,
-                                "vocab": w.vocab}));
+                                "vocab": w.vocab, "vocab_padded": lay0.vpad}));
 }
 
 // ----------------------------------------------------------------- compose ----
@@ -655,15 +695,90 @@ fn embed_probes_cmd(args: &[String]) {
 /// synthetic layer has `glue: None`, so a gate pointed at a dump the box did
 /// not hold came back `rc=0` with the whole glue battery skipped -- a pass that
 /// measured nothing (open item 17).
+/// Stream KK: the chunk's declared coordinate, `--layer N` / `--block N` over
+/// the manifest's own.
+///
+/// Not a switch on a check: the coordinate goes into the statement either way
+/// and `bounds-grid` compares it either way.  It is an override because one
+/// chunk's manifest cannot know where the grid puts it -- the `lm_head` chunk
+/// is extracted at some layer and proved *after* the last one, so its plan
+/// line says `--layer 32` and its block is the block it reads.
+fn coord_of(l: &mut layer::Layer, args: &[String]) {
+    if let Some(v) = arg_str(args, "--layer") {
+        l.layer = Some(v.parse().expect("--layer takes a layer index"));
+    }
+    if let Some(v) = arg_str(args, "--block") {
+        l.block = Some(v.parse().expect("--block takes a block index"));
+    }
+}
+
 pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     let vname = arg_strs(args, "--variants", &["intsplit6"])[0].clone();
     let variant = attn_witness::Variant::parse(&vname);
     let bands = arg_list(args, "--bands", &[8usize, 4, 2]);
     let src = src_of(args);
     if let Some(dir) = &src.dir {
-        match layer::Layer::load(dir, &src, &bands, variant) {
+        // Stream LL (E11): the verifier's load.  Only the model half of the dump
+        // is read; see `layer::Layer::load_weights`.  `--tight-table` sizes the
+        // exp table off the witness's own shifts, so it is refused here rather
+        // than silently sizing a table from stand-in zeros.
+        let weights_only = flag(args, "--weights-only");
+        assert!(!weights_only || !args.iter().any(|a| a == "--tight-table"),
+                "--weights-only and --tight-table are exclusive: --tight-table \
+                 sizes the exp table off the witness's own shifts, and the \
+                 model-only load has no witness -- the size comes from the \
+                 statement's `log_table` instead");
+        // Under `--weights-only` **every** loader knob comes off the statement,
+        // not off the command line: the variant, the prefix band list, whether
+        // the dump is read with its corner and whether the prefix is tiled, the
+        // master table's size and `nmax`.  A verifier holds `Fixed`, not the
+        // plan line that produced it -- and a chunk proved with `--tight-table`
+        // carries a `log_table` that neither the manifest nor any flag names.
+        // So `b65 expect-root --weights-only --params <tag>.fixed.json --witness
+        // DIR` is the whole command, and there is no line to get wrong.
+        let (variant, vname, bands, src) = if weights_only {
+            let f = arg_str(args, "--params").expect(
+                "--weights-only needs --params FILE (the chunk's own `Fixed.params`)");
+            let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--params {f}: {e}"));
+            let v: serde_json::Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|e| panic!("--params {f}: not JSON: {e}"));
+            let p: compose::Params =
+                serde_json::from_value(v.get("params").cloned().unwrap_or(v))
+                    .unwrap_or_else(|e| panic!("--params {f}: not a statement's params: {e}"));
+            eprintln!("expect-root: model-only load from the statement \
+(variant={} bands={:?} corner={} kv_bind={} log_table={} nmax={})",
+                      p.variant, p.bands, p.corner, p.kv_bind, p.log_table, p.nmax);
+            (attn_witness::Variant::parse(&p.variant), p.variant.clone(), p.bands.clone(),
+             attn_witness::Src { log_table: p.log_table, nmax: p.nmax,
+                                 corner: p.corner, tile: p.kv_bind, ..src.clone() })
+        } else {
+            (variant, vname, bands, src.clone())
+        };
+        let loaded = if weights_only {
+            layer::Layer::load_weights(dir, &src, &bands, variant)
+        } else {
+            layer::Layer::load(dir, &src, &bands, variant)
+        };
+        match loaded {
             Ok(mut l) => {
+                // Stream LL: the one stand-in the statement has to choose.
+                // `jo` is the attention output's per-token scale exponent --
+                // committed data, not model data, so the model-only load has
+                // none -- and the AO region admits it only inside the declared
+                // window (`joff = jo_max - jo >= 0`, `layer.rs`'s "attnout: jo
+                // above the window's top").  The window's *floor* is the safe
+                // end: it makes `e = jv - jo` non-negative, so the fold's `pj`
+                // is 1 and `denp` stays small, where the ceiling would put
+                // `2 denp` within a factor of two of the field.  No
+                // preprocessed column reads `jo`, so this moves no tree-0 cell.
+                if weights_only {
+                    let (_, p) = plan_params(args);
+                    for x in l.ao.jo.iter_mut() {
+                        *x = p.ao_jo_min;
+                    }
+                }
                 tighten_of(&mut l, args);
+                coord_of(&mut l, args);
                 return (l, vname);
             }
             Err(e) => {
@@ -683,7 +798,26 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     // here.  The int8-calibrated synthetic data stays complete at any wider
     // width, so this widens only the table domain and the o walk.
     l.attn_out_bits = arg_scalar(args, "--synth-ao-bits", l.attn_out_bits);
+    // Stream II: the wiring family on a synthetic layer.  A witness-construction
+    // switch and not a statement one -- without it a synthetic layer has no glue
+    // columns and composes exactly as it always did, which is what keeps every
+    // other stream's recorded synthetic digest where it is.
+    if flag(args, "--synth-glue") {
+        let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
+        l.synth_glue(src.seed, arg_scalar(args, "--glue-a", 32usize), round);
+    }
+    // Stream II (E11): the head chunk on a synthetic layer -- an `lm_head`
+    // matmul whose committed input is the final norm's output, and the wiring
+    // family that proves it.  A witness-construction switch like
+    // `--synth-glue`: without it a synthetic layer has no `lm_head` and no
+    // family, and composes exactly as it always did.
+    if flag(args, "--synth-head") {
+        let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
+        l.synth_head(src.seed, arg_scalar(args, "--glue-a", 32usize), round,
+                     arg_scalar(args, "--synth-vocab", 256usize));
+    }
     tighten_of(&mut l, args);
+    coord_of(&mut l, args);
     (l, vname)
 }
 
@@ -705,6 +839,71 @@ off_table {off})",
               l.bands.iter().map(|b| b.key_max()).max().unwrap_or(0), need);
 }
 
+/// The design point a lowering command works on: a witness dump, or -- with
+/// `--params FILE` -- the `params` object of a serialized statement.
+///
+/// Stream EE (open item 21).  `Fixed` carries every field `params_of` derives
+/// from a dump, so a `<tag>.fixed.json` a run left on disk is a complete
+/// description of that chunk's plan.  Reading it back is how a machine with no
+/// witness -- the coordinating box -- lowers a real 8B plan line and compares
+/// the fingerprints against what the run asked for.  It is a lowering path
+/// only: nothing here can prove, because a statement carries no trace.
+pub fn plan_params(args: &[String]) -> (String, compose::Params) {
+    if let Some(f) = arg_str(args, "--params") {
+        let bytes = std::fs::read(&f)
+            .unwrap_or_else(|e| panic!("--params {f}: {e}"));
+        let v: serde_json::Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("--params {f}: not JSON: {e}"));
+        // a `Fixed` (what `--ser-dir` writes) or a bare `Params`
+        let p = v.get("params").cloned().unwrap_or(v);
+        let params: compose::Params = serde_json::from_value(p)
+            .unwrap_or_else(|e| panic!("--params {f}: not a statement's params: {e}"));
+        eprintln!("params: {f} (s={} c={} bands={:?} kv_bind={})",
+                  params.s, params.c, params.bands, params.kv_bind);
+        return (format!("--params {f}"), params);
+    }
+    let (l, vname) = layer_of(args);
+    let params = params_of(&l, args, &vname);
+    (l.source.clone(), params)
+}
+
+/// Stream LL (E11): where a derivation's `Params` come from.
+///
+/// `b65 compose` derives them from the witness, as it always has. `b65
+/// expect-root` may instead be handed `--params FILE` -- a `Fixed` or a bare
+/// `Params`, `plan_params`' own two shapes -- and then the plan is built from
+/// *the statement's* declared shape rather than from a re-derivation of it.
+/// That is the shape the check wants: the verifier holds the statement, and
+/// four of the fields (`ao_jo_min` / `ao_jo_max` and `ao_acc_lo_bits` /
+/// `ao_acc_hi_bits`) are read off activations a verifier does not have, so
+/// `--weights-only` cannot derive them at all and requires the file.
+///
+/// Gated on `PRE_ONLY` so that `compose`'s own behaviour is untouched: nothing
+/// but `expect-root` reads `--params` here.
+fn expect_root_params(l: &layer::Layer, args: &[String], vname: &str) -> compose::Params {
+    if !compose::PRE_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
+        assert!(!flag(args, "--weights-only"),
+                "--weights-only is `expect-root`'s: it loads no activations, so \
+                 there is nothing to prove");
+        return params_of(l, args, vname);
+    }
+    match arg_str(args, "--params") {
+        Some(_) => {
+            let (src, p) = plan_params(args);
+            eprintln!("expect-root: params from the statement ({src})");
+            p
+        }
+        None => {
+            assert!(!flag(args, "--weights-only"),
+                    "--weights-only needs --params FILE (the chunk's own \
+                     `Fixed.params`): `ao_jo_min`/`ao_jo_max` and \
+                     `ao_acc_lo_bits`/`ao_acc_hi_bits` are read off activations \
+                     this load does not have");
+            params_of(l, args, vname)
+        }
+    }
+}
+
 pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Params {
     let b0 = &l.bands[0];
     let kmax = l.mats.iter().map(|m| m.kmax_blind()).max().unwrap()
@@ -724,6 +923,98 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
     } else {
         (b0.shape.c * l.nsub, l.band_sizes[..n_pre].iter().step_by(l.nsub).copied().collect())
     };
+    // Stream JJ (E11): data-derived and overridable exactly as `ao_rem_bits`
+    // is, and for the same reason -- a driver pins the model-wide worst case
+    // and proves every layer as one shape.  Below the witness's own value an
+    // `EPOW` lookup or an accumulator limb would land off its table, so that is
+    // an error and not a smaller proof.
+    //
+    // Stream TT (E11), log row 73: these four come out of the struct literal
+    // because the two limb widths now depend on the exponent window -- which
+    // form of the magnitude bound fits is a question about `e_hi`.
+    let ao_jv_min = {
+        let want = arg_scalar(args, "--ao-jv-min", l.ao.jv_range().0);
+        assert!(want <= l.ao.jv_range().0,
+                "--ao-jv-min {want} is above this witness's {}", l.ao.jv_range().0);
+        want
+    };
+    let ao_jv_max = {
+        let want = arg_scalar(args, "--ao-jv-max", l.ao.jv_range().1);
+        assert!(want >= l.ao.jv_range().1,
+                "--ao-jv-max {want} is below this witness's {}", l.ao.jv_range().1);
+        want
+    };
+    let ao_jo_min = {
+        let want = arg_scalar(args, "--ao-jo-min", l.ao.jo_range().0);
+        assert!(want <= l.ao.jo_range().0,
+                "--ao-jo-min {want} is above this witness's {}", l.ao.jo_range().0);
+        want
+    };
+    let ao_jo_max = {
+        let want = arg_scalar(args, "--ao-jo-max", l.ao.jo_range().1);
+        assert!(want >= l.ao.jo_range().1,
+                "--ao-jo-max {want} is below this witness's {}", l.ao.jo_range().1);
+        want
+    };
+    // Stream JJ: `|acc| <= 2^(lo + hi - 1)` under the offset form, so the two
+    // limbs together carry one bit more than the accumulator needs.  16 is the
+    // widest range table the layer already builds, which is why the low limb
+    // stops there; neither limb ever goes below `MIN_LOG_ROWS`, since a range
+    // table *is* its own `1 << bits` rows and the LogUp builder has no shorter
+    // column.
+    //
+    // Stream TT (E11), log row 73: and the magnitude form is the same split one
+    // bit narrower.  There the limbs range-check the committed `mag = |acc|`
+    // rather than `acc + 2^(lo+hi-1)`, so they need `acc_bits()` and not
+    // `acc_bits() + 1` -- the sign is read off the `sg` column the region
+    // already commits.  The wider form is kept wherever it fits, so that every
+    // chunk that composed before this existed keeps its columns and its digest;
+    // the narrow one is taken only when `Plan::new`'s window would refuse.
+    // `--ao-acc-mag` forces it, which is what the controls and the gate use.
+    let e_hi = (ao_jv_max - ao_jo_min).max(0) as u32;
+    let split = |need: u32| -> (u32, u32) {
+        let lo = arg_scalar(args, "--ao-acc-lo-bits",
+                            need.clamp(crate::common::MIN_LOG_ROWS, 16));
+        let hi = arg_scalar(args, "--ao-acc-hi-bits",
+                            need.saturating_sub(lo).max(crate::common::MIN_LOG_ROWS));
+        (lo, hi)
+    };
+    let need_off = l.ao.acc_bits() + 1;
+    let (lo_off, hi_off) = split(need_off);
+    let (lo_mag, hi_mag) = split(l.ao.acc_bits());
+    let ao_acc_mag =
+        flag(args, "--ao-acc-mag") || 1 + lo_off + hi_off + e_hi > 31;
+    let (ao_acc_lo_bits, ao_acc_hi_bits, need) = if ao_acc_mag {
+        (lo_mag, hi_mag, l.ao.acc_bits())
+    } else {
+        (lo_off, hi_off, need_off)
+    };
+    assert!(ao_acc_lo_bits + ao_acc_hi_bits >= need,
+            "--ao-acc-*-bits {ao_acc_lo_bits}+{ao_acc_hi_bits} is below this witness's {need}");
+    assert!(ao_acc_lo_bits >= crate::common::MIN_LOG_ROWS
+                && ao_acc_hi_bits >= crate::common::MIN_LOG_ROWS,
+            "--ao-acc-*-bits {ao_acc_lo_bits}+{ao_acc_hi_bits}: a limb is below \
+             MIN_LOG_ROWS");
+    if ao_acc_mag && !flag(args, "--ao-acc-mag") {
+        eprintln!("compose: the attention output takes the magnitude form -- the \
+                   offset window is 1 + {lo_off} + {hi_off} + {e_hi} > 31 (log row 73)");
+    }
+    // Stream TT (E11), log row 73: the sibling bound, decided the same way.
+    // `ao_q_bits` is `attn_out_bits - 1` and `ao_rem_bits` is the witness's own
+    // (a driver may only widen it), so `11 + 20 = 31` is not a pin anything can
+    // choose its way out of either -- the `denp2` form is what admits it.
+    let ao_q_bits = l.attn_out_bits - 1;
+    let ao_rem_bits = {
+        let want = arg_scalar(args, "--ao-rem-bits", l.ao.rem_bits());
+        assert!(want >= l.ao.rem_bits(),
+                "--ao-rem-bits {want} is below this witness's {}", l.ao.rem_bits());
+        want
+    };
+    let ao_denp2 = flag(args, "--ao-denp2") || ao_q_bits + ao_rem_bits > 30;
+    if ao_denp2 && !flag(args, "--ao-denp2") {
+        eprintln!("compose: the attention output takes the denp2 form -- the quotient \
+                   term is {ao_q_bits} + {ao_rem_bits} > 30 (log row 73)");
+    }
     compose::Params {
         s: l.ao.s, c, hd: l.ao.hd, nh: l.ao.nh,
         bands,
@@ -755,19 +1046,17 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // attention output declares it in the manifest, and a dump that
         // predates the knob reads back 8 -- so every pre-change statement is
         // parameter-identical and the standing digests stand.
-        ao_q_bits: l.attn_out_bits - 1,
+        ao_q_bits,
         // B9 step 1: `ao_rem_bits` and `kmax` are data-derived, so two real layers
         // of one model are two shapes and the chunk loop rejects the pair.  Both
         // are overridable now, so a driver can pin them at the model-wide worst
         // case and prove every layer of a model as one shape -- a few extra table
         // rows against a second emit chain.  Below the witness's own value the
         // range check would just push rows into `off_table`, so that is an error.
-        ao_rem_bits: {
-            let want = arg_scalar(args, "--ao-rem-bits", l.ao.rem_bits());
-            assert!(want >= l.ao.rem_bits(),
-                    "--ao-rem-bits {want} is below this witness's {}", l.ao.rem_bits());
-            want
-        },
+        // (Both are derived above, with the `denp2` decision that reads them.)
+        ao_rem_bits,
+        ao_jv_min, ao_jv_max, ao_jo_min, ao_jo_max,
+        ao_acc_lo_bits, ao_acc_hi_bits, ao_acc_mag, ao_denp2,
         // Stream Z: the fold's two pins, data-derived exactly as `ao_rem_bits`
         // and overridable the same way so a driver can pin the model-wide worst
         // case.  Zero -- absent from the serialized statement -- on a witness
@@ -801,10 +1090,19 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
                 // carried only when the region that needs it is on, so that
                 // with both flags off the serialized statement is not merely
                 // equivalent to the pre-change crate's but identical to it
-                dff: if flag(args, "--swiglu") { g.dff } else { 0 },
-                tails: flag(args, "--norm-tails"),
-                swiglu: flag(args, "--swiglu"),
-                deq_ties: flag(args, "--deq-ties"),
+                // Stream II: the two additive regions are unconditional now, so
+                // `dff` is always carried and `--norm-tails` / `--swiglu` are
+                // accepted and ignored -- the drivers still pass them.
+                dff: g.dff,
+                eps: g.eps,
+                inv_d: g.inv_d,
+                // Stream JJ (E11): the dequant output ties are unconditional
+                // too.  `--deq-ties` is accepted and ignored so drivers that
+                // pass it keep working.
+                deq_ties: true,
+                // stream II: which family this chunk carries is the witness's
+                // to say, not the command line's
+                head_norm: g.head,
             }
         }),
         // Stream H: the boundary commitment, off unless asked for either way --
@@ -846,6 +1144,20 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         } else {
             0
         },
+        // Stream NN: the rotation and the q/k/v quantize, present exactly when
+        // the witness carries what they need.  Not a flag: on a real dump the
+        // columns are there or they are not, and on a synthetic layer
+        // `--synth-glue` builds them exactly when the widths line up.  The
+        // wiring family is a precondition -- the input side ties into it.
+        rope: l.glue.as_ref().filter(|g| !g.head).and(l.rope.as_ref()).map(|r| {
+            compose::RopeParams {
+                nkv: r.nkv,
+                pos0: r.pos0,
+                theta: r.theta.to_bits(),
+                rope_type: r.rope_type.clone(),
+                rope_scale: r.rope_scale.iter().map(|v| v.to_bits()).collect(),
+            }
+        }),
     }
 }
 
@@ -877,10 +1189,18 @@ pub fn ser_write(dir: &str, tag: &str, ser: &Ser) {
     std::fs::create_dir_all(dir).expect("the serialization directory");
     std::fs::write(format!("{dir}/{tag}.fixed.json"), &ser.fixed_bytes)
         .expect("writing the statement");
+    // Stream KK: the claims, which `verify_composed` needs and which nothing
+    // wrote before -- so `bounds-grid --verify` could not have verified a
+    // serialized chunk however hard it tried.  They are small (tens of KB
+    // beside a 50 MB proof) and they are a third of the document the verifier
+    // reads, so they are written beside the other two.
+    std::fs::write(format!("{dir}/{tag}.claims.json"), &ser.claims_bytes)
+        .expect("writing the claims");
     if let Some(b) = &ser.proof_bytes {
         std::fs::write(format!("{dir}/{tag}.proof.json"), b).expect("writing the proof");
     }
-    eprintln!("compose: statement and proof written to {dir}/{tag}.{{fixed,proof}}.json");
+    eprintln!("compose: statement, claims and proof written to \
+               {dir}/{tag}.{{fixed,claims,proof}}.json");
 }
 
 /// The statement and the proof as bytes.
@@ -978,7 +1298,290 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
     (j, accepts)
 }
 
+/// Stream LL (E11), `notes/witness-slack.md` section 5 item 1, deliverable 1:
+/// what tree 0 is made of, from `Params` alone.
+///
+///     b65 pre-split --params FILE
+///
+/// `FILE` is a JSON `Params` -- `result.point.params` of any `compose` run, so
+/// the 8B reference chunk's tree 0 can be priced without the dump. The rollup
+/// answers the two questions the design fork turns on: how much of tree 0 a
+/// verifier could rebuild from the statement alone (`needs_params`), and how
+/// much of it is the same on every token block of the layer (`varies_layer`),
+/// which is what a published per-layer root would cover.
+fn pre_split_cmd(args: &[String]) {
+    let f = arg_str(args, "--params").expect("pre-split needs --params FILE");
+    let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--params {f}: {e}"));
+    let p: compose::Params = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|e| panic!("--params {f}: not a Params document: {e}"));
+    let plan = compose::Plan::new(&p);
+    let mut report = plan.pre_split_report();
+    report["params_file"] = json!(f);
+    report["c"] = json!(p.c);
+    report["s"] = json!(p.s);
+    let cols: Vec<Value> = plan.pre_split().iter()
+        .map(|c| json!({"id": c.id.id, "family": c.family, "log_size": c.log_size,
+                        "needs": c.needs, "varies": c.varies}))
+        .collect();
+    report["column_list"] = json!(cols);
+    eprintln!("pre-split: {} columns, {} cells; needs_model {:.2}%, varies_block {:.2}%",
+              report["columns"], report["cells"],
+              100.0 * report["needs_model"]["share"].as_f64().unwrap(),
+              100.0 * report["varies_block"]["share"].as_f64().unwrap());
+    emit("pre_split", report);
+}
+
+/// Stream LL (E11), `notes/witness-slack.md` section 5 item 1, deliverable 2:
+/// the expected tree-0 root of one chunk, derived from the model.
+///
+///     b65 expect-root --witness DIR [--layer k] [--block b] <the chunk's flags>
+///     b65 expect-root --weights-only --params <tag>.fixed.json --witness DIR ...
+///
+/// It takes exactly the arguments the chunk's `compose` line takes -- the plan
+/// line, minus `--ser-tag` -- builds the chunk's `Plan` and its tree 0, and
+/// stops there: the root, the model hash and the classification, and no proof.
+/// The derived root is the prover's own by construction, because it is the
+/// prover's own code up to `commit_pre` and there is no second implementation
+/// of tree 0 to drift from it.
+///
+/// **`--weights-only` is the verifier's form.** Without it `Layer::load` reads
+/// the whole dump, activations included, and recomputes `Q.K^T` on the way; tree
+/// 0 needs only the model half (the weights, the weight scales, `jv`, the norm
+/// weights, the embedding table, this stream's rope exponents, and the
+/// manifest's `frac_per_head` / `master_table_bits`).  With it,
+/// `Layer::load_weights` reads exactly those files and nothing else, and the
+/// derived root must be the same -- which is what `ll_box.sh`'s `root` step
+/// checks on a real dump, three ways: the full load's, the weights-only load's
+/// and the recorded proof's own `pre_root`.
+///
+/// `--weights-only` requires `--params FILE`, the chunk's own `Fixed.params`:
+/// `ao_jo_min`/`ao_jo_max` and `ao_acc_lo_bits`/`ao_acc_hi_bits` are read off
+/// activations, so they cannot be re-derived here -- and taking them from the
+/// statement is what the check wants anyway, since it is the statement's
+/// declared shape a verifier holds.
+fn expect_root_cmd(args: &[String]) {
+    compose::PRE_ONLY.store(true, std::sync::atomic::Ordering::Relaxed);
+    compose_cmd(args);
+    unreachable!("expect-root: the prover did not stop after committing tree 0");
+}
+
+/// Stream LL (E11), deliverable 2: the model manifest KK's
+/// `bounds-grid --expect-pre-roots` consumes.
+///
+///     b65 model-roots --plan PLAN [--pins "..."] [--out FILE] [--limit N]
+///                     [--weights-only --params-dir DIR]
+///
+/// `PLAN` is an `o_plan.py` plan file: one `compose` argument line per chunk.
+/// A plan line carries only the chunk's *own* arguments, so `--pins` supplies
+/// the driver's shared prefix (`--round`, `--numbits`, `--variants`, `--bands`,
+/// `--kmax` and the fold's two -- `ss_box.sh`'s `SEQPT`).
+///
+/// `--weights-only --params-dir DIR` is the verifier's form: each row is derived
+/// from the model half of the dump and from `DIR/<ser-tag>.fixed.json`, the
+/// statement `compose --ser-dir` wrote.  Without it the rows are derived the
+/// prover's way, from the whole dump, which is what a manifest built before any
+/// chunk has been proved has to do.
+///
+/// Three things it checks and one it reports: two chunks at one `(layer, c)`
+/// must derive the same root and name the same model; one layer must name one
+/// model; and **`master_table_bits` must be one value per layer across blocks**,
+/// or the layer is a named rejection and no manifest is written (the desk
+/// record's open item 3 -- `table/exp` is `1 << log_table` rows and `log_table`
+/// comes off each extraction's own manifest, so this is a requirement on the
+/// plan that nothing else states).
+/// Each line is run through `expect-root` in its own process -- one chunk's
+/// tree 0 at a time, which is what keeps the peak resident set to one chunk's
+/// -- and the rows are collected into
+///
+///     [{"layer": k, "block": b, "c": n, "pre_root": "...", "model": "..."}]
+///
+/// The rows a grid needs are keyed by `(layer, c)`, which is what
+/// `grid_cmd` looks them up by; `block` and `model` ride along so a reader can
+/// see which dump each row came from and so the grid can compare model hashes.
+fn model_roots_cmd(args: &[String]) {
+    let plan = arg_str(args, "--plan").expect("model-roots needs --plan FILE");
+    let text = std::fs::read_to_string(&plan)
+        .unwrap_or_else(|e| panic!("--plan {plan}: {e}"));
+    let limit = arg_scalar::<usize>(args, "--limit", usize::MAX);
+    // Stream LL box half.  A plan file holds a chunk's *own* arguments; the
+    // shared pins (`--round`, `--numbits`, `--variants`, `--bands`, `--kmax`,
+    // the fold's two) live in the driver that runs it (`ss_box.sh`'s `SEQPT`),
+    // so a plan line alone does not compose.  `--pins` is that prefix.
+    let pins: Vec<String> = arg_str(args, "--pins").unwrap_or_default()
+        .split_whitespace().map(|s| s.to_string()).collect();
+    // The verifier's mode: derive each row from the model half of the dump and
+    // the *statement's* own params, `<tag>.fixed.json` in `--params-dir` (what
+    // `compose --ser-dir` writes).  Without it the rows are derived the
+    // prover's way, from the whole dump, which is what a manifest built ahead
+    // of any proof has to do.
+    let weights_only = flag(args, "--weights-only");
+    let params_dir = arg_str(args, "--params-dir");
+    assert!(!weights_only || params_dir.is_some(),
+            "model-roots --weights-only needs --params-dir DIR (the serialized \
+             statements: DIR/<ser-tag>.fixed.json)");
+    let exe = std::env::current_exe().expect("model-roots: no path to this binary");
+    let mut rows: Vec<Value> = vec![];
+    let mut seen: std::collections::BTreeSet<(i64, u64)> = Default::default();
+    let mut skipped = 0usize;
+    let mut missing: Vec<String> = vec![];
+    let t0 = std::time::Instant::now();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if rows.len() >= limit {
+            break;
+        }
+        // The plan line's own arguments **first**, then the shared pins, minus
+        // the two that name the artifact rather than the chunk.  The order is
+        // load-bearing: `arg_str` and `arg_scalar` take the *first* match, so a
+        // line's own `--table-bits` or `--ao-rem-bits` has to precede the
+        // shared one or the shared one silently wins (stream SS's rider 1,
+        // `o_plan.py --ao-rem-per-line`).
+        let mut a: Vec<String> = vec![];
+        let mut tag = String::new();
+        let mut it = line.split_whitespace();
+        while let Some(w) = it.next() {
+            if w == "--ser-dir" {
+                it.next();
+                continue;
+            }
+            if w == "--ser-tag" {
+                tag = it.next().unwrap_or("").to_string();
+                continue;
+            }
+            a.push(w.to_string());
+        }
+        a.extend(pins.iter().cloned());
+        if weights_only {
+            let d = params_dir.as_ref().unwrap();
+            let f = format!("{d}/{tag}.fixed.json");
+            if !std::path::Path::new(&f).exists() {
+                missing.push(tag.clone());
+                continue;
+            }
+            a.push("--weights-only".into());
+            a.push("--params".into());
+            a.push(f);
+        }
+        let out = std::process::Command::new(&exe)
+            .arg("expect-root")
+            .args(&a)
+            .output()
+            .unwrap_or_else(|e| panic!("model-roots: cannot run {exe:?}: {e}"));
+        if !out.status.success() {
+            eprintln!("model-roots: {line}\n{}", String::from_utf8_lossy(&out.stderr));
+            panic!("model-roots: expect-root failed on a plan line");
+        }
+        let doc: Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("model-roots: expect-root wrote no JSON: {e}"));
+        let r = &doc["result"];
+        let layer = r["layer"].as_i64().unwrap_or(-1);
+        let c = r["c"].as_u64().unwrap_or(0);
+        // one row per (layer, c): every chunk of a grid at that cell has the
+        // same tree 0, and a second run of the same cell must agree with the
+        // first or the derivation is not a function of what it claims to be
+        if let Some(prev) = rows.iter().find(|p| {
+            p["layer"].as_i64() == Some(layer) && p["c"].as_u64() == Some(c)
+        }) {
+            assert_eq!(prev["pre_root"], r["pre_root"],
+                       "model-roots: two chunks at (layer {layer}, c {c}) derive \
+                        different tree-0 roots");
+            assert_eq!(prev["model"], r["model"],
+                       "model-roots: two chunks at (layer {layer}, c {c}) name \
+                        different models");
+            skipped += 1;
+            continue;
+        }
+        seen.insert((layer, c));
+        rows.push(json!({
+            "layer": layer,
+            "block": r["block"],
+            "c": c,
+            "pre_root": r["pre_root"],
+            "model": r["model"],
+            "source": r["source"],
+            "tag": tag,
+            "log_table": r["log_table"],
+            "weights_only": r["weights_only"],
+        }));
+    }
+    // the model hash is a per-layer constant: two rows at one layer that name
+    // two models is exactly the case section 5 item 1's last sentence names
+    let mut by_layer: std::collections::BTreeMap<i64, &Value> = Default::default();
+    for r in &rows {
+        let l = r["layer"].as_i64().unwrap_or(-1);
+        if let Some(prev) = by_layer.get(&l) {
+            assert_eq!(prev["model"], r["model"],
+                       "model-roots: layer {l} appears with two different model hashes");
+        } else {
+            by_layer.insert(l, r);
+        }
+    }
+    // Stream LL box half, the desk record's open item 3: `master_table_bits` has
+    // to be pinned per layer across blocks, or the model part of tree 0 is not a
+    // per-layer constant -- `table/exp` is `1 << log_table` rows and `log_table`
+    // comes off *each extraction's own manifest*, so two blocks of one layer can
+    // legitimately carry two table sizes and neither is wrong.  A requirement on
+    // the plan, checked here rather than assumed: a layer with two sizes is a
+    // named rejection and no manifest is written, because a manifest whose rows
+    // disagree about the layer's table is a manifest that pins nothing.
+    let mut tb: std::collections::BTreeMap<i64, std::collections::BTreeMap<u64, Vec<String>>> =
+        Default::default();
+    for r in &rows {
+        let l = r["layer"].as_i64().unwrap_or(-1);
+        let n = r["log_table"].as_u64().unwrap_or(0);
+        tb.entry(l).or_default().entry(n).or_default()
+            .push(r["tag"].as_str().unwrap_or("").to_string());
+    }
+    let rejections: Vec<Value> = tb.iter().filter(|(_, m)| m.len() > 1)
+        .map(|(l, m)| json!({
+            "layer": l,
+            "why": "master_table_bits is not pinned across this layer's blocks",
+            "table_bits": m.iter().map(|(n, tags)| json!({"log_table": n, "chunks": tags}))
+                .collect::<Vec<Value>>(),
+        }))
+        .collect();
+    let body = json!({
+        "plan": plan,
+        "rows": rows,
+        "distinct_cells": rows.len(),
+        "repeat_cells": skipped,
+        "layers": by_layer.len(),
+        "models": by_layer.values()
+            .map(|r| r["model"].as_str().unwrap_or("").to_string())
+            .collect::<std::collections::BTreeSet<String>>().len(),
+        "weights_only": weights_only,
+        "no_statement": missing,
+        "table_bits_by_layer": tb.iter()
+            .map(|(l, m)| json!({"layer": l,
+                                 "log_table": m.keys().collect::<Vec<&u64>>()}))
+            .collect::<Vec<Value>>(),
+        "rejections": rejections,
+        "secs": t0.elapsed().as_secs_f64(),
+    });
+    if !rejections.is_empty() {
+        for r in &rejections {
+            eprintln!("model-roots: REJECT layer {}: {}",
+                      r["layer"], r["why"].as_str().unwrap_or(""));
+        }
+        emit("model_roots", body);
+        eprintln!("model-roots: {} layer(s) rejected; no manifest written",
+                  rejections.len());
+        std::process::exit(1);
+    }
+    if let Some(f) = arg_str(args, "--out") {
+        std::fs::write(&f, serde_json::to_string_pretty(&body["rows"]).unwrap())
+            .unwrap_or_else(|e| panic!("--out {f}: {e}"));
+        eprintln!("model-roots: {} rows -> {f}", rows.len());
+    }
+    emit("model_roots", body);
+}
+
 fn compose_cmd(args: &[String]) {
+    // Stream EE (open item 21): before anything, because `prove_gen` reads it.
+    cudagen::fp_out_set(args);
     let (mut l, vname) = layer_of(args);
     // B7a milestone 4 (section 3 row 1): rung 3's sixth probe on its own, so the
     // `nopatch` control has a witness whose exp table is *not* the closed form
@@ -1006,15 +1609,28 @@ fn compose_cmd(args: &[String]) {
     for (key, slot) in [("--corrupt-fold-qm", &mut tamper.fold_qm),
                         ("--corrupt-fold-dent", &mut tamper.fold_dent),
                         ("--corrupt-ao-clamp", &mut tamper.ao_clamp),
+                        ("--corrupt-ao-den", &mut tamper.ao_den),
+                        ("--corrupt-ao-jo", &mut tamper.ao_jo),
+                        ("--corrupt-ao-num", &mut tamper.ao_num),
+                        ("--corrupt-ao-acc", &mut tamper.ao_acc),
+                        ("--corrupt-ao-jo-tok", &mut tamper.ao_jo_tok),
+                        // stream TT (log row 73): the magnitude window's own
+                        ("--corrupt-ao-mag", &mut tamper.ao_mag),
                         ("--corrupt-walk-act", &mut tamper.walk_over)] {
         if let Some(i) = arg_str(args, key) {
             *slot = Some(i.parse().unwrap_or_else(|_| panic!("{key} wants an index")));
             eprintln!("compose: bend {key} at {i} armed (a rejection is the pass)");
         }
     }
-    let params = params_of(&l, args, &vname);
-    eprintln!("compose: {} bands={:?} variant={} kmax={} rem={} p={}",
-              l.source, l.band_sizes, vname, params.kmax, params.ao_rem_bits, params.walk_p);
+    let params = expect_root_params(&l, args, &vname);
+    eprintln!("compose: {} bands={:?} variant={} kmax={} rem={} p={} jv=[{},{}] jo=[{},{}] \
+acc={}+{}",
+              l.source, l.band_sizes, vname, params.kmax, params.ao_rem_bits, params.walk_p,
+              params.ao_jv_min, params.ao_jv_max, params.ao_jo_min, params.ao_jo_max,
+              params.ao_acc_lo_bits, params.ao_acc_hi_bits);
+    if params.ao_acc_mag {
+        eprintln!("compose: attnout accumulator in the magnitude form (log row 73)");
+    }
     // Stream I: `--ser-dir DIR [--ser-tag TAG]` leaves this chunk's statement and
     // proof on disk under that tag, which is what `bounds-chain` reads back.
     let ser_dir = arg_str(args, "--ser-dir");
@@ -1095,16 +1711,125 @@ fn psweep_cmd(args: &[String]) {
     emit("psweep", json!({"source": l.source, "points": points}));
 }
 
+/// Stream II, the requantize seams' output-side control.  One committed
+/// activation of a walk group is moved to another legal value and the layer's
+/// exact accumulators move with it, so the chunk proves an honest matmul of
+/// the changed input: no tamper, no inconsistent region, just a prover that
+/// multiplied activations of its own choosing -- which is what
+/// `witness-slack.md` section 1d says the walk used to allow.
+///
+/// The element is the one whose bend disturbs the fewest *dequantized* outputs
+/// of its token, because those are what the rest of the chunk consumes: one
+/// activation's worth of accumulator is below a bf16 ulp on most channels, so
+/// the search usually finds an element the consumers cannot see at all and the
+/// seam's own output tie is then the only thing that can reject.  Returns the
+/// element and how many dequantized outputs it did move.
+fn bend_walk_qx(l: &mut layer::Layer, specs: &[dequant::Spec], mats: &[usize],
+                start: usize) -> Option<(usize, usize)> {
+    let m0 = &l.mats[mats[0]];
+    let (n_in, tokens) = (m0.n_in, m0.tokens);
+    if n_in * tokens == 0 {
+        return None;
+    }
+    let noise = |l: &layer::Layer, idx: usize, d: i64| -> usize {
+        let (t, k) = (idx / n_in, idx % n_in);
+        mats.iter().map(|mi| {
+            let m = &l.mats[*mi];
+            (0..m.n_out).filter(|c| {
+                let a0 = m.acc[t * m.n_out + c];
+                let a1 = a0 + d * m.qw[k * m.n_out + c] as i64;
+                // stream SS: a folded matmul's output is an integer, not a bf16
+                // pattern -- `deq_ref_a` has no answer for it and used to panic
+                // here the moment a `y-delay-v` witness reached a probe.
+                if m.variant == dequant::Variant::Fold {
+                    return layer::fold_out_a(a1, m, t, *c) != layer::fold_out_a(a0, m, t, *c);
+                }
+                layer::deq_ref_a(a1, m, &specs[*mi], t, *c)
+                    != layer::deq_ref_a(a0, m, &specs[*mi], t, *c)
+            }).count()
+        }).sum()
+    };
+    // any other legal activation: the walks range check `qx + 2^(bits-1)`, and
+    // both neighbours of an interior value are inside that window
+    let dir = |l: &layer::Layer, idx: usize| -> i64 {
+        if l.mats[mats[0]].qx[idx] < 126 { 1 } else { -1 }
+    };
+    let mut best = (usize::MAX, 0usize, 0i64);
+    for step in 0..n_in * tokens {
+        let idx = (start + step) % (n_in * tokens);
+        let d = dir(l, idx);
+        let s = noise(l, idx, d);
+        if s < best.0 {
+            best = (s, idx, d);
+        }
+        if s == 0 {
+            break;
+        }
+    }
+    let (moved, idx, d) = best;
+    let (t, k) = (idx / n_in, idx % n_in);
+    for mi in mats {
+        let m = &mut l.mats[*mi];
+        assert_eq!(m.n_in, n_in, "walk group mixes input widths");
+        m.qx[idx] = (m.qx[idx] as i64 + d) as i32;
+        let n_out = m.n_out;
+        for c in 0..n_out {
+            m.acc[t * n_out + c] += d * m.qw[k * n_out + c] as i64;
+        }
+    }
+    Some((idx, moved))
+}
+
 fn compose_probes_cmd(args: &[String]) {
     let (l, vname) = layer_of(args);
     let params = params_of(&l, args, &vname);
     let (hj, ok) = compose_once(&l, &params, &Default::default(), None);
     assert!(ok, "honest composed proof rejected");
     let honest_root = hj["pre_root"].as_str().unwrap().to_string();
+    let honest_v = hj["verdict"].clone();
     let mut out = vec![json!({"probe": "honest", "result": hj.clone()})];
+    // Stream NN: which verdict fields a control actually turned off.  "The
+    // control rejects" is not the whole claim a record should make -- "and by
+    // exactly this one field" is, because a probe that trips three checks at
+    // once has not isolated the tie it was written for.  Fields that are true
+    // (or all-true) on the honest run and not on this one, and nothing else.
+    let falsified = |got: &serde_json::Value| -> Vec<String> {
+        let all_true = |v: &serde_json::Value| -> Option<bool> {
+            match v {
+                serde_json::Value::Bool(b) => Some(*b),
+                serde_json::Value::Array(a)
+                    if !a.is_empty() && a.iter().all(|x| x.is_boolean()) =>
+                    Some(a.iter().all(|x| x.as_bool().unwrap())),
+                _ => None,
+            }
+        };
+        let mut f = vec![];
+        if let Some(o) = honest_v.as_object() {
+            for (k, hv) in o {
+                if all_true(hv) == Some(true)
+                    && all_true(got.get(k).unwrap_or(&serde_json::Value::Null)) == Some(false)
+                {
+                    f.push(k.clone());
+                }
+            }
+        }
+        f
+    };
 
+    // Stream NN-3: `--probe <substring>[,<substring>...]` runs only the controls
+    // whose name contains one of them (`arg_strs` splits on commas and reads
+    // one flag), so a control can have a process of its own.  Two reasons, both paid for on the H200's real 8B chunk: the suite
+    // is 46 probes and about two hours there, and one probe that cannot fire on
+    // a dump (`o seam`, whose rebuilt layer needs a bigger exp table than the
+    // honest statement declares) panics and takes every probe after it with it.
+    // With no `--probe` the list is what it always was.
+    let only = arg_strs(args, "--probe", &[]);
     let mut probe = |name: &str, l2: &layer::Layer, t: &compose::ProverTamper,
                      expect: &str| -> bool {
+        if !only.is_empty() && !only.iter().any(|w| name.contains(w.as_str())) {
+            out.push(json!({"probe": name, "skipped": "not selected by --probe"}));
+            return false;
+        }
         eprintln!("compose probe {name}");
         // verify against the HONEST fixed statement: the trusted half comes from
         // setup, never from the prover under test
@@ -1128,10 +1853,19 @@ fn compose_probes_cmd(args: &[String]) {
             None => (None, false),
         };
         let accepted = verdict.as_ref().map(|v| v.accepts()).unwrap_or(false);
+        let flipped = verdict.as_ref()
+            .map(|v| falsified(&serde_json::to_value(v).unwrap()))
+            .unwrap_or_default();
         out.push(json!({
             "probe": name, "expect_reject_by": expect,
             "accepted": accepted,
+            "falsified": flipped,
             "tamper_fired": out2.glue_tamper_fired,
+            // Stream NN-3: the `s_v` tie is an equality between two tree-0
+            // column families, so no verdict field can carry it -- a verifier
+            // holds it through `pre_root`.  The probe record carries the
+            // build's own reading, which is how a control on it is visible.
+            "sv_tie": out2.family_cells.get("sv_tie"),
             "prove_error": out2.prove_error,
             "root_differs_from_honest": root_differs,
             "verdict": verdict.as_ref().map(|v| serde_json::to_value(v).unwrap()),
@@ -1139,6 +1873,11 @@ fn compose_probes_cmd(args: &[String]) {
         accepted
     };
 
+    // Stream OO: every `layer_clone` below is dropped as soon as its probe has
+    // run.  A shadowed `let mut l2` is not freed until the function returns, so
+    // the six of them were held for the whole run and the 8B suite was
+    // OOM-killed on the box at probe 31 of 46 (log row 57, rc 137).  Nothing
+    // about what a probe proves changes.
     // 1. a corrupted accumulator: the dequant region stays self-consistent and the
     //    Y = W X identity is what rejects
     let mut l2 = layer_clone(&l);
@@ -1147,6 +1886,7 @@ fn compose_probes_cmd(args: &[String]) {
     l2.mats[dn].acc[123 % n] += 1;
     assert!(!probe("corrupted accumulator (down)", &l2, &Default::default(),
                    "the Y = W X identity"), "corrupted acc accepted");
+    drop(l2);
 
     // 2. a corrupted activation: the same identity, other side
     let mut l2 = layer_clone(&l);
@@ -1158,6 +1898,7 @@ fn compose_probes_cmd(args: &[String]) {
     }
     assert!(!probe("corrupted activation (qkv)", &l2, &Default::default(),
                    "the Y = W X identity"), "corrupted qx accepted");
+    drop(l2);
 
     // 3. a corrupted key in band 0: the Q.K^T identity
     let mut l2 = layer_clone(&l);
@@ -1165,6 +1906,7 @@ fn compose_probes_cmd(args: &[String]) {
     l2.bands[0].kk[1234 % n] += 1;
     assert!(!probe("corrupted key (band 0)", &l2, &Default::default(), "Q.K^T"),
             "corrupted key accepted");
+    drop(l2);
 
     // 4. a corrupted attention output: the A.V link
     let mut l2 = layer_clone(&l);
@@ -1172,6 +1914,7 @@ fn compose_probes_cmd(args: &[String]) {
     l2.ao.acc[999 % n] += 1;
     assert!(!probe("corrupted attention output", &l2, &Default::default(), "A.V"),
             "corrupted attnout accepted");
+    drop(l2);
 
     // 5. a corrupted attnout denominator: the denominator link
     let mut l2 = layer_clone(&l);
@@ -1179,6 +1922,7 @@ fn compose_probes_cmd(args: &[String]) {
     l2.ao.den[7 % n] += 1;
     assert!(!probe("corrupted attnout denominator", &l2, &Default::default(),
                    "the denominator link"), "corrupted den accepted");
+    drop(l2);
 
     // 5b. B10 step 3: a token that attends to a key the causal mask removes.  The
     //     corner's `sn` and the prefix's `sn` are what the per-token region's `az`
@@ -1204,6 +1948,7 @@ fn compose_probes_cmd(args: &[String]) {
     l2.corrupt_exp_table(4321);
     assert!(!probe("corrupted exp table, witness rebuilt", &l2, &Default::default(),
                    "the pinned preprocessed root"), "corrupted exp table accepted");
+    drop(l2);
 
     // 7. the corrupted normalisation table, same discipline
     assert!(!probe("corrupted norm table, witness rebuilt", &l,
@@ -1217,11 +1962,17 @@ fn compose_probes_cmd(args: &[String]) {
     //    claims can catch it.  The other two are the add's own argument, run
     //    here rather than only in `glue-probes`, on the real layer's columns.
     if l.glue.is_some() {
-        assert!(!probe("glue: gn2's copy of the residual stream", &l,
-                       &compose::ProverTamper { glue_stream: Some((2, 4321)),
-                                                ..Default::default() },
-                       "the tie gn1.xmid == gn2.in"),
-                "a broken residual thread accepted");
+        // stream II: the head chunk's family has one reduction and no add, so
+        // there is no second region's copy of the stream to break -- that probe
+        // is the layer's, and the head chunk's equivalent is the tail's own
+        // copy, which probe 12 below runs on whichever family this chunk has.
+        if !l.glue.as_ref().is_some_and(|g| g.head) {
+            assert!(!probe("glue: gn2's copy of the residual stream", &l,
+                           &compose::ProverTamper { glue_stream: Some((2, 4321)),
+                                                    ..Default::default() },
+                           "the tie gn1.xmid == gn2.in"),
+                    "a broken residual thread accepted");
+        }
         assert!(!probe("glue: one add's result, one step up", &l,
                        &compose::ProverTamper {
                            glue: Some((0, glue::Tamper::Result(97))), ..Default::default() },
@@ -1247,36 +1998,78 @@ fn compose_probes_cmd(args: &[String]) {
         if let Some(g) = gplan.glue.as_ref() {
             // `Tamper::Stream` counts leaves across every group of the row and
             // fires only inside group 0, so the index has to be derived from the
-            // layout rather than picked: a tail row is `[nreal x, 1 r, nreal w]`
-            // and anything at or past `nreal` corrupts nothing at all.
+            // layout rather than picked: a tail row is `[nreal x, 1 ms]` since
+            // stream II moved the weight into tree 0, and anything at or past
+            // `nreal` corrupts nothing at all.
             let in0 = g.t.nreal / 2;
+            // stream JJ: how far into the SwiGLU region's value list `up` starts
+            let swiglu_n = g.tff.map(|t| t.tokens * t.d).unwrap_or(0);
             for (k, i) in g.tails.iter().copied().enumerate() {
-                let n = k + 1;
+                // stream II: the region's own tag, so a head chunk's single
+                // tail is named `ntf` and the layer's two keep the names the
+                // record already carries
+                let n = g.regions[i].tag.clone();
+                let _ = k;
                 // the tie is the whole point of the tail: its copy of the
                 // stream is changed and the region stays internally consistent,
                 // so only `nt.In(0) == gn.In(0)` can catch it
-                assert!(!probe(&format!("tail nt{n}: its own copy of the stream"), &l,
+                assert!(!probe(&format!("tail {n}: its own copy of the stream"), &l,
                                &compose::ProverTamper {
                                    glue: Some((i, glue::Tamper::Stream(in0))),
                                    ..Default::default() },
-                               &format!("the tie nt{n}.in == gn{n}.in")),
+                               &format!("the tie {n}.In(0) == its reduction's In(0)")),
                         "a tail reading a different stream accepted");
-                assert!(!probe(&format!("tail nt{n}: one multiply's result"), &l,
+                assert!(!probe(&format!("tail {n}: one multiply's result"), &l,
                                &compose::ProverTamper {
                                    glue: Some((i, glue::Tamper::Result(97))),
                                    ..Default::default() },
                                "the multiply's output constraint"),
                         "a corrupted tail result accepted");
+                // stream II's three controls on the norm tail.  The first two
+                // change what `r` is without breaking anything inside the
+                // region: the `NormR` lookup still finds a row and the two
+                // multiplies still hold, so the only thing that can reject is
+                // the tie to the reduction's published sum of squares.
+                assert!(!probe(&format!("tail {n}: a wrong r on one row"), &l,
+                               &compose::ProverTamper {
+                                   glue: Some((i, glue::Tamper::Ms(37))),
+                                   ..Default::default() },
+                               &format!("the tie {n}.In(1) == G the reduction's Out(0)")),
+                        "a tail with a wrong r accepted");
+                assert!(!probe(&format!("tail {n}: two rows of one token, two rs"), &l,
+                               &compose::ProverTamper {
+                                   glue: Some((i, glue::Tamper::MsRow(37))),
+                                   ..Default::default() },
+                               &format!("the tie {n}.In(1) == G the reduction's Out(0)")),
+                        "a token whose rows disagree about r accepted");
             }
+            // and the third: one norm-weight cell bent.  It is preprocessed
+            // now, so every constraint still holds and the *root* is what
+            // moves -- a different kind of rejection from every probe above,
+            // and the one that says `w` is the model's and not the prover's.
+            let wtag = g.regions[g.tails[0]].tag.clone();
+            assert!(!probe(&format!("tail {wtag}: one norm-weight cell"), &l,
+                           &compose::ProverTamper { glue_w: Some(4321),
+                                                    ..Default::default() },
+                           "the pinned preprocessed root"),
+                    "a bent norm weight accepted");
             // the dequant output ties: the wiring family's copy of `o_out` (and
             // of `d_out`) is changed, the region's own add is recomputed from it,
             // and only the tie against the dequant region's published output can
             // tell.  This is the probe those ties exist for.
-            for (k, ((ri, _), name)) in g.out_ties.iter().enumerate() {
-                let _ = k;
+            // Stream JJ (E11): one per tie that has a counterparty.  For the
+            // SwiGLU seam the bent value is `gate`'s copy or `up`'s -- the
+            // region recomputes `silu(g) * u` from it either way, so nothing
+            // inside the region can tell and only the tie against the gate (or
+            // up) dequant region's published output rejects.
+            for t in g.out_ties.iter() {
+                let Some((ri, ti)) = t.at else { continue };
+                let name = t.name;
+                let vi = if name == "up" { 4321 + swiglu_n } else { 4321 };
+                let _ = ti;
                 assert!(!probe(&format!("deq tie: the wiring copy of {name}'s output"), &l,
                                &compose::ProverTamper {
-                                   glue_add: Some((*ri, 4321)), ..Default::default() },
+                                   glue_add: Some((ri, vi)), ..Default::default() },
                                &format!("the tie {name}_out == the {name} region's output")),
                         "a corrupted dequant output copy accepted");
             }
@@ -1297,6 +2090,219 @@ fn compose_probes_cmd(args: &[String]) {
         }
     }
 
+    // stream II: the three requantize seams.  Each gets the three controls the
+    //     brief names, and each has to reject by exactly one verdict field:
+    //     the input probe by `rq_in_ok`, the output probe by `rq_out_ok`, and
+    //     the scale probe by `sums_cancel` (the committed scale no longer
+    //     divides the attained maximum, so its `(pm, scale)` lookup is off the
+    //     table).  The indices are derived from the plan, never counted.
+    {
+        let rplan = compose::Plan::new(&params);
+        for (k, rp) in rplan.rqs.iter().enumerate() {
+            let n = rp.name.clone();
+            assert!(!probe(&format!("requant {n}: one input value, replaced"), &l,
+                           &compose::ProverTamper {
+                               rq: Some((k, requant::RqTamper::In(37))),
+                               ..Default::default() },
+                           &format!("the tie rq_in[{k}] == the producer's Out(0)")),
+                    "a requantize of values the producer did not write accepted");
+            // the output side: no tamper at all.  The layer itself carries one
+            // activation the requantize did not derive, and its own
+            // accumulators move with it, so every constraint and every other
+            // equality in the chunk still holds -- an honest matmul of the
+            // prover's own choice of input, which is exactly what
+            // `witness-slack.md` section 1d says the walk used to allow.
+            let mut lb = layer_of(args).0;
+            let bent = bend_walk_qx(&mut lb, &rplan.specs, &rplan.walks[rp.walk].mats, 41)
+                .unwrap_or_else(|| panic!("requant {n}: the output-side control bent nothing"));
+            eprintln!("  {n}: activation {} bent, {} dequantized outputs moved with it",
+                      bent.0, bent.1);
+            assert!(!probe(&format!("requant {n}: one activation the requantize did not derive"),
+                           &lb, &Default::default(),
+                           &format!("the tie rq_out[{k}] == walk_qx[{}]", rp.walk)),
+                    "an activation the requantize did not derive accepted");
+            assert!(!probe(&format!("requant {n}: the per-token scale, one step up"), &l,
+                           &compose::ProverTamper {
+                               rq: Some((k, requant::RqTamper::Scale(3))),
+                               ..Default::default() },
+                           "the (pm, scale) lookup"),
+                    "a scale that is not the ceil-divide of the attained max accepted");
+        }
+        // Stream II (E11), the scale tie.  A *consumer's* per-token scale moved
+        // by one, with its dequant region rederived under it, so every
+        // constraint that region carries still holds -- an honest dequant by a
+        // scale the requantize did not pin.  The bend has to be on a matmul
+        // that is not its group's first, because the seam reads its scale off
+        // that one and moving it would move both sides together; `down`'s group
+        // is `[down]` alone, so its own pair is not separable by a witness bend
+        // and would need a committed-column tamper instead.
+        for (k, rp) in rplan.rqs.iter().enumerate() {
+            let mats = &rplan.walks[rp.walk].mats;
+            let Some(mi) = mats.get(1).copied() else { continue };
+            let mut lb = layer_of(args).0;
+            let name = lb.mats[mi].name.clone();
+            match rp.v {
+                requant::SVariant::Pow2 => lb.mats[mi].jx[0] += 1,
+                requant::SVariant::Bf16 => lb.mats[mi].sx[0].1 += 1,
+            }
+            let at = mats.iter().position(|x| *x == mi).unwrap();
+            let base: usize = rplan.rqs[..k].iter().map(|q| rplan.walks[q.walk].mats.len()).sum();
+            assert!(!probe(&format!("requant {}: {name} dequantized by another scale",
+                                    rp.name),
+                           &lb, &Default::default(),
+                           &format!("the tie rq_sc[{k}] == deq_sc[{name}]")),
+                    "a dequant under a scale the requantize did not pin accepted");
+            let _ = base + at;
+        }
+
+        // Stream II (E11), the `o` seam.  `o` has no requantize region --
+        // `AttnOutEval` is its requantize -- so its control is the same shape as
+        // the three above's output side and no tamper either: one `o`
+        // activation the attention output did not produce, with the `o` matmul's
+        // own accumulator moved to match, so the matmul is honestly proved and
+        // only `claims.ao_q` against the walk's `qX` can see it.
+        if let Some(wi) = rplan.walks.iter().position(|w| w.name == "o") {
+            let mut lb = layer_of(args).0;
+            let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
+            let bent = lb.glue.is_some().then(|| {
+                lb.synth_glue_bent(src_of(args).seed, arg_scalar(args, "--glue-a", 32usize),
+                                   round, 41)
+            }).flatten();
+            match bent {
+                Some(at) => {
+                    eprintln!("  o seam: activation {at} bent, the whole layer rebuilt around it");
+                    assert!(!probe("o seam: one activation the attention output did not produce",
+                                   &lb, &Default::default(),
+                                   &format!("the tie ao_q == walk_qx[{wi}]")),
+                            "an o activation the attnout region did not requantize accepted");
+                }
+                None => eprintln!("  o seam: SKIP -- this shape has no wiring family, or its o \
+walk is not nh*hd wide, so the two folds are over different sequences and `ao_q_ok` is not \
+statable here"),
+            }
+        }
+
+        // ---- stream NN: the rotation and the quantize -----------------------
+        //
+        // Two ties per side and one preprocessed pin each, and every one of
+        // them has to reject by a *different* verdict field -- which is what
+        // `falsified` in the probe record says, rather than prose:
+        //
+        //   producer side, q and k   one dequant output copy      deq_out_ok
+        //   producer side, all three one committed input          nn_in_ok
+        //   consumer side, all three one band cell                nn_out_ok
+        //   the rotation's table     one angle cell               root_ok
+        //   the quantize's table     one scale exponent           root_ok
+        //   the division table       one quotient                 sums_cancel
+        if !rplan.quants.is_empty() {
+            let g = rplan.glue.as_ref().expect("the quantize regions need the wiring family");
+            let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
+            let (seed, ga) = (src_of(args).seed, arg_scalar(args, "--glue-a", 32usize));
+            // the input side of each rotation: one copy of the matmul's dequant
+            // output bent, the whole rotation and the quantize recomputed from
+            // it, so every constraint in three regions still holds and only the
+            // tie against the matmul's own published output can tell
+            for rr in &g.ropes {
+                assert!(!probe(&format!("rope {}: one dequant output copy", rr.name), &l,
+                               &compose::ProverTamper {
+                                   glue_add: Some((rr.mul, 4321)), ..Default::default() },
+                               &format!("the tie deq_out[{}] == rp{}m.In(0)", rr.name, rr.name)),
+                        "a rotation of values the matmul did not write accepted");
+            }
+            // one preprocessed angle: the products follow it, so every
+            // constraint holds and the *root* is what moves.  This is the probe
+            // that says `cos` and `sin` are the statement's and not the
+            // prover's -- and, because they are a function of the block, that
+            // tree 0 is pinned per block.
+            assert!(!probe("rope q: one cos cell of the angle table", &l,
+                           &compose::ProverTamper { rope_w: Some(97),
+                                                    ..Default::default() },
+                           "the pinned preprocessed root"),
+                    "a bent rotation angle accepted");
+            for (k, qp) in rplan.quants.iter().enumerate() {
+                let n = qp.name;
+                // the quantize's own input: another legal bf16 pattern, the
+                // quotient rebuilt around it.  For q and k the counterparty is
+                // the rotation's `Out(0)`; for v it is the matmul's `deq_out`.
+                assert!(!probe(&format!("quant {n}: one input value, replaced"), &l,
+                               &compose::ProverTamper {
+                                   quant: Some((k, rope::QTamper::In(37))),
+                                   ..Default::default() },
+                               &format!("the tie nn_in[{k}] == the producer's output")),
+                        "a quantize of values the producer did not write accepted");
+                assert!(!probe(&format!("quant {n}: one quotient off its own table row"), &l,
+                               &compose::ProverTamper {
+                                   quant: Some((k, rope::QTamper::Out(41))),
+                                   ..Default::default() },
+                               "the (tt, m7, q) division table"),
+                        "a quotient the division table does not carry accepted");
+                assert!(!probe(&format!("quant {n}: one preprocessed scale exponent"), &l,
+                               &compose::ProverTamper {
+                                   quant: Some((k, rope::QTamper::Scale(5))),
+                                   ..Default::default() },
+                               "the pinned preprocessed root"),
+                        "a bent quantize exponent accepted");
+            }
+            // the consumer side: one *band* cell moved and the bands rebuilt
+            // around it, so the attention this chunk proves is an honest
+            // attention over the bent column and nothing but the band's own
+            // claim against the quantize region's output can see it.  The
+            // generator is the witness's, so this needs a synthetic layer.
+            for (which, name) in [(0usize, "Q"), (1, "K"), (2, "V")] {
+                // the generator rebuilds the whole layer, so it only makes
+                // sense on a synthetic one -- on a dump it would replace the
+                // witness under test with a different layer and the probe would
+                // measure nothing about this chunk
+                if arg_str(args, "--witness").is_some() {
+                    eprintln!("  band {name}: SKIP -- the consumer-side control needs the \
+synthetic generator (Layer::synth_glue_band_bent); on a dump the bands are B1's");
+                    continue;
+                }
+                let mut lb = layer_of(args).0;
+                if lb.glue.is_none() {
+                    eprintln!("  band {name}: SKIP -- no synthetic wiring family here");
+                    continue;
+                }
+                lb.synth_glue_band_bent(seed, ga, round, which, 41);
+                // stream SS: with a folded `v` there is no quantize region on
+                // that side, so the falsified field is the dequant output tie
+                // and not `nn_out_ok` -- the fold publishes the int8 cell
+                // itself and the bands' V is what reads it
+                let tie = if which == 2 && rplan.oside_band("v") {
+                    "the tie deq_out[v] == the sum of the bands' own V claims"
+                } else {
+                    "the tie nn_out == the sum of the bands' own claims"
+                };
+                assert!(!probe(&format!("band {name}: one committed cell the matmuls did not produce"), &lb, &Default::default(),
+                               tie),
+                        "a band column the layer's matmuls did not produce accepted");
+            }
+            // stream NN (NN-2): and the prefix band's own copy of Q, whose
+            // counterparty is its group's corner rather than a quantize region.
+            // The bend moves one prefix cell and the band's whole attention is
+            // rebuilt around it, so the chunk is an honest attention over the
+            // cache with queries the `q` matmul did not produce -- and only
+            // `nn_q_ok` can see that.
+            if arg_str(args, "--witness").is_some() {
+                eprintln!("  prefix Q: SKIP -- the consumer-side control needs the \
+synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B1's");
+            } else {
+                let mut lp = layer_of(args).0;
+                if lp.glue.is_none() {
+                    eprintln!("  prefix Q: SKIP -- no synthetic wiring family here");
+                } else if lp.bands.iter().all(|b| b.corner) {
+                    eprintln!("  prefix Q: SKIP -- this shape has no prefix band");
+                } else {
+                    lp.synth_glue_prefix_q_bent(seed, ga, round, 41);
+                    assert!(!probe("prefix band Q: one query the corner does not carry", &lp,
+                                   &Default::default(),
+                                   "the tie prefix.Q == corner.Q, per band group"),
+                            "a prefix band's queries that are not the corner's accepted");
+                }
+            }
+        }
+    }
+
     // 16. stream E: the head tie.  One committed key of the argmax region is
     //     changed and the region is made consistent with it, so every constraint
     //     it carries still holds and only the equality with the head dequant's
@@ -1308,6 +2314,30 @@ fn compose_probes_cmd(args: &[String]) {
                            ..Default::default() },
                        "the tie am_key == head_key"),
                 "an argmax on keys that are not the head's output accepted");
+    }
+
+    // 11c. Stream UU (E11): one cell of a *residual* boundary tree moved alone,
+    //     the glue region it is tied to left exactly as it was.  Stream H's
+    //     `bounds` probe made this assertion for the pair of sides a layer
+    //     chunk carries, but only on real witness dirs; here it runs on every
+    //     shape the probe command is given, which is what puts the head chunk's
+    //     single input side (`bounds::sides`, one side, tree 3) under it.
+    //     Nothing else in the chunk moves, so the only thing that can reject is
+    //     the plain equality constraint that binds the tree to the region --
+    //     which is the whole statement that the root is bound to the proof and
+    //     not merely appended to it.
+    if params.bounds {
+        let n_glue = compose::Plan::new(&params).bounds.len();
+        assert!(n_glue > 0,
+                "--bounds produced no residual boundary side: the chunk has no wiring family");
+        for k in 0..n_glue {
+            assert!(!probe(&format!("residual boundary side {k}, its glue region untouched"),
+                           &l,
+                           &compose::ProverTamper { bounds: Some((k, 4321)),
+                                                    ..Default::default() },
+                           "the residual boundary equality constraint"),
+                    "a residual boundary column that disagrees with its region accepted");
+        }
     }
 
     // 12. Stream AA (E11): one cell of a K/V boundary tree moved *alone*, the
@@ -1364,6 +2394,118 @@ fn compose_probes_cmd(args: &[String]) {
                 "a corrupted embedding table accepted");
     }
 
+    // 17. Stream JJ (E11): the attention output's denominator on a row the `dz`
+    //     fold never publishes.  `den` is one committed cell per row and it
+    //     entered exactly two places -- `denp = den pj` per slot, and `den *
+    //     last` in the `dz` fold -- so on every row of a token but the last it
+    //     was free, and with it `denp`.  This probe rounds one such row honestly
+    //     against `den - 1`: `denp`, `qm`, `sg` and `d` are all rederived from
+    //     it, every lookup lands on a real table row and every constraint of the
+    //     pre-change AIR holds.  It is the control for `witness-slack.md`
+    //     section 7 item 1 and for the row-`den` hole found beside it.
+    {
+        let lay = layer::AoLayout::choose(params.nh, params.s, params.hd, params.ao_target);
+        if lay.chunks > 1 {
+            // `b = 1` is a channel block the `dz` fold does not close on
+            let idx = params.hd + lay.per_row;
+            assert!(!probe("attnout: one non-last row rounded against den - 1", &l,
+                           &compose::ProverTamper { ao_den: Some(idx),
+                                                    ..Default::default() },
+                           "the `den` pin across a token's rows"),
+                    "a rounding by an unpinned denominator accepted");
+        }
+    }
+
+    // 18. Stream JJ (E11), `witness-slack.md` section 1f: the three controls the
+    //     exponent window and the accumulator window exist for.  Each bends one
+    //     committed cell and rederives everything the honest builder would from
+    //     it, so every other check of the chunk still passes and exactly one
+    //     thing can reject:
+    //
+    //       * `--corrupt-ao-jo` moves one *row*'s `jo` by one and leaves the
+    //         token's other rows alone.  Every `EPOW` lookup still lands on a
+    //         real table row and the row's own arithmetic is self-consistent, so
+    //         only the `nofirst` pin on `joff` can see it.  (A whole token's
+    //         `jo` moved by one is a different matter and is *accepted*: `jo` is
+    //         the prover's choice inside the window, and what pins it to the
+    //         consumer's scale is the tie on `claims.ao_q`, which is stream
+    //         II's.  See the record.)
+    //       * `--corrupt-ao-num` doubles one slot's committed `num` and derives
+    //         `qm`, `sg`, `d` and the reference from it.  The triple
+    //         `(jvp + joff, num, pj)` is then not a row of the `EPOW` table, so
+    //         only that lookup can reject it.
+    //       * `--corrupt-ao-acc` moves one slot's committed low accumulator limb
+    //         by one inside its own table, so both range lookups land on real
+    //         rows and only the high limb's *value* -- no longer an integer --
+    //         parts company with the multiplicity the table was bumped at.
+    {
+        let lay = layer::AoLayout::choose(params.nh, params.s, params.hd, params.ao_target);
+        if lay.chunks > 1 {
+            // a channel in the first block: `b = 0`, a row the `nofirst` pin
+            // compares against its predecessor
+            let idx = params.hd;
+            assert!(!probe("attnout: one row's jo moved by one", &l,
+                           &compose::ProverTamper { ao_jo: Some(idx),
+                                                    ..Default::default() },
+                           "the `joff` pin across a token's rows"),
+                    "a per-row output exponent accepted");
+        }
+        assert!(!probe("attnout: one slot's num a doubling out of the window", &l,
+                       &compose::ProverTamper { ao_num: Some(params.hd + 1),
+                                                ..Default::default() },
+                       "the `EPOW` window lookup"),
+                "an exponent pair outside the window accepted");
+        assert!(!probe("attnout: one accumulator limb off its own decomposition", &l,
+                       &compose::ProverTamper { ao_acc: Some(params.hd + 2),
+                                                ..Default::default() },
+                       "the accumulator window's high limb"),
+                "an unbounded accumulator accepted");
+        // Stream TT (E11), log row 73: the magnitude form's own.  `amag` is
+        // pinned by `(amag - acc)(amag + acc) = 0`, which has two roots; this
+        // commits the other one.  Every constraint of the region holds and
+        // every other lookup lands, and the committed magnitude is about
+        // `2^31`, so `2 mag num` would run past the field -- which is the
+        // forgery the window exists to refuse.  Only the range check on the
+        // magnitude's limbs can see it.  Present only in the magnitude form,
+        // because the offset form commits no such column.
+        if params.ao_acc_mag {
+            assert!(!probe("attnout: the magnitude committed as the negative root", &l,
+                           &compose::ProverTamper { ao_mag: Some(params.hd + 3),
+                                                    ..Default::default() },
+                           "the magnitude window's limbs"),
+                    "a magnitude past the no-wrap window accepted");
+        } else {
+            eprintln!("compose probe SKIP attnout magnitude root: this statement is in \
+                       the offset form (--ao-acc-mag forces the other)");
+        }
+        // And the counterpart, whose verdict is now the *chunk's* to decide.  A
+        // whole token's `jo` moved by one inside the window, with the region
+        // rederived, changes every one of that token's requantized outputs.
+        //
+        // Stream JJ ran this and it accepted, and its record said what would
+        // pin it: the consumer-side tie on `claims.ao_q`, which was stream II's
+        // to add.  With that tie live it *does* pin it -- the `o` walk's
+        // committed activations are the pre-bend integers and the attnout
+        // region's fold is over the post-bend ones, so `ao_q_ok` alone rejects.
+        //
+        // On a chunk with no wiring family the `o` walk publishes no `qX` at
+        // all, so there is no consumer and this still accepts.  That is not a
+        // hole this control can close: `jo` is the prover's choice and a chunk
+        // whose attention output nothing downstream reads has nothing to
+        // compare it against.  Both cases are run, and the assert is the
+        // chunk's own shape rather than a constant.
+        let seam_live = compose::Plan::new(&params).glue.is_some()
+            && l.mats.iter().any(|m| m.name == "o" && m.n_in == l.ao.nh * l.ao.hd);
+        let jo_tok = probe("attnout: a whole token's jo moved by one", &l,
+                           &compose::ProverTamper { ao_jo_tok: Some(1),
+                                                    ..Default::default() },
+                           if seam_live { "the o seam, `ao_q` against the walk's qX" }
+                           else { "nothing -- this chunk has no consumer for it" });
+        assert_eq!(!jo_tok, seam_live,
+                   "a whole token's jo must reject exactly when the o seam is live: \
+                    seam_live={seam_live}, accepted={jo_tok}");
+    }
+
     // 8. a tampered claim in the serialized statement: the replayed transcript
     //    diverges and stwo's verify rejects
     {
@@ -1408,13 +2550,16 @@ fn layer_clone(l: &layer::Layer) -> layer::Layer {
             h1: g.h1.clone(), h2: g.h2.clone(),
             silu_in: g.silu_in.clone(), silu_out: g.silu_out.clone(),
             x_down: g.x_down.clone(),
-            eps: g.eps, inv_d: g.inv_d, reduce: g.reduce.clone(),
+            eps: g.eps, inv_d: g.inv_d, reduce: g.reduce.clone(), head: g.head,
         }),
         head_keys: l.head_keys.clone(),
         head_tok: l.head_tok.clone(),
         attn_out_bits: l.attn_out_bits,
         embed_tab: l.embed_tab.clone(),
         tok_in: l.tok_in.clone(),
+        layer: l.layer,
+        block: l.block,
+        rope: l.rope.clone(),
         source: l.source.clone(),
     }
 }
@@ -1529,6 +2674,12 @@ fn glue_cmd(args: &[String]) {
         ("unary+add", Prog::tree(leaves, leaves, UnKind::Square), 11),
         ("mul", Prog::pairs(per_row, Kind::Mul, UnKind::None, UnKind::None), 13),
         ("swiglu", Prog::pairs(per_row, Kind::Mul, UnKind::Silu, UnKind::None), 17),
+        // Stream II: the norm tail as it is composed -- the reduction's answer
+        // through `UnKind::NormR` and a preprocessed weight.  Here it runs on
+        // synthetic values, which is the isolation the composed rung has not
+        // got: a failure in this case is the region, never the wiring.
+        ("normtail", Prog::norm_tail(per_row, UnKind::NormR {
+            inv_d: bf16::from_f64(1.0 / per_row as f64), eps: bf16::from_f64(1e-5) }), 19),
     ];
     for (name, prog, seed) in &cases {
         let w = GlueWitness::synthetic(rows, prog, round, *seed);
@@ -1726,6 +2877,54 @@ fn selftest(args: &[String]) {
                             "requant": rq, "compose": cj}));
 }
 
+/// Stream EE (open item 21): `fpcompare EMIT.json ASK.json` -- does the plan
+/// line's emitted kernel set cover everything a chunk on that line looks up?
+///
+/// The rule is containment, not equality: one emit line installs the shapes of
+/// every component of its design point, and a chunk asks for the subset its own
+/// components use, so `ask ⊆ emit` is the property that keeps a run off the
+/// scalar route. Any fingerprint on the ask side and not on the emit side is
+/// the defect item 21 recorded, and it is named here with its family and its
+/// instruction count.
+fn fpcompare_cmd(args: &[String]) {
+    let files: Vec<&String> = args[1..].iter().filter(|a| !a.starts_with("--")).collect();
+    assert_eq!(files.len(), 2, "fpcompare wants EMIT.json and ASK.json");
+    let read = |p: &str| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(p).unwrap_or_else(|e| panic!("{p}: {e}"))).unwrap()
+    };
+    let (emitted, asked) = (read(files[0]), read(files[1]));
+    let mut missing = vec![];
+    let mut n_ask = 0usize;
+    for (family, fps) in asked["families"].as_object().expect("ask: no families") {
+        for (fp, instr) in fps.as_object().unwrap() {
+            n_ask += 1;
+            if emitted["families"][family].get(fp).is_none() {
+                missing.push(json!({"family": family, "fingerprint": fp,
+                                    "instructions": instr}));
+            }
+        }
+    }
+    let n_emit: usize = emitted["families"].as_object().map(|o| {
+        o.values().map(|v| v.as_object().unwrap().len()).sum()
+    }).unwrap_or(0);
+    for m in &missing {
+        eprintln!("fpcompare: {} {} ({} instructions) is asked for and never emitted",
+                  m["family"].as_str().unwrap(), m["fingerprint"].as_str().unwrap(),
+                  m["instructions"]);
+    }
+    let covered = missing.is_empty();
+    eprintln!("fpcompare: {n_ask} shape(s) asked, {n_emit} emitted, {} missing -- {}",
+              missing.len(), if covered { "COVERED" } else { "NOT COVERED" });
+    emit("fpcompare", json!({
+        "emit": files[0], "ask": files[1],
+        "emit_shapes": n_emit, "ask_shapes": n_ask,
+        "missing": missing, "covered": covered,
+    }));
+    if !covered {
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().cloned().unwrap_or_default();
@@ -1742,6 +2941,9 @@ fn main() {
         "pack" => pack_cmd(&args),
         "attn-probes" => attn_probes_cmd(&args),
         "compose" => compose_cmd(&args),
+        "pre-split" => pre_split_cmd(&args),
+        "expect-root" => expect_root_cmd(&args),
+        "model-roots" => model_roots_cmd(&args),
         "compose-chunks" => chunks::chunks_cmd(&args),
         "exprprobe" => exprprobe::cmd(&args),
         "cudacheck" => cudagen::cmd(&args),
@@ -1763,12 +2965,13 @@ fn main() {
         "bounds-grid" => bounds::grid_cmd(&args),
         "glue-probes" => glue_probes_cmd(&args),
         "selftest" => selftest(&args),
+        "fpcompare" => fpcompare_cmd(&args),
         "gkr" => gkrband::cmd(&args),
         other => {
             eprintln!("unknown subcommand {other:?}; \
                        expected tables|dequant|width|kmax|probes|pack|attn-probes|exprprobe|cudacheck|cudaemit|logupcheck|genemit|\
                        argmax|argmax-probes|embed|embed-probes|\
-                       compose|compose-probes|bounds-chain|bounds-grid|psweep|requant|requant-probes|glue|glue-probes|selftest");
+                       compose|pre-split|expect-root|model-roots|compose-probes|bounds-chain|bounds-grid|psweep|requant|requant-probes|glue|glue-probes|selftest");
             std::process::exit(2);
         }
     }

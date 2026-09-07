@@ -146,6 +146,13 @@ pub const SMUL_COLS: [&str; 5] =
 pub const VAL_COLS: [&str; 2] = ["b10_val_sm", "b10_val_ef"];
 pub const UN_COLS: [&str; 4] = ["b10_un_i_sm", "b10_un_i_ef", "b10_un_o_sm", "b10_un_o_ef"];
 /// A region's own selector: `end` marks the last row, for the Horner ties.
+/// Stream II: a region's `i`-th preprocessed value, as its two fields.  The
+/// norm weights are the only user today; they are the model's, so they belong
+/// beside the tables in tree 0 rather than beside the stream in tree 1.
+pub fn glue_pre_col(tag: &str, i: usize, k: usize) -> PreProcessedColumnId {
+    PreProcessedColumnId { id: format!("b10_gpre_{tag}_{i}_{}", ["sm", "ef"][k]) }
+}
+
 pub fn glue_sel(tag: &str, name: &str) -> PreProcessedColumnId {
     id(format!("b10_g{tag}_{name}"))
 }
@@ -282,6 +289,14 @@ pub enum UnKind {
     Square,
     Rsqrt,
     Silu,
+    /// Stream II: the norm's own `r`, as one table from the reduction's answer.
+    /// The chain B1 runs is `ms = store(root * inv_d)`, `t = store(ms + eps)`,
+    /// `r = store(rsqrt(t))` (`b1/model.py`'s `rmsnorm`), and `inv_d` and `eps`
+    /// are bf16 constants of the model, so the whole of it is a function of one
+    /// bf16 pattern and belongs in a table the preprocessed root stands behind.
+    /// A lookup on `(root, r)` is then what makes `r` the reduction's answer
+    /// rather than a value the prover chose.
+    NormR { inv_d: u16, eps: u16 },
 }
 
 impl UnKind {
@@ -291,6 +306,7 @@ impl UnKind {
             UnKind::Square => "square",
             UnKind::Rsqrt => "rsqrt",
             UnKind::Silu => "silu",
+            UnKind::NormR { .. } => "normr",
         }
     }
     pub fn parse(s: &str) -> Self {
@@ -299,6 +315,9 @@ impl UnKind {
             "square" => UnKind::Square,
             "rsqrt" => UnKind::Rsqrt,
             "silu" => UnKind::Silu,
+            // `normr` carries the model's two bf16 scalars, so it has no
+            // command-line spelling: the plan builds it from the manifest.
+            "normr" => panic!("normr is built from the manifest, not named on a command line"),
             other => panic!("unknown unary {other:?}"),
         }
     }
@@ -313,6 +332,12 @@ impl UnKind {
                 if x <= 0.0 { 0.0 } else { x.sqrt().recip() }
             }
             UnKind::Silu => x / (1.0 + (-x).exp()),
+            // one `store` per step, exactly as `rmsnorm` writes it
+            UnKind::NormR { inv_d, eps } => {
+                let ms = bf16::to_f32(bf16::from_f32(x * bf16::to_f32(*inv_d)));
+                let t = bf16::to_f32(bf16::from_f32(ms + bf16::to_f32(*eps)));
+                if t <= 0.0 { 0.0 } else { t.sqrt().recip() }
+            }
         }) as f64
     }
 }
@@ -359,6 +384,11 @@ pub enum Src {
     Un(usize, usize),
     /// an earlier slot's output in the same row
     Slot(usize),
+    /// Stream II: preprocessed value `i` of this row -- a `(sm, ef)` pair the
+    /// *statement* carries, not the prover.  The norm weights are the model's,
+    /// so they live in tree 0 under `pre_root` and no `VAL` lookup is needed:
+    /// the table is trusted by the same anchor every other table is.
+    Pre(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -388,6 +418,10 @@ pub struct Prog {
     /// the slot outputs a tie may read, as named groups -- the tree's root, the
     /// residual sums, ...
     pub outs: Vec<Vec<usize>>,
+    /// Stream II: how many preprocessed `(sm, ef)` values a row reads, i.e. how
+    /// many `Src::Pre` slots the program has.  Zero on every program that
+    /// existed before.
+    pub n_pre: usize,
 }
 
 impl Prog {
@@ -427,7 +461,7 @@ impl Prog {
             Src::Slot(k) => k,
             _ => unreachable!("a tree of at least two leaves ends in a slot"),
         };
-        Self { groups, kind: Kind::Add, slots, outs: vec![vec![root]] }
+        Self { groups, kind: Kind::Add, slots, outs: vec![vec![root]], n_pre: 0 }
     }
 
     /// `n` independent binary ops on two committed groups of `n` -- the residual
@@ -439,7 +473,7 @@ impl Prog {
         let slots = (0..n)
             .map(|i| (Self::src(&groups, 0, i), Self::src(&groups, 1, i)))
             .collect();
-        Self { groups, kind, slots, outs: vec![(0..n).collect()] }
+        Self { groups, kind, slots, outs: vec![(0..n).collect()], n_pre: 0 }
     }
 
     /// The composed layer's wiring region: one row is one `(residue, token)`
@@ -472,17 +506,69 @@ impl Prog {
     ///
     /// The two multiplies chain through `Src::Slot`, so `x * r` never leaves the
     /// row and only `h` is tied onwards.
-    pub fn norm_tail(n: usize) -> Self {
+    /// The RMSNorm tail, `h = (x * r) * w`, one row per `(residue, token)` block
+    /// of the stream -- the same tiling the reduction's first level uses, so the
+    /// tail's group 0 and the reduction's group 0 are the same values in the
+    /// same order and one Horner claim compares them.
+    ///
+    /// Stream II changed both of the other two operands.  Group 1 is no longer
+    /// `r` itself but the reduction's own answer, the sum of squares, under
+    /// `UnKind::NormR`: the unary lookup *is* `r = rsqrt(ms inv_d + eps)`, and
+    /// the `In(1)` tie against `gn1b`/`gn2b`'s `Out(0)` is what says the value
+    /// squared is the value the reduction summed.  One committed value per row
+    /// still, and because the tie compares every row of a token against the
+    /// same reduction row, the `a` rows of one token cannot carry different
+    /// `r`s.  The norm weight is `Src::Pre`: preprocessed, under `pre_root`,
+    /// because it is the model's and not the prover's.
+    ///
+    /// The two multiplies chain through `Src::Slot`, so `x * r` never leaves the
+    /// row and only `h` is tied onwards.
+    pub fn norm_tail(n: usize, un_r: UnKind) -> Self {
         let groups = vec![Group { n, un: UnKind::None },
-                          Group { n: 1, un: UnKind::None },
-                          Group { n, un: UnKind::None }];
+                          Group { n: 1, un: un_r }];
         let mut slots: Vec<(Src, Src)> = (0..n)
-            .map(|i| (Src::Leaf(0, i), Src::Leaf(1, 0)))
+            .map(|i| (Src::Leaf(0, i), Self::src(&groups, 1, 0)))
             .collect();
         for i in 0..n {
-            slots.push((Src::Slot(i), Src::Leaf(2, i)));
+            slots.push((Src::Slot(i), Src::Pre(i)));
         }
-        Self { groups, kind: Kind::Mul, slots, outs: vec![(n..2 * n).collect()] }
+        Self { groups, kind: Kind::Mul, slots, outs: vec![(n..2 * n).collect()], n_pre: n }
+    }
+
+    /// Stream NN: the products of B1's `rotate`, one row per (token, head).
+    ///
+    /// `rotate(t, cos, sin)` is `store(store(t cos) + store(r sin))` with
+    /// `r = cat([-t[h:], t[:h]])`, so per output channel `j` there are three
+    /// bf16 roundings in this order: `t[j] cos[j]`, `t[(j + h) mod hd] sin'[j]`,
+    /// then their sum.  A `Prog` carries one `Kind`, so the two multiplies live
+    /// here and the add is `Prog::rope_add`; one `eqs` entry joins them.
+    ///
+    /// The sign of `r` is folded into the table (`rope::sgn_sin`), so the
+    /// program is a pure permutation of committed leaves against preprocessed
+    /// operands and needs no negation node.  `cos[j]` is preprocessed value
+    /// `2 j` and `sin'[j]` is `2 j + 1`.
+    pub fn rope_mul(hd: usize) -> Self {
+        assert!(hd >= 2 && hd % 2 == 0, "a rotated head width is even");
+        let h = hd / 2;
+        let groups = vec![Group { n: hd, un: UnKind::None }];
+        let mut slots: Vec<(Src, Src)> = Vec::with_capacity(2 * hd);
+        for j in 0..hd {
+            slots.push((Src::Leaf(0, j), Src::Pre(2 * j)));
+            slots.push((Src::Leaf(0, (j + h) % hd), Src::Pre(2 * j + 1)));
+        }
+        Self { groups, kind: Kind::Mul, slots, outs: vec![(0..2 * hd).collect()], n_pre: 2 * hd }
+    }
+
+    /// Stream NN: the third rounding.  Its leaves are `rope_mul`'s `2 hd`
+    /// outputs in the same row order, so the join is one `GlueEq` between
+    /// `rope_mul.Out(0)` and this region's `In(0)`, and its own `Out(0)` is the
+    /// rotated value the quantize consumes.
+    pub fn rope_add(hd: usize) -> Self {
+        assert!(hd >= 2 && hd % 2 == 0, "a rotated head width is even");
+        let groups = vec![Group { n: 2 * hd, un: UnKind::None }];
+        let slots: Vec<(Src, Src)> =
+            (0..hd).map(|j| (Src::Leaf(0, 2 * j), Src::Leaf(0, 2 * j + 1))).collect();
+        Self { groups, kind: Kind::Add, slots, outs: vec![(0..hd).collect()], n_pre: 0 }
     }
 
     pub fn leaf_width(&self, g: usize) -> usize {
@@ -525,6 +611,13 @@ impl Prog {
             Kind::Mul => (b, b + 3),
         }
     }
+    /// Stream II: where the region's `i`-th preprocessed value sits inside
+    /// `GlueRegion::pre`.  The two selectors come first, as `glue_region` and
+    /// `Plan::pre_ids` both write them.
+    pub fn pre_at(&self, i: usize, k: usize) -> usize {
+        2 + 2 * i + k
+    }
+
     /// Where a source's `(sm, ef)` columns are; `None` for the constant zero.
     pub fn src_cols(&self, s: &Src, round: Round) -> Option<(usize, usize)> {
         match s {
@@ -538,6 +631,7 @@ impl Prog {
                 Some((b + 2, b + 3))
             }
             Src::Slot(k) => Some(self.out_cols(*k, round)),
+            Src::Pre(_) => None,
         }
     }
     /// The unary kinds this program's groups draw, deduplicated, in group order.
@@ -645,6 +739,27 @@ impl FrameworkEval for GlueEval {
         let c127 = m31_u32(127);
         let dmax = m31_u32(DMAX);
 
+        // ---- tree 0, in the region's own column order (stream OO) -------------
+        // The order these are *read* in is the order the lowered IR indexes
+        // tree 0 in, and `devfrac::frac_cols` is handed the region's `pre`
+        // vector by position -- so the read order has to be `glue_region`'s
+        // build order and `Plan::pre_ids`' registration order, which are both
+        // the two selectors and then the `Src::Pre` pairs. Stream II read the
+        // pairs first, which made no difference while `n_pre` was zero
+        // everywhere and made the generated fraction builder read the `nofirst`
+        // selector as a norm-weight mantissa on every chunk with a norm tail.
+        // The selectors are read whether or not this region carries a tie: the
+        // region commits them either way, so a conditional read would leave the
+        // supplied column list two longer than the IR's.
+        let nofirst = eval.get_preprocessed_column(glue_sel(&self.tag, "nofirst"));
+        let end = eval.get_preprocessed_column(glue_sel(&self.tag, "end"));
+        // the statement's own values (stream II): preprocessed, so nothing pins
+        // them but the root every table hangs on.
+        let pre_vals: Vec<(E::F, E::F)> = (0..self.prog.n_pre)
+            .map(|i| (eval.get_preprocessed_column(glue_pre_col(&self.tag, i, 0)),
+                      eval.get_preprocessed_column(glue_pre_col(&self.tag, i, 1))))
+            .collect();
+
         // ---- leaves: the committed inputs, and the unary that consumes them ---
         let kinds = &self.uns;
         let mut leaf_in: Vec<Vec<(E::F, E::F)>> = vec![];
@@ -688,6 +803,7 @@ impl FrameworkEval for GlueEval {
                     Src::Leaf(g, i) => leaf_in[*g][*i].clone(),
                     Src::Un(g, i) => leaf_un[*g][*i].clone(),
                     Src::Slot(k) => outs[*k].clone(),
+                    Src::Pre(i) => pre_vals[*i].clone(),
                 }
             };
             let (a_sm, a_ef) = get(sa, &outs);
@@ -799,8 +915,6 @@ impl FrameworkEval for GlueEval {
 
         // ---- the ties ---------------------------------------------------------
         if let Some(t) = &self.tie {
-            let nofirst = eval.get_preprocessed_column(glue_sel(&self.tag, "nofirst"));
-            let end = eval.get_preprocessed_column(glue_sel(&self.tag, "end"));
             for spec in &t.specs {
                 let [h_prev, h] =
                     eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
@@ -815,7 +929,8 @@ impl FrameworkEval for GlueEval {
                     f += (E::EF::from(sm.clone()) + E::EF::from(ef.clone()) * t.lam) * spec.w[k];
                 }
                 eval.add_constraint(h.clone() - (h_prev * nofirst.clone()) * spec.step - f);
-                eval.add_constraint((h - spec.claimed) * end.clone());
+                let claim = eval.claim(spec.claimed);
+                eval.add_constraint((h - claim) * end.clone());
             }
         }
         if !self.gkr {
@@ -831,6 +946,9 @@ impl FrameworkEval for GlueEval {
 pub struct GlueWitness {
     pub rows: usize,
     pub groups: Vec<Vec<u16>>,
+    /// Stream II: `rows * prog.n_pre` bf16 patterns the *statement* carries --
+    /// preprocessed, so they are not committed and no lookup pins them.
+    pub pre: Vec<u16>,
     /// what one f64-rounded evaluation says each `outs` group holds, per row
     pub ref_out: Vec<Vec<u16>>,
     pub source: String,
@@ -840,12 +958,19 @@ pub struct GlueWitness {
 impl GlueWitness {
     pub fn new(rows: usize, groups: Vec<Vec<u16>>, prog: &Prog, round: Round, source: String)
                -> Self {
+        Self::with_pre(rows, groups, vec![], prog, round, source)
+    }
+
+    /// Stream II: the same, with the row's preprocessed values.
+    pub fn with_pre(rows: usize, groups: Vec<Vec<u16>>, pre: Vec<u16>, prog: &Prog, round: Round,
+                    source: String) -> Self {
         for (g, vals) in groups.iter().enumerate() {
             assert_eq!(vals.len(), rows * prog.groups[g].n, "group {g} has the wrong shape");
         }
+        assert_eq!(pre.len(), rows * prog.n_pre, "the preprocessed block has the wrong shape");
         let odd = groups.iter().flatten().filter(|v| is_odd_pattern(**v)).count();
-        let ref_out = reference(&groups, rows, prog, round);
-        Self { rows, groups, ref_out, source, odd }
+        let ref_out = reference(&groups, &pre, rows, prog, round);
+        Self { rows, groups, pre, ref_out, source, odd }
     }
 
     /// Random bf16 values over a wide exponent spread, so the far branch, the
@@ -881,13 +1006,22 @@ impl GlueWitness {
             }
             groups.push(vals);
         }
-        Self::new(rows, groups, prog, round, format!("synthetic(seed={seed})"))
+        // the preprocessed half of a synthetic region: the same spread, since
+        // the norm weight is an ordinary bf16 value of the model
+        let mut pre = vec![0u16; rows * prog.n_pre];
+        for v in pre.iter_mut() {
+            let e: i32 = rng.random_range(-4..4);
+            let m: f64 = rng.random_range(-2.0f64..2.0);
+            *v = bf16::from_f64(m * (e as f64).exp2());
+        }
+        Self::with_pre(rows, groups, pre, prog, round, format!("synthetic(seed={seed})"))
     }
 }
 
 /// What the program computes, in f64 with one bf16 rounding per op -- the
 /// independent side of every `ref_mismatch` count below.
-pub fn reference(groups: &[Vec<u16>], rows: usize, prog: &Prog, round: Round) -> Vec<Vec<u16>> {
+pub fn reference(groups: &[Vec<u16>], pre: &[u16], rows: usize, prog: &Prog, round: Round)
+                 -> Vec<Vec<u16>> {
     let per_row: Vec<Vec<u16>> = (0..rows)
         .into_par_iter()
         .map(|j| {
@@ -923,6 +1057,7 @@ pub fn reference(groups: &[Vec<u16>], rows: usize, prog: &Prog, round: Round) ->
                         Src::Leaf(g, i) => lin[*g][*i],
                         Src::Un(g, i) => lun[*g][*i],
                         Src::Slot(k) => out[*k],
+                        Src::Pre(i) => canon(pre[j * prog.n_pre + *i]),
                     }
                 };
                 let (a, b) = (get(sa, &out), get(sb, &out));
@@ -1107,6 +1242,19 @@ pub enum Tamper {
     /// one committed leaf of group 0 replaced -- the residual stream a consumer
     /// reads is not the one its producer wrote (the Horner tie)
     Stream(usize),
+    /// Stream II: one row's committed sum of squares, bent by one pattern step.
+    /// It is still a legal `(sm, ef)`, so the `UnKind::NormR` lookup finds a row
+    /// and the region's arithmetic stays consistent -- `r` is simply the
+    /// `rsqrt` of a number this token's reduction did not produce.  Only the
+    /// tie `nt.In(1) == G gnb.Out(0)` can catch it.
+    Ms(usize),
+    /// Stream II: one row's committed sum of squares replaced by the *next
+    /// row's*.  Rows of one norm-tail region step through tokens at a fixed
+    /// residue, so this gives two rows of one token two different `r`s, out of
+    /// values that are each some token's honest reduction.  Again only the tie
+    /// can catch it -- and this is the one the record's "one `r` per token"
+    /// sentence rests on.
+    MsRow(usize),
 }
 
 impl Tamper {
@@ -1119,6 +1267,8 @@ impl Tamper {
             Tamper::NotBf16(_) => "a leaf that is not a bf16 value",
             Tamper::Sign(_) => "result sign flipped",
             Tamper::Stream(_) => "one value of the residual stream, swapped",
+            Tamper::Ms(_) => "one row's sum of squares, one step up",
+            Tamper::MsRow(_) => "one row's sum of squares taken from the next row",
         }
     }
 }
@@ -1269,6 +1419,15 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
     let m4g = if m4g != 0 && tamper.is_some() {
         eprintln!("gfill-dev: {tag}: a glue tamper is set, so this region fills on the host");
         0
+    } else if m4g != 0 && prog.n_pre > 0 {
+        // stream II: `FSlot` has no encoding for a preprocessed operand -- a
+        // `Src::Pre` lowers to `(NONE, NONE)`, which the kernel reads as the
+        // constant zero -- so a region with one takes the host fill whatever the
+        // switch says, as a wide walk group already does.  Announced, because a
+        // device fill that silently multiplied by zero would look like a bad
+        // witness.
+        eprintln!("gfill-dev: {tag}: the region reads preprocessed values, so it fills on the host");
+        0
     } else {
         m4g
     };
@@ -1327,6 +1486,25 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                             fired += 1;
                         }
                     }
+                    // stream II: the two probes the `In(1)` tie exists for.
+                    // Both leave a legal bf16 pattern, so the `NormR` lookup
+                    // still finds its row and the region stays self-consistent.
+                    if let Some(Tamper::Ms(t)) = tamper {
+                        if live && g == 1 && t % w.rows.max(1) == j {
+                            pat ^= 1;
+                            fired += 1;
+                        }
+                    }
+                    if let Some(Tamper::MsRow(t)) = tamper {
+                        if live && g == 1 && t % w.rows.max(1) == j {
+                            let nxt = (j + 1) % w.rows;
+                            let other = w.groups[g][nxt * gr.n + i];
+                            if other != pat {
+                                pat = other;
+                                fired += 1;
+                            }
+                        }
+                    }
                     let (mut sm, ef) = split(pat);
                     if let Some(Tamper::NotBf16(t)) = tamper {
                         if live && t % n_leaf_tot.max(1) == flat {
@@ -1377,6 +1555,12 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                         Src::Leaf(g, i) => lin[*g][*i],
                         Src::Un(g, i) => lun[*g][*i],
                         Src::Slot(k) => outs[*k],
+                        // stream II: the statement's own value, read from the
+                        // same block the preprocessed column is built from
+                        Src::Pre(i) => {
+                            let (sm, ef) = split(if live { w.pre[j * prog.n_pre + *i] } else { 0 });
+                            (sm, ef)
+                        }
                     }
                 };
                 let (a_sm, a_ef) = get(sa, &outs);
@@ -1609,7 +1793,22 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
     end[rows - 1] = M31::one();
     let mut nofirst = vec![M31::one(); rows];
     nofirst[0] = M31::zero();
-    let pre = vec![eval_of(log_rows, nofirst), eval_of(log_rows, end)];
+    let mut pre = vec![eval_of(log_rows, nofirst), eval_of(log_rows, end)];
+    // stream II: the region's own preprocessed values, `(sm, ef)` per slot, in
+    // the order `Plan::pre_ids` names them.  A tamper on one of these is a
+    // tamper on tree 0 and shows up as `root_ok` false, never as a rejected
+    // constraint -- which is the point of moving the norm weights here.
+    for i in 0..prog.n_pre {
+        for k in 0..2 {
+            let col: Vec<M31> = (0..rows)
+                .map(|j| {
+                    let (sm, ef) = split(if j < w.rows { w.pre[j * prog.n_pre + i] } else { 0 });
+                    if k == 0 { m31_of(sm) } else { m31_u32(ef) }
+                })
+                .collect();
+            pre.push(eval_of(log_rows, col));
+        }
+    }
     // the ties read the values in natural row order, per group
     let mut in_nat: Vec<Vec<(i64, i64)>> =
         prog.groups.iter().map(|g| Vec::with_capacity(rows * g.n)).collect();
@@ -1688,6 +1887,18 @@ enum L {
     Frac(usize),
     /// `(sm_a, sm_b, sm_c, cy, nz)`: two operand columns and a slot base
     SMul(usize, usize, usize),
+}
+
+/// Stream II: an operand's two column indices for the interaction, which reads
+/// out of two different vectors.  `PRE_TAG` says "preprocessed, index minus the
+/// tag"; `usize::MAX` is still the constant `+0`.
+pub const PRE_TAG: usize = 1 << 40;
+
+fn src_cols_any(prog: &Prog, s: &Src, round: Round) -> (usize, usize) {
+    match s {
+        Src::Pre(i) => (PRE_TAG + prog.pre_at(*i, 0), PRE_TAG + prog.pre_at(*i, 1)),
+        _ => prog.src_cols(s, round).unwrap_or((usize::MAX, usize::MAX)),
+    }
 }
 
 /// Where each tie's sequence sits in the fill's two row-flat natural arrays.
@@ -1830,11 +2041,11 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>,
         let (o0, o1) = prog.out_cols(si, round);
         match prog.kind {
             Kind::Add => {
-                let ea = prog.src_cols(sa, round).map(|c| c.1);
-                let eb = prog.src_cols(sb, round).map(|c| c.1);
-                looks.push(L::Pow(ea.unwrap_or(usize::MAX), b + 2, b));
+                let ea = src_cols_any(prog, sa, round).1;
+                let eb = src_cols_any(prog, sb, round).1;
+                looks.push(L::Pow(ea, b + 2, b));
                 un_of.push(usize::MAX);
-                looks.push(L::Pow(eb.unwrap_or(usize::MAX), b + 2, b + 1));
+                looks.push(L::Pow(eb, b + 2, b + 1));
                 un_of.push(usize::MAX);
                 looks.push(L::Norm(b));
                 un_of.push(usize::MAX);
@@ -1844,8 +2055,8 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>,
                 un_of.push(usize::MAX);
             }
             Kind::Mul => {
-                let ca = prog.src_cols(sa, round).map(|c| c.0).unwrap_or(usize::MAX);
-                let cb = prog.src_cols(sb, round).map(|c| c.0).unwrap_or(usize::MAX);
+                let ca = src_cols_any(prog, sa, round).0;
+                let cb = src_cols_any(prog, sb, round).0;
                 looks.push(L::SMul(ca, cb, b));
                 un_of.push(usize::MAX);
                 looks.push(L::Val(o0, o1));
@@ -1858,8 +2069,19 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>,
     let dmax = PackedM31::broadcast(m31_u32(DMAX));
     let k = 8 + usize::from(sticky);
     let fr = |i: usize, vr: usize| -> (PackedQM31, PackedQM31) {
-        // `usize::MAX` is the constant `+0` operand: sm = ef = 0, no column
-        let c = |x: usize| if x == usize::MAX { zero } else { r.base[x].data[vr] };
+        // `usize::MAX` is the constant `+0` operand: sm = ef = 0, no column.
+        // stream II: `PRE_TAG` is a preprocessed operand, which lives in the
+        // other vector -- `L::Un`'s `c(a + 2)` never sees one, because a
+        // preprocessed value carries no unary.
+        let c = |x: usize| {
+            if x == usize::MAX {
+                zero
+            } else if x >= PRE_TAG {
+                r.pre[x - PRE_TAG].data[vr]
+            } else {
+                r.base[x].data[vr]
+            }
+        };
         match &looks[i] {
             L::Val(a, b) => (one, rels.val.combine(&[c(*a), c(*b)])),
             L::Un(a, b) => (one, rels.un[un_of[i]].combine(&[c(*a), c(*b), c(a + 2), c(b + 2)])),
@@ -2004,27 +2226,42 @@ pub fn glue_table_ids(uns: &[UnKind]) -> Vec<PreProcessedColumnId> {
 }
 
 /// The same columns' contents, padded to their own row counts.
+///
+/// Stream II, `notes/witness-slack.md` section 7 item 5: the padding **repeats
+/// the last real row** rather than writing zeros.  `pow_table` has 273 rows and
+/// pads to 512, and a zero-padded `POW` carries the tuple `(0, 0)` beside the
+/// real `u = 0` row `(0, 1)` -- two legal rows for one key, so a prover may drop
+/// an operand the anchor meant to add.  `GTableEval` commits the multiplicity
+/// as a bare mask with no row selector, so nothing else forbids it.  Repeating
+/// the last row makes every padding row a duplicate of a real one, which is the
+/// state section 3 already records for `VAL` and `SMUL`, and it costs no column.
+/// The unary tables need it for a second reason: `UnKind::NormR`'s image of
+/// `(0, 0)` is `rsqrt(eps)`, not zero, so a zero-padded `UN` would have offered
+/// `r = 0` for a zero sum of squares.
 pub fn glue_table_cols(t: &GlueTables) -> Vec<Eval> {
     let pad = |n: u32| 1usize << n;
+    // the last real row, repeated -- `i.min(len - 1)`
+    let at = |len: usize, i: usize| i.min(len.saturating_sub(1));
     let mut out = vec![];
     for k in 0..2 {
         out.push(eval_of(t.log_pow, (0..pad(t.log_pow))
-            .map(|i| t.pow.get(i).map(|r| if k == 0 { r.0 } else { r.1 })
+            .map(|i| t.pow.get(at(t.pow.len(), i)).map(|r| if k == 0 { r.0 } else { r.1 })
                  .unwrap_or(M31::zero())).collect()));
     }
     for k in 0..5 {
         out.push(eval_of(t.log_smul, (0..pad(t.log_smul))
-            .map(|i| t.smul.get(i).map(|r| r[k]).unwrap_or(M31::zero())).collect()));
+            .map(|i| t.smul.get(at(t.smul.len(), i)).map(|r| r[k])
+                 .unwrap_or(M31::zero())).collect()));
     }
     for k in 0..2 {
         out.push(eval_of(t.log_val, (0..pad(t.log_val))
-            .map(|i| t.val.get(i).map(|r| if k == 0 { r.0 } else { r.1 })
+            .map(|i| t.val.get(at(t.val.len(), i)).map(|r| if k == 0 { r.0 } else { r.1 })
                  .unwrap_or(M31::zero())).collect()));
     }
     for u in &t.un {
         for k in 0..4 {
             out.push(eval_of(t.log_un, (0..pad(t.log_un))
-                .map(|i| u.get(i).map(|r| r[k]).unwrap_or(M31::zero())).collect()));
+                .map(|i| u.get(at(u.len(), i)).map(|r| r[k]).unwrap_or(M31::zero())).collect()));
         }
     }
     out
@@ -2188,6 +2425,13 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
 
     // ---- tree 0: the region's selector, then every table ----------------------
     let mut ids = vec![glue_sel("r", "nofirst"), glue_sel("r", "end")];
+    // stream II: and the region's own preprocessed values, in `glue_region`'s
+    // order -- the standalone rung has to name them too or tree 0 has columns
+    // the allocator has never heard of
+    for i in 0..prog.n_pre {
+        ids.push(glue_pre_col("r", i, 0));
+        ids.push(glue_pre_col("r", i, 1));
+    }
     let mut pre: Vec<Eval> = region.pre.clone();
     ids.extend(glue_table_ids(&uns));
     pre.extend(glue_table_cols(&tables));

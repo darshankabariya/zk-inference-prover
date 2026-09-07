@@ -150,7 +150,7 @@ fn eval_prefix_sum_constraints<E: EvalAtRow>(
     interaction: usize,
     eval: &mut E,
     row_diff: E::EF,
-    cumulative_sum_shift: SecureField,
+    cumulative_sum_shift: E::EF,
 ) {
     let [curr, prev] = eval.next_extension_interaction_mask(interaction, [0, -1]);
     eval.add_constraint(curr - prev - row_diff + cumulative_sum_shift);
@@ -312,12 +312,24 @@ pub enum RCol {
     /// columns in the same order, which is what lets `glue_interaction`'s
     /// builder index `r.base` by what `Prog` returns.
     Glue(usize),
+    /// Stream OO (E11): a glue region's preprocessed value `i`, half `k` --
+    /// the `(sm, ef)` pair of a `Src::Pre` operand. Stream II's norm tails read
+    /// the model's norm weight, which is the statement's and so lives in tree 0
+    /// under `pre_root`; the pair sits at `Prog::pre_at(i, k)` in the region's
+    /// own `pre` list and is named by `glue::glue_pre_col(tag, i, k)`. The only
+    /// preprocessed column a glue lookup reads.
+    GluePre(usize, usize),
     /// B11 stream V: a walk group's `i`-th trace mask. The activations are the
     /// region's first `pq` committed columns, which is the slice
     /// `walk_interaction`'s builder range-checks.
     Walk(usize),
     /// B11 stream V: the attention-output region's `i`-th trace mask.
     Ao(usize),
+    /// Stream JJ (E11): the attention-output region's slot-`i` preprocessed
+    /// column, `jvp = jv - jv_min`.  The only preprocessed column an attnout
+    /// lookup reads: `jv` is a model constant, so the exponent window's key is
+    /// half preprocessed and half committed.
+    AoPre(usize),
 }
 
 /// Which region a site's looks and a folded weight's column belong to: the
@@ -690,7 +702,7 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
 /// nothing else -- the verifier has no evaluator to lower.
 pub fn glue_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
                   -> Vec<SiteLooks> {
-    use crate::glue::{Kind, UnKind};
+    use crate::glue::{Kind, Src, UnKind};
     let Some(gp) = plan.glue.as_ref() else { return vec![] };
     let Some(gr) = rels.glue.as_ref() else { return vec![] };
     let one = SecureField::one();
@@ -716,6 +728,23 @@ pub fn glue_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
         // one of the region's committed masks, or the constant zero
         let col = |x: usize| -> Option<Affine> {
             (x != usize::MAX).then(|| Affine::col(RCol::Glue(x), one))
+        };
+        // Stream OO: a slot operand's half `k` (0 the mantissa, 1 the exponent).
+        // `Prog::src_cols` answers `None` for `Src::Pre` because the *fill*
+        // reads a preprocessed operand out of a second vector
+        // (`glue::src_cols_any`'s `PRE_TAG`), and the two callers that took the
+        // `None` for the constant zero dropped the operand's term from the
+        // affine form -- so a tail's slots folded under a form missing one
+        // column and `gkrlink`'s own assert fired at the first tail height.
+        // A preprocessed operand is a tree-0 column of the same region: the
+        // look is the same shape, at a different tree index.
+        let src = |s: &Src, k: usize| -> Option<Affine> {
+            match s {
+                Src::Pre(i) => Some(Affine::col(RCol::GluePre(*i, k), one)),
+                _ => prog.src_cols(s, plan.round).map(|c| {
+                    Affine::col(RCol::Glue(if k == 0 { c.0 } else { c.1 }), one)
+                }),
+            }
         };
         let unit = |den: Affine| LinkLook { num: None, den };
         let mut looks = vec![];
@@ -747,14 +776,16 @@ pub fn glue_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
             let (o0, o1) = prog.out_cols(si, plan.round);
             match prog.kind {
                 Kind::Add => {
-                    let ea = prog.src_cols(sa, plan.round).map(|c| c.1);
-                    let eb = prog.src_cols(sb, plan.round).map(|c| c.1);
-                    // `ef - etop + DMAX`: an affine form in two committed masks
-                    // with a constant, not a bare column
-                    let align = |ef: Option<usize>| {
+                    let ea = src(sa, 1);
+                    let eb = src(sb, 1);
+                    // `ef - etop + DMAX`: an affine form in two masks with a
+                    // constant, not a bare column.  `ef` is a column of either
+                    // tree; the constant zero contributes no term.
+                    let align = |ef: Option<Affine>| {
                         let mut a = Affine { terms: vec![], k: dmax };
                         if let Some(e) = ef {
-                            a.terms.push((RCol::Glue(e), one));
+                            a.terms.extend(e.terms);
+                            a.k += e.k;
                         }
                         a.terms.push((RCol::Glue(b + 2), -one));
                         Some(a)
@@ -773,12 +804,10 @@ pub fn glue_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
                     looks.push(unit(rel(z, al, &[col(o0), col(o1)])));
                 }
                 Kind::Mul => {
-                    let ca = prog.src_cols(sa, plan.round).map(|c| c.0)
-                        .unwrap_or(usize::MAX);
-                    let cb = prog.src_cols(sb, plan.round).map(|c| c.0)
-                        .unwrap_or(usize::MAX);
+                    let ca = src(sa, 0);
+                    let cb = src(sb, 0);
                     let (z, al) = gr.smul.parts();
-                    looks.push(unit(rel(z, al, &[col(ca), col(cb), col(b),
+                    looks.push(unit(rel(z, al, &[ca, cb, col(b),
                                                  col(b + 1), col(b + 2)])));
                     let (z, al) = gr.val.parts();
                     looks.push(unit(rel(z, al, &[col(o0), col(o1)])));
@@ -828,9 +857,10 @@ pub fn walk_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
 
 /// The attention-output region's lookup sites as affine forms.
 ///
-/// B11 stream V, lever 4. Three looks per channel slot in the AIR's order --
+/// B11 stream V, lever 4. Four looks per channel slot in the AIR's order --
 /// the `(qm, nz2)` pair check, then the error `d`, then the excluded bound
-/// `dp = 2 denp - 1 - d`. The third is the one worth naming: `dp` is not a
+/// `dp = 2 denp - 1 - d`, then (stream JJ, `witness-slack.md` section 7 item 1)
+/// `denp` itself. The third is the one worth naming: `dp` is not a
 /// committed column at all, it is an *affine form* over two of them, which is
 /// the same shape the per-token region's high limbs take and the reason memo
 /// section 4's collapse does not care. Every numerator is the literal one.
@@ -841,11 +871,32 @@ pub fn ao_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
     let lay = plan.ao_lay;
     let (qz, qal) = rels.qnz.parts();
     let rem = rels.range(plan.p.ao_rem_bits);
+    // stream JJ (E11): the exponent window and the accumulator window
+    let (ez, eal) = rels.epow.parts();
+    let (rlo, rhi) = (rels.range(plan.p.ao_acc_lo_bits), rels.range(plan.p.ao_acc_hi_bits));
+    let inv_lo = SecureField::from(M31::from_u32_unchecked(1 << plan.p.ao_acc_lo_bits))
+        .inverse();
+    // stream TT (E11), log row 73: the magnitude form offsets nothing -- the
+    // high limb reads the committed `amag` at `c0 + 9` instead
+    let acc_off = SecureField::from(M31::from_u32_unchecked(
+        if plan.p.ao_acc_mag { 0 }
+        else { 1 << (plan.p.ao_acc_lo_bits + plan.p.ao_acc_hi_bits - 1) }));
+    let ncs = if plan.p.ao_acc_mag { 10 } else { 9 };
     let mut looks = vec![];
     for sl in 0..lay.per_row {
-        // `ao_interaction`'s own indexing: slot `sl` starts at `1 + 6 * sl`,
-        // and the builder reads `+2`, `+3`, `+4` and `+5` off it
-        let c0 = 1 + 6 * sl;
+        // `ao_interaction`'s own indexing: slot `sl` starts at `2 + 9 * sl`,
+        // and the builder reads `+2`..`+8` off it.  `joff` is column 1 and the
+        // slot's `jvp` is preprocessed column `sl`.
+        let c0 = 2 + ncs * sl;
+        // the `EPOW` window: `(jvp + joff, num, pj)`
+        looks.push(LinkLook {
+            num: None,
+            den: Affine {
+                terms: vec![(RCol::AoPre(sl), eal[0]), (RCol::Ao(1), eal[0]),
+                            (RCol::Ao(c0 + 6), eal[1]), (RCol::Ao(c0 + 7), eal[2])],
+                k: -ez,
+            },
+        });
         looks.push(LinkLook {
             num: None,
             den: Affine {
@@ -862,6 +913,26 @@ pub fn ao_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
             den: range_den(rem, Affine {
                 terms: vec![(RCol::Ao(c0 + 4), two), (RCol::Ao(c0 + 5), -one)],
                 k: -one,
+            }),
+        });
+        // stream JJ: `denp`'s own range check -- stream TT's `denp2` form
+        // looks up `2 denp`, one bit better on the same table
+        looks.push(LinkLook {
+            num: None,
+            den: range_den(rem, Affine::col(RCol::Ao(c0 + 4),
+                                            if plan.p.ao_denp2 { two } else { one })),
+        });
+        // stream JJ: the accumulator window's two limbs
+        looks.push(LinkLook {
+            num: None,
+            den: range_den(rlo, Affine::col(RCol::Ao(c0 + 8), one)),
+        });
+        looks.push(LinkLook {
+            num: None,
+            den: range_den(rhi, Affine {
+                terms: vec![(RCol::Ao(if plan.p.ao_acc_mag { c0 + 9 } else { c0 }), inv_lo),
+                            (RCol::Ao(c0 + 8), -inv_lo)],
+                k: acc_off * inv_lo,
             }),
         });
     }
@@ -1488,7 +1559,10 @@ impl FrameworkEval for LinkEval {
         let eq_cur = eval_eq_constraints(INTERACTION_TRACE_IDX, &mut eval, &self.mle_point,
                                          q_cur, is_first, is_second);
         let terms = coeff_cur * eq_cur;
-        eval_prefix_sum_constraints(INTERACTION_TRACE_IDX, &mut eval, terms, self.shift);
+        // stream RR: `shift` is `claim / 2^h`, a value of the statement -- so a
+        // height whose folded claim is zero must not lower to a shorter shape
+        let shift = eval.claim(self.shift);
+        eval_prefix_sum_constraints(INTERACTION_TRACE_IDX, &mut eval, terms, shift);
         eval
     }
 }

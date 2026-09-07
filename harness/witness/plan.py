@@ -57,6 +57,23 @@ layer-0 re-extract with `--embed`).  The E11 plan at C=4096 is
 (the `=` form, because the value starts with a dash), and a line's flags are
 part of its emit key, so the emit set grows by the lines whose flags make a
 new kernel shape and by nothing else.
+
+**Stream MM (E11): what the model manifest needs of a plan.**  `b65
+model-roots` requires `master_table_bits` to be **one value per layer across
+blocks** -- `table/exp` is `1 << log_table` rows, so a layer whose blocks
+declare two widths has two tree-0 roots and no per-layer model root exists at
+all.  Each block's shape table gives that block's own tightest width, and on
+the recorded C=4096 extraction seven of the 33 layers carry two, so the
+recorded plan is rejected (stream LL's open item 3).  `--table-bits-per-layer`
+writes, for every block of a layer, the widest width any block of that layer
+asked for; the extra rows are the price of a manifest, and the plan must then
+run **without `--tight-table`**, which re-sizes the table off the witness
+after the flag is read and which no manifest and no flag names.
+
+`--head-per-block` says the head dump for block `b` is `<--head>_B<b>` rather
+than `--head` itself: a head dump carries its own `base_pos`, so the two seam
+blocks a `--verify --prompt` grid needs (stream KK) are two dumps, written by
+one `extract.py --blocks 7,8 --head --corner` pass (stream OO).
 """
 
 import argparse
@@ -85,8 +102,31 @@ def layer_line(tb, wdir, tag, extra=""):
     return f"--table-bits {tb} --bounds{extra} --witness {wdir} --ser-tag {tag}"
 
 
-def head_line(hdir, htb, tag="head", extra=""):
-    return (f"--table-bits {htb} --head-argmax --deq-per-row 501{extra} "
+def head_line(hdir, htb, tag="head", extra="", layer=None, block=None):
+    """The `lm_head` line.
+
+    **Stream KK (E11): the coordinate.**  A head dump's manifest says which
+    layer it was *extracted* at (16, for the C=4K set) and carries no block at
+    all, but the grid puts the head chunk after the last layer of the block it
+    reads.  `--layer` / `--block` declare that, `Fixed` carries it, and
+    `bounds-grid` places the chunk by the statement rather than by the tag --
+    which is what lets the head take a cell at all.
+
+    **Stream UU (E11): `--bounds`.**  The head chunk commits the residual its
+    final norm consumed as tree 3, exactly as a layer chunk commits its
+    `stream_in`, so the last layer's out root and the head's in root are
+    compared by the pair check like every other layer link.  It commits no tree
+    4 -- its norm's output is nobody's residual -- so the head is the last chunk
+    of the layer axis and never a producer.  A head dump too old to carry the
+    final norm has no wiring family and commits nothing here; the grid reports
+    that as a declared end rather than as a link that failed.
+    """
+    coord = ""
+    if layer is not None:
+        coord += f" --layer {layer}"
+    if block is not None:
+        coord += f" --block {block}"
+    return (f"--table-bits {htb} --bounds --head-argmax --deq-per-row 501{extra}{coord} "
             f"--witness {hdir} --ser-tag {tag}")
 
 
@@ -114,6 +154,16 @@ def main():
                          "corner-only configuration.")
     ap.add_argument("--head-every-block", action="store_true",
                     help="an lm_head chunk after every block, not only the last one")
+    # ---- stream KK (E11): which blocks need a head chunk, and why ------------
+    ap.add_argument("--head-blocks", default="",
+                    help="the blocks that get an lm_head chunk, e.g. '7,8' or '0-8' "
+                         "(default: the last block; --head-every-block is '0-B'). "
+                         "A GENERATED position's id has to equal the argmax the head "
+                         "proved for the position before it, so the block that owns the "
+                         "position before the first generated one needs a head chunk too "
+                         "-- for the 9-block C=4K sequence (8 prompt blocks + 1 decode "
+                         "block) that is block 7, and '--head-blocks 7,8' is what makes "
+                         "`bounds-grid --verify` report no declared generated position")
     ap.add_argument("--emit-out", default="",
                     help="also write the distinct emit shapes, one representative plan line "
                          "each, for `emitset` to walk instead of the plan")
@@ -137,6 +187,39 @@ def main():
     ap.add_argument("--head-flags", default="",
                     help="appended to the head line, e.g. '--ao-rem-bits 23' to keep the "
                          "head at its own pin when the shared pins are the layers'")
+    # ---- stream SS (E11): the attention-output remainder, per line ----------
+    # A shared `--ao-rem-bits` is the model-wide worst case, and a chunk whose
+    # own `ao_q_bits` is wide refuses it: `compose.rs` asserts
+    # `ao_q_bits + ao_rem_bits <= 30`, so the E11 set's `attn_out_bits 12`
+    # (`ao_q_bits` 11) refuses the shared 20 that its own worst block needs,
+    # while its own 19 is legal.  A line's arguments are placed BEFORE the
+    # shared ones (`chunks.rs::specs`) and `arg_scalar` takes the first match,
+    # so a per-line pin simply wins and the shared one stays as the default for
+    # the lines that do not carry one.  Off by default: with it absent every
+    # plan this repo has recorded is byte-identical.
+    ap.add_argument("--ao-rem-per-line", action="store_true",
+                    help="write each layer line's own --ao-rem-bits, off the shape table's "
+                         "row, instead of leaving it to the shared pin")
+    # ---- stream MM (E11): one master table width per layer ------------------
+    ap.add_argument("--table-bits-per-layer", action="store_true",
+                    help="give every block of a layer the widest --table-bits any block of "
+                         "that layer asked for, so `b65 model-roots` can derive one model "
+                         "root per layer (it rejects a layer whose blocks declare two "
+                         "widths). Run the plan WITHOUT --tight-table, which re-sizes the "
+                         "table off the witness and which no manifest names.")
+    ap.add_argument("--head-per-block", action="store_true",
+                    help="the head dump for block b is <--head>_B<b>, not --head itself "
+                         "(one `extract.py --blocks 7,8 --head --corner` pass writes both)")
+    ap.add_argument("--table-bits-map", default="",
+                    help="a JSON {\"<layer>\": bits, ...} (and optionally \"head\") giving "
+                         "each layer's declared master table width, instead of the shape "
+                         "table's. The shape table carries the EXTRACTION's "
+                         "`master_table_bits`, which stream J measured 1-3 bits loose, and "
+                         "declaring that without --tight-table put the C=4096 grid 137.9 GB "
+                         "into a 150.1 GB card (stream MM). A map built from a previous "
+                         "run's own tightened `params.log_table`, maxed over the blocks of "
+                         "each layer, is both tight and one width per layer, which is what "
+                         "`b65 model-roots` needs.")
     a = ap.parse_args()
     lf, l0f, hf = flags(a.layer_flags), flags(a.l0_flags), flags(a.head_flags)
 
@@ -149,6 +232,38 @@ def main():
         assert blocks, f"--blocks auto: no {a.dir}/shapes_B*.json"
     else:
         blocks = list(range(int(a.blocks)))
+
+    # stream KK: which blocks carry a head chunk.  `None` keeps the pre-KK rule
+    # (the last block, tagged `head`); a list tags them `B<b>head` unless there
+    # is only one.
+    if a.head_blocks:
+        head_blocks = set(want_layers(a.head_blocks, {b: None for b in blocks if b is not None}))
+    elif a.head_every_block:
+        head_blocks = {b for b in blocks if b is not None}
+    else:
+        head_blocks = None
+    # the layer coordinate the head chunk sits at: one past the last layer the
+    # plan writes, read off the dump's own shapes rather than assumed to be 32
+    n_layers = 1 + max(read_rows(f"{a.dir}/shapes.json" if blocks == [None]
+                                 else f"{a.dir}/shapes_B{blocks[-1]}.json"))
+
+    # stream MM: the widest `table_bits` any block of a layer asked for, so one
+    # model root per layer exists.  Built over the blocks the plan actually
+    # writes -- a width from a block this plan skips is not this plan's.
+    widest = {}
+    if a.table_bits_map:
+        m = json.load(open(a.table_bits_map))
+        widest = {int(k): int(v) for k, v in m.items() if k != "head"}
+    elif a.table_bits_per_layer:
+        for b in blocks:
+            if b is None:
+                rows_b = read_rows(f"{a.dir}/shapes.json")
+            else:
+                if b == 0 and not a.with_block_0:
+                    continue
+                rows_b = read_rows(f"{a.dir}/shapes_B{b}.json")
+            for k, r in rows_b.items():
+                widest[k] = max(widest.get(k, 0), r["table_bits"])
 
     lines, emit = [], {}
     n_rows, n_layer_rows = 0, 0
@@ -166,8 +281,12 @@ def main():
             lines.append(f"# block {b}: prefix c = {rows[sorted(rows)[0]]['c']}")
         want = want_layers(a.layers, rows)
         for k in want:
-            tb = rows[k]["table_bits"]
+            tb = widest.get(k, rows[k]["table_bits"])
             extra = lf + (l0f if k == 0 else "")
+            if a.ao_rem_per_line:
+                rem = rows[k].get("ao_rem_bits")
+                assert rem, f"--ao-rem-per-line: {a.dir}'s shape table has no ao_rem_bits"
+                extra += f" --ao-rem-bits {rem}"
             wdir = f"{wpre}{k}"
             if k == 0 and a.l0_dir:
                 wdir = f"{a.l0_dir}/{os.path.basename(wpre)}{k}"
@@ -176,11 +295,23 @@ def main():
             n_rows += 1
             n_layer_rows += 1
             emit.setdefault((rows[k]["c"], tb, False, extra), line)
-        if a.head and (a.head_every_block or b == blocks[-1]):
-            htb = json.load(open(f"{a.head}/manifest.json"))["master_table_bits"]
+        if a.head and (b in head_blocks if head_blocks is not None else b == blocks[-1]):
+            hdir = f"{a.head}_B{b}" if a.head_per_block else a.head
+            htb = json.load(open(f"{hdir}/manifest.json"))["master_table_bits"]
+            if a.table_bits_map:
+                hm = json.load(open(a.table_bits_map)).get("head")
+                if hm is not None:
+                    htb = int(hm)
+            elif a.table_bits_per_layer and a.head_per_block:
+                # the head chunks sit at one layer coordinate too, so they need
+                # one width between them for the same reason the layers do
+                htb = max(json.load(open(f"{a.head}_B{hb}/manifest.json"))
+                          ["master_table_bits"] for hb in sorted(head_blocks))
             lines.append("# the head, last, and it is the same compose family with two extra "
                          "arguments")
-            hl = head_line(a.head, htb, "head" if not a.head_every_block else f"{pre}head", hf)
+            solo = head_blocks is None or len(head_blocks) == 1
+            hl = head_line(hdir, htb, "head" if solo else f"{pre}head", hf,
+                           layer=n_layers, block=b)
             lines.append(hl)
             n_rows += 1
             emit.setdefault((None, htb, True, hf), hl)

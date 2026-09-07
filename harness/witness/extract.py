@@ -183,6 +183,35 @@ def _pow2_mat(spec, name):
     return spec.pow2_scales in ("all", "linear") or name in spec.pow2_matmuls
 
 
+def _rope_params_block(m):
+    """Stream NN: `rope_theta`, the `inv_freq_of` branch and its constants.
+
+    Returned as `{theta, rope_type, scale}` with `scale` in the order the
+    prover's `rope::inv_freq_of` reads it: `llama3` takes
+    `[factor, low_freq_factor, high_freq_factor, original_max_position_embeddings]`,
+    `proportional` takes `[partial_rotary_factor, factor]`, `default` takes none.
+    `None` for a model whose layers have different rope parameters -- the
+    statement would have to name which, and this stream does not carry that.
+    """
+    if getattr(m, "inv_freq", None) is None:
+        return None
+    rp = dict(m.cfg.rope_parameters) if hasattr(m, "cfg") else None
+    if rp is None:
+        return None
+    kind = rp.get("rope_type", "default")
+    if kind == "llama3":
+        scale = [float(rp["factor"]), float(rp["low_freq_factor"]),
+                 float(rp["high_freq_factor"]),
+                 float(rp["original_max_position_embeddings"])]
+    elif kind == "proportional":
+        scale = [float(rp.get("partial_rotary_factor", 1.0)), float(rp.get("factor", 1.0))]
+    elif kind == "default":
+        scale = []
+    else:
+        raise NotImplementedError(f"rope_type {kind}")
+    return dict(theta=float(rp["rope_theta"]), rope_type=kind, scale=scale)
+
+
 def pow2_exponent(t):
     """`j` such that the value is exactly `2^j`; NaN-safe, and -1000 if it is not."""
     v = t.detach().to("cpu").double().numpy()
@@ -283,6 +312,14 @@ if __name__ == "__main__":
         # prefix -- `m.head = Linear(..., "lm_head", ...)` -- so its recorder keys
         # are bare.
         keep |= {"lm_head/acc", "lm_head/qx", "lm_head/s_x"}
+        # Stream II (E11): the head chunk's own norm tail.  `lm_head` consumes
+        # the int8 activation of `rmsnorm(x, final_norm)`, and no dump carried
+        # either operand, so the final RMSNorm was proved by nobody (stream KK).
+        # The tail needs the last layer's committed residual (its input), the
+        # model's final-norm weight (preprocessed, tree 0) and B1's own rsqrt
+        # lookup and head input as the two references the region reproduces.
+        keep |= {f"L{m.L - 1}.x", "final_norm.rsqrt/in", "final_norm.rsqrt/out",
+                 "lm_head/x"}
     m.rec = LastChunk(keep)
     if a.ids:
         ids = torch.from_numpy(np.load(a.ids).astype(np.int64))
@@ -423,6 +460,50 @@ if __name__ == "__main__":
             jv = pow2_exponent(s_v.reshape(nh, hd))
             assert (jv != -1000).all(), "V scales are not powers of two -- wrong spec?"
             write("jv.i32", jv.reshape(-1), digests)
+
+            # ---- stream NN: what the rotation and the q/k/v quantize need ------------
+            # `jv.i32` above is `s_v`'s exponent.  `s_k` and (under
+            # `q_scale_mode == "head"`) `s_q` are the other two scales
+            # `attention_int` applies, and `inv_freq` is the model constant
+            # `rope(pos)` reads.  All three are per *query* head, because B1
+            # applies them after `repeat_interleave`; the prover asserts that a
+            # GQA group's heads agree before it states a gadget over the kv grid.
+            #
+            # Absent files are not an error: without `jq.i32` the q scale is the
+            # dynamic per-token one and its region is `requant.rs`'s `with_max`
+            # shape, which stream NN designed and did not build; without
+            # `inv_freq.f64` the model has per-layer-type frequencies and the
+            # statement would have to name which. The prover proves no rotation
+            # in either case and says so, rather than guessing one.
+            ascl = attention_scales(spec)
+            s_k = ascl[f"L{L}.k"]
+            jk = pow2_exponent(s_k.reshape(nh, -1).expand(nh, hd).contiguous())
+            assert (jk != -1000).all(), "K scales are not powers of two -- wrong spec?"
+            write("jk.i32", jk.reshape(-1), digests)
+            s_q = ascl.get(f"L{L}.q") if spec.q_scale_mode == "head" else None
+            if s_q is not None:
+                jq = pow2_exponent(s_q.reshape(nh, -1).expand(nh, hd).contiguous())
+                assert (jq != -1000).all(), "Q scales are not powers of two"
+                write("jq.i32", jq.reshape(-1), digests)
+            else:
+                print(f"  NN: q_scale_mode={spec.q_scale_mode!r} -- no jq.i32, so no "
+                      "q quantize region on this dump")
+            # The angle table itself is NOT written: the statement carries
+            # `rope_theta`, the branch of `inv_freq_of` this model takes and that
+            # branch's own constants, and the prover rebuilds `inv_freq` from
+            # them.  Stream LL's `pre-split` then classifies tree 0's cos/sin
+            # columns `needs: Params, varies: Block` instead of `needs: Model`,
+            # which is where the weights-tree design's margin lives.  What IS
+            # written is B1's own fp64 vector, as a *reference*: the prover
+            # compares its derivation against it and reports the mismatch count,
+            # so a branch this repo implements differently shows up as a number
+            # and not as a rejected proof.
+            inv = getattr(m, "inv_freq", None)
+            if inv is not None:
+                write("inv_freq.f64", inv.detach().to("cpu").double().numpy(), digests)
+            else:
+                print("  NN: this model has per-layer-type rope frequencies; "
+                      "inv_freq.f64 not written")
 
             # B9 step 1b: so must the *output* scale be the rectangle's.  Taking `s_o`
             # from the forward pass -- which attended to the prefix *and* the causal
@@ -630,6 +711,25 @@ if __name__ == "__main__":
                 tokh = lg.float().argmax(-1).numpy().astype(np.int64)
                 write("tok_head.i32", tokh.astype(np.int32), digests)
 
+                # ---- stream II (E11): the head chunk's norm tail ------------
+                # Five bf16 pattern columns and two bf16 scalars, which is what
+                # a chunk needs to prove `h = (x rsqrt(ms inv_d + eps)) w` for
+                # the *final* norm exactly as a layer proves it for norm1 and
+                # norm2: the residual in, the weight (tree 0, under `pre_root`),
+                # and B1's `r`, its `ms + eps` and its `h` as references.  The
+                # residual-in claim is also where the head chunk's tree-3
+                # boundary lands -- stream KK's, hooked here by writing the
+                # column the boundary would be taken over.
+                def hpat(t):
+                    return (t.detach().to("cpu").contiguous().to(BF16)
+                            .view(torch.int16).numpy().view(np.uint16))
+
+                write("xin_head.u16", hpat(m.rec.cols[f"L{m.L - 1}.x"]), digests)
+                write("w_head.u16", hpat(m.final_norm), digests)
+                write("rin_head.u16", hpat(m.rec.cols["final_norm.rsqrt/in"]), digests)
+                write("r_head.u16", hpat(m.rec.cols["final_norm.rsqrt/out"]), digests)
+                write("h_head.u16", hpat(m.rec.cols["lm_head/x"]), digests)
+
                 # Which tokens do these rows emit?  This block covers positions
                 # `base .. base + S - 1`, and row `t` predicts the token at position
                 # `base + t + 1` -- so the rows emit the window *shifted by one* from
@@ -655,6 +755,15 @@ if __name__ == "__main__":
                 )
                 head = dict(
                     vocab=int(lin.n_out), d_in=int(lin.n_in), tokens=int(hacc.shape[0]),
+                    # stream II: what the head chunk's norm tail is built from.
+                    # `eps` and `inv_d` are bf16 patterns of the model, because
+                    # a table is only as pinned as the parameters the verifier
+                    # builds it from, and `reduce` says whether the AIR's
+                    # balanced bf16 tree is B1's own accumulation.
+                    final_norm=True,
+                    eps=int(hpat(m.eps.reshape(1))[0]),
+                    inv_d=int(hpat(m.inv_d.reshape(1))[0]),
+                    reduce=spec.reduce, rms_norm_eps=float(m.eps.item()),
                     tied_embedding=bool(getattr(m, "tied", False)),
                     abs_max=int(hacc.abs().amax()), bits=bits_for(int(hacc.abs().amax())),
                     kmax_needed=max(0, bits_for(int(hacc.abs().amax())) - 9),
@@ -741,6 +850,15 @@ if __name__ == "__main__":
                     rows=int(nh * S))
             stats = dict(
                 heads=nh, s=S, c=P, hd=hd, layer=L, spec=a.spec, qk_bits=list(spec.qk_bits),
+                # stream NN: the key/value head count, so the prover sizes the
+                # rotation's regions from the model rather than by dividing a
+                # matmul's width by `hd` and guessing which head count it is
+                nkv=int(m.nkv),
+                # stream NN: everything the verifier needs to build the rotation's
+                # angle table itself.  `scale` is the branch's own constants in
+                # `inv_freq_of`'s order, so the prover reads a list and not four
+                # differently-named keys.
+                rope=_rope_params_block(m),
                 # Stream DD: which token block this is.  `c` already says it (a
                 # block's prefix is `block * s`), but a driver that walks a
                 # sequence should not have to divide to find out, and `blocks`

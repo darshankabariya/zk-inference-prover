@@ -760,10 +760,18 @@ pub fn ao(dev: &crate::devwfill::DevAo, lay: &crate::layer::AoLayout, nh: usize,
     let t = std::time::Instant::now();
     let mutate = accmut(Reg::Ao);
     let pr = lay.per_row;
-    assert_eq!(dev.base.len(), 1 + 6 * pr, "the attnout region's column count");
+    // stream JJ (E11): the base layout is `2 + 9 per_row` -- `den`, `joff`,
+    // then `acc, sg, qm, nz2, denp, d, num, pj, alo` per slot -- and this fold
+    // reads `den` and each slot's `acc`.  It was `1 + 6 per_row`; the two must
+    // move together (`layer::ao_region`, `devwfill::ao_region_dev`,
+    // `gkrlink`'s `c0`).
+    // stream TT (E11), log row 73: the magnitude form's layout is `2 + 10 pr`,
+    // but it never reaches here -- `ao_region` fills it on the host on both
+    // arms, so `dev` is `None` and this fold is the host's.
+    assert_eq!(dev.base.len(), 2 + 9 * pr, "the attnout region's column count");
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, pr);
     let cols: Vec<*const u32> =
-        (0..pr).map(|k| dev.base[1 + 6 * k].device_ptr).collect();
+        (0..pr).map(|k| dev.base[2 + 9 * k].device_ptr).collect();
     let acc = Acc::new(lay.log_rows, 4);
     let rp = pows(&rv_pow);
     let cfg = FAccAo {

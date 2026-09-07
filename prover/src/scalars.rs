@@ -25,10 +25,12 @@
 //! share `b65_walk_eval` and differ in how many matmuls they carry). The probe
 //! also hashes the eval's structure as it runs -- every mask, preprocessed,
 //! relation and constraint call, every base-field constant's value, every
-//! arithmetic step's kind, and each extension constant's 0 / 1 / other class,
-//! which is the one thing about a scalar's value the lowering folds on -- and
-//! that hash is part of the key. Two evals with the same name, sizes and
-//! structure hash lower to the same ops.
+//! arithmetic step's kind, and, per extension constant, everything the lowering
+//! reads about its *value*: its 0 / 1 / base / extension class and the index of
+//! the first earlier constant equal to it (stream QQ, README item 23) -- and
+//! that hash is part of the key. Those three are the whole of the lowering's
+//! value dependence, so a hit is an IR the caller would have lowered. Two evals
+//! with the same name, sizes and structure hash lower to the same ops.
 //!
 //! `B7_M5_IRCACHE`: 0 off (the default, the proven path), 1 on, 2 on with every
 //! hit checked against the full lowering -- ops, widths, constraints, fractions,
@@ -54,13 +56,24 @@ use crate::cudagen::{Ir, RelEntry, relation_entries};
 
 /// What one evaluation of an eval through the probe leaves behind: every
 /// extension constant in order, and the hash of the eval's structure.
+#[derive(Default)]
 struct Probed {
     consts: Vec<SecureField>,
+    /// Stream RR: the `EvalAtRow::claim` values, in call order. A claim is not
+    /// a constant of the eval and its value is not in `h`; it is recorded here
+    /// because the slot it fills still has to be replayed on a later chunk.
+    claims: Vec<SecureField>,
     h: u64,
+    /// Stream QQ (README item 23): value -> the index of the first occurrence
+    /// that carried it. `Lower::scalar` interns a slot *by value*, so two
+    /// constants that coincide share one slot and one op; that is a fact about
+    /// the values and it has to be in the key, or a hit serves an IR the caller
+    /// would not have lowered. Not part of `Probed`'s result -- only of `h`.
+    seen: HashMap<[u32; 4], usize>,
 }
 
 thread_local! {
-    static REC: RefCell<Probed> = const { RefCell::new(Probed { consts: Vec::new(), h: 0 }) };
+    static REC: RefCell<Probed> = RefCell::new(Probed::default());
 }
 
 /// fold bytes into the structure hash (FNV-1a)
@@ -79,15 +92,58 @@ fn tr_base(tag: u8, c: M31) {
     tr(&c.0.to_le_bytes());
 }
 
+/// Record one extension constant, and hash *exactly* what the lowering reads
+/// about its value -- no more, so the key stays a shape key, and no less, so a
+/// hit cannot serve an IR built from different values (README item 23).
+///
+/// The lowering reads three things and only three:
+///
+///  * `Lower::lit` -- is the value literally 0 or 1 (in the base field)? That
+///    decides whether `x + 0`, `x - 0`, `x * 1` and `0 * x` fold away.
+///  * `Lower::scalar` -- are the upper limbs zero? That is the node's width,
+///    m31 or qm31, and the width is in the fingerprint.
+///  * `Lower::scalar` again -- has this exact value been seen before? The slot
+///    table is keyed by value, so a repeat costs no slot and no op.
+///
+/// Class 0 and 1 cover the first, class 2 (base field, >= 2) and 3 (extension)
+/// the second, and the first-occurrence index the third. Before this the class
+/// was 0/1/other and the repeat was not hashed at all, which is how a band whose
+/// two claims coincided was served its sibling's IR and lost its `kernel
+/// fallback:` line.
 fn note(v: SecureField) {
     let l = v.to_m31_array();
-    let class: u8 = if l[1].0 == 0 && l[2].0 == 0 && l[3].0 == 0 && l[0].0 <= 1 {
-        l[0].0 as u8
-    } else {
-        2
+    let base = l[1].0 == 0 && l[2].0 == 0 && l[3].0 == 0;
+    let class: u8 = match (base, l[0].0) {
+        (true, 0) => 0,
+        (true, 1) => 1,
+        (true, _) => 2,
+        (false, _) => 3,
     };
     tr(&[b'S', class]);
-    REC.with(|r| r.borrow_mut().consts.push(v));
+    // `tr` borrows `REC` itself, so the first-occurrence lookup has to finish
+    // before it is called -- one borrow at a time.
+    let first = REC.with(|r| {
+        let mut r = r.borrow_mut();
+        let k = [l[0].0, l[1].0, l[2].0, l[3].0];
+        let i = r.consts.len();
+        let first = *r.seen.entry(k).or_insert(i);
+        r.consts.push(v);
+        first
+    });
+    tr(&(first as u64).to_le_bytes());
+}
+
+/// Stream RR: record one claim. A fixed tag, so the *number* and the *place* of
+/// an eval's claims are in the structure hash and their values are not -- which
+/// is the whole of the change this stream makes to the key. `Lower` no longer
+/// folds on a claim, no longer interns one by value and no longer widths one by
+/// value, so there is nothing left about the value for the key to carry.
+///
+/// It does not go into `seen`: a claim shares no slot with anything, so an
+/// ordinary constant that coincides with one is not a repeat.
+fn note_claim(v: SecureField) {
+    tr(b"Sc");
+    REC.with(|r| r.borrow_mut().claims.push(v));
 }
 
 /// A base value. `Some` is a lone `BaseExpr::Const`, which becomes a scalar the
@@ -360,6 +416,14 @@ impl EvalAtRow for ScalarProbe {
         tr(b"C;");
     }
 
+    /// Stream RR, the counterpart of `cudagen::LogupProbe::claim`: the value is
+    /// kept for provenance and hashed as a fixed tag, because a claim's value
+    /// stopped being a shape fact.
+    fn claim(&mut self, value: SecureField) -> Self::EF {
+        note_claim(value);
+        RecE
+    }
+
     fn combine_ef(values: [Self::F; SECURE_EXTENSION_DEGREE]) -> Self::EF {
         tr(b"E");
         if values.iter().all(|v| v.0.is_some()) {
@@ -390,10 +454,12 @@ fn probe<E: FrameworkEval>(eval: &E) -> Probed {
     REC.with(|r| {
         let mut r = r.borrow_mut();
         r.consts.clear();
+        r.claims.clear();
+        r.seen.clear();
         r.h = 0xcbf2_9ce4_8422_2325;
     });
     let _ = eval.evaluate(ScalarProbe);
-    REC.with(|r| std::mem::replace(&mut *r.borrow_mut(), Probed { consts: Vec::new(), h: 0 }))
+    REC.with(|r| std::mem::replace(&mut *r.borrow_mut(), Probed::default()))
 }
 
 // ---------------------------------------------------------------- the cache ----
@@ -407,6 +473,11 @@ enum Prov {
     Z(usize),
     /// relation entry k's `alpha_j`
     Alpha(usize, usize),
+    /// Stream RR: the `n`-th `EvalAtRow::claim` of the eval. Matched by ordinal
+    /// and never by value -- two claims that coincide on the chunk that filled
+    /// the entry are two slots, and matching by value would hand both of them
+    /// the first one's value on a chunk where they differ.
+    Claim(usize),
 }
 
 struct Entry {
@@ -482,8 +553,23 @@ fn find(v: SecureField, consts: &[SecureField], rels: &[RelEntry]) -> Option<Pro
     None
 }
 
-fn replay(prov: &[Prov], consts: &[SecureField], rels: &[RelEntry], family: &str)
-          -> Vec<SecureField> {
+/// Where slot `k`'s value comes from. Stream RR: a claim slot is matched by its
+/// *ordinal*, read off the IR, and never by value -- two claims that coincide
+/// on the chunk that filled the entry are two slots, and value matching would
+/// hand both of them the first one's value on a chunk where they differ.
+fn slot_prov(ir: &Ir, k: usize, consts: &[SecureField], rels: &[RelEntry]) -> Option<Prov> {
+    if let Some((_, n)) = ir.claim_slots.iter().find(|(slot, _)| *slot == k) {
+        return Some(Prov::Claim(*n));
+    }
+    find(ir.scalars[k], consts, rels)
+}
+
+fn provenance(ir: &Ir, consts: &[SecureField], rels: &[RelEntry]) -> Option<Vec<Prov>> {
+    (0..ir.scalars.len()).map(|k| slot_prov(ir, k, consts, rels)).collect()
+}
+
+fn replay(prov: &[Prov], consts: &[SecureField], claims: &[SecureField], rels: &[RelEntry],
+          family: &str) -> Vec<SecureField> {
     prov.iter()
         .map(|p| match *p {
             Prov::Const(i) => *consts.get(i).unwrap_or_else(|| {
@@ -492,6 +578,10 @@ fn replay(prov: &[Prov], consts: &[SecureField], rels: &[RelEntry], family: &str
             }),
             Prov::Z(k) => rels[k].z,
             Prov::Alpha(k, j) => rels[k].alphas[j],
+            Prov::Claim(n) => *claims.get(n).unwrap_or_else(|| {
+                panic!("{family}: the probe recorded {} claims, slot wants claim#{n}",
+                       claims.len())
+            }),
         })
         .collect()
 }
@@ -505,6 +595,7 @@ fn same(a: &Ir, b: &Ir, family: &str) {
     assert_eq!(a.cols, b.cols, "{family}: cached IR differs in its column counts");
     assert_eq!(a.pre_ids, b.pre_ids, "{family}: cached IR differs in its preprocessed ids");
     assert_eq!(a.scalar_refs, b.scalar_refs, "{family}: cached IR differs in its scalar refs");
+    assert_eq!(a.claim_slots, b.claim_slots, "{family}: cached IR differs in its claim slots");
     assert_eq!(a.log_size, b.log_size, "{family}: cached IR differs in log_size");
     assert_eq!(a.eval_log_size, b.eval_log_size, "{family}: cached IR differs in eval_log_size");
     assert_eq!(a.cumsum_shift, b.cumsum_shift, "{family}: cached IR differs in cumsum_shift");
@@ -534,7 +625,7 @@ pub fn cached_ir<E: FrameworkEval>(
     }
     let family = eval.cuda_eval_name();
     let t = std::time::Instant::now();
-    let Probed { consts, h } = probe(eval);
+    let Probed { consts, claims, h, .. } = probe(eval);
     let key: Key = (family, log_size, eval_log_size, logup, h);
     let hit = {
         let g = cache().lock().unwrap();
@@ -548,7 +639,7 @@ pub fn cached_ir<E: FrameworkEval>(
             _ => {}
         }
         if !prov.is_empty() {
-            ir.scalars = replay(&prov, &consts, &rels, family);
+            ir.scalars = replay(&prov, &consts, &claims, &rels, family);
         }
         HIT_NS.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
         HITS.fetch_add(1, Relaxed);
@@ -561,7 +652,7 @@ pub fn cached_ir<E: FrameworkEval>(
     }
     let ir = lower();
     let rels = relation_entries(eval);
-    let prov: Option<Vec<Prov>> = ir.scalars.iter().map(|v| find(*v, &consts, &rels)).collect();
+    let prov: Option<Vec<Prov>> = provenance(&ir, &consts, &rels);
     FILL_NS.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
     match prov {
         Some(prov) => {
@@ -572,11 +663,206 @@ pub fn cached_ir<E: FrameworkEval>(
             // A slot no probe can account for: this family stays uncached, and
             // the count says so rather than a silently slower chunk.
             UNCACHEABLE.fetch_add(1, Relaxed);
-            let k = ir.scalars.iter().position(|v| find(*v, &consts, &rels).is_none()).unwrap();
+            let k = (0..ir.scalars.len())
+                .find(|k| slot_prov(&ir, *k, &consts, &rels).is_none()).unwrap();
             eprintln!("ircache: {family} at 2^{log_size} is not cacheable: slot {k} of {} \
-                       matches none of {} recorded constants or {} relation entries",
-                      ir.scalars.len(), consts.len(), rels.len());
+                       matches none of {} recorded constants, {} claims or {} relation entries",
+                      ir.scalars.len(), consts.len(), claims.len(), rels.len());
         }
     }
     ir
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two claims and nothing else. The whole of the fixture is that its two
+    /// extension constants are the caller's, so the structure hash can be asked
+    /// what it does and does not distinguish.
+    struct TwoClaims {
+        a: SecureField,
+        b: SecureField,
+    }
+
+    impl FrameworkEval for TwoClaims {
+        fn cuda_eval_name(&self) -> &'static str {
+            "b65_qq_probe_test"
+        }
+        fn log_size(&self) -> u32 {
+            4
+        }
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            5
+        }
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let x = eval.next_trace_mask();
+            let y = eval.next_trace_mask();
+            eval.add_constraint(E::EF::from(x) - self.a);
+            eval.add_constraint(E::EF::from(y) - self.b);
+            eval
+        }
+    }
+
+    fn base(v: u32) -> SecureField {
+        SecureField::from(M31::from_u32_unchecked(v))
+    }
+    fn ext(v: u32) -> SecureField {
+        SecureField::from_m31_array([M31::from_u32_unchecked(v); 4])
+    }
+    fn h(a: SecureField, b: SecureField) -> u64 {
+        probe(&TwoClaims { a, b }).h
+    }
+
+    /// Stream QQ (README item 23). The cache key is the eval's structure plus
+    /// what the lowering reads about its scalars' *values*, and those are three
+    /// things: is a value 0 or 1 (`Lower::lit` folds `x - 0`, `x * 1`), are its
+    /// upper limbs zero (`Lower::scalar`'s width, which is in the fingerprint),
+    /// and has it been seen before (the slot table interns by value, so a
+    /// repeat costs neither slot nor op). Miss any of them and a hit serves an
+    /// IR the caller would not have lowered -- which is how a band whose two
+    /// claims coincided was handed its sibling's IR and lost its announced
+    /// `kernel fallback:` line.
+    #[test]
+    fn the_cache_key_carries_every_value_fact_the_lowering_reads() {
+        let ref_h = h(base(7), base(9));
+        assert_ne!(ref_h, h(base(7), base(7)), "two claims that coincide share a slot");
+        assert_ne!(ref_h, h(base(7), base(0)), "a zero claim folds `x - 0` away");
+        assert_ne!(ref_h, h(base(7), base(1)), "a one claim folds `x * 1` away");
+        assert_ne!(ref_h, h(base(7), ext(9)), "an extension claim is a qm31 node");
+        assert_ne!(ref_h, h(base(0), base(9)), "either side of the pair, not just the last");
+    }
+
+    /// And the other half: the key must not move with an ordinary value, or the
+    /// cache never hits and every chunk pays a full lowering.
+    #[test]
+    fn the_cache_key_is_a_shape_key_and_not_a_value_key() {
+        assert_eq!(h(base(7), base(9)), h(base(7), base(9)), "the same values");
+        assert_eq!(
+            h(base(7), base(9)),
+            h(base(11), base(13)),
+            "two distinct nonzero base-field claims are one shape"
+        );
+        assert_eq!(
+            h(ext(7), ext(9)),
+            h(ext(11), ext(13)),
+            "and so are two distinct extension claims"
+        );
+    }
+}
+
+/// Stream RR's controls. QQ's fixture above reads its two values as ordinary
+/// extension constants, which is what every claim in the AIR was before this
+/// stream and what the key above is still right about. This one reads them
+/// through `EvalAtRow::claim`, and the two things that must hold of a claim are
+/// the opposite ones: the key must *not* move with the value, and a hit must
+/// replay the slot by ordinal rather than by value.
+#[cfg(test)]
+mod rr {
+    use super::*;
+
+    struct TwoClaims {
+        a: SecureField,
+        b: SecureField,
+    }
+
+    impl FrameworkEval for TwoClaims {
+        fn cuda_eval_name(&self) -> &'static str {
+            "b65_rr_probe_test"
+        }
+        fn log_size(&self) -> u32 {
+            4
+        }
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            5
+        }
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let x = eval.next_trace_mask();
+            let y = eval.next_trace_mask();
+            let ca = eval.claim(self.a);
+            let cb = eval.claim(self.b);
+            eval.add_constraint(E::EF::from(x) - ca);
+            eval.add_constraint(E::EF::from(y) - cb);
+            eval
+        }
+    }
+
+    /// One claim, so the key can be asked whether the *number* of claims is
+    /// still a shape fact.
+    struct OneClaim {
+        a: SecureField,
+    }
+
+    impl FrameworkEval for OneClaim {
+        fn cuda_eval_name(&self) -> &'static str {
+            "b65_rr_probe_test"
+        }
+        fn log_size(&self) -> u32 {
+            4
+        }
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            5
+        }
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let x = eval.next_trace_mask();
+            let y = eval.next_trace_mask();
+            let ca = eval.claim(self.a);
+            eval.add_constraint(E::EF::from(x) - ca);
+            eval.add_constraint(E::EF::from(y));
+            eval
+        }
+    }
+
+    fn base(v: u32) -> SecureField {
+        SecureField::from(M31::from_u32_unchecked(v))
+    }
+    fn ext(v: u32) -> SecureField {
+        SecureField::from_m31_array([M31::from_u32_unchecked(v); 4])
+    }
+    fn h(a: SecureField, b: SecureField) -> u64 {
+        probe(&TwoClaims { a, b }).h
+    }
+
+    /// The lowering reads nothing about a claim's value, so neither may the
+    /// key. Every row here is a row QQ's `assert_ne!` list asserts for an
+    /// ordinary constant, and every one of them is now an equality.
+    #[test]
+    fn a_claims_value_is_not_in_the_cache_key() {
+        let r = h(ext(7), ext(9));
+        assert_eq!(r, h(ext(11), ext(13)), "two other distinct claims");
+        assert_eq!(r, h(ext(7), ext(7)), "two claims that coincide (EE's second collapse)");
+        assert_eq!(r, h(SecureField::zero(), SecureField::zero()), "both claims zero (item 21)");
+        assert_eq!(r, h(ext(7), SecureField::zero()), "one claim zero (log rows 61, 66)");
+        assert_eq!(r, h(SecureField::one(), SecureField::one()), "both claims one");
+        assert_eq!(r, h(base(5), base(6)), "base-field claims -- the width is fixed too");
+    }
+
+    /// And the key is still a key: how many claims an eval has, and where, is
+    /// structure and stays in the hash.
+    #[test]
+    fn how_many_claims_an_eval_has_is_still_in_the_key() {
+        assert_ne!(h(ext(7), ext(9)), probe(&OneClaim { a: ext(7) }).h);
+    }
+
+    /// The hazard the ordinal provenance exists for. The entry is filled by a
+    /// chunk whose two claims coincide -- one value, two slots -- and a later
+    /// chunk of the same shape has two different ones. Matching a slot by value
+    /// would find the first occurrence for both and hand the later chunk one
+    /// value twice, which is a blob that does not compute its own statement.
+    #[test]
+    fn a_hit_replays_a_claim_by_ordinal_and_not_by_value() {
+        let fill = TwoClaims { a: ext(5), b: ext(5) };
+        let ir = crate::cudagen::lower(&fill, SecureField::zero(), 4, 5);
+        let rels = relation_entries(&fill);
+        let filled = probe(&fill);
+        assert_eq!(ir.claim_slots.len(), 2, "two claims, two slots, coinciding values");
+        let prov = provenance(&ir, &filled.consts, &rels).expect("every slot accounted for");
+
+        let later = probe(&TwoClaims { a: ext(11), b: ext(13) });
+        let got = replay(&prov, &later.consts, &later.claims, &rels, "b65_rr_probe_test");
+        let want = [ext(11), ext(13)];
+        for (slot, n) in &ir.claim_slots {
+            assert_eq!(got[*slot], want[*n], "slot {slot} is claim #{n}");
+        }
+    }
 }

@@ -63,7 +63,8 @@ use crate::layer::{
 use crate::glue::{self, GKind, GTableEval, GlueEval, GlueRels, GlueTables, Kind, Prog, Tie,
                   TieKind, TieSpec, Tiling, UnKind};
 use crate::layout::Shape;
-use crate::walk_air::{AO_SEL, AttnOutEval, WALK_SEL, WalkEval, ao_chan, ao_sel, walk_sel, walk_w};
+use crate::walk_air::{AO_SEL, AttnOutEval, EPOW_COLS, WALK_SEL, WalkEval, ao_chan, ao_sel,
+                      walk_sel, walk_w};
 
 // ---------------------------------------------------------------- relations ----
 
@@ -74,6 +75,8 @@ pub struct Rels {
     pub frac: FracRel,
     pub mul: MulRel,
     pub qnz: PairRel,
+    /// Stream JJ (E11): the `(e - e_min, 2^max(e,0), 2^max(-e,0))` window table
+    pub epow: FracRel,
     pub widths: Vec<u32>,
     pub ranges: Vec<RangeRel>,
     /// B10 step 2: `POW`, `SMUL`, `VAL` and one unary table per kind.  `NORM` and
@@ -86,20 +89,55 @@ pub struct Rels {
     /// without the gadget draws exactly what it always drew.  Its arity is the
     /// channel block's width plus two, which is why it is not a `relation!`.
     pub emb: Option<crate::embed::EmbRel>,
+    /// Stream II: the requantize seams' own relations, drawn after everything
+    /// else so a proof without them draws exactly what it always drew.  All
+    /// five are drawn whenever any seam exists, whichever variants are in use --
+    /// a relation nobody combines against costs one channel draw and keeps the
+    /// order a function of "are there seams" alone.
+    pub rq: Option<RqRels>,
+    /// Stream NN-3: the quantize family's own tables, drawn after the seams'
+    /// and only when the chunk carries a quantize region -- so a proof without
+    /// the rotation draws exactly what it always drew.
+    pub qq: Option<QuantRels>,
+}
+
+/// Stream NN-3: one division relation per side width, in `Plan::q_tabs` order,
+/// and the family's own `(q, nz)` pair relation.  The regions keep reading the
+/// layer's 15-bit range and `requant.rs`'s sign table, which are width-free.
+#[derive(Clone)]
+pub struct QuantRels {
+    pub div: Vec<FracRel>,
+    pub qnz: PairRel,
+}
+
+/// Stream II: the five relations a requantize seam reads, beyond the `qnz` and
+/// 15-bit range relations it shares with the rest of the layer.
+#[derive(Clone)]
+pub struct RqRels {
+    pub rqv: FracRel,
+    pub rq3: FracRel,
+    pub rq4: MulRel,
+    pub scl2: PairRel,
+    pub scl3: FracRel,
 }
 
 impl Rels {
     /// `uns` is the plan's unary-kind list: the relations are drawn one per
     /// entry, in that order, and both sides index them by it.  `emb` is the
-    /// embedding relation's arity, or `None` when the gadget is off.
+    /// embedding relation's arity, or `None` when the gadget is off; `rq` says
+    /// whether the chunk carries requantize seams.
     pub fn draw(ch: &mut Blake2sM31Channel, widths: &[u32],
-                uns: Option<&[crate::glue::UnKind]>, emb: Option<usize>) -> Self {
+                uns: Option<&[crate::glue::UnKind]>, emb: Option<usize>, rq: bool,
+                qtabs: usize) -> Self {
         let exp = ExpRel::draw(ch);
         let norm = NormRel::draw(ch);
         let frac = FracRel::draw(ch);
         let mul = MulRel::draw(ch);
         let qnz = PairRel::draw(ch);
         let ranges: Vec<RangeRel> = widths.iter().map(|_| RangeRel::draw(ch)).collect();
+        // stream JJ: drawn after the ranges so the earlier relations keep their
+        // place in the transcript and only this proof's own tail moves
+        let epow = FracRel::draw(ch);
         let glue = uns.map(|ks| GlueRels {
             norm: norm.clone(),
             frac: frac.clone(),
@@ -110,7 +148,21 @@ impl Rels {
             uns: ks.to_vec(),
         });
         let emb = emb.map(|n| crate::embed::EmbRel::draw(ch, n));
-        Self { exp, norm, frac, mul, qnz, widths: widths.to_vec(), ranges, glue, emb }
+        let rq = rq.then(|| RqRels {
+            rqv: FracRel::draw(ch),
+            rq3: FracRel::draw(ch),
+            rq4: MulRel::draw(ch),
+            scl2: PairRel::draw(ch),
+            scl3: FracRel::draw(ch),
+        });
+        // stream NN-3: last of all, so every relation before it keeps its place
+        // in the transcript
+        let qq = (qtabs > 0).then(|| QuantRels {
+            div: (0..qtabs).map(|_| FracRel::draw(ch)).collect(),
+            qnz: PairRel::draw(ch),
+        });
+        Self { exp, norm, frac, mul, qnz, epow, widths: widths.to_vec(), ranges, glue, emb, rq,
+               qq }
     }
     pub fn range(&self, bits: u32) -> &RangeRel {
         &self.ranges[self.widths.iter().position(|w| *w == bits).unwrap()]
@@ -156,6 +208,54 @@ pub struct Params {
     pub ao_target: usize,
     pub ao_q_bits: u32,
     pub ao_rem_bits: u32,
+    /// Stream JJ (E11), `witness-slack.md` section 1f.  The attention output's
+    /// rescaling exponent is `e = jv[h,ch] - jo[t]`.  `jv` is calibrated
+    /// offline and is a model constant, so `ao_jv_min`/`ao_jv_max` are a
+    /// statement of the model; `jo` is per-token prover data, so
+    /// `ao_jo_min`/`ao_jo_max` are the window the statement admits the prover's
+    /// choice in.  Together they fix the `EPOW` table's domain
+    /// `[ao_jv_min - ao_jo_max, ao_jv_max - ao_jo_min]`, which is what bounds
+    /// the committed `num` and `pj` inside the AIR.
+    /// `ao_acc_lo_bits`/`ao_acc_hi_bits` are the two limbs of the range check
+    /// on `acc + 2^(lo + hi - 1)`, the other half of the no-wrap window.
+    /// `Plan::new` asserts the whole window fits under the field.
+    #[serde(default)]
+    pub ao_jv_min: i32,
+    #[serde(default)]
+    pub ao_jv_max: i32,
+    #[serde(default)]
+    pub ao_jo_min: i32,
+    #[serde(default)]
+    pub ao_jo_max: i32,
+    #[serde(default)]
+    pub ao_acc_lo_bits: u32,
+    #[serde(default)]
+    pub ao_acc_hi_bits: u32,
+    /// Stream TT (E11), log row 73.  The **magnitude form** of the same window.
+    /// With it on, the slot commits `mag = |acc|` beside `acc` and the two
+    /// limbs range-check *`mag`*, not `acc + 2^(lo+hi-1)`; the sign is carried
+    /// by the `sg` column the region already has, so the limbs cover
+    /// `AttnOut::acc_bits()` rather than `acc_bits() + 1` and the same
+    /// `1 + lo + hi + max(e_hi, 0) <= 31` window admits one more bit of
+    /// exponent.  It costs one committed column per slot and no lookup.
+    ///
+    /// It is **off unless the offset form does not fit** (`main.rs`'s
+    /// `params_of`), so every chunk that composed before this field existed
+    /// keeps the offset form, its columns, its proof and its digest; the field
+    /// is skipped in the serialization then, so the statement bytes do not move
+    /// either.  `y-delay-vw12`'s layer-0 chunks are what need it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ao_acc_mag: bool,
+    /// Stream TT (E11), log row 73, the sibling bound's half.  With it on the
+    /// region looks up `2 denp` in the `ao_rem_bits` table rather than `denp`,
+    /// which states `denp <= 2^(rem-1) - 1` -- the width an honest `denp`
+    /// actually has, since `AttnOut::rem_bits` is the bit length of `max
+    /// 2 denp`.  It costs no table, no column and no lookup, and it moves
+    /// `Plan::new`'s quotient assert from `ao_q_bits + ao_rem_bits <= 30` to
+    /// `<= 31`.  Off, and skipped in the serialization, unless the plain form
+    /// does not fit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ao_denp2: bool,
     /// Stream Z: the fold's two data-derived pins, present only on a statement
     /// with a `fold` matmul (a witness whose manifest declares one).  Zero --
     /// and skipped in the serialization, so every pre-change statement is
@@ -249,6 +349,53 @@ pub struct Params {
     /// `d` over a power of two.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub embed_per_row: usize,
+    /// Stream NN (E11), `witness-slack.md` section 1e: RoPE and the q/k/v
+    /// quantize, the two steps `b1/model.py` takes between the projections and
+    /// `attention_int`.  Absent -- and skipped in the serialization, so a
+    /// statement written without it is byte identical to one from a crate that
+    /// never had the feature -- on every chunk that does not prove them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rope: Option<RopeParams>,
+}
+
+/// Stream NN: what the verifier needs to rebuild the rotation's own table.
+///
+/// `cos` and `sin` are preprocessed operands of the RoPE regions, and
+/// `rope(pos)` reads the token's **absolute** position -- `pos0 + t` -- so tree
+/// 0 is a function of the block index as well as of (model, layer, shape,
+/// params).  `pos0` is that dependence, written down: `verify_composed` checks
+/// it against `Fixed::block`, which `bounds::chain_of` already compares along
+/// the token axis, so the block a chunk's angles were built for is the block the
+/// chain puts it at.  Stream LL's tree-0 derivation must take the same
+/// coordinate.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RopeParams {
+    /// key/value heads; `nh / nkv` is the GQA replication factor
+    pub nkv: usize,
+    /// absolute position of this block's token 0
+    pub pos0: usize,
+    /// `rope_theta`, as an IEEE-754 bit pattern -- exact, and reproducible from
+    /// a serialized statement without a float parser's rounding in the way
+    pub theta: u64,
+    /// which branch of `inv_freq_of` this model takes: `default`, `llama3` or
+    /// `proportional`
+    pub rope_type: String,
+    /// that branch's own constants, as bit patterns and in its own order:
+    /// `llama3` reads `[factor, low_freq_factor, high_freq_factor,
+    /// original_max_position_embeddings]`, `proportional` reads
+    /// `[partial_rotary_factor, factor]`, `default` reads none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rope_scale: Vec<u64>,
+}
+
+impl RopeParams {
+    /// The angle table's frequencies, from the statement and nothing else.
+    /// Stream LL: this is what makes tree 0's `cos` and `sin` columns
+    /// `needs: Params, varies: Block` -- a verifier never reads them off a dump.
+    pub fn inv(&self, hd: usize) -> Vec<f64> {
+        let sc: Vec<f64> = self.rope_scale.iter().map(|b| f64::from_bits(*b)).collect();
+        crate::rope::inv_freq_of(hd, f64::from_bits(self.theta), &self.rope_type, &sc)
+    }
 }
 
 /// The wiring family's two shape numbers.  `a` is how many rows one token's
@@ -259,23 +406,28 @@ pub struct Params {
 pub struct GlueParams {
     pub d: usize,
     pub a: usize,
-    /// The FFN width, for the SwiGLU's own tiling.  Zero on a dump whose
-    /// manifest predates it, which is what `swiglu` then refuses to run on.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    /// The FFN width, for the SwiGLU's own tiling.  Stream II made the region
+    /// unconditional, so a dump whose manifest predates `dff` no longer composes
+    /// with the wiring family at all -- and says so rather than proving less.
     pub dff: usize,
-    /// Stream E's two additive regions, off by default.  They are opt-in rather
-    /// than opt-out so that the pre-change proof is reproduced by the *default*
-    /// invocation -- the bit-for-bit control is then the ordinary run, not a run
-    /// with a flag in it.  Both are skipped when false so the serialized
-    /// statement is byte-identical to the pre-change crate's.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub tails: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub swiglu: bool,
+    /// Stream II: the model's two RMSNorm constants, as bf16 patterns.  They are
+    /// in the *statement* because the norm tail's `r` is now a table lookup
+    /// whose table bakes them in (`UnKind::NormR`), and a table is only as
+    /// pinned as the parameters the verifier builds it from.
+    pub eps: u16,
+    pub inv_d: u16,
     /// Stream E: make `o_out` and `d_out` the `o` and `down` dequant regions'
     /// own published outputs, tied to the copies the wiring family commits.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deq_ties: bool,
+    /// Stream II (E11), stream KK's finding: this chunk is the `lm_head` chunk,
+    /// so its wiring family is the *final* RMSNorm and nothing else -- one
+    /// reduction pair and one tail, whose input is the last layer's committed
+    /// residual and whose output the head requantizes.  Skipped in the
+    /// serialization, so a layer chunk's statement is byte identical to one
+    /// from a crate that never had the mode.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub head_norm: bool,
 }
 
 fn is_zero(v: &usize) -> bool {
@@ -297,6 +449,43 @@ pub struct Fixed {
     pub sizes: Vec<Vec<u32>>,
     /// the pinned root of tree 0: tables, selectors, weights and scales
     pub pre_root: String,
+    /// Stream KK: which layer of the model this chunk proves, and which token
+    /// block.  Declared -- like `pre_root`, and pinned to the model only when
+    /// stream LL derives the expected tree-0 root per (layer, shape) -- but
+    /// *compared*: `bounds::chain_of` demands `layer_b == layer_a + 1` on a
+    /// layer edge and `block_b == block_a + 1` on a token edge, and
+    /// `bounds-grid` takes the grid coordinate from here rather than from the
+    /// tag.  `None` on a statement written before the field existed, which is
+    /// why the comparisons are conditional on both sides declaring one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<usize>,
+    /// Stream LL (E11), `notes/witness-slack.md` section 5 item 1's last
+    /// sentence: the content hash of the model data tree 0 reads
+    /// (`Layer::model_hash`).  Declared, like `pre_root` and like `layer` --
+    /// but *compared*: `bounds-grid` refuses a grid whose chunks name two
+    /// different models, and refuses two chunks at the same layer whose model
+    /// hashes differ, so "two blocks of one layer used different weights" is
+    /// no longer unseen.  What ties the hash to the *proof* is the derived
+    /// tree-0 root (`--expect-pre-roots`), which `b65 model-roots` computes
+    /// from the same model.  `None` on a statement written before the field
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Stream KK (`notes/witness-slack.md` §1b): the token ids the embedding
+    /// region committed, one per position of this block, in position order.
+    /// `verify_composed` recomputes the Horner claim over them under the
+    /// chunk's own replayed `w` and compares it against `claims.embed_tok`, so
+    /// this vector is the proof's ids and not a second, free-standing
+    /// declaration.  Empty on a chunk with no embedding region.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tok_in: Vec<u32>,
+    /// Stream KK (§5 item 2): the tokens the `lm_head` chunk's argmax region
+    /// emitted, one per position, pinned the same way against
+    /// `claims.head_tok`.  Empty on a chunk without `--head-argmax`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tok_out: Vec<u32>,
 }
 
 /// The prover-supplied half: every claimed value the identities compare.
@@ -306,6 +495,14 @@ pub struct Claims {
     pub bands: Vec<[[u32; 4]; 6]>,
     pub ao_out: [u32; 4],
     pub ao_den: [u32; 4],
+    /// Stream JJ (E11): the attention-output region's claim over its *own
+    /// output* -- the signed requantized value `qm (1 - 2 sg)`, folded under
+    /// exactly `ao_out`'s weights.  `AttnOutEval` is the requantization of the
+    /// attention output, so this is the value the `o` walk's committed
+    /// activations equal row for row; the equality is stream II's to add.  A
+    /// `Vec` so a statement written before this stream still parses.
+    #[serde(default)]
+    pub ao_q: Vec<[u32; 4]>,
     /// per matmul: the dequant region's Freivalds side
     pub mat_h: Vec<[u32; 4]>,
     /// per walk group, per matmul: the walk's side
@@ -324,6 +521,23 @@ pub struct Claims {
     /// the value the `o` and `down` regions publish for their own bf16 outputs
     #[serde(default)]
     pub deq_out: Vec<[u32; 4]>,
+    /// Stream NN: per quantize region, the bf16 side it consumed and the
+    /// integer side it produced.  `nn_in` is compared against the rotation's
+    /// `Out(0)` (for q and k) or against `deq_out` (for v); `nn_out` against the
+    /// sum of the corner bands' own claims over their committed columns.
+    #[serde(default)]
+    pub nn_in: Vec<[u32; 4]>,
+    #[serde(default)]
+    pub nn_out: Vec<[u32; 4]>,
+    /// Stream NN: per band of `Plan::nn_bands`, that band's K, Q and V claims.
+    #[serde(default)]
+    pub band_qkv: Vec<[[u32; 4]; 3]>,
+    /// Stream NN (NN-2): per band of `Plan::nn_qbands`, that **prefix** band's
+    /// own Q claim.  Its counterparty is its group's corner, not a quantize
+    /// region: `nn_q_ok` says the two folds agree, and the corner's is already
+    /// tied to the rotated query, so the prefix's is too.
+    #[serde(default)]
+    pub band_q: Vec<[u32; 4]>,
     /// stream E: the head's order-key claim, when it is published
     #[serde(default)]
     pub head_key: Vec<[u32; 4]>,
@@ -331,6 +545,12 @@ pub struct Claims {
     /// `head_key` is what says it compared the head's own output
     #[serde(default)]
     pub am_key: Vec<[u32; 4]>,
+    /// stream KK: the argmax region's claim over the tokens it emitted, under
+    /// the same `w` its key claim uses.  The counterparty is not another claim
+    /// inside this proof but the statement's own `tok_out`, which the verifier
+    /// recomputes it from.
+    #[serde(default)]
+    pub head_tok: Vec<[u32; 4]>,
     /// stream BB: the embedding region's Horner claim over the residual stream
     /// it proved.  Equal to `glue_ties[stream_in]` is what says the row it
     /// proved is the row the layer consumed.
@@ -341,6 +561,29 @@ pub struct Claims {
     /// something to bind to.  Nothing inside this proof compares it.
     #[serde(default)]
     pub embed_tok: Vec<[u32; 4]>,
+    /// stream II: per requantize seam, its claim over the bf16 values it
+    /// consumed -- equal to the producing region's `Out(0)` is what says the
+    /// matmul's input is the producer's output.
+    #[serde(default)]
+    pub rq_in: Vec<[u32; 4]>,
+    /// stream II: the same seam's claim over the signed integers it derived --
+    /// equal to `walk_qx[the group]` is what says the walk multiplied *those*
+    /// activations.
+    #[serde(default)]
+    pub rq_out: Vec<[u32; 4]>,
+    /// stream II: per walk group, its own claim over its committed activations
+    /// in the canonical channel-major order.
+    #[serde(default)]
+    pub walk_qx: Vec<[u32; 4]>,
+    /// Stream II (E11): the requantize↔dequant scale tie.  `rq_sc` is one claim
+    /// per seam over the scale that seam pinned to the attained maximum;
+    /// `deq_sc` is one per *matmul* over the x-side scale its dequant used, and
+    /// is empty on a chunk with no seams.  Indexed by matmul so the verifier
+    /// reads a consumer's entry straight off the walk group's mat list.
+    #[serde(default)]
+    pub rq_sc: Vec<[u32; 4]>,
+    #[serde(default)]
+    pub deq_sc: Vec<[u32; 4]>,
     /// B11 stream Q: the bands' batch GKR proof, as bytes, on the GKR arm only.
     /// It rides here because the statement already travels everywhere the proof
     /// does and `Claims::flat` -- what the transcript mixes -- reads only the
@@ -354,6 +597,43 @@ pub fn qm(v: SecureField) -> [u32; 4] {
     let a = v.to_m31_array();
     [a[0].0, a[1].0, a[2].0, a[3].0]
 }
+/// Stream QQ (log row 61): at emit time a claim the placeholder set does not
+/// supply is a defect, not a zero.
+///
+/// Every region reads its tie claims through `.get(..)`, and the missing case
+/// used to be `SecureField::zero()`. That zero is not neutral: `Lower::ext`
+/// folds `x - 0` and `Ir::schedule` drops the dead slot with it, so the emitter
+/// installs a shape two instructions and one slot shorter than the one every
+/// real chunk asks for, and the component takes the announced scalar fallback
+/// for the life of the store. It happened once on `b65_key_eval` (open item 21,
+/// the other direction: a claim the *witness* drove to zero) and again on
+/// `deq_sc` and `walk_qx`, which stream II added without extending
+/// `fill_tie_claims` -- ten of the wired C=4K chunk's thirteen fallback lines.
+///
+/// So on the emit path the missing case panics and names the vector. On the
+/// prove path it stays a zero: a statement written before a claim existed still
+/// parses, and that is what `#[serde(default)]` on those fields is for.
+static EMIT_STRICT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_emit_strict(on: bool) {
+    EMIT_STRICT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn claim_at(v: Option<[u32; 4]>, what: &str) -> SecureField {
+    match v {
+        Some(a) => unqm(a),
+        None => {
+            assert!(
+                !EMIT_STRICT.load(std::sync::atomic::Ordering::Relaxed),
+                "cudaemit: no placeholder for claim {what} -- every claim vector a plan \
+                 can carry must be filled in `cudagen::fill_tie_claims`, or the emitted \
+                 shape folds the missing claim away and no chunk ever finds it"
+            );
+            SecureField::zero()
+        }
+    }
+}
+
 pub fn unqm(a: [u32; 4]) -> SecureField {
     SecureField::from_m31_array([
         M31::from_u32_unchecked(a[0]),
@@ -391,8 +671,188 @@ impl Claims {
         // the transcript is unchanged without it
         v.extend(self.embed_out.iter().map(|x| unqm(*x)));
         v.extend(self.embed_tok.iter().map(|x| unqm(*x)));
+        // stream KK, appended after both, for the same reason: a chunk without
+        // `--head-argmax` mixes exactly what it mixed before
+        v.extend(self.head_tok.iter().map(|x| unqm(*x)));
+        // stream JJ, appended after those for the same reason
+        v.extend(self.ao_q.iter().map(|x| unqm(*x)));
+        // stream II, appended last: empty unless the chunk carries requantize
+        // seams, so the transcript is unchanged without them
+        v.extend(self.rq_in.iter().map(|x| unqm(*x)));
+        v.extend(self.rq_out.iter().map(|x| unqm(*x)));
+        v.extend(self.walk_qx.iter().map(|x| unqm(*x)));
+        v.extend(self.rq_sc.iter().map(|x| unqm(*x)));
+        v.extend(self.deq_sc.iter().map(|x| unqm(*x)));
+        // stream NN, appended last for the same reason
+        v.extend(self.nn_in.iter().map(|x| unqm(*x)));
+        v.extend(self.nn_out.iter().map(|x| unqm(*x)));
+        v.extend(self.band_qkv.iter().flatten().map(|x| unqm(*x)));
+        // stream NN (NN-2), after the corner's three so no claim before it moves
+        v.extend(self.band_q.iter().map(|x| unqm(*x)));
         v
     }
+}
+
+/// Stream II: one requantize seam's Horner weights.  The region tiles by
+/// `MatLayout` -- row `j` is `(token, chunk)` with both descending, slot `sl`
+/// holding channel `chunk * per_row + sl` -- which is the dequant's own map, so
+/// these are `oside_w`'s constants: within a row the weight falls by `tokens`
+/// per slot, and the row step takes `k_in` inside a token and `k_bd` at its
+/// boundary.  Multiplying the accumulated steps out from row `(t, b)` to the
+/// last row gives `w^(N - 1 - c*tokens - t)` per value, which is the canonical
+/// stream weight the producing region's `Out(0)` tie already carries.
+fn rq_tie_w(w: SecureField, lam: SecureField, rp: &RqPlan,
+            claimed_in: SecureField, claimed_out: SecureField,
+            claimed_sc: SecureField) -> crate::requant::RqTie {
+    let n = (rp.tokens * rp.n) as i128;
+    let (tok, pr, nn) = (rp.tokens as i128, rp.lay.per_row as i128, rp.n as i128);
+    crate::requant::RqTie {
+        w: (0..rp.lay.per_row).map(|sl| wpow(w, n - 1 - sl as i128 * tok)).collect(),
+        k_in: wpow(w, -(pr * tok)),
+        k_bd: wpow(w, (nn - pr) * tok - 1),
+        lam,
+        claimed_in,
+        claimed_out,
+        // stream II (E11): the scale tie's row step.  Both sides fold one value
+        // per token on their own `last` rows with the tokens descending, so
+        // token `t` carries `w^t` either side and no other constant is needed.
+        mu: w,
+        claimed_sc,
+    }
+}
+
+/// Stream NN: one quantize region's two Horner weight sets.
+fn q_tie_w(w: SecureField, lam: SecureField, qp: &QuantPlan, nh: usize,
+           claimed_in: SecureField, claimed_out: SecureField) -> crate::rope::QTie {
+    let m_in = (qp.tokens * qp.n) as i128;
+    let n_out = (qp.tokens * nh * qp.hd) as i128;
+    let (pr, hd, rep) = (qp.lay.per_row as i128, qp.hd as i128, qp.rep as i128);
+    // the `rep` query heads one kv head is replicated into, as one weight
+    let r_sum = (0..rep).fold(SecureField::zero(), |a, k| a + wpow(w, -(k * hd)));
+    crate::rope::QTie {
+        w_in: (0..qp.lay.per_row).map(|sl| wpow(w, m_in - 1 - sl as i128)).collect(),
+        step_in: wpow(w, -pr),
+        w_out: (0..qp.lay.per_row)
+            .map(|sl| r_sum * wpow(w, n_out - 1 - sl as i128)).collect(),
+        step_out: wpow(w, -pr),
+        step_out_h: wpow(w, -pr - (rep - 1) * hd),
+        lam,
+        claimed_in,
+        claimed_out,
+    }
+}
+
+/// Stream NN: the corner bands' own committed Q, K and V, gathered onto the
+/// `(token, query head, channel)` grid the quantize regions are read against.
+/// A reference for the record, not an input to any constraint.
+fn nn_band_cols(plan: &Plan, layer: &Layer) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
+    let (nh, hd, s) = (plan.p.nh, plan.p.hd, plan.p.s);
+    let mut q = vec![0i64; s * nh * hd];
+    let mut k = vec![0i64; s * nh * hd];
+    let mut v = vec![0i64; s * nh * hd];
+    for b in &plan.nn_bands {
+        let a = &layer.bands[*b];
+        let off = plan.head_offsets[*b];
+        let sh = a.shape;
+        for inst in 0..sh.insts {
+            for t in 0..sh.s {
+                for ch in 0..hd {
+                    let dst = t * nh * hd + (off + inst) * hd + ch;
+                    q[dst] = a.qq[(inst * sh.s + t) * hd + ch] as i64;
+                    k[dst] = a.kk[(inst * sh.c + t) * hd + ch] as i64;
+                    v[dst] = a.vv[(inst * sh.c + t) * hd + ch] as i64;
+                }
+            }
+        }
+    }
+    (q, k, v)
+}
+
+/// Stream NN: band `b`'s three claims over its own committed K, Q and V, or
+/// `None` when this band publishes none.
+///
+/// Every weight is `w^(N - 1 - (t nh hd + hq hd + ch))` -- the token-major
+/// position on the **query-head** grid, which is the grid the bands hold and
+/// which the quantize region's `w_out` reaches through its replication sum.
+fn nn_band_ties(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
+                -> Option<(crate::attn_air::BandTie, crate::attn_air::BandTie,
+                           crate::attn_air::BandTie)> {
+    let k = plan.nn_bands.iter().position(|x| *x == b)?;
+    let p = &plan.p;
+    let l = &plan.lays[b];
+    let sh = &plan.shapes[b];
+    let off = Offsets::new(p.q_bits, p.k_bits);
+    let (hd, nh) = (p.hd as i128, p.nh as i128);
+    let n = (p.s as i128) * nh * hd;
+    let base = n - 1 - plan.head_offsets[b] as i128 * hd;
+    // Stream QQ (log row 66): the same backstop the other claim vectors read
+    // through -- an emit that reaches here without a placeholder folds this
+    // band's three claims away and installs a `b65_chan_eval`/`b65_key_eval`
+    // shape no rotated chunk asks for.
+    let cl = claims.band_qkv.get(k).copied();
+    let cl = |j: usize| claim_at(cl.map(|c| c[j]), "band_qkv");
+    let (pk, pq, pv) = (l.chan.pk as i128, l.chan.pq as i128, l.key.pv as i128);
+    let (cc, kc) = (l.chan.g.chunks as i128, l.key.g.chunks as i128);
+    // the channel region's group index is `inst hd + ch`, which is affine in the
+    // position, so one boundary constant serves
+    let kt = crate::attn_air::BandTie {
+        w: (0..l.chan.pk).map(|q| wpow(w, base - q as i128 * nh * hd)).collect(),
+        s_in: wpow(w, -(pk * nh * hd)),
+        s_bd: wpow(w, (cc - 1) * pk * nh * hd - 1),
+        s_ib: None,
+        off: off.k,
+        claimed: cl(0),
+    };
+    let qt = crate::attn_air::BandTie {
+        w: (0..l.chan.pq).map(|q| wpow(w, base - q as i128 * nh * hd)).collect(),
+        s_in: wpow(w, -(pq * nh * hd)),
+        s_bd: wpow(w, (cc - 1) * pq * nh * hd - 1),
+        s_ib: None,
+        off: off.q,
+        claimed: cl(1),
+    };
+    // the key region's group index is `inst C + key`, which is not: crossing an
+    // instance moves the head by one and the key by a whole context
+    let vt = crate::attn_air::BandTie {
+        w: (0..l.key.pv).map(|q| wpow(w, base - q as i128)).collect(),
+        s_in: wpow(w, -pv),
+        s_bd: wpow(w, (kc - 1) * pv - nh * hd),
+        s_ib: Some(wpow(w, (sh.c as i128 - 1) * nh * hd + (kc - 1) * pv - hd)),
+        off: off.v,
+        claimed: cl(2),
+    };
+    Some((kt, qt, vt))
+}
+
+/// Stream NN (NN-2): a **prefix** band's Q claim, under the same canonical
+/// weights the corner's takes.
+///
+/// The two bands of a group hold the same `S` queries over the same heads, so
+/// the weight of the cell at (query head `hq`, channel `ch`, token `t`) is the
+/// same `w^(N - 1 - (t nh hd + hq hd + ch))` on both -- only the *layout* that
+/// scatters those cells over rows differs, and that is exactly what `pq` and
+/// `chunks` carry.  Equality of the two folds is therefore "the same queries",
+/// with no positional assumption beyond the one the corner's own tie already
+/// makes.
+fn nn_band_qtie(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
+                -> Option<crate::attn_air::BandTie> {
+    let k = plan.nn_qbands.iter().position(|x| *x == b)?;
+    let p = &plan.p;
+    let l = &plan.lays[b];
+    let off = Offsets::new(p.q_bits, p.k_bits);
+    let (hd, nh) = (p.hd as i128, p.nh as i128);
+    let n = (p.s as i128) * nh * hd;
+    let base = n - 1 - plan.head_offsets[b] as i128 * hd;
+    let pq = l.chan.pq as i128;
+    let cc = l.chan.g.chunks as i128;
+    Some(crate::attn_air::BandTie {
+        w: (0..l.chan.pq).map(|q| wpow(w, base - q as i128 * nh * hd)).collect(),
+        s_in: wpow(w, -(pq * nh * hd)),
+        s_bd: wpow(w, (cc - 1) * pq * nh * hd - 1),
+        s_ib: None,
+        off: off.q,
+        claimed: claim_at(claims.band_q.get(k).copied(), "band_q"),
+    })
 }
 
 /// `w^e` for a signed exponent: an output side's row step points backwards
@@ -416,10 +876,115 @@ fn oside_w(w: SecureField, lam: SecureField, tokens: usize, n_out: usize,
         k_in: wpow(w, -(pr * tok)),
         k_bd: wpow(w, (no - pr) * tok - 1),
         kind,
+        head: None,
+    }
+}
+
+/// Stream SS: a folded `v`'s output side, on the **band grid**.
+///
+/// The fold publishes an integer, and the only thing in the statement that holds
+/// that integer is the corner bands' own V column -- so the weights are
+/// `rope::QTie::w_out`'s, not a producer-grid Horner's: the canonical position is
+/// `p = t nh hd + h hd + ch` over the *query* heads, and grouped-query attention
+/// is inside the weight (`r_sum` folds the `rep` copies one kv channel has).  A
+/// single equality still forces each copy separately, for the reason NN gives:
+/// the exponents are distinct over (query head, channel, token), so the
+/// difference is a polynomial in `w` whose coefficients were fixed before `w` was
+/// drawn.
+///
+/// The row step is two constants keyed on the row *after* one that begins a kv
+/// head, which is where the expanded channel index jumps by `(rep - 1) hd`; a
+/// token boundary is such a row too, so no third constant is wanted.  It needs
+/// `per_row` to divide `hd` -- asserted by the caller, and true of every layout
+/// `MatLayout::choose` picks beside `rope::q_layout`'s.
+fn oside_w_band(w: SecureField, lam: SecureField, tokens: usize, nh: usize, hd: usize,
+                rep: usize, per_row: usize) -> crate::layer::OSideW {
+    let n = (tokens * nh * hd) as i128;
+    let (pr, hdi, repi) = (per_row as i128, hd as i128, rep as i128);
+    let r_sum = (0..repi).fold(SecureField::zero(), |a, k| a + wpow(w, -(k * hdi)));
+    crate::layer::OSideW {
+        w: (0..per_row).map(|s| r_sum * wpow(w, n - 1 - s as i128)).collect(),
+        lam,
+        k_in: wpow(w, -pr),
+        k_bd: wpow(w, -pr - (repi - 1) * hdi),
+        kind: crate::dequant::OKind::Int,
+        head: Some(hd / per_row),
+    }
+}
+
+/// Stream NN: the same output side on the **token-major** canonical position
+/// `p = t n_out + c`, which is `MatLayout`'s own row order -- so the weight
+/// falls by `per_row` from one row to the next whether or not the row crosses a
+/// token, and `k_in` and `k_bd` are the same constant.
+///
+/// Only `q`, `k` and `v` take it, and only because those three claims had no
+/// counterparty before this stream: the rotation's rows are `hd` consecutive
+/// channels of one head, which is a run of `hd` consecutive *token-major*
+/// positions and a scattered set of channel-major ones.  `o`, `gate`, `up`,
+/// `down` and `lm_head` keep `oside_w`.
+fn oside_w_tok(w: SecureField, lam: SecureField, tokens: usize, n_out: usize,
+               per_row: usize, kind: crate::dequant::OKind) -> crate::layer::OSideW {
+    let n = (tokens * n_out) as i128;
+    let step = wpow(w, -(per_row as i128));
+    crate::layer::OSideW {
+        w: (0..per_row).map(|s| wpow(w, n - 1 - s as i128)).collect(),
+        lam,
+        k_in: step,
+        k_bd: step,
+        kind,
+        head: None,
     }
 }
 
 // -------------------------------------------------------------------- plan ----
+
+/// Stream NN: one quantize gadget -- the bf16 stream a rotation (or the `v`
+/// dequant) produced, and the integers a band committed.
+pub struct QuantPlan {
+    /// `"q"`, `"k"` or `"v"`; also the region's tag
+    pub name: &'static str,
+    /// index into `Params::mats`
+    pub mat: usize,
+    /// heads on the *producer* side: `nh` for q, `nkv` for k and v
+    pub heads: usize,
+    pub hd: usize,
+    /// `nh / heads` -- how many query heads the band replicates one kv head into
+    pub rep: usize,
+    /// `heads * hd`
+    pub n: usize,
+    pub tokens: usize,
+    pub lay: MatLayout,
+    /// Stream NN-3: this side's integer width, `Params::q_bits` for `q`,
+    /// `Params::k_bits` for `k` and `V_BITS` for `v`.  It sizes the region's own
+    /// division table, and `rope::qmax_of` reads B1's clamp off it.
+    pub bits: u32,
+    /// `(glue region, tie)` publishing the bf16 side -- a rotation's `Out(0)`.
+    /// `None` for `v`, whose bf16 side is the `v` dequant region's own published
+    /// output and is compared against `claims.deq_out` instead.
+    pub producer: Option<(usize, usize)>,
+}
+
+/// Stream II: one requantize seam -- a producing region's bf16 output, the
+/// integers a walk group multiplies, and the region that proves one is the
+/// requantize of the other.
+///
+/// There are three: `norm1`'s tail feeds the q/k/v group, `norm2`'s feeds
+/// gate/up, and the SwiGLU's product feeds `down`.  The fourth matmul input,
+/// `o`'s, has no region here because `AttnOutEval` **is** its requantize -- it
+/// commits `qm` and `sg` and pins them by the exact-rounding identity -- so
+/// what `o` needs is a claim on that region and not a second gadget.
+pub struct RqPlan {
+    /// the walk group's name, which is also the region's tag
+    pub name: String,
+    /// index into `Plan::walks`
+    pub walk: usize,
+    /// `(glue region, tie)` publishing the bf16 side
+    pub producer: (usize, usize),
+    pub n: usize,
+    pub tokens: usize,
+    pub lay: crate::layer::MatLayout,
+    pub v: crate::requant::SVariant,
+}
 
 pub struct WalkPlan {
     pub name: String,
@@ -458,13 +1023,42 @@ pub struct GlueRegionPlan {
 /// `gn2.roots == gn2b.in`.  What is left open is named in the record: the two
 /// norms' tails (`* r`, `* w`), the SwiGLU, and the ties from `o`'s and `down`'s
 /// dequant regions into `o_out` and `d_out`.
+/// One equality the verifier checks between two regions' Horner claims.
+///
+/// Stream II added `scale`, because one of the new ties compares sequences of
+/// different *lengths*: the norm tail carries one committed sum of squares per
+/// `(residue, token)` row and the reduction publishes one per token, so the
+/// tail's claim is the reduction's multiplied by `sum_res w^(...)`.  The factor
+/// is a function of the plan and the drawn challenge alone, so it is still one
+/// equality between two claims and not a second mechanism; empty means one.
+#[derive(Clone, Debug)]
+pub struct GlueEq {
+    pub a: (usize, usize),
+    pub b: (usize, usize),
+    /// exponents of the tie challenge whose powers sum to the factor `b` carries
+    pub scale: Vec<i128>,
+}
+
+impl GlueEq {
+    fn plain(a: (usize, usize), b: (usize, usize)) -> Self {
+        Self { a, b, scale: vec![] }
+    }
+    /// The factor, from the challenge the transcript drew.
+    pub fn factor(&self, w: SecureField) -> SecureField {
+        if self.scale.is_empty() {
+            return SecureField::one();
+        }
+        self.scale.iter().fold(SecureField::zero(), |acc, e| acc + wpow(w, *e))
+    }
+}
+
 pub struct GluePlan {
     pub t: Tiling,
     /// the SwiGLU's own tiling, over `dff` instead of `d`
     pub tff: Option<Tiling>,
     pub regions: Vec<GlueRegionPlan>,
-    /// `((region, tie), (region, tie))` the verifier compares
-    pub eqs: Vec<((usize, usize), (usize, usize))>,
+    /// what the verifier compares, `a == factor * b`
+    pub eqs: Vec<GlueEq>,
     pub uns: Vec<UnKind>,
     /// the layer's committed residual-stream input and output claims
     pub stream_in: (usize, usize),
@@ -476,11 +1070,127 @@ pub struct GluePlan {
     /// stream E: `((region, tie), name)` per dequant output tie -- the wiring
     /// side's claim over `o_out` and over `d_out`, and the matmul whose region
     /// has to publish the same value
-    pub out_ties: Vec<((usize, usize), &'static str)>,
+    pub out_ties: Vec<OutTie>,
+    /// stream II: the head chunk's family (`gnf`, `gnfb`, `ntf`) instead of the
+    /// layer's seven regions.  The witness build and the seam list both branch
+    /// on it, and nothing else does.
+    pub head_norm: bool,
+    /// Stream NN: the rotation, as `(Mul region, Add region)` per rotated side,
+    /// in `["q", "k"]` order.  Empty on a chunk without `Params::rope`.
+    pub ropes: Vec<RopeRegions>,
+}
+
+/// Stream NN: one side's rotation, as two glue regions and the shapes both
+/// halves are built from.
+#[derive(Clone, Debug)]
+pub struct RopeRegions {
+    pub name: &'static str,
+    /// index into `Params::mats` / `Plan::specs`
+    pub mat: usize,
+    /// heads on this side -- `nh` for q, `nkv` for k
+    pub heads: usize,
+    pub hd: usize,
+    pub tokens: usize,
+    /// region indices inside `GluePlan::regions`
+    pub mul: usize,
+    pub add: usize,
+}
+
+/// Stream E, generalised by stream JJ: one matmul's dequant output side.
+///
+/// `at` is the wiring-family tie the output is compared against -- region index
+/// and tie index -- and it is `None` for the three whose consumer is not in the
+/// statement at all.  `q` and `k` feed the attention through RoPE, which no
+/// region proves, and `v` through a per-channel power-of-two requantize which no
+/// region proves either; those three publish their claim and the verifier has
+/// nothing to read it against yet (`briefs/jj-layerwire-out.md`'s record).
+pub struct OutTie {
+    pub name: &'static str,
+    pub at: Option<(usize, usize)>,
+    /// Stream NN: the counterparty is a quantize region's *input* claim rather
+    /// than a wiring-family tie -- `v`, whose dequant output is rounded straight
+    /// into the band's V column with no rotation between.  An index into
+    /// `Plan::quants`.
+    pub quant: Option<usize>,
+    /// Stream SS: the counterparty is the corner bands' own V fold -- a folded
+    /// `v`, whose dequant output already *is* the integer the band commits, so
+    /// there is no quantize region between the two and the claim is compared
+    /// against `sum_b band_qkv[b][2]` directly.  Set by `Plan::new`, which is
+    /// where the bands and the layouts are known.
+    pub band: bool,
 }
 
 impl GluePlan {
+    /// Stream II (E11): the `lm_head` chunk's wiring family -- the final
+    /// RMSNorm, and nothing else.
+    ///
+    /// The head consumes the int8 activation of `rmsnorm(x, final_norm)`, and
+    /// before this the chunk committed that activation as a free column: no
+    /// dump carried the final norm's weight, so the norm was proved by nobody
+    /// (stream KK).  The family here is the layer's minus the parts a head
+    /// chunk has not got.  There is no residual add, so level 1 is
+    /// `Prog::tree(nreal, b, Square)` and not `norm_resid`; there is no second
+    /// norm and no SwiGLU.  What is left is exactly the three statements the
+    /// layer's own norms make, with the same table and the same weights:
+    /// `gnf.Out(0) == gnfb.In(0)` (one reduction over two levels),
+    /// `ntf.In(0) == gnf.In(0)` (the tail scaled the values the reduction
+    /// squared) and `ntf.In(1) == G gnfb.Out(0)` (`r` is that reduction's own
+    /// `rsqrt` answer, one per token across all `a` of its rows).
+    ///
+    /// `stream_in` is the residual claim, and **stream UU took the hook**: with
+    /// `--bounds` the head chunk commits tree 3 over exactly that claim
+    /// (`claims.glue_ties[0][0]`), which says the residual this chunk normalized
+    /// is the one the last layer's chunk published, and `bounds::chain_of`
+    /// compares the two roots on the ordinary layer axis.  `stream_out` is the
+    /// norm's output, which no chunk consumes, so `bounds::sides` gives the head
+    /// the input side alone.
+    fn head(p: &Params, gp: &GlueParams) -> Self {
+        let t = Tiling::new(p.s, gp.d, gp.a);
+        let (a, tok, nreal) = (t.a, t.tokens, t.nreal);
+        let stream: Vec<u128> =
+            (0..nreal).map(|j| (a * tok * (nreal - 1 - j)) as u128).collect();
+        let l2_in: Vec<u128> = (0..a).map(|r| (tok * (a - 1 - r)) as u128).collect();
+        let one = vec![0u128];
+        let lr1 = crate::common::log_rows_for(t.rows1(), 1);
+        let lr2 = crate::common::log_rows_for(tok, 1);
+        let (rows1, rows2) = (1usize << lr1, 1usize << lr2);
+        assert_eq!(rows1, a * tok, "the head norm's tie needs level 1 to tile exactly");
+        assert_eq!(rows2, tok, "the head norm's tie needs level 2 to tile exactly");
+        let un_r = UnKind::NormR { inv_d: gp.inv_d, eps: gp.eps };
+        let l1 = Prog::tree(nreal, t.b, UnKind::Square);
+        let l2 = Prog::tree(a, a, UnKind::None);
+        let tail = Prog::norm_tail(nreal, un_r);
+        let mut uns = l1.un_kinds();
+        if !uns.contains(&un_r) {
+            uns.push(un_r);
+        }
+        let g_scale: Vec<i128> = (0..a)
+            .map(|res| (rows1 as i128) - (rows2 as i128) - (res * tok) as i128)
+            .collect();
+        let regions = vec![
+            GlueRegionPlan { tag: "gnf".into(), prog: l1, log_rows: lr1,
+                             ties: vec![(TieKind::In(0), stream.clone(), 1),
+                                        (TieKind::Out(0), one.clone(), 1)] },
+            GlueRegionPlan { tag: "gnfb".into(), prog: l2, log_rows: lr2,
+                             ties: vec![(TieKind::In(0), l2_in, 1),
+                                        (TieKind::Out(0), one.clone(), 1)] },
+            GlueRegionPlan { tag: "ntf".into(), prog: tail, log_rows: lr1,
+                             ties: vec![(TieKind::In(0), stream.clone(), 1),
+                                        (TieKind::In(1), one, 1),
+                                        (TieKind::Out(0), stream, 1)] },
+        ];
+        let eqs = vec![GlueEq::plain((0, 1), (1, 0)),
+                       GlueEq::plain((2, 0), (0, 0)),
+                       GlueEq { a: (2, 1), b: (1, 1), scale: g_scale }];
+        Self { t, tff: None, regions, eqs, uns, stream_in: (0, 0), stream_out: (2, 2),
+               tails: vec![2], swiglu: None, out_ties: vec![], head_norm: true,
+               ropes: vec![] }
+    }
+
     pub fn new(p: &Params, gp: &GlueParams) -> Self {
+        if gp.head_norm {
+            return Self::head(p, gp);
+        }
         let t = Tiling::new(p.s, gp.d, gp.a);
         let (a, tok, nreal) = (t.a, t.tokens, t.nreal);
         // the canonical stream position of channel `c` of token `t` is
@@ -514,7 +1224,8 @@ impl GluePlan {
                            (TieKind::Out(0), one.clone(), 1)],
             });
         }
-        let mut eqs = vec![((0, 1), (1, 0)), ((0, 2), (2, 0)), ((2, 1), (3, 0))];
+        let mut eqs = vec![GlueEq::plain((0, 1), (1, 0)), GlueEq::plain((0, 2), (2, 0)),
+                           GlueEq::plain((2, 1), (3, 0))];
         let mut uns = l1.un_kinds();
         // ---- stream E: the dequant output ties -------------------------------
         //
@@ -523,12 +1234,18 @@ impl GluePlan {
         // columns and only a `VAL` lookup pinned them.  One claim each, on the
         // same channel-major weights the stream uses, and the `o` and `down`
         // dequant regions publish the same value from their own outputs.
-        let mut out_ties = vec![];
-        if gp.deq_ties {
-            for (ri, name) in [(0usize, "o"), (2usize, "down")] {
-                regions[ri].ties.push((TieKind::In(1), stream.clone(), 1));
-                out_ties.push(((ri, regions[ri].ties.len() - 1), name));
-            }
+        //
+        // Stream JJ (E11): unconditional, and all seven.  `o` and `down` keep
+        // E's `In(1)` tie on the two reduction regions; `gate` and `up` are
+        // read against the SwiGLU region's own `In(0)`/`In(1)`, which need no
+        // new tie because the region already publishes them; `q`, `k` and `v`
+        // publish a claim with no counterparty (see `OutTie`).  The list ends
+        // up in `MAT_NAMES` order because `claims.deq_out` is pushed in matmul
+        // order and the verifier reads the two side by side.
+        let mut oside_at: Vec<(&'static str, Option<(usize, usize)>)> = vec![];
+        for (ri, name) in [(0usize, "o"), (2usize, "down")] {
+            regions[ri].ties.push((TieKind::In(1), stream.clone(), 1));
+            oside_at.push((name, Some((ri, regions[ri].ties.len() - 1))));
         }
         // ---- stream E: the two norm tails ------------------------------------
         //
@@ -538,19 +1255,46 @@ impl GluePlan {
         // very values the reduction squared -- which is the half of "the norm
         // computed its own output" a committed column cannot fake.  `Out(0)` is
         // published for the requantize region that will read it.
+        //
+        // Stream II made the region unconditional and closed both of the gaps
+        // the first build left.  `r` is no longer a committed leaf: group 1
+        // commits the reduction's *answer* and `UnKind::NormR`'s lookup is
+        // `r = rsqrt(ms inv_d + eps)`, so the tie `nt.In(1) == G gnb.Out(0)`
+        // makes it the reduction's own answer -- and because every one of a
+        // token's `a` rows is compared against that one reduction row, they
+        // cannot carry different `r`s either.  `G` is the geometric sum over
+        // the `a` rows and is the verifier's own arithmetic (`GlueEq::scale`).
+        // The norm weight moved to `Src::Pre`, i.e. into tree 0 under
+        // `pre_root`, because it is the model's and not the prover's.
         let mut tails = vec![];
-        if gp.tails {
-            let tail = Prog::norm_tail(nreal);
-            for (gn, tag) in [(0usize, "nt1"), (2usize, "nt2")] {
+        {
+            let rows1 = 1usize << lr1;
+            let rows2 = 1usize << lr2;
+            assert_eq!(rows1, a * tok,
+                       "the norm tail's tie needs the level-1 region to tile exactly");
+            assert_eq!(rows2, tok,
+                       "the norm tail's tie needs the level-2 region to tile exactly");
+            let un_r = UnKind::NormR { inv_d: gp.inv_d, eps: gp.eps };
+            if !uns.contains(&un_r) {
+                uns.push(un_r);
+            }
+            let tail = Prog::norm_tail(nreal, un_r);
+            let one_pos = vec![0u128];
+            // sum_{res} w^(rows1 - rows2 - res * tokens)
+            let g_scale: Vec<i128> =
+                (0..a).map(|res| (rows1 as i128) - (rows2 as i128) - (res * tok) as i128).collect();
+            for (gn, gnb, tag) in [(0usize, 1usize, "nt1"), (2usize, 3usize, "nt2")] {
                 let i = regions.len();
                 regions.push(GlueRegionPlan {
                     tag: tag.into(),
                     prog: tail.clone(),
                     log_rows: lr1,
                     ties: vec![(TieKind::In(0), stream.clone(), 1),
+                               (TieKind::In(1), one_pos.clone(), 1),
                                (TieKind::Out(0), stream.clone(), 1)],
                 });
-                eqs.push(((i, 0), (gn, 0)));
+                eqs.push(GlueEq::plain((i, 0), (gn, 0)));
+                eqs.push(GlueEq { a: (i, 1), b: (gnb, 1), scale: g_scale.clone() });
                 tails.push(i);
             }
         }
@@ -564,7 +1308,7 @@ impl GluePlan {
         // B1's own columns, and the record says so.
         let mut tff = None;
         let mut swiglu = None;
-        if gp.swiglu {
+        {
             assert!(gp.dff > 0, "the SwiGLU needs the manifest's dff");
             let t2 = Tiling::new(p.s, gp.dff, gp.a);
             let prog = Prog::pairs(t2.nreal, Kind::Mul, UnKind::Silu, UnKind::None);
@@ -577,6 +1321,7 @@ impl GluePlan {
                 }
             }
             swiglu = Some(regions.len());
+            let i = regions.len();
             regions.push(GlueRegionPlan {
                 tag: "gsw".into(),
                 prog,
@@ -585,8 +1330,96 @@ impl GluePlan {
                            (TieKind::In(1), ff.clone(), 1),
                            (TieKind::Out(0), ff, 1)],
             });
+            // stream JJ: the gate/up seam.  `Prog::pairs` puts the unary on
+            // group 0, so `In(0)` is the silu's operand -- `gate` -- and `In(1)`
+            // is `up`.
+            oside_at.push(("gate", Some((i, 0))));
+            oside_at.push(("up", Some((i, 1))));
             tff = Some(t2);
         }
+        // ---- stream NN: the rotation ------------------------------------------
+        //
+        // Two regions per rotated side, because a `Prog` carries one `Kind` and
+        // `rotate` is two multiplies and an add: `rpqm`/`rpqa` for q,
+        // `rpkm`/`rpka` for k.  A row is one (token, head), its `hd` committed
+        // leaves are that head's dequant output and `cos`/`sgnsin` are
+        // preprocessed (`Src::Pre`), which is what makes tree 0 a function of
+        // the block.
+        //
+        // The weights are the **token-major** canonical position `t n_out + c`
+        // and not the channel-major one every earlier tie uses.  That is the
+        // whole reason a single row step serves here: a (token, head) row's
+        // leaves are `hd` consecutive positions, so a region's rows walk the
+        // stream in order and the Horner is the flat one.  `oside_w_tok` puts
+        // the q/k/v dequant regions' own output claims on the same convention,
+        // which is free -- those three claims had no counterparty before this
+        // stream and nothing else reads them.
+        let mut ropes = vec![];
+        if let Some(rp) = &p.rope {
+            let hd = p.hd;
+            for (name, heads) in [("q", p.nh), ("k", rp.nkv)] {
+                let mi = p.mats.iter().position(|m| m.name == name)
+                    .unwrap_or_else(|| panic!("--rope needs the {name} matmul"));
+                let m = &p.mats[mi];
+                assert_eq!(m.n_out, heads * hd,
+                           "the {name} matmul is {} wide, not {heads} x {hd}", m.n_out);
+                let rows = m.tokens * heads;
+                let lr = crate::common::log_rows_for(rows, 1);
+                assert_eq!(1usize << lr, rows,
+                           "the rotation's rows must tile exactly: {rows} is not a power of two");
+                let n_all = m.tokens * m.n_out;
+                // `w[k] = w^(width - 1 - k)`, `step = w^width`: the flat Horner
+                // over the stream, rows ascending in (token, head)
+                let win: Vec<u128> = (0..hd).map(|c| (hd - 1 - c) as u128).collect();
+                let wmid: Vec<u128> = (0..2 * hd).map(|c| (2 * hd - 1 - c) as u128).collect();
+                let (mul, add) = (regions.len(), regions.len() + 1);
+                regions.push(GlueRegionPlan {
+                    tag: format!("rp{name}m"),
+                    prog: Prog::rope_mul(hd),
+                    log_rows: lr,
+                    ties: vec![(TieKind::In(0), win.clone(), hd as u128),
+                               (TieKind::Out(0), wmid.clone(), (2 * hd) as u128)],
+                });
+                regions.push(GlueRegionPlan {
+                    tag: format!("rp{name}a"),
+                    prog: Prog::rope_add(hd),
+                    log_rows: lr,
+                    ties: vec![(TieKind::In(0), wmid, (2 * hd) as u128),
+                               (TieKind::Out(0), win, hd as u128)],
+                });
+                // the two halves are one rotation: the products the multiplies
+                // rounded are the values the add rounds
+                eqs.push(GlueEq::plain((mul, 1), (add, 0)));
+                // and the multiplies' committed leaves are the matmul's own
+                // dequant output, which is what shrinks `deq_out_open`
+                oside_at.push((name, Some((mul, 0))));
+                let _ = n_all;
+                ropes.push(RopeRegions { name, mat: mi, heads, hd, tokens: m.tokens,
+                                         mul, add });
+            }
+            // v is not rotated: its dequant output goes straight into the
+            // quantize gadget, whose input claim `verify_composed` compares
+            // against `deq_out` directly (`OutTie::quant`).
+            oside_at.push(("v", None));
+        } else {
+            // stream JJ: q, k and v publish without a counterparty, then the list
+            // is put in matmul order -- the order `claims.deq_out` arrives in
+            for n in ["q", "k", "v"] {
+                oside_at.push((n, None));
+            }
+        }
+        let out_ties: Vec<OutTie> = crate::layer::MAT_NAMES
+            .iter()
+            .filter_map(|n| oside_at.iter().find(|(m, _)| m == n))
+            .map(|(name, at)| OutTie {
+                name,
+                at: *at,
+                // filled in by `Plan::new`, which is where the quantize regions
+                // are laid out; the wiring plan does not know their order
+                quant: None,
+                band: false,
+            })
+            .collect();
         Self {
             t,
             tff,
@@ -598,6 +1431,8 @@ impl GluePlan {
             tails,
             swiglu,
             out_ties,
+            head_norm: false,
+            ropes,
         }
     }
 
@@ -616,12 +1451,10 @@ impl GluePlan {
                         kind: *kind,
                         w: we.iter().map(|e| w.pow(*e)).collect(),
                         step: w.pow(*se),
-                        claimed: claims
-                            .glue_ties
-                            .get(i)
-                            .and_then(|g| g.get(k))
-                            .map(|c| unqm(*c))
-                            .unwrap_or(SecureField::zero()),
+                        claimed: claim_at(
+                            claims.glue_ties.get(i).and_then(|g| g.get(k)).copied(),
+                            "glue_ties",
+                        ),
                     })
                     .collect(),
             })
@@ -631,6 +1464,40 @@ impl GluePlan {
     pub fn n_tables(&self) -> usize {
         3 + self.uns.len()
     }
+}
+
+/// Stream LL (E11): stop the prover after tree 0 is committed and report its
+/// root.  Set by `b65 expect-root` and by nothing else; the ordinary `compose`
+/// path never reads a set flag, so no recorded digest can move because of it.
+pub static PRE_ONLY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Stream LL (E11): what a preprocessed column needs in order to be rebuilt.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+pub enum PreNeeds {
+    /// `Fixed.params` alone determines every cell.
+    Params,
+    /// the model dump: a weight, a weight scale, or a per-layer calibration
+    /// constant that lives only in the dump's manifest.
+    Model,
+}
+
+/// Stream LL (E11): does the column move down the block axis of a grid?
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+pub enum PreVaries {
+    /// identical on every token block of the layer.
+    Layer,
+    /// its height or its contents are a function of the chunk's own `c`.
+    Block,
+}
+
+/// Stream LL (E11): one entry of `Plan::pre_split`.
+pub struct PreCol {
+    pub id: PreProcessedColumnId,
+    pub family: String,
+    pub log_size: u32,
+    pub needs: PreNeeds,
+    pub varies: PreVaries,
 }
 
 /// Everything both sides derive from `Params` alone: layouts, specs, widths,
@@ -651,6 +1518,36 @@ pub struct Plan {
     pub mat_lays: Vec<MatLayout>,
     pub ao_lay: AoLayout,
     pub walks: Vec<WalkPlan>,
+    /// Stream II: the requantize seams, empty on a chunk with no wiring family.
+    pub rqs: Vec<RqPlan>,
+    /// the scale variants those seams use, deduplicated and in a fixed order --
+    /// one division table and one scale table per variant
+    pub rq_vars: Vec<crate::requant::SVariant>,
+    /// Stream NN: the three quantize regions -- `q`, `k`, `v` -- in that order.
+    /// Empty on a chunk without `Params::rope`.
+    pub quants: Vec<QuantPlan>,
+    /// Stream NN-3: the widths the quantize regions' own division tables are
+    /// built at -- the distinct `QuantPlan::bits`, ascending, one table each.
+    /// Empty when the chunk carries no quantize region.
+    pub q_tabs: Vec<u32>,
+    /// and the width of their shared `(q, nz)` pair table: the widest side's,
+    /// because the division table is what fixes the admissible quotient and this
+    /// one only pins `nz = [q != 0]`.  Zero when there are no regions.
+    pub q_nz_bits: u32,
+    /// Stream NN: the bands that publish a K/Q/V claim over their own committed
+    /// columns.  Exactly the **corner** bands: their keys are this block's own
+    /// tokens, which are the ones this chunk's `k` and `v` matmuls produced,
+    /// while a prefix band's keys are the cache and are bound across blocks by
+    /// root equality instead.  The corner also carries the queries, which every
+    /// band of a group shares.
+    pub nn_bands: Vec<usize>,
+    /// Stream NN (NN-2): the bands that publish a Q claim **alone** -- every
+    /// prefix band of the same chunk, in band order.  Their counterparty is
+    /// their group's corner (`nn_q_ok`), which closes the asymmetry NN-1 left:
+    /// before this, a prover could attend to the cache with queries the `q`
+    /// matmul did not produce while attending to this block's own keys with
+    /// queries it did.  Empty on a chunk without `Params::rope`.
+    pub nn_qbands: Vec<usize>,
     pub widths: Vec<u32>,
     pub log_norm: u32,
     pub log_frac: u32,
@@ -782,7 +1679,85 @@ impl Plan {
         // flag-off digests do not move.  See `briefs/aa-kvbind.md`, item 4.
         let lays: Vec<Layouts> = shapes.iter().map(|sh| Layouts::choose(sh, &cfg)).collect();
 
-        let mut widths = vec![p.k_bits, p.q_bits, 8, p.z_lo_bits, p.z_hi_bits, p.ao_rem_bits];
+        // Stream JJ (E11): the no-wrap window, stated rather than asserted on
+        // the host.  `2 mag num < p` needs both factors bounded: `num` by the
+        // `EPOW` table's own domain, `mag = |acc|` by the two limbs.  The
+        // second line is the other term of the same identity, which the design
+        // has always needed and never said out loud.
+        assert!(p.ao_jv_min <= p.ao_jv_max, "the jv window is empty");
+        assert!(p.ao_jo_min <= p.ao_jo_max, "the jo window is empty");
+        let e_hi = p.ao_jv_max - p.ao_jo_min;
+        let e_lo = p.ao_jv_min - p.ao_jo_max;
+        assert!(e_hi <= 30 && -e_lo <= 30,
+                "the attention output's exponent window does not fit in the field:                  e in [{e_lo}, {e_hi}]");
+        assert!(p.ao_acc_lo_bits >= crate::common::MIN_LOG_ROWS
+                    && p.ao_acc_hi_bits >= crate::common::MIN_LOG_ROWS,
+                "an accumulator limb is narrower than a range table's shortest column");
+        // Stream TT (E11), log row 73: the same line reads both forms of the
+        // magnitude bound, because both end at the same product.
+        //   offset form (`ao_acc_mag` false): the limbs range-check
+        //     `acc + 2^(lo+hi-1)`, so `mag = |acc| <= 2^(lo+hi-1)` and
+        //     `2 mag num <= 2^(lo+hi+e_hi)`, which is under `p` exactly when
+        //     `1 + lo + hi + e_hi <= 31`;
+        //   magnitude form (`ao_acc_mag` true): they range-check the committed
+        //     `mag` itself, so `mag <= 2^(lo+hi) - 1` and
+        //     `2 mag num <= 2^(1+lo+hi+e_hi) - 2^(1+e_hi)`, under `p` at the
+        //     same `1 + lo + hi + e_hi <= 31`.
+        // The one bit between them is the sign, which the offset form spends on
+        // the window and the magnitude form reads off `sg`.  `params_of` sizes
+        // the limbs at `acc_bits() + 1` for the first and `acc_bits()` for the
+        // second, and takes the second only when the first does not fit here.
+        assert!(1 + p.ao_acc_lo_bits + p.ao_acc_hi_bits + e_hi.max(0) as u32 <= 31,
+                "the attention output's no-wrap window does not fit:                  1 + {} + {} + {} > 31{}",
+                p.ao_acc_lo_bits, p.ao_acc_hi_bits, e_hi.max(0),
+                if p.ao_acc_mag { " (magnitude form)" } else { "" });
+        // Stream OO (E11): the same term, at the bound the identity actually
+        // needs.  The error identity is
+        // `d = 2 mag num - (2 qm - 1) denp`, and what makes it an *integer*
+        // identity rather than a field one is that both of its non-negative
+        // sides stay under `p = 2^31 - 1`.  The right-hand side is the other
+        // assert's (`2 mag num < 2^30`).  The left-hand side is
+        // `d + (2 qm - 1) denp`, and the range checks bound both factors:
+        // `qm` is looked up in the `qnz` table, whose domain is `2^ao_q_bits`
+        // rows, so `qm <= 2^q_bits - 1`; `denp` is looked up in the
+        // `ao_rem_bits` range table, so `denp <= 2^rem_bits - 1`, and `d` is in
+        // the same table.  So
+        //     d + (2 qm - 1) denp <= (2^(q+1) - 2)(2^rem - 1)
+        //                          = 2^(q+rem+1) - 2^(q+1) - 2^(rem+1) + 2,
+        // which is below `2^31 - 1` exactly when `q_bits + rem_bits <= 30`.
+        // Stream JJ wrote the bound with an extra `1 +`, which is one bit
+        // tighter and refuses `ao_rem_bits = 23` at `ao_q_bits = 7` -- the
+        // C=4096 `b10-final` dump's own worst case (`shapes.json`).  Nothing
+        // the assert protects is loosened: the two ends of the identity are the
+        // same two products, bounded by the same two range tables.
+        //
+        // Stream TT (E11), log row 73: and the same one bit is loose here, for
+        // the same reason.  `ao_rem_bits` is the bit length of `max 2 denp`
+        // (`AttnOut::rem_bits`), so an honest `denp` needs `rem - 1` bits and
+        // it is only the *lookup* -- `denp` in the `ao_rem_bits` table -- that
+        // states the wider `denp <= 2^rem - 1`.  Looking up `2 denp` in the
+        // same table instead states `denp <= 2^(rem-1) - 1`, at no new table
+        // and no new column, and then
+        //     d + (2 qm - 1) denp <= (2^rem - 1) + (2^(q+1) - 3)(2^(rem-1) - 1)
+        //                          = 2^(q+rem) - 2^(q+1) - 2^(rem-1) + 2
+        // for `q + rem = 31`, which is below `2^31 - 1`.  So the `denp2` form
+        // admits `q_bits + rem_bits <= 31`.  `y-delay-vw12`'s layer 0 reads
+        // `11 + 20 = 31` and is the reason it exists; `params_of` takes the
+        // form only when the plain one does not fit, so no statement that
+        // composed before this moves.
+        let qcap = if p.ao_denp2 { 31 } else { 30 };
+        assert!(p.ao_q_bits + p.ao_rem_bits <= qcap,
+                "the attention output's quotient term does not fit: {} + {} > {qcap}{}",
+                p.ao_q_bits, p.ao_rem_bits,
+                if p.ao_denp2 { " (denp2 form)" } else { "" });
+        // The inert lead row commits `denp = 2^max(-e_lo, 0)`, forced by the
+        // `EPOW` lookup at key 0, so the `denp2` form needs twice that to still
+        // be a row of the range table.
+        assert!(!p.ao_denp2 || 1 + (-e_lo).max(0) as u32 <= p.ao_rem_bits,
+                "the denp2 form needs 2^(1 + {}) inside the {}-bit remainder table",
+                (-e_lo).max(0), p.ao_rem_bits);
+        let mut widths = vec![p.k_bits, p.q_bits, 8, p.z_lo_bits, p.z_hi_bits, p.ao_rem_bits,
+                              p.ao_acc_lo_bits, p.ao_acc_hi_bits];
         if let AttnVariant::IntSplit(k) = attn_variant {
             widths.push(k);
         }
@@ -790,12 +1765,28 @@ impl Plan {
         // limbs at 13 bits, its low-product quotient at 16, and its high
         // remainder at the pinned fold width; a widened attention output ranges
         // `o`'s committed activations at `ao_q_bits + 1`.
+        //
+        // Stream SS: and its clamped output `qc` at 7, and its quotient and
+        // clamp slack at `ao_q_bits` (`dequant.rs`'s `Fold` arm asks for
+        // `self.rel(7)` and `self.rel(sp.q_bits)`).  Neither was ever listed:
+        // every fold shape run so far carried `--z-hi-bits 7` and a `k_bits`
+        // equal to `ao_q_bits`, which put both in the list by accident, and a
+        // shape that does not panicked in `Tables::ridx`.  The list is
+        // deduplicated and sorted, so this moves no shape that already had them
+        // -- the E11 set (`--z-hi-bits 7`, `k_bits = ao_q_bits = 11`) included.
         if p.mats.iter().any(|m| m.variant == "fold") {
             assert!(p.fold_rem_bits > 0, "a fold matmul needs --fold-rem-bits");
-            widths.extend([crate::dequant::FOLD_LIMB, 16, p.fold_rem_bits]);
+            widths.extend([crate::dequant::FOLD_LIMB, 16, p.fold_rem_bits, 7, p.ao_q_bits]);
         }
         if p.ao_q_bits > 7 {
             widths.push(p.ao_q_bits + 1);
+        }
+        // Stream II: the requantize seams' sub-half comparison and their max
+        // argument are 15-bit range lookups, and a chunk that has the wiring
+        // family always has the seams.  Only then -- a chunk without it keeps
+        // the exact width list it had, and with it the digest moves anyway.
+        if p.glue.is_some() {
+            widths.push(15);
         }
         widths.sort_unstable();
         widths.dedup();
@@ -844,6 +1835,100 @@ impl Plan {
         let log_frac = crate::common::log_rows_for(frac_rows, 1);
         let log_mul = 14;
         let glue = p.glue.as_ref().map(|g| GluePlan::new(p, g));
+        // Stream II: the three requantize seams.  Each names the region whose
+        // `Out(0)` it consumes, so the producer index comes from the plan and is
+        // never counted by hand; the layout is the dequant's own `MatLayout`
+        // map, which is what makes `oside_w`'s weights apply unchanged.
+        let mut rqs = vec![];
+        let mut rq_vars: Vec<crate::requant::SVariant> = vec![];
+        if let Some(g) = glue.as_ref() {
+            // stream II: on the head chunk the only producer is the final
+            // norm's tail and the only consumer is the head's own walk, so the
+            // seam list is one entry and the layer's three are absent -- there
+            // is no layer here to have produced them.
+            let seams: Vec<(&str, (usize, usize), usize)> = if g.head_norm {
+                vec![("head", (g.tails[0], 2), g.t.d)]
+            } else {
+                vec![
+                    ("qkv", (g.tails[0], 2), g.t.d),
+                    ("gateup", (g.tails[1], 2), g.t.d),
+                    ("down", (g.swiglu.expect("the SwiGLU region is unconditional"), 2),
+                     g.tff.expect("the SwiGLU's tiling").d),
+                ]
+            };
+            for (name, producer, n) in seams {
+                let Some(wi) = walks.iter().position(|w| w.name == name) else { continue };
+                let m0 = &p.mats[walks[wi].mats[0]];
+                assert_eq!(m0.n_in, n, "the {name} walk's input width is not its producer's");
+                let v = if m0.variant == "pow2" {
+                    crate::requant::SVariant::Pow2
+                } else {
+                    crate::requant::SVariant::Bf16
+                };
+                if !rq_vars.contains(&v) {
+                    rq_vars.push(v);
+                }
+                rqs.push(RqPlan {
+                    name: name.to_string(),
+                    walk: wi,
+                    producer,
+                    n,
+                    tokens: m0.tokens,
+                    lay: MatLayout::choose(n, m0.tokens, p.deq_target),
+                    v,
+                });
+            }
+            rq_vars.sort_by_key(|v| *v == crate::requant::SVariant::Bf16);
+        }
+        // ---- stream NN: the three quantize regions ---------------------------
+        //
+        // `b1/model.py` quantizes q, k and v by scales that are per (head,
+        // channel) and constant down the tokens -- the transpose of the
+        // per-token scale `requant.rs` pins -- so the exponent is a preprocessed
+        // per-slot column and the region is `rope::QuantEval`.  The tables are
+        // `requant.rs`'s own, so the power-of-two division table has to be
+        // registered whether or not a *seam* asked for it.
+        let mut quants = vec![];
+        if let (Some(g), Some(rp)) = (glue.as_ref(), p.rope.as_ref()) {
+            assert!(p.corner,
+                    "the q/k/v ties read the corner band's own columns; --rope needs --corner");
+            assert!(p.nh % rp.nkv == 0, "nh={} is not a multiple of nkv={}", p.nh, rp.nkv);
+            assert_eq!(rp.inv(p.hd).len(), p.hd / 2, "inv_freq must be hd/2 long");
+            for (i, (name, heads, bits)) in
+                [("q", p.nh, p.q_bits), ("k", rp.nkv, p.k_bits),
+                 ("v", rp.nkv, crate::rope::V_BITS)]
+                    .into_iter().enumerate()
+            {
+                let mi = p.mats.iter().position(|m| m.name == name)
+                    .unwrap_or_else(|| panic!("--rope needs the {name} matmul"));
+                // Stream SS: a folded `v` has no quantize region, because the
+                // fold *is* the quantize -- `y-delay-v` states
+                // `round_hafz(acc s_x s_w / s_v)` in one rounding, so there is
+                // no bf16 stream for `rope::QuantEval` to round and nothing for
+                // it to prove.  The dequant region publishes the integer
+                // instead, and the bands' own V is what reads it
+                // (`Plan::oside_band`).
+                if name == "v" && specs[mi].variant == DeqVariant::Fold {
+                    continue;
+                }
+                let m = &p.mats[mi];
+                assert_eq!(m.n_out, heads * p.hd,
+                           "the {name} matmul is {} wide, not {heads} x {}", m.n_out, p.hd);
+                quants.push(QuantPlan {
+                    name,
+                    mat: mi,
+                    heads,
+                    hd: p.hd,
+                    rep: p.nh / heads,
+                    n: m.n_out,
+                    tokens: m.tokens,
+                    lay: crate::rope::q_layout(m.n_out, p.hd, m.tokens, p.deq_target),
+                    bits,
+                    // q and k read a rotation's output; v reads its own dequant
+                    producer: (i < 2).then(|| (g.ropes[i].add, 1)),
+                });
+            }
+        }
         // Stream H: the boundary is the wiring family's two stream ties, so it
         // exists exactly when the statement asks for it and the family is there.
         let bounds = match (&glue, p.bounds) {
@@ -879,8 +1964,70 @@ impl Plan {
             assert!(p.embed_per_row > 0, "`--embed` needs a channel-block target");
             crate::embed::EmbLayout::choose(g.t.d, p.s, p.embed_vocab, p.embed_per_row)
         });
+        // stream NN: the corner bands publish the K/Q/V claims
+        let nn_bands: Vec<usize> = if quants.is_empty() {
+            vec![]
+        } else {
+            (0..shapes.len()).filter(|b| corner[*b]).collect()
+        };
+        // stream NN (NN-2): every prefix band publishes its own Q, against its
+        // group's corner.  A group with no corner publishes nothing -- there is
+        // nothing to compare against -- and `--corner` is already required by
+        // the quantize regions, so that case does not arise on a rope chunk.
+        let nn_qbands: Vec<usize> = if quants.is_empty() {
+            vec![]
+        } else {
+            (0..shapes.len())
+                .filter(|b| !corner[*b] && corner.iter().enumerate()
+                        .any(|(c, is)| *is && group[c] == group[*b]))
+                .collect()
+        };
+        let mut glue = glue;
+        if !quants.is_empty() {
+            let g = glue.as_mut().expect("the quantize regions need the wiring family");
+            for (qi, q) in quants.iter().enumerate() {
+                if q.producer.is_none() {
+                    if let Some(t) = g.out_ties.iter_mut().find(|t| t.name == q.name) {
+                        t.quant = Some(qi);
+                    }
+                }
+            }
+        }
+        // Stream SS: and the folded `v`'s counterparty, which is the bands' own
+        // V.  Three conditions, each of which the band weights need: the bands
+        // are in the statement (`nn_bands`, i.e. the rotation is on), the
+        // rotation says how many query heads a kv head is replicated into, and
+        // the region's rows sit inside one kv head so that the step is the two
+        // constants `oside_w_band` derives.  Without them the fold still
+        // publishes its integer and the verdict names it open.
+        if let (Some(g), true) = (glue.as_mut(), p.rope.is_some()) {
+            if let Some(mi) = p.mats.iter().position(|m| m.name == "v") {
+                let pr = mat_lays[mi].per_row;
+                let fits = mat_lays[mi].lead == 0 && pr <= p.hd && p.hd % pr == 0;
+                if specs[mi].variant == DeqVariant::Fold && !nn_bands.is_empty() && fits {
+                    if let Some(t) = g.out_ties.iter_mut().find(|t| t.name == "v") {
+                        t.band = true;
+                    }
+                }
+            }
+        }
+        // stream NN-3: the tables the quantize regions own, deduplicated by
+        // width.  One per distinct side width, so `q` at 12 bits and `k` at 11
+        // get their own and `v`'s int8 side keeps the eight-bit window; the
+        // shared `(q, nz)` table is the widest of them.
+        let q_tabs = {
+            let mut w: Vec<u32> = quants.iter().map(|q| q.bits).collect();
+            w.sort_unstable();
+            w.dedup();
+            w
+        };
+        let q_nz_bits = q_tabs.last().copied().unwrap_or(0);
         Self { p: p.clone(), attn_variant, round, shapes, lays, cfg, head_offsets, corner, specs,
-               mat_lays, ao_lay, walks, widths, log_norm, log_frac, log_mul, glue, bounds,
+               mat_lays, ao_lay, walks, rqs, rq_vars, quants, q_tabs, q_nz_bits,
+               nn_bands, nn_qbands,
+               widths, log_norm,
+               log_frac, log_mul,
+               glue, bounds,
                kv, group, rows_band, emb }
     }
 
@@ -965,18 +2112,357 @@ impl Plan {
     /// Both sides ask the plan, so the preprocessed list, the region, the AIR and
     /// the verifier cannot disagree about it.
     pub fn has_oside(&self, name: &str) -> bool {
-        self.glue.as_ref().is_some_and(|g| g.out_ties.iter().any(|(_, n)| *n == name))
+        self.glue.as_ref().is_some_and(|g| g.out_ties.iter().any(|t| t.name == name))
             || (self.p.head_key && name == "lm_head")
     }
 
     /// What that output side accumulates: the head publishes the argmax's order
     /// key, everything else the glue's `(sm, ef)` pair.
+    /// Stream NN: which convention this matmul's output side folds under.
+    /// `q`, `k` and `v` take the token-major one exactly when the rotation is
+    /// in the statement -- without it their claims have no counterparty and
+    /// keep the weights every recorded digest was taken with.
+    pub fn oside_tok(&self, name: &str) -> bool {
+        self.glue.as_ref().is_some_and(|g| !g.ropes.is_empty())
+            && matches!(name, "q" | "k" | "v")
+    }
+    pub fn oside_of(&self, w: SecureField, lam: SecureField, name: &str, tokens: usize,
+                    n_out: usize, per_row: usize) -> crate::layer::OSideW {
+        if self.oside_band(name) {
+            let (nh, hd) = (self.p.nh, self.p.hd);
+            let nkv = self.p.rope.as_ref().map(|r| r.nkv).unwrap_or(nh);
+            return oside_w_band(w, lam, tokens, nh, hd, nh / nkv, per_row);
+        }
+        let f = if self.oside_tok(name) { oside_w_tok } else { oside_w };
+        f(w, lam, tokens, n_out, per_row, self.oside_kind(name))
+    }
+
+    /// Stream SS: is this matmul's dequant the delayed requantize?  The fold is
+    /// the one variant whose output is an integer rather than a bf16 pattern,
+    /// and every side that reads an output has to ask.
+    pub fn is_fold(&self, name: &str) -> bool {
+        self.p.mats.iter().position(|m| m.name == name)
+            .is_some_and(|mi| self.specs[mi].variant == DeqVariant::Fold)
+    }
+
+    /// Stream SS: does this matmul's output side fold under the band grid --
+    /// i.e. is it a folded `v` whose bands are in the statement and whose layout
+    /// the band weights fit?  When the answer is no, a folded `v` still publishes
+    /// its integer, on the producer grid, with nothing to read it against
+    /// (`deq_out_open`).
+    pub fn oside_band(&self, name: &str) -> bool {
+        self.glue.as_ref()
+            .is_some_and(|g| g.out_ties.iter().any(|t| t.name == name && t.band))
+    }
+
     pub fn oside_kind(&self, name: &str) -> crate::dequant::OKind {
         if name == "lm_head" {
             crate::dequant::OKind::Key
+        } else if self.is_fold(name) {
+            // stream SS: the fold has no bf16 output to publish
+            crate::dequant::OKind::Int
         } else {
             crate::dequant::OKind::Pair
         }
+    }
+
+    /// Stream LL (E11), `notes/witness-slack.md` section 5 item 1: the same list
+    /// `pre_ids` produces, with what each column needs in order to be rebuilt and
+    /// whether it is the same column on every token block of a layer.
+    ///
+    /// Two axes, because the two questions the item asks are not the same one:
+    ///
+    /// * `needs` -- `Params` means `Fixed.params` determines every cell, so a
+    ///   verifier holding the statement can rebuild the column. `Model` means it
+    ///   cannot: the column holds a weight, a weight scale, or a per-layer
+    ///   calibration constant that lives only in the dump's manifest
+    ///   (`b6_k_dinv` / `b6_x_dinv`, `b6_exp_y`).
+    /// * `varies` -- `Layer` means the column is identical on every block of the
+    ///   layer, so one published constant per layer covers a whole grid; `Block`
+    ///   means its height or its contents move with the chunk's own `c`.
+    ///
+    /// `pre_split_sizes` is asserted against the committed tree in `compose`, so
+    /// this list and tree 0 cannot drift apart.
+    pub fn pre_split(&self) -> Vec<PreCol> {
+        let mut v: Vec<PreCol> = vec![];
+        let mut put = |id: PreProcessedColumnId, family: &str, log_size: u32,
+                       needs: PreNeeds, varies: PreVaries| {
+            v.push(PreCol { id, family: family.to_string(), log_size, needs, varies });
+        };
+        for b in 0..self.shapes.len() {
+            let (lc, lk) = (&self.lays[b].chan, &self.lays[b].key);
+            for n in CHAN_SEL {
+                put(band_id(b, n), "band/sel", lc.g.log_rows, PreNeeds::Params,
+                    PreVaries::Block);
+            }
+            if self.corner[b] {
+                for n in CORNER_SEL {
+                    // the eighth is `dinv`, the per-instance master-table scale:
+                    // a model constant off the dump's `frac_per_head`, and the
+                    // one column of a band that is not a function of the shape
+                    let (fam, needs) = if n == CORNER_SEL[7] {
+                        ("band/dinv", PreNeeds::Model)
+                    } else {
+                        ("band/sel", PreNeeds::Params)
+                    };
+                    put(band_id(b, n), fam, lk.g.log_rows, needs, PreVaries::Block);
+                }
+                for i in 0..self.lays[b].key.q {
+                    put(msk_id(b, i), "band/mask", lk.g.log_rows, PreNeeds::Params,
+                        PreVaries::Block);
+                }
+            } else {
+                for n in KEY_SEL {
+                    let (fam, needs) = if n == KEY_SEL[7] {
+                        ("band/dinv", PreNeeds::Model)
+                    } else {
+                        ("band/sel", PreNeeds::Params)
+                    };
+                    put(band_id(b, n), fam, lk.g.log_rows, needs, PreVaries::Block);
+                }
+            }
+            if let Some(a) = crate::attn_air::act_id(b, self.corner[b], lk.g.lead) {
+                put(a, "band/sel", lk.g.log_rows, PreNeeds::Params, PreVaries::Block);
+            }
+            if self.rows_band[b] {
+                for n in ROW_SEL {
+                    put(band_id(b, n), "band/sel", self.lays[b].log_row,
+                        PreNeeds::Params, PreVaries::Block);
+                }
+            }
+        }
+        for s in 0..self.ao_lay.per_row {
+            put(ao_chan("jv", s), "attnout/jv", self.ao_lay.log_rows, PreNeeds::Model,
+                PreVaries::Layer);
+        }
+        for n in AO_SEL {
+            put(ao_sel(n), "attnout/sel", self.ao_lay.log_rows, PreNeeds::Params,
+                PreVaries::Layer);
+        }
+        for ((m, sp), lay) in self.p.mats.iter().zip(&self.specs).zip(&self.mat_lays) {
+            for s in 0..sp.per_row {
+                let names: &[&str] = match sp.variant {
+                    DeqVariant::Pow2 => &["j"],
+                    DeqVariant::Chain => &["m", "e"],
+                    DeqVariant::Fold => &["m", "p"],
+                    _ => unreachable!(),
+                };
+                for nm in names {
+                    put(chan_col(&m.name, nm, s), "dequant/scale", lay.log_rows,
+                        PreNeeds::Model, PreVaries::Layer);
+                }
+            }
+            for n in DEQ_SEL {
+                put(deq_sel(&m.name, n), "dequant/sel", lay.log_rows, PreNeeds::Params,
+                    PreVaries::Layer);
+            }
+            if self.has_oside(&m.name) {
+                for n in crate::dequant::DEQ_OSEL {
+                    put(deq_sel(&m.name, n), "dequant/sel", lay.log_rows,
+                        PreNeeds::Params, PreVaries::Layer);
+                }
+            }
+        }
+        for w in &self.walks {
+            for (mi, _) in w.mats.iter().enumerate() {
+                for pp in 0..w.lay.pk {
+                    put(walk_w(&w.name, mi, pp), "walk/weight", w.lay.g.log_rows,
+                        PreNeeds::Model, PreVaries::Layer);
+                }
+            }
+            for n in WALK_SEL {
+                put(walk_sel(&w.name, n), "walk/sel", w.lay.g.log_rows, PreNeeds::Params,
+                    PreVaries::Layer);
+            }
+        }
+        if let Some(g) = &self.glue {
+            // Stream NN: a rotation's Mul region carries the angle table, which
+            // is a pure function of `Fixed.params` -- `theta`, the rope branch
+            // and that branch's own constants -- and of the block, because
+            // `RopeParams::pos0` is this chunk's absolute position offset.  So
+            // it is `Params`/`Block`, never `Model`.  Every other region's
+            // `Src::Pre` pair is a norm weight off the dump.
+            let rope_mul: std::collections::BTreeSet<usize> =
+                g.ropes.iter().map(|r| r.mul).collect();
+            for (ri, r) in g.regions.iter().enumerate() {
+                put(crate::glue::glue_sel(&r.tag, "nofirst"), "glue/sel", r.log_rows,
+                    PreNeeds::Params, PreVaries::Layer);
+                put(crate::glue::glue_sel(&r.tag, "end"), "glue/sel", r.log_rows,
+                    PreNeeds::Params, PreVaries::Layer);
+                let (fam, needs, varies) = if rope_mul.contains(&ri) {
+                    ("rope/angle", PreNeeds::Params, PreVaries::Block)
+                } else {
+                    ("glue/normw", PreNeeds::Model, PreVaries::Layer)
+                };
+                for i in 0..r.prog.n_pre {
+                    for k in 0..2 {
+                        put(crate::glue::glue_pre_col(&r.tag, i, k), fam,
+                            r.log_rows, needs, varies);
+                    }
+                }
+            }
+        }
+        // the master exp table: the index column is `0..2^log_table`, the value
+        // column is this layer's own table and its exponent is the dump's
+        put(id(TBL_EXP_X), "table/exp", self.p.log_table, PreNeeds::Params,
+            PreVaries::Layer);
+        put(id(TBL_EXP_Y), "table/exp", self.p.log_table, PreNeeds::Model,
+            PreVaries::Layer);
+        for c in NORM_COLS {
+            put(id(c), "table/norm", self.log_norm, PreNeeds::Params, PreVaries::Layer);
+        }
+        for c in FRAC_COLS {
+            put(id(c), "table/frac", self.log_frac, PreNeeds::Params, PreVaries::Layer);
+        }
+        for c in MUL_COLS {
+            put(id(c), "table/mul", self.log_mul, PreNeeds::Params, PreVaries::Layer);
+        }
+        for c in QNZ_COLS {
+            put(id(c), "table/qnz", self.p.ao_q_bits, PreNeeds::Params, PreVaries::Layer);
+        }
+        for w in &self.widths {
+            put(tbl_range(*w), "table/range", *w, PreNeeds::Params, PreVaries::Layer);
+        }
+        for c in EPOW_COLS {
+            put(id(c), "table/epow", self.log_epow(), PreNeeds::Params, PreVaries::Layer);
+        }
+        if let Some(g) = &self.glue {
+            let t = crate::glue::GlueTables::new(self.p.kmax, self.round, &g.uns);
+            let mut logs: Vec<u32> = vec![t.log_pow; crate::glue::POW_COLS.len()];
+            logs.extend(vec![t.log_smul; crate::glue::SMUL_COLS.len()]);
+            logs.extend(vec![t.log_val; crate::glue::VAL_COLS.len()]);
+            logs.extend(vec![t.log_un; 4 * g.uns.len()]);
+            for (gid, ls) in crate::glue::glue_table_ids(&g.uns).into_iter().zip(logs) {
+                put(gid, "table/glue", ls, PreNeeds::Params, PreVaries::Layer);
+            }
+        }
+        for r in &self.rqs {
+            for n in crate::requant::RQ_SEL {
+                put(crate::requant::rq_sel(&r.name, n), "requant/sel", r.lay.log_rows,
+                    PreNeeds::Params, PreVaries::Layer);
+            }
+        }
+        // Stream NN: the q/k/v quantize regions, in `Plan::pre_ids`' order --
+        // three selectors off the shape, then one scale exponent per slot.  The
+        // exponents are B1's own `s_q`/`s_k`/`s_v`, model constants of exactly
+        // the kind the attention output's `jv` already was.
+        for q in &self.quants {
+            for n in crate::rope::Q_SEL {
+                put(crate::rope::q_sel(q.name, n), "quant/sel", q.lay.log_rows,
+                    PreNeeds::Params, PreVaries::Layer);
+            }
+            for sl in 0..q.lay.per_row {
+                put(crate::rope::q_scale_col(q.name, sl), "quant/scale", q.lay.log_rows,
+                    PreNeeds::Model, PreVaries::Layer);
+            }
+        }
+        for sv in &self.rq_vars {
+            for k in 0..crate::requant::rq_tab_width(*sv) {
+                put(crate::requant::rq_tab_col(*sv, k), "table/requant",
+                    crate::requant::rq_log_rows(*sv), PreNeeds::Params, PreVaries::Layer);
+            }
+            for k in 0..crate::requant::scl_tab_width(*sv) {
+                put(crate::requant::scl_tab_col(*sv, k), "table/requant", 15,
+                    PreNeeds::Params, PreVaries::Layer);
+            }
+        }
+        if self.needs_rq_rels() {
+            for c in crate::requant::RQV_COLS {
+                put(id(c), "table/requant", 9, PreNeeds::Params, PreVaries::Layer);
+            }
+        }
+        // stream NN-3: the quantize family's own tables.  Both are a closed
+        // form of the side's width -- `Params::q_bits` and `Params::k_bits` --
+        // so they need the statement's parameters and no model data at all.
+        for w in &self.q_tabs {
+            for k in 0..crate::rope::QDIV_COLS {
+                put(crate::rope::qdiv_col(*w, k), "table/quant",
+                    crate::rope::qdiv_log_rows(*w), PreNeeds::Params, PreVaries::Layer);
+            }
+        }
+        if !self.quants.is_empty() {
+            for k in 0..2 {
+                put(crate::rope::qnz_col(self.q_nz_bits, k), "table/quant",
+                    crate::rope::qnz_log_rows(self.q_nz_bits), PreNeeds::Params,
+                    PreVaries::Layer);
+            }
+        }
+        if let Some(mi) = self.argmax_mat() {
+            for n in crate::argmax::AM_SEL {
+                put(crate::argmax::id(n), "argmax/sel", self.mat_lays[mi].log_rows,
+                    PreNeeds::Params, PreVaries::Layer);
+            }
+        }
+        if let Some(l) = &self.emb {
+            for n in crate::embed::EMB_SEL {
+                put(crate::embed::id(n), "embed/sel", l.log_use, PreNeeds::Params,
+                    PreVaries::Layer);
+            }
+            put(crate::embed::cb_id(), "embed/sel", l.log_use, PreNeeds::Params,
+                PreVaries::Layer);
+            put(crate::embed::tab_v_id(), "embed/table", l.log_tab, PreNeeds::Params,
+                PreVaries::Layer);
+            put(crate::embed::tab_cb_id(), "embed/table", l.log_tab, PreNeeds::Params,
+                PreVaries::Layer);
+            for k in 0..l.pe {
+                put(crate::embed::tab_e_id(k), "embed/table", l.log_tab, PreNeeds::Model,
+                    PreVaries::Layer);
+            }
+        }
+        if self.p.gkr_bands {
+            for h in crate::gkrlink::link_heights(self) {
+                put(crate::gkrlink::first_id(h), "gkrlink/sel", h, PreNeeds::Params,
+                    PreVaries::Block);
+                put(crate::gkrlink::second_id(h), "gkrlink/sel", h, PreNeeds::Params,
+                    PreVaries::Block);
+            }
+        }
+        v
+    }
+
+    /// The log sizes `pre_split` says tree 0 has, in commit order.
+    pub fn pre_split_sizes(&self) -> Vec<u32> {
+        self.pre_split().iter().map(|c| c.log_size).collect()
+    }
+
+    /// The rollup stream LL's record quotes: per family, and per the two axes.
+    pub fn pre_split_report(&self) -> Value {
+        let cols = self.pre_split();
+        let mut fam: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+        let (mut model_c, mut model_n) = (0usize, 0usize);
+        let (mut block_c, mut block_n) = (0usize, 0usize);
+        for c in &cols {
+            let cells = 1usize << c.log_size;
+            let e = fam.entry(c.family.clone()).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += cells;
+            if c.needs == PreNeeds::Model {
+                model_c += 1;
+                model_n += cells;
+            }
+            if c.varies == PreVaries::Block {
+                block_c += 1;
+                block_n += cells;
+            }
+        }
+        let total: usize = cols.iter().map(|c| 1usize << c.log_size).sum();
+        let sh = |n: usize| n as f64 / total as f64;
+        json!({
+            "columns": cols.len(),
+            "cells": total,
+            "families": fam.iter().map(|(k, (c, n))| json!({
+                "family": k, "columns": c, "cells": n, "share": sh(*n),
+            })).collect::<Vec<_>>(),
+            // what a verifier cannot rebuild from `Fixed.params` alone
+            "needs_model": {"columns": model_c, "cells": model_n, "share": sh(model_n)},
+            "needs_params": {"columns": cols.len() - model_c, "cells": total - model_n,
+                             "share": sh(total - model_n)},
+            // what moves down the block axis: what a per-layer published root
+            // could not cover, and so what the verifier must rebuild per chunk
+            "varies_block": {"columns": block_c, "cells": block_n, "share": sh(block_n)},
+            "varies_layer": {"columns": cols.len() - block_c, "cells": total - block_n,
+                             "share": sh(total - block_n)},
+        })
     }
 
     pub fn pre_ids(&self) -> Vec<PreProcessedColumnId> {
@@ -1004,8 +2490,7 @@ impl Plan {
             }
         }
         for s in 0..self.ao_lay.per_row {
-            ids.push(ao_chan("n", s));
-            ids.push(ao_chan("p", s));
+            ids.push(ao_chan("jv", s));
         }
         ids.extend(AO_SEL.iter().map(|n| ao_sel(n)));
         for (m, sp) in self.p.mats.iter().zip(&self.specs) {
@@ -1042,6 +2527,12 @@ impl Plan {
             for r in &g.regions {
                 ids.push(crate::glue::glue_sel(&r.tag, "nofirst"));
                 ids.push(crate::glue::glue_sel(&r.tag, "end"));
+                // stream II: then the region's own preprocessed values, in the
+                // order `glue_region` appends their columns
+                for i in 0..r.prog.n_pre {
+                    ids.push(crate::glue::glue_pre_col(&r.tag, i, 0));
+                    ids.push(crate::glue::glue_pre_col(&r.tag, i, 1));
+                }
             }
         }
         ids.push(id(TBL_EXP_X));
@@ -1051,8 +2542,43 @@ impl Plan {
         ids.extend(MUL_COLS.iter().map(|c| id(*c)));
         ids.extend(QNZ_COLS.iter().map(|c| id(*c)));
         ids.extend(self.widths.iter().map(|w| tbl_range(*w)));
+        // Stream JJ (E11): the exponent window, last of the shared tables so
+        // that no table before it moves an index.
+        ids.extend(EPOW_COLS.iter().map(|c| id(*c)));
         if let Some(g) = &self.glue {
             ids.extend(crate::glue::glue_table_ids(&g.uns));
+        }
+        // stream II: the requantize seams register before the two ends -- four selectors per
+        // seam, then one division and one scale table per variant, then the
+        // 257-row sign table.  Strictly last, so no family that exists today
+        // moves an index.
+        for r in &self.rqs {
+            ids.extend(crate::requant::RQ_SEL.iter()
+                       .map(|n| crate::requant::rq_sel(&r.name, n)));
+        }
+        // stream NN: and the quantize regions -- three selectors, then one
+        // preprocessed scale exponent per slot, in `rope::q_region`'s own order
+        for q in &self.quants {
+            ids.extend(crate::rope::Q_SEL.iter().map(|n| crate::rope::q_sel(q.name, n)));
+            ids.extend((0..q.lay.per_row).map(|sl| crate::rope::q_scale_col(q.name, sl)));
+        }
+        for v in &self.rq_vars {
+            ids.extend((0..crate::requant::rq_tab_width(*v))
+                       .map(|k| crate::requant::rq_tab_col(*v, k)));
+            ids.extend((0..crate::requant::scl_tab_width(*v))
+                       .map(|k| crate::requant::scl_tab_col(*v, k)));
+        }
+        if self.needs_rq_rels() {
+            ids.extend(crate::requant::RQV_COLS.iter().map(|c| id(*c)));
+        }
+        // stream NN-3: the quantize family's own tables, after the seams' and
+        // the sign table -- one division table per side width, then the shared
+        // `(q, nz)` pair table
+        for w in &self.q_tabs {
+            ids.extend((0..crate::rope::QDIV_COLS).map(|k| crate::rope::qdiv_col(*w, k)));
+        }
+        if !self.quants.is_empty() {
+            ids.extend((0..2).map(|k| crate::rope::qnz_col(self.q_nz_bits, k)));
         }
         // stream E: the argmax region's own three selectors, last, so that no
         // family before it moves an index
@@ -1104,12 +2630,61 @@ impl Plan {
             + if self.p.gkr_glue { 0 }
               else { self.glue.as_ref().map(|g| g.regions.len()).unwrap_or(0) }
             - usize::from(self.p.gkr_attnout)
+            // stream II: one per requantize seam, before the two ends
+            + self.rqs.len()
+            // stream NN: and one per quantize region
+            + self.quants.len()
             + usize::from(self.argmax_mat().is_some())
             // stream BB: the embedding gadget's use region, last of all
             + usize::from(self.emb.is_some())
     }
+    /// Stream JJ (E11): the `EPOW` window's domain and height.  Derived from
+    /// `Params` alone -- both sides compute them, nothing commits them.
+    pub fn e_window(&self) -> (i32, i32) {
+        (self.p.ao_jv_min - self.p.ao_jo_max, self.p.ao_jv_max - self.p.ao_jo_min)
+    }
+    pub fn log_epow(&self) -> u32 {
+        let (lo, hi) = self.e_window();
+        crate::common::log_rows_for((hi - lo + 1) as usize, 1)
+    }
+    /// Stream II: where the requantize seams' tables start, and where the
+    /// embedding's table sum sits.  Written out rather than read off the end of
+    /// the list, because the seams register *before* the two ends -- stream
+    /// BB's `registration_is_append_only` says the embedding's ids and its two
+    /// components are the last thing any plan adds, and a family appended past
+    /// it would make that false.  The 6 is stream JJ's `EPOW` counted in.
+    /// Stream II's five relations are drawn for the requantize seams *and* for
+    /// stream NN's quantize regions, which read the sign table and (before
+    /// NN-3) the division table.  One predicate, so the prover, the emitter and
+    /// the probes cannot disagree about whether they exist.
+    pub fn needs_rq_rels(&self) -> bool {
+        !self.rqs.is_empty() || !self.quants.is_empty()
+    }
+    /// Stream NN-3: which of `q_tabs` a side of this width reads.
+    pub fn q_tab_at(&self, bits: u32) -> usize {
+        self.q_tabs.iter().position(|w| *w == bits)
+            .unwrap_or_else(|| panic!("no quantize division table at {bits} bits"))
+    }
+    pub fn rq_table_at(&self) -> usize {
+        6 + self.widths.len() + self.glue.as_ref().map(|g| g.n_tables()).unwrap_or(0)
+    }
+    pub fn n_rq_tables(&self) -> usize {
+        2 * self.rq_vars.len()
+            + usize::from(self.needs_rq_rels())
+            // stream NN-3: one division table per side width, then the quantize
+            // family's own `(q, nz)` table -- after the seams' tables and the
+            // sign table, so nothing before them moves an index
+            + self.q_tabs.len()
+            + usize::from(!self.quants.is_empty())
+    }
+    pub fn emb_table_at(&self) -> usize {
+        self.rq_table_at() + self.n_rq_tables()
+    }
     pub fn n_table_sums(&self) -> usize {
-        5 + self.widths.len() + self.glue.as_ref().map(|g| g.n_tables()).unwrap_or(0)
+        6 + self.widths.len() + self.glue.as_ref().map(|g| g.n_tables()).unwrap_or(0)
+            // stream II: one division and one scale table per variant, then the
+            // sign table, before the two ends
+            + self.n_rq_tables()
             // stream BB: the embedding table's own side, appended last
             + usize::from(self.emb.is_some())
     }
@@ -1140,6 +2715,11 @@ pub struct BuiltComponents {
     /// after everything else, in this order -- the use side then the table side
     pub embed: Option<FrameworkComponent<crate::embed::EmbedEval>>,
     pub emb_tab: Option<FrameworkComponent<crate::embed::EmbTableEval>>,
+    /// stream II: the requantize seams and their tables, after everything else
+    pub rqs: Vec<FrameworkComponent<crate::requant::RequantEval>>,
+    /// stream NN: the q/k/v quantize regions, in `Plan::quants` order
+    pub quants: Vec<FrameworkComponent<crate::rope::QuantEval>>,
+    pub rq_tabs: Vec<FrameworkComponent<TableEval>>,
     pub pows: Vec<Powers>,
     /// per band, in `chans`/`keys` order: does it have a per-token region?  A
     /// corner band does not (B10 step 3), so `rows` is shorter than `chans` and
@@ -1237,11 +2817,85 @@ impl BuiltComponents {
             let e = &c.eval;
             tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
         }
+        // stream II: and the requantize seams'.  Every dispatched component has
+        // to be here: the blob cache is keyed by the evaluator's address and the
+        // pipelined loop reuses addresses across chunks, so a component that is
+        // dispatched but never prewarmed can only read what another family left.
+        for c in &self.rqs {
+            let e = &c.eval;
+            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        }
+        for c in &self.quants {
+            let e = &c.eval;
+            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        }
+        for c in &self.rq_tabs {
+            let e = &c.eval;
+            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        }
         if let Some(c) = &self.emb_tab {
             let e = &c.eval;
             tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
         }
         tasks.par_iter().for_each(|t| t());
+    }
+
+    /// Stream EE (open item 21): the fingerprint every dispatched component
+    /// will look its kernel up by, in `cudaemit`'s own component order and
+    /// under `cudaemit`'s own names, so the two reports compare line for line.
+    ///
+    /// It is the same lowering the dispatch does (`cudagen::lowered_ir`) over
+    /// the same evals -- this chunk's real claims and challenges included --
+    /// so it answers "what will this chunk ask the store for", not "what
+    /// should it ask for".
+    pub fn fp_rows(&self) -> Vec<Value> {
+        let mut v = vec![];
+        for i in 0..self.chans.len() {
+            v.push(crate::cudagen::fp_row(&self.chans[i].eval, &format!("chan_band{i}")));
+            v.push(crate::cudagen::fp_row(&self.keys[i].eval, &format!("key_band{i}")));
+        }
+        for i in 0..self.rows.len() {
+            v.push(crate::cudagen::fp_row(&self.rows[i].eval, &format!("row_band{i}")));
+        }
+        for i in 0..self.links.len() {
+            v.push(crate::cudagen::fp_row(&self.links[i].eval, &format!("link{i}")));
+        }
+        v.push(crate::cudagen::fp_row(&self.ao.eval, "attnout"));
+        for i in 0..self.mats.len() {
+            v.push(crate::cudagen::fp_row(&self.mats[i].eval, &format!("dequant{i}")));
+        }
+        for i in 0..self.glue.len() {
+            v.push(crate::cudagen::fp_row(&self.glue[i].eval, &format!("glue{i}")));
+        }
+        for i in 0..self.gtables.len() {
+            v.push(crate::cudagen::fp_row(&self.gtables[i].eval, &format!("gtable{i}")));
+        }
+        for i in 0..self.walks.len() {
+            v.push(crate::cudagen::fp_row(&self.walks[i].eval, &format!("walk{i}")));
+        }
+        v.push(crate::cudagen::fp_row(&self.exp_t.eval, "exp_table"));
+        for i in 0..self.tables.len() {
+            v.push(crate::cudagen::fp_row(&self.tables[i].eval, &format!("table{i}")));
+        }
+        for i in 0..self.rqs.len() {
+            v.push(crate::cudagen::fp_row(&self.rqs[i].eval, &format!("requant{i}")));
+        }
+        for i in 0..self.quants.len() {
+            v.push(crate::cudagen::fp_row(&self.quants[i].eval, &format!("quant{i}")));
+        }
+        for i in 0..self.rq_tabs.len() {
+            v.push(crate::cudagen::fp_row(&self.rq_tabs[i].eval, &format!("rqtable{i}")));
+        }
+        if let Some(c) = &self.argmax {
+            v.push(crate::cudagen::fp_row(&c.eval, "argmax"));
+        }
+        if let Some(c) = &self.embed {
+            v.push(crate::cudagen::fp_row(&c.eval, "embed"));
+        }
+        if let Some(c) = &self.emb_tab {
+            v.push(crate::cudagen::fp_row(&c.eval, "emb_table"));
+        }
+        v
     }
 
     pub fn provers(&self) -> Vec<&dyn ComponentProver<crate::common::PcsB>> {
@@ -1276,6 +2930,19 @@ impl BuiltComponents {
             v.push(t);
         }
         for t in &self.gtables {
+            v.push(t);
+        }
+        // stream II: the requantize seams and their tables, before the two ends,
+        // as `Plan::pre_ids` has them
+        for r in &self.rqs {
+            v.push(r);
+        }
+        // stream NN: the quantize regions sit between the seams and their shared
+        // tables, which is where `Plan::pre_ids` puts their selectors too
+        for r in &self.quants {
+            v.push(r);
+        }
+        for t in &self.rq_tabs {
             v.push(t);
         }
         if let Some(a) = &self.argmax {
@@ -1321,6 +2988,19 @@ impl BuiltComponents {
             v.push(t);
         }
         for t in &self.gtables {
+            v.push(t);
+        }
+        // stream II: the requantize seams and their tables, before the two ends,
+        // as `Plan::pre_ids` has them
+        for r in &self.rqs {
+            v.push(r);
+        }
+        // stream NN: the quantize regions sit between the seams and their shared
+        // tables, which is where `Plan::pre_ids` puts their selectors too
+        for r in &self.quants {
+            v.push(r);
+        }
+        for t in &self.rq_tabs {
             v.push(t);
         }
         if let Some(a) = &self.argmax {
@@ -1394,6 +3074,10 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         let l = &plan.lays[b];
         let pow = plan.powers(b, r, s, rv, r_corner);
         let bc = claims.bands[b];
+        // stream NN: the corner bands' own K, Q and V claims
+        let nn = nn_band_ties(plan, b, w_glue, claims);
+        // stream NN (NN-2): a prefix band's Q claim, against its group's corner
+        let nn_q = nn_band_qtie(plan, b, w_glue, claims);
         // B11 stream S, lever 1: on the GKR arm a band component carries no
         // LogUp, so there is no claimed sum to hand it and none to consume.
         chans.push(FrameworkComponent::<ChanEval>::new(
@@ -1403,7 +3087,9 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                        range_check: true, gkr: p.gkr_bands,
                        // stream AA: empty unless `--kv-bind`, so the IR, the
                        // fingerprint and the proof are unmoved with it off
-                       bound_k: crate::bounds::kv_bounds_of(&plan.kv, b, l.chan.pk) },
+                       bound_k: crate::bounds::kv_bounds_of(&plan.kv, b, l.chan.pk),
+                       qk_bind: nn.as_ref().map(|(k, q, _)| (k.clone(), q.clone())),
+                       q_bind: nn_q.clone() },
             if p.gkr_bands { SecureField::zero() } else { next_use(claims) },
         ));
         keys.push(FrameworkComponent::<KeyEval>::new(
@@ -1416,7 +3102,8 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                           _ => None,
                       },
                       range_check: true, gkr: p.gkr_bands, corner: plan.corner[b],
-                      bound_v: crate::bounds::kv_bounds_of(&plan.kv, b, l.key.pv) },
+                      bound_v: crate::bounds::kv_bounds_of(&plan.kv, b, l.key.pv),
+                      v_bind: nn.as_ref().map(|(_, _, v)| v.clone()) },
             if p.gkr_bands { SecureField::zero() } else { next_use(claims) },
         ));
         // stream AA: "carries the per-token region", which with `--kv-bind` off
@@ -1474,8 +3161,16 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             mu_den: r_c * s_span.inverse(),
             claimed_out: unqm(claims.ao_out),
             claimed_den: unqm(claims.ao_den),
+            claimed_q: claim_at(claims.ao_q.first().copied(), "ao_q"),
             qnz: rels.qnz.clone(),
             rel_rem: rels.range(p.ao_rem_bits).clone(),
+            epow: rels.epow.clone(),
+            rel_acc_lo: rels.range(p.ao_acc_lo_bits).clone(),
+            rel_acc_hi: rels.range(p.ao_acc_hi_bits).clone(),
+            acc_lo_bits: p.ao_acc_lo_bits,
+            acc_hi_bits: p.ao_acc_hi_bits,
+            acc_mag: p.ao_acc_mag,
+            denp2: p.ao_denp2,
             gkr: p.gkr_attnout,
         },
         if p.gkr_attnout { SecureField::zero() } else { next_use(claims) },
@@ -1504,15 +3199,15 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 // what says so rather than trusting it.
                 oside: plan.has_oside(&m.name).then(|| {
                     let kind = plan.oside_kind(&m.name);
-                    let ow = oside_w(w_glue, lam_glue, m.tokens, m.n_out,
-                                     plan.mat_lays[mi].per_row, kind);
+                    let ow = plan.oside_of(w_glue, lam_glue, &m.name, m.tokens, m.n_out,
+                                           plan.mat_lays[mi].per_row);
                     let claimed = if m.name == "lm_head" {
                         claims.head_key.first().copied()
                     } else {
                         // the claims arrive in mat order and the plan lists the
                         // ties in the same order, `o` before `down`
                         plan.glue.as_ref().unwrap().out_ties.iter()
-                            .position(|(_, n)| *n == m.name)
+                            .position(|t| t.name == m.name)
                             .and_then(|k| claims.deq_out.get(k).copied())
                     };
                     crate::dequant::OSide {
@@ -1520,10 +3215,29 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         lam: ow.lam,
                         k_in: ow.k_in,
                         k_bd: ow.k_bd,
-                        claimed: claimed.map(unqm).unwrap_or(SecureField::zero()),
+                        claimed: claim_at(claimed, "deq_out/head_key"),
                         kind,
                     }
                 }),
+                // Stream II (E11): the x-side scale's claim, on every matmul a
+                // requantize seam feeds.  `mu` is the wiring family's own `w`
+                // and `lam` its `lam`, the same two the seam's own fold uses,
+                // so the two claims are comparable with no scale factor.
+                //
+                // Stream SS: never on a `Variant::Fold` region -- its second
+                // shared column is the divisor's token half, not the scale's
+                // exponent, so there is no claim to state (see `mat_interaction`'s
+                // caller and `rq_scale_open`).  The predicate is the same one
+                // there: the two have to agree or the AIR reads an interaction
+                // column the fill never wrote.
+                sside: (plan.rqs.iter()
+                        .any(|rp| plan.walks[rp.walk].mats.contains(&mi))
+                        && plan.specs[mi].variant != DeqVariant::Fold)
+                    .then(|| crate::dequant::SSide {
+                        mu: w_glue,
+                        lam: lam_glue,
+                        claimed: claim_at(claims.deq_sc.get(mi).copied(), "deq_sc"),
+                    }),
                 // B11 stream U, lever 3: under the flag this region's lookups
                 // are the batched GKR's, so the AIR emits none of them and the
                 // interaction masks they would allocate are not there to claim.
@@ -1558,6 +3272,45 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 act_off: 1 << (w.act_bits - 1),
                 range_check: true,
                 gkr: p.gkr_walks,
+                // stream II: the group's own claim over its committed
+                // activations, in the canonical channel-major order.  Present
+                // exactly when the chunk carries the wiring family, so a chunk
+                // without it proves what it always proved.
+                qx: plan.glue.as_ref().map(|_| {
+                    let m0 = &p.mats[w.mats[0]];
+                    let nn = (m0.tokens * m0.n_in) as i128;
+                    let claimed = claim_at(claims.walk_qx.get(wi).copied(), "walk_qx");
+                    // Stream II (E11), at the JJ merge: the `o` group folds
+                    // under the *attnout* region's weights, not the wiring
+                    // family's.  Every other group's counterparty is a
+                    // requantize region on the dequant's `MatLayout` map, whose
+                    // canonical weight is `w_glue^(N-1-k tokens-t)`; `o` has no
+                    // requantize region (`AttnOutEval` is its requantize) and
+                    // its only counterparty is `claims.ao_q`, which weights
+                    // element `(channel k, token t)` by `rv^k s^t`.  Both
+                    // conventions factorize as (channel power)(token power), so
+                    // this is a change of the three constants and nothing else:
+                    // slot `p` of chunk `b` carries token `t = b pq + p`, so the
+                    // slot weight is `s^p`, the step inside a channel is
+                    // `s^pq`, and the step at a channel boundary is `rv` with
+                    // the `chunks - 1` in-channel steps of that channel undone.
+                    if w.name == "o" {
+                        let (spow, sstep) = powers(s, w.lay.pq);
+                        return crate::walk_air::WalkQx {
+                            w: spow,
+                            m_in: sstep,
+                            m_bd: rv * sstep.inverse().pow(w.lay.g.chunks as u128 - 1),
+                            claimed,
+                        };
+                    }
+                    crate::walk_air::WalkQx {
+                        w: (0..w.lay.pq).map(|pp| wpow(w_glue, nn - 1 - pp as i128)).collect(),
+                        m_in: wpow(w_glue, -(w.lay.pq as i128)),
+                        m_bd: wpow(w_glue, (w.lay.pq as i128) * (w.lay.g.chunks as i128 - 1)
+                                   - m0.tokens as i128),
+                        claimed,
+                    }
+                }),
             },
             if p.gkr_walks { SecureField::zero() } else { next_use(claims) },
         ));
@@ -1635,10 +3388,26 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     // its own span is the whole resolution -- the mask index
                     // *is* the column index within it, which is `Prog`'s order.
                     Reg::Glue(g) => {
-                        let RCol::Glue(i) = c else {
-                            panic!("a non-glue column named on a glue region")
+                        let (tree, gi) = match c {
+                            RCol::Glue(i) =>
+                                (1, span_of(glue[*g].trace_locations(), 1) + i),
+                            // stream OO: the norm weight is the statement's, so
+                            // it is a tree-0 column of the same region and the
+                            // link names it by its preprocessed id
+                            RCol::GluePre(i, k) => {
+                                let tag = &plan.glue.as_ref()
+                                    .expect("a glue column with no glue plan")
+                                    .regions[*g].tag;
+                                let want = crate::glue::glue_pre_col(tag, *i, *k).id;
+                                let gi = ids.iter().position(|x| x.id == want)
+                                    .expect("a glue preprocessed column missing \
+                                             from the preprocessed tree");
+                                pre_idx.push(gi);
+                                (0, gi)
+                            }
+                            _ => panic!("a non-glue column named on a glue region"),
                         };
-                        terms.push((1, span_of(glue[*g].trace_locations(), 1) + i, *w));
+                        terms.push((tree, gi, *w));
                         continue;
                     }
                     Reg::Walk(k) => {
@@ -1649,10 +3418,21 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         continue;
                     }
                     Reg::Ao => {
-                        let RCol::Ao(i) = c else {
-                            panic!("a non-attnout column named on the attnout region")
+                        let (tree, g) = match c {
+                            RCol::Ao(i) => (1, span_of(ao.trace_locations(), 1) + i),
+                            // stream JJ: the slot's `jvp`, preprocessed
+                            RCol::AoPre(sl) => {
+                                let want = ao_chan("jv", *sl).id;
+                                let g = ids.iter().position(|x| x.id == want)
+                                    .expect("an attnout jv column missing from the \
+                                             preprocessed tree");
+                                pre_idx.push(g);
+                                (0, g)
+                            }
+                            _ => panic!("a non-attnout column named on the \
+                                         attnout region"),
                         };
-                        terms.push((1, span_of(ao.trace_locations(), 1) + i, *w));
+                        terms.push((tree, g, *w));
                         continue;
                     }
                     // B11 stream U, lever 3: a dequant region is one component,
@@ -1732,16 +3512,154 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             unqm(claims.table_sums[5 + t]),
         ));
     }
+    // Stream JJ (E11), `witness-slack.md` section 1f: the exponent window.  It
+    // is last of the core tables so that every table before it keeps its index,
+    // and it is the only one with no device build -- `1 << log_epow` is at most
+    // a few dozen rows, so there is nothing for a kernel to win.
+    tables.push(FrameworkComponent::<TableEval>::new(
+        alloc,
+        TableEval { log_rows: plan.log_epow(),
+                    cols: EPOW_COLS.iter().map(|c| id(*c)).collect(),
+                    kind: TableKind::Frac(rels.epow.clone()) },
+        unqm(claims.table_sums[5 + plan.widths.len()]),
+    ));
 
     let mut gtables = vec![];
     if let (Some(gp), Some(gr)) = (&plan.glue, &rels.glue) {
-        let base = 5 + plan.widths.len();
+        let base = 6 + plan.widths.len();
         for (t, (lr, cols, kind)) in
             crate::glue::glue_table_kinds(&gp.uns, gr).into_iter().enumerate()
         {
             gtables.push(FrameworkComponent::<GTableEval>::new(
                 alloc,
                 GTableEval { log_rows: lr, cols, kind },
+                unqm(claims.table_sums[base + t]),
+            ));
+        }
+    }
+
+    // stream II: the requantize seams, before the two ends.  Their weights are
+    // the wiring family's own `w` and `lam` on the dequant's `MatLayout` map, so
+    // a seam's input claim and its producer's `Out(0)` are two Horner sums over
+    // the same sequence under the same weights -- which is what equality means.
+    let mut rq_comps = vec![];
+    let mut quant_comps = vec![];
+    let mut rq_tabs = vec![];
+    if let Some(rr) = &rels.rq {
+        for (k, rp) in plan.rqs.iter().enumerate() {
+            let tie = rq_tie_w(w_glue, lam_glue, rp,
+                               claim_at(claims.rq_in.get(k).copied(), "rq_in"),
+                               claim_at(claims.rq_out.get(k).copied(), "rq_out"),
+                               claim_at(claims.rq_sc.get(k).copied(), "rq_sc"));
+            rq_comps.push(FrameworkComponent::<crate::requant::RequantEval>::new(
+                alloc,
+                crate::requant::RequantEval {
+                    tag: rp.name.clone(),
+                    log_rows: rp.lay.log_rows,
+                    per_row: rp.lay.per_row,
+                    chunks: rp.lay.chunks,
+                    v: rp.v,
+                    with_max: true,
+                    qnz: rels.qnz.clone(),
+                    rq3: rr.rq3.clone(),
+                    rq4: rr.rq4.clone(),
+                    scl2: rr.scl2.clone(),
+                    scl3: rr.scl3.clone(),
+                    r15: rels.range(15).clone(),
+                    rqv: Some(rr.rqv.clone()),
+                    tie: Some(tie),
+                },
+                next_use(claims),
+            ));
+        }
+        // stream NN: the quantize regions, between the seams and their shared
+        // tables -- the same order `Plan::pre_ids` and the component lists use
+        for (k, qp) in plan.quants.iter().enumerate() {
+            let tie = q_tie_w(w_glue, lam_glue, qp, p.nh,
+                              claim_at(claims.nn_in.get(k).copied(), "nn_in"),
+                              claim_at(claims.nn_out.get(k).copied(), "nn_out"));
+            // stream NN-3: this side's own division table, and the family's own
+            // `(q, nz)` table rather than the attention output's
+            let qr = rels.qq.as_ref().expect("the quantize regions draw their own tables");
+            quant_comps.push(FrameworkComponent::<crate::rope::QuantEval>::new(
+                alloc,
+                crate::rope::QuantEval {
+                    tag: qp.name.to_string(),
+                    log_rows: qp.lay.log_rows,
+                    per_row: qp.lay.per_row,
+                    chunks: qp.lay.chunks,
+                    bits: qp.bits,
+                    qnz: qr.qnz.clone(),
+                    rq3: qr.div[plan.q_tab_at(qp.bits)].clone(),
+                    rqv: rr.rqv.clone(),
+                    r15: rels.range(15).clone(),
+                    tie: Some(tie),
+                },
+                next_use(claims),
+            ));
+        }
+        let base = plan.rq_table_at();
+        let mut t = 0usize;
+        for v in &plan.rq_vars {
+            rq_tabs.push(FrameworkComponent::<TableEval>::new(
+                alloc,
+                TableEval {
+                    log_rows: crate::requant::rq_log_rows(*v),
+                    cols: (0..crate::requant::rq_tab_width(*v))
+                        .map(|k| crate::requant::rq_tab_col(*v, k)).collect(),
+                    kind: if *v == crate::requant::SVariant::Pow2 {
+                        TableKind::Frac(rr.rq3.clone())
+                    } else {
+                        TableKind::Mul(rr.rq4.clone())
+                    },
+                },
+                unqm(claims.table_sums[base + t]),
+            ));
+            t += 1;
+            rq_tabs.push(FrameworkComponent::<TableEval>::new(
+                alloc,
+                TableEval {
+                    log_rows: 15,
+                    cols: (0..crate::requant::scl_tab_width(*v))
+                        .map(|k| crate::requant::scl_tab_col(*v, k)).collect(),
+                    kind: if *v == crate::requant::SVariant::Pow2 {
+                        TableKind::Pair(rr.scl2.clone())
+                    } else {
+                        TableKind::Frac(rr.scl3.clone())
+                    },
+                },
+                unqm(claims.table_sums[base + t]),
+            ));
+            t += 1;
+        }
+        rq_tabs.push(FrameworkComponent::<TableEval>::new(
+            alloc,
+            TableEval { log_rows: 9,
+                        cols: crate::requant::RQV_COLS.iter().map(|c| id(*c)).collect(),
+                        kind: TableKind::Frac(rr.rqv.clone()) },
+            unqm(claims.table_sums[base + t]),
+        ));
+        t += 1;
+        // stream NN-3: the quantize family's own tables, in `Plan::pre_ids`'
+        // order -- one division table per side width, then the `(q, nz)` pair
+        if let Some(qr) = &rels.qq {
+            for (i, w) in plan.q_tabs.iter().enumerate() {
+                rq_tabs.push(FrameworkComponent::<TableEval>::new(
+                    alloc,
+                    TableEval { log_rows: crate::rope::qdiv_log_rows(*w),
+                                cols: (0..crate::rope::QDIV_COLS)
+                                    .map(|k| crate::rope::qdiv_col(*w, k)).collect(),
+                                kind: TableKind::Frac(qr.div[i].clone()) },
+                    unqm(claims.table_sums[base + t]),
+                ));
+                t += 1;
+            }
+            rq_tabs.push(FrameworkComponent::<TableEval>::new(
+                alloc,
+                TableEval { log_rows: crate::rope::qnz_log_rows(plan.q_nz_bits),
+                            cols: (0..2).map(|k| crate::rope::qnz_col(plan.q_nz_bits, k))
+                                .collect(),
+                            kind: TableKind::Pair(qr.qnz.clone()) },
                 unqm(claims.table_sums[base + t]),
             ));
         }
@@ -1754,7 +3672,8 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         let lay = plan.mat_lays[mi];
         let m = &plan.p.mats[mi];
         let tie = crate::argmax::ATie {
-            claimed: claims.am_key.first().copied().map(unqm).unwrap_or(SecureField::zero()),
+            claimed: claim_at(claims.am_key.first().copied(), "am_key"),
+            claimed_tok: claim_at(claims.head_tok.first().copied(), "head_tok"),
             tag: m.name.clone(),
             ..argmax_tie_w(w_glue, m.tokens, m.n_out, lay.per_row)
         };
@@ -1780,10 +3699,8 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         (Some(l), Some(er)) => {
             let g = plan.glue.as_ref().expect("the embedding gadget needs the wiring family");
             let mut tie = crate::embed::tie_w(w_glue, lam_glue, g.t.d, p.s, l);
-            tie.claimed =
-                claims.embed_out.first().copied().map(unqm).unwrap_or(SecureField::zero());
-            tie.claimed_tok =
-                claims.embed_tok.first().copied().map(unqm).unwrap_or(SecureField::zero());
+            tie.claimed = claim_at(claims.embed_out.first().copied(), "embed_out");
+            tie.claimed_tok = claim_at(claims.embed_tok.first().copied(), "embed_tok");
             let em = FrameworkComponent::<crate::embed::EmbedEval>::new(
                 alloc,
                 crate::embed::EmbedEval {
@@ -1799,15 +3716,17 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 alloc,
                 crate::embed::EmbTableEval { log_rows: l.log_tab, per_row: l.pe,
                                              rel: er.clone() },
-                unqm(claims.table_sums[plan.n_table_sums() - 1]),
+                unqm(claims.table_sums[plan.emb_table_at()]),
             );
             (Some(em), Some(et))
         }
         _ => (None, None),
     };
 
+
     BuiltComponents { chans, keys, rows, links, link_tie, ao, mats, walks, glue, exp_t, tables,
-                      gtables, argmax, embed, emb_tab, pows,
+                      gtables, argmax, embed, emb_tab, rqs: rq_comps, quants: quant_comps,
+                      rq_tabs, pows,
                       has_rows: plan.rows_band.clone() }
 }
 
@@ -1826,6 +3745,9 @@ fn argmax_tie_w(w: SecureField, tokens: usize, vocab: usize, per_row: usize)
         k_in: wpow(w, pr * tok),
         k_bd: wpow(w, -((v - pr) * tok + 1)),
         claimed: SecureField::zero(),
+        // stream KK: the token accumulator's step is `w` itself, one per token
+        k_tok: w,
+        claimed_tok: SecureField::zero(),
         tag: String::new(),
     }
 }
@@ -1891,6 +3813,31 @@ pub struct ProverTamper {
     /// everything inside the glue stays consistent and the only thing that can
     /// catch it is the dequant output tie.
     pub glue_add: Option<(usize, usize)>,
+    /// Stream II: a probe inside one requantize seam -- `(seam index, what)`.
+    /// Each leaves the region internally consistent and aims at one of its two
+    /// ties, or at the scale lookup.
+    pub rq: Option<(usize, crate::requant::RqTamper)>,
+    /// Stream II, control 3: bend one cell of a norm tail's *preprocessed*
+    /// weight block.  The region recomputes `h` from the bent weight, so every
+    /// constraint holds and the tree-0 root is what moves -- `root_ok` against
+    /// the statement's `pre_root` is the rejection, and it is a different kind
+    /// of rejection from every other control here.
+    pub glue_w: Option<usize>,
+    /// Stream NN: bend one cell of a rotation's *preprocessed* angle block.
+    /// The products are recomputed from the bent `cos`, so every constraint in
+    /// both halves still holds and the tree-0 root is what moves -- the same
+    /// shape stream II's `glue_w` has, under its own field so the two controls
+    /// cannot fire together and the probe stays a one-field rejection.
+    pub rope_w: Option<usize>,
+    /// Stream NN: a probe inside one quantize region -- `(region index, what)`.
+    /// Each leaves the region internally consistent and aims at one of its two
+    /// ties, at the division table, or at `pre_root`.
+    pub quant: Option<(usize, crate::rope::QTamper)>,
+    /// Stream NN: bend one cell of a **band's** own committed K, Q or V and
+    /// rebuild the band around it, so the attention it proves is honest and the
+    /// only thing that can see it is the band's new claim against the quantize
+    /// region's output.  `(which of K/Q/V, which cell)`.
+    pub band_qkv: Option<(usize, usize)>,
     /// Stream E: a tamper inside the composed argmax region
     pub argmax: Option<crate::argmax::Tamper>,
     /// Stream BB: a tamper inside the composed embedding region.  `TokRow` is
@@ -1910,6 +3857,40 @@ pub struct ProverTamper {
     pub fold_dent: Option<usize>,
     pub ao_clamp: Option<usize>,
     pub walk_over: Option<usize>,
+    /// Stream JJ (witness-slack section 7 item 1): round one *non-last* row of
+    /// the attention output against `den - 1`, self-consistently -- the whole
+    /// row's `denp`, `qm`, `sg` and `d` are rederived from it, so every
+    /// constraint and every lookup of the pre-change AIR holds and the pre-change
+    /// statement accepts a rounding by a denominator nothing pinned.  The index
+    /// is a flat `(h, t, ch)` site, as `ao_clamp`'s is.
+    pub ao_den: Option<usize>,
+    /// Stream JJ (E11): move one *row*'s `jo` by one and leave the token's
+    /// other rows alone.  Every `EPOW` lookup still lands on a real table row
+    /// and the row's own arithmetic is self-consistent, so only the `nofirst`
+    /// pin on `joff` -- "one output exponent per token" -- can reject it.
+    pub ao_jo: Option<usize>,
+    /// One slot's `num` doubled: a `(key, num, pj)` triple the `EPOW` table
+    /// does not carry, so only the window lookup can reject it.  The index is
+    /// a flat `(h, t, ch)` site.
+    pub ao_num: Option<usize>,
+    /// One slot's low accumulator limb moved by one, so `alo + 2^lo ahi` is no
+    /// longer `acc + acc_off`: the other half of the no-wrap window, and only
+    /// its own two range lookups can reject it.
+    pub ao_acc: Option<usize>,
+    /// One *token*'s `jo` moved by one, on every row of it, with the whole
+    /// region rederived.  This one must be **accepted**: `jo` is the prover's
+    /// choice inside the window and nothing in this statement reads the
+    /// attention output's scale.  It is the honest limit of what section 1f
+    /// buys, and the probe that says so.  The index is a token.
+    pub ao_jo_tok: Option<usize>,
+    /// Stream TT (E11), log row 73: one slot's committed magnitude replaced by
+    /// `-|acc|` -- the other root of the pin `(amag - acc)(amag + acc) = 0`,
+    /// so every constraint of the region still holds and every other lookup
+    /// lands.  As a field element it is about `2^31`, which is exactly the
+    /// forgery `2 mag num < p` exists to stop, and the only reader of it is
+    /// the high accumulator limb's range check.  The magnitude form only; the
+    /// index is a flat `(h, t, ch)` site, as `ao_num`'s is.
+    pub ao_mag: Option<usize>,
 }
 
 pub fn prove_layer(layer: &Layer, params: &Params, tamper: &ProverTamper) -> Composed {
@@ -1942,6 +3923,10 @@ pub struct Gen {
     pub am_region: Option<crate::argmax::ARegion>,
     /// stream BB: the embedding gadget's two regions, when it is composed
     pub emb_region: Option<crate::embed::ERegion>,
+    /// stream II: the requantize seams, in `Plan::rqs` order
+    pub rq_regions: Vec<crate::requant::RqRegion>,
+    /// stream NN: the quantize regions, in `Plan::quants` order
+    pub q_regions: Vec<crate::rope::QRegion>,
     pub n_deq_base: usize,
     pub pre_tables: Vec<Option<Eval>>,
     pub base_mults: Vec<Option<Eval>>,
@@ -1985,7 +3970,8 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     assert_eq!(layer.bands[0].log_table, p.log_table, "exp table rows disagree");
 
     let mut tables = Tables::new(layer.bands[0].table.clone(), p.log_table, p.kmax,
-                                 plan.round, p.ao_q_bits, plan.widths.clone());
+                                 plan.round, p.ao_q_bits, plan.widths.clone(),
+                                 plan.e_window().0, plan.e_window().1);
     if let Some(i) = tamper.norm_row {
         let i = i % tables.norm.len();
         tables.norm[i].m7 = (tables.norm[i].m7 + 1) % 128;
@@ -2043,7 +4029,21 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // stream Z: the fold region and the widened attention output's walk
             // both fill on the host, whatever the switches say
             || plan.specs.iter().any(|s| s.variant == DeqVariant::Fold)
-            || plan.walks.iter().any(|w| w.act_bits != 8),
+            || plan.walks.iter().any(|w| w.act_bits != 8)
+            // stream JJ (E11): an armed attnout tamper does too -- `ao_region`
+            // sets its own mode to 0 because the device fill has no `corrupt`
+            // path -- so its counters are the host's and the shared
+            // multiplicity columns have to be as well.  Without this the
+            // defaults cuda regime stops at "B7_M4_WFILL=1 but the attnout is
+            // host-built" and no attnout control can be run on the card.
+            || tamper.ao_clamp.is_some() || tamper.ao_den.is_some()
+            || tamper.ao_jo.is_some() || tamper.ao_num.is_some()
+            || tamper.ao_acc.is_some() || tamper.ao_jo_tok.is_some()
+            || tamper.ao_mag.is_some()
+            // stream TT (E11), log row 73: and the magnitude form, whose tenth
+            // column the fork's `b65_fill_attnout` does not write -- `ao_region`
+            // sets its own mode to 0 for it on both arms
+            || p.ao_acc_mag || p.ao_denp2,
     );
     let mut mult_exp = std::mem::take(&mut tables.m_exp);
     let mut mult_r = std::mem::take(&mut tables.m_r);
@@ -2110,15 +4110,20 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     crate::util::m4_add("gen/pre_bands", m4_t.elapsed().as_secs_f64());
 
     let m4_t = std::time::Instant::now();
-    let aor = ao_region(&layer.ao, p.ao_target, p.ao_q_bits, p.ao_rem_bits, &mut tables,
-                        None, tamper.ao_clamp);
+    let aor = ao_region(&layer.ao, p.ao_target, p.ao_q_bits, p.ao_rem_bits,
+                        (p.ao_acc_lo_bits, p.ao_acc_hi_bits), p.ao_acc_mag, p.ao_denp2,
+                        p.ao_jv_min, p.ao_jo_max,
+                        &mut tables, None, tamper.ao_clamp, tamper.ao_den, tamper.ao_jo,
+                        tamper.ao_num, tamper.ao_acc, tamper.ao_jo_tok, tamper.ao_mag);
 
     crate::util::m4_add("gen/attnout", m4_t.elapsed().as_secs_f64());
 
     let m4_t = std::time::Instant::now();
     let mut mat_regions = vec![];
-    for (m, sp) in layer.mats.iter().zip(&plan.specs) {
+    for (mi, (m, sp)) in layer.mats.iter().zip(&plan.specs).enumerate() {
         let r = mat_region(m, sp, &mut tables, plan.has_oside(&m.name),
+                           plan.oside_band(&m.name)
+                               .then(|| plan.p.hd / plan.mat_lays[mi].per_row),
                            (tamper.fold_qm, tamper.fold_dent));
         mat_regions.push(r);
     }
@@ -2198,6 +4203,11 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     let mut glue_b1: Value = json!(null);
     if let Some(gp) = &plan.glue {
         let gc = layer.glue.as_ref().expect("params ask for the glue, the witness has none");
+        // Stream II, at the merge with JJ: a synthetic layer's family is built
+        // in `Layer::synth_glue`, which also rewires the matmul inputs to be
+        // the family's own outputs -- JJ's marker-plus-substitution route is
+        // gone, and `synth_glue` sets `o_out`/`d_out` to the `o` and `down`
+        // dequant references so JJ's output ties still bite on the desk.
         assert_eq!(gc.d, gp.t.d, "the witness's d disagrees with the glue params");
         let mut gt = GlueTables::new(p.kmax, plan.round, &gp.uns);
         gt.norm = tables.norm.clone();
@@ -2210,12 +4220,25 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         // region reads the identical block -- the tie compares those, and B1's
         // own column is the separate check
         let mut tail_in: Vec<Vec<u16>> = vec![];
+        // stream II: and each norm's own sum of squares, one per token, which is
+        // what the tail's group 1 commits and `UnKind::NormR` turns into `r`
+        let mut ms_out: Vec<Vec<u16>> = vec![];
         // stream 0: xin + o_out into xmid, and the squares' first levels;
         // stream 1: xmid + d_out into xout, and norm2's
+        //
+        // Stream II, the head chunk: one reduction and no add.  `xin` is the
+        // last layer's committed residual, level 1 is the squares' tree alone,
+        // and there is no second stream to thread -- so the loop runs once,
+        // over an empty second operand, and the region's output group 1 (the
+        // add) does not exist to be compared.
+        let empty: Vec<u16> = vec![];
+        let sources: Vec<(&Vec<u16>, &Vec<u16>, &str)> = if gp.head_norm {
+            vec![(&empty, &empty, "xin_head")]
+        } else {
+            vec![(&gc.o_out, &gc.xmid, "xmid"), (&gc.d_out, &gc.xout, "xout")]
+        };
         let mut stream = t.lay(&gc.xin);
-        for (k, (add, want, wname)) in
-            [(&gc.o_out, &gc.xmid, "xmid"), (&gc.d_out, &gc.xout, "xout")].iter().enumerate()
-        {
+        for (k, (add, want, wname)) in sources.iter().enumerate() {
             let i1 = 2 * k;
             let (prog1, tag1) = (gp.regions[i1].prog.clone(), gp.regions[i1].tag.clone());
             let (prog2, tag2) =
@@ -2226,7 +4249,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                     stream[vi % n] ^= 1;
                 }
             }
-            let mut addv = t.lay(add);
+            let mut addv = if gp.head_norm { vec![] } else { t.lay(add) };
             if let Some((ri, vi)) = tamper.glue_add {
                 if ri == i1 {
                     let n = addv.len();
@@ -2234,46 +4257,73 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 }
             }
             tail_in.push(stream.clone());
+            let leaves = if gp.head_norm {
+                vec![stream.clone()]
+            } else {
+                vec![stream.clone(), addv]
+            };
             let w1 = crate::glue::GlueWitness::new(
-                rows1, vec![stream.clone(), addv], &prog1, plan.round,
+                rows1, leaves, &prog1, plan.round,
                 format!("B1 residual stream [{} x {}]", t.tokens, t.d));
             let tam1 = tamper.glue.filter(|(ri, _)| *ri == i1).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
             let r1 = crate::glue::glue_region(&w1, &prog1, plan.round, &tag1, &mut gt, tam1);
             crate::util::m4_add("gen/glue_region", t_gr.elapsed().as_secs_f64());
             // what the region computed is what the next one reads: that is what
-            // the tie says, and it is checked against B1's own column here
-            let got = t.unlay(&r1.outs[1]);
-            let bad = (0..t.tokens * t.d)
-                .filter(|i| crate::glue::canon(got[*i]) != crate::glue::canon(want[*i]))
-                .count();
-            mismatch.push(json!({"column": wname, "values": t.tokens * t.d, "mismatch": bad}));
+            // the tie says, and it is checked against B1's own column here.
+            // The head chunk's level 1 has no add, so there is no second output
+            // group and nothing to compare -- its own reference is the tail's.
+            let got = if gp.head_norm { vec![] } else { t.unlay(&r1.outs[1]) };
+            // streams JJ and II: a synthetic layer carries no B1 column to be
+            // right about, and an absent reference is reported as absent
+            // (`null`) rather than as zero mismatches.
+            if !gp.head_norm && want.len() >= t.tokens * t.d {
+                let bad = (0..t.tokens * t.d)
+                    .filter(|i| crate::glue::canon(got[*i]) != crate::glue::canon(want[*i]))
+                    .count();
+                mismatch.push(json!({"column": wname, "values": t.tokens * t.d,
+                                     "mismatch": bad}));
+            } else {
+                mismatch.push(json!({"column": wname, "values": 0,
+                                     "mismatch": serde_json::Value::Null,
+                                     "note": "the dump does not carry this column"}));
+            }
             let l2 = t.roots_to_l2(&r1.outs[0]);
             let w2 = crate::glue::GlueWitness::new(
                 t.tokens, vec![l2], &prog2, plan.round,
                 format!("the level-1 roots [{} x {}]", t.tokens, t.a));
+            // stream II: the tail reads this norm's own sum of squares, one per
+            // token -- `r` is its `UnKind::NormR` image and nothing else
             let tam2 = tamper.glue.filter(|(ri, _)| *ri == i1 + 1).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
             let r2 = crate::glue::glue_region(&w2, &prog2, plan.round, &tag2, &mut gt, tam2);
             crate::util::m4_add("gen/glue_region", t_gr.elapsed().as_secs_f64());
-            stream = t.lay(&got);
+            ms_out.push(r2.outs[0][..t.tokens].to_vec());
+            if !gp.head_norm {
+                stream = t.lay(&got);
+            }
             glue_regions.push(r1);
             glue_regions.push(r2);
         }
         // ---- stream E: h = (x * r) * w, once per norm -------------------------
         for (k, i) in gp.tails.iter().copied().enumerate() {
-            let (rcol, wcol, want, wname) = if k == 0 {
-                (&gc.r1, &gc.w1, &gc.h1, "x_q")
+            let (rcol, wcol, want, wname, rname) = if gp.head_norm {
+                (&gc.r1, &gc.w1, &gc.h1, "h_head", "r_head")
+            } else if k == 0 {
+                (&gc.r1, &gc.w1, &gc.h1, "x_q", "n1_out")
             } else {
-                (&gc.r2, &gc.w2, &gc.h2, "x_gate")
+                (&gc.r2, &gc.w2, &gc.h2, "x_gate", "n2_out")
             };
+            let un_r = crate::glue::UnKind::NormR { inv_d: gc.inv_d, eps: gc.eps };
             let prog = gp.regions[i].prog.clone();
             let tag = gp.regions[i].tag.clone();
-            // `r` is per token and a row is one `(residue, token)` pair, so the
-            // row's single leaf is its own token's `r`; `w` is per channel and
-            // constant down the tokens, so the row reads channels `res + j a`.
-            let rblk: Vec<u16> =
-                (0..rows1).map(|m| crate::glue::canon(rcol[m % t.tokens])).collect();
+            // stream II: a row is one `(residue, token)` pair, so its single
+            // group-1 leaf is its own token's sum of squares -- the reduction's
+            // published answer, not a committed `r`.  `w` is per channel and
+            // constant down the tokens, so the row reads channels `res + j a`;
+            // it is preprocessed now, so it is `pre` and not a group.
+            let msblk: Vec<u16> =
+                (0..rows1).map(|m| crate::glue::canon(ms_out[k][m % t.tokens])).collect();
             // B11 stream L, anatomy: the same shape of serial gather as the
             // SwiGLU's below -- `rows1 * nreal` canonicalisations, one row
             // independent of the next.
@@ -2285,9 +4335,18 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                     row[j] = crate::glue::canon(wcol[res + j * t.a]);
                 }
             });
+            // stream II's control 3: one norm-weight cell bent on the prover
+            // side.  It is preprocessed, so the constraint set stays satisfied
+            // and the *root* moves -- `root_ok` against the statement's
+            // `pre_root` is what rejects it, and the record says so.
+            if let Some(x) = tamper.glue_w.filter(|_| k == 0) {
+                let at = x % wblk.len();
+                wblk[at] ^= 1;
+                eprintln!("compose: norm weight cell {at} of {tag} bent (a rejection is the pass)");
+            }
             crate::util::m4_add("gen/glue_wblk", t_wb.elapsed().as_secs_f64());
-            let w = crate::glue::GlueWitness::new(
-                rows1, vec![tail_in[k].clone(), rblk, wblk], &prog, plan.round,
+            let w = crate::glue::GlueWitness::with_pre(
+                rows1, vec![tail_in[k].clone(), msblk], wblk, &prog, plan.round,
                 format!("B1 norm{} tail [{} x {}]", k + 1, t.tokens, t.d));
             let tam = tamper.glue.filter(|(ri, _)| *ri == i).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
@@ -2306,6 +4365,26 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                                      "mismatch": bad}));
             } else {
                 mismatch.push(json!({"column": wname, "values": 0,
+                                     "mismatch": serde_json::Value::Null,
+                                     "note": "the dump does not carry this column"}));
+            }
+            // stream II: and the derived `r` itself, against B1's own
+            // `n1_out`/`n2_out`.  The tail no longer commits `r`, so this is the
+            // one number that says the `NormR` table reproduces the model: a
+            // dump whose norm reduction is B1's fp32 accumulation rather than
+            // its balanced tree (`reduce = "fp32"`) will differ here, and the
+            // `x_q`/`x_gate` count above will differ with it.
+            if rcol.len() >= t.tokens {
+                let rbad = (0..t.tokens)
+                    .filter(|tt| {
+                        let got = crate::glue::un_image(un_r,
+                                                        crate::glue::canon(ms_out[k][*tt]));
+                        crate::glue::canon(got) != crate::glue::canon(rcol[*tt])
+                    })
+                    .count();
+                mismatch.push(json!({"column": rname, "values": t.tokens, "mismatch": rbad}));
+            } else {
+                mismatch.push(json!({"column": rname, "values": 0,
                                      "mismatch": serde_json::Value::Null,
                                      "note": "the dump does not carry this column"}));
             }
@@ -2346,6 +4425,17 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                     }
                 });
             crate::util::m4_add("gen/glue_deqref", t_dq.elapsed().as_secs_f64());
+            // Stream JJ (E11): the SwiGLU seam's control.  One of the region's
+            // two committed input copies is bent and the product is recomputed
+            // from it, so every constraint inside the region still holds and
+            // only the tie against the gate (or up) dequant region's published
+            // output can reject.  `vi` past `n` aims at `up`.
+            if let Some((ri, vi)) = tamper.glue_add {
+                if ri == i {
+                    let n2 = gate_out.len();
+                    if vi < n2 { gate_out[vi] ^= 1 } else { up_out[(vi - n2) % n2] ^= 1 }
+                }
+            }
             let prog = gp.regions[i].prog.clone();
             let tag = gp.regions[i].tag.clone();
             let w = crate::glue::GlueWitness::new(
@@ -2387,6 +4477,122 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             crate::util::m4_add("gen/glue_b1", t_b1.elapsed().as_secs_f64());
             glue_regions.push(r);
         }
+        // ---- stream NN: the rotation ----------------------------------------
+        //
+        // Two regions per side, in the plan's own order.  A row is one
+        // (token, head) and its `hd` leaves are that head's slice of the
+        // matmul's dequant output, so the row walks `hd` consecutive
+        // token-major positions and the tie is a flat Horner.  `cos` and
+        // `sgnsin` are preprocessed and depend on the token's **absolute**
+        // position, `pos0 + t`.
+        if let Some(rp) = &p.rope {
+            // the angle table, from the STATEMENT.  A dump that carries B1's own
+            // `inv_freq.f64` is checked against it below and never consumed:
+            // what tree 0 holds is a function of `Params`, which is stream LL's
+            // precondition for the cheap half of the weights-tree split.
+            let hd = p.hd;
+            let inv = rp.inv(hd);
+            if let Some(refv) = layer.rope.as_ref().and_then(|r| r.inv_ref.as_ref()) {
+                // Two comparisons, because the f64 vector is not what the proof
+                // commits and equality of it is the wrong bar.
+                //
+                // `theta ** x` is a libm `pow` in this crate and torch's own in
+                // `b1/model.py`, and the two round differently: on
+                // Llama-3.1-8B's `llama3` branch they disagree in 3 of 64 pairs
+                // by exactly one ulp of f64.  That is a rounding difference in
+                // a transcendental, not a different rotation, and asserting
+                // f64 equality made every real chunk refuse to prove.
+                //
+                // What tree 0 holds is `rope_at`'s bf16 `cos` and `sgnsin` at
+                // this chunk's own positions.  So the f64 gap is *reported*
+                // (`rope_inv_vs_b1`, which is what NN session 1 section 6 said
+                // it was), and the bf16 table the region actually commits is
+                // *asserted* -- every cell, at every position this chunk uses.
+                let bad = inv.iter().zip(refv).filter(|(a, b)| a != b).count();
+                let t_iv = std::time::Instant::now();
+                let cells: usize = (0..p.s)
+                    .into_par_iter()
+                    .map(|t| {
+                        let pos = rp.pos0 + t;
+                        let a = crate::rope::pre_row(&inv, hd, pos);
+                        let b = crate::rope::pre_row(refv, hd, pos);
+                        a.iter().zip(&b).filter(|(x, y)| x != y).count()
+                    })
+                    .sum();
+                crate::util::m4_add("gen/rope_invref", t_iv.elapsed().as_secs_f64());
+                assert_eq!(cells, 0,
+                           "the angle table the statement builds differs from the dump's \
+inv_freq in {cells} of {} committed bf16 cells: the rotation this chunk would prove is not \
+B1's (the f64 vectors differ in {bad} of {} places)",
+                           2 * hd * p.s, inv.len());
+                if bad != 0 {
+                    eprintln!("compose: rope inv_freq differs from the dump's in {bad} of {} \
+f64 places and in 0 of {} committed bf16 cells -- a `pow` rounding difference, not a \
+different rotation", inv.len(), 2 * hd * p.s);
+                }
+            }
+            for rr in &gp.ropes {
+                let mi = layer.mats.iter().position(|m| m.name == rr.name)
+                    .unwrap_or_else(|| panic!("--rope needs the {} matmul", rr.name));
+                let n_out = rr.heads * hd;
+                let rows = rr.tokens * rr.heads;
+                // the dequant region's own reference, which is exactly what its
+                // `Out(0)` claim folds -- so the tie below is between two folds
+                // of one sequence and not between two computations of it
+                let t_dq = std::time::Instant::now();
+                let mut deq = vec![0u16; rr.tokens * n_out];
+                deq.par_chunks_mut(n_out).enumerate().for_each(|(t, row)| {
+                    for (c, slot) in row.iter_mut().enumerate() {
+                        *slot = crate::layer::deq_ref(&layer.mats[mi], &plan.specs[mi], t, c);
+                    }
+                });
+                crate::util::m4_add("gen/rope_deqref", t_dq.elapsed().as_secs_f64());
+                // the control on the producer side: one dequant output copy
+                // bent, the whole rotation recomputed around it, so every
+                // constraint inside both regions still holds and only the tie
+                // against the matmul's own published output can reject
+                if let Some((ri, vi)) = tamper.glue_add {
+                    if ri == rr.mul {
+                        let n = deq.len();
+                        deq[vi % n] ^= 1;
+                    }
+                }
+                let mut pre = vec![0u16; rows * 2 * hd];
+                pre.par_chunks_mut(2 * hd).enumerate().for_each(|(j, row)| {
+                    row.copy_from_slice(&crate::rope::pre_row(&inv, hd, rp.pos0 + j / rr.heads));
+                });
+                // stream NN's control 3: one preprocessed angle bent.  The
+                // region stays satisfiable with the products recomputed around
+                // it, so `root_ok` against the statement's `pre_root` is the
+                // only thing that can reject -- the same shape stream II's
+                // norm-weight control has.
+                if let Some(x) = tamper.rope_w.filter(|_| rr.name == "q") {
+                    let at = x % pre.len();
+                    let was = pre[at];
+                    pre[at] = crate::rope::bend_pat(was);
+                    assert_ne!(crate::glue::split(pre[at]), crate::glue::split(was),
+                               "the rope angle probe did not fire at cell {at}");
+                    eprintln!("compose: rope angle cell {at} of rp{}m bent {was:#06x} -> \
+{:#06x} (a rejection is the pass)", rr.name, pre[at]);
+                }
+                let mprog = gp.regions[rr.mul].prog.clone();
+                let mtag = gp.regions[rr.mul].tag.clone();
+                let wm = crate::glue::GlueWitness::with_pre(
+                    rows, vec![deq], pre, &mprog, plan.round,
+                    format!("the {} dequant output [{} x {}]", rr.name, rr.tokens, n_out));
+                let tam = tamper.glue.filter(|(ri, _)| *ri == rr.mul).map(|(_, x)| x);
+                let rm = crate::glue::glue_region(&wm, &mprog, plan.round, &mtag, &mut gt, tam);
+                let aprog = gp.regions[rr.add].prog.clone();
+                let atag = gp.regions[rr.add].tag.clone();
+                let wa = crate::glue::GlueWitness::new(
+                    rows, vec![rm.outs[0].clone()], &aprog, plan.round,
+                    format!("the {} rotation's products [{} x {}]", rr.name, rows, 2 * hd));
+                let tam = tamper.glue.filter(|(ri, _)| *ri == rr.add).map(|(_, x)| x);
+                let ra = crate::glue::glue_region(&wa, &aprog, plan.round, &atag, &mut gt, tam);
+                glue_regions.push(rm);
+                glue_regions.push(ra);
+            }
+        }
         tables.m_norm = std::mem::take(&mut gt.m_norm);
         tables.m_frac = std::mem::take(&mut gt.m_frac);
         tables.off_table += gt.off_table;
@@ -2399,6 +4605,81 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         gtables = Some(gt);
     }
     crate::util::m4_add("gen/glue", m4_t.elapsed().as_secs_f64());
+
+    // ---- stream II: the requantize seams ------------------------------------
+    //
+    // Each reads its producing region's *computed* output -- not a column of
+    // the dump -- so what the seam requantizes is what the wiring family just
+    // proved, and the tie is what says the walk multiplied the result.  The
+    // per-token scale is the dump's own `jx`/`sx`, i.e. the same field element
+    // the matmul's dequant region commits, which is what leaves the remaining
+    // scale seam a one-constraint job.
+    let m4_t = std::time::Instant::now();
+    let mut rq_regions: Vec<crate::requant::RqRegion> = vec![];
+    for (k, rp) in plan.rqs.iter().enumerate() {
+        let g = plan.glue.as_ref().expect("a requantize seam needs the wiring family");
+        let reg = &glue_regions[rp.producer.0];
+        let x = if rp.producer.0 == g.swiglu.unwrap_or(usize::MAX) {
+            g.tff.expect("the SwiGLU's tiling").unlay(&reg.outs[0])
+        } else {
+            g.t.unlay(&reg.outs[0])
+        };
+        let m0 = &layer.mats[plan.walks[rp.walk].mats[0]];
+        let r = crate::requant::rq_region(
+            &rp.name, &x, &m0.qx, &m0.jx.iter().map(|v| *v as i64).collect::<Vec<_>>(),
+            &m0.sx, rp.tokens, rp.n, rp.v, rp.lay, &mut tables,
+            tamper.rq.filter(|(i, _)| *i == k).map(|(_, t)| t));
+        rq_regions.push(r);
+    }
+    crate::util::m4_add("gen/requant", m4_t.elapsed().as_secs_f64());
+
+    // ---- stream NN: the three quantize regions -------------------------------
+    //
+    // q and k read the rotation's own output, v its matmul's dequant reference:
+    // in both cases the region consumes what another region *proved*, not a
+    // column of the dump, so the input tie compares two folds of one sequence.
+    // `want` is the bands' own committed integers, gathered onto the query-head
+    // grid -- a reference count and nothing the AIR reads.
+    let m4_t = std::time::Instant::now();
+    let mut q_regions: Vec<crate::rope::QRegion> = vec![];
+    let nn_cols = (!plan.quants.is_empty()).then(|| nn_band_cols(&plan, layer));
+    for (k, qp) in plan.quants.iter().enumerate() {
+        let mi = layer.mats.iter().position(|m| m.name == qp.name)
+            .unwrap_or_else(|| panic!("--rope needs the {} matmul", qp.name));
+        let x: Vec<u16> = match qp.producer {
+            Some((ri, _)) => glue_regions[ri].outs[0].clone(),
+            None => {
+                let mut v = vec![0u16; qp.tokens * qp.n];
+                let n_out = qp.n;
+                v.par_chunks_mut(n_out).enumerate().for_each(|(t, row)| {
+                    for (c, slot) in row.iter_mut().enumerate() {
+                        *slot = crate::layer::deq_ref(&layer.mats[mi], &plan.specs[mi], t, c);
+                    }
+                });
+                v
+            }
+        };
+        // the exponents, from the query-head grid onto the producer's own: a
+        // GQA group's `rep` query heads share one scale, and `Layer::qkv_j`
+        // says so out loud rather than picking a head quietly
+        let jj = layer.qkv_j(qp.name, qp.heads, qp.hd, qp.rep);
+        let want: Vec<i64> = nn_cols.as_ref().map(|(q, kk, vv)| {
+            let src = match qp.name { "q" => q, "k" => kk, _ => vv };
+            (0..qp.tokens)
+                .flat_map(|t| (0..qp.n).map(move |c| (t, c)))
+                .map(|(t, c)| {
+                    let (kv, ch) = (c / qp.hd, c % qp.hd);
+                    src[t * plan.p.nh * qp.hd + kv * qp.rep * qp.hd + ch]
+                })
+                .collect()
+        }).unwrap_or_default();
+        let r = crate::rope::q_region(
+            qp.name, &x, &jj, Some(&want), qp.tokens, qp.n, qp.hd, qp.bits, plan.q_nz_bits,
+            qp.lay, &mut tables,
+            tamper.quant.filter(|(i, _)| *i == k).map(|(_, t)| t));
+        q_regions.push(r);
+    }
+    crate::util::m4_add("gen/quant", m4_t.elapsed().as_secs_f64());
 
     let m4_t = std::time::Instant::now();
     // ---- shared tables (tree 0 tail) and their multiplicities (tree 1 tail) --
@@ -2499,6 +4780,18 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             pre_tables.push(None);
         }
     }
+    // Stream JJ (E11): the exponent window table.  Host-built on both arms --
+    // it is `1 << log_epow` rows, a few dozen at most -- so it sits after the
+    // 21 columns `tables_dev` builds and the device parity check skips it.
+    let log_epow = plan.log_epow();
+    {
+        let rows = tables.epow_rows();
+        for k in 0..3 {
+            pre_logs.push(log_epow);
+            pre_tables.push(Some(eval_of(log_epow, rows.iter()
+                .map(|r| m31_u32(match k { 0 => r.0, 1 => r.1, _ => r.2 })).collect())));
+        }
+    }
     // `m_exp` needs a counter to sum, and there is one only where a band's fill
     // ran on the device (21.1). With the bands on the host it stays a host
     // column and a 4a upload -- the honest accounting, not a special case.
@@ -2538,6 +4831,13 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             base_mults.push(None);
         }
     }
+    // and its multiplicity, bumped by `ao_region` (and, on the device arm, by
+    // the host loop `ao_region_dev` runs beside the kernel -- `e = jv - jo` is
+    // a function of `ao.jv`, `ao.jo` and the layout alone, so no counter has to
+    // come back off the card for it)
+    mult_logs.push(log_epow);
+    base_mults.push(Some(eval_of(log_epow,
+                                 tables.m_epow.iter().map(|m| m31_u32(*m)).collect())));
     crate::util::m4_add("gen/tables", m4_t.elapsed().as_secs_f64());
 
     // B7a milestone 4 (section 3 row 1): the shared tables' columns, uploaded
@@ -2587,6 +4887,15 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         let d = aor.dev.as_ref().expect("B7_M4_WFILL=1 but the attnout is host-built");
         pre_counters[3].push(&d.m_qnz);
         pre_counters[ri(p.ao_rem_bits)].push(&d.m_rem);
+        // stream JJ (E11): the accumulator window's two limb tables.  Every
+        // shared table a device fill bumps must hand its counter over here, or
+        // `tables_dev` has nothing to sum for it and stops -- which is what the
+        // `ao_acc_hi_bits` table did on the H200's reference chunk ("shared
+        // table 4 has no device counter to sum"), the defaults cuda regime
+        // being the only place that asks.  `EPOW` is deliberately not here: its
+        // column is a host loop on both arms, so it has no device counter.
+        pre_counters[ri(p.ao_acc_lo_bits)].push(&d.m_acc_lo);
+        pre_counters[ri(p.ao_acc_hi_bits)].push(&d.m_acc_hi);
         for (b, a) in layer.bands.iter().enumerate() {
             // A corner band is host-built (the static fill kernels do not know
             // its layout), so its bumps sit in the host multiplicity arrays and
@@ -2615,11 +4924,11 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     });
     if pre_mode == 2 {
         let d = dev_rest.as_ref().unwrap();
-        let hp: Vec<&Eval> =
-            (2..pre_tables.len()).map(|i| crate::devtab::htab(&pre_tables, i)).collect();
+        let hp: Vec<&Eval> = (2..pre_tables.len() - 3)
+            .map(|i| crate::devtab::htab(&pre_tables, i)).collect();
         crate::devpre::check_run("shared tables", &hp, &d.pre);
         if !d.mult.is_empty() {
-            let hm: Vec<&Eval> = (1..base_mults.len())
+            let hm: Vec<&Eval> = (1..base_mults.len() - 1)
                 .map(|i| crate::devtab::htab(&base_mults, i)).collect();
             crate::devpre::check_run("shared multiplicities", &hm, &d.mult);
         }
@@ -2637,11 +4946,19 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             match dev_rest {
                 Some(r) => {
                     pre.extend(r.pre);
+                    // stream JJ: the exponent window has no device build, so
+                    // its three columns and its multiplicity are uploaded
+                    let n = pre_tables.len();
+                    pre.extend(pre_tables[n - 3..].iter()
+                        .map(|e| crate::device::upload_col(crate::devtab::hone(e))));
                     if r.mult.is_empty() {
                         mult.extend(base_mults[1..].iter()
                             .map(|e| crate::device::upload_col(crate::devtab::hone(e))));
                     } else {
                         mult.extend(r.mult);
+                        let m = base_mults.len();
+                        mult.extend(base_mults[m - 1..].iter()
+                            .map(|e| crate::device::upload_col(crate::devtab::hone(e))));
                     }
                 }
                 None => {
@@ -2660,8 +4977,8 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     let glue_tamper_fired =
         tamper.glue.map(|_| glue_regions.iter().map(|r| r.fired).sum::<usize>());
     Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
-          glue_regions, glue_tcols, glue_mcols, glue_b1, am_region, emb_region,
-          n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
+          glue_regions, glue_tcols, glue_mcols, glue_b1, am_region, emb_region, rq_regions,
+          q_regions, n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
           m4e_tabdev, trace_secs, pre_key, bounds_tamper: tamper.bounds, glue_tamper_fired }
 }
 
@@ -2669,8 +4986,8 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
 /// interaction, the components and the proof.
 pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
-              glue_regions, glue_tcols, glue_mcols, glue_b1, am_region, emb_region,
-              n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
+              glue_regions, glue_tcols, glue_mcols, glue_b1, am_region, emb_region, rq_regions,
+              q_regions, n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
               m4e_tabdev, trace_secs, pre_key, bounds_tamper, glue_tamper_fired } = g;
     let p = &plan.p;
     let t0 = std::time::Instant::now();
@@ -2764,6 +5081,91 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // And the glue's shared tables close both trees, as before.
     pre_all.extend(glue_tcols.iter().map(AnyCol::Host));
     base_all.extend(glue_mcols.iter().map(AnyCol::Host));
+    // stream II: the requantize seams join both trees before the two ends, in `Plan::pre_ids`'
+    // order -- every seam's four selectors, then the division and scale tables
+    // per variant, then the sign table.  The tables' own multiplicity columns
+    // follow in tree 1, in the same order, matching the component list.
+    let rq_tab_pre: Vec<Eval> = plan.rq_vars.iter()
+        .flat_map(|v| {
+            let mut c = crate::requant::rq_tab_cols(*v);
+            c.extend(crate::requant::scl_tab_cols(*v));
+            c
+        })
+        .chain(if rq_regions.is_empty() && q_regions.is_empty() { vec![] }
+               else { crate::requant::rqv_tab_cols() })
+        // stream NN-3: and the quantize family's own two, last
+        .chain(plan.q_tabs.iter().flat_map(|w| crate::rope::qdiv_tab_cols(*w)))
+        .chain(if plan.quants.is_empty() { vec![] }
+               else { crate::rope::qnz_tab_cols(plan.q_nz_bits) })
+        .collect();
+    // one multiplicity vector per table, merged across the seams that share it
+    let rq_tab_mult: Vec<Eval> = {
+        let mut out = vec![];
+        for v in &plan.rq_vars {
+            let lr = crate::requant::rq_log_rows(*v);
+            let mut m = vec![0u32; 1usize << lr];
+            let mut ms = vec![0u32; 1usize << 15];
+            for r in rq_regions.iter().filter(|r| r.v == *v) {
+                for (a, b) in m.iter_mut().zip(&r.m_rq) {
+                    *a += *b;
+                }
+                for (a, b) in ms.iter_mut().zip(&r.m_scl) {
+                    *a += *b;
+                }
+            }
+            out.push(crate::common::eval_of(lr, m.iter().map(|x| m31_u32(*x)).collect()));
+            out.push(crate::common::eval_of(15, ms.iter().map(|x| m31_u32(*x)).collect()));
+        }
+        if !rq_regions.is_empty() || !q_regions.is_empty() {
+            let mut m = vec![0u32; 512];
+            for r in &rq_regions {
+                for (a, b) in m.iter_mut().zip(&r.m_rqv) {
+                    *a += *b;
+                }
+            }
+            for r in &q_regions {
+                for (a, b) in m.iter_mut().zip(&r.m_rqv) {
+                    *a += *b;
+                }
+            }
+            out.push(crate::common::eval_of(9, m.iter().map(|x| m31_u32(*x)).collect()));
+        }
+        // stream NN-3: the quantize family's own two, in `Plan::pre_ids`' order.
+        // A division table is shared by every side of its width; the `(q, nz)`
+        // table by all three regions.
+        for w in &plan.q_tabs {
+            let lr = crate::rope::qdiv_log_rows(*w);
+            let mut m = vec![0u32; 1usize << lr];
+            for r in q_regions.iter().filter(|r| r.bits == *w) {
+                for (a, b) in m.iter_mut().zip(&r.m_rq) {
+                    *a += *b;
+                }
+            }
+            out.push(crate::common::eval_of(lr, m.iter().map(|x| m31_u32(*x)).collect()));
+        }
+        if !plan.quants.is_empty() {
+            let lr = crate::rope::qnz_log_rows(plan.q_nz_bits);
+            let mut m = vec![0u32; 1usize << lr];
+            for r in &q_regions {
+                for (a, b) in m.iter_mut().zip(&r.m_qnz) {
+                    *a += *b;
+                }
+            }
+            out.push(crate::common::eval_of(lr, m.iter().map(|x| m31_u32(*x)).collect()));
+        }
+        out
+    };
+    for r in &rq_regions {
+        pre_all.extend(r.pre.iter().map(AnyCol::Host));
+        base_all.extend(r.base.iter().map(AnyCol::Host));
+    }
+    // stream NN: the quantize regions, between the seams and the shared tables
+    for r in &q_regions {
+        pre_all.extend(r.pre.iter().map(AnyCol::Host));
+        base_all.extend(r.base.iter().map(AnyCol::Host));
+    }
+    pre_all.extend(rq_tab_pre.iter().map(AnyCol::Host));
+    base_all.extend(rq_tab_mult.iter().map(AnyCol::Host));
     // stream E: the argmax region closes both trees, matching `pre_ids` and the
     // component order -- appending it moves no family before it
     if let Some(r) = am_region.as_ref() {
@@ -2816,6 +5218,11 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // committed it before (`B7_M5_PRECACHE=1`); otherwise committed here and,
     // with the cache on, kept -- or, in mode 2, checked against what is kept.
     let pre_sizes: Vec<u32> = pre_all.iter().map(|c| c.log_size()).collect();
+    // Stream LL (E11): the classification is the same list, in the same order,
+    // at the same heights -- asserted here so `pre_split` and tree 0 cannot
+    // drift apart, on every shape any gate runs.
+    assert_eq!(pre_sizes, plan.pre_split_sizes(),
+               "pre_split disagrees with the committed tree 0");
     match crate::precache::take(pre_key, &pre_sizes) {
         Some(tree) => {
             sess.commit_cached(tree, pre_sizes);
@@ -2830,7 +5237,40 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             crate::precache::fill(pre_key, &sess);
         }
     }
-    crate::util::m4_add("wall/commit_pre", m4_t.elapsed().as_secs_f64());
+    let ll_pre_secs = m4_t.elapsed().as_secs_f64();
+    crate::util::m4_add("wall/commit_pre", ll_pre_secs);
+    // Stream LL (E11), `notes/witness-slack.md` section 5 item 1: `b65
+    // expect-root` wants tree 0's root and nothing after it.  The stop is here
+    // rather than in a second builder so that the derived root is the prover's
+    // own by construction -- there is no second implementation of tree 0 to
+    // drift.  `experiments/b13/ll/gate.sh` step 3 is the control that says the
+    // two agree: the same shape through `compose` and through `expect-root`.
+    if PRE_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
+        let root = sess.tree_root(0);
+        crate::util::emit("expect_root", json!({
+            "pre_root": root,
+            "model": layer.model_hash(),
+            "layer": layer.layer,
+            "block": layer.block,
+            "source": layer.source,
+            "c": p.c,
+            "s": p.s,
+            // Stream LL box half: `master_table_bits` is the one shape field that
+            // is neither the statement's nor the model's -- it comes off each
+            // extraction's own manifest -- so the row carries it and
+            // `model-roots` pins it per layer across blocks.
+            "log_table": p.log_table,
+            // whether this row was derived from the model half of the dump alone
+            // (`--weights-only`), which is the property that makes it a
+            // *verifier's* derivation and not a second prover's
+            "weights_only": layer.source.starts_with("B6.5 model-only"),
+            "split": plan.pre_split_report(),
+            "trace_secs": trace_secs,
+            "commit_pre_secs": ll_pre_secs,
+            "peak_rss_bytes": crate::util::peak_rss_bytes(),
+        }));
+        std::process::exit(0);
+    }
     let m4_t = std::time::Instant::now();
     if m4_refs {
         sess.commit_any(base_all);
@@ -2847,6 +5287,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         let qnz = sess.draw_relation(PairRel::draw);
         let ranges: Vec<RangeRel> =
             widths.iter().map(|_| sess.draw_relation(RangeRel::draw)).collect();
+        // stream JJ, in `Rels::draw`'s order
+        let epow = sess.draw_relation(FracRel::draw);
         let glue = plan.glue.as_ref().map(|g| GlueRels {
             norm: norm.clone(),
             frac: frac.clone(),
@@ -2861,7 +5303,22 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         let emb = plan.emb.map(|l| {
             sess.draw_relation(|ch| crate::embed::EmbRel::draw(ch, l.arity()))
         });
-        Rels { exp, norm, frac, mul, qnz, widths: widths.clone(), ranges, glue, emb }
+        // stream II: last, after the embedding's, so the flag-off draw order is
+        // the one every recorded digest was taken under
+        let rq = plan.needs_rq_rels().then(|| RqRels {
+            rqv: sess.draw_relation(FracRel::draw),
+            rq3: sess.draw_relation(FracRel::draw),
+            rq4: sess.draw_relation(MulRel::draw),
+            scl2: sess.draw_relation(PairRel::draw),
+            scl3: sess.draw_relation(FracRel::draw),
+        });
+        // stream NN-3: and the quantize family's own tables, last of all
+        let qq = (!plan.q_tabs.is_empty()).then(|| QuantRels {
+            div: plan.q_tabs.iter().map(|_| sess.draw_relation(FracRel::draw)).collect(),
+            qnz: sess.draw_relation(PairRel::draw),
+        });
+        Rels { exp, norm, frac, mul, qnz, epow, widths: widths.clone(), ranges, glue, emb, rq,
+               qq }
     };
     let n_ch = plan.n_challenges();
     let ch = sess.draw_felts(n_ch);
@@ -2913,6 +5370,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     ]
     .into_iter()
     .chain(plan.widths.iter().map(|w| (format!("table/range{w}"), *w)))
+    .chain(std::iter::once(("table/epow".to_string(), plan.log_epow())))
     .collect();
     let affinity: Vec<crate::gkrlink::Affinity> = if crate::util::m4_switch_off("B11_GKR_AFFINE") {
         vec![]
@@ -3016,16 +5474,36 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         if let Some(g) = gkr.as_mut() {
             g.reg = crate::gkrlink::Reg::Band(b);
         }
+        // stream NN: the corner bands' own K, Q and V claims.  The weights are
+        // the verifier's own; the claims are what this pass computes, so the
+        // builder is handed a blank statement and its `claimed` fields are
+        // unused here.
+        let nn_t = nn_band_ties(&plan, b, w_glue, &Claims::default());
+        // stream NN (NN-2): and a prefix band's Q claim alone
+        let nn_qt = nn_band_qtie(&plan, b, w_glue, &Claims::default());
+        let nn_bind = match (nn_t.as_ref(), nn_qt.as_ref()) {
+            (Some((k, q, v)), _) =>
+                Some(attn_trace::NnBind { k: Some(k), q, v: Some(v) }),
+            (None, Some(q)) => Some(attn_trace::NnBind { k: None, q, v: None }),
+            (None, None) => None,
+        };
         let it = attn_trace::interaction_phase(a, l, &plan.cfg, &pow, &rels.exp, &rels.ranges,
                                                &band_committed[b], &plan.widths, false,
                                                plan.rows_band[b], air.as_ref(),
-                                               gkr.as_deref_mut());
+                                               gkr.as_deref_mut(), nn_bind.as_ref());
         crate::util::m4_add("int/bands_build", t_ib.elapsed().as_secs_f64());
         inter_all.extend(it.cols);
         inter_mark(&format!("band{b}{}", if a.corner { " (corner)" } else { "" }),
                    &inter_all, &mut inter_seen, &mut inter_split);
         claims.bands.push([qm(it.claimed_chan), qm(it.claimed_hs), qm(it.claimed_av),
                            qm(it.claimed_sn), qm(it.claimed_am), qm(it.claimed_az)]);
+        if it.claimed_nn.len() == 3 {
+            claims.band_qkv.push([qm(it.claimed_nn[0]), qm(it.claimed_nn[1]),
+                                  qm(it.claimed_nn[2])]);
+        } else if it.claimed_nn.len() == 1 {
+            // stream NN (NN-2): a prefix band publishes Q alone
+            claims.band_q.push(qm(it.claimed_nn[0]));
+        }
         claims.use_sums.extend(it.use_sums.iter().map(|v| qm(*v)));
     }
     crate::util::m4_add("int/bands", m4_t.elapsed().as_secs_f64());
@@ -3167,6 +5645,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 return match (c, &r.dev) {
                     (RCol::Glue(i), Some(d)) => Src::Dev(d.base[*i].device_ptr),
                     (RCol::Glue(i), None) => Src::Host(&r.base[*i]),
+                    // stream OO: `Prog::pre_at` is where the pair sits in the
+                    // region's own preprocessed list, the same index the fill
+                    // reads through `glue::src_cols_any`'s `PRE_TAG`
+                    (RCol::GluePre(i, k), Some(d)) =>
+                        Src::Dev(d.pre[r.prog.pre_at(*i, *k)].device_ptr),
+                    (RCol::GluePre(i, k), None) =>
+                        Src::Host(&r.pre[r.prog.pre_at(*i, *k)]),
                     _ => panic!("a non-glue column named on a glue region"),
                 };
             }
@@ -3182,6 +5667,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 return match (c, &aor.dev) {
                     (RCol::Ao(i), Some(d)) => Src::Dev(d.base[*i].device_ptr),
                     (RCol::Ao(i), None) => Src::Host(&aor.base[*i]),
+                    (RCol::AoPre(sl), Some(d)) => Src::Dev(d.pre[*sl].device_ptr),
+                    (RCol::AoPre(sl), None) => Src::Host(&aor.pre[*sl]),
                     _ => panic!("a non-attnout column named on the attnout region"),
                 };
             }
@@ -3303,20 +5790,35 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     inter_mark("attnout", &inter_all, &mut inter_seen, &mut inter_split);
     claims.ao_out = qm(aoi.claimed_out);
     claims.ao_den = qm(aoi.claimed_den);
+    claims.ao_q = vec![qm(aoi.claimed_q)];
     if !p.gkr_attnout {
         claims.use_sums.push(qm(aoi.use_sum));
     }
     crate::util::m4_add("int/attnout", m4_t.elapsed().as_secs_f64());
     let m4_t = std::time::Instant::now();
-    for (m, reg) in layer.mats.iter().zip(&mat_regions) {
+    claims.deq_sc = vec![[0u32; 4]; if plan.rqs.is_empty() { 0 } else { layer.mats.len() }];
+    for (mi, (m, reg)) in layer.mats.iter().zip(&mat_regions).enumerate() {
         // stream E: the output side rides on the wiring family's tie challenge,
         // so it exists exactly when that family does and the plan says this
         // matmul publishes one
         let ow = plan.has_oside(&m.name).then(|| {
-            oside_w(w_glue, lam_glue, m.tokens, m.n_out, reg.lay.per_row,
-                    plan.oside_kind(&m.name))
+            plan.oside_of(w_glue, lam_glue, &m.name, m.tokens, m.n_out, reg.lay.per_row)
         });
-        let it = mat_interaction(m, reg, rv, s, &rels, ow.as_ref(), p.gkr_dequant);
+        // stream II (E11): the x-side scale's fold, on the matmuls a seam feeds.
+        //
+        // Stream SS: not on a folded one.  This claim folds the region's *shared*
+        // columns as `(ms, es)`, the language the seam's own scale claim is in,
+        // and a fold region's second shared column is not `es` -- it is
+        // `dent = 2^(G_t - alpha)`, the token half of the divisor.  Folding it
+        // would compare two different quantities and the honest proof would not
+        // prove.  The tie is named open instead (`rq_scale_open`); closing it
+        // wants `es` committed beside `dent` with a power-of-two lookup pinning
+        // the one to the other, which is a column and a table this stream did
+        // not add.
+        let sc = (plan.rqs.iter().any(|rp| plan.walks[rp.walk].mats.contains(&mi))
+                  && plan.specs[mi].variant != DeqVariant::Fold)
+            .then_some((w_glue, lam_glue));
+        let it = mat_interaction(m, reg, rv, s, &rels, ow.as_ref(), p.gkr_dequant, sc);
         inter_all.extend(it.cols);
         inter_mark(&format!("dequant/{}", m.name), &inter_all, &mut inter_seen,
                    &mut inter_split);
@@ -3333,6 +5835,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             } else {
                 claims.deq_out.push(qm(c));
             }
+        }
+        if let Some(c) = it.claimed_sc {
+            claims.deq_sc[mi] = qm(c);
         }
     }
     // Stream E: the head's key claim against B1's own `key_head` column.  The
@@ -3386,6 +5891,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         inter_mark(&format!("walk/{}", reg.name), &inter_all, &mut inter_seen,
                    &mut inter_split);
         claims.walk_acc.push(it.claimed.iter().map(|v| qm(*v)).collect());
+        // stream II: and the group's claim over its own committed activations,
+        // pushed for every group whether or not a seam consumes it -- `o`'s
+        // counterparty is stream JJ's to publish, and this is the half of that
+        // seam II owns.
+        if plan.glue.is_some() {
+            claims.walk_qx.push(qm(it.qx_claim));
+        }
         if !p.gkr_walks {
             claims.use_sums.push(qm(it.use_sum));
         }
@@ -3506,6 +6018,25 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                                       "log_rows": *w, "key_cols": 1, "looks": 1}));
             claims.table_sums.push(qm(sum));
         }
+        // stream JJ: the exponent window, last of the core tables
+        {
+            let nw = plan.widths.len();
+            let lj = plan.log_epow();
+            let (c, sum) = crate::devfrac::frac_cols(
+                &m4e_air.tables[4 + nw].eval, "table epow", lj,
+                tc(&pre_tables, &tab_pre, 17 + nw, 3),
+                tc(&base_mults, &tab_mult, 5 + nw, 1),
+                || {
+                    let refs: Vec<&Eval> =
+                        (0..3).map(|i| htab(&pre_tables, 17 + nw + i)).collect();
+                    table_col(lj, &rels.epow, &refs, htab(&base_mults, 5 + nw))
+                });
+            inter_all.extend(c);
+            inter_mark("table/epow", &inter_all, &mut inter_seen, &mut inter_split);
+            table_regions.push(json!({"region": "table/epow", "log_rows": lj,
+                                      "key_cols": 3, "looks": 1}));
+            claims.table_sums.push(qm(sum));
+        }
         // The glue's tables have no device path (and no generated kernels), so
         // their sides keep the hand-written builder, reading the owned glue
         // vectors directly.
@@ -3534,6 +6065,110 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     crate::util::m4_add("int/tables", m4_t.elapsed().as_secs_f64());
 
+    // stream II: the requantize seams' interaction columns, before the two ends'.  Within
+    // a seam the AIR reads its two Horner accumulators before it finalizes its
+    // LogUp, so the tie columns come before the fraction columns here too; the
+    // seams' shared tables follow, in `Plan::pre_ids`' order.
+    let m4_t = std::time::Instant::now();
+    if let Some(rr) = rels.rq.as_ref() {
+        for (k, reg) in rq_regions.iter().enumerate() {
+            let tie = rq_tie_w(w_glue, lam_glue, &plan.rqs[k],
+                               SecureField::zero(), SecureField::zero(),
+                               SecureField::zero());
+            let (cols, use_sum, cin, cout, csc) = crate::requant::rq_interaction(
+                reg, &tie, &rels.qnz, &rr.rq3, &rr.rq4, &rr.scl2, &rr.scl3,
+                rels.range(15), &rr.rqv);
+            inter_all.extend(crate::device::host_cols(cols));
+            claims.rq_in.push(qm(cin));
+            claims.rq_out.push(qm(cout));
+            claims.rq_sc.push(qm(csc));
+            claims.use_sums.push(qm(use_sum));
+            inter_mark(&format!("requant/{}", reg.tag), &inter_all, &mut inter_seen,
+                       &mut inter_split);
+        }
+        // stream NN: and the quantize regions, in the same place the components
+        // and the preprocessed ids put them
+        for (k, reg) in q_regions.iter().enumerate() {
+            let qp = &plan.quants[k];
+            let tie = q_tie_w(w_glue, lam_glue, qp, p.nh,
+                              SecureField::zero(), SecureField::zero());
+            let qr = rels.qq.as_ref().expect("the quantize regions draw their own tables");
+            let (cols, use_sum, cin, cout) = crate::rope::q_interaction(
+                reg, &tie, qp.hd, &qr.qnz, &qr.div[plan.q_tab_at(qp.bits)],
+                rels.range(15), &rr.rqv);
+            inter_all.extend(crate::device::host_cols(cols));
+            claims.nn_in.push(qm(cin));
+            claims.nn_out.push(qm(cout));
+            claims.use_sums.push(qm(use_sum));
+            inter_mark(&format!("quant/{}", reg.tag), &inter_all, &mut inter_seen,
+                       &mut inter_split);
+        }
+        // the table sides, one per preprocessed table, in the same order the
+        // ids and the components are in: per variant a division table and a
+        // scale table, then the sign table.
+        let mut pi = 0usize; // cursor into `rq_tab_pre`
+        let mut mi = 0usize; // cursor into `rq_tab_mult`
+        use stwo::prover::backend::simd::m31::PackedM31;
+        use stwo::prover::backend::simd::qm31::PackedQM31;
+        use stwo_constraint_framework::Relation;
+        // stream NN-3: the combiner is passed in rather than selected by an
+        // index, because the quantize family's tables are relations of their
+        // own and the seams' five no longer cover the list
+        let side = |lr: u32, ncol: usize, pi: usize, mi: usize,
+                    comb: &(dyn Fn(&[PackedM31]) -> PackedQM31 + Sync)| {
+            crate::plogup::build(lr, 1, |_, vr| {
+                let vals: Vec<PackedM31> = (0..ncol).map(|k| rq_tab_pre[pi + k].data[vr]).collect();
+                (-PackedQM31::from(rq_tab_mult[mi].data[vr]), comb(&vals))
+            })
+        };
+        for v in &plan.rq_vars {
+            let is_p2 = *v == crate::requant::SVariant::Pow2;
+            let lr = crate::requant::rq_log_rows(*v);
+            let w = crate::requant::rq_tab_width(*v);
+            let (c, sum) = if is_p2 {
+                side(lr, w, pi, mi, &|x| rr.rq3.combine(x))
+            } else {
+                side(lr, w, pi, mi, &|x| rr.rq4.combine(x))
+            };
+            inter_all.extend(crate::device::host_cols(c));
+            claims.table_sums.push(qm(sum));
+            pi += w;
+            mi += 1;
+            let ws = crate::requant::scl_tab_width(*v);
+            let (c, sum) = if is_p2 {
+                side(15, ws, pi, mi, &|x| rr.scl2.combine(x))
+            } else {
+                side(15, ws, pi, mi, &|x| rr.scl3.combine(x))
+            };
+            inter_all.extend(crate::device::host_cols(c));
+            claims.table_sums.push(qm(sum));
+            pi += ws;
+            mi += 1;
+        }
+        let (c, sum) = side(9, 3, pi, mi, &|x| rr.rqv.combine(x));
+        inter_all.extend(crate::device::host_cols(c));
+        claims.table_sums.push(qm(sum));
+        pi += 3;
+        mi += 1;
+        // stream NN-3: and the quantize family's own, in `Plan::pre_ids`' order
+        if let Some(qr) = rels.qq.as_ref() {
+            for (i, w) in plan.q_tabs.iter().enumerate() {
+                let lr = crate::rope::qdiv_log_rows(*w);
+                let (c, sum) =
+                    side(lr, crate::rope::QDIV_COLS, pi, mi, &|x| qr.div[i].combine(x));
+                inter_all.extend(crate::device::host_cols(c));
+                claims.table_sums.push(qm(sum));
+                pi += crate::rope::QDIV_COLS;
+                mi += 1;
+            }
+            let (c, sum) = side(crate::rope::qnz_log_rows(plan.q_nz_bits), 2, pi, mi,
+                                &|x| qr.qnz.combine(x));
+            inter_all.extend(crate::device::host_cols(c));
+            claims.table_sums.push(qm(sum));
+        }
+        inter_mark("requant/tables", &inter_all, &mut inter_seen, &mut inter_split);
+    }
+    crate::util::m4_add("int/requant", m4_t.elapsed().as_secs_f64());
     // Stream E: the argmax's interaction columns come *after* the tables' own
     // sides, because the framework hands out interaction spans in component
     // order and the argmax component is last of all.  Appended earlier, this
@@ -3548,12 +6183,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         let m = &plan.p.mats[mi];
         let tie = crate::argmax::ATie {
             claimed: SecureField::zero(),
+            claimed_tok: SecureField::zero(),
             tag: m.name.clone(),
             ..argmax_tie_w(w_glue, m.tokens, m.n_out, plan.mat_lays[mi].per_row)
         };
-        let (tcols, claimed) = crate::argmax::tie_col(r, m.tokens, &tie);
+        let (tcols, claimed, claimed_tok) = crate::argmax::tie_col(r, m.tokens, &tie);
         inter_all.extend(crate::device::host_cols(tcols));
         claims.am_key.push(qm(claimed));
+        claims.head_tok.push(qm(claimed_tok));
         let (lcols, use_sum) =
             crate::argmax::logup(r, plan.p.head_argmax_lax,
                                  rels.range(crate::argmax::KEY_BITS));
@@ -3587,6 +6224,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         inter_mark("embed", &inter_all, &mut inter_seen, &mut inter_split);
     }
     crate::util::m4_add("int/embed", m4_t.elapsed().as_secs_f64());
+
     // an independent recomputation of every tie claim, from the region's witness
     // rather than from its trace: a tie is only worth something if it is checkable
     let glue_ties_ok = match (&plan.glue, &rels.glue) {
@@ -3637,6 +6275,62 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             "exponent_out_of_range": g.bad_exp,
         })).collect::<Vec<_>>(),
         "glue_vs_b1": glue_b1,
+        // stream NN: the angle frequencies the STATEMENT derives against B1's
+        // own fp64 vector, when the dump carries it.  A reference and never an
+        // input -- what tree 0 holds is `RopeParams::inv`'s answer, so this
+        // number says whether this repo's `inv_freq_of` is torch's.
+        "rope_inv_vs_b1": match (&p.rope, layer.rope.as_ref().and_then(|r| r.inv_ref.as_ref())) {
+            (Some(rp), Some(refv)) => {
+                let inv = rp.inv(p.hd);
+                // `mismatch` is the f64 vector's; `cell_mismatch` is the bf16
+                // table the region commits, which is the one that is asserted.
+                let cells: usize = (0..p.s)
+                    .into_par_iter()
+                    .map(|t| {
+                        let a = crate::rope::pre_row(&inv, p.hd, rp.pos0 + t);
+                        let b = crate::rope::pre_row(refv, p.hd, rp.pos0 + t);
+                        a.iter().zip(&b).filter(|(x, y)| x != y).count()
+                    })
+                    .sum();
+                json!({"values": inv.len(), "rope_type": rp.rope_type,
+                       "mismatch": inv.iter().zip(refv).filter(|(a, b)| a != b).count(),
+                       "cells": 2 * p.hd * p.s, "cell_mismatch": cells})
+            }
+            _ => json!(null),
+        },
+        // Stream NN-3: `s_v` is used at two sites and the statement now says so.
+        // The `v` quantize divides by the per-(head, channel) exponent it
+        // commits to tree 0 and the attention output rescales by `jv - jo` off
+        // its own tree-0 column; in B1 both are one `s_v`.  The two columns tile
+        // the grid differently -- the attention output's rows are
+        // (head, token, chunk) and the region's are (token, channel block) --
+        // so the equality is per (head, channel) and not per row, and a GQA
+        // group's `rep` query heads all read the kv head's one exponent.  It
+        // costs **no proof cells**: both sides are preprocessed, so a prover who
+        // rescales by one scale and quantizes by another commits a tree 0 that
+        // is not the statement's and `root_ok` rejects it.  `mismatch` is the
+        // count of (head, channel) sites where the two disagree.
+        "sv_tie": match q_regions.iter().zip(&plan.quants).find(|(_, qp)| qp.name == "v") {
+            Some((r, qp)) => {
+                let (nh, hd) = (layer.ao.nh, layer.ao.hd);
+                let mut bad = 0usize;
+                for h in 0..nh {
+                    for ch in 0..hd {
+                        let kv = h / qp.rep;
+                        if i64::from(layer.ao.jv[h * hd + ch]) != r.je[kv * qp.hd + ch] {
+                            bad += 1;
+                        }
+                    }
+                }
+                // and the dump's own two loads of `jv.i32`, which is what a
+                // real chunk's tie rests on
+                let refbad = layer.rope.as_ref()
+                    .map(|rc| (0..nh * hd).filter(|i| rc.jv[*i] != layer.ao.jv[*i]).count());
+                json!({"sites": nh * hd, "mismatch": bad, "ok": bad == 0,
+                       "rope_jv_mismatch": refbad})
+            }
+            None => json!(null),
+        },
         "head_key_vs_b1": head_key_b1,
         // stream BB: what the embedding gadget costs this chunk, or null with
         // the flag off.  Reported per position and per block so E1 folds it into
@@ -3654,6 +6348,53 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 "off_table": r.off_table,
             })
         }),
+        // stream NN: what each quantize region costs, and the number that
+        // matters -- how many of the integers it derived from the rotation's
+        // output equal the value the *band* committed.  A nonzero `clamped` is
+        // an incompleteness and not a disagreement: B1 clamps at this side's own
+        // `qmax` and the region's division table has no row past it, so a
+        // clamped site has no honest witness here at all.  Stream NN-3: the
+        // table is the side's own, so `clamped` counts B1's clamp and nothing
+        // else -- before it, at `qk_bits (12, 11)`, it counted "the region is
+        // narrower than the model" as well.
+        "quant": q_regions.iter().zip(&plan.quants).map(|(r, qp)| json!({
+            "region": r.tag,
+            "bits": r.bits, "qmax": crate::rope::qmax_of(r.bits),
+            "div_rows": crate::rope::qdiv_table(r.bits).len(),
+            "heads": qp.heads, "rep": qp.rep, "n": qp.n, "tokens": qp.tokens,
+            "layout": {"per_row": r.lay.per_row, "chunks": r.lay.chunks,
+                       "log_rows": r.lay.log_rows, "lead": r.lay.lead},
+            "columns": {"base": r.base.len(), "preprocessed": r.pre.len()},
+            "cells": {"base": r.base_cells(), "preprocessed": r.pre_cells()},
+            "cells_per_value": r.base_cells() as f64 / (r.tokens * r.n) as f64,
+            "checked": r.ref_n, "matches_band": r.ref_ok,
+            "mismatch": r.ref_n - r.ref_ok,
+            "clamped": r.clamped, "off_table": r.off_table,
+        })).collect::<Vec<_>>(),
+        // stream II: what each requantize seam costs and, the number that
+        // matters, how many of the integers it *derived* from the producer's
+        // output equal the activation the walk actually committed.  On a real
+        // dump that is a B1 reference check: a non-zero count is the two sides
+        // disagreeing about the forward pass, which the tie then rejects.
+        "requant": rq_regions.iter().zip(&plan.rqs).map(|(r, rp)| json!({
+            "seam": r.tag,
+            "producer": {"region": plan.glue.as_ref().map(|g| g.regions[rp.producer.0].tag.clone()),
+                         "tie": rp.producer.1},
+            "variant": r.v.name(),
+            "n": r.n, "tokens": r.tokens,
+            "layout": {"per_row": r.lay.per_row, "chunks": r.lay.chunks,
+                       "log_rows": r.lay.log_rows, "lead": r.lay.lead},
+            "columns": {"preprocessed": r.pre.len(), "base": r.base.len()},
+            "cells": {"preprocessed": r.pre_cells(), "base": r.base_cells()},
+            "cells_per_value": r.base_cells() as f64 / (r.tokens * r.n) as f64,
+            "off_table": r.off_table,
+            "checked": r.ref_n, "matches_walk_qx": r.ref_ok,
+            "mismatch": r.ref_n - r.ref_ok,
+        })).collect::<Vec<_>>(),
+        "requant_tables": {
+            "preprocessed": rq_tab_pre.iter().map(|e| e.domain.size()).sum::<usize>(),
+            "multiplicity": rq_tab_mult.iter().map(|e| e.domain.size()).sum::<usize>(),
+        },
         "interaction": inter_all.iter().map(|c| c.size()).sum::<usize>(),
         // B11 stream F step 3: the interaction set region by region, in the
         // order `inter_all` is built, plus the rollup by family. `tables` is the
@@ -3779,6 +6520,19 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let built = build_components_linked(&plan, &rels, r, s, rv, r_corner, w_glue, lam_glue,
                                         &claims, link_hl.as_deref());
     crate::util::m4_add("wall/build_components", m4_t.elapsed().as_secs_f64());
+    // Stream EE (open item 21): `--fp-out FILE` writes the fingerprint set this
+    // chunk will look up, for the pre-run comparison against `cudaemit
+    // --fp-out` on the same plan line. `--fp-only` stops here: the components
+    // exist and their fingerprints are the whole answer, so the report is
+    // written and the process ends without proving.
+    if let Some((path, only)) = crate::cudagen::fp_out() {
+        let rows = built.fp_rows();
+        crate::cudagen::fp_write(path, "compose", &layer.source, &rows);
+        if *only {
+            eprintln!("--fp-only: fingerprints written, proving skipped");
+            std::process::exit(0);
+        }
+    }
     let sizes: Vec<Vec<u32>> = sess
         .ops
         .iter()
@@ -3813,6 +6567,23 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         pre_root: proof
             .as_ref()
             .map(|pf| format!("{:?}", pf.commitments[0]))
+            .unwrap_or_default(),
+        // stream KK: the chunk's own coordinate, off the dump's manifest (or
+        // the `--layer` / `--block` overrides a plan line carries for a chunk
+        // whose manifest cannot know where the grid puts it, the `lm_head`
+        // chunk being the one that cannot).
+        layer: layer.layer,
+        block: layer.block,
+        // stream LL: the content hash of this chunk's model half, so a grid can
+        // compare "which model" as well as "which layer".
+        model: Some(layer.model_hash()),
+        // stream KK: the ids the embedding region committed, one per position,
+        // and the tokens the argmax region emitted -- published so that a
+        // reader of two chunks can compare them position by position.  Each is
+        // pinned inside its own proof by the Horner claim beside it.
+        tok_in: emb_region.as_ref().map(|r| r.token_ids()).unwrap_or_default(),
+        tok_out: am_region.as_ref()
+            .map(|r| r.token_ids(p.mats[plan.argmax_mat().expect("the head matmul")].tokens))
             .unwrap_or_default(),
     };
     Composed {
@@ -3866,6 +6637,12 @@ pub struct Verdict {
     /// stream E, one per dequant output tie: the region's own output claim equals
     /// the wiring family's claim over the same values
     pub deq_out_ok: Vec<bool>,
+    /// Stream JJ: the dequant outputs that publish a claim with no counterparty
+    /// in this statement -- `q`, `k` and `v`, whose consumers reach the
+    /// attention through RoPE and a per-channel requantize that no region
+    /// proves.  Reported so a reader cannot mistake seven published claims for
+    /// seven checked ties; it is not part of `accepts`.
+    pub deq_out_open: Vec<String>,
     /// stream E: the argmax's key claim equals the head dequant's -- "the token
     /// this row emits is the maximum of the logits *this layer computed*"
     pub head_tie_ok: bool,
@@ -3873,6 +6650,63 @@ pub struct Verdict {
     /// `stream_in` claim -- "the residual stream this layer consumed is row
     /// `tok[t]` of the pinned embedding matrix".  True when the gadget is off.
     pub embed_ok: bool,
+    /// stream KK (`notes/witness-slack.md` §1b): the ids the statement publishes
+    /// are the ids the proof committed -- the Horner sum of `fixed.tok_in`
+    /// under this chunk's own replayed `w` equals `claims.embed_tok`.  A
+    /// probabilistic binding over a post-commitment challenge (§0), not a
+    /// constraint.  True when the gadget is off *and* the statement publishes
+    /// no ids; an embedding chunk that publishes none is rejected.
+    pub embed_tok_ok: bool,
+    /// stream KK (§5 item 2): the same for the head chunk's emitted tokens --
+    /// `fixed.tok_out` against `claims.head_tok`.  True when `--head-argmax` is
+    /// off and nothing is published.
+    pub head_tok_ok: bool,
+    /// stream II: per requantize seam, "the matmul's input is the producer's
+    /// output", and "the walk multiplied the integers this seam derived"
+    pub rq_in_ok: Vec<bool>,
+    pub rq_out_ok: Vec<bool>,
+    /// Stream II (E11): per (seam, consuming matmul) pair, in plan order -- "the
+    /// scale this matmul dequantized by is the scale the requantize pinned to
+    /// its input's attained maximum".  Empty on a chunk with no seams.
+    pub rq_scale_ok: Vec<bool>,
+    /// Stream SS: the `(seam, matmul)` pairs whose consumer is a `Variant::Fold`
+    /// region.  The fold's second shared column is the divisor's token half and
+    /// not the scale's exponent, so the claim cannot be stated in the seam's
+    /// language; these are named rather than counted.
+    pub rq_scale_open: Vec<String>,
+    /// Stream II (E11): true when this chunk publishes both the attnout
+    /// region's `ao_q` and the `o` walk's `qX` but its `o` matmul does not read
+    /// `nh * hd` channels -- so the two folds are over different sequences and
+    /// `ao_q_ok` says nothing.  A desk shape, never a real layer; reported so a
+    /// reader cannot mistake a vacuous `ao_q_ok` for a checked seam.
+    pub ao_q_open: bool,
+    /// stream II: the `o` seam, once stream JJ publishes `ao_q`.  True while
+    /// that claim is absent -- an equality nobody can state yet is not a
+    /// failure, and the record says so rather than the verdict pretending.
+    pub ao_q_ok: bool,
+    /// Stream NN, per quantize region in `q`, `k`, `v` order: "the value this
+    /// region rounded is the value the rotation produced" (or, for `v`, the
+    /// value the matmul's dequant published).
+    pub nn_in_ok: Vec<bool>,
+    /// and per region: "the integers this region produced are the columns the
+    /// bands committed" -- the sum of the corner bands' own claims, which is
+    /// what closes `witness-slack.md` section 1e inside one chunk.
+    pub nn_out_ok: Vec<bool>,
+    /// Stream NN: the statement's `pos0` is the block coordinate `Fixed::block`
+    /// declares.  The rotation's `cos`/`sin` are preprocessed and read the
+    /// token's *absolute* position, so tree 0 is a function of the block; this
+    /// is what stops a chunk from proving one block's angles while the chain
+    /// puts it at another.  True when the statement declares no block.
+    pub nn_pos_ok: bool,
+    /// Stream NN (NN-2), per prefix band of `Plan::nn_qbands`: "this band's own
+    /// Q column is its group's corner's".  The corner's Q is tied to the
+    /// rotated query (`nn_out_ok`), so this carries the tie to the band that
+    /// attends to the cache -- which NN-1 left untied, and asymmetrically so.
+    pub nn_q_ok: Vec<bool>,
+    /// Stream NN: true when the chunk carries the wiring family but no rotation
+    /// -- a shape whose q/k/v widths do not line up with its bands.  Reported so
+    /// a reader cannot mistake an absent family for a checked one.
+    pub nn_open: bool,
     /// the layer's committed residual-stream input and output claims
     pub stream_in: Option<[u32; 4]>,
     pub stream_out: Option<[u32; 4]>,
@@ -3912,12 +6746,23 @@ impl Verdict {
 
             && self.walk_ok.iter().all(|x| *x) && self.glue_ok.iter().all(|x| *x)
             && self.deq_out_ok.iter().all(|x| *x) && self.head_tie_ok && self.embed_ok
+            && self.embed_tok_ok && self.head_tok_ok
+            && self.rq_in_ok.iter().all(|x| *x) && self.rq_out_ok.iter().all(|x| *x)
+            && self.rq_scale_ok.iter().all(|x| *x) && self.ao_q_ok
+            && self.nn_in_ok.iter().all(|x| *x) && self.nn_out_ok.iter().all(|x| *x)
+            && self.nn_pos_ok && self.nn_q_ok.iter().all(|x| *x)
     }
     fn rejected(msg: &str) -> Self {
         Self { stark_ok: false, root_ok: false, sums_cancel: false, qk_ok: vec![],
                den_ok: vec![], av_ok: false, den_link_ok: false, walk_ok: vec![],
                sizes_ok: false, glue_ok: vec![false], deq_out_ok: vec![false],
-               head_tie_ok: false, embed_ok: false,
+               deq_out_open: vec![], head_tie_ok: false, embed_ok: false,
+               embed_tok_ok: false, head_tok_ok: false,
+               rq_in_ok: vec![false], rq_out_ok: vec![false], rq_scale_ok: vec![false],
+               rq_scale_open: vec![],
+               ao_q_open: false, ao_q_ok: false,
+               nn_in_ok: vec![false], nn_out_ok: vec![false], nn_pos_ok: false,
+               nn_q_ok: vec![false], nn_open: false,
                stream_in: None, stream_out: None,
                bound_roots: vec![], bound_sides: vec![],
                error: Some(msg.to_string()), verify_secs: 0.0 }
@@ -3956,6 +6801,25 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         // stream BB: one claim each, or none at all
         || claims.embed_out.len() != usize::from(plan.emb.is_some())
         || claims.embed_tok.len() != usize::from(plan.emb.is_some())
+        // stream KK: the head's token claim, exactly when the argmax is composed
+        || claims.head_tok.len() != usize::from(plan.argmax_mat().is_some())
+        // stream II: one claim per seam per side, and one per walk group when
+        // the chunk carries the wiring family
+        || claims.rq_in.len() != plan.rqs.len()
+        || claims.rq_out.len() != plan.rqs.len()
+        || claims.walk_qx.len()
+            != if plan.glue.is_some() { plan.walks.len() } else { 0 }
+        // stream II: the scale tie -- one per seam, and one per matmul when the
+        // chunk carries any seam at all
+        || claims.rq_sc.len() != plan.rqs.len()
+        || claims.deq_sc.len() != if plan.rqs.is_empty() { 0 } else { p.mats.len() }
+        // stream NN: one claim per quantize region per side, and three per band
+        // that publishes its own columns
+        || claims.nn_in.len() != plan.quants.len()
+        || claims.nn_out.len() != plan.quants.len()
+        || claims.band_qkv.len() != plan.nn_bands.len()
+        // stream NN (NN-2): and one per prefix band
+        || claims.band_q.len() != plan.nn_qbands.len()
     {
         return Verdict::rejected("claims shape mismatch");
     }
@@ -3974,7 +6838,8 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     vcs.commit(proof.commitments[0], &fixed.sizes[0], &mut ch);
     vcs.commit(proof.commitments[1], &fixed.sizes[1], &mut ch);
     let rels = Rels::draw(&mut ch, &plan.widths, plan.glue.as_ref().map(|g| g.uns.as_slice()),
-                          plan.emb.map(|l| l.arity()));
+                          plan.emb.map(|l| l.arity()),
+                          plan.needs_rq_rels(), plan.q_tabs.len());
     let n_ch = plan.n_challenges();
     let f = ch.draw_secure_felts(n_ch);
     let (r, s, rv) = (f[0], f[1], f[2]);
@@ -4132,7 +6997,13 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         Some(g) => (
             g.eqs
                 .iter()
-                .map(|((ra, ta), (rb, tb))| claims.glue_ties[*ra][*ta] == claims.glue_ties[*rb][*tb])
+                .map(|e| {
+                    // stream II: `a == factor * b`, the factor being the plan's
+                    // own geometric sum over the tail's `a` rows per token.
+                    // With no factor this is the equality it always was.
+                    unqm(claims.glue_ties[e.a.0][e.a.1])
+                        == e.factor(w_glue) * unqm(claims.glue_ties[e.b.0][e.b.1])
+                })
                 .collect(),
             Some(claims.glue_ties[g.stream_in.0][g.stream_in.1]),
             Some(claims.glue_ties[g.stream_out.0][g.stream_out.1]),
@@ -4143,16 +7014,40 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // own published outputs against the copies the wiring family committed.
     // This is what makes `o_out` and `d_out` the dequant's results rather than
     // two columns that merely happen to agree.
-    let deq_out_ok: Vec<bool> = match &plan.glue {
-        Some(g) => g
-            .out_ties
-            .iter()
-            .enumerate()
-            .map(|(k, ((ra, ta), _))| {
-                claims.deq_out.get(k).copied() == Some(claims.glue_ties[*ra][*ta])
-            })
-            .collect(),
-        None => vec![],
+    //
+    // Stream JJ (E11): one entry per tie that HAS a counterparty, in the plan's
+    // order.  `deq_out_open` names the outputs that publish a claim the
+    // statement cannot yet read -- they are not counted as passing.
+    let (deq_out_ok, deq_out_open): (Vec<bool>, Vec<String>) = match &plan.glue {
+        Some(g) => {
+            let mut ok = vec![];
+            let mut open = vec![];
+            for (k, t) in g.out_ties.iter().enumerate() {
+                match (t.at, t.quant) {
+                    (Some((ra, ta)), _) => ok.push(
+                        claims.deq_out.get(k).copied() == Some(claims.glue_ties[ra][ta])),
+                    // stream NN: `v` has no rotation between its dequant and
+                    // its band column, so its counterparty is the quantize
+                    // region's input claim and `nn_in_ok` is where it is read
+                    (None, Some(qi)) => ok.push(
+                        claims.deq_out.get(k).copied() == claims.nn_in.get(qi).copied()),
+                    // stream SS: a *folded* `v` has no quantize region either --
+                    // the fold is the quantize -- so the published output is the
+                    // int8 cell itself and the counterparty is the corner bands'
+                    // own V fold, the sum `nn_out_ok` compares the other two
+                    // against.  Under the same weights, so the equality says the
+                    // bands attended over the very integers this region rounded.
+                    (None, None) if t.band => {
+                        let sum = claims.band_qkv.iter()
+                            .fold(SecureField::zero(), |acc, c| acc + unqm(c[2]));
+                        ok.push(claims.deq_out.get(k).copied().map(unqm) == Some(sum));
+                    }
+                    (None, None) => open.push(t.name.to_string()),
+                }
+            }
+            (ok, open)
+        }
+        None => (vec![], vec![]),
     };
 
     // stream E: the argmax compared the head's own output.  Both claims are
@@ -4162,6 +7057,104 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         !claims.am_key.is_empty() && claims.am_key.first() == claims.head_key.first()
     } else {
         true
+    };
+
+    // stream II: the requantize seams.  Two equalities each, both between
+    // claims the statement already carries: the seam's input claim against the
+    // producing region's `Out(0)`, which says the matmul's input is the bf16
+    // value the wiring family proved; and the seam's output claim against the
+    // walk group's own claim over its committed activations, which says the
+    // walk multiplied *those* integers.  With the requantize's own constraints
+    // in between -- the division table, the attained maximum and the scale
+    // lookup -- the pair is "the activation is the requantize of the producer's
+    // output under the pinned per-token scale".
+    let rq_in_ok: Vec<bool> = match &plan.glue {
+        Some(_) => plan
+            .rqs
+            .iter()
+            .enumerate()
+            .map(|(k, rp)| {
+                claims.rq_in.get(k).copied()
+                    == Some(claims.glue_ties[rp.producer.0][rp.producer.1])
+            })
+            .collect(),
+        None => vec![],
+    };
+    let rq_out_ok: Vec<bool> = plan
+        .rqs
+        .iter()
+        .enumerate()
+        .map(|(k, rp)| claims.rq_out.get(k).copied() == claims.walk_qx.get(rp.walk).copied())
+        .collect();
+    // Stream II (E11): the scale tie.  The per-token activation scale is
+    // committed twice and, before this, never compared: once by the requantize
+    // region, where `with_max` pins it to the ceil-divide of the attained
+    // maximum of the seam's own input, and once as the x-side scale of every
+    // consuming matmul's dequant.  A prover could requantize under one scale
+    // and dequantize under another; these equalities say it did not.
+    //
+    // One entry per (seam, consumer) pair -- three for `qkv` (q, k and v share
+    // the seam's input, each has its own dequant region), two for `gateup`, one
+    // for `down`, one for the head.  `o` is not here and cannot be: its
+    // producer's scale is the attnout region's preprocessed `num`/`pj`, so that
+    // comparison is preprocessed against committed and not a claim pair.
+    let mut rq_scale_ok: Vec<bool> = vec![];
+    let mut rq_scale_open: Vec<String> = vec![];
+    for (k, rp) in plan.rqs.iter().enumerate() {
+        for mi in &plan.walks[rp.walk].mats {
+            // stream SS: a folded matmul publishes no x-side scale -- its shared
+            // columns are `(ms, dent)` and not `(ms, es)` -- so it is named,
+            // not counted as a pass by silence (stream JJ's `deq_out_open`
+            // convention, for the same reason).
+            if plan.specs[*mi].variant == DeqVariant::Fold {
+                rq_scale_open.push(format!("{}/{}", rp.name, plan.p.mats[*mi].name));
+                continue;
+            }
+            rq_scale_ok.push(claims.rq_sc.get(k).copied() == claims.deq_sc.get(*mi).copied());
+        }
+    }
+    // Stream II, the `o` seam.  `AttnOutEval` is the attention output's own
+    // requantize, so what closes it is one claim on that region -- stream JJ's
+    // `claims.ao_q`, a Horner fold over the signed `qm (1 - 2 sg)` -- against
+    // the `o` walk's activation claim.  Both now fold the same values in the
+    // same order under the same weights: the walk's `WalkQx` for the `o` group
+    // carries `rv^k s^t` (see `build_components`), and its fold is over
+    // `a - act_off`, which is the signed value the attnout region publishes.
+    //
+    // Live on every chunk that publishes both claims.  A chunk with no wiring
+    // family publishes no `walk_qx` at all and there is nothing to compare; a
+    // chunk with **no attention** -- the `lm_head` chunk, whose only matmul is
+    // the head -- has no `o` walk, so the attnout region is absent, `ao_q` is
+    // empty and the seam is vacuous.  Both report `true`, and neither is a
+    // skipped check: in both cases the statement contains no `o` matmul whose
+    // input could be wrong.
+    //
+    // The third case is a shape, not a statement: a *synthetic* layer whose `o`
+    // walk is not `nh * hd` channels wide folds a different sequence from the
+    // attnout region's, and the equality is not statable there.  The witness
+    // builder wires `o` from `AttnOut::q_ref` exactly when the widths line up
+    // (`Layer::synth_glue`), so on any shape a gate proves this is either live
+    // or structurally absent -- it is never a mismatched comparison read as a
+    // pass.
+    //
+    // The width test is the statement's own: the attention output is `nh * hd`
+    // channels and the `o` walk reads `n_in` of them, and both are `Params`.  A
+    // shape where they disagree is not a layer of any transformer -- its `o`
+    // matmul does not consume the attention output at all -- so the two folds
+    // run over different sequences and the equality is not statable.  That case
+    // is *reported*, in `ao_q_open`, and never counted as a pass by silence;
+    // it is stream JJ's `deq_out_open` convention, for the same reason.
+    let ao_q_at = plan.walks.iter().position(|w| w.name == "o").filter(|_| {
+        plan.glue.is_some() && !claims.ao_q.is_empty()
+    });
+    let ao_q_wide = p.mats.iter().find(|m| m.name == "o")
+        .is_some_and(|m| m.n_in == p.nh * p.hd);
+    let ao_q_open = ao_q_at.is_some() && !ao_q_wide;
+    let ao_q_ok = match ao_q_at {
+        Some(wi) if ao_q_wide => {
+            claims.ao_q.first().copied() == claims.walk_qx.get(wi).copied()
+        }
+        _ => true,
     };
 
     // stream BB: the embedding gadget's tie.  Both claims are Horner sums over
@@ -4175,8 +7168,155 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         (None, _) => true,
     };
 
+    // stream KK: the published token vectors against the claims that pin them.
+    // Both are Horner images under `w_glue`, which is drawn after tree 1 -- so
+    // the ids were fixed before the challenge existed and a second vector with
+    // the same image is a collision, not a choice (`notes/witness-slack.md`
+    // §0's probabilistic binding).  The conventions are each region's own: the
+    // embedding walks its positions ascending, the argmax's rows walk them
+    // descending, so the two exponents are mirrored and this is where that is
+    // written down.
+    let horner = |ids: &[u32], asc: bool| -> SecureField {
+        let mut acc = SecureField::zero();
+        if asc {
+            for v in ids {
+                acc = acc * w_glue + SecureField::from(m31_u32(*v));
+            }
+        } else {
+            for v in ids.iter().rev() {
+                acc = acc * w_glue + SecureField::from(m31_u32(*v));
+            }
+        }
+        acc
+    };
+    let embed_tok_ok = match &plan.emb {
+        Some(_) => {
+            fixed.tok_in.len() == p.s
+                && claims.embed_tok.first().map(|c| unqm(*c))
+                    == Some(horner(&fixed.tok_in, true))
+        }
+        None => fixed.tok_in.is_empty(),
+    };
+    let head_tok_ok = match plan.argmax_mat() {
+        Some(mi) => {
+            fixed.tok_out.len() == p.mats[mi].tokens
+                && claims.head_tok.first().map(|c| unqm(*c))
+                    == Some(horner(&fixed.tok_out, false))
+        }
+        None => fixed.tok_out.is_empty(),
+    };
+
+    // ---- stream NN: the rotation's two seams ---------------------------------
+    //
+    // The input side: what the quantize rounded is what the rotation's `Out(0)`
+    // published (q and k), or what the matmul's own dequant published (v).  Two
+    // Horner sums over the same sequence under the same weights, from the parsed
+    // claims alone.
+    //
+    // The output side: the integers the quantize produced are the columns the
+    // *bands* committed -- and the counterparty is a **sum** over the corner
+    // bands, because a chunk's heads are split across bands and each covers a
+    // disjoint slice of them.  Grouped-query attention is inside the weights,
+    // not inside this sum: a producer value carries the sum of the `rep`
+    // weights its copies have on the band side (`rope::QTie::w_out`), so a
+    // single equality forces every replicated copy separately.
+    let (nn_in_ok, nn_out_ok): (Vec<bool>, Vec<bool>) = {
+        let (mut a, mut b) = (vec![], vec![]);
+        for (k, qp) in plan.quants.iter().enumerate() {
+            let want_in = match qp.producer {
+                Some((ri, ti)) => Some(claims.glue_ties[ri][ti]),
+                None => {
+                    // `v`: the counterparty is the dequant output tie the plan
+                    // marked with this region's index
+                    plan.glue.as_ref().and_then(|g| {
+                        g.out_ties.iter().position(|t| t.quant == Some(k))
+                            .and_then(|j| claims.deq_out.get(j).copied())
+                    })
+                }
+            };
+            a.push(claims.nn_in.get(k).copied() == want_in && want_in.is_some());
+            let idx = match qp.name { "q" => 1usize, "k" => 0, _ => 2 };
+            let sum = claims.band_qkv.iter()
+                .fold(SecureField::zero(), |acc, c| acc + unqm(c[idx]));
+            b.push(claims.nn_out.get(k).copied().map(unqm) == Some(sum));
+        }
+        (a, b)
+    };
+    // and the block coordinate the angles were built for.  `pos0` is in the
+    // statement, `block` is what `bounds::chain_of` compares along the token
+    // axis, and this is the one line that joins them -- without it a chunk could
+    // prove block 3's rotation and chain in at block 5.
+    let nn_pos_ok = match (&p.rope, fixed.block) {
+        (Some(r), Some(b)) => r.pos0 == b * p.s,
+        _ => true,
+    };
+    let nn_open = plan.glue.as_ref().is_some_and(|g| !g.head_norm) && plan.quants.is_empty();
+    // Stream NN (NN-2): the prefix band's own Q against its group's corner.
+    // Both folds run over the same (query head, channel, token) set under the
+    // same canonical weights -- only the layout that scatters those cells over
+    // rows differs -- so equality is "the same queries", and the corner's side
+    // is already the rotated query by `nn_out_ok`.  The difference of the two
+    // folds is a polynomial in `w_glue` whose coefficients were fixed before
+    // `w_glue` was drawn, which is the argument every tie in this family rests
+    // on.
+    let nn_q_ok: Vec<bool> = plan.nn_qbands.iter().enumerate().map(|(k, b)| {
+        let corner = plan.nn_bands.iter().position(|c| plan.group[*c] == plan.group[*b]);
+        match corner {
+            Some(ci) => claims.band_q.get(k).copied().map(unqm)
+                == claims.band_qkv.get(ci).map(|c| unqm(c[1])),
+            None => false,
+        }
+    }).collect();
+
     Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
-              head_tie_ok, embed_ok,
+              deq_out_open, head_tie_ok, embed_ok, embed_tok_ok, head_tok_ok,
+              rq_in_ok, rq_out_ok, rq_scale_ok, rq_scale_open, ao_q_open, ao_q_ok,
+              nn_in_ok, nn_out_ok, nn_pos_ok, nn_q_ok, nn_open,
               sizes_ok, glue_ok, stream_in, stream_out, bound_roots, bound_sides, error,
               verify_secs: t0.elapsed().as_secs_f64() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stream QQ, at the NN merge (log row 66): the guard itself, gated.
+    ///
+    /// Everything else in this stream says "the vectors are filled"; nothing
+    /// said what happens when the next stream adds one and forgets. That is the
+    /// case the guard exists for, and it fired on stream NN's four before this
+    /// test was written -- `cudaemit` on NN's rotation shapes panicked naming
+    /// `band_q`. Here it is as a control, so a later refactor that turns the
+    /// panic back into a zero fails at `cargo test` and not on a card.
+    #[test]
+    fn the_emit_guard_names_the_claim_vector_it_is_missing() {
+        // the prove path is unchanged: a statement written before a claim
+        // existed still parses, which is what `#[serde(default)]` is for
+        assert_eq!(claim_at(None, "band_q"), SecureField::zero());
+        assert_eq!(claim_at(Some([1, 2, 3, 4]), "band_q"), unqm([1, 2, 3, 4]));
+
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        set_emit_strict(true);
+        // a claim that IS supplied is returned on the emit path too
+        let ok = std::panic::catch_unwind(|| claim_at(Some([1, 2, 3, 4]), "band_q"));
+        let missing = std::panic::catch_unwind(|| claim_at(None, "band_q"));
+        set_emit_strict(false);
+        std::panic::set_hook(prev);
+
+        assert_eq!(ok.expect("a supplied claim must not panic"), unqm([1, 2, 3, 4]));
+        let e = missing.expect_err("a missing claim must panic on the emit path");
+        let msg = e
+            .downcast_ref::<String>()
+            .map(|s| s.as_str())
+            .or_else(|| e.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(msg.contains("no placeholder for claim band_q"),
+                "the panic must name the vector, got: {msg}");
+        assert!(msg.contains("fill_tie_claims"),
+                "the panic must name where to fix it, got: {msg}");
+
+        // and the flag is off again, so nothing else in the suite sees it
+        assert_eq!(claim_at(None, "band_q"), SecureField::zero());
+    }
 }

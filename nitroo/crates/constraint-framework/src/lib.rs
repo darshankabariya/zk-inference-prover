@@ -139,6 +139,24 @@ pub trait EvalAtRow {
         val
     }
 
+    /// A value the *statement* carries rather than a compile-time constant of
+    /// the AIR: a claimed sum, the closing value of a Horner tie, the shift a
+    /// prefix-sum column is pinned to. Numerically it is that value and nothing
+    /// else, which is what the default returns, so every evaluator in this
+    /// crate -- and every constraint, and therefore every proof -- is exactly
+    /// what it was before this method existed.
+    ///
+    /// It exists for evaluators that lower an AIR to code rather than evaluate
+    /// it. Such an evaluator cannot tell a claim from a literal by looking:
+    /// `From<SecureField>` and `From<BaseField>` for the symbolic extension
+    /// type build the same node, and `Zero` is `From<BaseField::zero()>`, so a
+    /// claim that happens to be zero is indistinguishable from the framework's
+    /// own zero and gets folded away with it. The AIR says which is which by
+    /// calling this; an override then keeps the value out of the shape.
+    fn claim(&mut self, value: SecureField) -> Self::EF {
+        Self::EF::from(value)
+    }
+
     /// Combines 4 base field values into a single extension field value.
     fn combine_ef(values: [Self::F; SECURE_EXTENSION_DEGREE]) -> Self::EF;
 

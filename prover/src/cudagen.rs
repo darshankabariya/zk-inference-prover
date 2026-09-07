@@ -152,12 +152,27 @@ pub struct LogupProbe {
     pub inner: ExprEvaluator,
     /// one per `add_to_relation`, in call order
     pub mults: Vec<ExtExpr>,
+    /// Stream RR: one per `EvalAtRow::claim`, in call order. The expression
+    /// carries `Param(claim_param(n))` in the claim's place, so the value is
+    /// out of the tree and the n-th call is what the lowering resolves.
+    pub claims: Vec<SecureField>,
 }
 
 impl LogupProbe {
     pub fn new() -> Self {
-        Self { inner: ExprEvaluator::new(), mults: vec![] }
+        Self { inner: ExprEvaluator::new(), mults: vec![], claims: vec![] }
     }
+}
+
+/// The extension parameter that stands for the `n`-th `EvalAtRow::claim` call.
+/// `#` cannot occur in a Rust identifier, so it cannot collide with a relation
+/// name's `{name}_z` / `{name}_alpha{i}` or with `intermediate{k}`.
+pub fn claim_param(n: usize) -> String {
+    format!("claim#{n}")
+}
+
+fn claim_ordinal(p: &str) -> Option<usize> {
+    p.strip_prefix("claim#").and_then(|s| s.parse::<usize>().ok())
 }
 
 impl Default for LogupProbe {
@@ -207,6 +222,20 @@ impl EvalAtRow for LogupProbe {
 
     fn add_extension_intermediate(&mut self, expr: Self::EF) -> Self::EF {
         self.inner.add_extension_intermediate(expr)
+    }
+
+    /// Stream RR. The one method that does not delegate, and the only place
+    /// this probe changes the expression the inner evaluator would have built:
+    /// a claim becomes a named parameter instead of a constant node, and its
+    /// value goes into `claims` where `Lower` reads it by ordinal.
+    ///
+    /// `ExprEvaluator` has no notion of a parameter's value, so nothing else in
+    /// the fork sees a difference; `Lower::ext`'s `Param` arm is what turns the
+    /// name back into a slot.
+    fn claim(&mut self, value: SecureField) -> Self::EF {
+        let n = self.claims.len();
+        self.claims.push(value);
+        ExtExpr::Param(claim_param(n))
     }
 
     fn combine_ef(values: [Self::F; SECURE_EXTENSION_DEGREE]) -> Self::EF {
@@ -294,6 +323,17 @@ pub struct Ir {
     /// the generated kernel, so a value collision or a drift in the B6.5 crate
     /// aborts instead of proving the wrong statement
     pub scalar_refs: Vec<u32>,
+    /// Stream RR: `(slot, n)` for every slot that holds the `n`-th
+    /// `EvalAtRow::claim` of this eval, in slot order. A claim slot is
+    /// allocated by *occurrence*: never interned by value, never folded, always
+    /// four limbs wide -- so the fingerprint stops being a function of what the
+    /// claim happens to be. Not hashed by `fingerprint`, and not part of the
+    /// shape: it is how `scalars::cached_ir` replays the slot on a later chunk,
+    /// where matching by value would give two coinciding claims one value.
+    /// Empty on an IR serialized before the field existed and on any IR with no
+    /// claim, which is every shape a store emitted before this stream.
+    #[serde(default)]
+    pub claim_slots: Vec<(usize, usize)>,
     /// columns per tree: `[preprocessed, base, interaction]`
     pub cols: [usize; 3],
     /// columns per interaction, all of them (B11 stream K).  A component under
@@ -432,6 +472,14 @@ struct Lower {
     ir: Ir,
     intern: HashMap<String, usize>,
     slot: HashMap<[u32; 4], usize>,
+    /// Stream RR: the `EvalAtRow::claim` values, in call order -- `LogupProbe`'s
+    /// `claims`, which `Param(claim#n)` indexes.
+    claims: Vec<SecureField>,
+    /// claim ordinal -> its slot. The second reference to one claim is the same
+    /// slot and the same node, exactly as a repeated value used to be.
+    claim_at: HashMap<usize, usize>,
+    /// the slots those are, so `lit` refuses to read their values
+    claim_slot: std::collections::HashSet<usize>,
     /// interaction -> symbolic `idx` -> real column index in that interaction
     colmap: Vec<HashMap<usize, usize>>,
     /// preprocessed id -> the first slot of tree 0 holding it
@@ -548,6 +596,42 @@ impl Lower {
         self.push(format!("S{k}"), Op::Scalar(k), w)
     }
 
+    /// Stream RR: the slot of the `n`-th claim. `scalar` above interns by value
+    /// and widths by value; this does neither.
+    ///
+    ///  * **allocated by occurrence.** Two claims that happen to be equal get
+    ///    two slots and two nodes, exactly as two unequal ones do -- which is
+    ///    the half of the class EE's `b65_key_eval 0x18afbca6` was (one slot and
+    ///    one instruction short of its group, because a band's two claims
+    ///    coincided).
+    ///  * **width 4, always.** The width is in the fingerprint, and whether a
+    ///    claim's upper limbs are zero is a fact about the chunk. Four limbs is
+    ///    what a Horner sum under an extension challenge is, so this is the
+    ///    width every real and every placeholder claim already had.
+    ///  * **never folded**, via `lit` above.
+    ///
+    /// The value still goes into the slot: the blob replays it and the kernel
+    /// computes with it. Only the *shape* stops seeing it.
+    fn claim_slot(&mut self, n: usize) -> usize {
+        let k = match self.claim_at.get(&n) {
+            Some(k) => *k,
+            None => {
+                let v = *self.claims.get(n).unwrap_or_else(|| {
+                    panic!("claim#{n} lowered but the probe recorded {} claims",
+                           self.claims.len())
+                });
+                let k = self.ir.scalars.len();
+                self.ir.scalars.push(v);
+                self.ir.scalar_refs.push(0);
+                self.ir.claim_slots.push((k, n));
+                self.claim_at.insert(n, k);
+                self.claim_slot.insert(k);
+                k
+            }
+        };
+        self.push(format!("S{k}"), Op::Scalar(k), 4)
+    }
+
     fn constm31(&mut self, c: M31) -> usize {
         self.push(format!("K{}", c.0), Op::ConstM31(c.0), 1)
     }
@@ -573,10 +657,16 @@ impl Lower {
     /// consequence is safe by construction: the fingerprint would not be in the
     /// generated table and `blob_for` aborts the prover rather than handing the
     /// component to a kernel that computes something else.
+    ///
+    /// Stream RR: a *claim* slot is excluded, and that is not a 2^-124 event
+    /// but a data property -- a Horner tie over an all-zero sub-band closes on
+    /// zero, and two bands' claims coincide when their values do (README items
+    /// 21 and 23, log rows 53, 61 and 66). A claim's value is never read here,
+    /// so `x - claim` is an instruction whatever the claim is.
     fn lit(&self, id: usize) -> Option<u32> {
         match self.ir.ops[id] {
             Op::ConstM31(c) => Some(c),
-            Op::Scalar(k) => {
+            Op::Scalar(k) if !self.claim_slot.contains(&k) => {
                 let l = limbs(self.ir.scalars[k]);
                 if l[1] == 0 && l[2] == 0 && l[3] == 0 { Some(l[0]) } else { None }
             }
@@ -676,6 +766,10 @@ impl Lower {
             ExtExpr::Param(p) => {
                 if let Some(id) = self.inter.get(p).copied() {
                     return id;
+                }
+                // Stream RR: the AIR said this one is a claim.
+                if let Some(n) = claim_ordinal(p) {
+                    return self.claim_slot(n);
                 }
                 assert_ne!(
                     p, "claimed_sum",
@@ -880,6 +974,7 @@ fn lower_impl<E: FrameworkEval>(
     // alone would have produced; `mults` is the one thing it adds.
     let probe = eval.evaluate(LogupProbe::new());
     let mults = probe.mults;
+    let claims = probe.claims;
     let ev = probe.inner;
     let info = eval.evaluate(InfoEvaluator::new(log_size, vec![], claimed_sum));
     let rels = relation_entries(eval);
@@ -976,6 +1071,7 @@ fn lower_impl<E: FrameworkEval>(
             fracs: vec![],
             scalars: vec![],
             scalar_refs: vec![],
+            claim_slots: vec![],
             cols,
             tree_cols,
             pre_ids,
@@ -986,6 +1082,9 @@ fn lower_impl<E: FrameworkEval>(
         },
         intern: HashMap::new(),
         slot: HashMap::new(),
+        claims,
+        claim_at: HashMap::new(),
+        claim_slot: std::collections::HashSet::new(),
         colmap,
         pre_index,
         inter: HashMap::new(),
@@ -1329,7 +1428,8 @@ pub fn cmd(args: &[String]) {
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_2B02);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
                                           plan.glue.as_ref().map(|g| g.uns.as_slice()),
-                                          plan.emb.map(|l| l.arity()));
+                                          plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
+                                          plan.q_tabs.len());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b02);
     fill_tie_claims(&plan, &mut claims, 0x7135_2b02);
@@ -1363,6 +1463,42 @@ pub fn cmd(args: &[String]) {
         go!("exp_table".to_string(), &b.exp_t);
         for i in 0..b.tables.len() {
             go!(format!("table{i}"), &b.tables[i]);
+        }
+        // Stream OO: the list has to be every *dispatched* component, and until
+        // here it was eight families of thirteen -- the glue, the glue's
+        // tables, the argmax, the embedding gadget's two and stream II's
+        // requantize seams and their tables were dispatched to a generated
+        // kernel and never once checked against `CpuDomainEvaluator`. That is
+        // the only thing in the tree that compares a lowering against the AIR
+        // it claims to be, and it is a desk check: `prewarm_blobs` and
+        // `fp_rows` have carried the full list for two streams.
+        for i in 0..b.glue.len() {
+            go!(format!("glue{i}"), &b.glue[i]);
+        }
+        for i in 0..b.gtables.len() {
+            go!(format!("g_table{i}"), &b.gtables[i]);
+        }
+        for i in 0..b.rqs.len() {
+            go!(format!("requant{i}"), &b.rqs[i]);
+        }
+        for i in 0..b.rq_tabs.len() {
+            go!(format!("rq_table{i}"), &b.rq_tabs[i]);
+        }
+        // Stream NN, added at its merge: `b65_quant_eval` is dispatched like any
+        // other family and was in neither this list nor the two emit walks, so
+        // nothing in the tree compared its lowering against the AIR it claims to
+        // be.  Same reason stream OO gave for the eight it added here.
+        for i in 0..b.quants.len() {
+            go!(format!("quant{i}"), &b.quants[i]);
+        }
+        if let Some(c) = &b.argmax {
+            go!("argmax".to_string(), c);
+        }
+        if let Some(c) = &b.embed {
+            go!("embed".to_string(), c);
+        }
+        if let Some(c) = &b.emb_tab {
+            go!("emb_table".to_string(), c);
         }
 
         let bad: Vec<&Value> = rows.iter().filter(|r| r["mismatches"] != json!(0)).collect();
@@ -2169,6 +2305,75 @@ pub fn blob_for<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
     blob_timed(eval)
 }
 
+/// The IR a *running chunk* lowers a component to -- the one whose fingerprint
+/// `cuda_eval_blob` looks the kernel up by.
+///
+/// Stream EE (open item 21): named so the dispatch and the pre-run fingerprint
+/// report cannot lower two different things. It is the emitter's `lower` over
+/// the same eval, through the B7b IR cache.
+pub fn lowered_ir<E: FrameworkEval>(eval: &E) -> Ir {
+    crate::scalars::cached_ir(
+        eval,
+        eval.log_size(),
+        eval.max_constraint_log_degree_bound(),
+        false,
+        || lower(eval, SecureField::zero(), eval.log_size(), eval.max_constraint_log_degree_bound()),
+    )
+}
+
+/// One component's row of the fingerprint report, in the shape `cudaemit`
+/// writes its own rows in, so the two sides compare field for field.
+pub fn fp_row<E: FrameworkEval>(eval: &E, name: &str) -> serde_json::Value {
+    let ir = lowered_ir(eval);
+    json!({
+        "component": name,
+        "family": eval.cuda_eval_name(),
+        "fingerprint": format!("{:#010x}", ir.fingerprint()),
+        "instructions": ir.ops.len(),
+        "constraints": ir.constraints.len(),
+        "scalars": ir.scalars.len(),
+        "log_size": ir.log_size,
+        "eval_log_size": ir.eval_log_size,
+    })
+}
+
+/// Stream EE (open item 21): a fingerprint set, in one shape for both sides --
+/// `cudaemit --fp-out` writes what a plan line *installs*, `compose --fp-out`
+/// writes what a chunk on that line *asks for*, and `b65 fpcompare` reads the
+/// two files.
+pub fn fp_json(side: &str, source: &str, rows: &[serde_json::Value]) -> serde_json::Value {
+    let mut fams: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+    for r in rows {
+        let f = r["family"].as_str().unwrap_or("?").to_string();
+        let fp = r["fingerprint"].as_str().unwrap_or("?").to_string();
+        let n = r["instructions"].as_u64().unwrap_or(0);
+        fams.entry(f).or_default().insert(fp, n);
+    }
+    json!({"side": side, "source": source, "families": fams, "components": rows})
+}
+
+pub fn fp_write(path: &str, side: &str, source: &str, rows: &[serde_json::Value]) {
+    let j = fp_json(side, source, rows);
+    std::fs::write(path, serde_json::to_string_pretty(&j).unwrap())
+        .unwrap_or_else(|e| panic!("--fp-out {path}: {e}"));
+    let n: usize = j["families"].as_object().unwrap().values()
+        .map(|v| v.as_object().unwrap().len()).sum();
+    eprintln!("fp-out ({side}): {n} shape(s) over {} famil(ies) -> {path}",
+              j["families"].as_object().unwrap().len());
+}
+
+/// `--fp-out FILE` / `--fp-only` on `compose`, set once from the command line.
+static FP_OUT: std::sync::OnceLock<Option<(String, bool)>> = std::sync::OnceLock::new();
+
+pub fn fp_out_set(args: &[String]) {
+    let _ = FP_OUT.set(crate::arg_str(args, "--fp-out")
+                       .map(|p| (p, crate::flag(args, "--fp-only"))));
+}
+
+pub fn fp_out() -> Option<&'static (String, bool)> {
+    FP_OUT.get().and_then(|o| o.as_ref())
+}
+
 fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
     let name = eval.cuda_eval_name();
     if crate::cudakernels::SHAPES.is_empty() {
@@ -2177,14 +2382,23 @@ fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
         return None;
     }
     // B7b (README 26): by shape, with this proof's scalars replayed.
-    let ir = crate::scalars::cached_ir(
-        eval,
-        eval.log_size(),
-        eval.max_constraint_log_degree_bound(),
-        false,
-        || lower(eval, SecureField::zero(), eval.log_size(), eval.max_constraint_log_degree_bound()),
-    );
+    let ir = lowered_ir(eval);
     let fp = ir.fingerprint();
+    // Stream OO: the bisect switch. `B7_KERNEL_SKIP` is a comma-separated list
+    // of `cuda_eval_name`s whose constraint kernel declines to the CPU on this
+    // run, exactly as an absent kernel does -- the same announced fallback the
+    // store has taken for the glue and corner shapes since stream B. It is a
+    // diagnostic and not a configuration: the CPU path evaluates the same AIR,
+    // so a run that sets it must reproduce the run that does not, and the
+    // family whose name makes an otherwise-rejected chunk prove is the family
+    // whose generated kernel disagrees with the AIR.
+    if let Ok(skip) = std::env::var("B7_KERNEL_SKIP") {
+        if skip.split(',').any(|s| s.trim() == name) {
+            eprintln!("kernel fallback: {name} fingerprint {fp:#010x} \
+                       ({} instructions) evaluates on the CPU (B7_KERNEL_SKIP)", ir.ops.len());
+            return None;
+        }
+    }
     let shape = match crate::cudakernels::shape_of(name, fp) {
         Some(s) => s,
         // B10 step 5 (stream B): the glue and the corner-witness shapes lower
@@ -2247,13 +2461,42 @@ fn fill_tie_claims(plan: &crate::compose::Plan, claims: &mut crate::compose::Cla
     // the emitted kernel would not match the proved one.
     claims.embed_out = vec![felt()];
     claims.embed_tok = vec![felt()];
+    // stream JJ: the attnout region's output claim, the same shape of tie
+    claims.ao_q = vec![felt()];
+    // stream KK: the argmax region's token claim
+    claims.head_tok = vec![felt()];
+    // Stream QQ (log row 61): stream II's four claim vectors. Leaving them
+    // empty is what cost the wired C=4K chunk ten of its thirteen `kernel
+    // fallback:` lines -- `deq_sc` and `walk_qx` are read through
+    // `.get(..).unwrap_or(zero)`, the zero folds, and the emitted dequant and
+    // walk shapes came out two instructions and one slot short of every shape
+    // a real chunk asks for. Sized from the plan, exactly as the ones above.
+    //
+    // A vector is filled here whether or not this design point reads it: an
+    // unread placeholder changes nothing, and the rule "every claim vector is
+    // filled" is one a later stream can keep without knowing which regions
+    // read which claim. `compose::claim_at` is the backstop that says so.
+    claims.walk_qx = plan.walks.iter().map(|_| felt()).collect();
+    claims.deq_sc = plan.mat_lays.iter().map(|_| felt()).collect();
+    claims.rq_in = plan.rqs.iter().map(|_| felt()).collect();
+    claims.rq_out = plan.rqs.iter().map(|_| felt()).collect();
+    claims.rq_sc = plan.rqs.iter().map(|_| felt()).collect();
+    // Stream QQ at the NN merge (log row 66): stream NN's four, in the same
+    // state stream II's were in -- `nn_in`/`nn_out` are read per quantize
+    // region, `band_qkv` per rotated band and `band_q` per prefix band, all
+    // through `.get(..)`, and an unfilled one folds `x - 0` out of
+    // `b65_quant_eval` and of the corner and prefix `b65_chan_eval`s. Found by
+    // this stream's own guard on its first contact with someone else's work.
+    claims.nn_in = plan.quants.iter().map(|_| felt()).collect();
+    claims.nn_out = plan.quants.iter().map(|_| felt()).collect();
+    claims.band_qkv = plan.nn_bands.iter().map(|_| std::array::from_fn(|_| felt())).collect();
+    claims.band_q = plan.nn_qbands.iter().map(|_| felt()).collect();
 }
 
 /// `cudaemit`: lower every component, group by fingerprint into kernels, and
 /// write the generated CUDA, the Rust shape table and a manifest.
 pub fn emit_cmd(args: &[String]) {
-    let (l, vname) = crate::layer_of(args);
-    let params = crate::params_of(&l, args, &vname);
+    let (source, params) = crate::plan_params(args);
     let plan = crate::compose::Plan::new(&params);
     let out = crate::arg_str(args, "--out").unwrap_or_else(|| "/root/b7/gen".to_string());
     let launch = Launch {
@@ -2269,10 +2512,14 @@ pub fn emit_cmd(args: &[String]) {
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_2B03);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
                                           plan.glue.as_ref().map(|g| g.uns.as_slice()),
-                                          plan.emb.map(|l| l.arity()));
+                                          plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
+                                          plan.q_tabs.len());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b03);
     fill_tie_claims(&plan, &mut claims, 0x7135_2b03);
+    // Stream QQ (log row 61): from here on a claim the placeholder set does
+    // not supply is a panic naming the vector, not a zero that folds away.
+    crate::compose::set_emit_strict(true);
     let link = plan.p.gkr_bands.then(|| crate::gkrlink::link_for(&plan, 0x0b65_1157));
     let b = crate::compose::build_components_linked(&plan, &rels, f[0], f[1], f[2], f[3], f[4],
                                                     f[5], &claims, link.as_deref());  // family -> shapes, in first-seen order; a shape is a fingerprint. Seeded
@@ -2363,9 +2610,29 @@ pub fn emit_cmd(args: &[String]) {
         for i in 0..b.walks.len() {
             go!(b.walks[i], format!("walk{i}"));
         }
+        // Stream QQ (log row 61): the requantize seams and their tables.
+        // `BuiltComponents::fp_rows` has walked them since stream EE and
+        // `cudacheck` since stream II, but no emitter ever did -- so
+        // `b65_requant_eval` had not one shape in a 208-shape store, and all
+        // three seams of the wired C=4K chunk took the scalar route. This is
+        // not open item 21's kind: nothing folds, the family was simply never
+        // asked for.
+        for i in 0..b.rqs.len() {
+            go!(b.rqs[i], format!("requant{i}"));
+        }
+        for i in 0..b.rq_tabs.len() {
+            go!(b.rq_tabs[i], format!("rqtable{i}"));
+        }
         go!(b.exp_t, "exp_table".to_string());
         for i in 0..b.tables.len() {
             go!(b.tables[i], format!("table{i}"));
+        }
+        // Stream NN, added at its merge: the q/k/v quantize regions.  Without
+        // this the family has no shape in the store at all, so the cuda arm
+        // falls back to `accumulate_pointwise_cpu` for all three on every
+        // chunk that carries the rotation and no emit can ever change that.
+        for i in 0..b.quants.len() {
+            go!(b.quants[i], format!("quant{i}"));
         }
         // B11 stream K: the head's argmax region was never emitted -- 10,079
         // instructions on the CPU per `lm_head` chunk until now.
@@ -2381,6 +2648,43 @@ pub fn emit_cmd(args: &[String]) {
         }
         if let Some(et) = &b.emb_tab {
             go!(et, "emb_table".to_string());
+        }
+
+        // Stream EE (open item 21): the **collapsed** grid bands.
+        //
+        // `Lower::ext` folds `x - 0` and `schedule` then drops the dead scalar
+        // slot with it, so a claim a witness drives to exactly zero takes two
+        // instructions out of the IR and the component lowers to a fingerprint
+        // these placeholder claims never produce -- `exprprobe::claims_for`
+        // hands out four nonzero limbs per claim, and `fill_tie_claims` is the
+        // same hazard already found on the tie claims.
+        //
+        // The grid region has one such pair.  `KeyEval`'s `claimed_av` and
+        // `claimed_sn` are both folds of the numerator accumulator `zn`
+        // (`attn_air.rs`'s `av`/`sn` constraints), so both are exactly zero on
+        // a band whose numerator column is identically zero -- and that is an
+        // ordinary witness, not a coincidence: `commit_base` writes a zero
+        // numerator wherever a key's shift is off the exp table, and at a long
+        // prefix a whole `S`-key sub-band can be off it for every token of the
+        // chunk.  The C=16384 E11 run met exactly that on layer 2 of blocks
+        // 17-32: the prover asked for `b65_key_eval 0x67c40d82` at **744**
+        // instructions where every emitted shape of that band is **748**, and
+        // 16 chunks took the announced scalar fallback.
+        //
+        // So the emitter lowers every band a second time with that pair zeroed
+        // and installs whatever shape is new.  It is additive -- no fingerprint
+        // an earlier emit produced moves -- and value-preserving: the kernel is
+        // chosen by shape and the blob still replays the proof's own scalars,
+        // so a collapsed band computes `av - 0` exactly as the fallback did.
+        let mut zclaims = claims.clone();
+        for bc in zclaims.bands.iter_mut() {
+            bc[2] = [0; 4];
+            bc[3] = [0; 4];
+        }
+        let bz = crate::compose::build_components_linked(&plan, &rels, f[0], f[1], f[2], f[3],
+                                                         f[4], f[5], &zclaims, link.as_deref());
+        for i in 0..bz.keys.len() {
+            go!(bz.keys[i], format!("key_band{i}_zav"));
         }
     }
 
@@ -2451,7 +2755,7 @@ pub fn emit_cmd(args: &[String]) {
     std::fs::write(dir.join("cudakernels.rs"), &table).unwrap();
 
     let man = json!({
-        "source": l.source,
+        "source": source,
         "launch": {"block": launch.block, "min_blocks": launch.min_blocks},
         "seg_cap": seg_cap,
         "families": manifest,
@@ -2479,6 +2783,11 @@ pub fn emit_cmd(args: &[String]) {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    }
+    // Stream EE (open item 21): the set this line installs, for the pre-run
+    // comparison against what a chunk on the same line asks for.
+    if let Some(p) = crate::arg_str(args, "--fp-out") {
+        fp_write(&p, "cudaemit", &source, &rows);
     }
     crate::util::emit("cudaemit", man);
 }
@@ -2663,7 +2972,8 @@ pub fn logup_cmd(args: &[String]) {
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_4B04);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
                                           plan.glue.as_ref().map(|g| g.uns.as_slice()),
-                                          plan.emb.map(|l| l.arity()));
+                                          plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
+                                          plan.q_tabs.len());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b04);
     fill_tie_claims(&plan, &mut claims, 0x7135_4b04);
@@ -3082,10 +3392,14 @@ pub fn gen_emit_cmd(args: &[String]) {
     stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_4B05);
     let rels = crate::compose::Rels::draw(&mut ch, &plan.widths,
                                           plan.glue.as_ref().map(|g| g.uns.as_slice()),
-                                          plan.emb.map(|l| l.arity()));
+                                          plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
+                                          plan.q_tabs.len());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b05);
     fill_tie_claims(&plan, &mut claims, 0x7135_4b05);
+    // Stream QQ (log row 61): from here on a claim the placeholder set does
+    // not supply is a panic naming the vector, not a zero that folds away.
+    crate::compose::set_emit_strict(true);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
 
     // Same accumulate-across-design-points store as `cudaemit`, in its own file:
@@ -3196,9 +3510,23 @@ pub fn gen_emit_cmd(args: &[String]) {
         for i in 0..b.walks.len() {
             go!(b.walks[i], format!("walk{i}"));
         }
+        // Stream QQ (log row 61): the requantize seams and their tables, so
+        // `--families b65_requant_eval` can reach them at all.
+        for i in 0..b.rqs.len() {
+            go!(b.rqs[i], format!("requant{i}"));
+        }
+        for i in 0..b.rq_tabs.len() {
+            go!(b.rq_tabs[i], format!("rqtable{i}"));
+        }
         go!(b.exp_t, "exp_table".to_string());
         for i in 0..b.tables.len() {
             go!(b.tables[i], format!("table{i}"));
+        }
+        // Stream NN, added at its merge: the quantize regions' fraction half,
+        // in the same commit as the constraint half above -- adding a family to
+        // one walk alone is exactly the gap stream BB's comment below names.
+        for i in 0..b.quants.len() {
+            go!(b.quants[i], format!("quant{i}"));
         }
         // B11 stream BB: the same two families here. This walk is the one the
         // argmax is missing from (`$FAMS` names ten families and not
@@ -3317,4 +3645,150 @@ pub fn gen_emit_cmd(args: &[String]) {
         dir.display()
     );
     crate::util::emit("genemit", man);
+}
+
+// ------------------------------------------------------------ stream RR ----
+
+/// The class this stream closes, reproduced and then closed, on the smallest
+/// AIR that can carry it: two Horner-style closings, one per claim.
+///
+/// `Consts` reads its two values the way every call site in the AIR read them
+/// before this stream -- as ordinary extension constants -- and its shape moves
+/// with the values. `Claims` reads the same two values through
+/// `EvalAtRow::claim` and its shape does not move at all. Those are README
+/// items 21 and 23 and log rows 53, 61 and 66: a claim that is zero by data, or
+/// two claims that coincide, lowered to a fingerprint no emit had produced, and
+/// the component took the announced `kernel fallback:`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Claims {
+        a: SecureField,
+        b: SecureField,
+    }
+
+    impl FrameworkEval for Claims {
+        fn cuda_eval_name(&self) -> &'static str {
+            "b65_rr_claim_test"
+        }
+        fn log_size(&self) -> u32 {
+            4
+        }
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            5
+        }
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let x = eval.next_trace_mask();
+            let y = eval.next_trace_mask();
+            let ca = eval.claim(self.a);
+            let cb = eval.claim(self.b);
+            eval.add_constraint(E::EF::from(x) - ca);
+            eval.add_constraint(E::EF::from(y) - cb);
+            eval
+        }
+    }
+
+    /// The same AIR, the same two values, read as literals.
+    struct Consts {
+        a: SecureField,
+        b: SecureField,
+    }
+
+    impl FrameworkEval for Consts {
+        fn cuda_eval_name(&self) -> &'static str {
+            "b65_rr_const_test"
+        }
+        fn log_size(&self) -> u32 {
+            4
+        }
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            5
+        }
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let x = eval.next_trace_mask();
+            let y = eval.next_trace_mask();
+            eval.add_constraint(E::EF::from(x) - self.a);
+            eval.add_constraint(E::EF::from(y) - self.b);
+            eval
+        }
+    }
+
+    fn base(v: u32) -> SecureField {
+        SecureField::from(M31::from_u32_unchecked(v))
+    }
+    fn ext(v: u32) -> SecureField {
+        SecureField::from_m31_array([M31::from_u32_unchecked(v); 4])
+    }
+    /// what the store is keyed on, and the two counts a fold moves
+    fn shape<E: FrameworkEval>(e: &E) -> (u32, usize, usize) {
+        let ir = lower(e, SecureField::zero(), 4, 5);
+        (ir.fingerprint(), ir.ops.len(), ir.scalars.len())
+    }
+
+    /// Every pair of values a chunk can carry lowers to one shape.
+    #[test]
+    fn a_claims_value_is_not_a_shape_fact() {
+        let want = shape(&Claims { a: ext(7), b: ext(9) });
+        for (why, a, b) in [
+            ("two other distinct claims", ext(11), ext(13)),
+            ("both claims zero -- README item 21", SecureField::zero(), SecureField::zero()),
+            ("one claim zero -- log rows 61 and 66", ext(7), SecureField::zero()),
+            ("two claims that coincide -- EE's 0x18afbca6", ext(7), ext(7)),
+            ("both claims one", SecureField::one(), SecureField::one()),
+            ("base-field claims -- the node width", base(5), base(6)),
+            ("one of each", base(5), ext(6)),
+        ] {
+            assert_eq!(shape(&Claims { a, b }), want, "{why}");
+        }
+    }
+
+    /// The reproduction, in the same test file: read as literals, the same
+    /// seven pairs are four different shapes, and each difference is the
+    /// fingerprint of a kernel no emit produced.
+    #[test]
+    fn read_as_literals_the_same_values_are_four_shapes() {
+        let want = shape(&Consts { a: ext(7), b: ext(9) });
+        assert_eq!(shape(&Consts { a: ext(11), b: ext(13) }), want,
+                   "two distinct nonzero claims are one shape -- this is the case that works");
+        for (why, a, b) in [
+            ("both claims zero", SecureField::zero(), SecureField::zero()),
+            ("one claim zero", ext(7), SecureField::zero()),
+            ("two claims that coincide", ext(7), ext(7)),
+            ("base-field claims", base(5), base(6)),
+        ] {
+            assert_ne!(shape(&Consts { a, b }), want, "{why}");
+        }
+    }
+
+    /// And the shape a claim lowers to is the shape the literal route lowered a
+    /// distinct nonzero pair to -- which is why nothing in any store moves.
+    #[test]
+    fn the_claim_route_lowers_to_what_a_distinct_nonzero_pair_always_did() {
+        assert_eq!(
+            shape(&Claims { a: ext(7), b: ext(9) }).1,
+            shape(&Consts { a: ext(7), b: ext(9) }).1,
+            "instruction count"
+        );
+        assert_eq!(
+            shape(&Claims { a: ext(7), b: ext(9) }).2,
+            shape(&Consts { a: ext(7), b: ext(9) }).2,
+            "slot count"
+        );
+    }
+
+    /// The shape stops seeing the value; the blob does not. Two coinciding
+    /// claims are two slots and both carry the value, so the kernel computes
+    /// the statement the chunk published.
+    #[test]
+    fn the_claim_values_still_reach_their_slots() {
+        let ir = lower(&Claims { a: ext(7), b: ext(9) }, SecureField::zero(), 4, 5);
+        assert_eq!(ir.claim_slots.len(), 2);
+        for (slot, n) in &ir.claim_slots {
+            assert_eq!(ir.scalars[*slot], [ext(7), ext(9)][*n]);
+        }
+        let ir = lower(&Claims { a: ext(7), b: ext(7) }, SecureField::zero(), 4, 5);
+        assert_eq!(ir.claim_slots.len(), 2, "coinciding claims still get a slot each");
+        assert_eq!(ir.scalars.iter().filter(|v| **v == ext(7)).count(), 2);
+    }
 }
