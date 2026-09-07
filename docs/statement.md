@@ -35,10 +35,14 @@ side is in this statement).
 | 15 | embedding row into the first segment's residual stream | bound on layer 0, absent elsewhere | `--unsound-skip-embedding` |
 | 16 | logits into the emitted token | bound on the head segment, absent elsewhere | `--unsound-skip-argmax` |
 
-A head segment has no attention and no MLP, so edges 3 to 11 and 14 are
-absent there; its edge 1 is the final norm's reduction, its edge 2 the norm's
-output into the head matmul, and its edge 13 the residual it consumed,
-committed as the in side of the last layer link.
+A head segment has no attention and no MLP of its own, so edges 3 to 11 and 14
+are absent there. Absent says this segment states none of those seams, not that
+its witness holds no such matmuls: a head dump carries its layer's eight
+matmuls, and the head segment proves each of them against the pinned weights
+(edge 12) while binding the input of none and reading the output of none. The
+one requantize seam it states is the final norm's output into the head matmul.
+Its edge 1 is the final norm's reduction, its edge 2 that seam, and its edge 13
+the residual it consumed, committed as the in side of the last layer link.
 
 ## What each bound edge means
 

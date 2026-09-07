@@ -85,6 +85,21 @@ reads, so the two counts differ and the proof stopped before the first kernel
 ran. The kernel now asks that every column it reads was supplied, which is what
 its fingerprint pins; no digest moved.
 
+**The head shape.** A synthetic head segment: the final norm, an `lm_head`
+matmul over its output, and the layer's own seven matmuls beside them, which is
+what a head dump carries. Its one requantize seam is the head's, so the seam
+between the attention output and the `o` matmul is not part of what it states
+and edge 5 is **absent** there rather than unbound -- as are edges 3, 4, 6 to 11
+and 14. A synthetic head carries no `key_head.u16`, so the argmax cannot be
+stated on it and `--unsound-skip-argmax` is what a synthetic head forces; edge 16
+is unbound here for that reason alone, and on a head dump, which does carry it,
+that edge is bound and nothing else in the table differs. The row is a shape no
+page pinned before, so it is a new digest and not a moved one.
+
+| shape | flags after `$SYN` | digest (first 16 hex) | unbound edges | recorded |
+|---|---|---|---|---|
+| `head` | `--head-groups 2,1 --nout 64 --residual-stream-a 32 --kmax 16 --synth-head --synth-vocab 256 --unsound-skip-argmax` | `e3f31c1d4aeae77e` | 16 | SIMD backend, 2026-09-07; pinned in `tests/` |
+
 **The unbound configuration.** The same shapes with the skips set reproduce the
 digests recorded on 2026-09-06, before the sound defaults; `RS`, `LB` and `KV`
 stand for `--unsound-skip-residual-stream`, `--unsound-skip-layer-boundary` and

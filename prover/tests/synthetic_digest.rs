@@ -135,3 +135,43 @@ fn synthetic_segment_digests_and_binding_tables_are_pinned() {
         assert_eq!(prov_skips, skips, "{}: provenance.unsound_skips", c.name);
     }
 }
+
+/// The head shape, pinned here for the first time (issue #58).
+///
+/// A head chunk's family is the final norm, which builds no `o` seam -- and the
+/// dump a head chunk is loaded from carries its layer's `o` matmul all the same,
+/// so both `ao_q` and the `o` Freivalds check's `qX` are published and the
+/// verifier used to compare two folds this statement never binds to each other.
+/// An honest head chunk was rejected by that comparison and nothing else. Here
+/// the seam is *absent*: `ao_q_open` is false beside a vacuous `ao_q_ok`, and the
+/// binding table says the same.
+///
+/// A synthetic head carries no `key_head.u16`, so the argmax has to be skipped to
+/// prove it at all and edge 16 is unbound here; on a head dump it is bound and
+/// nothing else about the table moves. It takes no `--diagonal-block` either: a
+/// head chunk commits no K/V boundary, so its plan holds the prefix key tiles
+/// alone and a synthetic head built with the diagonal block would disagree with
+/// it. Edge 14 is absent here for the same reason it is on a head dump.
+#[test]
+fn the_synthetic_head_chunk_proves_with_the_o_seam_absent() {
+    let args = args_of(&["--head-groups", "2,1", "--nout", "64", "--residual-stream-a", "32",
+                         "--kmax", "16", "--synth-head", "--synth-vocab", "256",
+                         "--unsound-skip-argmax"]);
+    let v = prove(&args);
+    let point = &v["result"]["point"];
+    assert_eq!(point["accepts"], serde_json::Value::Bool(true),
+               "the honest head chunk must verify: zk-prover {}", args.join(" "));
+    let got = point["proof_sha256"].as_str().unwrap_or("");
+    assert!(got.starts_with("e3f31c1d4aeae77e"),
+            "head: proof digest moved for `zk-prover {}`: got {got}; if the change is meant to \
+             alter the proof, record the new digest in prover/README.md and here in the same \
+             pull request", args.join(" "));
+    // the seam is absent, not open: nothing about this chunk's `o` matmul is
+    // compared, and the record says absent rather than a checked pass
+    assert_eq!(point["verdict"]["ao_q_ok"], serde_json::Value::Bool(true), "head: ao_q_ok");
+    assert_eq!(point["verdict"]["ao_q_open"], serde_json::Value::Bool(false), "head: ao_q_open");
+    assert_eq!(point["binding"]["unbound"], serde_json::json!([16]), "head: unbound edges");
+    assert_eq!(point["binding"]["absent"], serde_json::json!([3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15]),
+               "head: absent edges");
+    assert_eq!(v["provenance"]["unsound_skips"], serde_json::json!(["argmax"]));
+}
