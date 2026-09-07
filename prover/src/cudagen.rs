@@ -560,6 +560,18 @@ fn limbs(v: SecureField) -> [u32; 4] {
     [a[0].0, a[1].0, a[2].0, a[3].0]
 }
 
+/// Stream PP (E11): the emitted kernel's tree index for a physical one.  The
+/// model tree (index 1) is never named by a component's own mask -- its columns
+/// reach the AIR through the preprocessed gather, inside tree 0 -- so the
+/// emitter drops its slot and every stored kernel keeps the numbering it was
+/// emitted against.  `component_prover.rs` does the same to the dispatch ABI's
+/// pointer arrays.
+pub fn emit_tree(t: usize) -> usize {
+    assert_ne!(t, crate::common::MODEL_TREE,
+               "the model tree cannot be named by a component's own mask");
+    if t == 0 { 0 } else { t - 1 }
+}
+
 impl Lower {
     fn push(&mut self, key: String, op: Op, w: u8) -> usize {
         if let Some(i) = self.intern.get(&key) {
@@ -687,9 +699,12 @@ impl Lower {
                 let col = *self.colmap[i]
                     .get(&idx)
                     .unwrap_or_else(|| panic!("column idx {idx} of interaction {i} unmapped"));
+                // Stream PP (E11): the emitted kernel's tree numbering, which
+                // skips the model tree -- see `emit_tree`.
+                let t = emit_tree(i);
                 self.push(
-                    format!("C{i}_{col}_{off}"),
-                    Op::Load { tree: i, col, off },
+                    format!("C{t}_{col}_{off}"),
+                    Op::Load { tree: t, col, off },
                     1,
                 )
             }
@@ -1009,7 +1024,7 @@ fn lower_impl<E: FrameworkEval>(
     for c in &ev.constraints {
         collect_cols_ext(c, &mut seen);
     }
-    let n_int = info.mask_offsets.len().max(3);
+    let n_int = info.mask_offsets.len().max(crate::common::INTER_TREE + 1);
     let mut colmap = vec![HashMap::new(); n_int];
     for i in 0..n_int {
         let idxs: Vec<usize> = ev.claimed.iter().enumerate()
@@ -1025,7 +1040,11 @@ fn lower_impl<E: FrameworkEval>(
         }
         let n = idxs.len();
         for (j, idx) in idxs.into_iter().enumerate() {
-            let j = if mutate == Mutate::ColShift && i == 1 && n > 1 { (j + 1) % n } else { j };
+            let j = if mutate == Mutate::ColShift && i == crate::common::BASE_TREE && n > 1 {
+                (j + 1) % n
+            } else {
+                j
+            };
             colmap[i].insert(idx, j);
         }
     }
@@ -1048,19 +1067,25 @@ fn lower_impl<E: FrameworkEval>(
         pre_index.entry(id.clone()).or_insert(i);
     }
 
+    // Stream PP (E11): the emitted kernel sees the *compacted* trees -- the
+    // preprocessed view (both preprocessed trees gathered into one vector, as
+    // `FrameworkComponent` hands it over), then the base trace, then the
+    // interaction trace, then the boundary trees.  The model tree is never in a
+    // component's own mask, so dropping its slot leaves exactly the numbering
+    // every stored kernel was emitted against.
     let cols = [
         pre_ids.len(),
-        info.mask_offsets.get(1).map(|v| v.len()).unwrap_or(0),
-        info.mask_offsets.get(2).map(|v| v.len()).unwrap_or(0),
+        info.mask_offsets.get(crate::common::BASE_TREE).map(|v| v.len()).unwrap_or(0),
+        info.mask_offsets.get(crate::common::INTER_TREE).map(|v| v.len()).unwrap_or(0),
     ];
-    let tree_cols: Vec<usize> = (0..n_int)
-        .map(|i| {
-            if i == 0 {
-                pre_ids.len()
-            } else {
-                info.mask_offsets.get(i).map(|v| v.len()).unwrap_or(0)
-            }
-        })
+    assert!(
+        info.mask_offsets.get(crate::common::MODEL_TREE).map(|v| v.is_empty()).unwrap_or(true),
+        "a component named the model tree in its own mask; it is read through \
+         the preprocessed gather and nowhere else"
+    );
+    let tree_cols: Vec<usize> = std::iter::once(pre_ids.len())
+        .chain((crate::common::BASE_TREE..n_int)
+               .map(|i| info.mask_offsets.get(i).map(|v| v.len()).unwrap_or(0)))
         .collect();
 
     let mut lo = Lower {

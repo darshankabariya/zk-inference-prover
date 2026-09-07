@@ -1206,8 +1206,11 @@ mod tests {
                 let spans = b.components();
                 let last = spans[n - 1].trace_log_degree_bounds();
                 let prev = spans[n - 2].trace_log_degree_bounds();
-                assert_eq!(last[1].len(), 1, "the table region commits one column");
-                assert_eq!(prev[1].len(), 1 + 2 * plan.emb.unwrap().pe,
+                // stream PP: the base trace is tree 2 -- the shape tree and the
+                // model tree are 0 and 1.
+                let base = crate::common::BASE_TREE;
+                assert_eq!(last[base].len(), 1, "the table region commits one column");
+                assert_eq!(prev[base].len(), 1 + 2 * plan.emb.unwrap().pe,
                            "the use region commits `tk` and two cells per channel");
             }
         }

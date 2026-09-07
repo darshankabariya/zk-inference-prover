@@ -38,10 +38,14 @@ pub fn add_to_relation_entries<E: FrameworkEval>(
 
     // Aggregating the preprocessed columns. This information does not propagate from
     // "next_interaction_mask", hence requires special treatment.
+    // Stream PP (E11): gathered from the shape tree and the model tree.
     sub_tree[PREPROCESSED_TRACE_IDX] = component
         .preprocessed_column_indices
         .iter()
-        .map(|idx| trace[PREPROCESSED_TRACE_IDX][*idx])
+        .map(|idx| {
+            let (tree, col) = component.pre_loc(*idx);
+            trace[tree][col]
+        })
         .collect();
 
     (0..1 << log_size)

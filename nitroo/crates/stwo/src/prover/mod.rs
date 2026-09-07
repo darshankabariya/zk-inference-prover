@@ -6,7 +6,7 @@ use crate::core::circle::CirclePoint;
 use crate::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
 use crate::core::pcs::utils::get_lifting_log_size;
 use crate::core::proof::{ExtendedStarkProof, StarkProof};
-use crate::core::verifier::{COMPOSITION_LOG_SPLIT, PREPROCESSED_TRACE_IDX};
+use crate::core::verifier::{COMPOSITION_LOG_SPLIT, MODEL_TRACE_IDX, PREPROCESSED_TRACE_IDX};
 use crate::prover::backend::{BackendForChannel, Column};
 
 mod air;
@@ -56,9 +56,16 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
     let n_preprocessed_columns = commitment_scheme.trees[PREPROCESSED_TRACE_IDX]
         .polynomials
         .len();
+    // Stream PP (E11): tree 1 is the model tree.
+    let n_model_columns = commitment_scheme
+        .trees
+        .get(MODEL_TRACE_IDX)
+        .map(|t| t.polynomials.len())
+        .unwrap_or(0);
     let component_provers = ComponentProvers {
         components: components.to_vec(),
         n_preprocessed_columns,
+        n_model_columns,
     };
     let trace = commitment_scheme.trace();
 

@@ -11,6 +11,10 @@ use crate::core::pcs::CommitmentSchemeVerifier;
 use crate::core::proof::StarkProof;
 use crate::core::vcs::verifier::MerkleVerificationError;
 pub const PREPROCESSED_TRACE_IDX: usize = 0;
+/// Stream PP (E11): the second preprocessed tree -- the model columns, whose
+/// root is the published per-layer model commitment.  See
+/// `stwo_constraint_framework`'s note beside `ORIGINAL_TRACE_IDX`.
+pub const MODEL_TRACE_IDX: usize = 1;
 
 // TODO(Leo): remove this once the composition poly split can be dependant on a config instead of
 // being hardcoded.
@@ -42,10 +46,18 @@ pub fn verify_ex<MC: MerkleChannel>(
     let n_preprocessed_columns = commitment_scheme.trees[PREPROCESSED_TRACE_IDX]
         .column_log_sizes
         .len();
+    // Stream PP (E11): tree 1 is the model tree, committed beside the shape
+    // tree and before the base trace.
+    let n_model_columns = commitment_scheme
+        .trees
+        .get(MODEL_TRACE_IDX)
+        .map(|t| t.column_log_sizes.len())
+        .unwrap_or(0);
 
     let components = Components {
         components: components.to_vec(),
         n_preprocessed_columns,
+        n_model_columns,
     };
     let split_composition_log_degree_bound =
         components.composition_log_degree_bound() - COMPOSITION_LOG_SPLIT;

@@ -364,8 +364,8 @@ fn probes_cmd(args: &[String]) {
 ///
 /// This is the question B6 exists to answer.  B5 proved one head at ~1,200 columns
 /// and 600 KiB-1 MiB of proof; B1's model has 24 x 14 = 336 head-instances, so
-/// per-head instantiation extrapolates to a 200-340 MB proof, two orders of
-/// magnitude over a single-digit MiB proof.  Packing shares one column set across the band, and
+/// per-head instantiation extrapolates to a 200-340 MB proof, two orders over
+/// a single-digit MiB proof.  Packing shares one column set across the band, and
 /// the sweep below is what that is worth.
 fn pack_cmd(args: &[String]) {
     let src = src_of(args);
@@ -1256,13 +1256,21 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
         "proof_bytes": proof_bytes_len,
         "statement_bytes": {"fixed": fixed_bytes.len(), "claims": claims_bytes.len()},
         "pre_root": out.fixed.pre_root,
+        // stream PP: the per-layer model commitment this chunk proves against
+        "model_root": out.fixed.model_root,
         "columns": {"preprocessed": out.n_columns[0], "base": out.n_columns[1],
                     "interaction": out.n_columns[2],
                     "total": out.n_columns.iter().sum::<usize>()},
-        "cells": {"preprocessed": out.stats.tree_cells.first().copied().unwrap_or(0),
-                  "base": out.stats.tree_cells.get(1).copied().unwrap_or(0),
-                  "interaction": out.stats.tree_cells.get(2).copied().unwrap_or(0),
-                  "fresh": out.stats.tree_cells[1..].iter().sum::<usize>()},
+        // stream PP: `preprocessed` is the shape tree and the model tree
+        // together, so the number stays comparable with the pre-split records.
+        "cells": {"preprocessed": out.stats.pre_cells(),
+                  "shape": out.stats.tree_cells.first().copied().unwrap_or(0),
+                  "model": out.stats.model_cells(),
+                  "base": out.stats.tree_cells.get(crate::common::BASE_TREE)
+                      .copied().unwrap_or(0),
+                  "interaction": out.stats.tree_cells.get(crate::common::INTER_TREE)
+                      .copied().unwrap_or(0),
+                  "fresh": out.stats.fresh_cells()},
         "family_cells": out.family_cells,
         "ref_mismatch": out.ref_bad, "off_table": out.off_table,
         "glue_ties_ok": out.glue_ties_ok,
@@ -1362,10 +1370,23 @@ fn pre_split_cmd(args: &[String]) {
 /// activations, so they cannot be re-derived here -- and taking them from the
 /// statement is what the check wants anyway, since it is the statement's
 /// declared shape a verifier holds.
+///
+/// **Stream PP (E11): `--shape-only` is the committed-model verifier's form.**
+/// It stops one tree earlier -- after the shape tree and before the model tree
+/// -- and emits `pre_root` alone.  The shape tree is a function of
+/// `Fixed.params` and of the per-layer calibration the model manifest
+/// publishes, so the root it derives is one no weight can move: the desk gate
+/// derives it at two seeds, and the two agree while the model roots differ.
+/// On a real dump the loader is still `--weights-only`'s, so the *files* are
+/// still opened; a `Layer::from_params` that opens none is the box half's, and
+/// this brief's Record names it.
 fn expect_root_cmd(args: &[String]) {
+    if flag(args, "--shape-only") {
+        compose::SHAPE_ONLY.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     compose::PRE_ONLY.store(true, std::sync::atomic::Ordering::Relaxed);
     compose_cmd(args);
-    unreachable!("expect-root: the prover did not stop after committing tree 0");
+    unreachable!("expect-root: the prover did not stop after the preprocessed trees");
 }
 
 /// Stream LL (E11), deliverable 2: the model manifest KK's
@@ -1490,7 +1511,10 @@ fn model_roots_cmd(args: &[String]) {
         }) {
             assert_eq!(prev["pre_root"], r["pre_root"],
                        "model-roots: two chunks at (layer {layer}, c {c}) derive \
-                        different tree-0 roots");
+                        different shape roots");
+            assert_eq!(prev["model_root"], r["model_root"],
+                       "model-roots: two chunks at (layer {layer}, c {c}) derive \
+                        different model roots");
             assert_eq!(prev["model"], r["model"],
                        "model-roots: two chunks at (layer {layer}, c {c}) name \
                         different models");
@@ -1498,11 +1522,37 @@ fn model_roots_cmd(args: &[String]) {
             continue;
         }
         seen.insert((layer, c));
+        // Stream PP (E11), the desk record's open item 2: the shape tree holds
+        // two columns that are functions of the *calibration* and of no weight
+        // -- `band/dinv` and the exp table's value column, both classified
+        // `PreNeeds::Manifest` -- and the calibration they need is
+        // `frac_per_head` and `master_table_bits`.  `model-roots` published
+        // `log_table` and not `frac_per_head`, so a verifier deriving the shape
+        // root on a real dump had to take `frac_per_head` off the dump's own
+        // manifest.  Publishing it here is what makes it public input: the
+        // manifest carries the model root the verifier compares AND the
+        // calibration the verifier derives with, and the dump is needed for
+        // neither.
+        let calib = a.iter().position(|w| w == "--witness")
+            .and_then(|i| a.get(i + 1))
+            .and_then(|d| std::fs::read(format!("{d}/manifest.json")).ok())
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+        let field = |k: &str| calib.as_ref().map(|m| m[k].clone()).unwrap_or(Value::Null);
         rows.push(json!({
             "layer": layer,
             "block": r["block"],
             "c": c,
             "pre_root": r["pre_root"],
+            // stream PP: the per-layer calibration the shape derivation needs,
+            // published beside the root rather than read off the dump
+            "frac_per_head": field("frac_per_head"),
+            "frac_shared_per_head": field("frac_shared_per_head"),
+            "master_table_bits": field("master_table_bits"),
+            // stream PP: the per-layer model commitment.  The shape root is
+            // keyed by `(layer, c)` because the shape moves with the chunk;
+            // this one is keyed by the layer alone, and the rejection below is
+            // what says so.
+            "model_root": r["model_root"],
             "model": r["model"],
             "source": r["source"],
             "tag": tag,
@@ -1522,14 +1572,25 @@ fn model_roots_cmd(args: &[String]) {
             by_layer.insert(l, r);
         }
     }
-    // Stream LL box half, the desk record's open item 3: `master_table_bits` has
-    // to be pinned per layer across blocks, or the model part of tree 0 is not a
-    // per-layer constant -- `table/exp` is `1 << log_table` rows and `log_table`
-    // comes off *each extraction's own manifest*, so two blocks of one layer can
-    // legitimately carry two table sizes and neither is wrong.  A requirement on
-    // the plan, checked here rather than assumed: a layer with two sizes is a
-    // named rejection and no manifest is written, because a manifest whose rows
-    // disagree about the layer's table is a manifest that pins nothing.
+    // Stream LL box half, the desk record's open item 3: `master_table_bits` had
+    // to be pinned per layer across blocks, or the model part of tree 0 was not
+    // a per-layer constant -- `table/exp` is `1 << log_table` rows, it was a
+    // model column, and `log_table` comes off each chunk's own statement, so two
+    // blocks of one layer can legitimately carry two table sizes and neither is
+    // wrong.  A layer with two sizes was a named rejection and no manifest was
+    // written.
+    //
+    // **Stream PP (E11) retires that rejection.** The exp table's index column
+    // is `PreNeeds::Params` and its value column `PreNeeds::Manifest`, so the
+    // whole table is in the SHAPE tree and no model-tree column's height depends
+    // on the width any more (`Plan::pre_split`).  The shape root is derived per
+    // chunk from that chunk's own `Fixed.params`, which is where the tightened
+    // width lives, so a per-block width costs the derivation nothing.  Two
+    // widths in one layer is now a **report**, not a rejection -- and it is the
+    // report that says `--tight-table` is admissible again, which is what
+    // design (a)'s per-layer `--table-bits` map (+0.496% preprocessed, log row
+    // 75) existed to avoid.  What still has to hold is the model root itself,
+    // and that is the check below.
     let mut tb: std::collections::BTreeMap<i64, std::collections::BTreeMap<u64, Vec<String>>> =
         Default::default();
     for r in &rows {
@@ -1538,14 +1599,40 @@ fn model_roots_cmd(args: &[String]) {
         tb.entry(l).or_default().entry(n).or_default()
             .push(r["tag"].as_str().unwrap_or("").to_string());
     }
-    let rejections: Vec<Value> = tb.iter().filter(|(_, m)| m.len() > 1)
+    let widths_vary: Vec<Value> = tb.iter().filter(|(_, m)| m.len() > 1)
         .map(|(l, m)| json!({
             "layer": l,
-            "why": "master_table_bits is not pinned across this layer's blocks",
             "table_bits": m.iter().map(|(n, tags)| json!({"log_table": n, "chunks": tags}))
                 .collect::<Vec<Value>>(),
         }))
         .collect();
+    for w in &widths_vary {
+        eprintln!("model-roots: layer {} carries two exp-table widths across its \
+                   blocks; the exp table is a shape column, so the model root is \
+                   unaffected", w["layer"]);
+    }
+    let mut rejections: Vec<Value> = vec![];
+    // Stream PP (E11): the model root is the *published commitment* for a
+    // layer, so it has to be one value across that layer's blocks.  The
+    // classification is what should make that true -- every model-tree column
+    // is `varies: Layer`, asserted in `Plan::pre_ids_split` -- and this is the
+    // check that says it held on a real plan.  A layer with two model roots is
+    // a named rejection and no manifest is written: a manifest whose rows
+    // disagree about a layer's model commits nothing.
+    let mut mr: std::collections::BTreeMap<i64, std::collections::BTreeMap<String, Vec<String>>> =
+        Default::default();
+    for r in &rows {
+        let l = r["layer"].as_i64().unwrap_or(-1);
+        let root = r["model_root"].as_str().unwrap_or("").to_string();
+        mr.entry(l).or_default().entry(root).or_default()
+            .push(r["tag"].as_str().unwrap_or("").to_string());
+    }
+    rejections.extend(mr.iter().filter(|(_, m)| m.len() > 1).map(|(l, m)| json!({
+        "layer": l,
+        "why": "the model root is not one value across this layer's blocks",
+        "model_roots": m.iter().map(|(root, tags)| json!({"model_root": root, "chunks": tags}))
+            .collect::<Vec<Value>>(),
+    })));
     let body = json!({
         "plan": plan,
         "rows": rows,
@@ -1560,6 +1647,15 @@ fn model_roots_cmd(args: &[String]) {
         "table_bits_by_layer": tb.iter()
             .map(|(l, m)| json!({"layer": l,
                                  "log_table": m.keys().collect::<Vec<&u64>>()}))
+            .collect::<Vec<Value>>(),
+        // stream PP: the layers whose blocks tightened to two different exp-table
+        // widths.  A report, not a rejection: the exp table is a shape column, so
+        // the width reaches the shape root (per chunk) and not the model root.
+        "table_bits_vary": widths_vary,
+        // stream PP: the published model commitment, one per layer
+        "model_roots_by_layer": mr.iter()
+            .map(|(l, m)| json!({"layer": l,
+                                 "model_root": m.keys().collect::<Vec<&String>>()}))
             .collect::<Vec<Value>>(),
         "rejections": rejections,
         "secs": t0.elapsed().as_secs_f64(),
@@ -1591,6 +1687,18 @@ fn compose_cmd(args: &[String]) {
     // to bite on (section 5 rules 5 and 8). The proof still accepts here -- the
     // table and the witness agree; it is the pinned preprocessed root, which
     // only `compose-probes` checks, that rejects it.
+    // Stream PP (E11), the model-tree control: bend one cell of the first
+    // matmul's quantized weight array.  It is a *weight*, so only the model
+    // tree moves -- the shape root must not.  `--corrupt-exp` is the mirror
+    // control: the exp table is a shape column now, so it moves the shape root
+    // and leaves the model root alone.
+    if let Some(i) = arg_str(args, "--corrupt-weight") {
+        let idx: usize = i.parse().expect("--corrupt-weight wants a weight index");
+        let m = l.mats.first_mut().expect("--corrupt-weight: the layer has no matmul");
+        assert!(idx < m.qw.len(),
+                "--corrupt-weight {idx}: the first matmul has {} weights", m.qw.len());
+        m.qw[idx] += 1;
+    }
     if let Some(i) = arg_str(args, "--corrupt-exp") {
         l.corrupt_exp_table(i.parse().expect("--corrupt-exp wants a table row"));
         eprintln!("compose: exp table row {i} flipped, witness rebuilt");

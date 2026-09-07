@@ -447,8 +447,14 @@ pub struct Fixed {
     pub pow_bits: u32,
     /// column log sizes per tree, in commit order
     pub sizes: Vec<Vec<u32>>,
-    /// the pinned root of tree 0: tables, selectors, weights and scales
+    /// the pinned root of tree 0, the shape tree: tables, selectors, masks,
+    /// cos/sin and `dinv` -- everything a verifier rebuilds from this statement
+    /// and the model manifest's per-layer calibration, with no weights.
     pub pre_root: String,
+    /// Stream PP (E11): the pinned root of tree 1, the model tree -- the
+    /// weights and their scales.  One constant per (model, layer); the verifier
+    /// compares it against the published manifest and derives nothing.
+    pub model_root: String,
     /// Stream KK: which layer of the model this chunk proves, and which token
     /// block.  Declared -- like `pre_root`, and pinned to the model only when
     /// stream LL derives the expected tree-0 root per (layer, shape) -- but
@@ -1472,14 +1478,47 @@ impl GluePlan {
 pub static PRE_ONLY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Stream PP (E11): stop one tree earlier -- after the **shape** tree and
+/// before the model tree.  This is the verifier's own derivation: the shape
+/// tree is a function of `Fixed.params` and of the manifest's per-layer
+/// calibration, so a run that stops here has read no weight, and the desk gate
+/// says so by deriving the same root at two seeds.  Set by
+/// `b65 expect-root --shape-only` and by nothing else.
+pub static SHAPE_ONLY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Stream LL (E11): what a preprocessed column needs in order to be rebuilt.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
 pub enum PreNeeds {
     /// `Fixed.params` alone determines every cell.
     Params,
-    /// the model dump: a weight, a weight scale, or a per-layer calibration
-    /// constant that lives only in the dump's manifest.
+    /// Stream PP (E11): a per-layer calibration constant -- `frac_per_head` and
+    /// `master_table_bits` -- that is not in the weights but is published, per
+    /// layer, by the model manifest `b65 model-roots` writes.  Public input, so
+    /// the verifier rebuilds the column; it is not a weight, so it does not
+    /// belong to the model tree.
+    Manifest,
+    /// the model dump: a weight or a weight scale.
     Model,
+}
+
+/// Stream PP (E11): which of the two committed preprocessed trees a column
+/// takes.  `Params` and `Manifest` are the verifier's to rebuild and go to the
+/// shape tree; `Model` is the publisher's and goes to the model tree, whose
+/// root is the per-layer model commitment.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+pub enum PreTree {
+    Shape,
+    Model,
+}
+
+impl PreNeeds {
+    pub fn tree(self) -> PreTree {
+        match self {
+            PreNeeds::Params | PreNeeds::Manifest => PreTree::Shape,
+            PreNeeds::Model => PreTree::Model,
+        }
+    }
 }
 
 /// Stream LL (E11): does the column move down the block axis of a grid?
@@ -2031,10 +2070,11 @@ impl Plan {
                kv, group, rows_band, emb }
     }
 
-    /// How many trees the transcript commits: the three that were always there,
+    /// How many trees the transcript commits: stream PP's two preprocessed
+    /// trees (shape, then model), the base trace and the interaction trace,
     /// plus one per boundary side.
     pub fn n_trees(&self) -> usize {
-        3 + self.bounds.len() + self.kv.len()
+        4 + self.bounds.len() + self.kv.len()
     }
 
     /// Tree 0's column ids, in exactly the order the prover commits them.
@@ -2201,7 +2241,13 @@ impl Plan {
                     // a model constant off the dump's `frac_per_head`, and the
                     // one column of a band that is not a function of the shape
                     let (fam, needs) = if n == CORNER_SEL[7] {
-                        ("band/dinv", PreNeeds::Model)
+                        // stream PP: `dinv` is `2^-(F - frac_i)`, a function of
+                        // the manifest's `frac_per_head` and of no weight -- so
+                        // it is public and stays in the shape tree.  It is the
+                        // only `Block`-varying column that was ever `Model`,
+                        // and moving it is what makes the model tree a
+                        // per-layer constant.
+                        ("band/dinv", PreNeeds::Manifest)
                     } else {
                         ("band/sel", PreNeeds::Params)
                     };
@@ -2214,7 +2260,7 @@ impl Plan {
             } else {
                 for n in KEY_SEL {
                     let (fam, needs) = if n == KEY_SEL[7] {
-                        ("band/dinv", PreNeeds::Model)
+                        ("band/dinv", PreNeeds::Manifest)
                     } else {
                         ("band/sel", PreNeeds::Params)
                     };
@@ -2306,7 +2352,13 @@ impl Plan {
         // column is this layer's own table and its exponent is the dump's
         put(id(TBL_EXP_X), "table/exp", self.p.log_table, PreNeeds::Params,
             PreVaries::Layer);
-        put(id(TBL_EXP_Y), "table/exp", self.p.log_table, PreNeeds::Model,
+        // stream PP: the value column is `table_of(1 << log_table, nmax, frac)`
+        // -- a closed form of the manifest's `frac_per_head` and the statement's
+        // table width, and of no weight.  It is the only column whose height is
+        // `1 << log_table`, so moving it to the shape tree is what frees the
+        // model root of the table width and retires design (a)'s per-layer
+        // `--table-bits` map (log row 75).
+        put(id(TBL_EXP_Y), "table/exp", self.p.log_table, PreNeeds::Manifest,
             PreVaries::Layer);
         for c in NORM_COLS {
             put(id(c), "table/norm", self.log_norm, PreNeeds::Params, PreVaries::Layer);
@@ -2327,11 +2379,15 @@ impl Plan {
             put(id(c), "table/epow", self.log_epow(), PreNeeds::Params, PreVaries::Layer);
         }
         if let Some(g) = &self.glue {
-            let t = crate::glue::GlueTables::new(self.p.kmax, self.round, &g.uns);
-            let mut logs: Vec<u32> = vec![t.log_pow; crate::glue::POW_COLS.len()];
-            logs.extend(vec![t.log_smul; crate::glue::SMUL_COLS.len()]);
-            logs.extend(vec![t.log_val; crate::glue::VAL_COLS.len()]);
-            logs.extend(vec![t.log_un; 4 * g.uns.len()]);
+            // Stream PP (E11): the four heights, and not the tables.  Building
+            // the tables here cost a `2^(kmax+1)`-row `frac` on every call and
+            // asserted `kmax >= DMAX + 1`, which a plan that carries a glue
+            // gadget it never proves need not satisfy.
+            let t = crate::glue::GlueTables::log_sizes(self.round);
+            let mut logs: Vec<u32> = vec![t.pow; crate::glue::POW_COLS.len()];
+            logs.extend(vec![t.smul; crate::glue::SMUL_COLS.len()]);
+            logs.extend(vec![t.val; crate::glue::VAL_COLS.len()]);
+            logs.extend(vec![t.un; 4 * g.uns.len()]);
             for (gid, ls) in crate::glue::glue_table_ids(&g.uns).into_iter().zip(logs) {
                 put(gid, "table/glue", ls, PreNeeds::Params, PreVaries::Layer);
             }
@@ -2420,9 +2476,69 @@ impl Plan {
         v
     }
 
-    /// The log sizes `pre_split` says tree 0 has, in commit order.
+    /// The log sizes `pre_split` says the two preprocessed trees have, in
+    /// commit order: the shape tree first, then the model tree.
     pub fn pre_split_sizes(&self) -> Vec<u32> {
-        self.pre_split().iter().map(|c| c.log_size).collect()
+        let cols = self.pre_split();
+        cols.iter()
+            .filter(|c| c.needs.tree() == PreTree::Shape)
+            .chain(cols.iter().filter(|c| c.needs.tree() == PreTree::Model))
+            .map(|c| c.log_size)
+            .collect()
+    }
+
+    /// Stream PP (E11): the shape tree's log sizes, in commit order.
+    pub fn shape_sizes(&self) -> Vec<u32> {
+        self.pre_split()
+            .iter()
+            .filter(|c| c.needs.tree() == PreTree::Shape)
+            .map(|c| c.log_size)
+            .collect()
+    }
+
+    /// Stream PP (E11): the model tree's log sizes, in commit order.
+    pub fn model_sizes(&self) -> Vec<u32> {
+        self.pre_split()
+            .iter()
+            .filter(|c| c.needs.tree() == PreTree::Model)
+            .map(|c| c.log_size)
+            .collect()
+    }
+
+    /// Stream PP (E11): `true` for every column of `pre_ids` that the model
+    /// tree commits, in `pre_ids`' own order -- the mask the commit path uses
+    /// to split one flat column list into the two trees.
+    pub fn pre_is_model(&self) -> Vec<bool> {
+        self.pre_split()
+            .iter()
+            .map(|c| c.needs.tree() == PreTree::Model)
+            .collect()
+    }
+
+    /// Stream PP (E11): the shape tree's ids and the model tree's, each in its
+    /// own tree's commit order.  The model tree's root is the per-layer model
+    /// commitment, so every column in it must be identical on every block of
+    /// the layer -- asserted here rather than argued.
+    pub fn pre_ids_split(&self) -> (Vec<PreProcessedColumnId>, Vec<PreProcessedColumnId>) {
+        let cols = self.pre_split();
+        let ids = self.pre_ids();
+        assert_eq!(cols.len(), ids.len(),
+                   "pre_split and pre_ids disagree on how many preprocessed columns there are");
+        let mut shape = vec![];
+        let mut model = vec![];
+        for (c, id) in cols.iter().zip(ids) {
+            assert_eq!(c.id, id, "pre_split and pre_ids disagree on the column order");
+            match c.needs.tree() {
+                PreTree::Shape => shape.push(id),
+                PreTree::Model => {
+                    assert!(c.varies == PreVaries::Layer,
+                            "the model tree carries {:?}, which varies with the block -- its \
+                             root would not be a per-layer constant", c.id);
+                    model.push(id);
+                }
+            }
+        }
+        (shape, model)
     }
 
     /// The rollup stream LL's record quotes: per family, and per the two axes.
@@ -2430,12 +2546,17 @@ impl Plan {
         let cols = self.pre_split();
         let mut fam: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
         let (mut model_c, mut model_n) = (0usize, 0usize);
+        let (mut man_c, mut man_n) = (0usize, 0usize);
         let (mut block_c, mut block_n) = (0usize, 0usize);
         for c in &cols {
             let cells = 1usize << c.log_size;
             let e = fam.entry(c.family.clone()).or_insert((0, 0));
             e.0 += 1;
             e.1 += cells;
+            if c.needs == PreNeeds::Manifest {
+                man_c += 1;
+                man_n += cells;
+            }
             if c.needs == PreNeeds::Model {
                 model_c += 1;
                 model_n += cells;
@@ -2457,6 +2578,13 @@ impl Plan {
             "needs_model": {"columns": model_c, "cells": model_n, "share": sh(model_n)},
             "needs_params": {"columns": cols.len() - model_c, "cells": total - model_n,
                              "share": sh(total - model_n)},
+            // stream PP: the per-layer calibration the model manifest publishes
+            // -- public input, so the verifier rebuilds these itself
+            "needs_manifest": {"columns": man_c, "cells": man_n, "share": sh(man_n)},
+            // stream PP: the two committed preprocessed trees
+            "model_tree": {"columns": model_c, "cells": model_n, "share": sh(model_n)},
+            "shape_tree": {"columns": cols.len() - model_c, "cells": total - model_n,
+                           "share": sh(total - model_n)},
             // what moves down the block axis: what a per-layer published root
             // could not cover, and so what the verifier must rebuild per chunk
             "varies_block": {"columns": block_c, "cells": block_n, "share": sh(block_n)},
@@ -3059,8 +3187,12 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         lam_glue: SecureField, claims: &Claims,
                         link: Option<&[crate::gkrlink::HeightLink]>) -> BuiltComponents {
     let p = &plan.p;
-    let ids = plan.pre_ids();
-    let alloc = &mut TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    // Stream PP (E11): tree 0's ids and tree 1's, each in its own tree's commit
+    // order.  The AIR still asks for a preprocessed column by id and never
+    // names a tree; the allocator is what decides which of the two carries it.
+    let (shape_ids, model_ids) = plan.pre_ids_split();
+    let alloc =
+        &mut TraceLocationAllocator::new_with_split_preprocessed_columns(&shape_ids, &model_ids);
     let off = Offsets::new(p.q_bits, p.k_bits);
     let mut use_k = 0usize;
     let mut next_use = |claims: &Claims| {
@@ -3375,10 +3507,24 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 ri += 1;
             }
         }
+        // Stream PP (E11): the tie reads the *global* mask, so its `(tree,
+        // column)` pairs are physical -- the base trace is tree 2 and the
+        // interaction tree 3.  Its preprocessed reads are indices into the
+        // concatenated preprocessed space (the shape tree's columns then the
+        // model tree's), which is the space `preprocessed_column_indices`
+        // speaks and `Components::mask_points` scatters; `pre_loc` turns one
+        // back into a physical pair.  Some of them are model columns -- the
+        // attention output's `jv`, a dequant weight scale, a norm weight.
+        let pre_ids_all: Vec<crate::compose::PreProcessedColumnId> =
+            shape_ids.iter().chain(model_ids.iter()).cloned().collect();
+        let n_shape = shape_ids.len();
+        let pre_loc = |gi: usize| {
+            if gi < n_shape { (0usize, gi) } else { (1usize, gi - n_shape) }
+        };
         let mut pre_idx = vec![];
         let mut heights = vec![];
         for (l, comp) in hl.iter().zip(&links) {
-            let t2 = span_of(comp.trace_locations(), 2);
+            let t2 = span_of(comp.trace_locations(), crate::common::INTER_TREE);
             let mut terms = vec![];
             for (reg, c, w) in &l.weights {
                 use crate::gkrlink::{RCol, Reg};
@@ -3390,7 +3536,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     Reg::Glue(g) => {
                         let (tree, gi) = match c {
                             RCol::Glue(i) =>
-                                (1, span_of(glue[*g].trace_locations(), 1) + i),
+                                (crate::common::BASE_TREE, span_of(glue[*g].trace_locations(), crate::common::BASE_TREE) + i),
                             // stream OO: the norm weight is the statement's, so
                             // it is a tree-0 column of the same region and the
                             // link names it by its preprocessed id
@@ -3399,11 +3545,11 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                                     .expect("a glue column with no glue plan")
                                     .regions[*g].tag;
                                 let want = crate::glue::glue_pre_col(tag, *i, *k).id;
-                                let gi = ids.iter().position(|x| x.id == want)
+                                let gi = pre_ids_all.iter().position(|x| x.id == want)
                                     .expect("a glue preprocessed column missing \
-                                             from the preprocessed tree");
+                                             from the preprocessed trees");
                                 pre_idx.push(gi);
-                                (0, gi)
+                                pre_loc(gi)
                             }
                             _ => panic!("a non-glue column named on a glue region"),
                         };
@@ -3414,20 +3560,22 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         let RCol::Walk(i) = c else {
                             panic!("a non-walk column named on a walk region")
                         };
-                        terms.push((1, span_of(walks[*k].trace_locations(), 1) + i, *w));
+                        terms.push((crate::common::BASE_TREE,
+                                    span_of(walks[*k].trace_locations(), crate::common::BASE_TREE) + i, *w));
                         continue;
                     }
                     Reg::Ao => {
                         let (tree, g) = match c {
-                            RCol::Ao(i) => (1, span_of(ao.trace_locations(), 1) + i),
+                            RCol::Ao(i) => (crate::common::BASE_TREE,
+                                             span_of(ao.trace_locations(), crate::common::BASE_TREE) + i),
                             // stream JJ: the slot's `jvp`, preprocessed
                             RCol::AoPre(sl) => {
                                 let want = ao_chan("jv", *sl).id;
-                                let g = ids.iter().position(|x| x.id == want)
+                                let g = pre_ids_all.iter().position(|x| x.id == want)
                                     .expect("an attnout jv column missing from the \
-                                             preprocessed tree");
+                                             preprocessed trees");
                                 pre_idx.push(g);
-                                (0, g)
+                                pre_loc(g)
                             }
                             _ => panic!("a non-attnout column named on the \
                                          attnout region"),
@@ -3441,15 +3589,16 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     Reg::Deq(m) => {
                         let (tree, g) = match c {
                             RCol::Deq(i) =>
-                                (1, span_of(mats[*m].trace_locations(), 1) + i),
+                                (crate::common::BASE_TREE,
+                                 span_of(mats[*m].trace_locations(), crate::common::BASE_TREE) + i),
                             RCol::DeqPre(sl) => {
                                 let want =
                                     crate::dequant::chan_col(&p.mats[*m].name, "m", *sl).id;
-                                let g = ids.iter().position(|x| x.id == want)
+                                let g = pre_ids_all.iter().position(|x| x.id == want)
                                     .expect("a dequant weight-scale column missing \
-                                             from the preprocessed tree");
+                                             from the preprocessed trees");
                                 pre_idx.push(g);
-                                (0, g)
+                                pre_loc(g)
                             }
                             _ => panic!("a band column named on a dequant region"),
                         };
@@ -3458,16 +3607,19 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     }
                 };
                 let (tree, g) = match c {
-                    RCol::Chan(i) => (1, span_of(chans[band].trace_locations(), 1) + i),
-                    RCol::Key(i) => (1, span_of(keys[band].trace_locations(), 1) + i),
+                    RCol::Chan(i) => (crate::common::BASE_TREE,
+                                      span_of(chans[band].trace_locations(), crate::common::BASE_TREE) + i),
+                    RCol::Key(i) => (crate::common::BASE_TREE,
+                                     span_of(keys[band].trace_locations(), crate::common::BASE_TREE) + i),
                     RCol::Row(i) =>
-                        (1, span_of(rows[row_of[band]].trace_locations(), 1) + i),
+                        (crate::common::BASE_TREE,
+                         span_of(rows[row_of[band]].trace_locations(), crate::common::BASE_TREE) + i),
                     RCol::Msk(i) => {
                         let want = crate::attn_air::msk_id(band, *i).id;
-                        let g = ids.iter().position(|x| x.id == want)
-                            .expect("a corner mask the preprocessed tree does not carry");
+                        let g = pre_ids_all.iter().position(|x| x.id == want)
+                            .expect("a corner mask the preprocessed trees do not carry");
                         pre_idx.push(g);
-                        (0, g)
+                        pre_loc(g)
                     }
                     _ => panic!("a dequant column named on a band"),
                 };
@@ -5217,23 +5369,70 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // B7b (README 26): tree 0 from the cache when this layer and shape have
     // committed it before (`B7_M5_PRECACHE=1`); otherwise committed here and,
     // with the cache on, kept -- or, in mode 2, checked against what is kept.
-    let pre_sizes: Vec<u32> = pre_all.iter().map(|c| c.log_size()).collect();
+    // Stream PP (E11): the one flat preprocessed list splits into the two
+    // committed trees -- the shape tree, which the verifier rebuilds from the
+    // statement, then the model tree, whose root is the published per-layer
+    // model commitment.  The split is `pre_split`'s classification applied to
+    // `pre_all` in `pre_ids`' own order, so there is no second column list to
+    // drift.  Both are committed before the base trace, because their cells
+    // enter the LogUp numerators.
+    let is_model = plan.pre_is_model();
+    assert_eq!(is_model.len(), pre_all.len(),
+               "pre_split disagrees with the committed preprocessed trees");
+    let (mut shape_all, mut model_all) = (vec![], vec![]);
+    for (c, m) in pre_all.into_iter().zip(&is_model) {
+        if *m { model_all.push(c) } else { shape_all.push(c) }
+    }
+    let shape_sizes: Vec<u32> = shape_all.iter().map(|c| c.log_size()).collect();
+    let model_sizes: Vec<u32> = model_all.iter().map(|c| c.log_size()).collect();
     // Stream LL (E11): the classification is the same list, in the same order,
-    // at the same heights -- asserted here so `pre_split` and tree 0 cannot
-    // drift apart, on every shape any gate runs.
-    assert_eq!(pre_sizes, plan.pre_split_sizes(),
-               "pre_split disagrees with the committed tree 0");
-    match crate::precache::take(pre_key, &pre_sizes) {
-        Some(tree) => {
-            sess.commit_cached(tree, pre_sizes);
+    // at the same heights -- asserted here so `pre_split` and the two trees
+    // cannot drift apart, on every shape any gate runs.
+    assert_eq!(shape_sizes, plan.shape_sizes(),
+               "pre_split disagrees with the committed shape tree");
+    assert_eq!(model_sizes, plan.model_sizes(),
+               "pre_split disagrees with the committed model tree");
+    let commit_one = |sess: &mut Session, cols: Vec<crate::device::AnyCol>| {
+        if m4_refs {
+            sess.commit_any(cols);
+        } else {
+            sess.commit(cols.iter().map(|c| c.host().clone()).collect());
+        }
+    };
+    let cached = crate::precache::take(pre_key, &shape_sizes, &model_sizes);
+    let shape_t = std::time::Instant::now();
+    match &cached {
+        Some((shape_tree, _)) => sess.commit_cached(shape_tree.clone(), shape_sizes.clone()),
+        None => commit_one(&mut sess, shape_all),
+    }
+    let pp_shape_secs = shape_t.elapsed().as_secs_f64();
+    crate::util::m4_add("wall/commit_shape", pp_shape_secs);
+    // Stream PP (E11): the verifier's own work stops here.  Everything after
+    // this line reads the model; the shape root does not.
+    if SHAPE_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
+        crate::util::emit("shape_root", json!({
+            "pre_root": sess.tree_root(0),
+            "layer": layer.layer,
+            "block": layer.block,
+            "c": p.c,
+            "s": p.s,
+            "log_table": p.log_table,
+            "columns": shape_sizes.len(),
+            "cells": shape_sizes.iter().map(|s| 1usize << s).sum::<usize>(),
+            "split": plan.pre_split_report(),
+            "trace_secs": trace_secs,
+            "commit_shape_secs": pp_shape_secs,
+            "peak_rss_bytes": crate::util::peak_rss_bytes(),
+        }));
+        std::process::exit(0);
+    }
+    match cached {
+        Some((_, model_tree)) => {
+            sess.commit_cached(model_tree, model_sizes.clone());
             crate::util::m4_add("wall/commit_pre_cached", m4_t.elapsed().as_secs_f64());
         }
         None => {
-            if m4_refs {
-                sess.commit_any(pre_all);
-            } else {
-                sess.commit(pre_all.iter().map(|c| c.host().clone()).collect());
-            }
+            commit_one(&mut sess, model_all);
             crate::precache::fill(pre_key, &sess);
         }
     }
@@ -5247,8 +5446,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // two agree: the same shape through `compose` and through `expect-root`.
     if PRE_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
         let root = sess.tree_root(0);
+        // Stream PP (E11): the two preprocessed roots the split produced.  The
+        // shape root is what the verifier derives; the model root is what it
+        // compares against the published manifest.
+        let model_root = sess.tree_root(1);
         crate::util::emit("expect_root", json!({
             "pre_root": root,
+            "model_root": model_root,
             "model": layer.model_hash(),
             "layer": layer.layer,
             "block": layer.block,
@@ -6541,7 +6745,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             _ => None,
         })
         .collect();
-    let n_columns = [sizes[0].len(), sizes[1].len(), n_inter];
+    // stream PP: the shape tree and the model tree are both preprocessed, so
+    // the reported preprocessed width is their sum; the base tree is at 2.
+    let n_columns = [sizes[0].len() + sizes[1].len(), sizes[2].len(), n_inter];
     // B7a milestone 3: the lowering, off the prove loop's critical path.
     #[cfg(feature = "cuda")]
     if crate::util::m3_switch("B7_M3_PREWARM") {
@@ -6567,6 +6773,11 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         pre_root: proof
             .as_ref()
             .map(|pf| format!("{:?}", pf.commitments[0]))
+            .unwrap_or_default(),
+        // stream PP: the model commitment this chunk proves against
+        model_root: proof
+            .as_ref()
+            .map(|pf| format!("{:?}", pf.commitments[1]))
             .unwrap_or_default(),
         // stream KK: the chunk's own coordinate, off the dump's manifest (or
         // the `--layer` / `--block` overrides a plan line carries for a chunk
@@ -6623,6 +6834,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
 pub struct Verdict {
     pub stark_ok: bool,
     pub root_ok: bool,
+    /// Stream PP (E11): the proof's second root is the one the statement
+    /// declares as its model commitment.
+    pub model_root_ok: bool,
     pub sums_cancel: bool,
     pub qk_ok: Vec<bool>,
     pub den_ok: Vec<bool>,
@@ -6741,7 +6955,8 @@ impl Verdict {
             .map(|s| s.root.as_str())
     }
     pub fn accepts(&self) -> bool {
-        self.stark_ok && self.root_ok && self.sums_cancel && self.av_ok && self.den_link_ok
+        self.stark_ok && self.root_ok && self.model_root_ok
+            && self.sums_cancel && self.av_ok && self.den_link_ok
             && self.sizes_ok && self.qk_ok.iter().all(|x| *x) && self.den_ok.iter().all(|x| *x)
 
             && self.walk_ok.iter().all(|x| *x) && self.glue_ok.iter().all(|x| *x)
@@ -6753,7 +6968,8 @@ impl Verdict {
             && self.nn_pos_ok && self.nn_q_ok.iter().all(|x| *x)
     }
     fn rejected(msg: &str) -> Self {
-        Self { stark_ok: false, root_ok: false, sums_cancel: false, qk_ok: vec![],
+        Self { stark_ok: false, root_ok: false, model_root_ok: false,
+               sums_cancel: false, qk_ok: vec![],
                den_ok: vec![], av_ok: false, den_link_ok: false, walk_ok: vec![],
                sizes_ok: false, glue_ok: vec![false], deq_out_ok: vec![false],
                deq_out_open: vec![], head_tie_ok: false, embed_ok: false,
@@ -6835,8 +7051,13 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     config.mix_into(&mut ch);
     let mut vcs = CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
     let root_ok = format!("{:?}", proof.commitments[0]) == fixed.pre_root;
+    // stream PP: the model tree's root is the second declared one -- a
+    // *declaration* here, like `pre_root`; what pins it to a model is
+    // `bounds-grid --expect-model-roots` against the published manifest.
+    let model_root_ok = format!("{:?}", proof.commitments[1]) == fixed.model_root;
     vcs.commit(proof.commitments[0], &fixed.sizes[0], &mut ch);
     vcs.commit(proof.commitments[1], &fixed.sizes[1], &mut ch);
+    vcs.commit(proof.commitments[2], &fixed.sizes[2], &mut ch);
     let rels = Rels::draw(&mut ch, &plan.widths, plan.glue.as_ref().map(|g| g.uns.as_slice()),
                           plan.emb.map(|l| l.arity()),
                           plan.needs_rq_rels(), plan.q_tabs.len());
@@ -6885,14 +7106,14 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     } else if claims.gkr.is_some() {
         return Verdict::rejected("the statement carries a GKR proof the flag did not ask for");
     }
-    vcs.commit(proof.commitments[2], &fixed.sizes[2], &mut ch);
+    vcs.commit(proof.commitments[3], &fixed.sizes[3], &mut ch);
     // Stream H: one tree per boundary side, replayed in the prover's order.  The
     // roots are read out below; nothing is drawn from them here, because nothing
     // in the AIR reads a boundary column except its equality constraint.
     if proof.commitments.len() < plan.n_trees() {
         return Verdict::rejected("the proof carries fewer roots than the statement claims");
     }
-    for t in 3..plan.n_trees() {
+    for t in crate::bounds::FIRST_TREE..plan.n_trees() {
         vcs.commit(proof.commitments[t], &fixed.sizes[t], &mut ch);
     }
     // Stream AA: every boundary tree's root, in the prover's order -- stream H's
@@ -7268,7 +7489,8 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         }
     }).collect();
 
-    Verdict { stark_ok, root_ok, sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
+    Verdict { stark_ok, root_ok, model_root_ok,
+              sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
               deq_out_open, head_tie_ok, embed_ok, embed_tok_ok, head_tok_ok,
               rq_in_ok, rq_out_ok, rq_scale_ok, rq_scale_open, ao_q_open, ao_q_ok,
               nn_in_ok, nn_out_ok, nn_pos_ok, nn_q_ok, nn_open,

@@ -39,8 +39,22 @@ use stwo::core::Fraction;
 
 #[rustfmt::skip]
 pub use stwo::core::verifier::PREPROCESSED_TRACE_IDX;
-pub const ORIGINAL_TRACE_IDX: usize = 1;
-pub const INTERACTION_TRACE_IDX: usize = 2;
+/// Stream PP (E11): the preprocessed trace is committed as **two** trees.  Tree
+/// 0 (`PREPROCESSED_TRACE_IDX`) holds the columns a verifier can rebuild from
+/// the public statement; tree 1 (`MODEL_TRACE_IDX`) holds the columns that are a
+/// function of the model, and its root is the published per-layer model
+/// commitment.  Both are committed before the base trace, because their cells
+/// enter the LogUp numerators and a tree committed after the relation
+/// challenges would let a prover choose weights knowing the challenge.
+///
+/// No `EvalAtRow` call site sees the split: a component's preprocessed view is
+/// still one flat vector in `get_preprocessed_column` call order, gathered from
+/// the two trees by `FrameworkComponent::pre_loc`.  Tree 1 is therefore never
+/// named by a component's own mask, and every component's `mask_offsets` entry
+/// at index 1 is empty.
+pub use stwo::core::verifier::MODEL_TRACE_IDX;
+pub const ORIGINAL_TRACE_IDX: usize = 2;
+pub const INTERACTION_TRACE_IDX: usize = 3;
 
 /// A vector that describes the batching of logup entries.
 /// Each vector member corresponds to a logup entry, and contains the batch number to which the

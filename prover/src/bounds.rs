@@ -64,10 +64,11 @@ use crate::glue::{GlueRegion, TieKind};
 /// for a degree-1 packing, and it is what the tree commits.
 pub const PACK: i64 = 512;
 
-/// The first tree index the boundary sides take. Trees 0–2 are the
-/// preprocessed, base and interaction trees, in that order, and the note says
-/// why the boundary trees follow rather than precede them.
-pub const FIRST_TREE: usize = 3;
+/// The first tree index the boundary sides take. Stream PP (E11): trees 0–3 are
+/// the shape tree, the model tree, the base trace and the interaction trace, in
+/// that order, and the note says why the boundary trees follow rather than
+/// precede them.
+pub const FIRST_TREE: usize = 4;
 
 /// Whether the feature is on for this run. Off by default, deliberately: with
 /// the flag off not one committed cell moves, which is what lets the recorded
@@ -1062,7 +1063,8 @@ struct GridChunk {
 ///   --expect-token-links N
 ///   --verify                    also run `verify_composed` on every chunk proof
 ///   --prompt FILE               the declared prompt's ids (a JSON list, or an `ids` field)
-///   --expect-pre-roots FILE     the tree-0 root each (layer, prefix) must declare
+///   --expect-pre-roots FILE     the shape root each (layer, prefix) must declare
+///   --expect-model-roots FILE   the model commitment each layer must declare
 /// ```
 ///
 /// Exit status 0 only when every implied link ran and chained on its own
@@ -1120,6 +1122,21 @@ pub fn grid_cmd(args: &[String]) {
         v.get("roots").unwrap_or(&v).as_array()
             .unwrap_or_else(|| panic!("--expect-pre-roots {f}: want a list of \
                                        {{layer, c, pre_root}}"))
+            .clone()
+    });
+    // Stream PP (E11): the published model commitment, one root per layer.
+    // `Fixed.model_root` is a *declaration* -- the verifier's own replay only
+    // says the proof's second commitment is the one the statement names -- so
+    // this is where it is pinned to a model.  The file is `b65 model-roots`'
+    // own manifest; the same file serves `--expect-pre-roots`, whose rows are
+    // keyed by `(layer, c)` because the shape moves with the chunk.
+    let expect_model: Option<Vec<Value>> = crate::arg_str(args, "--expect-model-roots").map(|f| {
+        let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--expect-model-roots {f}: {e}"));
+        let v: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("--expect-model-roots {f}: not JSON: {e}"));
+        v.get("roots").unwrap_or(&v).as_array()
+            .unwrap_or_else(|| panic!("--expect-model-roots {f}: want a list of \
+                                       {{layer, model_root}}"))
             .clone()
     });
     if verify && prompt.is_none() {
@@ -1624,11 +1641,73 @@ pub fn grid_cmd(args: &[String]) {
                 missing.len(), missing.join(", ")));
         }
     } else {
-        declared.push(json!({"what": "which model each chunk's tree-0 root is",
+        declared.push(json!({"what": "which model each chunk's shape root is",
                              "why": "no --expect-pre-roots table was given, so every \
                                      chunk's pre_root is compared only against its own \
                                      proof; `b65 model-roots --plan PLAN` derives the \
                                      table from the model"}));
+    }
+
+    // ---- stream PP: the model tree's root, against the published manifest ---
+    //
+    // This is the whole of the committed-model setting.  The verifier holds a
+    // commitment to the model as public input and never the weights: it derives
+    // the *shape* root itself (above, and `b65 expect-root --shape-only` needs
+    // no weights at all) and compares the *model* root against the manifest's
+    // row for this chunk's layer.  A chunk whose model root is not the
+    // manifest's for its layer is a named failure, and so is a manifest that has
+    // no row for a layer the grid uses -- a manifest that omits a layer is a
+    // manifest that checks nothing there.
+    let mut model_rows: Vec<Value> = vec![];
+    if let Some(table) = &expect_model {
+        for ch in &chunks {
+            let want = table.iter()
+                .find(|r| r["layer"].as_u64() == Some(ch.layer as u64));
+            let got = &ch.fixed.model_root;
+            let ok = want.and_then(|r| r["model_root"].as_str()) == Some(got.as_str())
+                && !got.is_empty();
+            if !ok {
+                failures.push(format!(
+                    "{}: the statement declares model_root {got} for layer {}, and the \
+                     manifest says {}", ch.tag, ch.layer,
+                    want.and_then(|r| r["model_root"].as_str())
+                        .unwrap_or("nothing at all")));
+            }
+            // the manifest's own model hash, against the statement's: a
+            // manifest published for another model is the case the root
+            // comparison alone would only catch by accident
+            let want_model = want.and_then(|r| r["model"].as_str());
+            let model_ok = match (want_model, ch.fixed.model.as_deref()) {
+                (Some(a), Some(b)) => a == b,
+                _ => true,
+            };
+            if !model_ok {
+                failures.push(format!(
+                    "{}: the statement names model {} and the model manifest's row for \
+                     layer {} was published for {}", ch.tag,
+                    ch.fixed.model.clone().unwrap_or_default(), ch.layer,
+                    want_model.unwrap_or("nothing")));
+            }
+            model_rows.push(json!({"tag": ch.tag, "layer": ch.layer,
+                                   "model_root": got, "ok": ok, "model_ok": model_ok}));
+        }
+        let missing: Vec<String> = chunks.iter()
+            .filter(|ch| !table.iter()
+                    .any(|r| r["layer"].as_u64() == Some(ch.layer as u64)))
+            .map(|ch| ch.tag.clone())
+            .collect();
+        if !missing.is_empty() {
+            failures.push(format!(
+                "the model manifest has no row for {} chunk(s): {}",
+                missing.len(), missing.join(", ")));
+        }
+    } else {
+        declared.push(json!({"what": "the model each chunk proves against",
+                             "chunks": chunks.len(),
+                             "why": "no --expect-model-roots manifest was given, so every \
+                                     chunk's model_root is compared only against its own \
+                                     proof; `b65 model-roots --plan PLAN` publishes the \
+                                     manifest from the weights"}));
     }
 
     let all_layer = run[0] == want_layer && passed[0] == run[0];
@@ -1681,6 +1760,9 @@ pub fn grid_cmd(args: &[String]) {
                        "mismatches": bad_ids, "unbacked": unbacked, "all": ids_ok},
             "pre_roots": {"table": crate::arg_str(args, "--expect-pre-roots"),
                           "chunks": pre_rows},
+            // stream PP: the published model commitment, per chunk
+            "model_roots": {"manifest": crate::arg_str(args, "--expect-model-roots"),
+                            "chunks": model_rows},
             // stream LL: which model each chunk named, and how many the grid
             // used -- one is the only answer that is not a failure
             "models": {"distinct": all_models.len(),
@@ -1963,7 +2045,9 @@ mod tests {
             glue: Some(GlueParams { d: 64, a: 4, ..Default::default() }),
             ..Default::default()
         };
-        let n = 3 + 2 + kv_layout(&params).map(|k| k.n_sides()).unwrap_or(0);
+        // stream PP: four trees before the boundary ones -- the shape tree, the
+        // model tree, the base trace and the interaction trace.
+        let n = FIRST_TREE + 2 + kv_layout(&params).map(|k| k.n_sides()).unwrap_or(0);
         Fixed {
             params,
             log_blowup: 1,
@@ -1971,6 +2055,9 @@ mod tests {
             pow_bits: 0,
             sizes: vec![vec![4]; n],
             pre_root: "pre".into(),
+            // stream PP: the model commitment; the tests below drive the
+            // per-layer comparison through `--expect-model-roots`
+            model_root: "model".into(),
             // stream KK: the tests below drive the coordinate comparison
             // through `at`, which sets these; undeclared is the pre-KK case and
             // the default here so every existing test keeps asking what it asked
@@ -1997,16 +2084,17 @@ mod tests {
         f.params.head_argmax = true;
         f.params.corner = false;
         f.params.glue = Some(GlueParams { d: 64, a: 4, head_norm: true, ..Default::default() });
-        f.sizes = vec![vec![4]; 3 + glue_sides(&f.params)];
+        f.sizes = vec![vec![4]; FIRST_TREE + glue_sides(&f.params)];
         f
     }
 
     /// Root lists for a pair, with the boundaries the caller asks for made
     /// equal and every other root distinct.
     ///
-    /// Tree layout for `--kv-bind` with two head band groups and `c > 0`:
-    /// `[0 pre][1 base][2 inter][3 glue in][4 glue out][5 g0 out][6 g0 in]
-    ///  [7 g1 out][8 g1 in]`.
+    /// Tree layout for `--kv-bind` with two head band groups and `c > 0`
+    /// (stream PP: the preprocessed trace is two trees, so the boundary ones
+    /// start at 4): `[0 shape][1 model][2 base][3 inter][4 glue in][5 glue out]
+    /// [6 g0 out][7 g0 in][8 g1 out][9 g1 in]`.
     fn roots(fa: &Fixed, fb: &Fixed, kv_equal: bool, residual_equal: bool)
         -> (Vec<String>, Vec<String>) {
         let (na, nb) = (fa.sizes.len(), fb.sizes.len());
@@ -2238,9 +2326,10 @@ mod tests {
     #[test]
     fn head_chunk_commits_the_input_side_only() {
         let h = head_fixed(1024, 512);
-        assert_eq!(glue_sides(&h.params), 1, "the head takes tree 3 and no tree 4");
+        assert_eq!(glue_sides(&h.params), 1,
+                   "the head takes the first boundary tree and no second one");
         assert!(has_in_side(&h.params));
-        assert_eq!(h.sizes.len(), 4);
+        assert_eq!(h.sizes.len(), FIRST_TREE + 1);
         let l = fixed(1024, 512, true);
         assert_eq!(glue_sides(&l.params), 2, "a layer chunk still takes both");
     }

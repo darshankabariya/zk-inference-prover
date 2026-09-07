@@ -25,7 +25,10 @@ use stwo::stwo_cuda::bindings::CudaSecureField;
 use tracing::{span, Level};
 
 use super::{CpuDomainEvaluator, SimdDomainEvaluator};
-use crate::{fnv1a_eval_id_gen, FrameworkComponent, FrameworkEval, PREPROCESSED_TRACE_IDX};
+use crate::{
+    fnv1a_eval_id_gen, FrameworkComponent, FrameworkEval, ORIGINAL_TRACE_IDX,
+    PREPROCESSED_TRACE_IDX,
+};
 
 const CHUNK_SIZE: usize = 1;
 
@@ -48,10 +51,15 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
         let trace_domain = CanonicCoset::new(self.eval.log_size());
 
         let mut component_polys = trace.polys.sub_tree(&self.trace_locations);
+        // Stream PP (E11): the preprocessed view is gathered from the shape
+        // tree and the model tree, in the component's own call order.
         component_polys[PREPROCESSED_TRACE_IDX] = self
             .preprocessed_column_indices
             .iter()
-            .map(|idx| &trace.polys[PREPROCESSED_TRACE_IDX][*idx])
+            .map(|idx| {
+                let (tree, col) = self.pre_loc(*idx);
+                &trace.polys[tree][col]
+            })
             .collect();
 
         // B11 stream K, diagnostic twin of the cuda impl's: see there.
@@ -217,10 +225,15 @@ impl<E: FrameworkEval + Sync> ComponentProver<CpuBackend> for FrameworkComponent
         let trace_domain = CanonicCoset::new(self.eval.log_size());
 
         let mut component_polys = trace.polys.sub_tree(&self.trace_locations);
+        // Stream PP (E11): the preprocessed view is gathered from the shape
+        // tree and the model tree, in the component's own call order.
         component_polys[PREPROCESSED_TRACE_IDX] = self
             .preprocessed_column_indices
             .iter()
-            .map(|idx| &trace.polys[PREPROCESSED_TRACE_IDX][*idx])
+            .map(|idx| {
+                let (tree, col) = self.pre_loc(*idx);
+                &trace.polys[tree][col]
+            })
             .collect();
 
         // Extend trace if necessary.
@@ -306,10 +319,15 @@ impl<E: FrameworkEval + Sync> ComponentProver<CudaBackend> for FrameworkComponen
         span.exit();
 
         let span = span!(Level::INFO, "component_polys generate").entered();
+        // Stream PP (E11): the preprocessed view is gathered from the shape
+        // tree and the model tree, in the component's own call order.
         component_polys[PREPROCESSED_TRACE_IDX] = self
             .preprocessed_column_indices
             .iter()
-            .map(|idx| &trace.polys[PREPROCESSED_TRACE_IDX][*idx])
+            .map(|idx| {
+                let (tree, col) = self.pre_loc(*idx);
+                &trace.polys[tree][col]
+            })
             .collect();
         span.exit();
 
@@ -454,17 +472,23 @@ impl<E: FrameworkEval + Sync> ComponentProver<CudaBackend> for FrameworkComponen
             .map(|column_evaluations| column_evaluations.device_ptr)
             .collect_vec();
 
-        let trace1_evaluations_vec = trace[1]
+        // Stream PP (E11): the model tree is committed at index 1 and no
+        // component names it in its own mask -- its columns reach the AIR
+        // through the preprocessed gather above, inside `trace[0]`.  So the
+        // dispatch ABI's second array is the *base* trace, at index 2, and the
+        // chain starts at 3.  `cudagen` applies the same compaction when it
+        // lowers, which is why no emitted kernel moves.
+        let trace1_evaluations_vec = trace[ORIGINAL_TRACE_IDX]
             .iter()
             .map(|column_evaluations| column_evaluations.device_ptr)
             .collect_vec();
 
         // Interactions past the third ride in the third pointer array: the
-        // dispatch ABI carries three trees, so trees 2.. are chained here and
+        // dispatch ABI carries three trees, so trees 3.. are chained here and
         // the emitted kernels index them with a column offset (B11 stream K).
         // A component with three trees or fewer sees exactly the old layout.
         let mut trace2_evaluations_vec = vec![];
-        for tree in trace.iter().skip(2) {
+        for tree in trace.iter().skip(ORIGINAL_TRACE_IDX + 1) {
             trace2_evaluations_vec.extend(
                 tree.iter().map(|column_evaluations| column_evaluations.device_ptr),
             );
