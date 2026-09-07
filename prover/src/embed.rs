@@ -1136,7 +1136,7 @@ mod tests {
             }),
             corner: false, gkr_bands: false, gkr_dequant: false, gkr_glue: false,
             gkr_walks: false, gkr_attnout: false, layer_boundary: false, kv_boundary: false,
-            head_key: false, head_argmax: false, head_argmax_lax: false,
+            logits_claim: false, prove_argmax: false, prove_argmax_lax: false,
             embed_vocab: if embed { 300 } else { 0 },
             embed_per_row: if embed { 32 } else { 0 },
             // stream NN: this fixture's q/k/v widths do not line up with its

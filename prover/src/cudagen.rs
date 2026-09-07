@@ -2479,7 +2479,7 @@ fn fill_binding_claims(plan: &crate::compose::Plan, claims: &mut crate::compose:
             g.regions.iter().map(|r| r.bindings.iter().map(|_| felt()).collect()).collect();
         claims.deq_out = g.output_bindings.iter().map(|_| felt()).collect();
     }
-    claims.head_key = vec![felt()];
+    claims.logits_claim = vec![felt()];
     claims.am_key = vec![felt()];
     // B11 stream BB: the embedding gadget's two claims are binding claims of
     // exactly the shape this function exists for -- a zero here folds away and

@@ -1223,7 +1223,7 @@ pub fn grid_cmd(args: &[String]) {
                                    its own prefix implies (c = {c} = {declared} x {s})"));
         }
         let block = tagged_block.or(fixed.block).unwrap_or(declared);
-        let is_head = fixed.params.head_argmax;
+        let is_head = fixed.params.prove_argmax;
         chunk_rows.push(json!({
             "tag": tag,
             "block": block,
@@ -2075,7 +2075,7 @@ mod tests {
     /// argmax composed.  Four trees, not five.
     fn head_fixed(c: usize, s: usize) -> Fixed {
         let mut f = fixed(c, s, false);
-        f.params.head_argmax = true;
+        f.params.prove_argmax = true;
         f.params.corner = false;
         f.params.glue = Some(GlueParams { d: 64, a: 4, head_norm: true, ..Default::default() });
         f.sizes = vec![vec![4]; FIRST_TREE + glue_sides(&f.params)];

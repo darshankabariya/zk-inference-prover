@@ -324,15 +324,15 @@ pub struct Params {
     /// `GlueParams` because a head dump carries no wiring columns at all -- the
     /// two features share the binding challenge, not the witness.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub head_key: bool,
+    pub logits_claim: bool,
     /// Stream E: compose the argmax region into this proof, bound to the head's
-    /// key claim.  Implies `head_key` -- that claim is its counterparty.
+    /// key claim.  Implies `logits_claim` -- that claim is its counterparty.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub head_argmax: bool,
+    pub prove_argmax: bool,
     /// the weaker statement ("the token attains the maximum"), which is what the
     /// binding probe separates from the strict one
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub head_argmax_lax: bool,
+    pub prove_argmax_lax: bool,
     /// Stream BB (E11): the embedding gadget's vocabulary, and zero when the
     /// gadget is off -- which is what the plan reads as "no embedding region".
     /// The gadget proves that the layer's committed residual-stream input is
@@ -489,7 +489,7 @@ pub struct Fixed {
     pub tok_in: Vec<u32>,
     /// Stream KK (§5 item 2): the tokens the `lm_head` chunk's argmax region
     /// emitted, one per position, pinned the same way against
-    /// `claims.head_tok`.  Empty on a chunk without `--head-argmax`.
+    /// `claims.head_tok`.  Empty on a chunk that proves no argmax.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tok_out: Vec<u32>,
 }
@@ -546,9 +546,9 @@ pub struct Claims {
     pub band_q: Vec<[u32; 4]>,
     /// stream E: the head's order-key claim, when it is published
     #[serde(default)]
-    pub head_key: Vec<[u32; 4]>,
+    pub logits_claim: Vec<[u32; 4]>,
     /// stream E: the argmax region's claim over the keys it compared -- equal to
-    /// `head_key` is what says it compared the head's own output
+    /// `logits_claim` is what says it compared the head's own output
     #[serde(default)]
     pub am_key: Vec<[u32; 4]>,
     /// stream KK: the argmax region's claim over the tokens it emitted, under
@@ -671,14 +671,14 @@ impl Claims {
         // stream E, appended last: empty unless the dequant output bindings are on,
         // so the transcript is unchanged without them
         v.extend(self.deq_out.iter().map(|x| unqm(*x)));
-        v.extend(self.head_key.iter().map(|x| unqm(*x)));
+        v.extend(self.logits_claim.iter().map(|x| unqm(*x)));
         v.extend(self.am_key.iter().map(|x| unqm(*x)));
         // stream BB, appended last: empty unless the embedding gadget is on, so
         // the transcript is unchanged without it
         v.extend(self.embed_out.iter().map(|x| unqm(*x)));
         v.extend(self.embed_tok.iter().map(|x| unqm(*x)));
         // stream KK, appended after both, for the same reason: a chunk without
-        // `--head-argmax` mixes exactly what it mixed before
+        // the argmax mixes exactly what it mixed before
         v.extend(self.head_tok.iter().map(|x| unqm(*x)));
         // stream JJ, appended after those for the same reason
         v.extend(self.ao_q.iter().map(|x| unqm(*x)));
@@ -2131,13 +2131,13 @@ impl Plan {
     /// Stream E: the binding challenge pair is drawn for the wiring family *or* for
     /// a head-key claim on its own, since a head dump has no wiring columns.
     pub fn has_bindings(&self) -> bool {
-        self.glue.is_some() || self.p.head_key
+        self.glue.is_some() || self.p.logits_claim
     }
 
     /// Stream E: the index of the matmul the argmax region is bound to, when it
     /// is composed.  Its layout is that matmul's, so the binding is positionwise.
     pub fn argmax_mat(&self) -> Option<usize> {
-        self.p.head_argmax
+        self.p.prove_argmax
             .then(|| self.p.mats.iter().position(|m| m.name == "lm_head"))
             .flatten()
     }
@@ -2153,7 +2153,7 @@ impl Plan {
     /// the verifier cannot disagree about it.
     pub fn has_output_claim(&self, name: &str) -> bool {
         self.glue.as_ref().is_some_and(|g| g.output_bindings.iter().any(|t| t.name == name))
-            || (self.p.head_key && name == "lm_head")
+            || (self.p.logits_claim && name == "lm_head")
     }
 
     /// What that output side accumulates: the head publishes the argmax's order
@@ -3334,7 +3334,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     let ow = plan.output_claim_of(w_glue, lam_glue, &m.name, m.tokens, m.n_out,
                                            plan.mat_lays[mi].per_row);
                     let claimed = if m.name == "lm_head" {
-                        claims.head_key.first().copied()
+                        claims.logits_claim.first().copied()
                     } else {
                         // the claims arrive in mat order and the plan lists the
                         // bindings in the same order, `o` before `down`
@@ -3347,7 +3347,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         lam: ow.lam,
                         k_in: ow.k_in,
                         k_bd: ow.k_bd,
-                        claimed: claim_at(claimed, "deq_out/head_key"),
+                        claimed: claim_at(claimed, "deq_out/logits_claim"),
                         kind,
                     }
                 }),
@@ -3834,7 +3834,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             crate::argmax::ArgmaxEval {
                 log_rows: lay.log_rows,
                 per_row: lay.per_row,
-                lax: plan.p.head_argmax_lax,
+                lax: plan.p.prove_argmax_lax,
                 rk: rels.range(crate::argmax::KEY_BITS).clone(),
                 binding: Some(binding),
             },
@@ -4293,15 +4293,15 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     let m4_t = std::time::Instant::now();
     let am_region = plan.argmax_mat().map(|mi| {
         let m = &plan.p.mats[mi];
-        let keys = layer.head_keys.as_ref().expect("--head-argmax needs key_head.u16");
-        let tok = layer.head_tok.as_ref().expect("--head-argmax needs tok_head.i32");
+        let keys = layer.head_keys.as_ref().expect("the argmax needs key_head.u16");
+        let tok = layer.head_tok.as_ref().expect("the argmax needs tok_head.i32");
         let w = crate::argmax::AWitness::from_cols(
             m.tokens, m.n_out, keys.iter().map(|k| u32::from(*k)).collect(), tok.clone())
             .expect("the head dump's argmax columns");
         let ri = tables.widths.iter().position(|w| *w == crate::argmax::KEY_BITS)
             .expect("the argmax needs the layer's 16-bit range table (--z-lo-bits 16)");
         let mut m_rk = std::mem::take(&mut tables.m_r[ri]);
-        let r = crate::argmax::region(&w, plan.p.head_argmax_lax, plan.mat_lays[mi],
+        let r = crate::argmax::region(&w, plan.p.prove_argmax_lax, plan.mat_lays[mi],
                                       &mut m_rk, tamper.argmax);
         tables.m_r[ri] = m_rk;
         tables.off_table += r.off_table;
@@ -6035,7 +6035,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
         if let Some(c) = it.claimed_out {
             if m.name == "lm_head" {
-                claims.head_key.push(qm(c));
+                claims.logits_claim.push(qm(c));
             } else {
                 claims.deq_out.push(qm(c));
             }
@@ -6049,7 +6049,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // rebuilds the same Horner sum from the dump's column and compares the two
     // field elements, which is 512 x vocab values checked at once.
     let mut head_key_b1 = json!(null);
-    if plan.p.head_key {
+    if plan.p.logits_claim {
         if let (Some(mi), Some(keys)) =
             (layer.mats.iter().position(|m| m.name == "lm_head"), layer.head_keys.as_ref())
         {
@@ -6077,7 +6077,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 };
                 u = u * mult + f;
             }
-            let got = claims.head_key.first().copied().map(unqm);
+            let got = claims.logits_claim.first().copied().map(unqm);
             head_key_b1 = json!({
                 "values": m.tokens * m.n_out,
                 "matches_b1": got == Some(u),
@@ -6396,7 +6396,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         claims.am_key.push(qm(claimed));
         claims.head_tok.push(qm(claimed_tok));
         let (lcols, use_sum) =
-            crate::argmax::logup(r, plan.p.head_argmax_lax,
+            crate::argmax::logup(r, plan.p.prove_argmax_lax,
                                  rels.range(crate::argmax::KEY_BITS));
         inter_all.extend(crate::device::host_cols(lcols));
         claims.use_sums.push(qm(use_sum));
@@ -6872,7 +6872,7 @@ pub struct Verdict {
     /// no ids; an embedding chunk that publishes none is rejected.
     pub embed_tok_ok: bool,
     /// stream KK (§5 item 2): the same for the head chunk's emitted tokens --
-    /// `fixed.tok_out` against `claims.head_tok`.  True when `--head-argmax` is
+    /// `fixed.tok_out` against `claims.head_tok`.  True when the argmax is
     /// off and nothing is published.
     pub head_tok_ok: bool,
     /// stream II: per requantize seam, "the matmul's input is the producer's
@@ -7274,8 +7274,8 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // stream E: the argmax compared the head's own output.  Both claims are
     // Horner sums over the same values with mirrored weights, so equality is the
     // whole statement -- and it is checked from the parsed claims alone.
-    let head_binding_ok = if plan.p.head_argmax {
-        !claims.am_key.is_empty() && claims.am_key.first() == claims.head_key.first()
+    let head_binding_ok = if plan.p.prove_argmax {
+        !claims.am_key.is_empty() && claims.am_key.first() == claims.logits_claim.first()
     } else {
         true
     };

@@ -1101,11 +1101,11 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         corner,
         // Stream E: the head's order-key claim.  Not under `--no-glue`'s gate,
         // because a head dump has no wiring columns to switch off.
-        // `--head-argmax` implies the key claim: it is the counterparty
+        // the argmax implies the logits claim: it is the counterparty
         // -- and the head publishes it exactly when the argmax reads it.
-        head_key: argmax,
-        head_argmax: argmax,
-        head_argmax_lax: flag(args, "--head-argmax-lax"),
+        logits_claim: argmax,
+        prove_argmax: argmax,
+        prove_argmax_lax: flag(args, "--argmax-lax"),
         variant: vname.to_string(),
         log_table: b0.log_table,
         q_bits: b0.q_bits, k_bits: b0.k_bits, nmax: b0.nmax,
@@ -2505,7 +2505,7 @@ synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B
                        &compose::ProverTamper {
                            argmax: Some(argmax::Tamper::Key(1234567)),
                            ..Default::default() },
-                       "the binding am_key == head_key"),
+                       "the binding am_key == logits_claim"),
                 "an argmax on keys that are not the head's output accepted");
     }
 

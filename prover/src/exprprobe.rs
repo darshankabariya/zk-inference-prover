@@ -703,7 +703,7 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
             .as_ref()
             .map(|g| g.output_bindings.iter().map(|_| felt()).collect())
             .unwrap_or_default(),
-        head_key: vec![felt()], am_key: vec![felt()],
+        logits_claim: vec![felt()], am_key: vec![felt()],
         head_tok: vec![felt()],
         // stream BB: the embedding gadget's two
         embed_out: vec![felt()], embed_tok: vec![felt()],
