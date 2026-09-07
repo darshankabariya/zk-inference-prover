@@ -648,6 +648,17 @@ pub fn probe(a: &BuiltComponents, b: &BuiltComponents) -> Value {
 /// sized vectors. Sizes are taken generously from the plan: `build_components`
 /// consumes `use_sums` and `table_sums` sequentially, so over-length is safe and
 /// under-length panics loudly.
+///
+/// `use_sums` is the one vector that is not a guess. It used to be sized by a
+/// formula with a margin of 16, and a chunk that carried one component more
+/// than the formula expected ran the margin out and stopped the two kernel
+/// emitters and the prover's own AIR lowering with an index panic. A chunk with
+/// no prefix key tile is exactly that chunk: it has no prefix key tiles for the
+/// formula's `3 * nb` to pay for the rest of the plan out of, while the
+/// embedding gadget a layer-0 chunk carries takes one more entry. It is sized
+/// from `Plan::n_use()` -- "the number of components that carry lookups, in
+/// `use_sums` order" -- so the placeholder and the consumer count the same
+/// components.
 pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Claims {
     let mut x = seed | 1;
     let mut felt = || {
@@ -677,8 +688,9 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
             .iter()
             .map(|w| (0..w.mats.len()).map(|_| felt()).collect())
             .collect(),
-        // 3 per key tile + attnout + one per matmul + one per Freivalds check, and a margin.
-        use_sums: (0..(3 * nb + 1 + nm + nw + 16)).map(|_| felt()).collect(),
+        // one per component that carries lookups, in `use_sums` order -- the
+        // plan's own count and not a formula with a margin
+        use_sums: (0..plan.n_use()).map(|_| felt()).collect(),
         // exp + norm/frac/mul/qnz + one per range width, and a margin (the
         // residual stream's table sides come out of the same margin).
         table_sums: (0..(5 + plan.widths.len() + 16)).map(|_| felt()).collect(),
@@ -782,4 +794,84 @@ pub fn cmd(args: &[String]) {
     }
     crate::util::emit("exprprobe", json!({"source": l.source, "probe": report,
                                     "params": serde_json::to_value(&params).unwrap()}));
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    /// The chunk the placeholder used to be one entry short on: the segment
+    /// with no prefix, which is token block 0's -- `c == 0`, so the plan builds
+    /// no prefix key tile and the chunk is its own diagonal block -- carrying
+    /// the embedding gadget a layer-0 chunk carries. `compose.rs` uses it too,
+    /// so the two sides of the count are pinned on one shape.
+    pub(crate) fn params_no_prefix() -> crate::compose::Params {
+        let mats: Vec<crate::compose::MatParams> = ["q", "o"]
+            .iter()
+            .map(|n| crate::compose::MatParams {
+                name: (*n).into(), variant: "pow2".into(), n_in: 64, n_out: 64, tokens: 32,
+            })
+            .collect();
+        crate::compose::Params {
+            // `c = 0` is what makes this block 0: no unchecked prefix, so no
+            // prefix key tile, and the diagonal block carries its group's
+            // per-token component
+            s: 32, c: 0, hd: 32, nh: 3, head_groups: vec![2, 1],
+            variant: "intsplit6".into(), log_table: 16,
+            q_bits: 8, k_bits: 8, nmax: 1, chan_target: 128, grid_target: 64, rw: 16,
+            z_lo_bits: 16, z_hi_bits: 6, z_min: 1, mats, deq_target: 16, kmax: 12,
+            round: "away".into(), ao_target: 16, ao_q_bits: 7, ao_rem_bits: 8,
+            ao_jv_min: -8, ao_jv_max: -6, ao_jo_min: -10, ao_jo_max: -10,
+            ao_acc_lo_bits: 16, ao_acc_hi_bits: 4,
+            ao_acc_mag: false, ao_denp2: false,
+            fold_rem_bits: 0, fold_alpha: 0, freivalds_p: 136,
+            residual_stream: Some(crate::compose::ResidualStreamParams {
+                d: 64, a: 4, dff: 64, bind_matmul_outputs: false, head_norm: false,
+                eps: crate::bf16::from_f64(1e-5),
+                inv_d: crate::bf16::from_f64(1.0 / 64.0),
+            }),
+            // a chunk with no prefix is its own diagonal block and nothing else
+            diagonal_block: true,
+            // the five reductions off, which is the configuration that prices
+            // them and the one both refusals were reported under
+            gkr_key_tiles: false, gkr_dequant: false, gkr_residual_stream: false,
+            gkr_freivalds: false, gkr_attnout: false, layer_boundary: false, kv_boundary: false,
+            logits_claim: false, prove_argmax: false, prove_argmax_lax: false,
+            embed_vocab: 300, embed_per_row: 32,
+            rope: None,
+        }
+    }
+
+    /// The placeholder claims are the plan's own count and not a formula with a
+    /// margin. Before this, `use_sums` was `3 * nb + 1 + nm + nw + 16`; a chunk
+    /// with no prefix key tile has no prefix key tiles for the `3 * nb` term to
+    /// pay for the rest of the plan out of, and `genemit` and `cudaemit` stopped
+    /// on it with an index panic instead of lowering it.
+    #[test]
+    fn the_placeholder_use_sums_are_the_plans_own_count() {
+        let plan = crate::compose::Plan::new(&params_no_prefix());
+        assert!(plan.emb.is_some(), "the fixture carries the embedding gadget");
+        assert_eq!(plan.shapes.len(), plan.p.head_groups.len(),
+                   "a chunk with no prefix has one key tile per head group, its diagonal block");
+        let claims = super::claims_for(&plan, 0x0b65_5700);
+        assert_eq!(claims.use_sums.len(), plan.n_use(),
+                   "the placeholder must carry one claimed sum per component that carries \
+                    lookups, which is what `build_components` consumes");
+    }
+
+    /// And the lowering the emitters run does not stop on that chunk: this is
+    /// `genemit`'s own route -- draw the relations, fabricate the claims, build
+    /// every component -- on the shape it refused.
+    #[test]
+    fn the_chunk_with_no_prefix_lowers() {
+        let plan = crate::compose::Plan::new(&params_no_prefix());
+        let mut ch = stwo::core::channel::Blake2sM31Channel::default();
+        stwo::core::channel::Channel::mix_u64(&mut ch, 0x0b65_5701);
+        let rels = crate::compose::Rels::draw(
+            &mut ch, &plan.widths, plan.residual_stream.as_ref().map(|g| g.uns.as_slice()),
+            plan.emb.map(|l| l.arity()), plan.needs_rq_rels(), plan.q_tabs.len());
+        let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
+        let claims = super::claims_for(&plan, 0x0b65_5701);
+        let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4],
+                                                 f[5], &claims);
+        assert!(b.embed.is_some(), "the embedding gadget is one of the components lowered");
+    }
 }
