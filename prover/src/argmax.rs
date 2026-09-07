@@ -1,9 +1,9 @@
-//! B10 step 4: the token tie -- "the emitted token is the argmax of the logits".
+//! B10 step 4: the token binding -- "the emitted token is the argmax of the logits".
 //!
 //! Greedy decoding emits `argmax_v logits[t, v]`, and `torch.argmax` returns the
 //! **first** maximal index.  On the real 512-token continuations 15 of 512 rows
 //! (C=4K) and 14 of 512 (C=16K) have two or three co-maximal logits
-//! (`b10/out/head_ties_*.json`), so the tie-breaking rule decides the token often
+//! (`b10/out/head_ties_*.json`), so the co-maximum choice rule decides the token often
 //! enough to matter and the statement has to name it.
 //!
 //! # Two statements, and why the strict one is not the expensive one
@@ -11,7 +11,7 @@
 //! B6.5's max argument proves "`tok` attains the maximum": commit the maximum's
 //! pattern `pm`, range-check `pm - k_i >= 0` on every entry, and a selector with
 //! `sel_i (pm - k_i) = 0`, `sum_i sel_i = 1` pins `pm` to an attained value.  On
-//! a tied row a prover may point the selector at either co-maximal entry.
+//! a co-maximal row a prover may point the selector at either co-maximal entry.
 //!
 //! The strict statement -- "`tok` is the **lowest-indexed** maximum", which is
 //! B1's own rule -- looks like it needs an equality indicator pinned in both
@@ -30,7 +30,7 @@
 //! of its own; `sel_tok = 1` and all others are 0 by telescoping, so
 //! `sel_i (pm - k_i) = 0` still says the maximum is attained -- at `tok`.  The
 //! running sum closes against the committed token instead of against 1, which is
-//! the tie itself and costs nothing extra.
+//! the binding itself and costs nothing extra.
 //!
 //! So the strict statement is the lax one with `s` renamed to `b`, one extra
 //! degree-2 constraint (monotonicity), and a different closing value.  `--lax`
@@ -43,7 +43,7 @@
 //! pattern order, but logits are signed, so the key is the sign-flipped pattern
 //! (`k = s ? 0x7FFF - mag : 0x8000 + mag`), which is a total order matching the
 //! float order.  Pinning `k` to the `lm_head` dequant's own output is a
-//! positionwise tie of the kind B10 step 2 built for the glue, and it is the
+//! positionwise binding of the kind B10 step 2 built for the glue, and it is the
 //! composition's job, not this region's.  Standalone, `k` is the statement's
 //! input.
 
@@ -81,7 +81,7 @@ pub fn order_key(pat: u16) -> u32 {
 
 // -------------------------------------------------------------------- the AIR --
 
-/// Stream E: the argmax's side of the head tie.  One Horner claim over the
+/// Stream E: the argmax's side of the head binding.  One Horner claim over the
 /// region's committed keys, with the *mirror* of the dequant's weights -- this
 /// region's index map ascends the vocabulary where the dequant's chunks descend,
 /// so its row step is the inverse of the output side's.
@@ -90,7 +90,7 @@ pub fn order_key(pat: u16) -> u32 {
 /// walk the same `(token, chunk)` rows and sharing the columns is what makes it
 /// impossible for the two sides to disagree about which row is which.
 #[derive(Clone)]
-pub struct ATie {
+pub struct ArgmaxBinding {
     pub w: Vec<SecureField>,
     pub k_in: SecureField,
     pub k_bd: SecureField,
@@ -114,9 +114,9 @@ pub struct ArgmaxEval {
     /// prove only "the token attains the maximum" -- B6.5's argument unchanged
     pub lax: bool,
     pub rk: RangeRel,
-    /// stream E: the tie to the head's dequant output, when this region is
+    /// stream E: the binding to the head's dequant output, when this region is
     /// composed rather than proved on its own
-    pub tie: Option<ATie>,
+    pub binding: Option<ArgmaxBinding>,
 }
 
 impl FrameworkEval for ArgmaxEval {
@@ -208,7 +208,7 @@ impl FrameworkEval for ArgmaxEval {
 
         // the running sum: `sum_i b_i`, closed at the token's last row.  Lax closes
         // it against 1 (a selector was placed somewhere); strict closes it against
-        // the committed token, which *is* the tie.
+        // the committed token, which *is* the binding.
         let [ss_prev, ss] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
         let mut f = E::F::zero();
         for s in if self.lax { &sels } else { &bs } {
@@ -227,11 +227,11 @@ impl FrameworkEval for ArgmaxEval {
         }
         eval.add_constraint((ss - want) * last);
 
-        // Stream E: the tie.  `end` was committed from the start and unused; it
-        // is exactly the selector a Horner claim closes on, so the tie needs no
+        // Stream E: the binding.  `end` was committed from the start and unused; it
+        // is exactly the selector a Horner claim closes on, so the binding needs no
         // new column of its own beyond the step selectors it borrows from the
         // head dequant's region.
-        if let Some(t) = &self.tie {
+        if let Some(t) = &self.binding {
             let oin = eval.get_preprocessed_column(
                 crate::dequant::deq_sel(&t.tag, crate::dequant::DEQ_OSEL[0]));
             let obd = eval.get_preprocessed_column(
@@ -281,7 +281,7 @@ impl FrameworkEval for ArgmaxEval {
 pub enum Tamper {
     /// point the token at a different entry that also attains the maximum -- the
     /// probe the *lax* statement cannot reject and the strict one must
-    Tie(usize),
+    CoMax(usize),
     /// name a token whose logit is not the maximum at all
     NotMax(usize),
     /// claim a maximum above every entry: attained by none
@@ -294,7 +294,7 @@ pub enum Tamper {
     /// Stream E: one committed key changed, with `pm` and `tok` recomputed from
     /// the changed keys so the region stays internally consistent.  Every
     /// constraint here still holds -- what this region proves is a statement
-    /// *about* its keys -- and only the tie to the head's dequant output can
+    /// *about* its keys -- and only the binding to the head's dequant output can
     /// tell that they are not the logits the layer computed.
     Key(usize),
 }
@@ -309,14 +309,14 @@ pub struct AWitness {
     pub pm: Vec<u32>,
     pub source: String,
     /// rows where more than one entry attains the maximum
-    pub ties: usize,
+    pub co_max_rows: usize,
 }
 
 impl AWitness {
-    /// A synthetic block with a controlled tie rate, so the strict statement has
-    /// something to bite on.  `tie_frac` of the rows get a second entry at the
+    /// A synthetic block with a controlled co-maximum rate, so the strict statement has
+    /// something to bite on.  `co_max_frac` of the rows get a second entry at the
     /// maximum, placed *after* the first so the lowest-index rule is what picks.
-    pub fn synthetic(tokens: usize, vocab: usize, tie_frac: f64, seed: u64) -> Self {
+    pub fn synthetic(tokens: usize, vocab: usize, co_max_frac: f64, seed: u64) -> Self {
         use rand::rngs::SmallRng;
         use rand::{Rng, SeedableRng};
         let mut rng = SmallRng::seed_from_u64(seed);
@@ -324,7 +324,7 @@ impl AWitness {
         for k in key.iter_mut() {
             *k = rng.random_range(0..(1u32 << KEY_BITS) - 1);
         }
-        let (mut tok, mut pm, mut ties) = (vec![0u32; tokens], vec![0u32; tokens], 0usize);
+        let (mut tok, mut pm, mut co_max_rows) = (vec![0u32; tokens], vec![0u32; tokens], 0usize);
         for t in 0..tokens {
             let row = &mut key[t * vocab..(t + 1) * vocab];
             let mut best = 0usize;
@@ -333,12 +333,12 @@ impl AWitness {
                     best = i;
                 }
             }
-            if rng.random::<f64>() < tie_frac && best + 1 < vocab {
+            if rng.random::<f64>() < co_max_frac && best + 1 < vocab {
                 // a co-maximal entry strictly after the winner: the lax statement
                 // would accept either, the strict one only the first
                 let j = rng.random_range(best + 1..vocab);
                 row[j] = row[best];
-                ties += 1;
+                co_max_rows += 1;
             }
             // the argmax is the *first* attained entry, as torch's is
             let mx = *row.iter().max().unwrap();
@@ -346,8 +346,8 @@ impl AWitness {
             tok[t] = first as u32;
             pm[t] = mx;
         }
-        Self { tokens, vocab, key, tok, pm, ties,
-               source: format!("synthetic(seed={seed}, ties={tie_frac})") }
+        Self { tokens, vocab, key, tok, pm, co_max_rows,
+               source: format!("synthetic(seed={seed}, co_max={co_max_frac})") }
     }
 
     /// The real head's own keys and tokens, from an `extract.py --head` dump:
@@ -358,19 +358,19 @@ impl AWitness {
     /// it honestly.
     ///
     /// This is the statement's *input*: what pins `key` to the head's dequant is
-    /// a positionwise tie, and that tie is not built yet (see the record).  Until
+    /// a positionwise binding, and that binding is not built yet (see the record).  Until
     /// it is, "the emitted token is the maximum" is proved about a committed key
     /// column that B1 wrote, not about the logits the layer computed.
     /// The same, from columns a `Layer` already holds.
     pub fn from_cols(tokens: usize, vocab: usize, key: Vec<u32>, tok: Vec<u32>)
                      -> Result<Self, String> {
-        let (mut pm, mut ties) = (vec![0u32; tokens], 0usize);
+        let (mut pm, mut co_max_rows) = (vec![0u32; tokens], 0usize);
         for t in 0..tokens {
             let row = &key[t * vocab..(t + 1) * vocab];
             let mx = *row.iter().max().expect("a row of the vocabulary");
             pm[t] = mx;
             if row.iter().filter(|v| **v == mx).count() > 1 {
-                ties += 1;
+                co_max_rows += 1;
             }
             let first = row.iter().position(|v| *v == mx).expect("the maximum") as u32;
             if tok[t] != first {
@@ -378,7 +378,7 @@ impl AWitness {
                     "row {t}: the dump emits {} but the first maximum is {first}", tok[t]));
             }
         }
-        Ok(Self { tokens, vocab, key, tok, pm, ties, source: "the layer's head columns".into() })
+        Ok(Self { tokens, vocab, key, tok, pm, co_max_rows, source: "the layer's head columns".into() })
     }
 
     pub fn from_dump(dir: &str, tokens: usize, vocab: usize) -> Result<Self, String> {
@@ -401,14 +401,14 @@ impl AWitness {
         if tok.len() != tokens {
             return Err(format!("tok_head: {} values, want {tokens}", tok.len()));
         }
-        let (mut pm, mut ties) = (vec![0u32; tokens], 0usize);
+        let (mut pm, mut co_max_rows) = (vec![0u32; tokens], 0usize);
         for t in 0..tokens {
             let row = &key[t * vocab..(t + 1) * vocab];
             let mx = *row.iter().max().expect("a row of the vocabulary");
             pm[t] = mx;
             let n_at = row.iter().filter(|v| **v == mx).count();
             if n_at > 1 {
-                ties += 1;
+                co_max_rows += 1;
             }
             // B1 decoded greedily with torch's lowest-index rule, so the dump's
             // token has to *be* the first maximum; a dump that disagrees is a
@@ -419,13 +419,13 @@ impl AWitness {
                     "row {t}: the dump emits {} but the first maximum is {first}", tok[t]));
             }
         }
-        Ok(Self { tokens, vocab, key, tok, pm, ties, source: format!("dump({dir})") })
+        Ok(Self { tokens, vocab, key, tok, pm, co_max_rows, source: format!("dump({dir})") })
     }
 
     fn tampered(&self, bad: Option<Tamper>) -> (Vec<u32>, Vec<u32>) {
         let (mut tok, mut pm) = (self.tok.clone(), self.pm.clone());
         match bad {
-            Some(Tamper::Tie(t)) => {
+            Some(Tamper::CoMax(t)) => {
                 // move the token to another entry attaining the same maximum, if the
                 // row has one
                 let t = t % self.tokens;
@@ -473,7 +473,7 @@ impl Outcome {
         let fresh = self.cells[1] + self.cells[2];
         json!({
             "tokens": w.tokens, "vocab": w.vocab, "source": w.source,
-            "ties_in_witness": w.ties, "lax": self.lax,
+            "co_max_rows_in_witness": w.co_max_rows, "lax": self.lax,
             "layout": {"per_row": lay.per_row, "chunks": lay.chunks, "log_rows": lay.log_rows,
                        "lead_rows": lay.lead,
                        "lead_frac": lay.lead as f64 / (1usize << lay.log_rows) as f64},
@@ -499,17 +499,17 @@ impl Outcome {
 /// own -- what a composed proof needs, and what `run` now builds its standalone
 /// proof out of so the two cannot drift apart.
 ///
-/// The layout is *given*, not chosen: a tie to the head's dequant is
+/// The layout is *given*, not chosen: a binding to the head's dequant is
 /// positionwise, so both regions have to walk the same `(token, chunk)` rows.
 pub struct ARegion {
     pub lay: MatLayout,
     pub pre: Vec<Eval>,
     pub base: Vec<Eval>,
     pub off_table: usize,
-    /// the committed keys, row-major over `(row, slot)` -- the tie's Horner input
+    /// the committed keys, row-major over `(row, slot)` -- the binding's Horner input
     pub keys: Vec<u32>,
     /// stream KK: the committed token per *row*, zero on an inert lead row --
-    /// the second tie's Horner input, and the vector the head chunk publishes
+    /// the second binding's Horner input, and the vector the head chunk publishes
     pub toks: Vec<u32>,
     pub col_pm: usize,
     pub k0: usize,
@@ -639,15 +639,15 @@ pub fn logup(r: &ARegion, lax: bool, rk: &RangeRel) -> (Vec<Eval>, SecureField) 
     crate::plogup::build(r.lay.log_rows, n, f)
 }
 
-/// Stream E: the tie's accumulator column, and the value it closes on.  The
+/// Stream E: the binding's accumulator column, and the value it closes on.  The
 /// weights are the mirror of the head dequant's output side, and an inert row
 /// contributes nothing on either side.
-pub fn tie_col(r: &ARegion, tokens: usize, t: &ATie) -> (Vec<Eval>, SecureField, SecureField) {
+pub fn binding_col(r: &ARegion, tokens: usize, t: &ArgmaxBinding) -> (Vec<Eval>, SecureField, SecureField) {
     let rows = 1usize << r.lay.log_rows;
     let mut u = vec![SecureField::zero(); rows];
     // stream KK: the second accumulator, one step per token over the committed
     // `tk`.  Its multipliers are the same three preprocessed selectors the key
-    // tie reads (`oin`, `obd`, `oact`), so the two cannot disagree about which
+    // binding reads (`oin`, `obd`, `oact`), so the two cannot disagree about which
     // row begins a token.
     let mut g = vec![SecureField::zero(); rows];
     for j in 0..rows {
@@ -728,7 +728,7 @@ pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
         &[id(AM_SEL[0]), id(AM_SEL[1]), id(AM_SEL[2]), tbl_range(KEY_BITS)]);
     let am = FrameworkComponent::<ArgmaxEval>::new(
         alloc, ArgmaxEval { log_rows: lay.log_rows, per_row: pr, lax, rk: rk.clone(),
-                            tie: None },
+                            binding: None },
         use_sum);
     let tb = FrameworkComponent::<RangeTableEval>::new(
         alloc, RangeTableEval { bits: KEY_BITS, rel: rk }, tsum);
@@ -769,11 +769,11 @@ mod tests {
             let r = region(&w, false, lay, &mut m_rk, None);
             let ch = SecureField::from_m31_array(
                 [m31_u32(61), m31_u32(67), m31_u32(71), m31_u32(73)]);
-            let tie = ATie { w: vec![SecureField::zero(); lay.per_row],
+            let binding = ArgmaxBinding { w: vec![SecureField::zero(); lay.per_row],
                              k_in: SecureField::zero(), k_bd: SecureField::zero(),
                              claimed: SecureField::zero(), k_tok: ch,
                              claimed_tok: SecureField::zero(), tag: String::new() };
-            let (_, _, claimed) = tie_col(&r, tokens, &tie);
+            let (_, _, claimed) = binding_col(&r, tokens, &binding);
             let toks = r.token_ids(tokens);
             assert_eq!(toks, w.tok, "the published tokens are the region's");
             // exactly `verify_composed`'s `horner(.., false)`

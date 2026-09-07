@@ -367,7 +367,7 @@ pub struct ChanEval {
     /// Stream NN (NN-2): this band's own Q claim alone, on a **prefix** band.
     ///
     /// A band group is a prefix band and a corner over the same heads and the
-    /// same `S` queries, and each commits its own `Q` column.  NN-1 tied the
+    /// same `S` queries, and each commits its own `Q` column.  NN-1 bound the
     /// corner's and left the prefix's untied, so a prover could attend to the
     /// cache with queries the `q` matmul did not produce while attending to
     /// this block's own keys with queries it did.  This is the other half: the
@@ -711,7 +711,7 @@ impl FrameworkEval for KeyEval {
         if let Some(t) = &self.v_bind {
             let [h_prev, h] =
                 eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
-            let s_ib = t.s_ib.expect("the V tie needs an instance-boundary step");
+            let s_ib = t.s_ib.expect("the V binding needs an instance-boundary step");
             let step = E::EF::from(nofirst.clone()) * t.s_in
                 + (E::EF::from(notzero.clone()) - E::EF::from(nofirst.clone())
                    - E::EF::from(istart_v.clone())) * t.s_bd

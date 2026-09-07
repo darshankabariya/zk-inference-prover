@@ -36,9 +36,9 @@
 //! **The use side** (`EmbedEval`), one row per `(token, channel block)`:
 //! commits the token id and the block's `pe` channels as `(sm, ef)` pairs, and
 //! carries two Horner claims -- one over the stream values, one over the ids.
-//! The stream claim uses the wiring family's own tie challenge and weight
-//! convention, so the verifier compares it against `glue_ties[stream_in]` by
-//! equality.  That comparison is the tie: it says the row this region proved is
+//! The stream claim uses the wiring family's own binding challenge and weight
+//! convention, so the verifier compares it against `stream_bindings[stream_in]` by
+//! equality.  That comparison is the binding: it says the row this region proved is
 //! the row the layer consumed.
 //!
 //! **The table side** (`EmbTableEval`), one row per `(vocabulary entry, channel
@@ -84,7 +84,7 @@
 //!
 //! Both regions' columns are base columns (tree 1), committed before the
 //! relation challenges are drawn.  The two Horner accumulators are interaction
-//! columns (tree 2), built after the tie challenge `w` and its companion `lam`
+//! columns (tree 2), built after the binding challenge `w` and its companion `lam`
 //! are drawn -- exactly where the wiring family builds its own.  Nothing this
 //! module commits lands in a boundary tree, and it adds no tree.
 
@@ -239,12 +239,12 @@ impl<F: Clone, EF: RelationEFTraitBound<F>> Relation<F, EF> for EmbRel {
     }
 }
 
-// -------------------------------------------------------------------- ties ----
+// -------------------------------------------------------------------- bindings ----
 
-/// The stream tie's weights, in the wiring family's own convention: the value
+/// The stream binding's weights, in the wiring family's own convention: the value
 /// at canonical stream position `q = c * tokens + t` weighs `w^(N - 1 - q)` with
 /// `N = d * tokens`, and a value is `sm + lam ef`.  That is exactly what
-/// `GluePlan`'s `stream_in` tie accumulates over `gn1`'s group 0, so the two
+/// `GluePlan`'s `stream_in` binding accumulates over `gn1`'s group 0, so the two
 /// claims are comparable by equality and nothing else has to be arranged.
 #[derive(Clone, Debug)]
 pub struct ETie {
@@ -266,7 +266,7 @@ fn wpow(w: SecureField, e: i128) -> SecureField {
 }
 
 /// The weights both sides derive from the drawn `w` and `lam` and the layout.
-pub fn tie_w(w: SecureField, lam: SecureField, d: usize, tokens: usize, lay: &EmbLayout) -> ETie {
+pub fn binding_w(w: SecureField, lam: SecureField, d: usize, tokens: usize, lay: &EmbLayout) -> ETie {
     let (n, tok, pe) = ((d * tokens) as i128, tokens as i128, lay.pe as i128);
     let last = (lay.k - 1) as i128 * pe;
     ETie {
@@ -293,7 +293,7 @@ pub struct EmbedEval {
     pub rel: EmbRel,
     /// the 8-bit range relation `ef` is checked against
     pub rel_ef: RangeRel,
-    pub tie: ETie,
+    pub binding: ETie,
 }
 
 impl FrameworkEval for EmbedEval {
@@ -344,29 +344,29 @@ impl FrameworkEval for EmbedEval {
                 &self.rel_ef, E::EF::from(act.clone()), core::slice::from_ref(e)));
         }
 
-        // the stream tie: the counterparty is the wiring family's `stream_in`
+        // the stream binding: the counterparty is the wiring family's `stream_in`
         // claim over the very same values, under the same weights
-        let mult: E::EF = E::EF::from(s_in.clone()) * self.tie.k_in
-            + E::EF::from(s_bd.clone()) * self.tie.k_bd;
+        let mult: E::EF = E::EF::from(s_in.clone()) * self.binding.k_in
+            + E::EF::from(s_bd.clone()) * self.binding.k_bd;
         let [h_prev, h] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
         let mut f = E::EF::zero();
         for i in 0..self.per_row {
-            f += (E::EF::from(sm[i].clone()) + E::EF::from(ef[i].clone()) * self.tie.lam)
-                * self.tie.w[i];
+            f += (E::EF::from(sm[i].clone()) + E::EF::from(ef[i].clone()) * self.binding.lam)
+                * self.binding.w[i];
         }
         eval.add_constraint(h.clone() - h_prev * mult - f * act.clone());
-        let claim = eval.claim(self.tie.claimed);
+        let claim = eval.claim(self.binding.claimed);
         eval.add_constraint((h - claim) * s_end.clone());
 
         // the id claim: one step per token, so the ids are a named value of the
         // statement and not merely columns inside it
         let kmult: E::EF =
-            E::EF::from(s_in.clone()) + E::EF::from(s_bd.clone()) * self.tie.k_tok;
+            E::EF::from(s_in.clone()) + E::EF::from(s_bd.clone()) * self.binding.k_tok;
         let [g_prev, g] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
         eval.add_constraint(
             g.clone() - g_prev * kmult - E::EF::from(tk * (E::F::one() - s_in) * act),
         );
-        let claim_tok = eval.claim(self.tie.claimed_tok);
+        let claim_tok = eval.claim(self.binding.claimed_tok);
         eval.add_constraint((g - claim_tok) * s_end);
 
         eval.finalize_logup_in_pairs();
@@ -420,7 +420,7 @@ pub enum Tamper {
     Tok(usize),
     /// **the aimed corruption.**  The id moved *and* the committed row
     /// recomputed from the table to match it, so the region is internally
-    /// consistent and every constraint inside it still holds.  Only the tie to
+    /// consistent and every constraint inside it still holds.  Only the binding to
     /// the layer's `bin` can tell that this is not the row the layer consumed.
     /// This is the shape of `argmax::Tamper::Key`.
     TokRow(usize),
@@ -732,9 +732,9 @@ pub fn table_side(r: &ERegion, rel: &EmbRel) -> (Vec<Eval>, SecureField) {
     crate::attn_trace::table_col(r.lay.log_tab, rel, &refs, &r.tab_mult)
 }
 
-/// The two Horner columns and the two claims they close on: the stream tie and
+/// The two Horner columns and the two claims they close on: the stream binding and
 /// the id claim, in the order the AIR reads them.
-pub fn tie_cols(r: &ERegion, t: &ETie) -> (Vec<Eval>, SecureField, SecureField) {
+pub fn binding_cols(r: &ERegion, t: &ETie) -> (Vec<Eval>, SecureField, SecureField) {
     let rows = 1usize << r.lay.log_use;
     let (pe, k) = (r.lay.pe, r.lay.k);
     let n_use = r.tokens * k;
@@ -784,12 +784,12 @@ pub struct Outcome {
     pub cells: [usize; 3],
     pub n_cols: [usize; 3],
     pub off_table: usize,
-    pub tie_ok: bool,
+    pub binding_ok: bool,
 }
 
 impl Outcome {
     pub fn accepts(&self) -> bool {
-        self.proven.stark_ok && self.sums.cancels() && self.off_table == 0 && self.tie_ok
+        self.proven.stark_ok && self.sums.cancels() && self.off_table == 0 && self.binding_ok
     }
     pub fn json(&self, w: &EWitness, lay: &EmbLayout) -> Value {
         let fresh = self.cells[1] + self.cells[2];
@@ -810,7 +810,7 @@ impl Outcome {
             "roots": self.proven.roots,
             "off_table": self.off_table,
             "checks": {"stark": self.proven.stark_ok, "sums_cancel": self.sums.cancels(),
-                       "off_table": self.off_table, "tie": self.tie_ok},
+                       "off_table": self.off_table, "binding": self.binding_ok},
             "accepts": self.accepts(),
             "prove_error": self.proven.prove_error,
         })
@@ -819,10 +819,10 @@ impl Outcome {
 
 /// The standalone proof: the two regions, the 8-bit range table, one transcript.
 ///
-/// The tie has no counterparty here -- there is no wiring family in a standalone
+/// The binding has no counterparty here -- there is no wiring family in a standalone
 /// run -- so the claim is recomputed from the witness's own `xin` and compared,
 /// which is the same comparison `verify_composed` makes against
-/// `glue_ties[stream_in]` and is what makes `TokRow` bite in this harness too.
+/// `stream_bindings[stream_in]` and is what makes `TokRow` bite in this harness too.
 pub fn run(w: &EWitness, target: usize, bad: Option<Tamper>) -> (Outcome, EmbLayout) {
     let lay = EmbLayout::choose(w.d, w.tokens, w.vocab, target);
     let mut m_ef = vec![0u32; 1 << EF_BITS];
@@ -846,14 +846,14 @@ pub fn run(w: &EWitness, target: usize, bad: Option<Tamper>) -> (Outcome, EmbLay
     let rel_ef = sess.draw_relation(RangeRel::draw);
     let rel = sess.draw_relation(|ch| EmbRel::draw(ch, lay.arity()));
     let ch = sess.draw_felts(2);
-    let tie = {
-        let mut t = tie_w(ch[0], ch[1], w.d, w.tokens, &lay);
-        let (cols, hc, gc) = tie_cols(&r, &t);
+    let binding = {
+        let mut t = binding_w(ch[0], ch[1], w.d, w.tokens, &lay);
+        let (cols, hc, gc) = binding_cols(&r, &t);
         t.claimed = hc;
         t.claimed_tok = gc;
         (t, cols)
     };
-    let (tie, tcols) = tie;
+    let (binding, tcols) = binding;
     let (lcols, use_sum) = logup(&r, &rel, &rel_ef);
     let (tbcols, tab_sum) = table_side(&r, &rel);
     let (efcols, ef_sum) = crate::attn_trace::table_col(EF_BITS, &rel_ef, &[&tbl_ef], &mult_ef);
@@ -863,7 +863,7 @@ pub fn run(w: &EWitness, target: usize, bad: Option<Tamper>) -> (Outcome, EmbLay
     icols.extend(efcols);
     sess.commit(icols.clone());
 
-    // the tie's counterparty, recomputed from the witness rather than the trace
+    // the binding's counterparty, recomputed from the witness rather than the trace
     let want = {
         let (n, tok) = ((w.d * w.tokens) as i128, w.tokens as i128);
         let mut acc = SecureField::zero();
@@ -871,13 +871,13 @@ pub fn run(w: &EWitness, target: usize, bad: Option<Tamper>) -> (Outcome, EmbLay
             for c in 0..w.d {
                 let (sm, ef) = crate::glue::split(w.xin[t * w.d + c]);
                 acc += (SecureField::from(m31_of(sm))
-                        + SecureField::from(m31_u32(ef)) * tie.lam)
+                        + SecureField::from(m31_u32(ef)) * binding.lam)
                     * wpow(ch[0], n - 1 - (c as i128 * tok + t as i128));
             }
         }
         acc
     };
-    let tie_ok = tie.claimed == want;
+    let binding_ok = binding.claimed == want;
 
     let mut ids: Vec<PreProcessedColumnId> = EMB_SEL.iter().map(|n| id(n)).collect();
     ids.push(cb_id());
@@ -889,7 +889,7 @@ pub fn run(w: &EWitness, target: usize, bad: Option<Tamper>) -> (Outcome, EmbLay
     let em = FrameworkComponent::<EmbedEval>::new(
         alloc,
         EmbedEval { log_rows: lay.log_use, per_row: lay.pe, rel: rel.clone(),
-                    rel_ef: rel_ef.clone(), tie },
+                    rel_ef: rel_ef.clone(), binding },
         use_sum,
     );
     let et = FrameworkComponent::<EmbTableEval>::new(
@@ -910,7 +910,7 @@ pub fn run(w: &EWitness, target: usize, bad: Option<Tamper>) -> (Outcome, EmbLay
     ];
     let n_cols = [pre_all.len(), base_all.len(), icols.len()];
     (Outcome { proven, sums: Sums { uses: use_sum, tables: tab_sum + ef_sum }, cells, n_cols,
-               off_table: r.off_table, tie_ok },
+               off_table: r.off_table, binding_ok },
      lay)
 }
 
@@ -924,7 +924,7 @@ pub fn price(d: usize, tokens: usize, vocab: usize, target: usize) -> Value {
     let (ur, tr) = (1usize << lay.log_use, 1usize << lay.log_tab);
     // the use side: `tk` and two cells per channel slot
     let use_base = ur * (1 + 2 * lay.pe);
-    // one LogUp column per pair of lookups, four cells each, plus the two ties
+    // one LogUp column per pair of lookups, four cells each, plus the two bindings
     let use_inter = ur * (4 * (1 + lay.pe).div_ceil(2) + 8);
     let tab_base = tr;
     let tab_inter = tr * 4;
@@ -951,12 +951,12 @@ mod tests {
 
     /// The one thing a box run would otherwise be the first to check: that the
     /// claim this module publishes is the *same function of the same values*
-    /// the wiring family's `stream_in` tie is.
+    /// the wiring family's `stream_in` binding is.
     ///
     /// The glue side is recomputed here from `GluePlan`'s own definition --
     /// weights `w^(a tokens (nreal - 1 - j))` per leaf, a row step of `w`, over
     /// `Tiling`'s natural row order (row `r*tokens + t`, leaf `j` is channel
-    /// `r + j a`) -- and compared against `tie_cols`.  Equality is what makes
+    /// `r + j a`) -- and compared against `binding_cols`.  Equality is what makes
     /// `verify_composed`'s one-line comparison meaningful; if the conventions
     /// ever drift, this fails here rather than on a card.
     fn glue_stream_claim(xin: &[u16], d: usize, tokens: usize, a: usize,
@@ -977,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn tie_matches_the_wiring_family() {
+    fn binding_matches_the_wiring_family() {
         for (d, tokens, vocab, a, target) in
             [(128usize, 16usize, 97usize, 4usize, 32usize),
              (128, 16, 97, 32, 16),
@@ -992,8 +992,8 @@ mod tests {
                 [m31_u32(7), m31_u32(11), m31_u32(13), m31_u32(17)]);
             let lam = SecureField::from_m31_array(
                 [m31_u32(3), m31_u32(5), m31_u32(19), m31_u32(23)]);
-            let t = tie_w(ch, lam, d, tokens, &lay);
-            let (_, got, _) = tie_cols(&r, &t);
+            let t = binding_w(ch, lam, d, tokens, &lay);
+            let (_, got, _) = binding_cols(&r, &t);
             let want = glue_stream_claim(&w.xin, d, tokens, a, ch, lam);
             assert_eq!(got, want, "d={d} tokens={tokens} a={a} target={target}");
         }
@@ -1009,8 +1009,8 @@ mod tests {
         let r = region(&w, lay, &mut m_ef, None);
         let ch = SecureField::from_m31_array(
             [m31_u32(29), m31_u32(31), m31_u32(37), m31_u32(41)]);
-        let t = tie_w(ch, SecureField::one(), d, tokens, &lay);
-        let (_, _, got) = tie_cols(&r, &t);
+        let t = binding_w(ch, SecureField::one(), d, tokens, &lay);
+        let (_, _, got) = binding_cols(&r, &t);
         let mut want = SecureField::zero();
         for k in 0..tokens {
             want = want * ch + SecureField::from(m31_u32(w.tok[k]));
@@ -1086,8 +1086,8 @@ mod tests {
             let r = region(&w, lay, &mut m_ef, None);
             let ch = SecureField::from_m31_array(
                 [m31_u32(43), m31_u32(47), m31_u32(53), m31_u32(59)]);
-            let t = tie_w(ch, SecureField::one(), d, tokens, &lay);
-            let (_, _, claimed) = tie_cols(&r, &t);
+            let t = binding_w(ch, SecureField::one(), d, tokens, &lay);
+            let (_, _, claimed) = binding_cols(&r, &t);
             // exactly `verify_composed`'s `horner(.., true)`
             let ids = r.token_ids();
             assert_eq!(ids.len(), tokens);
@@ -1130,7 +1130,7 @@ mod tests {
                 // fixture carries a real `dff` and the model's two norm
                 // constants.  A mechanical update, not a change of what the
                 // test asserts -- both plans it compares gain the same columns.
-                d: 64, a: 4, dff: 64, deq_ties: false, head_norm: false,
+                d: 64, a: 4, dff: 64, bind_matmul_outputs: false, head_norm: false,
                 eps: crate::bf16::from_f64(1e-5),
                 inv_d: crate::bf16::from_f64(1.0 / 64.0),
             }),
@@ -1193,7 +1193,7 @@ mod tests {
             // dispatched component. `prewarm` bumps `blob_report().lowerings`
             // once per call whatever the kernel store holds, so the count is
             // the list's length and the components' is what it has to equal.
-            // Off the GKR arm there is no `link_tie`, so the two coincide.
+            // Off the GKR arm there is no `link_binding`, so the two coincide.
             let before = crate::cudagen::blob_report()["lowerings"].as_u64().unwrap();
             b.prewarm_blobs();
             let after = crate::cudagen::blob_report()["lowerings"].as_u64().unwrap();

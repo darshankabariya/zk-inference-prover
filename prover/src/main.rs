@@ -129,7 +129,7 @@ pub fn check_skips(args: &[String]) {
         }
     }
     for old in ["--bounds", "--kv-bind", "--embed", "--head-argmax", "--head-key",
-                "--norm-tails", "--swiglu", "--deq-ties", "--no-glue"] {
+                "--norm-tails", "--swiglu", "--deq-bindings", "--no-glue"] {
         if flag(args, old) {
             eprintln!("compose: {old} is retired -- what it switched is decided by default now, \
                        and an --unsound-skip-<name> flag is the only way off it");
@@ -368,7 +368,7 @@ fn probes_cmd(args: &[String]) {
     let w8 = Witness::get(&dir, &mat, n, per_row, arg_scalar(args, "--k", 896usize));
     let honest8 = dequant::run(&w8, &sp8, None);
     assert!(honest8.accepts(), "honest int8 proof rejected");
-    // an element with qm >= 1 for the tie shift, one with qm = 0, acc < 0 for the sign
+    // an element with qm >= 1 for the binding shift, one with qm = 0, acc < 0 for the sign
     let pick = |want_zero: bool| -> Option<usize> {
         (0..w8.acc.len()).find(|i| {
             let den = w8.den[(i / per_row) % w8.den.len()];
@@ -379,10 +379,10 @@ fn probes_cmd(args: &[String]) {
     };
     let mut out8 = vec![];
     if let Some(i) = pick(false) {
-        eprintln!("probe int8 tie shift");
+        eprintln!("probe int8 binding shift");
         let o = dequant::run(&w8, &sp8, Some(Tamper::TieShift(i)));
-        assert!(!o.accepts(), "the tie's second witness must be rejected");
-        out8.push(json!({"probe": "int8: the tie's other witness (qm - 1, d + 2 den)",
+        assert!(!o.accepts(), "the binding's second witness must be rejected");
+        out8.push(json!({"probe": "int8: the binding's other witness (qm - 1, d + 2 den)",
                          "note": "B6's `2 den - d` check accepted this whenever d = 0; \
                                   the -1 excludes it for every d",
                          "accepted": o.accepts(), "stark_ok": o.proven.stark_ok,
@@ -484,11 +484,11 @@ fn attn_probes_cmd(args: &[String]) {
 }
 
 // ------------------------------------------------------------------ argmax ----
-/// B10 step 4: the token tie, at both strengths, so the difference is measured.
+/// B10 step 4: the token binding, at both strengths, so the difference is measured.
 fn argmax_cmd(args: &[String]) {
     let tokens: usize = arg_scalar(args, "--tokens", 8usize);
     let vocab: usize = arg_scalar(args, "--vocab", 4096usize);
-    let ties: f64 = arg_scalar(args, "--ties", 0.25f64);
+    let bindings: f64 = arg_scalar(args, "--bindings", 0.25f64);
     let pr: usize = arg_scalar(args, "--per-row", 64usize);
     let seed: u64 = arg_scalar(args, "--seed", 7u64);
     // `--witness DIR` proves the argmax on the head's own keys: `key_head.u16`
@@ -504,7 +504,7 @@ fn argmax_cmd(args: &[String]) {
             eprintln!("argmax on the dump's own keys: {tk} rows of {vc}");
             argmax::AWitness::from_dump(&dir, tk, vc).expect("the head dump's argmax columns")
         }
-        None => argmax::AWitness::synthetic(tokens, vocab, ties, seed),
+        None => argmax::AWitness::synthetic(tokens, vocab, bindings, seed),
     };
     let (tokens, vocab) = (w.tokens, w.vocab);
     let mut points = vec![];
@@ -518,19 +518,19 @@ fn argmax_cmd(args: &[String]) {
         assert!(o.accepts(), "honest argmax proof rejected (lax={lax})");
         points.push(o.json(&w, &lay));
     }
-    emit("argmax", json!({"points": points, "ties_in_witness": w.ties, "tokens": tokens,
+    emit("argmax", json!({"points": points, "co_max_rows_in_witness": w.co_max_rows, "tokens": tokens,
                           "vocab": vocab}));
 }
 
-/// What each statement rejects -- and, for the tie, what only the strict one does.
+/// What each statement rejects -- and, for the binding, what only the strict one does.
 fn argmax_probes_cmd(args: &[String]) {
     let tokens: usize = arg_scalar(args, "--tokens", 8usize);
     let vocab: usize = arg_scalar(args, "--vocab", 4096usize);
     let pr: usize = arg_scalar(args, "--per-row", 64usize);
-    // every row tied, so the tie probe always has a second maximum to move to
+    // every row bound, so the binding probe always has a second maximum to move to
     let w = argmax::AWitness::synthetic(tokens, vocab, 1.0, arg_scalar(args, "--seed", 7u64));
     let cases: Vec<(&str, argmax::Tamper)> = vec![
-        ("the token is a *later* co-maximal entry", argmax::Tamper::Tie(3)),
+        ("the token is a *later* co-maximal entry", argmax::Tamper::CoMax(3)),
         ("the token does not attain the maximum", argmax::Tamper::NotMax(5)),
         ("the claimed maximum is above every entry", argmax::Tamper::PmHigh(2)),
         ("the claimed maximum is below the true one", argmax::Tamper::PmLow(4)),
@@ -545,18 +545,18 @@ fn argmax_probes_cmd(args: &[String]) {
             let (o, lay) = argmax::run(&w, lax, pr, Some(*bad));
             out.push(json!({"probe": name, "lax": lax, "rejected": !o.accepts(),
                             "result": o.json(&w, &lay)}));
-            // The tie probe is exactly the difference between the two statements:
+            // The binding probe is exactly the difference between the two statements:
             // the lax one cannot see it, and saying so is the point of running it.
-            let is_tie = name.contains("co-maximal");
+            let is_binding = name.contains("co-maximal");
             if !lax {
                 assert!(!o.accepts(), "strict: {name} must be rejected");
-            } else if !is_tie {
+            } else if !is_binding {
                 assert!(!o.accepts(), "lax: {name} must be rejected");
             }
         }
     }
     emit("argmax_probes", json!({"probes": out, "tokens": tokens, "vocab": vocab,
-                                 "ties_in_witness": w.ties}));
+                                 "co_max_rows_in_witness": w.co_max_rows}));
 }
 
 
@@ -596,8 +596,8 @@ fn embed_cmd(args: &[String]) {
     };
     let (o, lay) = embed::run(&w, target, None);
     if !o.accepts() {
-        eprintln!("  REJECTED: stark={} sums={} off={} tie={}", o.proven.stark_ok,
-                  o.sums.cancels(), o.off_table, o.tie_ok);
+        eprintln!("  REJECTED: stark={} sums={} off={} binding={}", o.proven.stark_ok,
+                  o.sums.cancels(), o.off_table, o.binding_ok);
     }
     assert!(o.accepts(), "honest embedding proof rejected");
     // the forecast at the two real vocabularies, beside the measured point, so
@@ -628,11 +628,11 @@ fn embed_cmd(args: &[String]) {
             let felt = |a: u32| stwo::core::fields::qm31::SecureField::from_m31_array(
                 [common::m31_u32(a), common::m31_u32(a + 1),
                  common::m31_u32(a + 2), common::m31_u32(a + 3)]);
-            let mut tie = embed::tie_w(felt(7), felt(101), *d, 512, &l);
-            tie.claimed = felt(1_000_003);
-            tie.claimed_tok = felt(2_000_003);
+            let mut binding = embed::binding_w(felt(7), felt(101), *d, 512, &l);
+            binding.claimed = felt(1_000_003);
+            binding.claimed_tok = felt(2_000_003);
             let use_eval = embed::EmbedEval { log_rows: l.log_use, per_row: l.pe,
-                                              rel: rel.clone(), rel_ef: rk, tie };
+                                              rel: rel.clone(), rel_ef: rk, binding };
             let tab_eval = embed::EmbTableEval { log_rows: l.log_tab, per_row: l.pe, rel };
             let one = |name: &str, ir: cudagen::Ir| json!({
                 "family": name, "d": d, "vocab": vocab,
@@ -668,7 +668,7 @@ fn embed_probes_cmd(args: &[String]) {
         ("one token id moved, the committed row left alone", "the embedding lookup",
          embed::Tamper::Tok(3)),
         ("one token id moved *and* its row recomputed from the table",
-         "the tie to the layer's residual-stream input", embed::Tamper::TokRow(5)),
+         "the binding to the layer's residual-stream input", embed::Tamper::TokRow(5)),
         ("one committed channel of the stream changed", "the embedding lookup",
          embed::Tamper::Val(777)),
     ];
@@ -686,7 +686,7 @@ fn embed_probes_cmd(args: &[String]) {
     // Stream KK: the cell is chosen in a row *no token uses*, so the rebuilt
     // witness is the honest one value for value and the pinned root is the only
     // thing that can see the change.  A cell in a used row makes the stream
-    // differ from the layer's, which the tie catches first -- a rejection for
+    // differ from the layer's, which the binding catches first -- a rejection for
     // the wrong reason, and one that came and went with the witness's draw.
     let unused = (0..w.vocab as u32).find(|v| !w.tok.contains(v)).unwrap_or(0) as usize;
     let (o, lay) = embed::run(&w, target, Some(embed::Tamper::Table(unused * w.d + 1)));
@@ -983,13 +983,13 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
     let kv_boundary = corner && !head && !skip("kv-boundary");
     assert!(!has_head_mat || l.head_keys.is_some() || skip("argmax"),
             "compose: the head chunk carries no key_head.u16, so the emitted token cannot \
-             be tied to the logits; pass --unsound-skip-argmax to prove the head without \
+             be bound to the logits; pass --unsound-skip-argmax to prove the head without \
              the argmax");
     let argmax = has_head_mat && l.head_keys.is_some() && !skip("argmax");
     let has_embed = family && l.embed_tab.is_some() && l.tok_in.is_some();
     assert!(l.layer != Some(0) || has_embed || skip("embedding"),
             "compose: a layer-0 chunk without embed.u16 and tok_in.i32 (extract it with \
-             --embed), so the residual stream it consumes cannot be tied to the embedding \
+             --embed), so the residual stream it consumes cannot be bound to the embedding \
              rows of its ids; pass --unsound-skip-embedding to prove the unbound statement");
     let embed = has_embed && !skip("embedding");
     // Stream AA (E11): with the K/V boundary the declared prefix is `l.nsub` bands of
@@ -1175,9 +1175,9 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
                 dff: g.dff,
                 eps: g.eps,
                 inv_d: g.inv_d,
-                // Stream JJ (E11): the dequant output ties are unconditional
+                // Stream JJ (E11): the dequant output bindings are unconditional
                 // too; the field stays in the statement's serialization.
-                deq_ties: true,
+                bind_matmul_outputs: true,
                 // stream II: which family this chunk carries is the witness's
                 // to say, not the command line's
                 head_norm: g.head,
@@ -1204,12 +1204,12 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         gkr_walks: flag(args, "--gkr-walks"),
         gkr_attnout: flag(args, "--gkr-attnout"),
         // Stream BB (E11): the embedding gadget.  `--embed` needs the wiring
-        // columns (its tie's counterparty is their `stream_in` claim) and the
+        // columns (its binding's counterparty is their `stream_in` claim) and the
         // dump's `embed.u16` / `tok_in.i32`; it panics on a dump without them
         // rather than standing anything in.  Zero -- absent from the serialized
         // statement -- everywhere else.
         embed_vocab: if embed {
-            let g = l.glue.as_ref().expect("the embedding gadget ties into the family");
+            let g = l.glue.as_ref().expect("the embedding gadget bindings into the family");
             let tab = l.embed_tab.as_ref().expect("the embedding gadget needs embed.u16");
             assert_eq!(tab.len() % g.d, 0,
                        "embed.u16 holds {} values, which is not a multiple of d = {}",
@@ -1227,7 +1227,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // the witness carries what they need.  Not a flag: on a real dump the
         // columns are there or they are not, and on a synthetic layer
         // `--synth-glue` builds them exactly when the widths line up.  The
-        // wiring family is a precondition -- the input side ties into it.
+        // wiring family is a precondition -- the input side bindings into it.
         rope: l.glue.as_ref().filter(|g| !g.head).and(l.rope.as_ref()).map(|r| {
             compose::RopeParams {
                 nkv: r.nkv,
@@ -1355,7 +1355,7 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
                   "fresh": out.stats.fresh_cells()},
         "family_cells": out.family_cells,
         "ref_mismatch": out.ref_bad, "off_table": out.off_table,
-        "glue_ties_ok": out.glue_ties_ok,
+        "stream_bindings_ok": out.stream_bindings_ok,
         // Stream H: the boundary trees' own cells and columns, and the two roots
         // the chain check compares.  Null on a chunk proved with the flag off.
         "bounds": out.bounds,
@@ -1915,7 +1915,7 @@ fn psweep_cmd(args: &[String]) {
 /// of its token, because those are what the rest of the chunk consumes: one
 /// activation's worth of accumulator is below a bf16 ulp on most channels, so
 /// the search usually finds an element the consumers cannot see at all and the
-/// seam's own output tie is then the only thing that can reject.  Returns the
+/// seam's own output binding is then the only thing that can reject.  Returns the
 /// element and how many dequantized outputs it did move.
 fn bend_walk_qx(l: &mut layer::Layer, specs: &[dequant::Spec], mats: &[usize],
                 start: usize) -> Option<(usize, usize)> {
@@ -1984,7 +1984,7 @@ fn compose_probes_cmd(args: &[String]) {
     // Stream NN: which verdict fields a control actually turned off.  "The
     // control rejects" is not the whole claim a record should make -- "and by
     // exactly this one field" is, because a probe that trips three checks at
-    // once has not isolated the tie it was written for.  Fields that are true
+    // once has not isolated the binding it was written for.  Fields that are true
     // (or all-true) on the honest run and not on this one, and nothing else.
     let falsified = |got: &serde_json::Value| -> Vec<String> {
         let all_true = |v: &serde_json::Value| -> Option<bool> {
@@ -2054,11 +2054,11 @@ fn compose_probes_cmd(args: &[String]) {
             "accepted": accepted,
             "falsified": flipped,
             "tamper_fired": out2.glue_tamper_fired,
-            // Stream NN-3: the `s_v` tie is an equality between two tree-0
+            // Stream NN-3: the `s_v` binding is an equality between two tree-0
             // column families, so no verdict field can carry it -- a verifier
             // holds it through `pre_root`.  The probe record carries the
             // build's own reading, which is how a control on it is visible.
-            "sv_tie": out2.family_cells.get("sv_tie"),
+            "sv_binding": out2.family_cells.get("sv_binding"),
             "prove_error": out2.prove_error,
             "root_differs_from_honest": root_differs,
             "verdict": verdict.as_ref().map(|v| serde_json::to_value(v).unwrap()),
@@ -2149,7 +2149,7 @@ fn compose_probes_cmd(args: &[String]) {
                    "the pinned preprocessed root"), "corrupted norm table accepted");
 
     // 9-11. B10 step 2, rule 13: the wiring family's own probes, inside the
-    //    composed path.  The first is the one the ties exist for -- a region's
+    //    composed path.  The first is the one the bindings exist for -- a region's
     //    copy of the residual stream is changed and everything *inside* that
     //    region stays consistent, so only the equality between two regions'
     //    claims can catch it.  The other two are the add's own argument, run
@@ -2163,7 +2163,7 @@ fn compose_probes_cmd(args: &[String]) {
             assert!(!probe("glue: gn2's copy of the residual stream", &l,
                            &compose::ProverTamper { glue_stream: Some((2, 4321)),
                                                     ..Default::default() },
-                           "the tie gn1.xmid == gn2.in"),
+                           "the binding gn1.xmid == gn2.in"),
                     "a broken residual thread accepted");
         }
         assert!(!probe("glue: one add's result, one step up", &l,
@@ -2203,14 +2203,14 @@ fn compose_probes_cmd(args: &[String]) {
                 // record already carries
                 let n = g.regions[i].tag.clone();
                 let _ = k;
-                // the tie is the whole point of the tail: its copy of the
+                // the binding is the whole point of the tail: its copy of the
                 // stream is changed and the region stays internally consistent,
                 // so only `nt.In(0) == gn.In(0)` can catch it
                 assert!(!probe(&format!("tail {n}: its own copy of the stream"), &l,
                                &compose::ProverTamper {
                                    glue: Some((i, glue::Tamper::Stream(in0))),
                                    ..Default::default() },
-                               &format!("the tie {n}.In(0) == its reduction's In(0)")),
+                               &format!("the binding {n}.In(0) == its reduction's In(0)")),
                         "a tail reading a different stream accepted");
                 assert!(!probe(&format!("tail {n}: one multiply's result"), &l,
                                &compose::ProverTamper {
@@ -2222,18 +2222,18 @@ fn compose_probes_cmd(args: &[String]) {
                 // change what `r` is without breaking anything inside the
                 // region: the `NormR` lookup still finds a row and the two
                 // multiplies still hold, so the only thing that can reject is
-                // the tie to the reduction's published sum of squares.
+                // the binding to the reduction's published sum of squares.
                 assert!(!probe(&format!("tail {n}: a wrong r on one row"), &l,
                                &compose::ProverTamper {
                                    glue: Some((i, glue::Tamper::Ms(37))),
                                    ..Default::default() },
-                               &format!("the tie {n}.In(1) == G the reduction's Out(0)")),
+                               &format!("the binding {n}.In(1) == G the reduction's Out(0)")),
                         "a tail with a wrong r accepted");
                 assert!(!probe(&format!("tail {n}: two rows of one token, two rs"), &l,
                                &compose::ProverTamper {
                                    glue: Some((i, glue::Tamper::MsRow(37))),
                                    ..Default::default() },
-                               &format!("the tie {n}.In(1) == G the reduction's Out(0)")),
+                               &format!("the binding {n}.In(1) == G the reduction's Out(0)")),
                         "a token whose rows disagree about r accepted");
             }
             // and the third: one norm-weight cell bent.  It is preprocessed
@@ -2246,24 +2246,24 @@ fn compose_probes_cmd(args: &[String]) {
                                                     ..Default::default() },
                            "the pinned preprocessed root"),
                     "a bent norm weight accepted");
-            // the dequant output ties: the wiring family's copy of `o_out` (and
+            // the dequant output bindings: the wiring family's copy of `o_out` (and
             // of `d_out`) is changed, the region's own add is recomputed from it,
-            // and only the tie against the dequant region's published output can
-            // tell.  This is the probe those ties exist for.
-            // Stream JJ (E11): one per tie that has a counterparty.  For the
+            // and only the binding against the dequant region's published output can
+            // tell.  This is the probe those bindings exist for.
+            // Stream JJ (E11): one per binding that has a counterparty.  For the
             // SwiGLU seam the bent value is `gate`'s copy or `up`'s -- the
             // region recomputes `silu(g) * u` from it either way, so nothing
-            // inside the region can tell and only the tie against the gate (or
+            // inside the region can tell and only the binding against the gate (or
             // up) dequant region's published output rejects.
-            for t in g.out_ties.iter() {
+            for t in g.output_bindings.iter() {
                 let Some((ri, ti)) = t.at else { continue };
                 let name = t.name;
                 let vi = if name == "up" { 4321 + swiglu_n } else { 4321 };
                 let _ = ti;
-                assert!(!probe(&format!("deq tie: the wiring copy of {name}'s output"), &l,
+                assert!(!probe(&format!("deq binding: the wiring copy of {name}'s output"), &l,
                                &compose::ProverTamper {
                                    glue_add: Some((ri, vi)), ..Default::default() },
-                               &format!("the tie {name}_out == the {name} region's output")),
+                               &format!("the binding {name}_out == the {name} region's output")),
                         "a corrupted dequant output copy accepted");
             }
             if let Some(i) = g.swiglu {
@@ -2297,7 +2297,7 @@ fn compose_probes_cmd(args: &[String]) {
                            &compose::ProverTamper {
                                rq: Some((k, requant::RqTamper::In(37))),
                                ..Default::default() },
-                           &format!("the tie rq_in[{k}] == the producer's Out(0)")),
+                           &format!("the binding rq_in[{k}] == the producer's Out(0)")),
                     "a requantize of values the producer did not write accepted");
             // the output side: no tamper at all.  The layer itself carries one
             // activation the requantize did not derive, and its own
@@ -2312,7 +2312,7 @@ fn compose_probes_cmd(args: &[String]) {
                       bent.0, bent.1);
             assert!(!probe(&format!("requant {n}: one activation the requantize did not derive"),
                            &lb, &Default::default(),
-                           &format!("the tie rq_out[{k}] == walk_qx[{}]", rp.walk)),
+                           &format!("the binding rq_out[{k}] == walk_qx[{}]", rp.walk)),
                     "an activation the requantize did not derive accepted");
             assert!(!probe(&format!("requant {n}: the per-token scale, one step up"), &l,
                            &compose::ProverTamper {
@@ -2321,7 +2321,7 @@ fn compose_probes_cmd(args: &[String]) {
                            "the (pm, scale) lookup"),
                     "a scale that is not the ceil-divide of the attained max accepted");
         }
-        // Stream II (E11), the scale tie.  A *consumer's* per-token scale moved
+        // Stream II (E11), the scale binding.  A *consumer's* per-token scale moved
         // by one, with its dequant region rederived under it, so every
         // constraint that region carries still holds -- an honest dequant by a
         // scale the requantize did not pin.  The bend has to be on a matmul
@@ -2343,7 +2343,7 @@ fn compose_probes_cmd(args: &[String]) {
             assert!(!probe(&format!("requant {}: {name} dequantized by another scale",
                                     rp.name),
                            &lb, &Default::default(),
-                           &format!("the tie rq_sc[{k}] == deq_sc[{name}]")),
+                           &format!("the binding rq_sc[{k}] == deq_sc[{name}]")),
                     "a dequant under a scale the requantize did not pin accepted");
             let _ = base + at;
         }
@@ -2366,7 +2366,7 @@ fn compose_probes_cmd(args: &[String]) {
                     eprintln!("  o seam: activation {at} bent, the whole layer rebuilt around it");
                     assert!(!probe("o seam: one activation the attention output did not produce",
                                    &lb, &Default::default(),
-                                   &format!("the tie ao_q == walk_qx[{wi}]")),
+                                   &format!("the binding ao_q == walk_qx[{wi}]")),
                             "an o activation the attnout region did not requantize accepted");
                 }
                 None => eprintln!("  o seam: SKIP -- this shape has no wiring family, or its o \
@@ -2377,7 +2377,7 @@ statable here"),
 
         // ---- stream NN: the rotation and the quantize -----------------------
         //
-        // Two ties per side and one preprocessed pin each, and every one of
+        // Two bindings per side and one preprocessed pin each, and every one of
         // them has to reject by a *different* verdict field -- which is what
         // `falsified` in the probe record says, rather than prose:
         //
@@ -2394,12 +2394,12 @@ statable here"),
             // the input side of each rotation: one copy of the matmul's dequant
             // output bent, the whole rotation and the quantize recomputed from
             // it, so every constraint in three regions still holds and only the
-            // tie against the matmul's own published output can tell
+            // binding against the matmul's own published output can tell
             for rr in &g.ropes {
                 assert!(!probe(&format!("rope {}: one dequant output copy", rr.name), &l,
                                &compose::ProverTamper {
                                    glue_add: Some((rr.mul, 4321)), ..Default::default() },
-                               &format!("the tie deq_out[{}] == rp{}m.In(0)", rr.name, rr.name)),
+                               &format!("the binding deq_out[{}] == rp{}m.In(0)", rr.name, rr.name)),
                         "a rotation of values the matmul did not write accepted");
             }
             // one preprocessed angle: the products follow it, so every
@@ -2421,7 +2421,7 @@ statable here"),
                                &compose::ProverTamper {
                                    quant: Some((k, rope::QTamper::In(37))),
                                    ..Default::default() },
-                               &format!("the tie nn_in[{k}] == the producer's output")),
+                               &format!("the binding nn_in[{k}] == the producer's output")),
                         "a quantize of values the producer did not write accepted");
                 assert!(!probe(&format!("quant {n}: one quotient off its own table row"), &l,
                                &compose::ProverTamper {
@@ -2458,16 +2458,16 @@ synthetic generator (Layer::synth_glue_band_bent); on a dump the bands are B1's"
                 }
                 lb.synth_glue_band_bent(seed, ga, round, which, 41);
                 // stream SS: with a folded `v` there is no quantize region on
-                // that side, so the falsified field is the dequant output tie
+                // that side, so the falsified field is the dequant output binding
                 // and not `nn_out_ok` -- the fold publishes the int8 cell
                 // itself and the bands' V is what reads it
-                let tie = if which == 2 && rplan.oside_band("v") {
-                    "the tie deq_out[v] == the sum of the bands' own V claims"
+                let binding = if which == 2 && rplan.oside_band("v") {
+                    "the binding deq_out[v] == the sum of the bands' own V claims"
                 } else {
-                    "the tie nn_out == the sum of the bands' own claims"
+                    "the binding nn_out == the sum of the bands' own claims"
                 };
                 assert!(!probe(&format!("band {name}: one committed cell the matmuls did not produce"), &lb, &Default::default(),
-                               tie),
+                               binding),
                         "a band column the layer's matmuls did not produce accepted");
             }
             // stream NN (NN-2): and the prefix band's own copy of Q, whose
@@ -2489,28 +2489,28 @@ synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B
                     lp.synth_glue_prefix_q_bent(seed, ga, round, 41);
                     assert!(!probe("prefix band Q: one query the corner does not carry", &lp,
                                    &Default::default(),
-                                   "the tie prefix.Q == corner.Q, per band group"),
+                                   "the binding prefix.Q == corner.Q, per band group"),
                             "a prefix band's queries that are not the corner's accepted");
                 }
             }
         }
     }
 
-    // 16. stream E: the head tie.  One committed key of the argmax region is
+    // 16. stream E: the head binding.  One committed key of the argmax region is
     //     changed and the region is made consistent with it, so every constraint
     //     it carries still holds and only the equality with the head dequant's
     //     own key claim can reject.
     if compose::Plan::new(&params).argmax_mat().is_some() {
-        assert!(!probe("head tie: one of the argmax's committed keys", &l,
+        assert!(!probe("head binding: one of the argmax's committed keys", &l,
                        &compose::ProverTamper {
                            argmax: Some(argmax::Tamper::Key(1234567)),
                            ..Default::default() },
-                       "the tie am_key == head_key"),
+                       "the binding am_key == head_key"),
                 "an argmax on keys that are not the head's output accepted");
     }
 
     // 11c. Stream UU (E11): one cell of a *residual* boundary tree moved alone,
-    //     the glue region it is tied to left exactly as it was.  Stream H's
+    //     the glue region it is bound to left exactly as it was.  Stream H's
     //     `bounds` probe made this assertion for the pair of sides a layer
     //     chunk carries, but only on real witness dirs; here it runs on every
     //     shape the probe command is given, which is what puts the head chunk's
@@ -2534,7 +2534,7 @@ synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B
     }
 
     // 12. Stream AA (E11): one cell of a K/V boundary tree moved *alone*, the
-    //     region it is tied to left exactly as it was.  Nothing else in the
+    //     region it is bound to left exactly as it was.  Nothing else in the
     //     chunk changes, so the only thing that can reject is `ChanEval`'s /
     //     `KeyEval`'s equality constraint -- and that is precisely the statement
     //     that the boundary root is *bound to the proof* and not merely appended
@@ -2559,7 +2559,7 @@ synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B
     // 7b. Stream BB: the embedding gadget's three probes, when the run asked for
     //     it.  The second is the aimed corruption -- the id moved to a different
     //     valid entry with the committed row recomputed to match, so the region
-    //     is internally consistent and every constraint inside it holds; the tie
+    //     is internally consistent and every constraint inside it holds; the binding
     //     to the layer's residual-stream input is the only thing that can see it.
     if params.embed_vocab > 0 {
         for (name, expect, t) in [
@@ -2567,7 +2567,7 @@ synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B
              "the embedding lookup (sums do not cancel)", embed::Tamper::Tok(3)),
             ("embedding: one token id moved to another valid entry, its row \
               recomputed to match",
-             "the tie to the layer's residual-stream input", embed::Tamper::TokRow(5)),
+             "the binding to the layer's residual-stream input", embed::Tamper::TokRow(5)),
             ("embedding: one committed channel of the stream changed",
              "the embedding lookup (sums do not cancel)", embed::Tamper::Val(777)),
         ] {
@@ -2621,7 +2621,7 @@ synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B
     //         only the `nofirst` pin on `joff` can see it.  (A whole token's
     //         `jo` moved by one is a different matter and is *accepted*: `jo` is
     //         the prover's choice inside the window, and what pins it to the
-    //         consumer's scale is the tie on `claims.ao_q`, which is stream
+    //         consumer's scale is the binding on `claims.ao_q`, which is stream
     //         II's.  See the record.)
     //       * `--corrupt-ao-num` doubles one slot's committed `num` and derives
     //         `qm`, `sg`, `d` and the reference from it.  The triple
@@ -2676,8 +2676,8 @@ synthetic generator (Layer::synth_glue_prefix_q_bent); on a dump the bands are B
         // rederived, changes every one of that token's requantized outputs.
         //
         // Stream JJ ran this and it accepted, and its record said what would
-        // pin it: the consumer-side tie on `claims.ao_q`, which was stream II's
-        // to add.  With that tie live it *does* pin it -- the `o` walk's
+        // pin it: the consumer-side binding on `claims.ao_q`, which was stream II's
+        // to add.  With that binding live it *does* pin it -- the `o` walk's
         // committed activations are the pre-bend integers and the attnout
         // region's fold is over the post-bend ones, so `ao_q_ok` alone rejects.
         //
@@ -2852,8 +2852,8 @@ fn glue_cmd(args: &[String]) {
 
     let check = |o: &glue::Outcome, what: &str| {
         if !o.accepts() {
-            eprintln!("  {what}: stark={} sums={} off={} tie={} err={:?}", o.proven.stark_ok,
-                      o.sums.cancels(), o.off_table, o.tie_ok, o.proven.prove_error);
+            eprintln!("  {what}: stark={} sums={} off={} binding={} err={:?}", o.proven.stark_ok,
+                      o.sums.cancels(), o.off_table, o.binding_ok, o.proven.prove_error);
         }
         assert!(o.accepts(), "honest glue proof rejected ({what})");
         assert_eq!(o.ref_n - o.ref_ok, 0, "glue disagrees with its own reference ({what})");
@@ -2969,9 +2969,9 @@ fn glue_probes_cmd(args: &[String]) {
         let w = GlueWitness::synthetic(rows, &prog, round, seed);
         let honest = glue::run(&w, &prog, round, kmax, None);
         if !honest.accepts() {
-            eprintln!("  {label}: stark={} sums={} off={} tie={} refbad={} err={:?}",
+            eprintln!("  {label}: stark={} sums={} off={} binding={} refbad={} err={:?}",
                       honest.proven.stark_ok, honest.sums.cancels(), honest.off_table,
-                      honest.tie_ok, honest.ref_n - honest.ref_ok, honest.proven.prove_error);
+                      honest.binding_ok, honest.ref_n - honest.ref_ok, honest.proven.prove_error);
         }
         assert!(honest.accepts(), "honest {label} rejected");
         assert_eq!(honest.ref_n - honest.ref_ok, 0, "{label}: reference mismatch");
@@ -2995,7 +2995,7 @@ fn glue_probes_cmd(args: &[String]) {
                             "stark_ok": o.proven.stark_ok,
                             "sums_cancel": o.sums.cancels(),
                             "off_table": o.off_table,
-                            "tie_ok": o.tie_ok,
+                            "binding_ok": o.binding_ok,
                             "prove_error": o.proven.prove_error}));
         }
     }

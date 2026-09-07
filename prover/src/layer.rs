@@ -637,7 +637,7 @@ impl GlueCols {
 
 impl GlueCols {
     /// Stream II: the wiring family on a synthetic layer, so the desk can run
-    /// the whole composed statement -- ties, norm tails, SwiGLU and all -- at a
+    /// the whole composed statement -- bindings, norm tails, SwiGLU and all -- at a
     /// shape that proves in seconds and without a dump.  Only the columns the
     /// regions *consume* are built: `xmid`, `xout` and the five reference
     /// columns are what the regions compute, and a synthetic layer has no B1 to
@@ -1595,7 +1595,7 @@ exponent(s) small, so B1's clamp fires");
         // `v` quantize divides by it and the attention output rescales by it
         // (`AttnOut::e` is `jv - jo`).  A real dump reads both off one
         // `jv.i32`; a synthetic layer drew the attention output's at random, so
-        // the two sites disagreed and no desk shape could state the tie.  The
+        // the two sites disagreed and no desk shape could state the binding.  The
         // attention output is rebuilt below, so this is the value it takes.
         self.ao.jv = jv.clone();
         // the bands' own columns, on the query-head grid: the kv head's values
@@ -1844,7 +1844,7 @@ unmoved (a rejection is the pass)");
             // by `jv - jo` off `AttnOut::jv`; the `v` quantize divides by the
             // same exponent, so it takes it from there rather than from the
             // rotation's own copy of `jv.i32`.  A dump loads both from that one
-            // file (`Layer::load` and `RopeCols::load`), and `family_cells.sv_tie`
+            // file (`Layer::load` and `RopeCols::load`), and `family_cells.sv_binding`
             // reports the two against each other on every run.
             "v" => &self.ao.jv,
             other => panic!("no quantize exponents for {other}"),
@@ -2128,10 +2128,10 @@ impl Layer {
     ///
     /// And then make the *matmuls* consistent with them.  A synthetic layer's
     /// activations were seven unrelated random columns, which is fine while
-    /// nothing ties a matmul's input to anything; with the requantize seams in,
+    /// nothing bindings a matmul's input to anything; with the requantize seams in,
     /// an honest proof needs `qX` to actually be the requantize of the
     /// producer's output under the token's own scale, or the seam's own scale
-    /// lookup goes off-table before any tie is reached.  So this runs the
+    /// lookup goes off-table before any binding is reached.  So this runs the
     /// wiring family's own reference forward -- `glue::reference` on the very
     /// programs the regions prove, so the two cannot disagree -- and rebuilds
     /// each group's input, scale and accumulator from it.
@@ -2327,7 +2327,7 @@ impl Layer {
         // ---- stream NN: the bands are the q/k/v matmuls' own outputs --------
         //
         // A synthetic layer's bands were three unrelated draws, so no shape it
-        // could prove carried a positionwise q/k/v tie
+        // could prove carried a positionwise q/k/v binding
         // (`briefs/jj-layerwire-out.md` section 11.4 item 2).  Here the layer's
         // own `q`/`k`/`v` dequant outputs are rotated and quantized -- through
         // `glue::reference` on the very programs the regions prove, so the two
@@ -2404,8 +2404,8 @@ impl Layer {
             self.glue = Some(gc);
             return;
         }
-        // Stream JJ's dequant output ties: `o_out` is the `o` region's own
-        // dequant reference, so an honest run ties and a bent copy does not.
+        // Stream JJ's dequant output bindings: `o_out` is the `o` region's own
+        // dequant reference, so an honest run bindings and a bent copy does not.
         // `o`'s input is not rewired (its requantize is `AttnOutEval`'s), so
         // its accumulator is final by here.
         gc.o_out = out_col(self, "o", d);
@@ -2433,7 +2433,7 @@ impl Layer {
                            round);
         let x_down = tff.unlay(&sw[0]);
         wire(self, &["down"], &x_down, dff);
-        // and the second output tie, after `down`'s accumulator is final
+        // and the second output binding, after `down`'s accumulator is final
         gc.d_out = out_col(self, "down", d);
 
         self.glue = Some(gc);
@@ -2602,7 +2602,7 @@ pub struct WalkLayout {
 impl WalkLayout {
     pub fn choose(n_in: usize, n_out_max: usize, tokens: usize, p_target: usize) -> Self {
         // pick the chunk count whose weights-per-row is closest to the target,
-        // preferring fewer padded rows on ties
+        // preferring fewer padded rows on bindings
         let mut best: Option<(isize, usize, Self)> = None;
         for chunks in 1..=n_out_max {
             let pk = n_out_max.div_ceil(chunks);
@@ -3301,10 +3301,10 @@ pub fn deq_ref(m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
 pub fn deq_ref_a(a: i64, m: &Mat, spec: &Spec, t: usize, c: usize) -> u16 {
     // Stream JJ (E11): every rounding here is `spec.round`'s, not `from_f64`'s.
     // `from_f64` is round-to-nearest-even and this reference is what the output
-    // ties' claim is built from, so under `--round away` an exact tie made the
+    // bindings' claim is built from, so under `--round away` an exact tie made the
     // claim disagree with the region's own committed cells by one ulp and the
     // *honest* proof failed to prove.  It cost ~1% of slots on a synthetic
-    // layer; on a witness with no ties it costs nothing, which is why stream E
+    // layer; on a witness with no bindings it costs nothing, which is why stream E
     // never saw it.
     let rd = |x: f64| bf16::from_f64_round(x, spec.round);
     match spec.variant {
@@ -3561,7 +3561,7 @@ pub struct MatInteraction {
 }
 
 /// The weights an output-side Horner claim runs on, as the composition derives
-/// them from the tie challenge.  Same numbers on both sides of the tie: the
+/// them from the binding challenge.  Same numbers on both sides of the binding: the
 /// consumer's own claim is built from `w_glue` too.
 pub struct OSideW {
     pub w: Vec<SecureField>,
@@ -3843,7 +3843,7 @@ pub fn deq_logup_eval(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField
         }),
         // the output side carries no lookups, so it cannot change this eval's
         // LogUp IR -- leaving it off here keeps the lowering identical whether
-        // the tie is on or not, which is what `B7_M4_LOGUPIR=2` compares
+        // the binding is on or not, which is what `B7_M4_LOGUPIR=2` compares
         oside: None,
         sside: None,
         gkr: false,
@@ -4124,7 +4124,7 @@ impl AoRegion {
 /// Stream TT (E11), log row 73: under `acc_mag` the slot carries a tenth
 /// column `mag = |acc|` and `alo` is *its* low limb, not the offset
 /// accumulator's.  `acc` stays where it was, so the `z` fold, the device
-/// accumulator and `gkrlink`'s tie read the same column they always did.
+/// accumulator and `gkrlink`'s binding read the same column they always did.
 #[allow(clippy::too_many_arguments)]
 pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32,
                  acc_bits: (u32, u32), acc_mag: bool, denp2: bool,

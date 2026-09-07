@@ -213,7 +213,7 @@ fn shape_of(family: &str, ir: &Ir) -> usize {
 /// silent, on the same `B7_KERNEL_FALLBACK` switch the constraint side has used
 /// for the glue and corner shapes since stream B (`cudagen.rs`). This is the
 /// route the `lit` caveat needs: a lowering whose scalars fold differently from
-/// the emitted one produces a fingerprint nothing compiled, and the glue's ties
+/// the emitted one produces a fingerprint nothing compiled, and the glue's bindings
 /// are the only place in the design that can do it.
 ///
 /// A region whose columns are on the *device* has no host builder at all, so

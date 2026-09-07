@@ -483,11 +483,11 @@ pub struct YSide {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum OKind {
     /// the glue's `(sm, ef)` pair, `sm + lam ef` -- the language the wiring
-    /// family's own claims are in, so the residual-stream ties compare with it
+    /// family's own claims are in, so the residual-stream bindings compare with it
     Pair,
     /// the argmax's order key, `0x8000 + mag - sg(2 mag + 1)` with
     /// `mag = eo 2^7 + m7`.  Degree 2 in the committed fields (one `sg mag`
-    /// product), which is the whole reason the head's tie is cheap: the key
+    /// product), which is the whole reason the head's binding is cheap: the key
     /// never becomes a column, it is read off the dequant's own output.
     Key,
     /// Stream SS: the signed **integer** `qc (1 - 2 sg)`, the only output a
@@ -756,7 +756,7 @@ impl FrameworkEval for DequantEval {
                     );
                     // B6 review, open gap 7: `2 den - d` lets d = 2 den through, so
                     // an exact tie verifies with either of two outputs; `-1` closes
-                    // it (d <= 2 den - 1, and the tie's only witness is d = 0).
+                    // it (d <= 2 den - 1, and the binding's only witness is d = 0).
                     let dp = den * two - E::F::one() - d.clone();
                     // (qm, [qm != 0]) in one pair-table lookup: with q_bits = 7 the
                     // domain *is* B1's clamp at 127, so the statement is "no clamp
@@ -1351,7 +1351,7 @@ pub fn run(w: &Witness, sp: &Spec, tamper: Option<Tamper>) -> Outcome {
                     let mut d = if a < 0 && qm == 0 { den - 2 * pm }
                                 else { 2 * pm - (2 * qm - 1) * den };
                     match tamper {
-                        // the tie's other witness: d lands at d + 2 den, which the
+                        // the binding's other witness: d lands at d + 2 den, which the
                         // -1 in the bound now excludes for every d
                         Some(Tamper::TieShift(t)) if t == i && qm >= 1 => {
                             qm -= 1;

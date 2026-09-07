@@ -772,8 +772,8 @@ if __name__ == "__main__":
                     # the alignment, both ways round
                     emits_next_token=nxt, emits_next_of=int(S - 1),
                     emits_same_position=same, emits_same_of=int(S),
-                    # what the tie has to carry (README 9.2 measured this separately)
-                    ties=int((lg.float() == lg.float().amax(-1, keepdim=True)).sum(-1).gt(1).sum()),
+                    # what the binding has to carry (README 9.2 measured this separately)
+                    co_max_rows=int((lg.float() == lg.float().amax(-1, keepdim=True)).sum(-1).gt(1).sum()),
                 )
                 print(f"  head  vocab {lin.n_out:,} |acc| <= {int(hacc.abs().amax()):,} "
                       f"({head['bits']} bits) pow2 {head['scales_pow2']}")

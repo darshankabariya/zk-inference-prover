@@ -3,7 +3,7 @@
 //! Today a band region's lookups are proved by committing running-sum columns:
 //! `attn_trace::logup_cols` pairs the region's lookups, builds the pointwise
 //! partial sums, and the AIR's `finalize_logup_in_pairs` asserts the recurrence
-//! while a boundary constraint ties the last row to the region's entry in
+//! while a boundary constraint bindings the last row to the region's entry in
 //! `claims.use_sums`. Those columns are 88% of the bands' interaction cells and
 //! the bands are two thirds of the interaction tree at long context, so they are
 //! the largest single thing being committed that does not have to be.
@@ -24,7 +24,7 @@
 //! stream R's outside-the-circuit pairing). The input layer holds one entry
 //! per look -- numerator `1` or `1 - mask`, denominator `combine(cols) - z`,
 //! both *affine* in the committed columns -- which is what lets the `mle_eval`
-//! link (memo section 4) tie the GKR's input-layer claims to the committed
+//! link (memo section 4) binding the GKR's input-layer claims to the committed
 //! base columns. R's pairing is not lost: fraction addition is exactly the
 //! GKR's gate, so the pairing the committed path performs in `plogup::paired`
 //! is now the circuit's own first layer, sumchecked inside the proof instead
@@ -107,7 +107,7 @@ impl Site {
     }
     /// B11 stream S, lever 3: the input layer holds the *unpaired* looks, one
     /// entry each, so the GKR's input-layer claims are affine in the committed
-    /// columns and the `mle_eval` link (memo section 4) can tie them down.
+    /// columns and the `mle_eval` link (memo section 4) can binding them down.
     /// Stream R's pairing is not lost -- fraction addition is exactly the
     /// GKR's gate, so the pairing is now the circuit's own first layer,
     /// sumchecked instead of precomputed outside the proof.
@@ -295,7 +295,7 @@ impl Collect {
         // B11 stream S, lever 3: the looks feed the circuit *unpaired* -- one
         // input-layer entry per look, `look_frac` read directly, so the
         // input-layer claims stay affine in the committed columns and the
-        // `mle_eval` link can tie them down. The circuit's own first layer now
+        // `mle_eval` link can binding them down. The circuit's own first layer now
         // does the pairing stream R precomputed outside the proof.
         let frac = |look: usize, vr: usize| {
             crate::attn_trace::look_frac(&looks[look], vr, cols, pre, exp, ranges)
@@ -1609,7 +1609,7 @@ fn sums_of(n_sites: usize, insts: &[Inst], claims: &[Vec<SecureField>]) -> Vec<S
 /// proof, so a prover cannot change the shape of what it proved. What comes back
 /// is unchecked in one specific sense that the caller has to close: the
 /// `GkrArtifact` carries claimed evaluations of the input layers at a random
-/// point, and nothing here ties those to the committed base columns.
+/// point, and nothing here bindings those to the committed base columns.
 pub fn verify(
     channel: &mut impl Channel,
     sites: &[Site],

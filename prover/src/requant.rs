@@ -64,7 +64,7 @@ pub const RANGE15: &str = "b65_range_15";
 /// requantize region per seam and their row counts differ -- and there is a
 /// fourth, `gt0`.  `nofirst` is "not this token's first row", so it cannot also
 /// say "not row 0", and the output-side accumulator needs both.
-/// Stream II: `mlast` is `[j > 0 and last]`, the scale tie's row step.  It is
+/// Stream II: `mlast` is `[j > 0 and last]`, the scale binding's row step.  It is
 /// its own column rather than the product `gt0 * last` because the accumulator
 /// it multiplies is already degree 1, and `max_constraint_log_degree_bound` is
 /// `log_rows + 1`.
@@ -75,10 +75,10 @@ pub fn rq_sel(tag: &str, name: &str) -> PreProcessedColumnId {
 
 /// Stream II: `(sm, m7, sg)` over every legal signed significand -- 257 rows.
 /// The requantize keys its own lookups on the magnitude pair `(ef, m7)`, but a
-/// tie to a producing region has to speak the wiring family's `(sm, ef)`
+/// binding to a producing region has to speak the wiring family's `(sm, ef)`
 /// language and the walk's `qX` needs a sign.  One lookup per element pins both
 /// derived fields from one committed `sm`, which is cheaper than a 2^15 pair
-/// table and keeps the tie's folded value degree 1.
+/// table and keeps the binding's folded value degree 1.
 pub const RQV_COLS: [&str; 3] = ["b65_rqv_sm", "b65_rqv_m7", "b65_rqv_sg"];
 
 /// Stream II: the division and scale tables' preprocessed ids, tagged by
@@ -182,7 +182,7 @@ pub struct RqTie {
     pub lam: SecureField,
     pub claimed_in: SecureField,
     pub claimed_out: SecureField,
-    /// Stream II (E11): the scale tie's row step, one power per token on the
+    /// Stream II (E11): the scale binding's row step, one power per token on the
     /// region's `last` rows.  Tokens descend in `MatLayout::at`, so token `t`
     /// ends up weighted `mu^t` on both sides and the two claims are directly
     /// comparable.
@@ -301,10 +301,10 @@ pub struct RequantEval {
     pub scl3: FracRel,
     pub r15: RangeRel,
     /// Stream II: the `(sm, m7, sg)` table's relation, and the two claims.
-    /// `None` on the standalone rung, which commits no sign and ties to
+    /// `None` on the standalone rung, which commits no sign and bindings to
     /// nothing.
     pub rqv: Option<FracRel>,
-    pub tie: Option<RqTie>,
+    pub binding: Option<RqTie>,
 }
 
 impl FrameworkEval for RequantEval {
@@ -357,7 +357,7 @@ impl FrameworkEval for RequantEval {
         };
 
         let mut sels: Vec<E::F> = vec![];
-        // stream II: what the two ties fold, collected as the slots are read
+        // stream II: what the two bindings fold, collected as the slots are read
         let mut in_vals: Vec<(E::F, E::F)> = vec![];
         let mut out_vals: Vec<E::EF> = vec![];
         for _ in 0..self.per_row {
@@ -442,8 +442,8 @@ impl FrameworkEval for RequantEval {
         // for one preprocessed column and no product of two.
         //
         // Allocated before `finalize_logup_in_pairs`, so the interaction order
-        // is ties then fractions, as the wiring family's regions already are.
-        if let Some(t) = &self.tie {
+        // is bindings then fractions, as the wiring family's regions already are.
+        if let Some(t) = &self.binding {
             let step = E::EF::from(nofirst.clone()) * t.k_in
                 + (E::EF::from(gt0.clone()) - E::EF::from(nofirst.clone())) * t.k_bd;
             let [ui_prev, ui] =
@@ -875,7 +875,7 @@ pub fn run(w: &RWitness, v: SVariant, with_max: bool, per_row_target: usize,
     // stream II: and `gt0`, the fourth selector, which the standalone rung does
     // not use but the composed one's output-side accumulator needs
     pre.push(eval_of(lay.log_rows, (0..rows).map(|j| m31_u32((j > 0) as u32)).collect()));
-    // stream II: and `mlast`, the scale tie's step, which the standalone rung
+    // stream II: and `mlast`, the scale binding's step, which the standalone rung
     // does not use either
     pre.push(eval_of(lay.log_rows,
                      (0..rows).map(|j| m31_u32((j > 0 && lastf(j)) as u32)).collect()));
@@ -1008,7 +1008,7 @@ pub fn run(w: &RWitness, v: SVariant, with_max: bool, per_row_target: usize,
                       chunks: lay.chunks, v, with_max,
                       qnz: qnz.clone(), rq3: rq3.clone(), rq4: rq4.clone(),
                       scl2: scl2.clone(), scl3: scl3.clone(), r15: r15.clone(),
-                      rqv: None, tie: None },
+                      rqv: None, binding: None },
         use_sum,
     );
     let mut tbl_comps: Vec<FrameworkComponent<TableEval>> = vec![];
@@ -1140,11 +1140,11 @@ pub fn requant_ref(x: &[u16], tokens: usize, n: usize, v: SVariant)
 }
 
 /// What a probe corrupts on a composed seam.  Each leaves the region internally
-/// consistent and aims at one of the two ties.
+/// consistent and aims at one of the two bindings.
 #[derive(Clone, Copy, Debug)]
 pub enum RqTamper {
     /// one committed input value moved to another legal bf16 pattern, with the
-    /// region's own quotient recomputed from it -- only the tie to the producer
+    /// region's own quotient recomputed from it -- only the binding to the producer
     /// can tell
     In(usize),
     /// the committed per-token scale one step up, everything recomputed under
@@ -1242,7 +1242,7 @@ pub fn rq_region(tag: &str, x: &[u16], qx: &[i32], jx: &[i64], sx: &[(u32, u32)]
         let p = crate::glue::canon(x[i]);
         match tamper {
             // to another legal pattern, so `VAL`, `RQV` and the division table
-            // all still find a row and only the tie can reject
+            // all still find a row and only the binding can reject
             Some(RqTamper::In(t)) if t % (tokens * n) == i => p ^ 1,
             _ => p,
         }
@@ -1272,7 +1272,7 @@ pub fn rq_region(tag: &str, x: &[u16], qx: &[i32], jx: &[i64], sx: &[(u32, u32)]
     let sx = sx.to_vec();
     // the scale probe bends the *committed* scale alone: every quotient, every
     // threshold and every multiplicity stays the one the honest scale derives,
-    // so the seam's two ties are untouched and the only thing that can tell is
+    // so the seam's two bindings are untouched and the only thing that can tell is
     // the region's own `(pm, scale)` lookup -- the constraint that says the
     // scale is the ceil-divide of the attained maximum rather than a choice.
     let (mut jc, mut sc) = (jx.clone(), sx.clone());
@@ -1401,7 +1401,7 @@ pub fn rq_region(tag: &str, x: &[u16], qx: &[i32], jx: &[i64], sx: &[(u32, u32)]
         sel(&|j| j % lay.chunks == lay.chunks - 1),
         sel(&|j| j + 1 == rows),
         sel(&|j| j > 0),
-        // stream II: the scale tie's step -- `[j > 0 and last]`
+        // stream II: the scale binding's step -- `[j > 0 and last]`
         sel(&|j| j > 0 && j % lay.chunks == lay.chunks - 1),
     ];
     let base: Vec<Eval> = cols.into_iter().map(|c| eval_of(lay.log_rows, c)).collect();
@@ -1415,7 +1415,7 @@ pub fn rq_region(tag: &str, x: &[u16], qx: &[i32], jx: &[i64], sx: &[(u32, u32)]
     // `jc`/`sc`, not `jx`/`sx`: the scale control bends the *committed* column,
     // and this Horner reads that column -- so it follows the bend and the
     // region stays internally consistent.  What then sees the bend is the
-    // region's own `(pm, scale)` lookup and the tie against the consumer's
+    // region's own `(pm, scale)` lookup and the binding against the consumer's
     // dequant, which is what those two checks are for.
     let sc_nat: Vec<(i64, i64)> = (0..tokens)
         .map(|t| match v {
@@ -1429,7 +1429,7 @@ pub fn rq_region(tag: &str, x: &[u16], qx: &[i32], jx: &[i64], sx: &[(u32, u32)]
 
 /// The region's two Horner columns and its LogUp columns, in the AIR's order.
 #[allow(clippy::too_many_arguments)]
-pub fn rq_interaction(r: &RqRegion, tie: &RqTie, qnz: &PairRel, rq3: &FracRel, rq4: &MulRel,
+pub fn rq_interaction(r: &RqRegion, binding: &RqTie, qnz: &PairRel, rq3: &FracRel, rq4: &MulRel,
                       scl2: &PairRel, scl3: &FracRel, r15: &RangeRel, rqv: &FracRel)
                       -> (Vec<Eval>, SecureField, SecureField, SecureField, SecureField) {
     let lay = r.lay;
@@ -1437,7 +1437,7 @@ pub fn rq_interaction(r: &RqRegion, tie: &RqTie, qnz: &PairRel, rq3: &FracRel, r
     let pr = lay.per_row;
     let mut cols: Vec<Eval> = vec![];
 
-    // the two ties, first, as the AIR reads them
+    // the two bindings, first, as the AIR reads them
     let mut claims = [SecureField::zero(); 2];
     for side in 0..2 {
         let mut h = vec![SecureField::zero(); rows];
@@ -1447,13 +1447,13 @@ pub fn rq_interaction(r: &RqRegion, tie: &RqTie, qnz: &PairRel, rq3: &FracRel, r
                 let idx = j * pr + k;
                 let val = if side == 0 {
                     let (sm, ef) = r.in_nat[idx];
-                    SecureField::from(m31_of(sm)) + SecureField::from(m31_of(ef)) * tie.lam
+                    SecureField::from(m31_of(sm)) + SecureField::from(m31_of(ef)) * binding.lam
                 } else {
                     SecureField::from(m31_of(r.out_nat[idx]))
                 };
-                f += val * tie.w[k];
+                f += val * binding.w[k];
             }
-            let step = if j % lay.chunks != 0 { tie.k_in } else { tie.k_bd };
+            let step = if j % lay.chunks != 0 { binding.k_in } else { binding.k_bd };
             h[j] = if j == 0 { f } else { h[j - 1] * step + f };
         }
         claims[side] = h[rows - 1];
@@ -1473,14 +1473,14 @@ pub fn rq_interaction(r: &RqRegion, tie: &RqTie, qnz: &PairRel, rq3: &FracRel, r
                 let (a, b) = r.sc_nat[t];
                 let mut v = SecureField::from(m31_of(a));
                 if n_sc > 1 {
-                    v += SecureField::from(m31_of(b)) * tie.lam;
+                    v += SecureField::from(m31_of(b)) * binding.lam;
                 }
                 v
             } else {
                 SecureField::zero()
             };
             let step = if j == 0 { SecureField::zero() }
-                       else if last { tie.mu } else { SecureField::one() };
+                       else if last { binding.mu } else { SecureField::one() };
             h[j] = if j == 0 { f } else { h[j - 1] * step + f };
         }
         cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));

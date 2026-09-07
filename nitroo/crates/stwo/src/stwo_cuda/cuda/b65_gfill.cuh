@@ -122,7 +122,7 @@ extern "C" void b65_fill_glue(
     // `Prog::outs`, flattened: `out_slot[k]` is the slot the k-th output holds
     const unsigned *out_slot,
     unsigned *const *cols,
-    // `rows * out_w` each: the joined pattern, and the natural pair the ties read
+    // `rows * out_w` each: the joined pattern, and the natural pair the bindings read
     unsigned *out_pat,
     int *out_nat,
     // `rows * n_leaves` pairs, likewise

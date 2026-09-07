@@ -154,7 +154,7 @@ pub trait EvalAtRow {
     }
 
     /// A value the *statement* carries rather than a compile-time constant of
-    /// the AIR: a claimed sum, the closing value of a Horner tie, the shift a
+    /// the AIR: a claimed sum, the closing value of a Horner binding, the shift a
     /// prefix-sum column is pinned to. Numerically it is that value and nothing
     /// else, which is what the default returns, so every evaluator in this
     /// crate -- and every constraint, and therefore every proof -- is exactly

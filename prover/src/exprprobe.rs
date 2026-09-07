@@ -669,7 +669,7 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         bands: (0..nb).map(|_| std::array::from_fn(|_| felt())).collect(),
         ao_out: felt(),
         ao_den: felt(),
-        // stream JJ: a tie claim like the others -- a zero here would fold away
+        // stream JJ: a binding claim like the others -- a zero here would fold away
         ao_q: vec![felt()],
         mat_h: (0..nm).map(|_| felt()).collect(),
         walk_acc: plan
@@ -682,26 +682,26 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         // exp + norm/frac/mul/qnz + one per range width, and a margin (the
         // glue's table sides come out of the same margin).
         table_sums: (0..(5 + plan.widths.len() + 16)).map(|_| felt()).collect(),
-        // Stream QQ (log rows 61 and 66): every tie claim vector is filled here
+        // Stream QQ (log rows 61 and 66): every binding claim vector is filled here
         // too, with the same distinct nonzero placeholders `felt()` gives the
         // rest. The comment this replaces said empty placeholders "keep the
         // IR's shape" and it was wrong three times over: a region reads a
         // missing claim as `SecureField::zero()`, `Lower::ext` folds `x - 0`
         // and `Ir::schedule` drops the slot with it, so an empty vector lowers
         // to a shape two instructions and one slot short of the one every real
-        // chunk asks for. `cudagen::fill_tie_claims` overwrites all of these on
+        // chunk asks for. `cudagen::fill_binding_claims` overwrites all of these on
         // the emit path; filling them here means the probe and `cudacheck` see
         // the same shape, and that a vector added by a later stream is wrong in
         // one place instead of two.
-        glue_ties: plan
+        stream_bindings: plan
             .glue
             .as_ref()
-            .map(|g| g.regions.iter().map(|r| r.ties.iter().map(|_| felt()).collect()).collect())
+            .map(|g| g.regions.iter().map(|r| r.bindings.iter().map(|_| felt()).collect()).collect())
             .unwrap_or_default(),
         deq_out: plan
             .glue
             .as_ref()
-            .map(|g| g.out_ties.iter().map(|_| felt()).collect())
+            .map(|g| g.output_bindings.iter().map(|_| felt()).collect())
             .unwrap_or_default(),
         head_key: vec![felt()], am_key: vec![felt()],
         head_tok: vec![felt()],

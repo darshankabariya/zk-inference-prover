@@ -263,7 +263,7 @@ __global__ __launch_bounds__(B65_GFILL_BLOCK) void b65_gfill_kernel(
             cols[b + 1][i] = g_m31_of((long long)ef);
             // `j`, not `i`: the host builds `in_nat` by walking `filled` in
             // *coset* row order and never permutes it -- only the committed
-            // columns go through `eval_of`. The ties read this array by row, so
+            // columns go through `eval_of`. The bindings read this array by row, so
             // it stays in row order here too.
             in_nat[((size_t)j * cfg.n_leaves + flat) * 2] = (int)sm;
             in_nat[((size_t)j * cfg.n_leaves + flat) * 2 + 1] = (int)ef;
@@ -416,7 +416,7 @@ __global__ __launch_bounds__(B65_GFILL_BLOCK) void b65_gfill_kernel(
         g_bump_or_off(m_val, vo, &off, drop);
     }
 
-    // ---- the outputs the ties and the next region read --------------------
+    // ---- the outputs the bindings and the next region read --------------------
     for (unsigned k = 0; k < cfg.out_w; ++k) {
         const B65GSlot sl = slots[out_slot[k]];
         const long long sm = g_sgn_of(cols[sl.o_sm][i]);

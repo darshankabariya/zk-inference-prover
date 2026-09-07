@@ -314,7 +314,7 @@ pub fn q_scale_col(tag: &str, sl: usize) -> PreProcessedColumnId {
 ///
 /// Both fold the region's own rows under the **token-major** canonical position
 /// `p = t n + c`, which is the order `MatLayout` walks its rows in -- so a
-/// single row step serves, and the producing region's `Out(0)` tie and the
+/// single row step serves, and the producing region's `Out(0)` binding and the
 /// consuming band's fold are two sums over the same positions.
 #[derive(Clone)]
 pub struct QTie {
@@ -360,7 +360,7 @@ pub struct QuantEval {
     pub rq3: FracRel,
     pub rqv: FracRel,
     pub r15: RangeRel,
-    pub tie: Option<QTie>,
+    pub binding: Option<QTie>,
 }
 
 impl FrameworkEval for QuantEval {
@@ -441,7 +441,7 @@ impl FrameworkEval for QuantEval {
         // falls by `per_row` from one `MatLayout` row to the next whether or not
         // the row crosses a token.  `gt0` is `[j > 0]` and stops the `[-1, 0]`
         // mask wrapping the last row into the first.
-        if let Some(t) = &self.tie {
+        if let Some(t) = &self.binding {
             let step_in = E::EF::from(gt0.clone()) * t.step_in;
             let [ui_prev, ui] =
                 eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
@@ -477,7 +477,7 @@ impl FrameworkEval for QuantEval {
 pub enum QTamper {
     /// one committed bf16 input moved to another legal pattern, with the whole
     /// row recomputed around it: every constraint still holds and only the
-    /// input tie can see it
+    /// input binding can see it
     In(usize),
     /// one committed quotient moved, the input left alone: the division table
     /// rejects, which is the control that says the lookup is load-bearing
@@ -521,7 +521,7 @@ pub struct QRegion {
     pub bits: u32,
     /// Stream NN-3: the per-channel scale exponents this region *committed* to
     /// tree 0 -- the plan's own, or the bent copy under a `Scale` probe.  The
-    /// `s_v` tie compares the `v` region's against the attention output's.
+    /// `s_v` binding compares the `v` region's against the attention output's.
     pub je: Vec<i64>,
     pub m_rq: Vec<u32>,
     pub m_qnz: Vec<u32>,
@@ -587,7 +587,7 @@ pub fn q_region(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, tokens: 
     }
     // The input probe has to be *quiet on the output*: it moves the bf16 value
     // this region rounded and must leave the integer it produced alone, or
-    // `nn_out_ok` sees it too and the control has not isolated the input tie it
+    // `nn_out_ok` sees it too and the control has not isolated the input binding it
     // was written for.  A one-ulp move of the mantissa usually rounds to the
     // same quotient; this scans forward from the asked-for site for one that
     // does, and says so rather than silently taking a coupled site.
@@ -741,9 +741,9 @@ the probe would move the output too");
               off_table, ref_ok, ref_n, clamped, bits, je, m_rq, m_qnz, m_rqv, log_rq, fired }
 }
 
-/// One quantize region's interaction columns: the two tie accumulators, then
+/// One quantize region's interaction columns: the two binding accumulators, then
 /// the LogUp fractions in the AIR's own lookup order.
-pub fn q_interaction(r: &QRegion, tie: &QTie, hd: usize, qnz: &PairRel, rq3: &FracRel,
+pub fn q_interaction(r: &QRegion, binding: &QTie, hd: usize, qnz: &PairRel, rq3: &FracRel,
                      r15: &RangeRel, rqv: &FracRel)
                      -> (Vec<Eval>, SecureField, SecureField, SecureField) {
     use stwo::prover::backend::simd::m31::PackedM31;
@@ -762,19 +762,19 @@ pub fn q_interaction(r: &QRegion, tie: &QTie, hd: usize, qnz: &PairRel, rq3: &Fr
                 let idx = j * pr + k;
                 let (val, wk) = if side == 0 {
                     let (sm, ef) = r.in_nat[idx];
-                    (SecureField::from(m31_of(sm)) + SecureField::from(m31_of(ef)) * tie.lam,
-                     tie.w_in[k])
+                    (SecureField::from(m31_of(sm)) + SecureField::from(m31_of(ef)) * binding.lam,
+                     binding.w_in[k])
                 } else {
-                    (SecureField::from(m31_of(r.out_nat[idx])), tie.w_out[k])
+                    (SecureField::from(m31_of(r.out_nat[idx])), binding.w_out[k])
                 };
                 f += val * wk;
             }
             let step = if side == 0 {
-                tie.step_in
+                binding.step_in
             } else if j % m == 0 {
-                tie.step_out_h
+                binding.step_out_h
             } else {
-                tie.step_out
+                binding.step_out
             };
             h[j] = if j == 0 { f } else { h[j - 1] * step + f };
         }
@@ -818,7 +818,7 @@ pub fn q_interaction(r: &QRegion, tie: &QTie, hd: usize, qnz: &PairRel, rq3: &Fr
 /// The quantize region's tiling.  `per_row` must divide `hd`, so that a row
 /// never straddles two heads and the GQA replication weight is a per-slot
 /// constant; and the tiling must be exact, because a padded row would commit a
-/// bf16 pattern nobody produced and the input tie would carry it.
+/// bf16 pattern nobody produced and the input binding would carry it.
 pub fn q_layout(n: usize, hd: usize, tokens: usize, target: usize) -> MatLayout {
     let mut best: Option<MatLayout> = None;
     for pr in 1..=hd {

@@ -50,7 +50,7 @@ pub enum Round {
     Even,
     /// round to nearest, ties away from zero.  The round bit alone decides, so the
     /// sticky column disappears from the witness and both tables halve, at a
-    /// numeric difference only exact ties can see.
+    /// numeric difference only exact bindings can see.
     Away,
     /// truncate.  The cheapest of the three and the furthest from B1.
     Zero,

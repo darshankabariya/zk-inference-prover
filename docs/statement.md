@@ -44,7 +44,7 @@ committed as the in side of the last layer link.
 
 **The residual stream and the norms (1, 7).** The two RMSNorm reductions read
 the residual stream the segment committed, not a copy: the norm's reduction
-tree and the residual add are tied by an equality the verifier checks from
+tree and the residual add are bound by an equality the verifier checks from
 the claims. Unbound, the prover could normalise any vector it liked and
 present the result as the norm of the residual.
 
@@ -65,7 +65,7 @@ prover could add any vector to the residual stream, or gate any product.
 component reads are the projections' outputs, rotated and rounded exactly as
 the model does it: the rotation is its own component built from the
 statement's rotation parameters, the per-head power-of-two quantize is
-another, and the key tiles' columns are tied to their outputs. Edge 5 says
+another, and the key tiles' columns are bound to their outputs. Edge 5 says
 the o matmul's input is the attention output's requantization. Unbound, the
 attention would be over values of the prover's choosing while the projections
 and the o matmul each prove the wrong thing correctly.

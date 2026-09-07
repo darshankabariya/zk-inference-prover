@@ -128,12 +128,12 @@ pub fn mode() -> u32 {
 /// Whether anything on the host will read the two natural arrays.
 ///
 /// **B11 stream N: the answer is always yes, and that is a finding.** Brief N
-/// scoped this download as existing "only to bring the ties' arrays back", so
-/// that moving the tie fold onto the card would delete it. Opening it says
+/// scoped this download as existing "only to bring the bindings' arrays back", so
+/// that moving the binding fold onto the card would delete it. Opening it says
 /// otherwise: `in_nat` / `out_nat` have three host readers, and only one of
 /// them is the fold.
 ///
-///  * `glue::glue_interaction`'s Horner ties -- the fold, which stream N moves
+///  * `glue::glue_interaction`'s Horner bindings -- the fold, which stream N moves
 ///    to the device (`devacc::gtie`).
 ///  * `bounds::cols` (`bounds.rs:130`), which builds the **boundary tree's
 ///    committed columns** out of the same sequence, packed `sm * PACK + ef`
@@ -141,7 +141,7 @@ pub fn mode() -> u32 {
 ///    the sequence's pins (`--bounds`), and it is a committed column rather
 ///    than a check -- so it cannot simply be dropped, and a device path for it
 ///    is its own lever with its own gate.
-///  * `GlueRegion::tie_claim`, the independent recomputation of every claim
+///  * `GlueRegion::binding_claim`, the independent recomputation of every claim
 ///    from the witness rather than from the trace (`compose.rs:2447`,
 ///    `glue.rs:2165`). The bar keeps checks, and with the fold on the card
 ///    this one gains teeth: it now cross-checks the *device's* claim against a
@@ -151,7 +151,7 @@ pub fn mode() -> u32 {
 /// a named predicate rather than deleted because it is where the reasoning
 /// lives, and because the day `bounds::cols` moves to the card it is the one
 /// line that changes.
-pub fn tie_host() -> bool {
+pub fn binding_host() -> bool {
     true
 }
 
@@ -266,7 +266,7 @@ fn up_u32(v: Vec<u32>) -> Uint32Vec {
 // --------------------------------------------------------------------- the region --
 
 /// One glue region's columns, on the device, plus the host-side arrays the
-/// ties, the next region and the reference check read back.
+/// bindings, the next region and the reference check read back.
 pub struct DevGlue {
     pub pre: Vec<BaseFieldVec>,
     pub base: Vec<BaseFieldVec>,
@@ -281,7 +281,7 @@ pub struct DevGlue {
     pub off_table: usize,
     pub bad_exp: usize,
     /// `(sm, ef)` per leaf and per output, in row order, regrouped the way
-    /// `GlueRegion` holds them. **Empty when the ties fold on the device**
+    /// `GlueRegion` holds them. **Empty when the bindings fold on the device**
     /// (`B7_M4_GTIE=1`): nothing on the host reads them then, and bringing them
     /// back is all `gen/gfill_d2h` ever was.
     pub in_nat: Vec<Vec<(i64, i64)>>,
@@ -289,11 +289,11 @@ pub struct DevGlue {
     pub outs: Vec<Vec<u16>>,
     /// B11 stream N: the same two arrays where the kernel wrote them, row-flat
     /// and in coset row order, kept alive for `devacc::gtie`. The `Uint32Vec`
-    /// owns the allocation; the ties read it as `i32`, which is how
+    /// owns the allocation; the bindings read it as `i32`, which is how
     /// `b65_fill_glue` wrote it.
     pub d_in_nat: Uint32Vec,
     pub d_out_nat: Uint32Vec,
-    /// the two arrays' row widths, which are the ties' strides
+    /// the two arrays' row widths, which are the bindings' strides
     pub n_leaves: usize,
     pub out_w: usize,
 }
@@ -460,7 +460,7 @@ pub fn glue_region_dev(w: &GlueWitness, prog: &Prog, round: crate::bf16::Round,
     // B11 stream N: the two `(sm, ef)` arrays come back only if something on
     // the host is going to fold them.
     //
-    // They exist for one reader -- `glue::glue_interaction`'s Horner ties --
+    // They exist for one reader -- `glue::glue_interaction`'s Horner bindings --
     // and under `B7_M4_GTIE=1` that fold happens on the card, out of the very
     // arrays this would copy. So the download and the regrouping below are
     // skipped and `in_nat` / `out_nat` stay empty; the device arrays are kept
@@ -468,9 +468,9 @@ pub fn glue_region_dev(w: &GlueWitness, prog: &Prog, round: crate::bf16::Round,
     //
     // `out_pat` is a different array and a different reader: `ref_count`'s f64
     // cross-check compares it against `w.ref_out` on the host. It is one
-    // `u32` per output slot rather than two per value, it is not what the ties
+    // `u32` per output slot rather than two per value, it is not what the bindings
     // read, and the check stays -- so it comes back either way.
-    let host_nat = tie_host();
+    let host_nat = binding_host();
     let flat_in = if host_nat { d_in_nat.to_vec() } else { vec![] };
     let flat_on = if host_nat { d_out_nat.to_vec() } else { vec![] };
     let flat_op = d_out_pat.to_vec();

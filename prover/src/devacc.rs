@@ -114,10 +114,10 @@ pub struct FAccS2 {
     pub m_n: [u32; 4],
 }
 
-/// Mirrors `B65AccGTie`: one of the glue region's Horner ties.
+/// Mirrors `B65AccGTie`: one of the glue region's Horner bindings.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct FAccGTie {
+pub struct FAccGBinding {
     pub src: u32,
     pub off: u32,
     pub width: u32,
@@ -225,7 +225,7 @@ unsafe extern "C" {
                   rv_step: [u32; 4], flags: *mut u32, a: *mut u32, b: *mut u32,
                   cfg: FAccAo);
     fn b65_acc_gtie(in_nat: *const i32, out_nat: *const i32, weights: *const u32,
-                    n_weights: u32, lam: [u32; 4], specs: *const FAccGTie,
+                    n_weights: u32, lam: [u32; 4], specs: *const FAccGBinding,
                     n_specs: u32, a: *mut u32, b: *mut u32, rows: u32, mutate: u32);
 }
 
@@ -250,9 +250,9 @@ pub enum Reg {
     Walk,
     Deq,
     Ao,
-    /// B11 stream N: the glue region's Horner ties, the seventh region and the
+    /// B11 stream N: the glue region's Horner bindings, the seventh region and the
     /// only one whose values are not committed columns.
-    GTie,
+    GBinding,
 }
 
 impl Reg {
@@ -264,7 +264,7 @@ impl Reg {
             Reg::Walk => "walk",
             Reg::Deq => "deq",
             Reg::Ao => "ao",
-            Reg::GTie => "gtie",
+            Reg::GBinding => "gtie",
         }
     }
 }
@@ -299,7 +299,7 @@ pub fn accmut(reg: Reg) -> u32 {
         "nomask" => 7,
         "everyrow" => 8,
         "nosplit" => 9,
-        // B11 stream N: the ties' three factors, one control each.
+        // B11 stream N: the bindings' three factors, one control each.
         "notiestep" => 10,
         "notiew" => 11,
         "notielam" => 12,
@@ -805,22 +805,22 @@ pub fn ao(dev: &crate::devwfill::DevAo, lay: &crate::layer::AoLayout, nh: usize,
     DevAccCols { cols, claims: vec![claims[2], claims[3]], log_rows: lay.log_rows }
 }
 
-// ============================================================== the glue ties ==
+// ============================================================== the glue bindings ==
 
 /// `B7_M4_GTIE`: 0 the host, 1 the device, 2 both with every cell asserted.
 ///
 /// B11 stream N. Born off, like every path before it: this switch joins the
 /// default table in `util::m4b_default` in the same commit that lands its
 /// digest gate, and not before.
-pub fn tie_mode() -> u32 {
+pub fn binding_mode() -> u32 {
     crate::util::m4b_mode("B7_M4_GTIE")
 }
 
-/// One glue region's Horner ties, on their way into the tree.
+/// One glue region's Horner bindings, on their way into the tree.
 ///
-/// The seventh region of `b65_acc.cuh`'s table and the plainest of them: a tie
+/// The seventh region of `b65_acc.cuh`'s table and the plainest of them: a binding
 /// has no segmentation at all, so there are no flags and no stage 2 -- one
-/// stage-1 lane per tie and then the shared affine scan, which is the same
+/// stage-1 lane per binding and then the shared affine scan, which is the same
 /// primitive as every other region's and therefore the same field element the
 /// host's serial fold produces.
 ///
@@ -828,14 +828,14 @@ pub fn tie_mode() -> u32 {
 /// card, in coset row order. Before this stream they were copied back across
 /// the link for the host to fold, which is the whole of `gen/gfill_d2h`.
 ///
-/// The caller owns the order: `specs` is `Tie::specs` as the AIR reads it, and
-/// the columns come back four per tie in that order, which is exactly what
+/// The caller owns the order: `specs` is `Binding::specs` as the AIR reads it, and
+/// the columns come back four per binding in that order, which is exactly what
 /// `attn_trace::secure_cols_pub` produces on the host arm.
 pub fn gtie(in_nat: *const i32, out_nat: *const i32, log_rows: u32,
-            specs: &[FAccGTie], weights: &[SecureField], lam: SecureField)
+            specs: &[FAccGBinding], weights: &[SecureField], lam: SecureField)
             -> DevAccCols {
     let t = std::time::Instant::now();
-    let mutate = accmut(Reg::GTie);
+    let mutate = accmut(Reg::GBinding);
     let acc = Acc::new(log_rows, specs.len());
     let w = pows(weights);
     unsafe {
@@ -847,6 +847,6 @@ pub fn gtie(in_nat: *const i32, out_nat: *const i32, log_rows: u32,
     let claims = acc.last();
     let order: Vec<u32> = (0..specs.len() as u32).collect();
     let cols = acc.split(&order, mutate);
-    note(Reg::GTie, "glue", cols.len(), acc.rows, t.elapsed().as_secs_f64());
+    note(Reg::GBinding, "glue", cols.len(), acc.rows, t.elapsed().as_secs_f64());
     DevAccCols { cols, claims, log_rows }
 }

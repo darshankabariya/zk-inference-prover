@@ -1080,7 +1080,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         for j in 0..rows {
             let (f, nofirst, istart, notzero) = fold[j];
             let step = if nofirst { t.s_in }
-                       else if istart { t.s_ib.expect("the V tie needs an instance step") }
+                       else if istart { t.s_ib.expect("the V binding needs an instance step") }
                        else if notzero { t.s_bd }
                        else { SecureField::zero() };
             h[j] = if j > 0 { h[j - 1] * step } else { SecureField::zero() } + f;

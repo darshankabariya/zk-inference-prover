@@ -114,7 +114,7 @@ for e in EXPERTS:
 
 # --- the routing argument, priced by analogy ---------------------------------
 # Nobody has built it.  Two pieces, each with a measured analogue:
-#   (a) selection: every token's FFN rows have to be tied to the instance of the
+#   (a) selection: every token's FFN rows have to be bound to the instance of the
 #       expert it was routed to -- a LogUp multiset over (token, expert) pairs.
 #       The nearest measured thing is B4's packed pair table, 2 cells per lookup
 #       plus the committed expert id: ~3 cells per (token, chosen expert).
@@ -135,7 +135,7 @@ for e in EXPERTS[1:]:
     print(f"    E={e}: {g(cells)}cells per proof = {g(cells / S)}cells/token "
           f"({cells / dense_total * 100:.4f}% of the dense FFN's {g(dense_total)})")
 print("  -- small beside the walk, and the point is that it is a *new gadget*: no AIR")
-print("     in this project ties a committed row to a routed instance.")
+print("     in this project bindings a committed row to a routed instance.")
 
 print()
 ratios = []
@@ -160,7 +160,7 @@ print("the accumulators grow only x k.  Per token at S=512 the FFN costs " +
 print("The comparison that matters is against a dense model with the same *active*")
 print(f"parameters, which pays x{TOPK}: at E=8 MoE pays x{d[8]:.2f}, i.e. **x{d[8] / TOPK:.2f} of pure proving")
 print("overhead for the same FLOPs per token**.  And the scheme still lacks the gadget:")
-print("no AIR in this project ties a committed row to a routed instance.  Priced by")
+print("no AIR in this project bindings a committed row to a routed instance.  Priced by")
 print("analogy the argument is cheap (<0.01% of the FFN), but 'cheap once built' is not")
 print("'built'.  H6 is a negative control and it fires: **MoE does not prove as cheaply")
 print("as dense.**  The batching that makes the dense scheme work -- one weight pass")

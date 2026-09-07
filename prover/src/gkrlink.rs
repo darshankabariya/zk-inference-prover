@@ -1,7 +1,7 @@
 //! B11 stream S, lever 3: the link that makes the GKR arm sound.
 //!
 //! `gkrband` proves the bands' fractional sums, but its `GkrArtifact` ends in
-//! *claimed evaluations of the input layers at a random point* -- nothing ties
+//! *claimed evaluations of the input layers at a random point* -- nothing bindings
 //! those to the committed base columns. This module closes that gap along the
 //! reduction of `experiments/b11/gkr/memo.md` section 4: with the input layer
 //! laid out `(look, row)` and every look's numerator and denominator *affine*
@@ -29,7 +29,7 @@
 //!   existing kernel machinery;
 //! * what upstream's `MleCoeffColumnOracle` did at the OODS point -- read the
 //!   coefficient polynomial off the committed masks -- becomes two explicit
-//!   *tie* constraints per height in a bespoke component (`LinkTie`): the
+//!   *binding* constraints per height in a bespoke component (`LinkTie`): the
 //!   committed coefficient column equals the `w_c` combination of the base
 //!   columns' own OODS values, and the committed carry-quotient column equals
 //!   its succinct analytic evaluation. Both are identically zero for an
@@ -283,7 +283,7 @@ pub fn eval_is_first(coset: Coset, p: CirclePoint<SecureField>) -> SecureField {
 /// the mask order are the same order -- that is what lets the prover resolve
 /// these against `com.base[at[which] + i]` and the verifier against the
 /// component's trace location span, and the two cannot disagree without the
-/// tie constraint rejecting.
+/// binding constraint rejecting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RCol {
     /// the channel region's `i`-th trace mask (`ks` then `qs`)
@@ -416,7 +416,7 @@ fn range_den(rel: &crate::attn_air::RangeRel, slot: Affine) -> Affine {
 /// The bands' lookup sites as affine forms, mirroring `gkrband::sites_of`'s
 /// site order and `attn_trace::interaction_phase`'s look order exactly. This
 /// is the verifier's half of "one definition of the fraction": the collector
-/// reads the committed columns, this names them, and the tie constraint is
+/// reads the committed columns, this names them, and the binding constraint is
 /// what makes the two the same function.
 pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> Vec<SiteLooks> {
     let p = &plan.p;
@@ -1243,7 +1243,7 @@ fn eq_weights(k: usize, x_look: &[SecureField]) -> Vec<SecureField> {
 
 /// Derive the per-height fold from the plan, the drawn relations, the GKR
 /// artifact and the post-GKR challenge. The verifier calls this to know what
-/// the tie constraints assert; the prover calls it to build the very columns
+/// the binding constraints assert; the prover calls it to build the very columns
 /// those constraints check. `Err` is a rejection, never a panic: the artifact
 /// is proof-derived data.
 pub fn link_params(
@@ -1467,7 +1467,7 @@ fn fold_dev(h: u32, konst: SecureField, terms: &[(*const u32, SecureField)])
 
 /// Build one height's committed columns from its folded coefficient column.
 /// The fold resolves referenced columns against this chunk's committed data
-/// (the prover's ground truth); the tie constraints are what force it to agree
+/// (the prover's ground truth); the binding constraints are what force it to agree
 /// with the verifier's own resolution through the component spans.
 pub fn build_height_cols(hl: &HeightLink, coeff_col: SecureColumn) -> Vec<Eval> {
     let h = hl.h;
@@ -1568,7 +1568,7 @@ impl FrameworkEval for LinkEval {
 }
 
 // ------------------------------------------------------------------------
-// The tie component: the two OODS equalities per height that upstream's
+// The binding component: the two OODS equalities per height that upstream's
 // oracle and succinct column performed implicitly. Identically zero for an
 // honest prover, so the prover side only consumes its accumulator slots.
 // ------------------------------------------------------------------------
@@ -1587,7 +1587,7 @@ pub struct TieHeight {
 
 pub struct LinkTie {
     pub heights: Vec<TieHeight>,
-    /// preprocessed columns the ties read (the corner masks), globally indexed
+    /// preprocessed columns the bindings read (the corner masks), globally indexed
     pub pre_idx: Vec<usize>,
 }
 
@@ -1636,20 +1636,20 @@ impl Component for LinkTie {
         for t in &self.heights {
             // the committed coefficient column is the `w_c` combination of
             // the base columns -- as polynomials, checked at the OODS point
-            let mut tie_coeff = ext(t.coeff_at) - t.konst;
+            let mut binding_coeff = ext(t.coeff_at) - t.konst;
             for (tree, col, w) in &t.terms {
-                tie_coeff -= *w * mask[*tree][*col][0];
+                binding_coeff -= *w * mask[*tree][*col][0];
             }
-            evaluation_accumulator.accumulate(denom_inverse * tie_coeff);
+            evaluation_accumulator.accumulate(denom_inverse * binding_coeff);
             // the committed carry-quotient column is the succinct one. The
             // lifted protocol samples a 2^h column's polynomial at the point
             // doubled down to its own domain, so the analytic side evaluates
-            // at the same mapped point -- the coefficient tie above needs no
+            // at the same mapped point -- the coefficient binding above needs no
             // mapping because every column it compares shares one height and
             // therefore one lift.
             let mapped = point.repeated_double(max_log_degree_bound - t.h);
-            let tie_q = ext(t.q_at) - eval_carry_quotient_col(&t.mle_point, mapped);
-            evaluation_accumulator.accumulate(denom_inverse * tie_q);
+            let binding_q = ext(t.q_at) - eval_carry_quotient_col(&t.mle_point, mapped);
+            evaluation_accumulator.accumulate(denom_inverse * binding_q);
         }
     }
 }
@@ -1660,7 +1660,7 @@ impl<B: stwo::prover::backend::Backend> ComponentProver<B> for LinkTie {
         _trace: &Trace<'_, B>,
         evaluation_accumulator: &mut DomainEvaluationAccumulator<B>,
     ) {
-        // an honest prover's tie constraints are identically zero as
+        // an honest prover's binding constraints are identically zero as
         // polynomials, so their quotient contribution is the zero polynomial:
         // consume the accumulator coefficients and add nothing
         evaluation_accumulator.skip_coeffs(self.n_constraints());
@@ -1670,7 +1670,7 @@ impl<B: stwo::prover::backend::Backend> ComponentProver<B> for LinkTie {
 /// Placeholder link parameters for the emit path: the heights are the plan's
 /// own, the scalars distinct nonzero pseudo-random values. The blob replays
 /// the real scalars at prove time; distinctness keeps `lit` from folding
-/// slots away, exactly as `fill_tie_claims` does for the glue ties.
+/// slots away, exactly as `fill_binding_claims` does for the glue bindings.
 pub fn link_for(plan: &crate::compose::Plan, seed: u64) -> Vec<HeightLink> {
     let mut x = seed | 1;
     let mut felt = || {

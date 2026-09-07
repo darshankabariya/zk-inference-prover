@@ -613,7 +613,7 @@ extern "C" void b65_acc_ao(const m31 *den_col, const m31 *const *acc_cols,
     cuda_free_memory(d_rv);
 }
 
-// ============================================================== the glue ties ==
+// ============================================================== the glue bindings ==
 
 // `glue::m31_of` again -- `b65_gfill.cu` has its own copy for the same reason,
 // that the natural arrays hold the witness's signed values and not field
@@ -624,7 +624,7 @@ __device__ __forceinline__ m31 b65a_m31_of(long long v) {
     return (m31)(((v % p) + p) % p);
 }
 
-// One tie, one lane: the row's own sum in `b`, the constant step in `a`, and
+// One binding, one lane: the row's own sum in `b`, the constant step in `a`, and
 // nothing else. Row 0 opens the recurrence, so its multiplier is zero.
 __global__ void b65a_gtie_kernel(const int *__restrict__ in_nat,
                                  const int *__restrict__ out_nat,
@@ -639,7 +639,7 @@ __global__ void b65a_gtie_kernel(const int *__restrict__ in_nat,
     const unsigned lane = blockIdx.y;
     const B65AccGTie S = specs[lane];
     // Coset row order, as `b65_gfill.cu` wrote it and as the host folded it:
-    // the ties never permute, only the committed columns do.
+    // the bindings never permute, only the committed columns do.
     const int *src = (S.src == 0u) ? in_nat : out_nat;
     const size_t row = (size_t)j * S.stride + S.off;
     qm31 f = B65A_QZERO;
@@ -654,7 +654,7 @@ __global__ void b65a_gtie_kernel(const int *__restrict__ in_nat,
             (mutate == B65A_MUT_NOTIEW) ? b65a_of_m31(1u) : weights[S.w_off + k];
         f = add(f, mul(v, wk));
     }
-    const qm31 step = (mutate == B65A_MUT_NOTIESTEP) ? b65a_of_m31(1u) : S.step;
+    const qm31 step = (mutate == B65A_MUT_NOBINDSTEP) ? b65a_of_m31(1u) : S.step;
     a[(size_t)lane * rows + j] = (j == 0u) ? B65A_QZERO : step;
     b[(size_t)lane * rows + j] = f;
 }

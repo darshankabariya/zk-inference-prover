@@ -22,7 +22,7 @@
 //!   tree 4   bout   the residual-stream output  (region `gn2`, the add's outputs)
 //! ```
 //!
-//! The AIR ties each boundary column to the region column the rest of the layer
+//! The AIR bindings each boundary column to the region column the rest of the layer
 //! statement already binds, by a **plain equality constraint** — no lookup, no
 //! challenge, no accumulator. That is what lets the two trees be committed
 //! *after* the interaction tree: an equality constraint is checked at the OODS
@@ -51,12 +51,12 @@ use stwo::prover::backend::Column;
 
 use crate::common::{Eval, eval_of};
 use crate::compose::{Fixed, GluePlan};
-use crate::glue::{GlueRegion, TieKind};
+use crate::glue::{GlueRegion, BindingKind};
 
 /// The multiplier that folds a value's `(sm, ef)` pair into one cell.
 ///
 /// A bf16 value is carried in the region as a signed significand and an
-/// exponent. Packing them as `PACK * sm + ef` keeps the tie constraint degree 1
+/// exponent. Packing them as `PACK * sm + ef` keeps the binding constraint degree 1
 /// and is injective on the representation: `sm` spans only `{0} ∪ ±[128, 255]`
 /// and `ef` only `[0, 255]`, so two distinct pairs differ by at least `PACK` in
 /// the first term while the second can differ by at most 255, and the whole
@@ -76,7 +76,7 @@ pub const FIRST_TREE: usize = 4;
 #[derive(Clone, Copy, Debug)]
 pub struct Bound {
     pub tree: usize,
-    pub kind: TieKind,
+    pub kind: BindingKind,
     /// values per row, which is also the tree's column count
     pub n: usize,
 }
@@ -91,7 +91,7 @@ pub struct Side {
 }
 
 /// The two sides, read off the glue plan. `stream_in` and `stream_out` already
-/// name the two ties that are the layer's boundary, so this is only turning that
+/// name the two bindings that are the layer's boundary, so this is only turning that
 /// naming into a tree assignment — the input side first, so tree 3 is always the
 /// input and tree 4 always the output, in every chunk of every shape.
 ///
@@ -110,12 +110,12 @@ pub fn sides(gp: &GluePlan) -> Vec<Side> {
     }
     want.iter()
         .enumerate()
-        .map(|(i, (region, tie))| {
+        .map(|(i, (region, binding))| {
             let r = &gp.regions[*region];
-            let kind = r.ties[*tie].0;
+            let kind = r.bindings[*binding].0;
             let n = match kind {
-                TieKind::In(g) => r.prog.groups[g].n,
-                TieKind::Out(o) => r.prog.outs[o].len(),
+                BindingKind::In(g) => r.prog.groups[g].n,
+                BindingKind::Out(o) => r.prog.outs[o].len(),
             };
             Side {
                 bound: Bound { tree: FIRST_TREE + i, kind, n },
@@ -129,24 +129,24 @@ pub fn sides(gp: &GluePlan) -> Vec<Side> {
 /// One side's committed columns: `n` columns of `2^log_rows` rows, column `j`
 /// holding the packed value at slot `j` of each row.
 ///
-/// The values come from `GlueRegion::tie_vals`, which is the same sequence in
-/// the same natural row order that the Horner tie accumulates — so the boundary
-/// tree and the tie are two views of one thing, and the layout question reduces
-/// to the one the glue family already answered. `gn1`'s input tie and `gn2`'s
-/// output tie carry the same weight vector, which is exactly the statement that
+/// The values come from `GlueRegion::binding_vals`, which is the same sequence in
+/// the same natural row order that the Horner binding accumulates — so the boundary
+/// tree and the binding are two views of one thing, and the layout question reduces
+/// to the one the glue family already answered. `gn1`'s input binding and `gn2`'s
+/// output binding carry the same weight vector, which is exactly the statement that
 /// they place canonical stream position `q` at the same `(row, slot)`; that is
 /// why one chunk's output tree and the next chunk's input tree are comparable
 /// at all.
 ///
 /// `tamper` flips one cell, by flat index over `(row, slot)`. It exists for the
-/// probe that has to show the tie bites: a boundary column that disagrees with
+/// probe that has to show the binding bites: a boundary column that disagrees with
 /// the region must take its own chunk's proof down.
 pub fn cols(region: &GlueRegion, side: &Side, tamper: Option<usize>) -> Vec<Eval> {
-    let vals = region.tie_vals(side.bound.kind);
-    let w = region.tie_width(side.bound.kind);
+    let vals = region.binding_vals(side.bound.kind);
+    let w = region.binding_width(side.bound.kind);
     assert_eq!(w, side.bound.n, "the boundary's width disagrees with its plan");
     let rows = 1usize << side.log_rows;
-    assert_eq!(vals.len(), rows * w, "the tie's values do not fill the region");
+    assert_eq!(vals.len(), rows * w, "the binding's values do not fill the region");
     (0..w)
         .map(|j| {
             let mut v: Vec<M31> = (0..rows)
@@ -481,7 +481,7 @@ fn glue_layout_eq(a: &crate::compose::Params, b: &crate::compose::Params) -> boo
                 && ga.a == gb.a
                 && ga.eps == gb.eps
                 && ga.inv_d == gb.inv_d
-                && ga.deq_ties == gb.deq_ties
+                && ga.bind_matmul_outputs == gb.bind_matmul_outputs
                 && (gb.head_norm || ga.dff == gb.dff)
         }
         _ => false,
@@ -642,7 +642,7 @@ pub fn chain_of(
     };
     let axis = axis_of(&fa.params, &fb.params);
     // Stream KK: the coordinate the statement declares, compared on the pair's
-    // own axis.  `pre_root` is what would tie a declared layer to the model
+    // own axis.  `pre_root` is what would binding a declared layer to the model
     // (stream LL); until then this says the two chunks agree about which edge
     // they are, which is what the tag used to say on its own.
     let step = |a: Option<usize>, b: Option<usize>, d: usize| match (a, b) {
@@ -720,7 +720,7 @@ fn prove_one(tag: &str, name: &str, dir: &str, out_dir: &str, args: &[String],
     let mut params = crate::params_of(&l, &a, &vname);
     params.bounds = true;
     assert!(params.glue.is_some(),
-            "{name}: the boundary is the wiring family's two stream ties, and this \
+            "{name}: the boundary is the wiring family's two stream bindings, and this \
              witness has no glue columns -- extract it with `extract.py --glue`");
     let out = crate::compose::prove_layer(&l, &params, tamper);
     let ser = crate::compose_ser(&out);
@@ -751,7 +751,7 @@ fn chunk_json(c: &Chunk) -> Value {
         "prove_secs": c.json.get("prove_secs"),
         "trace_secs": c.json.get("trace_secs"),
         "verify_secs": c.json.get("verify_secs"),
-        "glue_ties_ok": c.json.get("glue_ties_ok"),
+        "stream_bindings_ok": c.json.get("stream_bindings_ok"),
         "glue_vs_b1": c.json.pointer("/family_cells/glue_vs_b1"),
         "verdict": c.json.get("verdict"),
     })
@@ -772,7 +772,7 @@ pub fn cmd(args: &[String]) {
     let c_dir = crate::arg_str(args, "--c");
     let a_out = crate::arg_str(args, "--a-out-tampered");
     let b_in = crate::arg_str(args, "--b-in-tampered");
-    let tie_cell: usize = crate::arg_scalar(args, "--tie-cell", 4321usize);
+    let binding_cell: usize = crate::arg_scalar(args, "--binding-cell", 4321usize);
     let out_dir = crate::arg_str(args, "--out-dir").unwrap_or_else(|| "bounds_out".into());
     let none = crate::compose::ProverTamper::default();
 
@@ -788,16 +788,16 @@ pub fn cmd(args: &[String]) {
     //    equality constraint is the only thing that can reject -- which is the
     //    statement that the root is bound to the proof and not merely appended.
     let t = prove_one(
-        "p1_tie",
+        "p1_binding",
         "N, one boundary cell",
         &a_dir,
         &out_dir,
         args,
-        &crate::compose::ProverTamper { bounds: Some((1, tie_cell)), ..Default::default() },
+        &crate::compose::ProverTamper { bounds: Some((1, binding_cell)), ..Default::default() },
     );
     probes.push(json!({
         "probe": "one cell of the output boundary tree, the region left alone",
-        "tampered_cell": tie_cell,
+        "tampered_cell": binding_cell,
         "expects": "its own chunk's proof rejects (the equality constraint)",
         "accepts": t.accepts,
         "prove_error": t.json.get("prove_error"),
@@ -834,7 +834,7 @@ pub fn cmd(args: &[String]) {
     //    * while the residual stream is a free committed input, the chunk stays
     //      internally consistent and proves, and only the pair check catches the
     //      move -- the case the feature was built for;
-    //    * once the norm tails and the dequant output ties are in (stream E),
+    //    * once the norm tails and the dequant output bindings are in (stream E),
     //      the stream is pinned forward into the matmul inputs, so a one-bit
     //      change to it is caught *inside* the chunk and the proof is rejected.
     //
@@ -1326,8 +1326,8 @@ pub fn grid_cmd(args: &[String]) {
                         "layer": k, "from": chunks[i].tag, "to": chunks[j].tag,
                         "why": "the head chunk performs no attention and commits no K/V \
                                 boundary, so there is no cache to hand over: its input is \
-                                its own block's residual, tied on the layer axis, and its \
-                                output is its own block's ids, tied by the emitted -> \
+                                its own block's residual, bound on the layer axis, and its \
+                                output is its own block's ids, bound by the emitted -> \
                                 consumed check"}));
                 } else {
                     token_links.push((i, j));
@@ -1409,7 +1409,7 @@ pub fn grid_cmd(args: &[String]) {
                         serde_json::to_string(&json!({
                             "stark": v.stark_ok, "root": v.root_ok, "sums": v.sums_cancel,
                             "embed": v.embed_ok, "embed_tok": v.embed_tok_ok,
-                            "head_tie": v.head_tie_ok, "head_tok": v.head_tok_ok,
+                            "head_binding": v.head_binding_ok, "head_tok": v.head_tok_ok,
                             "error": v.error})).unwrap()
                     });
                     (v.accepts(), v.verify_secs, why)
@@ -1566,7 +1566,7 @@ pub fn grid_cmd(args: &[String]) {
         }
     }
     // Deliberately *not* a failure: a grid of 32 layers has 32 model hashes,
-    // because a layer's weights are its own.  What ties the 32 into one model
+    // because a layer's weights are its own.  What bindings the 32 into one model
     // is the manifest `b65 model-roots` writes, which asserts one hash per
     // layer and names them all; the grid's own check is the per-layer one
     // above, which is what section 5 item 1's last sentence asks for.
@@ -1783,7 +1783,7 @@ pub fn grid_cmd(args: &[String]) {
 // The layer boundary above binds the residual stream along the *layer* axis.
 // Stream AA binds the attention cache along the *token* axis, with the same
 // instrument and for the same reason: today a chunk's K and V are ordinary
-// committed base columns fed from the witness, tied to nothing outside the
+// committed base columns fed from the witness, bound to nothing outside the
 // chunk, so two chunks of one sequence may have attended to two different
 // prefixes and no verifier can tell.
 //
@@ -1991,8 +1991,8 @@ pub fn side_roots(glue: &[Side], kv: &[KvSide], root: impl Fn(usize) -> String) 
             tree: s.bound.tree,
             axis: Axis::Layer,
             role: match s.bound.kind {
-                TieKind::In(_) => "in",
-                TieKind::Out(_) => "out",
+                BindingKind::In(_) => "in",
+                BindingKind::Out(_) => "out",
             },
             group: None,
             root: root(s.bound.tree),
@@ -2134,8 +2134,8 @@ mod tests {
         // the root of tree `t` is the string `t`
         let root = |t: usize| t.to_string();
         let glue = [
-            Side { bound: Bound { tree: 3, kind: TieKind::In(0), n: 1 }, region: 0, log_rows: 1 },
-            Side { bound: Bound { tree: 4, kind: TieKind::Out(1), n: 1 }, region: 0, log_rows: 1 },
+            Side { bound: Bound { tree: 3, kind: BindingKind::In(0), n: 1 }, region: 0, log_rows: 1 },
+            Side { bound: Bound { tree: 4, kind: BindingKind::Out(1), n: 1 }, region: 0, log_rows: 1 },
         ];
         let kv = [
             KvSide { tree: 5, group: 0, out: true, bands: vec![], columns: 0, cells: 0 },

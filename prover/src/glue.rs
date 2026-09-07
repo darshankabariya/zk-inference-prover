@@ -1,7 +1,7 @@
 //! B10 step 2 — the glue between the composed layer's regions.
 //!
-//! B6.5's composition ties every matmul's accumulators to its own committed
-//! activations and weights, and nothing at all ties one region's output to the
+//! B6.5's composition bindings every matmul's accumulators to its own committed
+//! activations and weights, and nothing at all bindings one region's output to the
 //! next region's input (open gap 1).  The wiring is four gadgets, and every one
 //! of them is bf16 elementwise arithmetic:
 //!
@@ -73,13 +73,13 @@
 //! row**, so the wiring between its adds is fixed column indices and costs
 //! nothing; chaining two such regions (`leaves`, then `d / leaves`) is the whole
 //! reduction, and with both widths powers of two it is bit-identical to
-//! `tree_sum`.  Two regions are tied by a **Horner claim** over the values they
+//! `tree_sum`.  Two regions are bound by a **Horner claim** over the values they
 //! share — B6.5's `h_m == acc_m` trick, at ~0.5 cells per value — so a value is
 //! never committed twice.
 //!
-//! # What ties two regions positionwise
+//! # What bindings two regions positionwise
 //!
-//! A tie's weights are the verifier's own powers of a drawn challenge, chosen so
+//! A binding's weights are the verifier's own powers of a drawn challenge, chosen so
 //! that the value at **canonical stream position** `q` weighs `w^(N-1-q)` in
 //! every region that carries it.  The canonical order of a `(tokens x d)`
 //! activation stream is channel-major, `q = c*tokens + t`, because that is the
@@ -145,7 +145,7 @@ pub const SMUL_COLS: [&str; 5] =
     ["b10_smul_a", "b10_smul_b", "b10_smul_c", "b10_smul_cy", "b10_smul_nz"];
 pub const VAL_COLS: [&str; 2] = ["b10_val_sm", "b10_val_ef"];
 pub const UN_COLS: [&str; 4] = ["b10_un_i_sm", "b10_un_i_ef", "b10_un_o_sm", "b10_un_o_ef"];
-/// A region's own selector: `end` marks the last row, for the Horner ties.
+/// A region's own selector: `end` marks the last row, for the Horner bindings.
 /// Stream II: a region's `i`-th preprocessed value, as its two fields.  The
 /// norm weights are the only user today; they are the model's, so they belong
 /// beside the tables in tree 0 rather than beside the stream in tree 1.
@@ -400,7 +400,7 @@ pub enum Kind {
 /// One committed input group of a region: `n` bf16 values per row, all under the
 /// same unary (or none).  A region has as many groups as it has distinct input
 /// streams -- the norm-and-residual region has two, the residual stream and what
-/// is added to it -- and each group carries its own Horner tie, so two regions
+/// is added to it -- and each group carries its own Horner binding, so two regions
 /// can be compared positionwise on a stream without committing it twice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Group {
@@ -415,7 +415,7 @@ pub struct Prog {
     pub kind: Kind,
     /// `(a, b)` per slot, in evaluation order
     pub slots: Vec<(Src, Src)>,
-    /// the slot outputs a tie may read, as named groups -- the tree's root, the
+    /// the slot outputs a binding may read, as named groups -- the tree's root, the
     /// residual sums, ...
     pub outs: Vec<Vec<usize>>,
     /// Stream II: how many preprocessed `(sm, ef)` values a row reads, i.e. how
@@ -467,7 +467,7 @@ impl Prog {
     /// `n` independent binary ops on two committed groups of `n` -- the residual
     /// adds, the SwiGLU product, the norm's per-channel multiplies.  The row is
     /// laid out as `[all a, then all b]`, which is what lets a producer's output
-    /// tie be compared with the consumer's group-`a` tie positionwise.
+    /// binding be compared with the consumer's group-`a` binding positionwise.
     pub fn pairs(n: usize, kind: Kind, un_a: UnKind, un_b: UnKind) -> Self {
         let groups = vec![Group { n, un: un_a }, Group { n, un: un_b }];
         let slots = (0..n)
@@ -480,7 +480,7 @@ impl Prog {
     /// block of the residual stream, and it proves both the RMSNorm reduction's
     /// first `log2(pad)` levels over the squares *and* the residual add against
     /// the block's second operand.  The stream is committed **once** and read by
-    /// both, so the two gadgets need no tie between them at all.
+    /// both, so the two gadgets need no binding between them at all.
     pub fn norm_resid(n: usize, pad: usize) -> Self {
         let mut p = Self::tree(n, pad, UnKind::Square);
         p.groups.push(Group { n, un: UnKind::None });
@@ -505,7 +505,7 @@ impl Prog {
     /// record, not built).
     ///
     /// The two multiplies chain through `Src::Slot`, so `x * r` never leaves the
-    /// row and only `h` is tied onwards.
+    /// row and only `h` is bound onwards.
     /// The RMSNorm tail, `h = (x * r) * w`, one row per `(residue, token)` block
     /// of the stream -- the same tiling the reduction's first level uses, so the
     /// tail's group 0 and the reduction's group 0 are the same values in the
@@ -514,15 +514,15 @@ impl Prog {
     /// Stream II changed both of the other two operands.  Group 1 is no longer
     /// `r` itself but the reduction's own answer, the sum of squares, under
     /// `UnKind::NormR`: the unary lookup *is* `r = rsqrt(ms inv_d + eps)`, and
-    /// the `In(1)` tie against `gn1b`/`gn2b`'s `Out(0)` is what says the value
+    /// the `In(1)` binding against `gn1b`/`gn2b`'s `Out(0)` is what says the value
     /// squared is the value the reduction summed.  One committed value per row
-    /// still, and because the tie compares every row of a token against the
+    /// still, and because the binding compares every row of a token against the
     /// same reduction row, the `a` rows of one token cannot carry different
     /// `r`s.  The norm weight is `Src::Pre`: preprocessed, under `pre_root`,
     /// because it is the model's and not the prover's.
     ///
     /// The two multiplies chain through `Src::Slot`, so `x * r` never leaves the
-    /// row and only `h` is tied onwards.
+    /// row and only `h` is bound onwards.
     pub fn norm_tail(n: usize, un_r: UnKind) -> Self {
         let groups = vec![Group { n, un: UnKind::None },
                           Group { n: 1, un: un_r }];
@@ -648,9 +648,9 @@ impl Prog {
 
 // ------------------------------------------------------------------ the AIR ---
 
-/// Which of a region's value sequences a tie accumulates.
+/// Which of a region's value sequences a binding accumulates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TieKind {
+pub enum BindingKind {
     /// group `g`'s committed leaves, as committed (never the unary image)
     In(usize),
     /// the slots named by `outs[i]`
@@ -666,7 +666,7 @@ pub enum TieKind {
 /// stream into rows.
 #[derive(Clone, Debug)]
 pub struct TieSpec {
-    pub kind: TieKind,
+    pub kind: BindingKind,
     /// one weight per member of the sequence within a row
     pub w: Vec<SecureField>,
     /// the row-to-row step
@@ -675,7 +675,7 @@ pub struct TieSpec {
 }
 
 #[derive(Clone)]
-pub struct Tie {
+pub struct Binding {
     pub lam: SecureField,
     pub specs: Vec<TieSpec>,
 }
@@ -695,7 +695,7 @@ pub struct GlueEval {
     /// the kinds `un` is indexed by -- the plan's union, see `GlueRels::uns`
     pub uns: Vec<UnKind>,
     pub val: ValRel,
-    pub tie: Option<Tie>,
+    pub binding: Option<Binding>,
     /// B11 stream V, lever 3: this region's lookups are proved by the batched
     /// GKR instead of committed running-sum columns, so the AIR emits neither
     /// the relation entries nor the interaction masks they would allocate. The
@@ -748,7 +748,7 @@ impl FrameworkEval for GlueEval {
         // pairs first, which made no difference while `n_pre` was zero
         // everywhere and made the generated fraction builder read the `nofirst`
         // selector as a norm-weight mantissa on every chunk with a norm tail.
-        // The selectors are read whether or not this region carries a tie: the
+        // The selectors are read whether or not this region carries a binding: the
         // region commits them either way, so a conditional read would leave the
         // supplied column list two longer than the IR's.
         let nofirst = eval.get_preprocessed_column(glue_sel(&self.tag, "nofirst"));
@@ -900,8 +900,8 @@ impl FrameworkEval for GlueEval {
         // notes/bounds-design.md.
         if let Some(b) = &self.bound {
             let members: Vec<(E::F, E::F)> = match b.kind {
-                TieKind::In(g) => leaf_in[g].clone(),
-                TieKind::Out(o) => {
+                BindingKind::In(g) => leaf_in[g].clone(),
+                BindingKind::Out(o) => {
                     self.prog.outs[o].iter().map(|s| outs[*s].clone()).collect()
                 }
             };
@@ -913,14 +913,14 @@ impl FrameworkEval for GlueEval {
             }
         }
 
-        // ---- the ties ---------------------------------------------------------
-        if let Some(t) = &self.tie {
+        // ---- the bindings ---------------------------------------------------------
+        if let Some(t) = &self.binding {
             for spec in &t.specs {
                 let [h_prev, h] =
                     eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
                 let members: Vec<(E::F, E::F)> = match spec.kind {
-                    TieKind::In(g) => leaf_in[g].clone(),
-                    TieKind::Out(o) => {
+                    BindingKind::In(g) => leaf_in[g].clone(),
+                    BindingKind::Out(o) => {
                         self.prog.outs[o].iter().map(|s| outs[*s].clone()).collect()
                     }
                 };
@@ -1273,18 +1273,18 @@ pub enum Tamper {
     /// the result's sign, flipped
     Sign(usize),
     /// one committed leaf of group 0 replaced -- the residual stream a consumer
-    /// reads is not the one its producer wrote (the Horner tie)
+    /// reads is not the one its producer wrote (the Horner binding)
     Stream(usize),
     /// Stream II: one row's committed sum of squares, bent by one pattern step.
     /// It is still a legal `(sm, ef)`, so the `UnKind::NormR` lookup finds a row
     /// and the region's arithmetic stays consistent -- `r` is simply the
     /// `rsqrt` of a number this token's reduction did not produce.  Only the
-    /// tie `nt.In(1) == G gnb.Out(0)` can catch it.
+    /// binding `nt.In(1) == G gnb.Out(0)` can catch it.
     Ms(usize),
     /// Stream II: one row's committed sum of squares replaced by the *next
     /// row's*.  Rows of one norm-tail region step through tokens at a fixed
     /// residue, so this gives two rows of one token two different `r`s, out of
-    /// values that are each some token's honest reduction.  Again only the tie
+    /// values that are each some token's honest reduction.  Again only the binding
     /// can catch it -- and this is the one the record's "one `r` per token"
     /// sentence rests on.
     MsRow(usize),
@@ -1326,14 +1326,14 @@ pub struct GlueRegion {
     /// tamper means the probe measured nothing, and the caller must say so
     /// rather than report the honest proof's verdict as the tamper's.
     pub fired: usize,
-    /// natural row order, for the Horner ties: per group, then per `outs` group
+    /// natural row order, for the Horner bindings: per group, then per `outs` group
     pub in_nat: Vec<Vec<(i64, i64)>>,
     pub out_nat: Vec<Vec<(i64, i64)>>,
     /// B11 stream M: the region's columns when the fill left them on the card,
     /// under `B7_M4_GFILL=1`. `pre` and `base` are then empty and this is where
-    /// the columns are. The three arrays above are *not* on the card: the ties
+    /// the columns are. The three arrays above are *not* on the card: the bindings
     /// and the boundary sides read them by row, they are a fifth of the
-    /// columns' bytes, and bringing them back is what lets the whole tie half
+    /// columns' bytes, and bringing them back is what lets the whole binding half
     /// stay exactly where it was.
     pub dev: Option<crate::devgfill::DevGlue>,
 }
@@ -1348,24 +1348,24 @@ impl GlueRegion {
         n << self.log_rows
     }
 
-    /// The values one tie accumulates, in natural row order.
-    pub fn tie_vals(&self, kind: TieKind) -> &[(i64, i64)] {
+    /// The values one binding accumulates, in natural row order.
+    pub fn binding_vals(&self, kind: BindingKind) -> &[(i64, i64)] {
         match kind {
-            TieKind::In(g) => &self.in_nat[g],
-            TieKind::Out(o) => &self.out_nat[o],
+            BindingKind::In(g) => &self.in_nat[g],
+            BindingKind::Out(o) => &self.out_nat[o],
         }
     }
-    /// The width of one tie's sequence within a row.
-    pub fn tie_width(&self, kind: TieKind) -> usize {
+    /// The width of one binding's sequence within a row.
+    pub fn binding_width(&self, kind: BindingKind) -> usize {
         match kind {
-            TieKind::In(g) => self.prog.groups[g].n,
-            TieKind::Out(o) => self.prog.outs[o].len(),
+            BindingKind::In(g) => self.prog.groups[g].n,
+            BindingKind::Out(o) => self.prog.outs[o].len(),
         }
     }
     /// The claim itself, recomputed from the witness rather than from the trace.
-    pub fn tie_claim(&self, spec: &TieSpec, lam: SecureField) -> SecureField {
-        let vals = self.tie_vals(spec.kind);
-        let w = self.tie_width(spec.kind);
+    pub fn binding_claim(&self, spec: &TieSpec, lam: SecureField) -> SecureField {
+        let vals = self.binding_vals(spec.kind);
+        let w = self.binding_width(spec.kind);
         let rows = 1usize << self.log_rows;
         let mut h = SecureField::zero();
         for j in 0..rows {
@@ -1385,7 +1385,7 @@ struct RowOut {
     cells: Vec<M31>,
     outs: Vec<u16>,
     /// the row's committed leaves and its named outputs, in natural row order and
-    /// as the columns actually hold them -- the Horner ties read these, because a
+    /// as the columns actually hold them -- the Horner bindings read these, because a
     /// committed `Eval` is bit-reversed
     in_nat: Vec<(i64, i64)>,
     out_nat: Vec<(i64, i64)>,
@@ -1519,7 +1519,7 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
                             fired += 1;
                         }
                     }
-                    // stream II: the two probes the `In(1)` tie exists for.
+                    // stream II: the two probes the `In(1)` binding exists for.
                     // Both leave a legal bf16 pattern, so the `NormR` lookup
                     // still finds its row and the region stays self-consistent.
                     if let Some(Tamper::Ms(t)) = tamper {
@@ -1842,7 +1842,7 @@ pub fn glue_region(w: &GlueWitness, prog: &Prog, round: Round, tag: &str,
             pre.push(eval_of(log_rows, col));
         }
     }
-    // the ties read the values in natural row order, per group
+    // the bindings read the values in natural row order, per group
     let mut in_nat: Vec<Vec<(i64, i64)>> =
         prog.groups.iter().map(|g| Vec::with_capacity(rows * g.n)).collect();
     let mut out_nat: Vec<Vec<(i64, i64)>> =
@@ -1898,7 +1898,7 @@ pub struct GlueRels {
 }
 
 pub struct GlueInteraction {
-    /// B11 stream M: columns of either kind. The ties are host accumulators and
+    /// B11 stream M: columns of either kind. The bindings are host accumulators and
     /// always will be; the LogUp half goes wherever `devfrac::frac_cols` sends
     /// it, which since this stream is the generated kernel.
     pub cols: Vec<crate::device::AnyCol<'static>>,
@@ -1934,19 +1934,19 @@ fn src_cols_any(prog: &Prog, s: &Src, round: Round) -> (usize, usize) {
     }
 }
 
-/// Where each tie's sequence sits in the fill's two row-flat natural arrays.
+/// Where each binding's sequence sits in the fill's two row-flat natural arrays.
 ///
-/// B11 stream N. The host reads a tie through `tie_vals`, which hands back the
+/// B11 stream N. The host reads a binding through `binding_vals`, which hands back the
 /// one regrouped vector for that group or output. The device has no regrouped
 /// vectors -- `b65_fill_glue` writes one array per kind, `n_leaves` or `out_w`
-/// `(sm, ef)` pairs to a row -- so a tie is named by where its sequence starts
+/// `(sm, ef)` pairs to a row -- so a binding is named by where its sequence starts
 /// in a row and how wide it is. Both offsets are the same running sums the fill
 /// itself uses: `FGroup::flat` for the leaves, and `out_slot`'s concatenation
 /// order for the outputs.
 ///
-/// The weights of every tie are packed into one array, so the kernel takes one
+/// The weights of every binding are packed into one array, so the kernel takes one
 /// upload rather than one per lane.
-fn tie_specs(r: &GlueRegion, t: &Tie) -> (Vec<crate::devacc::FAccGTie>, Vec<SecureField>) {
+fn binding_specs(r: &GlueRegion, t: &Binding) -> (Vec<crate::devacc::FAccGBinding>, Vec<SecureField>) {
     let prog = &r.prog;
     let n_leaves = prog.n_leaves();
     let out_w: usize = prog.outs.iter().map(|o| o.len()).sum();
@@ -1956,19 +1956,19 @@ fn tie_specs(r: &GlueRegion, t: &Tie) -> (Vec<crate::devacc::FAccGTie>, Vec<Secu
         .iter()
         .map(|spec| {
             let (src, off, width, stride) = match spec.kind {
-                TieKind::In(g) => {
+                BindingKind::In(g) => {
                     let off: usize = prog.groups[..g].iter().map(|x| x.n).sum();
                     (0u32, off, prog.groups[g].n, n_leaves)
                 }
-                TieKind::Out(o) => {
+                BindingKind::Out(o) => {
                     let off: usize = prog.outs[..o].iter().map(|x| x.len()).sum();
                     (1u32, off, prog.outs[o].len(), out_w)
                 }
             };
-            assert_eq!(width, spec.w.len(), "a tie's weight count is its width");
+            assert_eq!(width, spec.w.len(), "a binding's weight count is its width");
             let w_off = weights.len();
             weights.extend_from_slice(&spec.w);
-            crate::devacc::FAccGTie {
+            crate::devacc::FAccGBinding {
                 src,
                 off: off as u32,
                 width: width as u32,
@@ -1982,16 +1982,16 @@ fn tie_specs(r: &GlueRegion, t: &Tie) -> (Vec<crate::devacc::FAccGTie>, Vec<Secu
     (specs, weights)
 }
 
-/// The region's Horner ties and its LogUp columns, in the AIR's own order.
+/// The region's Horner bindings and its LogUp columns, in the AIR's own order.
 ///
 /// B11 stream M: `air` is this region's own eval, and it is here because the
 /// LogUp half now goes through `devfrac::frac_cols` like every other family's.
 /// The glue was the last component with no device route at all -- not for want
 /// of a kernel, which stream K's split emitter has compiled and installed since
 /// `b65_glue_eval` fit under the cap, but because nothing ever called the
-/// router. The ties stay on the host: they are a serial Horner fold over the
+/// router. The bindings stay on the host: they are a serial Horner fold over the
 /// region's own values, which is `devacc`'s shape and not this stream's.
-pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>,
+pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, binding: Option<&Binding>,
                         air: &GlueEval, gkr: bool) -> GlueInteraction {
     use stwo::prover::backend::simd::m31::PackedM31;
     let prog = &r.prog;
@@ -2000,19 +2000,19 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>,
     let sticky = round.needs_sticky();
     let mut cols = crate::device::ColSink::new();
     let mut claimed: Vec<SecureField> = vec![];
-    if let Some(t) = tie {
-        // B11 stream N: which side folds the ties. The device route needs the
+    if let Some(t) = binding {
+        // B11 stream N: which side folds the bindings. The device route needs the
         // fill's own natural arrays, so it exists exactly when this region
         // filled on the card; mode 2 builds both and asserts every cell and
         // every claim.
-        let m4t = r.dev.as_ref().filter(|_| crate::devacc::tie_mode() >= 1);
-        let host = m4t.is_none() || crate::devacc::tie_mode() == 2;
+        let m4t = r.dev.as_ref().filter(|_| crate::devacc::binding_mode() >= 1);
+        let host = m4t.is_none() || crate::devacc::binding_mode() == 2;
         let mut host_cols: Vec<crate::common::Eval> = vec![];
         let mut host_claims: Vec<SecureField> = vec![];
         if host {
             for spec in &t.specs {
-                let vals = r.tie_vals(spec.kind);
-                let wdt = r.tie_width(spec.kind);
+                let vals = r.binding_vals(spec.kind);
+                let wdt = r.binding_width(spec.kind);
                 let mut h = vec![SecureField::zero(); rows];
                 for j in 0..rows {
                     let mut f = SecureField::zero();
@@ -2029,7 +2029,7 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>,
         }
         match m4t {
             Some(d) => {
-                let (specs, weights) = tie_specs(r, t);
+                let (specs, weights) = binding_specs(r, t);
                 let got = crate::devacc::gtie(
                     d.d_in_nat.device_ptr as *const i32,
                     d.d_out_nat.device_ptr as *const i32,
@@ -2039,7 +2039,7 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>,
                     t.lam,
                 );
                 claimed = crate::devacc::place(
-                    &format!("glue {} ties", r.tag),
+                    &format!("glue {} bindings", r.tag),
                     got,
                     host.then_some((host_cols, host_claims)),
                     &mut cols,
@@ -2051,7 +2051,7 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>,
             }
         }
     }
-    let n_tie = cols.len();
+    let n_binding = cols.len();
 
     // the lookups, in exactly the order `evaluate` adds them
     let mut looks: Vec<L> = vec![];
@@ -2143,7 +2143,7 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>,
     // handed to the collector before the GKR proof ran, in `compose`'s own pass
     // -- see the comment there for why the two are in different places -- so
     // there are no running-sum columns to build and no claimed sum to carry.
-    // The tie columns above are untouched: they are Horner accumulators, they
+    // The binding columns above are untouched: they are Horner accumulators, they
     // are 0.4% of this family's interaction cells, and nothing about them is a
     // lookup.
     if gkr {
@@ -2163,7 +2163,7 @@ pub fn glue_interaction(r: &GlueRegion, rels: &GlueRels, tie: Option<&Tie>,
             crate::plogup::build(r.log_rows, n_pairs, fpair)
         });
     cols.extend_any(lcols);
-    debug_assert!(cols.len() > n_tie, "glue {}: no LogUp columns", r.tag);
+    debug_assert!(cols.len() > n_binding, "glue {}: no LogUp columns", r.tag);
     GlueInteraction { cols: cols.into_inner(), use_sum, claimed }
 }
 
@@ -2358,17 +2358,17 @@ pub struct Outcome {
     pub table_cells_pre: usize,
     pub table_cells_fresh: usize,
     pub region_cells: usize,
-    /// the glue component's own interaction cells: the Horner ties and the
+    /// the glue component's own interaction cells: the Horner bindings and the
     /// LogUp columns its lookups drag along (a pair of lookups is 4 columns)
     pub inter_cells: usize,
     pub n_columns: [usize; 3],
-    pub tie_ok: bool,
+    pub binding_ok: bool,
     pub trace_secs: f64,
 }
 
 impl Outcome {
     pub fn accepts(&self) -> bool {
-        self.proven.stark_ok && self.sums.cancels() && self.off_table == 0 && self.tie_ok
+        self.proven.stark_ok && self.sums.cancels() && self.off_table == 0 && self.binding_ok
             && self.bad_exp == 0
     }
     /// Cells the gadget adds per op, witness *and* LogUp columns, the way B6 and
@@ -2414,7 +2414,7 @@ impl Outcome {
             "odd_input_patterns": self.odd,
             "reference_checked": self.ref_n, "reference_ok": self.ref_ok,
             "reference_mismatch": self.ref_n - self.ref_ok,
-            "tie_ok": self.tie_ok,
+            "binding_ok": self.binding_ok,
             "columns": {"preprocessed": self.n_columns[0], "base": self.n_columns[1],
                         "interaction": self.n_columns[2],
                         "total": self.n_columns.iter().sum::<usize>()},
@@ -2425,13 +2425,13 @@ impl Outcome {
     }
 }
 
-/// The tie specs a standalone region carries: one per input group and one per
+/// The binding specs a standalone region carries: one per input group and one per
 /// `outs` group, with the plain descending weights -- the composed proof picks
 /// its own so that two differently tiled regions line up (see `compose::glue`).
-pub fn plain_ties(prog: &Prog, log_rows: u32, w: SecureField) -> Vec<TieSpec> {
+pub fn plain_bindings(prog: &Prog, log_rows: u32, w: SecureField) -> Vec<TieSpec> {
     let _ = log_rows;
     let mut specs = vec![];
-    let mut push = |kind: TieKind, width: usize| {
+    let mut push = |kind: BindingKind, width: usize| {
         // the value at flat position `q` weighs `w^(N-1-q)`: within a row the
         // weights descend, and the row step is `w^width`
         let ws: Vec<SecureField> =
@@ -2440,10 +2440,10 @@ pub fn plain_ties(prog: &Prog, log_rows: u32, w: SecureField) -> Vec<TieSpec> {
                              claimed: SecureField::zero() });
     };
     for (g, gr) in prog.groups.iter().enumerate() {
-        push(TieKind::In(g), gr.n);
+        push(BindingKind::In(g), gr.n);
     }
     for (oi, o) in prog.outs.iter().enumerate() {
-        push(TieKind::Out(oi), o.len());
+        push(BindingKind::Out(oi), o.len());
     }
     specs
 }
@@ -2516,8 +2516,8 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
     let ch = sess.draw_felts(2);
     let (w_ch, lam) = (ch[0], ch[1]);
     let notie = std::env::var("B10_GLUE_NOTIE").is_ok();
-    let specs = plain_ties(prog, region.log_rows, w_ch);
-    let tie0 = Tie { lam, specs: specs.clone() };
+    let specs = plain_bindings(prog, region.log_rows, w_ch);
+    let tie0 = Binding { lam, specs: specs.clone() };
     // B11 stream M: the eval the LogUp half lowers, built before the claims
     // exist. `compose` does the same thing for the same reason (`claims_for`'s
     // placeholders): a claimed sum enters constraints and never a lookup, so
@@ -2527,14 +2527,14 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
         norm: rels.norm.clone(), frac: rels.frac.clone(), pow: rels.pow.clone(),
         smul: rels.smul.clone(), un: rels.un.clone(), uns: rels.uns.clone(),
         val: rels.val.clone(),
-        tie: if notie { None } else { Some(tie0.clone()) }, bound: None,
+        binding: if notie { None } else { Some(tie0.clone()) }, bound: None,
         // the standalone gadget has no GKR arm; the flag lives in `compose`
         gkr: false,
     };
     let it = glue_interaction(&region, &rels, if notie { None } else { Some(&tie0) },
                               &air0, false);
     let inter_cells = it.cols.len() << region.log_rows;
-    let tie = Tie {
+    let binding = Binding {
         lam,
         specs: specs
             .iter()
@@ -2544,9 +2544,9 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
     };
 
     // an independent recomputation of every claim, from the witness rather than
-    // from the trace: a tie is only worth something if it is checkable
-    let tie_ok = notie
-        || tie.specs.iter().all(|s| region.tie_claim(s, lam) == s.claimed);
+    // from the trace: a binding is only worth something if it is checkable
+    let binding_ok = notie
+        || binding.specs.iter().all(|s| region.binding_claim(s, lam) == s.claimed);
 
     let mut sums = Sums { uses: it.use_sum, tables: SecureField::zero() };
     // B11 stream M: this rung is the SimdBackend probe path and commits through
@@ -2583,7 +2583,7 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
                    norm: rels.norm.clone(), frac: rels.frac.clone(), pow: rels.pow.clone(),
                    smul: rels.smul.clone(), un: rels.un.clone(), uns: rels.uns.clone(),
                    val: rels.val.clone(),
-                   tie: if notie { None } else { Some(tie) }, bound: None, gkr: false },
+                   binding: if notie { None } else { Some(binding) }, bound: None, gkr: false },
         it.use_sum,
     );
     let tcomps: Vec<FrameworkComponent<GTableEval>> = tkinds
@@ -2610,7 +2610,7 @@ pub fn run(w: &GlueWitness, prog: &Prog, round: Round, kmax: u32,
         off_table: tables.off_table, bad_exp: region.bad_exp, fired: region.fired,
         ref_ok: region.ref_ok, ref_n: region.ref_n, odd: w.odd,
         table_cells_pre, table_cells_fresh, region_cells, inter_cells,
-        n_columns, tie_ok, trace_secs,
+        n_columns, binding_ok, trace_secs,
     }
 }
 
@@ -2679,7 +2679,7 @@ pub fn check_tables(round: Round, samples: usize) -> Value {
 /// the composite is *bit-identical* to `tree_sum`.
 ///
 /// The canonical position of channel `c` of token `t` is `c * tokens + t`
-/// (channel-major), which is exactly what makes the Horner tie's weights plain
+/// (channel-major), which is exactly what makes the Horner binding's weights plain
 /// powers in both tilings: in this one the row index is `r * tokens + t` and the
 /// leaf `j` sits `j a tokens` positions later.
 #[derive(Clone, Copy, Debug)]

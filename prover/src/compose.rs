@@ -60,8 +60,8 @@ use crate::layer::{
     AoLayout, Layer, MatLayout, Tables, WALK_GROUPS, WalkLayout, ao_interaction, ao_region,
     mat_interaction, mat_region, walk_interaction, walk_region,
 };
-use crate::glue::{self, GKind, GTableEval, GlueEval, GlueRels, GlueTables, Kind, Prog, Tie,
-                  TieKind, TieSpec, Tiling, UnKind};
+use crate::glue::{self, GKind, GTableEval, GlueEval, GlueRels, GlueTables, Kind, Prog, Binding,
+                  BindingKind, TieSpec, Tiling, UnKind};
 use crate::layout::Shape;
 use crate::walk_air::{AO_SEL, AttnOutEval, EPOW_COLS, WALK_SEL, WalkEval, ao_chan, ao_sel,
                       walk_sel, walk_w};
@@ -302,7 +302,7 @@ pub struct Params {
     /// Stream H: the layer's residual-stream input and output are each committed
     /// in a tree of their own, so that two chunks' boundaries can be compared
     /// from bytes.  Needs the wiring family, since the boundary *is* its two
-    /// stream ties; absent, and a chunk composes exactly as it did before.
+    /// stream bindings; absent, and a chunk composes exactly as it did before.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bounds: bool,
     /// Stream AA (E11): the chunk's keys and values are committed in boundary
@@ -322,22 +322,22 @@ pub struct Params {
     pub kv_bind: bool,
     /// Stream E: publish the head's order-key claim.  It sits here rather than in
     /// `GlueParams` because a head dump carries no wiring columns at all -- the
-    /// two features share the tie challenge, not the witness.
+    /// two features share the binding challenge, not the witness.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub head_key: bool,
-    /// Stream E: compose the argmax region into this proof, tied to the head's
+    /// Stream E: compose the argmax region into this proof, bound to the head's
     /// key claim.  Implies `head_key` -- that claim is its counterparty.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub head_argmax: bool,
     /// the weaker statement ("the token attains the maximum"), which is what the
-    /// tie probe separates from the strict one
+    /// binding probe separates from the strict one
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub head_argmax_lax: bool,
     /// Stream BB (E11): the embedding gadget's vocabulary, and zero when the
     /// gadget is off -- which is what the plan reads as "no embedding region".
     /// The gadget proves that the layer's committed residual-stream input is
     /// row `tok[t]` of an embedding matrix pinned in tree 0, so it needs the
-    /// wiring family (its tie's counterparty is `glue_ties[stream_in]`) and it
+    /// wiring family (its binding's counterparty is `stream_bindings[stream_in]`) and it
     /// belongs on the layer-0 chunk of a block.  Skipped when zero, so every
     /// statement written without it is byte identical to one from a crate that
     /// never had the feature.
@@ -417,9 +417,9 @@ pub struct GlueParams {
     pub eps: u16,
     pub inv_d: u16,
     /// Stream E: make `o_out` and `d_out` the `o` and `down` dequant regions'
-    /// own published outputs, tied to the copies the wiring family commits.
+    /// own published outputs, bound to the copies the wiring family commits.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub deq_ties: bool,
+    pub bind_matmul_outputs: bool,
     /// Stream II (E11), stream KK's finding: this chunk is the `lm_head` chunk,
     /// so its wiring family is the *final* RMSNorm and nothing else -- one
     /// reduction pair and one tail, whose input is the last layer's committed
@@ -473,7 +473,7 @@ pub struct Fixed {
     /// but *compared*: `bounds-grid` refuses a grid whose chunks name two
     /// different models, and refuses two chunks at the same layer whose model
     /// hashes differ, so "two blocks of one layer used different weights" is
-    /// no longer unseen.  What ties the hash to the *proof* is the derived
+    /// no longer unseen.  What bindings the hash to the *proof* is the derived
     /// tree-0 root (`--expect-pre-roots`), which `b65 model-roots` computes
     /// from the same model.  `None` on a statement written before the field
     /// existed.
@@ -517,13 +517,13 @@ pub struct Claims {
     pub use_sums: Vec<[u32; 4]>,
     /// per table component, in table order
     pub table_sums: Vec<[u32; 4]>,
-    /// B10 step 2: per glue region, per tie, the Horner claim over the values it
+    /// B10 step 2: per glue region, per binding, the Horner claim over the values it
     /// carries.  The verifier's equalities between them are what say the residual
     /// stream is threaded; `glue.stream_in` and `glue.stream_out` name the two
     /// that are the layer's boundary.
     #[serde(default)]
-    pub glue_ties: Vec<Vec<[u32; 4]>>,
-    /// stream E: one per dequant output tie, in `GluePlan::out_ties` order --
+    pub stream_bindings: Vec<Vec<[u32; 4]>>,
+    /// stream E: one per dequant output binding, in `GluePlan::output_bindings` order --
     /// the value the `o` and `down` regions publish for their own bf16 outputs
     #[serde(default)]
     pub deq_out: Vec<[u32; 4]>,
@@ -541,7 +541,7 @@ pub struct Claims {
     /// Stream NN (NN-2): per band of `Plan::nn_qbands`, that **prefix** band's
     /// own Q claim.  Its counterparty is its group's corner, not a quantize
     /// region: `nn_q_ok` says the two folds agree, and the corner's is already
-    /// tied to the rotated query, so the prefix's is too.
+    /// bound to the rotated query, so the prefix's is too.
     #[serde(default)]
     pub band_q: Vec<[u32; 4]>,
     /// stream E: the head's order-key claim, when it is published
@@ -558,7 +558,7 @@ pub struct Claims {
     #[serde(default)]
     pub head_tok: Vec<[u32; 4]>,
     /// stream BB: the embedding region's Horner claim over the residual stream
-    /// it proved.  Equal to `glue_ties[stream_in]` is what says the row it
+    /// it proved.  Equal to `stream_bindings[stream_in]` is what says the row it
     /// proved is the row the layer consumed.
     #[serde(default)]
     pub embed_out: Vec<[u32; 4]>,
@@ -581,7 +581,7 @@ pub struct Claims {
     /// in the canonical channel-major order.
     #[serde(default)]
     pub walk_qx: Vec<[u32; 4]>,
-    /// Stream II (E11): the requantize↔dequant scale tie.  `rq_sc` is one claim
+    /// Stream II (E11): the requantize↔dequant scale binding.  `rq_sc` is one claim
     /// per seam over the scale that seam pinned to the attained maximum;
     /// `deq_sc` is one per *matmul* over the x-side scale its dequant used, and
     /// is empty on a chunk with no seams.  Indexed by matmul so the verifier
@@ -606,7 +606,7 @@ pub fn qm(v: SecureField) -> [u32; 4] {
 /// Stream QQ (log row 61): at emit time a claim the placeholder set does not
 /// supply is a defect, not a zero.
 ///
-/// Every region reads its tie claims through `.get(..)`, and the missing case
+/// Every region reads its binding claims through `.get(..)`, and the missing case
 /// used to be `SecureField::zero()`. That zero is not neutral: `Lower::ext`
 /// folds `x - 0` and `Ir::schedule` drops the dead slot with it, so the emitter
 /// installs a shape two instructions and one slot shorter than the one every
@@ -614,7 +614,7 @@ pub fn qm(v: SecureField) -> [u32; 4] {
 /// for the life of the store. It happened once on `b65_key_eval` (open item 21,
 /// the other direction: a claim the *witness* drove to zero) and again on
 /// `deq_sc` and `walk_qx`, which stream II added without extending
-/// `fill_tie_claims` -- ten of the wired C=4K chunk's thirteen fallback lines.
+/// `fill_binding_claims` -- ten of the wired C=4K chunk's thirteen fallback lines.
 ///
 /// So on the emit path the missing case panics and names the vector. On the
 /// prove path it stays a zero: a statement written before a claim existed still
@@ -632,7 +632,7 @@ pub fn claim_at(v: Option<[u32; 4]>, what: &str) -> SecureField {
             assert!(
                 !EMIT_STRICT.load(std::sync::atomic::Ordering::Relaxed),
                 "cudaemit: no placeholder for claim {what} -- every claim vector a plan \
-                 can carry must be filled in `cudagen::fill_tie_claims`, or the emitted \
+                 can carry must be filled in `cudagen::fill_binding_claims`, or the emitted \
                  shape folds the missing claim away and no chunk ever finds it"
             );
             SecureField::zero()
@@ -665,10 +665,10 @@ impl Claims {
         }
         v.extend(self.use_sums.iter().map(|x| unqm(*x)));
         v.extend(self.table_sums.iter().map(|x| unqm(*x)));
-        for g in &self.glue_ties {
+        for g in &self.stream_bindings {
             v.extend(g.iter().map(|x| unqm(*x)));
         }
-        // stream E, appended last: empty unless the dequant output ties are on,
+        // stream E, appended last: empty unless the dequant output bindings are on,
         // so the transcript is unchanged without them
         v.extend(self.deq_out.iter().map(|x| unqm(*x)));
         v.extend(self.head_key.iter().map(|x| unqm(*x)));
@@ -706,8 +706,8 @@ impl Claims {
 /// per slot, and the row step takes `k_in` inside a token and `k_bd` at its
 /// boundary.  Multiplying the accumulated steps out from row `(t, b)` to the
 /// last row gives `w^(N - 1 - c*tokens - t)` per value, which is the canonical
-/// stream weight the producing region's `Out(0)` tie already carries.
-fn rq_tie_w(w: SecureField, lam: SecureField, rp: &RqPlan,
+/// stream weight the producing region's `Out(0)` binding already carries.
+fn rq_binding_w(w: SecureField, lam: SecureField, rp: &RqPlan,
             claimed_in: SecureField, claimed_out: SecureField,
             claimed_sc: SecureField) -> crate::requant::RqTie {
     let n = (rp.tokens * rp.n) as i128;
@@ -719,7 +719,7 @@ fn rq_tie_w(w: SecureField, lam: SecureField, rp: &RqPlan,
         lam,
         claimed_in,
         claimed_out,
-        // stream II (E11): the scale tie's row step.  Both sides fold one value
+        // stream II (E11): the scale binding's row step.  Both sides fold one value
         // per token on their own `last` rows with the tokens descending, so
         // token `t` carries `w^t` either side and no other constant is needed.
         mu: w,
@@ -728,7 +728,7 @@ fn rq_tie_w(w: SecureField, lam: SecureField, rp: &RqPlan,
 }
 
 /// Stream NN: one quantize region's two Horner weight sets.
-fn q_tie_w(w: SecureField, lam: SecureField, qp: &QuantPlan, nh: usize,
+fn q_binding_w(w: SecureField, lam: SecureField, qp: &QuantPlan, nh: usize,
            claimed_in: SecureField, claimed_out: SecureField) -> crate::rope::QTie {
     let m_in = (qp.tokens * qp.n) as i128;
     let n_out = (qp.tokens * nh * qp.hd) as i128;
@@ -780,7 +780,7 @@ fn nn_band_cols(plan: &Plan, layer: &Layer) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
 /// Every weight is `w^(N - 1 - (t nh hd + hq hd + ch))` -- the token-major
 /// position on the **query-head** grid, which is the grid the bands hold and
 /// which the quantize region's `w_out` reaches through its replication sum.
-fn nn_band_ties(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
+fn nn_band_bindings(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
                 -> Option<(crate::attn_air::BandTie, crate::attn_air::BandTie,
                            crate::attn_air::BandTie)> {
     let k = plan.nn_bands.iter().position(|x| *x == b)?;
@@ -838,7 +838,7 @@ fn nn_band_ties(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
 /// same `w^(N - 1 - (t nh hd + hq hd + ch))` on both -- only the *layout* that
 /// scatters those cells over rows differs, and that is exactly what `pq` and
 /// `chunks` carry.  Equality of the two folds is therefore "the same queries",
-/// with no positional assumption beyond the one the corner's own tie already
+/// with no positional assumption beyond the one the corner's own binding already
 /// makes.
 fn nn_band_qtie(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
                 -> Option<crate::attn_air::BandTie> {
@@ -867,7 +867,7 @@ fn wpow(w: SecureField, e: i128) -> SecureField {
     if e >= 0 { w.pow(e as u128) } else { w.pow((-e) as u128).inverse() }
 }
 
-/// Stream E: one matmul's output-side weights, from the wiring family's own tie
+/// Stream E: one matmul's output-side weights, from the wiring family's own binding
 /// challenge -- the consumer builds its claim from the same `w`, which is what
 /// makes the two comparable.  The value at channel `c` of token `t` carries
 /// `w^(N - 1 - (c tokens + t))`; that splits into a per-slot weight and a row
@@ -964,7 +964,7 @@ pub struct QuantPlan {
     /// `Params::k_bits` for `k` and `V_BITS` for `v`.  It sizes the region's own
     /// division table, and `rope::qmax_of` reads B1's clamp off it.
     pub bits: u32,
-    /// `(glue region, tie)` publishing the bf16 side -- a rotation's `Out(0)`.
+    /// `(glue region, binding)` publishing the bf16 side -- a rotation's `Out(0)`.
     /// `None` for `v`, whose bf16 side is the `v` dequant region's own published
     /// output and is compared against `claims.deq_out` instead.
     pub producer: Option<(usize, usize)>,
@@ -984,7 +984,7 @@ pub struct RqPlan {
     pub name: String,
     /// index into `Plan::walks`
     pub walk: usize,
-    /// `(glue region, tie)` publishing the bf16 side
+    /// `(glue region, binding)` publishing the bf16 side
     pub producer: (usize, usize),
     pub n: usize,
     pub tokens: usize,
@@ -1008,10 +1008,10 @@ pub struct GlueRegionPlan {
     pub tag: String,
     pub prog: Prog,
     pub log_rows: u32,
-    /// per tie: what it accumulates, the within-row weight *exponents* and the
+    /// per binding: what it accumulates, the within-row weight *exponents* and the
     /// row-step exponent -- powers of the challenge the transcript draws, so the
     /// verifier builds the same weights the prover did
-    pub ties: Vec<(TieKind, Vec<u128>, u128)>,
+    pub bindings: Vec<(BindingKind, Vec<u128>, u128)>,
 }
 
 /// B6.5 open gap 1, as four regions and three equalities.
@@ -1027,11 +1027,11 @@ pub struct GlueRegionPlan {
 /// on the same row, so the residual stream is committed once and read by both;
 /// the three equalities are `gn1.roots == gn1b.in`, `gn1.xmid == gn2.in` and
 /// `gn2.roots == gn2b.in`.  What is left open is named in the record: the two
-/// norms' tails (`* r`, `* w`), the SwiGLU, and the ties from `o`'s and `down`'s
+/// norms' tails (`* r`, `* w`), the SwiGLU, and the bindings from `o`'s and `down`'s
 /// dequant regions into `o_out` and `d_out`.
 /// One equality the verifier checks between two regions' Horner claims.
 ///
-/// Stream II added `scale`, because one of the new ties compares sequences of
+/// Stream II added `scale`, because one of the new bindings compares sequences of
 /// different *lengths*: the norm tail carries one committed sum of squares per
 /// `(residue, token)` row and the reduction publishes one per token, so the
 /// tail's claim is the reduction's multiplied by `sum_res w^(...)`.  The factor
@@ -1041,7 +1041,7 @@ pub struct GlueRegionPlan {
 pub struct GlueEq {
     pub a: (usize, usize),
     pub b: (usize, usize),
-    /// exponents of the tie challenge whose powers sum to the factor `b` carries
+    /// exponents of the binding challenge whose powers sum to the factor `b` carries
     pub scale: Vec<i128>,
 }
 
@@ -1073,10 +1073,10 @@ pub struct GluePlan {
     /// accounting can name their cells apart from the reduction's
     pub tails: Vec<usize>,
     pub swiglu: Option<usize>,
-    /// stream E: `((region, tie), name)` per dequant output tie -- the wiring
+    /// stream E: `((region, binding), name)` per dequant output binding -- the wiring
     /// side's claim over `o_out` and over `d_out`, and the matmul whose region
     /// has to publish the same value
-    pub out_ties: Vec<OutTie>,
+    pub output_bindings: Vec<OutputBinding>,
     /// stream II: the head chunk's family (`gnf`, `gnfb`, `ntf`) instead of the
     /// layer's seven regions.  The witness build and the seam list both branch
     /// on it, and nothing else does.
@@ -1104,17 +1104,17 @@ pub struct RopeRegions {
 
 /// Stream E, generalised by stream JJ: one matmul's dequant output side.
 ///
-/// `at` is the wiring-family tie the output is compared against -- region index
-/// and tie index -- and it is `None` for the three whose consumer is not in the
+/// `at` is the wiring-family binding the output is compared against -- region index
+/// and binding index -- and it is `None` for the three whose consumer is not in the
 /// statement at all.  `q` and `k` feed the attention through RoPE, which no
 /// region proves, and `v` through a per-channel power-of-two requantize which no
 /// region proves either; those three publish their claim and the verifier has
 /// nothing to read it against yet (`briefs/jj-layerwire-out.md`'s record).
-pub struct OutTie {
+pub struct OutputBinding {
     pub name: &'static str,
     pub at: Option<(usize, usize)>,
     /// Stream NN: the counterparty is a quantize region's *input* claim rather
-    /// than a wiring-family tie -- `v`, whose dequant output is rounded straight
+    /// than a wiring-family binding -- `v`, whose dequant output is rounded straight
     /// into the band's V column with no rotation between.  An index into
     /// `Plan::quants`.
     pub quant: Option<usize>,
@@ -1145,7 +1145,7 @@ impl GluePlan {
     ///
     /// `stream_in` is the residual claim, and **stream UU took the hook**: with
     /// `--bounds` the head chunk commits tree 3 over exactly that claim
-    /// (`claims.glue_ties[0][0]`), which says the residual this chunk normalized
+    /// (`claims.stream_bindings[0][0]`), which says the residual this chunk normalized
     /// is the one the last layer's chunk published, and `bounds::chain_of`
     /// compares the two roots on the ordinary layer axis.  `stream_out` is the
     /// norm's output, which no chunk consumes, so `bounds::sides` gives the head
@@ -1160,8 +1160,8 @@ impl GluePlan {
         let lr1 = crate::common::log_rows_for(t.rows1(), 1);
         let lr2 = crate::common::log_rows_for(tok, 1);
         let (rows1, rows2) = (1usize << lr1, 1usize << lr2);
-        assert_eq!(rows1, a * tok, "the head norm's tie needs level 1 to tile exactly");
-        assert_eq!(rows2, tok, "the head norm's tie needs level 2 to tile exactly");
+        assert_eq!(rows1, a * tok, "the head norm's binding needs level 1 to tile exactly");
+        assert_eq!(rows2, tok, "the head norm's binding needs level 2 to tile exactly");
         let un_r = UnKind::NormR { inv_d: gp.inv_d, eps: gp.eps };
         let l1 = Prog::tree(nreal, t.b, UnKind::Square);
         let l2 = Prog::tree(a, a, UnKind::None);
@@ -1175,21 +1175,21 @@ impl GluePlan {
             .collect();
         let regions = vec![
             GlueRegionPlan { tag: "gnf".into(), prog: l1, log_rows: lr1,
-                             ties: vec![(TieKind::In(0), stream.clone(), 1),
-                                        (TieKind::Out(0), one.clone(), 1)] },
+                             bindings: vec![(BindingKind::In(0), stream.clone(), 1),
+                                        (BindingKind::Out(0), one.clone(), 1)] },
             GlueRegionPlan { tag: "gnfb".into(), prog: l2, log_rows: lr2,
-                             ties: vec![(TieKind::In(0), l2_in, 1),
-                                        (TieKind::Out(0), one.clone(), 1)] },
+                             bindings: vec![(BindingKind::In(0), l2_in, 1),
+                                        (BindingKind::Out(0), one.clone(), 1)] },
             GlueRegionPlan { tag: "ntf".into(), prog: tail, log_rows: lr1,
-                             ties: vec![(TieKind::In(0), stream.clone(), 1),
-                                        (TieKind::In(1), one, 1),
-                                        (TieKind::Out(0), stream, 1)] },
+                             bindings: vec![(BindingKind::In(0), stream.clone(), 1),
+                                        (BindingKind::In(1), one, 1),
+                                        (BindingKind::Out(0), stream, 1)] },
         ];
         let eqs = vec![GlueEq::plain((0, 1), (1, 0)),
                        GlueEq::plain((2, 0), (0, 0)),
                        GlueEq { a: (2, 1), b: (1, 1), scale: g_scale }];
         Self { t, tff: None, regions, eqs, uns, stream_in: (0, 0), stream_out: (2, 2),
-               tails: vec![2], swiglu: None, out_ties: vec![], head_norm: true,
+               tails: vec![2], swiglu: None, output_bindings: vec![], head_norm: true,
                ropes: vec![] }
     }
 
@@ -1216,24 +1216,24 @@ impl GluePlan {
                 tag: n1.into(),
                 prog: l1.clone(),
                 log_rows: lr1,
-                ties: vec![
-                    (TieKind::In(0), stream.clone(), 1),
-                    (TieKind::Out(0), one.clone(), 1),
-                    (TieKind::Out(1), stream.clone(), 1),
+                bindings: vec![
+                    (BindingKind::In(0), stream.clone(), 1),
+                    (BindingKind::Out(0), one.clone(), 1),
+                    (BindingKind::Out(1), stream.clone(), 1),
                 ],
             });
             regions.push(GlueRegionPlan {
                 tag: n2.into(),
                 prog: l2.clone(),
                 log_rows: lr2,
-                ties: vec![(TieKind::In(0), l2_in.clone(), 1),
-                           (TieKind::Out(0), one.clone(), 1)],
+                bindings: vec![(BindingKind::In(0), l2_in.clone(), 1),
+                           (BindingKind::Out(0), one.clone(), 1)],
             });
         }
         let mut eqs = vec![GlueEq::plain((0, 1), (1, 0)), GlueEq::plain((0, 2), (2, 0)),
                            GlueEq::plain((2, 1), (3, 0))];
         let mut uns = l1.un_kinds();
-        // ---- stream E: the dequant output ties -------------------------------
+        // ---- stream E: the dequant output bindings -------------------------------
         //
         // `gn1`'s group 1 *is* `o_out` and `gn2`'s is `d_out`, and neither has
         // ever carried a Horner claim -- the wiring family committed those
@@ -1242,22 +1242,22 @@ impl GluePlan {
         // dequant regions publish the same value from their own outputs.
         //
         // Stream JJ (E11): unconditional, and all seven.  `o` and `down` keep
-        // E's `In(1)` tie on the two reduction regions; `gate` and `up` are
+        // E's `In(1)` binding on the two reduction regions; `gate` and `up` are
         // read against the SwiGLU region's own `In(0)`/`In(1)`, which need no
-        // new tie because the region already publishes them; `q`, `k` and `v`
-        // publish a claim with no counterparty (see `OutTie`).  The list ends
+        // new binding because the region already publishes them; `q`, `k` and `v`
+        // publish a claim with no counterparty (see `OutputBinding`).  The list ends
         // up in `MAT_NAMES` order because `claims.deq_out` is pushed in matmul
         // order and the verifier reads the two side by side.
         let mut oside_at: Vec<(&'static str, Option<(usize, usize)>)> = vec![];
         for (ri, name) in [(0usize, "o"), (2usize, "down")] {
-            regions[ri].ties.push((TieKind::In(1), stream.clone(), 1));
-            oside_at.push((name, Some((ri, regions[ri].ties.len() - 1))));
+            regions[ri].bindings.push((BindingKind::In(1), stream.clone(), 1));
+            oside_at.push((name, Some((ri, regions[ri].bindings.len() - 1))));
         }
         // ---- stream E: the two norm tails ------------------------------------
         //
         // A tail's group 0 is the same block of the residual stream the
         // reduction's own group 0 is, in the same order and under the same
-        // weights, so the tie `nt.In(0) == gn.In(0)` says the tail scaled the
+        // weights, so the binding `nt.In(0) == gn.In(0)` says the tail scaled the
         // very values the reduction squared -- which is the half of "the norm
         // computed its own output" a committed column cannot fake.  `Out(0)` is
         // published for the requantize region that will read it.
@@ -1265,7 +1265,7 @@ impl GluePlan {
         // Stream II made the region unconditional and closed both of the gaps
         // the first build left.  `r` is no longer a committed leaf: group 1
         // commits the reduction's *answer* and `UnKind::NormR`'s lookup is
-        // `r = rsqrt(ms inv_d + eps)`, so the tie `nt.In(1) == G gnb.Out(0)`
+        // `r = rsqrt(ms inv_d + eps)`, so the binding `nt.In(1) == G gnb.Out(0)`
         // makes it the reduction's own answer -- and because every one of a
         // token's `a` rows is compared against that one reduction row, they
         // cannot carry different `r`s either.  `G` is the geometric sum over
@@ -1277,9 +1277,9 @@ impl GluePlan {
             let rows1 = 1usize << lr1;
             let rows2 = 1usize << lr2;
             assert_eq!(rows1, a * tok,
-                       "the norm tail's tie needs the level-1 region to tile exactly");
+                       "the norm tail's binding needs the level-1 region to tile exactly");
             assert_eq!(rows2, tok,
-                       "the norm tail's tie needs the level-2 region to tile exactly");
+                       "the norm tail's binding needs the level-2 region to tile exactly");
             let un_r = UnKind::NormR { inv_d: gp.inv_d, eps: gp.eps };
             if !uns.contains(&un_r) {
                 uns.push(un_r);
@@ -1295,9 +1295,9 @@ impl GluePlan {
                     tag: tag.into(),
                     prog: tail.clone(),
                     log_rows: lr1,
-                    ties: vec![(TieKind::In(0), stream.clone(), 1),
-                               (TieKind::In(1), one_pos.clone(), 1),
-                               (TieKind::Out(0), stream.clone(), 1)],
+                    bindings: vec![(BindingKind::In(0), stream.clone(), 1),
+                               (BindingKind::In(1), one_pos.clone(), 1),
+                               (BindingKind::Out(0), stream.clone(), 1)],
                 });
                 eqs.push(GlueEq::plain((i, 0), (gn, 0)));
                 eqs.push(GlueEq { a: (i, 1), b: (gnb, 1), scale: g_scale.clone() });
@@ -1309,7 +1309,7 @@ impl GluePlan {
         // Over `dff`, so it carries its own tiling.  Its three claims have no
         // counterparty inside the glue yet: group 0 is the gate matmul's
         // dequantized output, group 1 is `up`'s, and the output is what `down`
-        // requantizes.  All three land when the dequant ties and the requantize
+        // requantizes.  All three land when the dequant bindings and the requantize
         // placement do; until then the claims are published and compared against
         // B1's own columns, and the record says so.
         let mut tff = None;
@@ -1332,9 +1332,9 @@ impl GluePlan {
                 tag: "gsw".into(),
                 prog,
                 log_rows: crate::common::log_rows_for(t2.rows1(), 1),
-                ties: vec![(TieKind::In(0), ff.clone(), 1),
-                           (TieKind::In(1), ff.clone(), 1),
-                           (TieKind::Out(0), ff, 1)],
+                bindings: vec![(BindingKind::In(0), ff.clone(), 1),
+                           (BindingKind::In(1), ff.clone(), 1),
+                           (BindingKind::Out(0), ff, 1)],
             });
             // stream JJ: the gate/up seam.  `Prog::pairs` puts the unary on
             // group 0, so `In(0)` is the silu's operand -- `gate` -- and `In(1)`
@@ -1353,7 +1353,7 @@ impl GluePlan {
         // the block.
         //
         // The weights are the **token-major** canonical position `t n_out + c`
-        // and not the channel-major one every earlier tie uses.  That is the
+        // and not the channel-major one every earlier binding uses.  That is the
         // whole reason a single row step serves here: a (token, head) row's
         // leaves are `hd` consecutive positions, so a region's rows walk the
         // stream in order and the Horner is the flat one.  `oside_w_tok` puts
@@ -1383,15 +1383,15 @@ impl GluePlan {
                     tag: format!("rp{name}m"),
                     prog: Prog::rope_mul(hd),
                     log_rows: lr,
-                    ties: vec![(TieKind::In(0), win.clone(), hd as u128),
-                               (TieKind::Out(0), wmid.clone(), (2 * hd) as u128)],
+                    bindings: vec![(BindingKind::In(0), win.clone(), hd as u128),
+                               (BindingKind::Out(0), wmid.clone(), (2 * hd) as u128)],
                 });
                 regions.push(GlueRegionPlan {
                     tag: format!("rp{name}a"),
                     prog: Prog::rope_add(hd),
                     log_rows: lr,
-                    ties: vec![(TieKind::In(0), wmid, (2 * hd) as u128),
-                               (TieKind::Out(0), win, hd as u128)],
+                    bindings: vec![(BindingKind::In(0), wmid, (2 * hd) as u128),
+                               (BindingKind::Out(0), win, hd as u128)],
                 });
                 // the two halves are one rotation: the products the multiplies
                 // rounded are the values the add rounds
@@ -1405,7 +1405,7 @@ impl GluePlan {
             }
             // v is not rotated: its dequant output goes straight into the
             // quantize gadget, whose input claim `verify_composed` compares
-            // against `deq_out` directly (`OutTie::quant`).
+            // against `deq_out` directly (`OutputBinding::quant`).
             oside_at.push(("v", None));
         } else {
             // stream JJ: q, k and v publish without a counterparty, then the list
@@ -1414,10 +1414,10 @@ impl GluePlan {
                 oside_at.push((n, None));
             }
         }
-        let out_ties: Vec<OutTie> = crate::layer::MAT_NAMES
+        let output_bindings: Vec<OutputBinding> = crate::layer::MAT_NAMES
             .iter()
             .filter_map(|n| oside_at.iter().find(|(m, _)| m == n))
-            .map(|(name, at)| OutTie {
+            .map(|(name, at)| OutputBinding {
                 name,
                 at: *at,
                 // filled in by `Plan::new`, which is where the quantize regions
@@ -1436,21 +1436,21 @@ impl GluePlan {
             stream_out: (2, 2),
             tails,
             swiglu,
-            out_ties,
+            output_bindings,
             head_norm: false,
             ropes,
         }
     }
 
-    /// The tie specs, with the claims the statement carries filled in.
-    pub fn ties(&self, w: SecureField, lam: SecureField, claims: &Claims) -> Vec<Tie> {
+    /// The binding specs, with the claims the statement carries filled in.
+    pub fn bindings(&self, w: SecureField, lam: SecureField, claims: &Claims) -> Vec<Binding> {
         self.regions
             .iter()
             .enumerate()
-            .map(|(i, r)| Tie {
+            .map(|(i, r)| Binding {
                 lam,
                 specs: r
-                    .ties
+                    .bindings
                     .iter()
                     .enumerate()
                     .map(|(k, (kind, we, se))| TieSpec {
@@ -1458,8 +1458,8 @@ impl GluePlan {
                         w: we.iter().map(|e| w.pow(*e)).collect(),
                         step: w.pow(*se),
                         claimed: claim_at(
-                            claims.glue_ties.get(i).and_then(|g| g.get(k)).copied(),
-                            "glue_ties",
+                            claims.stream_bindings.get(i).and_then(|g| g.get(k)).copied(),
+                            "stream_bindings",
                         ),
                     })
                     .collect(),
@@ -1930,7 +1930,7 @@ impl Plan {
         let mut quants = vec![];
         if let (Some(g), Some(rp)) = (glue.as_ref(), p.rope.as_ref()) {
             assert!(p.corner,
-                    "the q/k/v ties read the corner band's own columns; --rope needs --corner");
+                    "the q/k/v bindings read the corner band's own columns; --rope needs --corner");
             assert!(p.nh % rp.nkv == 0, "nh={} is not a multiple of nkv={}", p.nh, rp.nkv);
             assert_eq!(rp.inv(p.hd).len(), p.hd / 2, "inv_freq must be hd/2 long");
             for (i, (name, heads, bits)) in
@@ -1968,7 +1968,7 @@ impl Plan {
                 });
             }
         }
-        // Stream H: the boundary is the wiring family's two stream ties, so it
+        // Stream H: the boundary is the wiring family's two stream bindings, so it
         // exists exactly when the statement asks for it and the family is there.
         let bounds = match (&glue, p.bounds) {
             (Some(g), true) => crate::bounds::sides(g),
@@ -1993,13 +1993,13 @@ impl Plan {
         } else {
             vec![]
         };
-        // Stream BB (E11): the embedding gadget.  It ties to the wiring
+        // Stream BB (E11): the embedding gadget.  It bindings to the wiring
         // family's `stream_in` claim, so a statement that asks for it without
         // the wiring family is a loud configuration error rather than a proof
         // with nothing to compare against.
         let emb = (p.embed_vocab > 0).then(|| {
             let g = glue.as_ref()
-                .expect("`--embed` ties to the wiring family's stream input; it needs the glue");
+                .expect("`--embed` bindings to the wiring family's stream input; it needs the glue");
             assert!(p.embed_per_row > 0, "`--embed` needs a channel-block target");
             crate::embed::EmbLayout::choose(g.t.d, p.s, p.embed_vocab, p.embed_per_row)
         });
@@ -2026,7 +2026,7 @@ impl Plan {
             let g = glue.as_mut().expect("the quantize regions need the wiring family");
             for (qi, q) in quants.iter().enumerate() {
                 if q.producer.is_none() {
-                    if let Some(t) = g.out_ties.iter_mut().find(|t| t.name == q.name) {
+                    if let Some(t) = g.output_bindings.iter_mut().find(|t| t.name == q.name) {
                         t.quant = Some(qi);
                     }
                 }
@@ -2044,7 +2044,7 @@ impl Plan {
                 let pr = mat_lays[mi].per_row;
                 let fits = mat_lays[mi].lead == 0 && pr <= p.hd && p.hd % pr == 0;
                 if specs[mi].variant == DeqVariant::Fold && !nn_bands.is_empty() && fits {
-                    if let Some(t) = g.out_ties.iter_mut().find(|t| t.name == "v") {
+                    if let Some(t) = g.output_bindings.iter_mut().find(|t| t.name == "v") {
                         t.band = true;
                     }
                 }
@@ -2128,31 +2128,31 @@ impl Plan {
     /// How many secure felts the transcript draws after the relations, and where
     /// the corner's key challenge sits.  It goes *last* so a proof without the
     /// corner draws exactly what it drew before.
-    /// Stream E: the tie challenge pair is drawn for the wiring family *or* for
+    /// Stream E: the binding challenge pair is drawn for the wiring family *or* for
     /// a head-key claim on its own, since a head dump has no wiring columns.
-    pub fn has_ties(&self) -> bool {
+    pub fn has_bindings(&self) -> bool {
         self.glue.is_some() || self.p.head_key
     }
 
-    /// Stream E: the index of the matmul the argmax region is tied to, when it
-    /// is composed.  Its layout is that matmul's, so the tie is positionwise.
+    /// Stream E: the index of the matmul the argmax region is bound to, when it
+    /// is composed.  Its layout is that matmul's, so the binding is positionwise.
     pub fn argmax_mat(&self) -> Option<usize> {
         self.p.head_argmax
             .then(|| self.p.mats.iter().position(|m| m.name == "lm_head"))
             .flatten()
     }
     pub fn n_challenges(&self) -> usize {
-        3 + if self.has_ties() { 2 } else { 0 } + if self.p.corner { 1 } else { 0 }
+        3 + if self.has_bindings() { 2 } else { 0 } + if self.p.corner { 1 } else { 0 }
     }
     pub fn corner_challenge_at(&self) -> usize {
-        3 + if self.has_ties() { 2 } else { 0 }
+        3 + if self.has_bindings() { 2 } else { 0 }
     }
 
     /// Stream E: does this matmul's dequant region publish an output-side claim?
     /// Both sides ask the plan, so the preprocessed list, the region, the AIR and
     /// the verifier cannot disagree about it.
     pub fn has_oside(&self, name: &str) -> bool {
-        self.glue.as_ref().is_some_and(|g| g.out_ties.iter().any(|t| t.name == name))
+        self.glue.as_ref().is_some_and(|g| g.output_bindings.iter().any(|t| t.name == name))
             || (self.p.head_key && name == "lm_head")
     }
 
@@ -2192,7 +2192,7 @@ impl Plan {
     /// (`deq_out_open`).
     pub fn oside_band(&self, name: &str) -> bool {
         self.glue.as_ref()
-            .is_some_and(|g| g.out_ties.iter().any(|t| t.name == name && t.band))
+            .is_some_and(|g| g.output_bindings.iter().any(|t| t.name == name && t.band))
     }
 
     pub fn oside_kind(&self, name: &str) -> crate::dequant::OKind {
@@ -2824,12 +2824,12 @@ pub struct BuiltComponents {
     pub chans: Vec<FrameworkComponent<ChanEval>>,
     pub keys: Vec<FrameworkComponent<KeyEval>>,
     pub rows: Vec<FrameworkComponent<RowEval>>,
-    /// B11 stream S, lever 3: one univariate IOP per link height, and the tie
+    /// B11 stream S, lever 3: one univariate IOP per link height, and the binding
     /// component that pins its columns to the base columns at OODS. Empty and
     /// `None` off the GKR arm (and on the emit and probe paths, which have no
     /// artifact to derive them from).
     pub links: Vec<FrameworkComponent<crate::gkrlink::LinkEval>>,
-    pub link_tie: Option<crate::gkrlink::LinkTie>,
+    pub link_binding: Option<crate::gkrlink::LinkTie>,
     pub ao: FrameworkComponent<AttnOutEval>,
     pub mats: Vec<FrameworkComponent<DequantEval>>,
     pub walks: Vec<FrameworkComponent<WalkEval>>,
@@ -3040,7 +3040,7 @@ impl BuiltComponents {
         for l in &self.links {
             v.push(l);
         }
-        if let Some(t) = &self.link_tie {
+        if let Some(t) = &self.link_binding {
             v.push(t);
         }
         v.push(&self.ao);
@@ -3098,7 +3098,7 @@ impl BuiltComponents {
         for l in &self.links {
             v.push(l);
         }
-        if let Some(t) = &self.link_tie {
+        if let Some(t) = &self.link_binding {
             v.push(t);
         }
         v.push(&self.ao);
@@ -3207,7 +3207,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         let pow = plan.powers(b, r, s, rv, r_corner);
         let bc = claims.bands[b];
         // stream NN: the corner bands' own K, Q and V claims
-        let nn = nn_band_ties(plan, b, w_glue, claims);
+        let nn = nn_band_bindings(plan, b, w_glue, claims);
         // stream NN (NN-2): a prefix band's Q claim, against its group's corner
         let nn_q = nn_band_qtie(plan, b, w_glue, claims);
         // B11 stream S, lever 1: on the GKR arm a band component carries no
@@ -3258,10 +3258,10 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     // B11 stream S, lever 3: the link components allocate right after the
     // bands, matching where the prover commits their columns.
     //
-    // B11 stream U, lever 3: the *tie* is built lower down, after the dequant
+    // B11 stream U, lever 3: the *binding* is built lower down, after the dequant
     // components exist, because a dequant region's folded weights name columns
     // in that region's own span. The allocation order -- what the statement
-    // depends on -- is unchanged; only where the tie reads the spans back moves.
+    // depends on -- is unchanged; only where the binding reads the spans back moves.
     let mut links = vec![];
     if let Some(hl) = link {
         for l in hl {
@@ -3326,7 +3326,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 rels: sub,
                 yside: Some(YSide { rv_pow, rv_step, s, claimed_h: unqm(claims.mat_h[mi]) }),
                 // stream E: the output side, on the matmuls the plan names.  The
-                // claims arrive in the same order the plan lists the ties, which
+                // claims arrive in the same order the plan lists the bindings, which
                 // is mat order -- `o` before `down` -- and the assert below is
                 // what says so rather than trusting it.
                 oside: plan.has_oside(&m.name).then(|| {
@@ -3337,8 +3337,8 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         claims.head_key.first().copied()
                     } else {
                         // the claims arrive in mat order and the plan lists the
-                        // ties in the same order, `o` before `down`
-                        plan.glue.as_ref().unwrap().out_ties.iter()
+                        // bindings in the same order, `o` before `down`
+                        plan.glue.as_ref().unwrap().output_bindings.iter()
                             .position(|t| t.name == m.name)
                             .and_then(|k| claims.deq_out.get(k).copied())
                     };
@@ -3452,7 +3452,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     // the order the prover commits its columns in, so the two cannot diverge
     let mut glue = vec![];
     if let (Some(gp), Some(gr)) = (&plan.glue, &rels.glue) {
-        let ties = gp.ties(w_glue, lam_glue, claims);
+        let bindings = gp.bindings(w_glue, lam_glue, claims);
         for (i, r) in gp.regions.iter().enumerate() {
             glue.push(FrameworkComponent::<GlueEval>::new(
                 alloc,
@@ -3468,7 +3468,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     un: gr.un.clone(),
                     uns: gr.uns.clone(),
                     val: gr.val.clone(),
-                    tie: Some(ties[i].clone()),
+                    binding: Some(bindings[i].clone()),
                     // Stream H: a region carries a boundary side when the plan
                     // named it one.  The sides are registered in `stream_in`,
                     // `stream_out` order and the components in region order, so
@@ -3489,14 +3489,14 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         }
     }
 
-    // B11 stream S, lever 3, moved down by streams U and V: the tie, from the spans
+    // B11 stream S, lever 3, moved down by streams U and V: the binding, from the spans
     // the allocator handed out above.
-    let mut link_tie = None;
+    let mut link_binding = None;
     if let Some(hl) = link {
         let span_of = |locs: &[stwo::core::pcs::TreeSubspan], tree: usize| {
             locs.iter().find(|sp| sp.tree_index == tree)
                 .map(|sp| sp.col_start)
-                .expect("a component with no span in the tree the tie reads")
+                .expect("a component with no span in the tree the binding reads")
         };
         // band -> index into `rows` (the bands that carry a per-token region)
         let mut row_of = vec![usize::MAX; plan.rows_band.len()];
@@ -3507,7 +3507,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 ri += 1;
             }
         }
-        // Stream PP (E11): the tie reads the *global* mask, so its `(tree,
+        // Stream PP (E11): the binding reads the *global* mask, so its `(tree,
         // column)` pairs are physical -- the base trace is tree 2 and the
         // interaction tree 3.  Its preprocessed reads are indices into the
         // concatenated preprocessed space (the shape tree's columns then the
@@ -3630,7 +3630,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 q_at: t2, coeff_at: t2 + 4,
             });
         }
-        link_tie = Some(crate::gkrlink::LinkTie { heights, pre_idx });
+        link_binding = Some(crate::gkrlink::LinkTie { heights, pre_idx });
     }
 
     let exp_t = FrameworkComponent::<ExpTableEval>::new(
@@ -3699,7 +3699,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     let mut rq_tabs = vec![];
     if let Some(rr) = &rels.rq {
         for (k, rp) in plan.rqs.iter().enumerate() {
-            let tie = rq_tie_w(w_glue, lam_glue, rp,
+            let binding = rq_binding_w(w_glue, lam_glue, rp,
                                claim_at(claims.rq_in.get(k).copied(), "rq_in"),
                                claim_at(claims.rq_out.get(k).copied(), "rq_out"),
                                claim_at(claims.rq_sc.get(k).copied(), "rq_sc"));
@@ -3719,7 +3719,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     scl3: rr.scl3.clone(),
                     r15: rels.range(15).clone(),
                     rqv: Some(rr.rqv.clone()),
-                    tie: Some(tie),
+                    binding: Some(binding),
                 },
                 next_use(claims),
             ));
@@ -3727,7 +3727,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         // stream NN: the quantize regions, between the seams and their shared
         // tables -- the same order `Plan::pre_ids` and the component lists use
         for (k, qp) in plan.quants.iter().enumerate() {
-            let tie = q_tie_w(w_glue, lam_glue, qp, p.nh,
+            let binding = q_binding_w(w_glue, lam_glue, qp, p.nh,
                               claim_at(claims.nn_in.get(k).copied(), "nn_in"),
                               claim_at(claims.nn_out.get(k).copied(), "nn_out"));
             // stream NN-3: this side's own division table, and the family's own
@@ -3745,7 +3745,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     rq3: qr.div[plan.q_tab_at(qp.bits)].clone(),
                     rqv: rr.rqv.clone(),
                     r15: rels.range(15).clone(),
-                    tie: Some(tie),
+                    binding: Some(binding),
                 },
                 next_use(claims),
             ));
@@ -3817,17 +3817,17 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         }
     }
 
-    // stream E: the argmax, tied to the head's key claim.  It shares the layer's
+    // stream E: the argmax, bound to the head's key claim.  It shares the layer's
     // 16-bit range table and the head dequant's step selectors, so it adds one
     // component and no table.
     let argmax = plan.argmax_mat().map(|mi| {
         let lay = plan.mat_lays[mi];
         let m = &plan.p.mats[mi];
-        let tie = crate::argmax::ATie {
+        let binding = crate::argmax::ArgmaxBinding {
             claimed: claim_at(claims.am_key.first().copied(), "am_key"),
             claimed_tok: claim_at(claims.head_tok.first().copied(), "head_tok"),
             tag: m.name.clone(),
-            ..argmax_tie_w(w_glue, m.tokens, m.n_out, lay.per_row)
+            ..argmax_binding_w(w_glue, m.tokens, m.n_out, lay.per_row)
         };
         FrameworkComponent::<crate::argmax::ArgmaxEval>::new(
             alloc,
@@ -3836,7 +3836,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 per_row: lay.per_row,
                 lax: plan.p.head_argmax_lax,
                 rk: rels.range(crate::argmax::KEY_BITS).clone(),
-                tie: Some(tie),
+                binding: Some(binding),
             },
             next_use(claims),
         )
@@ -3845,14 +3845,14 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     // stream BB: the embedding gadget, after the argmax and after everything
     // else.  The use region takes the last `use_sums` cursor position and the
     // table region the last `table_sums` slot, which is what keeps both lists
-    // append-only.  Its tie reads the wiring family's own `w` and `lam`, so it
+    // append-only.  Its binding reads the wiring family's own `w` and `lam`, so it
     // draws no challenge of its own.
     let (embed, emb_tab) = match (&plan.emb, &rels.emb) {
         (Some(l), Some(er)) => {
             let g = plan.glue.as_ref().expect("the embedding gadget needs the wiring family");
-            let mut tie = crate::embed::tie_w(w_glue, lam_glue, g.t.d, p.s, l);
-            tie.claimed = claim_at(claims.embed_out.first().copied(), "embed_out");
-            tie.claimed_tok = claim_at(claims.embed_tok.first().copied(), "embed_tok");
+            let mut binding = crate::embed::binding_w(w_glue, lam_glue, g.t.d, p.s, l);
+            binding.claimed = claim_at(claims.embed_out.first().copied(), "embed_out");
+            binding.claimed_tok = claim_at(claims.embed_tok.first().copied(), "embed_tok");
             let em = FrameworkComponent::<crate::embed::EmbedEval>::new(
                 alloc,
                 crate::embed::EmbedEval {
@@ -3860,7 +3860,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     per_row: l.pe,
                     rel: er.clone(),
                     rel_ef: rels.range(crate::embed::EF_BITS).clone(),
-                    tie,
+                    binding,
                 },
                 next_use(claims),
             );
@@ -3876,21 +3876,21 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     };
 
 
-    BuiltComponents { chans, keys, rows, links, link_tie, ao, mats, walks, glue, exp_t, tables,
+    BuiltComponents { chans, keys, rows, links, link_binding, ao, mats, walks, glue, exp_t, tables,
                       gtables, argmax, embed, emb_tab, rqs: rq_comps, quants: quant_comps,
                       rq_tabs, pows,
                       has_rows: plan.rows_band.clone() }
 }
 
-/// Stream E: the argmax side's tie weights -- the mirror of the head dequant's
+/// Stream E: the argmax side's binding weights -- the mirror of the head dequant's
 /// output side.  Its index map ascends the vocabulary (`i = (chunks-1-b) pr + sl`)
 /// where the dequant's descends, so the ordinary row step is the *inverse* of the
 /// output side's and the boundary step differs in the token term's sign.
-fn argmax_tie_w(w: SecureField, tokens: usize, vocab: usize, per_row: usize)
-                -> crate::argmax::ATie {
+fn argmax_binding_w(w: SecureField, tokens: usize, vocab: usize, per_row: usize)
+                -> crate::argmax::ArgmaxBinding {
     let n = (tokens * vocab) as i128;
     let (tok, pr, v) = (tokens as i128, per_row as i128, vocab as i128);
-    crate::argmax::ATie {
+    crate::argmax::ArgmaxBinding {
         w: (0..per_row)
             .map(|sl| wpow(w, n - 1 - (v - pr) * tok - sl as i128 * tok))
             .collect(),
@@ -3920,8 +3920,8 @@ pub struct Composed {
     pub family_cells: Value,
     pub n_columns: [usize; 3],
     /// B10 step 2: the glue regions' own reference and B1 comparisons, and the
-    /// tie claims each of them recomputed from the witness rather than the trace
-    pub glue_ties_ok: bool,
+    /// binding claims each of them recomputed from the witness rather than the trace
+    pub stream_bindings_ok: bool,
     /// Stream H: what the boundary trees cost this chunk, or null when the flag
     /// was off and there are none
     pub bounds: Value,
@@ -3944,12 +3944,12 @@ pub struct ProverTamper {
     pub norm_row: Option<usize>,
     /// B10 step 2: corrupt one glue region's own copy of the stream it shares
     /// with another region -- `(region index, value index)`.  Everything inside
-    /// the region stays consistent, so what has to reject is the tie.
+    /// the region stays consistent, so what has to reject is the binding.
     pub glue_stream: Option<(usize, usize)>,
     /// a tamper inside one glue region's arithmetic, by region index
     pub glue: Option<(usize, crate::glue::Tamper)>,
     /// Stream H: corrupt one cell of *one* boundary tree, leaving the region it
-    /// is tied to alone -- `(which side, which cell)`, side 0 being the input
+    /// is bound to alone -- `(which side, which cell)`, side 0 being the input
     /// and side 1 the output.  Nothing else in the chunk changes, so what has to
     /// reject is that side's equality constraint: the probe that says the root
     /// is bound to the proof and not merely appended to it.
@@ -3963,11 +3963,11 @@ pub struct ProverTamper {
     /// `(region index, value index)` into `o_out` for `gn1` or `d_out` for
     /// `gn2`.  The region recomputes its add from the corrupted value, so
     /// everything inside the glue stays consistent and the only thing that can
-    /// catch it is the dequant output tie.
+    /// catch it is the dequant output binding.
     pub glue_add: Option<(usize, usize)>,
     /// Stream II: a probe inside one requantize seam -- `(seam index, what)`.
     /// Each leaves the region internally consistent and aims at one of its two
-    /// ties, or at the scale lookup.
+    /// bindings, or at the scale lookup.
     pub rq: Option<(usize, crate::requant::RqTamper)>,
     /// Stream II, control 3: bend one cell of a norm tail's *preprocessed*
     /// weight block.  The region recomputes `h` from the bent weight, so every
@@ -3983,7 +3983,7 @@ pub struct ProverTamper {
     pub rope_w: Option<usize>,
     /// Stream NN: a probe inside one quantize region -- `(region index, what)`.
     /// Each leaves the region internally consistent and aims at one of its two
-    /// ties, at the division table, or at `pre_root`.
+    /// bindings, at the division table, or at `pre_root`.
     pub quant: Option<(usize, crate::rope::QTamper)>,
     /// Stream NN: bend one cell of a **band's** own committed K, Q or V and
     /// rebuild the band around it, so the attention it proves is honest and the
@@ -3995,7 +3995,7 @@ pub struct ProverTamper {
     /// Stream BB: a tamper inside the composed embedding region.  `TokRow` is
     /// the aimed one -- the id moved to another valid entry with the committed
     /// row recomputed to match, so every constraint inside the region holds and
-    /// only the tie to the layer's `bin` rejects.
+    /// only the binding to the layer's `bin` rejects.
     pub embed: Option<crate::embed::Tamper>,
     /// Stream Z, the four wired-site bends.  Each bends exactly one committed
     /// cell after the honest value is derived, so the constraint that pins the
@@ -4286,7 +4286,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
 
     crate::util::m4_add("gen/dequant", m4_t.elapsed().as_secs_f64());
 
-    // Stream E: the argmax region, on the head dequant's own layout so the tie
+    // Stream E: the argmax region, on the head dequant's own layout so the binding
     // is positionwise.  Its range lookups go on the layer's 16-bit table, so its
     // multiplicities are bumped into that table's vector the way the wiring
     // family's go into `NORM` and `FRAC`.
@@ -4311,14 +4311,14 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
 
     // Stream BB: the embedding gadget.  Its use side commits the layer's own
     // residual-stream input -- the wiring family's `gn1` group 0, value for
-    // value -- so that the tie it publishes and the one the wiring family
+    // value -- so that the binding it publishes and the one the wiring family
     // publishes are two claims over the same sequence.  Its `ef` range lookups
     // go on the layer's 8-bit table, exactly as the argmax's go on the 16-bit
     // one.
     let m4_t = std::time::Instant::now();
     let emb_region = plan.emb.map(|l| {
         let gc = layer.glue.as_ref()
-            .expect("`--embed` ties to the wiring family; extract with `--glue`");
+            .expect("`--embed` bindings to the wiring family; extract with `--glue`");
         let tab = layer.embed_tab.as_ref()
             .expect("`--embed` needs `embed.u16` in the dump");
         let tok = layer.tok_in.as_ref().expect("`--embed` needs `tok_in.i32` in the dump");
@@ -4359,7 +4359,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         // in `Layer::synth_glue`, which also rewires the matmul inputs to be
         // the family's own outputs -- JJ's marker-plus-substitution route is
         // gone, and `synth_glue` sets `o_out`/`d_out` to the `o` and `down`
-        // dequant references so JJ's output ties still bite on the desk.
+        // dequant references so JJ's output bindings still bite on the desk.
         assert_eq!(gc.d, gp.t.d, "the witness's d disagrees with the glue params");
         let mut gt = GlueTables::new(p.kmax, plan.round, &gp.uns);
         gt.norm = tables.norm.clone();
@@ -4369,7 +4369,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         let rows1 = t.rows1();
         let mut mismatch = vec![];
         // what the two reduction regions read as their stream, kept so a tail
-        // region reads the identical block -- the tie compares those, and B1's
+        // region reads the identical block -- the binding compares those, and B1's
         // own column is the separate check
         let mut tail_in: Vec<Vec<u16>> = vec![];
         // stream II: and each norm's own sum of squares, one per token, which is
@@ -4422,7 +4422,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             let r1 = crate::glue::glue_region(&w1, &prog1, plan.round, &tag1, &mut gt, tam1);
             crate::util::m4_add("gen/glue_region", t_gr.elapsed().as_secs_f64());
             // what the region computed is what the next one reads: that is what
-            // the tie says, and it is checked against B1's own column here.
+            // the binding says, and it is checked against B1's own column here.
             // The head chunk's level 1 has no add, so there is no second output
             // group and nothing to compare -- its own reference is the tail's.
             let got = if gp.head_norm { vec![] } else { t.unlay(&r1.outs[1]) };
@@ -4554,8 +4554,8 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                        "the gate matmul's width is not the SwiGLU's dff");
             // The two matmuls' dequantized outputs, read through the dequant
             // region's own reference so this region consumes exactly what that
-            // region proves.  What is *not* here is the tie pinning them to it:
-            // that is the open dequant tie, and until it lands these leaves are
+            // region proves.  What is *not* here is the binding pinning them to it:
+            // that is the open dequant binding, and until it lands these leaves are
             // pinned only by their VAL lookups.
             // B11 stream L, anatomy: this is `tokens * d` calls to `deq_ref`,
             // twice -- 4.2 M of them on a C=4K chunk's `gn1` -- and it was a
@@ -4580,7 +4580,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // Stream JJ (E11): the SwiGLU seam's control.  One of the region's
             // two committed input copies is bent and the product is recomputed
             // from it, so every constraint inside the region still holds and
-            // only the tie against the gate (or up) dequant region's published
+            // only the binding against the gate (or up) dequant region's published
             // output can reject.  `vi` past `n` aims at `up`.
             if let Some((ri, vi)) = tamper.glue_add {
                 if ri == i {
@@ -4634,7 +4634,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         // Two regions per side, in the plan's own order.  A row is one
         // (token, head) and its `hd` leaves are that head's slice of the
         // matmul's dequant output, so the row walks `hd` consecutive
-        // token-major positions and the tie is a flat Horner.  `cos` and
+        // token-major positions and the binding is a flat Horner.  `cos` and
         // `sgnsin` are preprocessed and depend on the token's **absolute**
         // position, `pos0 + t`.
         if let Some(rp) = &p.rope {
@@ -4689,7 +4689,7 @@ different rotation", inv.len(), 2 * hd * p.s);
                 let n_out = rr.heads * hd;
                 let rows = rr.tokens * rr.heads;
                 // the dequant region's own reference, which is exactly what its
-                // `Out(0)` claim folds -- so the tie below is between two folds
+                // `Out(0)` claim folds -- so the binding below is between two folds
                 // of one sequence and not between two computations of it
                 let t_dq = std::time::Instant::now();
                 let mut deq = vec![0u16; rr.tokens * n_out];
@@ -4701,7 +4701,7 @@ different rotation", inv.len(), 2 * hd * p.s);
                 crate::util::m4_add("gen/rope_deqref", t_dq.elapsed().as_secs_f64());
                 // the control on the producer side: one dequant output copy
                 // bent, the whole rotation recomputed around it, so every
-                // constraint inside both regions still holds and only the tie
+                // constraint inside both regions still holds and only the binding
                 // against the matmul's own published output can reject
                 if let Some((ri, vi)) = tamper.glue_add {
                     if ri == rr.mul {
@@ -4762,7 +4762,7 @@ different rotation", inv.len(), 2 * hd * p.s);
     //
     // Each reads its producing region's *computed* output -- not a column of
     // the dump -- so what the seam requantizes is what the wiring family just
-    // proved, and the tie is what says the walk multiplied the result.  The
+    // proved, and the binding is what says the walk multiplied the result.  The
     // per-token scale is the dump's own `jx`/`sx`, i.e. the same field element
     // the matmul's dequant region commits, which is what leaves the remaining
     // scale seam a one-constraint job.
@@ -4789,7 +4789,7 @@ different rotation", inv.len(), 2 * hd * p.s);
     //
     // q and k read the rotation's own output, v its matmul's dequant reference:
     // in both cases the region consumes what another region *proved*, not a
-    // column of the dump, so the input tie compares two folds of one sequence.
+    // column of the dump, so the input binding compares two folds of one sequence.
     // `want` is the bands' own committed integers, gathered onto the query-head
     // grid -- a reference count and nothing the AIR reads.
     let m4_t = std::time::Instant::now();
@@ -5527,7 +5527,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let n_ch = plan.n_challenges();
     let ch = sess.draw_felts(n_ch);
     let (r, s, rv) = (ch[0], ch[1], ch[2]);
-    let (w_glue, lam_glue) = if plan.has_ties() {
+    let (w_glue, lam_glue) = if plan.has_bindings() {
         (ch[3], ch[4])
     } else {
         (SecureField::zero(), SecureField::zero())
@@ -5682,7 +5682,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // the verifier's own; the claims are what this pass computes, so the
         // builder is handed a blank statement and its `claimed` fields are
         // unused here.
-        let nn_t = nn_band_ties(&plan, b, w_glue, &Claims::default());
+        let nn_t = nn_band_bindings(&plan, b, w_glue, &Claims::default());
         // stream NN (NN-2): and a prefix band's Q claim alone
         let nn_qt = nn_band_qtie(&plan, b, w_glue, &Claims::default());
         let nn_bind = match (nn_t.as_ref(), nn_qt.as_ref()) {
@@ -5817,7 +5817,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
         claims.gkr = Some(b);
     }
-    // B11 stream S, lever 3: one univariate IOP per height ties the GKR's
+    // B11 stream S, lever 3: one univariate IOP per height bindings the GKR's
     // input-layer claims to the committed base columns. The fold challenge is
     // drawn right after the sumcheck -- the verifier draws at the same spot --
     // and the columns join the interaction tree right after the bands, where
@@ -6002,7 +6002,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let m4_t = std::time::Instant::now();
     claims.deq_sc = vec![[0u32; 4]; if plan.rqs.is_empty() { 0 } else { layer.mats.len() }];
     for (mi, (m, reg)) in layer.mats.iter().zip(&mat_regions).enumerate() {
-        // stream E: the output side rides on the wiring family's tie challenge,
+        // stream E: the output side rides on the wiring family's binding challenge,
         // so it exists exactly when that family does and the plan says this
         // matmul publishes one
         let ow = plan.has_oside(&m.name).then(|| {
@@ -6015,7 +6015,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // and a fold region's second shared column is not `es` -- it is
         // `dent = 2^(G_t - alpha)`, the token half of the divisor.  Folding it
         // would compare two different quantities and the honest proof would not
-        // prove.  The tie is named open instead (`rq_scale_open`); closing it
+        // prove.  The binding is named open instead (`rq_scale_open`); closing it
         // wants `es` committed beside `dent` with a power-of-two lookup pinning
         // the one to the other, which is a column and a table this stream did
         // not add.
@@ -6108,10 +6108,10 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     crate::util::m4_add("int/walks", m4_t.elapsed().as_secs_f64());
     let m4_t = std::time::Instant::now();
-    // the glue regions' ties and lookups, in component order
+    // the glue regions' bindings and lookups, in component order
     if let (Some(gp), Some(gr)) = (&plan.glue, &rels.glue) {
         let blank = Claims::default();
-        let specs = gp.ties(w_glue, lam_glue, &blank);
+        let specs = gp.bindings(w_glue, lam_glue, &blank);
         for (i, reg) in glue_regions.iter().enumerate() {
             let t_ig = std::time::Instant::now();
             let it = crate::glue::glue_interaction(reg, gr, Some(&specs[i]),
@@ -6120,7 +6120,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             inter_all.extend(it.cols);
             inter_mark(&format!("glue/{}", reg.tag), &inter_all, &mut inter_seen,
                        &mut inter_split);
-            claims.glue_ties.push(it.claimed.iter().map(|v| qm(*v)).collect());
+            claims.stream_bindings.push(it.claimed.iter().map(|v| qm(*v)).collect());
             // B11 stream V, lever 3: with the collector owning this region's
             // lookups there is no claimed sum to carry -- the GKR's per-site
             // sum stands exactly where it stood, in `sums_cancel`.
@@ -6271,16 +6271,16 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
 
     // stream II: the requantize seams' interaction columns, before the two ends'.  Within
     // a seam the AIR reads its two Horner accumulators before it finalizes its
-    // LogUp, so the tie columns come before the fraction columns here too; the
+    // LogUp, so the binding columns come before the fraction columns here too; the
     // seams' shared tables follow, in `Plan::pre_ids`' order.
     let m4_t = std::time::Instant::now();
     if let Some(rr) = rels.rq.as_ref() {
         for (k, reg) in rq_regions.iter().enumerate() {
-            let tie = rq_tie_w(w_glue, lam_glue, &plan.rqs[k],
+            let binding = rq_binding_w(w_glue, lam_glue, &plan.rqs[k],
                                SecureField::zero(), SecureField::zero(),
                                SecureField::zero());
             let (cols, use_sum, cin, cout, csc) = crate::requant::rq_interaction(
-                reg, &tie, &rels.qnz, &rr.rq3, &rr.rq4, &rr.scl2, &rr.scl3,
+                reg, &binding, &rels.qnz, &rr.rq3, &rr.rq4, &rr.scl2, &rr.scl3,
                 rels.range(15), &rr.rqv);
             inter_all.extend(crate::device::host_cols(cols));
             claims.rq_in.push(qm(cin));
@@ -6294,11 +6294,11 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // and the preprocessed ids put them
         for (k, reg) in q_regions.iter().enumerate() {
             let qp = &plan.quants[k];
-            let tie = q_tie_w(w_glue, lam_glue, qp, p.nh,
+            let binding = q_binding_w(w_glue, lam_glue, qp, p.nh,
                               SecureField::zero(), SecureField::zero());
             let qr = rels.qq.as_ref().expect("the quantize regions draw their own tables");
             let (cols, use_sum, cin, cout) = crate::rope::q_interaction(
-                reg, &tie, qp.hd, &qr.qnz, &qr.div[plan.q_tab_at(qp.bits)],
+                reg, &binding, qp.hd, &qr.qnz, &qr.div[plan.q_tab_at(qp.bits)],
                 rels.range(15), &rr.rqv);
             inter_all.extend(crate::device::host_cols(cols));
             claims.nn_in.push(qm(cin));
@@ -6380,18 +6380,18 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // evaluating a 2^23 polynomial on a 2^16 domain -- which is exactly how it
     // failed the first time.
 
-    // stream E: the argmax's tie column then its lookups, the order the AIR
+    // stream E: the argmax's binding column then its lookups, the order the AIR
     // reads them, and its use sum last of all -- the component is last too
     let m4_t = std::time::Instant::now();
     if let (Some(r), Some(mi)) = (am_region.as_ref(), plan.argmax_mat()) {
         let m = &plan.p.mats[mi];
-        let tie = crate::argmax::ATie {
+        let binding = crate::argmax::ArgmaxBinding {
             claimed: SecureField::zero(),
             claimed_tok: SecureField::zero(),
             tag: m.name.clone(),
-            ..argmax_tie_w(w_glue, m.tokens, m.n_out, plan.mat_lays[mi].per_row)
+            ..argmax_binding_w(w_glue, m.tokens, m.n_out, plan.mat_lays[mi].per_row)
         };
-        let (tcols, claimed, claimed_tok) = crate::argmax::tie_col(r, m.tokens, &tie);
+        let (tcols, claimed, claimed_tok) = crate::argmax::binding_col(r, m.tokens, &binding);
         inter_all.extend(crate::device::host_cols(tcols));
         claims.am_key.push(qm(claimed));
         claims.head_tok.push(qm(claimed_tok));
@@ -6407,14 +6407,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // stream BB: the embedding gadget's interaction columns, last of all,
     // because its two components are last of all.  Within the use region the
     // AIR reads the two Horner accumulators before it finalizes its LogUp, so
-    // the tie columns come before the fraction columns here too; the table
+    // the binding columns come before the fraction columns here too; the table
     // region's single column follows, matching the component order.
     let m4_t = std::time::Instant::now();
     if let (Some(r), Some(er)) = (emb_region.as_ref(), rels.emb.as_ref()) {
-        let mut tie = crate::embed::tie_w(w_glue, lam_glue, r.d, r.tokens, &r.lay);
-        let (tcols, hc, gc) = crate::embed::tie_cols(r, &tie);
-        tie.claimed = hc;
-        tie.claimed_tok = gc;
+        let mut binding = crate::embed::binding_w(w_glue, lam_glue, r.d, r.tokens, &r.lay);
+        let (tcols, hc, gc) = crate::embed::binding_cols(r, &binding);
+        binding.claimed = hc;
+        binding.claimed_tok = gc;
         inter_all.extend(crate::device::host_cols(tcols));
         claims.embed_out.push(qm(hc));
         claims.embed_tok.push(qm(gc));
@@ -6429,13 +6429,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     crate::util::m4_add("int/embed", m4_t.elapsed().as_secs_f64());
 
-    // an independent recomputation of every tie claim, from the region's witness
-    // rather than from its trace: a tie is only worth something if it is checkable
-    let glue_ties_ok = match (&plan.glue, &rels.glue) {
+    // an independent recomputation of every binding claim, from the region's witness
+    // rather than from its trace: a binding is only worth something if it is checkable
+    let stream_bindings_ok = match (&plan.glue, &rels.glue) {
         (Some(gp), Some(_)) => {
-            let specs = gp.ties(w_glue, lam_glue, &claims);
-            glue_regions.iter().zip(&specs).all(|(reg, tie)| {
-                tie.specs.iter().all(|sp| reg.tie_claim(sp, lam_glue) == sp.claimed)
+            let specs = gp.bindings(w_glue, lam_glue, &claims);
+            glue_regions.iter().zip(&specs).all(|(reg, binding)| {
+                binding.specs.iter().all(|sp| reg.binding_claim(sp, lam_glue) == sp.claimed)
             })
         }
         _ => true,
@@ -6514,7 +6514,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // rescales by one scale and quantizes by another commits a tree 0 that
         // is not the statement's and `root_ok` rejects it.  `mismatch` is the
         // count of (head, channel) sites where the two disagree.
-        "sv_tie": match q_regions.iter().zip(&plan.quants).find(|(_, qp)| qp.name == "v") {
+        "sv_binding": match q_regions.iter().zip(&plan.quants).find(|(_, qp)| qp.name == "v") {
             Some((r, qp)) => {
                 let (nh, hd) = (layer.ao.nh, layer.ao.hd);
                 let mut bad = 0usize;
@@ -6527,7 +6527,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                     }
                 }
                 // and the dump's own two loads of `jv.i32`, which is what a
-                // real chunk's tie rests on
+                // real chunk's binding rests on
                 let refbad = layer.rope.as_ref()
                     .map(|rc| (0..nh * hd).filter(|i| rc.jv[*i] != layer.ao.jv[*i]).count());
                 json!({"sites": nh * hd, "mismatch": bad, "ok": bad == 0,
@@ -6579,11 +6579,11 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // matters, how many of the integers it *derived* from the producer's
         // output equal the activation the walk actually committed.  On a real
         // dump that is a B1 reference check: a non-zero count is the two sides
-        // disagreeing about the forward pass, which the tie then rejects.
+        // disagreeing about the forward pass, which the binding then rejects.
         "requant": rq_regions.iter().zip(&plan.rqs).map(|(r, rp)| json!({
             "seam": r.tag,
             "producer": {"region": plan.glue.as_ref().map(|g| g.regions[rp.producer.0].tag.clone()),
-                         "tie": rp.producer.1},
+                         "binding": rp.producer.1},
             "variant": r.v.name(),
             "n": r.n, "tokens": r.tokens,
             "layout": {"per_row": r.lay.per_row, "chunks": r.lay.chunks,
@@ -6821,7 +6821,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         },
         family_cells,
         n_columns,
-        glue_ties_ok,
+        stream_bindings_ok,
         bounds: bounds_report,
         kv_bounds: kv_report,
         glue_tamper_fired,
@@ -6848,18 +6848,18 @@ pub struct Verdict {
     /// `gn1.xmid == gn2.in`, `gn2.roots == gn2b.in` -- the residual stream is
     /// threaded, from serialized bytes alone
     pub glue_ok: Vec<bool>,
-    /// stream E, one per dequant output tie: the region's own output claim equals
+    /// stream E, one per dequant output binding: the region's own output claim equals
     /// the wiring family's claim over the same values
     pub deq_out_ok: Vec<bool>,
     /// Stream JJ: the dequant outputs that publish a claim with no counterparty
     /// in this statement -- `q`, `k` and `v`, whose consumers reach the
     /// attention through RoPE and a per-channel requantize that no region
     /// proves.  Reported so a reader cannot mistake seven published claims for
-    /// seven checked ties; it is not part of `accepts`.
+    /// seven checked bindings; it is not part of `accepts`.
     pub deq_out_open: Vec<String>,
     /// stream E: the argmax's key claim equals the head dequant's -- "the token
     /// this row emits is the maximum of the logits *this layer computed*"
-    pub head_tie_ok: bool,
+    pub head_binding_ok: bool,
     /// stream BB: the embedding region's claim equals the wiring family's
     /// `stream_in` claim -- "the residual stream this layer consumed is row
     /// `tok[t]` of the pinned embedding matrix".  True when the gadget is off.
@@ -6913,8 +6913,8 @@ pub struct Verdict {
     /// puts it at another.  True when the statement declares no block.
     pub nn_pos_ok: bool,
     /// Stream NN (NN-2), per prefix band of `Plan::nn_qbands`: "this band's own
-    /// Q column is its group's corner's".  The corner's Q is tied to the
-    /// rotated query (`nn_out_ok`), so this carries the tie to the band that
+    /// Q column is its group's corner's".  The corner's Q is bound to the
+    /// rotated query (`nn_out_ok`), so this carries the binding to the band that
     /// attends to the cache -- which NN-1 left untied, and asymmetrically so.
     pub nn_q_ok: Vec<bool>,
     /// Stream NN: true when the chunk carries the wiring family but no rotation
@@ -6960,7 +6960,7 @@ impl Verdict {
             && self.sizes_ok && self.qk_ok.iter().all(|x| *x) && self.den_ok.iter().all(|x| *x)
 
             && self.walk_ok.iter().all(|x| *x) && self.glue_ok.iter().all(|x| *x)
-            && self.deq_out_ok.iter().all(|x| *x) && self.head_tie_ok && self.embed_ok
+            && self.deq_out_ok.iter().all(|x| *x) && self.head_binding_ok && self.embed_ok
             && self.embed_tok_ok && self.head_tok_ok
             && self.rq_in_ok.iter().all(|x| *x) && self.rq_out_ok.iter().all(|x| *x)
             && self.rq_scale_ok.iter().all(|x| *x) && self.ao_q_ok
@@ -6972,7 +6972,7 @@ impl Verdict {
                sums_cancel: false, qk_ok: vec![],
                den_ok: vec![], av_ok: false, den_link_ok: false, walk_ok: vec![],
                sizes_ok: false, glue_ok: vec![false], deq_out_ok: vec![false],
-               deq_out_open: vec![], head_tie_ok: false, embed_ok: false,
+               deq_out_open: vec![], head_binding_ok: false, embed_ok: false,
                embed_tok_ok: false, head_tok_ok: false,
                rq_in_ok: vec![false], rq_out_ok: vec![false], rq_scale_ok: vec![false],
                rq_scale_open: vec![],
@@ -7009,9 +7009,9 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         || claims.walk_acc.iter().zip(&plan.walks).any(|(c, w)| c.len() != w.mats.len())
         || claims.use_sums.len() != plan.n_use()
         || claims.table_sums.len() != plan.n_table_sums()
-        || claims.glue_ties.len() != n_glue
+        || claims.stream_bindings.len() != n_glue
         || plan.glue.as_ref().is_some_and(|g| {
-            g.regions.iter().zip(&claims.glue_ties).any(|(r, c)| r.ties.len() != c.len())
+            g.regions.iter().zip(&claims.stream_bindings).any(|(r, c)| r.bindings.len() != c.len())
         })
         || fixed.sizes.len() != plan.n_trees()
         // stream BB: one claim each, or none at all
@@ -7025,7 +7025,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         || claims.rq_out.len() != plan.rqs.len()
         || claims.walk_qx.len()
             != if plan.glue.is_some() { plan.walks.len() } else { 0 }
-        // stream II: the scale tie -- one per seam, and one per matmul when the
+        // stream II: the scale binding -- one per seam, and one per matmul when the
         // chunk carries any seam at all
         || claims.rq_sc.len() != plan.rqs.len()
         || claims.deq_sc.len() != if plan.rqs.is_empty() { 0 } else { p.mats.len() }
@@ -7064,7 +7064,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let n_ch = plan.n_challenges();
     let f = ch.draw_secure_felts(n_ch);
     let (r, s, rv) = (f[0], f[1], f[2]);
-    let (w_glue, lam_glue) = if plan.has_ties() {
+    let (w_glue, lam_glue) = if plan.has_bindings() {
         (f[3], f[4])
     } else {
         (SecureField::zero(), SecureField::zero())
@@ -7096,7 +7096,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
             return Verdict::rejected("the GKR proved a different number of sites than the plan has");
         }
         // B11 stream S, lever 3: the fold challenge, at the same transcript
-        // position the prover drew it, then the per-height parameters the tie
+        // position the prover drew it, then the per-height parameters the binding
         // constraints assert. A malformed artifact is a rejection here.
         let alpha = ch.draw_secure_felts(1)[0];
         match crate::gkrlink::link_params(&plan, &rels, &insts, &artifact, alpha) {
@@ -7222,31 +7222,31 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
                     // stream II: `a == factor * b`, the factor being the plan's
                     // own geometric sum over the tail's `a` rows per token.
                     // With no factor this is the equality it always was.
-                    unqm(claims.glue_ties[e.a.0][e.a.1])
-                        == e.factor(w_glue) * unqm(claims.glue_ties[e.b.0][e.b.1])
+                    unqm(claims.stream_bindings[e.a.0][e.a.1])
+                        == e.factor(w_glue) * unqm(claims.stream_bindings[e.b.0][e.b.1])
                 })
                 .collect(),
-            Some(claims.glue_ties[g.stream_in.0][g.stream_in.1]),
-            Some(claims.glue_ties[g.stream_out.0][g.stream_out.1]),
+            Some(claims.stream_bindings[g.stream_in.0][g.stream_in.1]),
+            Some(claims.stream_bindings[g.stream_out.0][g.stream_out.1]),
         ),
         None => (vec![], None, None),
     };
-    // stream E: and one per dequant output tie -- the `o` and `down` regions'
+    // stream E: and one per dequant output binding -- the `o` and `down` regions'
     // own published outputs against the copies the wiring family committed.
     // This is what makes `o_out` and `d_out` the dequant's results rather than
     // two columns that merely happen to agree.
     //
-    // Stream JJ (E11): one entry per tie that HAS a counterparty, in the plan's
+    // Stream JJ (E11): one entry per binding that HAS a counterparty, in the plan's
     // order.  `deq_out_open` names the outputs that publish a claim the
     // statement cannot yet read -- they are not counted as passing.
     let (deq_out_ok, deq_out_open): (Vec<bool>, Vec<String>) = match &plan.glue {
         Some(g) => {
             let mut ok = vec![];
             let mut open = vec![];
-            for (k, t) in g.out_ties.iter().enumerate() {
+            for (k, t) in g.output_bindings.iter().enumerate() {
                 match (t.at, t.quant) {
                     (Some((ra, ta)), _) => ok.push(
-                        claims.deq_out.get(k).copied() == Some(claims.glue_ties[ra][ta])),
+                        claims.deq_out.get(k).copied() == Some(claims.stream_bindings[ra][ta])),
                     // stream NN: `v` has no rotation between its dequant and
                     // its band column, so its counterparty is the quantize
                     // region's input claim and `nn_in_ok` is where it is read
@@ -7274,7 +7274,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // stream E: the argmax compared the head's own output.  Both claims are
     // Horner sums over the same values with mirrored weights, so equality is the
     // whole statement -- and it is checked from the parsed claims alone.
-    let head_tie_ok = if plan.p.head_argmax {
+    let head_binding_ok = if plan.p.head_argmax {
         !claims.am_key.is_empty() && claims.am_key.first() == claims.head_key.first()
     } else {
         true
@@ -7296,7 +7296,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
             .enumerate()
             .map(|(k, rp)| {
                 claims.rq_in.get(k).copied()
-                    == Some(claims.glue_ties[rp.producer.0][rp.producer.1])
+                    == Some(claims.stream_bindings[rp.producer.0][rp.producer.1])
             })
             .collect(),
         None => vec![],
@@ -7307,7 +7307,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         .enumerate()
         .map(|(k, rp)| claims.rq_out.get(k).copied() == claims.walk_qx.get(rp.walk).copied())
         .collect();
-    // Stream II (E11): the scale tie.  The per-token activation scale is
+    // Stream II (E11): the scale binding.  The per-token activation scale is
     // committed twice and, before this, never compared: once by the requantize
     // region, where `with_max` pins it to the ceil-divide of the attained
     // maximum of the seam's own input, and once as the x-side scale of every
@@ -7378,12 +7378,12 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         _ => true,
     };
 
-    // stream BB: the embedding gadget's tie.  Both claims are Horner sums over
+    // stream BB: the embedding gadget's binding.  Both claims are Horner sums over
     // the same sequence of stream values under the same weights, so equality is
     // the whole statement -- and it is checked from the parsed claims alone.
     let embed_ok = match (&plan.emb, &plan.glue) {
         (Some(_), Some(g)) => {
-            claims.embed_out.first() == Some(&claims.glue_ties[g.stream_in.0][g.stream_in.1])
+            claims.embed_out.first() == Some(&claims.stream_bindings[g.stream_in.0][g.stream_in.1])
         }
         (Some(_), None) => false,
         (None, _) => true,
@@ -7445,12 +7445,12 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         let (mut a, mut b) = (vec![], vec![]);
         for (k, qp) in plan.quants.iter().enumerate() {
             let want_in = match qp.producer {
-                Some((ri, ti)) => Some(claims.glue_ties[ri][ti]),
+                Some((ri, ti)) => Some(claims.stream_bindings[ri][ti]),
                 None => {
-                    // `v`: the counterparty is the dequant output tie the plan
+                    // `v`: the counterparty is the dequant output binding the plan
                     // marked with this region's index
                     plan.glue.as_ref().and_then(|g| {
-                        g.out_ties.iter().position(|t| t.quant == Some(k))
+                        g.output_bindings.iter().position(|t| t.quant == Some(k))
                             .and_then(|j| claims.deq_out.get(j).copied())
                     })
                 }
@@ -7478,7 +7478,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // rows differs -- so equality is "the same queries", and the corner's side
     // is already the rotated query by `nn_out_ok`.  The difference of the two
     // folds is a polynomial in `w_glue` whose coefficients were fixed before
-    // `w_glue` was drawn, which is the argument every tie in this family rests
+    // `w_glue` was drawn, which is the argument every binding in this family rests
     // on.
     let nn_q_ok: Vec<bool> = plan.nn_qbands.iter().enumerate().map(|(k, b)| {
         let corner = plan.nn_bands.iter().position(|c| plan.group[*c] == plan.group[*b]);
@@ -7491,7 +7491,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
 
     Verdict { stark_ok, root_ok, model_root_ok,
               sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
-              deq_out_open, head_tie_ok, embed_ok, embed_tok_ok, head_tok_ok,
+              deq_out_open, head_binding_ok, embed_ok, embed_tok_ok, head_tok_ok,
               rq_in_ok, rq_out_ok, rq_scale_ok, rq_scale_open, ao_q_open, ao_q_ok,
               nn_in_ok, nn_out_ok, nn_pos_ok, nn_q_ok, nn_open,
               sizes_ok, glue_ok, stream_in, stream_out, bound_roots, bound_sides, error,
@@ -7507,7 +7507,7 @@ pub enum EdgeState {
     /// the verifier compares the producer's claim with the consumer's, or the
     /// two sides are columns of one AIR component
     Bound,
-    /// the consumer reads a value nothing ties to its producer: the prover
+    /// the consumer reads a value nothing bindings to its producer: the prover
     /// asserts it and the verifier checks nothing
     Unbound,
     /// neither side is in this statement (a head chunk has no attention, a
@@ -7551,7 +7551,7 @@ impl Plan {
     /// The binding table of this statement: every edge of `EDGES` marked bound,
     /// unbound or absent, decided from the plan fields `verify_composed` reads
     /// for the same edge -- the residual-stream equalities (`glue.eqs`), the
-    /// requantize seams (`rqs`), the dequant output ties (`glue.out_ties`), the
+    /// requantize seams (`rqs`), the dequant output bindings (`glue.output_bindings`), the
     /// quantize regions and their key tiles (`quants`, `nn_bands`), the `o`
     /// walk's width, the boundary trees (`bounds`, `kv`), the embedding layout
     /// (`emb`) and the argmax (`argmax_mat`).  `layer` is the segment's declared
@@ -7568,8 +7568,8 @@ impl Plan {
         let attention = !head && !self.shapes.is_empty();
         let has_mat = |n: &str| p.mats.iter().any(|m| m.name == n);
         let seam = |n: &str| self.rqs.iter().any(|r| r.name == n);
-        let tied = |n: &str| {
-            g.is_some_and(|g| g.out_ties.iter().any(|t| t.name == n && t.at.is_some()))
+        let bound = |n: &str| {
+            g.is_some_and(|g| g.output_bindings.iter().any(|t| t.name == n && t.at.is_some()))
         };
         let no_family = || {
             Some(String::from(
@@ -7607,7 +7607,7 @@ impl Plan {
                 } else {
                     put(n, Unbound, Some(format!(
                         "no requantize seam for {name}: the matmul's int8 input is not \
-                         tied to its producer's output")));
+                         bound to its producer's output")));
                 }
             } else if head {
                 if n == 2 {
@@ -7631,7 +7631,7 @@ impl Plan {
         if !attention {
             put(3, Absent, if head { head_only() } else { Some("no attention".into()) });
         } else if let Some(g) = g {
-            let open: Vec<&str> = g.out_ties.iter()
+            let open: Vec<&str> = g.output_bindings.iter()
                 .filter(|t| matches!(t.name, "q" | "k" | "v")
                             && t.at.is_none() && t.quant.is_none() && !t.band)
                 .map(|t| t.name)
@@ -7644,7 +7644,7 @@ impl Plan {
                 put(3, Unbound, Some(format!(
                     "dequant outputs with no counterparty: {}", open.join(", "))));
             } else if self.quants.is_empty() || self.nn_bands.is_empty() {
-                put(3, Unbound, Some("no quantize region ties the rotated q, k, v to the \
+                put(3, Unbound, Some("no quantize region bindings the rotated q, k, v to the \
                                       key tiles' columns".into()));
             } else {
                 put(3, Bound, None);
@@ -7680,7 +7680,7 @@ impl Plan {
             }
         }
 
-        // 6, 9, 11: a dequant output tied to the region that consumes it
+        // 6, 9, 11: a dequant output bound to the region that consumes it
         // (`deq_out_ok`)
         for (n, names) in [(6usize, &["o"][..]), (9, &["gate", "up"][..]), (11, &["down"][..])] {
             if !names.iter().all(|m| has_mat(m)) {
@@ -7691,13 +7691,13 @@ impl Plan {
                 put(n, Absent, head_only());
             } else if g.is_none() {
                 put(n, Unbound, no_family());
-            } else if names.iter().all(|m| tied(m))
+            } else if names.iter().all(|m| bound(m))
                 && (n != 9 || g.is_some_and(|g| g.swiglu.is_some()))
             {
                 put(n, Bound, None);
             } else {
                 put(n, Unbound, Some(format!(
-                    "the {} dequant publishes no output claim tied to its consumer",
+                    "the {} dequant publishes no output claim bound to its consumer",
                     names.join(" and "))));
             }
         }
@@ -7748,7 +7748,7 @@ impl Plan {
         } else if layer == Some(0) {
             put(15, Unbound, Some("a layer-0 segment without the embedding gadget \
                                    (--unsound-skip-embedding): the residual stream it \
-                                   consumes is not tied to the embedding rows of its \
+                                   consumes is not bound to the embedding rows of its \
                                    ids".into()));
         } else {
             put(15, Absent, Some(match layer {
@@ -7757,12 +7757,12 @@ impl Plan {
             }));
         }
 
-        // 16: the argmax over the head's logits (`head_tie_ok`, `head_tok_ok`)
+        // 16: the argmax over the head's logits (`head_binding_ok`, `head_tok_ok`)
         if self.argmax_mat().is_some() {
             put(16, Bound, None);
         } else if has_mat("lm_head") {
             put(16, Unbound, Some("the head chunk publishes no argmax \
-                                   (--unsound-skip-argmax): the emitted token is not tied \
+                                   (--unsound-skip-argmax): the emitted token is not bound \
                                    to the logits".into()));
         } else {
             put(16, Absent, Some("no lm_head matmul".into()));
@@ -7943,7 +7943,7 @@ mod tests {
             .unwrap_or("");
         assert!(msg.contains("no placeholder for claim band_q"),
                 "the panic must name the vector, got: {msg}");
-        assert!(msg.contains("fill_tie_claims"),
+        assert!(msg.contains("fill_binding_claims"),
                 "the panic must name where to fix it, got: {msg}");
 
         // and the flag is off again, so nothing else in the suite sees it

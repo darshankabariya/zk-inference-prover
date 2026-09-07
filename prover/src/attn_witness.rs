@@ -587,7 +587,7 @@ impl Attn {
     /// them.  It is `build` with a public name, and it exists so a synthetic
     /// layer's bands can be *the layer's own matmul outputs* rather than three
     /// unrelated draws: without that no synthetic shape can carry a positionwise
-    /// q/k/v tie, which is what `briefs/jj-layerwire-out.md` section 11.4 item 2
+    /// q/k/v binding, which is what `briefs/jj-layerwire-out.md` section 11.4 item 2
     /// names as the thing stream NN has to build first.
     #[allow(clippy::too_many_arguments)]
     pub fn from_qkv(sh: Shape, variant: Variant, qq: Vec<i32>, kk: Vec<i32>, vv: Vec<i32>,

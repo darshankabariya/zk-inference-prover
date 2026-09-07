@@ -219,7 +219,7 @@ impl LayoutKey {
         // builds today (S in {16,32,48,64,128,256,512,1024} x hd x insts x c x
         // target): the two rules agree everywhere EXCEPT `(S=48, target 8|16)`
         // and `(S=64, target=48)`, where `q` and `chunks` are reciprocal rather
-        // than linear and the tie-break lands differently.  No invocation in
+        // than linear and the binding-break lands differently.  No invocation in
         // the tree uses those: the shapes actually run are S=512 (spr 64),
         // S=240, S=48 (spr 32), S=32 (spr 64) and S=16 (spr 8), and all of them
         // move nothing.  Re-check this before introducing a new `--s`/`--scores-

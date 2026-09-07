@@ -330,7 +330,7 @@ def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
                 with_head=True, corner=True):
     """The whole per-token budget for a shape, summed group by group: the cost
     model's `cells_per_token` plus B10 step 2's glue, with the model-level terms
-    (the head's accumulators, its lookups, the token tie, the final norm) charged
+    (the head's accumulators, its lookups, the token binding, the final norm) charged
     to exactly one group."""
     batch = cm.BATCH if batch is None else batch
     out = dict(total=0.0, preprocessed=0.0, glue=0.0, parts={})

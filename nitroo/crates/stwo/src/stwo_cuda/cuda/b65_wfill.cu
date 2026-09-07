@@ -392,7 +392,7 @@ __global__ void b65w_ao(const unsigned *__restrict__ acc,
             // `(mag * 2^e) / den + 0.5`, floored: one f64 rounding per
             // operation and no add for the compiler to contract into an FMA.
             // `ldexp(1.0, e)` is `(e as f64).exp2()` exactly -- both are the
-            // representable power of two -- and `aoref` is the control: ties to
+            // representable power of two -- and `aoref` is the control: bindings to
             // even instead of half away from zero, which an integer over an
             // integer denominator produces in quantity.
             const double sc = __dmul_rn((double)mag, ldexp(1.0, e));

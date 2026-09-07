@@ -316,9 +316,9 @@ REQUANT_CELLS = (B65C["requant_max"] - 1.0) if B65C and B65C.get("requant_max") 
 # 15-bit range lookup on `pm - pat_i`, one selector bit, and the constraint
 # `sel_i (pm - pat_i) = 0` that pins the maximum to an attained element.
 #
-# What step 4 adds on top of the gadget is the *tie*: `sum_i sel_i * i` against
+# What step 4 adds on top of the gadget is the *binding*: `sum_i sel_i * i` against
 # the committed next token, which is one accumulator over a column the argument
-# already commits and costs no cell per vocabulary entry.  So the whole token tie
+# already commits and costs no cell per vocabulary entry.  So the whole token binding
 # is priced by this one number.
 #
 # Two numbers price this gadget and they disagree, so the model carries both.
@@ -360,7 +360,7 @@ MAXARG_CELLS_BUILT = B10A["marginal"] if B10A else 0.0
 MAXARG_CELLS = MAXARG_CELLS_BUILT or MAXARG_CELLS_B65
 # E1 / B9 probe 2 (`b9/moe.py`, and `b9/out/moe.json`'s `routing`): the MoE
 # routing-selection argument, priced **by analogy** because nobody has built it.
-# No AIR in this project ties a committed row to a routed instance, so neither
+# No AIR in this project bindings a committed row to a routed instance, so neither
 # number below is a measurement of this gadget -- each is the nearest gadget that
 # was measured, and the model prints them as such.
 #   (a) selection: a LogUp multiset tying each token's FFN rows to the instance of
@@ -379,8 +379,8 @@ DEQUANT_POW2_AWAY_PER_ACC = (B6C or {}).get("pow2_away") or DEQUANT_POW2_PER_ACC
 ATTNOUT_CELLS_PER_ACC = (B6C or {}).get("int8") or 0.0
 
 # --- B10 step 2: the glue between the regions ---------------------------------
-# B6.5 open gap 1: the composition ties every matmul's accumulators to its own
-# committed activations, and nothing ties one region's output to the next
+# B6.5 open gap 1: the composition bindings every matmul's accumulators to its own
+# committed activations, and nothing bindings one region's output to the next
 # region's input.  The wiring is four gadgets, and every one of them is bf16
 # elementwise arithmetic:
 #
@@ -702,7 +702,7 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
         count from `(nh + 2 nkv) hd`).
 
     `head=False` drops the model-level terms (the `lm_head`'s accumulators, its
-    lookups and the token tie) so that a model whose layers are not all alike can
+    lookups and the token binding) so that a model whose layers are not all alike can
     be summed group by group without counting the head more than once.
     """
     L, d, nh, nkv, hd, dff, vocab = cfg
@@ -766,7 +766,7 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     # B6.5: the requantize + max argument, once per *distinct* matmul input
     # (q/k/v share one, gate/up share one; o's input is already int8 via the fold)
     requant = (L * (2 * d + dff_active) + d) * REQUANT_CELLS if seq else 0.0
-    # B10 step 4: the token tie.  Proving that the emitted token *is* the argmax
+    # B10 step 4: the token binding.  Proving that the emitted token *is* the argmax
     # means showing no other logit is larger, which is one comparison per
     # vocabulary entry per token -- the max argument's own per-value price.  The
     # `lm_head` walk and its dequant are already charged (`walk` counts
@@ -830,7 +830,7 @@ def lm_head_chunk(cfg, seq, seq_batch=1):
         and the chain -- at 27B, 0.26 M and 2.90 Mcells/token respectively;
       * the **argmax**, one comparison per vocabulary entry per token, at the
         built gadget's measured marginal (`MAXARG_CELLS`);
-      * the **token tie** itself, `sum_i sel_i * i` against the committed next
+      * the **token binding** itself, `sum_i sel_i * i` against the committed next
         token -- one accumulator over a column the argmax already commits, so it
         is free per entry and is not a line here.
 
@@ -1208,7 +1208,7 @@ def report():
           "input), and wiring it")
     print("  between a dequant's output and a walk's input is AIR work, not trace")
 
-    # --- B10 step 4: the `lm_head` chunk and the token tie -------------------------
+    # --- B10 step 4: the `lm_head` chunk and the token binding -------------------------
     print()
     print("B10 step 4 -- the `lm_head` chunk, one per 512-token continuation:")
     print(f"  the argmax is priced at {MAXARG_CELLS:.3f} cells/comparison -- the gadget B10 "
@@ -1223,7 +1223,7 @@ def report():
     print("  requant_max - requant_only (b65/out/requant_*.json) -- the same *shape* of gadget,"
           " run over")
     print("  the vocabulary instead of a matmul input's row, but not this build of it")
-    print("  (the tie `sum_i sel_i * i` rides free on a column the argument already commits)")
+    print("  (the binding `sum_i sel_i * i` rides free on a column the argument already commits)")
     print()
     print(f"  {'model':<10} {'vocab':>9} {'walk':>10} {'dequant':>10} {'argmax':>10} "
           f"{'fresh':>10} {'preproc':>10}")

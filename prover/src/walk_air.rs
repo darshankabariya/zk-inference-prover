@@ -177,7 +177,7 @@ impl FrameworkEval for WalkEval {
             eval.add_constraint((acc - claim) * end.clone());
         }
         // stream II: the activation claim, allocated before the LogUp columns
-        // so that the interaction order is ties-then-fractions, as the wiring
+        // so that the interaction order is bindings-then-fractions, as the wiring
         // family's regions already are.  The value folded is `a - act_off`, the
         // signed activation, which is what a producer's requantize publishes.
         if let Some(q) = &self.qx {
@@ -318,7 +318,7 @@ impl FrameworkEval for AttnOutEval {
         // load-bearing: `joff` is the first column of this region a *lookup*
         // reads at a mask, and `gkrlink::LinkTie` resolves a referenced column
         // as `mask[tree][col][0]` -- the value at the column's *first* sampled
-        // offset.  With `[-1, 0]` the GKR arm's tie would read the previous
+        // offset.  With `[-1, 0]` the GKR arm's binding would read the previous
         // row's `joff`, which agrees with this row's on every witness whose
         // `jo` is constant and on no other; `--gkr-attnout` then accepts or
         // rejects by luck of the data.  Any future lookup over a masked column
@@ -361,7 +361,7 @@ impl FrameworkEval for AttnOutEval {
             // the sign pin (B6 review, gap 7), as in the standalone gadget
             eval.add_constraint(sg.clone() * (E::F::one() - nz2.clone()));
             // denp = den pj = den 2^max(-e, 0), committed so the error identity
-            // and the tie-excluding bound stay degree <= 3 / degree 1
+            // and the binding-excluding bound stay degree <= 3 / degree 1
             eval.add_constraint(denp.clone() - den.clone() * pj.clone());
             let mag = acc.clone() - (acc.clone() * sg.clone()) * two;
             eval.add_constraint(
@@ -393,7 +393,7 @@ impl FrameworkEval for AttnOutEval {
                 // and halving is a bijection mod an odd prime, so the branch
                 // where `d + dp + 1` is odd puts `denp` at `(d + dp + 1 + p)/2`
                 // -- about 2^30, where `0 <= d <= 2 denp - 1` is not an integer
-                // reading and `d = 2 denp0` (the exact tie's second witness the
+                // reading and `d = 2 denp0` (the exact binding's second witness the
                 // `-1` exists to exclude) is back.  Range-checking `denp` in the
                 // same `ao_rem_bits` table costs one lookup per slot, is
                 // satisfied by every honest row -- `rem_bits` is derived as the

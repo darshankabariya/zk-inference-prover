@@ -671,7 +671,7 @@ impl Lower {
     /// component to a kernel that computes something else.
     ///
     /// Stream RR: a *claim* slot is excluded, and that is not a 2^-124 event
-    /// but a data property -- a Horner tie over an all-zero sub-band closes on
+    /// but a data property -- a Horner binding over an all-zero sub-band closes on
     /// zero, and two bands' claims coincide when their values do (README items
     /// 21 and 23, log rows 53, 61 and 66). A claim's value is never read here,
     /// so `x - claim` is an instruction whatever the claim is.
@@ -1457,7 +1457,7 @@ pub fn cmd(args: &[String]) {
                                           plan.q_tabs.len());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b02);
-    fill_tie_claims(&plan, &mut claims, 0x7135_2b02);
+    fill_binding_claims(&plan, &mut claims, 0x7135_2b02);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
 
     let mut passes = vec![];
@@ -2450,19 +2450,19 @@ fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
 
 // -------------------------------------------------------------- cudaemit ----
 
-/// B11 stream K: the tie claims must be present, nonzero and distinct when a
-/// design point is lowered for emit. `claims_for` leaves the four tie vectors
+/// B11 stream K: the binding claims must be present, nonzero and distinct when a
+/// design point is lowered for emit. `claims_for` leaves the four binding vectors
 /// empty and the builders read the gaps as zero -- and a zero-valued scalar
 /// slot is exactly what `lit` folds away, so the emitted IR was missing the
 /// claimed side every real proof carries: the glue lowered to ~10,400
-/// instructions at emit and 29,304 at prove, and no tie-bearing kernel could
+/// instructions at emit and 29,304 at prove, and no binding-bearing kernel could
 /// ever match at prove time. The values are otherwise irrelevant -- the blob
 /// replays the real ones -- so distinct nonzero placeholders, sized exactly
 /// from the plan, make the emitted shape the proved shape. (A real proof
-/// whose tie claim lands on 0 or 1, or on another slot's value, still folds
+/// whose binding claim lands on 0 or 1, or on another slot's value, still folds
 /// differently and takes the announced fallback -- `lit`'s recorded 2^-124
 /// caveat, unchanged.)
-fn fill_tie_claims(plan: &crate::compose::Plan, claims: &mut crate::compose::Claims, seed: u64) {
+fn fill_binding_claims(plan: &crate::compose::Plan, claims: &mut crate::compose::Claims, seed: u64) {
     let mut x = seed | 1;
     let mut felt = || {
         let mut a = [0u32; 4];
@@ -2475,18 +2475,18 @@ fn fill_tie_claims(plan: &crate::compose::Plan, claims: &mut crate::compose::Cla
         a
     };
     if let Some(g) = plan.glue.as_ref() {
-        claims.glue_ties =
-            g.regions.iter().map(|r| r.ties.iter().map(|_| felt()).collect()).collect();
-        claims.deq_out = g.out_ties.iter().map(|_| felt()).collect();
+        claims.stream_bindings =
+            g.regions.iter().map(|r| r.bindings.iter().map(|_| felt()).collect()).collect();
+        claims.deq_out = g.output_bindings.iter().map(|_| felt()).collect();
     }
     claims.head_key = vec![felt()];
     claims.am_key = vec![felt()];
-    // B11 stream BB: the embedding gadget's two claims are tie claims of
+    // B11 stream BB: the embedding gadget's two claims are binding claims of
     // exactly the shape this function exists for -- a zero here folds away and
     // the emitted kernel would not match the proved one.
     claims.embed_out = vec![felt()];
     claims.embed_tok = vec![felt()];
-    // stream JJ: the attnout region's output claim, the same shape of tie
+    // stream JJ: the attnout region's output claim, the same shape of binding
     claims.ao_q = vec![felt()];
     // stream KK: the argmax region's token claim
     claims.head_tok = vec![felt()];
@@ -2541,7 +2541,7 @@ pub fn emit_cmd(args: &[String]) {
                                           plan.q_tabs.len());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b03);
-    fill_tie_claims(&plan, &mut claims, 0x7135_2b03);
+    fill_binding_claims(&plan, &mut claims, 0x7135_2b03);
     // Stream QQ (log row 61): from here on a claim the placeholder set does
     // not supply is a panic naming the vector, not a zero that folds away.
     crate::compose::set_emit_strict(true);
@@ -2681,8 +2681,8 @@ pub fn emit_cmd(args: &[String]) {
         // slot with it, so a claim a witness drives to exactly zero takes two
         // instructions out of the IR and the component lowers to a fingerprint
         // these placeholder claims never produce -- `exprprobe::claims_for`
-        // hands out four nonzero limbs per claim, and `fill_tie_claims` is the
-        // same hazard already found on the tie claims.
+        // hands out four nonzero limbs per claim, and `fill_binding_claims` is the
+        // same hazard already found on the binding claims.
         //
         // The grid region has one such pair.  `KeyEval`'s `claimed_av` and
         // `claimed_sn` are both folds of the numerator accumulator `zn`
@@ -3001,7 +3001,7 @@ pub fn logup_cmd(args: &[String]) {
                                           plan.q_tabs.len());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b04);
-    fill_tie_claims(&plan, &mut claims, 0x7135_4b04);
+    fill_binding_claims(&plan, &mut claims, 0x7135_4b04);
     let b = crate::compose::build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
 
     let mut rows = vec![];
@@ -3421,7 +3421,7 @@ pub fn gen_emit_cmd(args: &[String]) {
                                           plan.q_tabs.len());
     let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
     let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b05);
-    fill_tie_claims(&plan, &mut claims, 0x7135_4b05);
+    fill_binding_claims(&plan, &mut claims, 0x7135_4b05);
     // Stream QQ (log row 61): from here on a claim the placeholder set does
     // not supply is a panic naming the vector, not a zero that folds away.
     crate::compose::set_emit_strict(true);
