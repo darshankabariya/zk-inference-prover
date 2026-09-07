@@ -91,8 +91,9 @@ LOGUP_NS = {
 }
 
 # --- B3's two missing terms, measured ----------------------------------------
-# (1) the r^T W walk. Its three QM31 accumulator columns cost 12 M31 cells per
-#     trace row, and a row carries `p` weights, so the walk commits 12/p fresh
+# (1) the r^T W Freivalds check. Its three QM31 accumulator columns cost 12 M31
+#     cells per trace row, and a row carries `p` weights, so the check commits
+#     12/p fresh
 #     cells per weight -- a knob, not a constant. B3's width sweep is read here
 #     and the design point is the one that minimises fresh cells subject to the
 #     proof staying small (b3/README.md section 2).
@@ -111,13 +112,13 @@ def b3_constants():
         shape=best["shape"], s=best["s"],
         range_all=[(p["cells"]["cells_per_weight"], p["cells"]["fresh_per_token"])
                    for p in pts],
-        # cells of *preprocessed* trace the walk reads per proof, per weight
+        # cells of *preprocessed* trace the check reads per proof, per weight
         preprocessed_per_weight=best["cells"]["preprocessed_per_weight"],
     )
 
 
 B3C = b3_constants()
-WEIGHT_WALK_CELLS_PER_WEIGHT = B3C["cells_per_weight"] if B3C else 0.0
+WEIGHT_FREIVALDS_CELLS_PER_WEIGHT = B3C["cells_per_weight"] if B3C else 0.0
 PREPROCESSED_PER_WEIGHT = B3C["preprocessed_per_weight"] if B3C else 0.0
 
 
@@ -389,7 +390,8 @@ ATTNOUT_CELLS_PER_ACC = (B6C or {}).get("int8") or 0.0
 #   (b) SwiGLU       one `silu` unary table and one bf16 product per `dff` channel
 #   (c) two residual adds, `d` bf16 adds each
 #   (d) the requantize's placement -- B6.5's gadget, already charged as `requant`;
-#       wiring it between a dequant's output and a walk's input adds no cell.
+#       wiring it between a dequant's output and a Freivalds check's input adds
+#       no cell.
 #
 # Three primitives price all four, and two of the three are already measured:
 #
@@ -485,7 +487,7 @@ HEAD_DEQUANT_PER_ACC = DEQUANT_POW2_AWAY_PER_ACC
 #     offset and so carries only 2^29 of magnitude;
 #   * 2^30 -- M31's own injectivity edge, floor(p/2) = 2^30 - 1, which B6's chain
 #     and the attention-output fold both reach because each commits an explicit
-#     sign bit and reads the magnitude (`walk_air.rs`: `mag = acc - 2 acc sg`).
+#     sign bit and reads the magnitude (`freivalds.rs`: `mag = acc - 2 acc sg`).
 # So a numerator wider than 8 bits at C = 16K is not a layout change and costs no
 # cell per accumulator; it is a *bound* change that leaves B4's window and lands
 # in the sign-bit one.
@@ -656,7 +658,8 @@ def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True):
     resid = L * 2 * d * ADD_CELLS
     # (d) the requantize's placement.  B6.5 priced the gadget and `cells_per_token`
     # already charges it on every distinct matmul input; wiring it between a
-    # dequant's output and a walk's input is AIR work at zero marginal cell.
+    # dequant's output and a Freivalds check's input is AIR work at zero marginal
+    # cell.
     requant_place = 0.0
     total = sq + red + scale + scalars + swiglu + resid + requant_place
     # what the stub this replaces charged: B1's witness columns for the two norms
@@ -684,7 +687,7 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
 
     E1's three additions:
 
-      * `experts` / `topk` -- a mixture of experts.  A proof walks **every** expert
+      * `experts` / `topk` -- a mixture of experts.  A proof covers **every** expert
         the chunk's tokens touch, in full, because Freivalds' weight-side cost is
         per weight and exactly invariant to how many tokens used it (B9 probe 2:
         218.63 M preprocessed cells for the 8B FFN whether the expert served 512
@@ -692,10 +695,10 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
         *per-token* terms scale with `topk`, and against a dense model with the
         same active parameters the weight side is x experts/topk.
       * `seq_batch` (B) -- how many decoded **sequences** one proof covers.  The
-        per-proof terms (the walk, the preprocessed read) amortise over
+        per-proof terms (the Freivalds check, the preprocessed read) amortise over
         `seq * seq_batch` tokens rather than `seq`.  This is the MoE counter: at
-        `B ~ experts/topk` each expert sees `seq` tokens again, so its walk is
-        amortised exactly as a dense matmul's is at B = 1.
+        `B ~ experts/topk` each expert sees `seq` tokens again, so its Freivalds
+        check is amortised exactly as a dense matmul's is at B = 1.
       * `attn_accs_per_layer` / `attn_params_per_layer` -- overrides for
         attention shapes the GQA formulas do not describe (MLA's q/kv low-rank
         pair, which commits a different accumulator count and a different weight
@@ -739,12 +742,13 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
         attn = L * per_layer / (seq or 1)
     n_lookups = L * (2 * dff_active + 2 * (2 * d + 1)) + vocab
     logup = n_lookups * LOGUP_MARGINAL[batch]
-    # B3: the weight walk's accumulators, and a range check per int8 activation.
-    # The walk is a per-*proof* cost, so it divides by the tokens the proof covers
+    # B3: the weight Freivalds check's accumulators, and a range check per int8
+    # activation.  The check is a per-*proof* cost, so it divides by the tokens
+    # the proof covers
     # -- `seq * seq_batch`, not `seq`.
-    params = n_params(cfg, experts=experts, walked=True, head=head,
+    params = n_params(cfg, experts=experts, freivalds=True, head=head,
                       attn_params_per_layer=attn_params_per_layer)
-    walk = WEIGHT_WALK_CELLS_PER_WEIGHT * params / tokens if seq else 0.0
+    freivalds = WEIGHT_FREIVALDS_CELLS_PER_WEIGHT * params / tokens if seq else 0.0
     # B4: the packed pair table halves B3's per-activation range check
     rng_cells = B4C["range_marginal"] if B4C else LOGUP_MARGINAL[batch]
     rng = act * rng_cells if seq else 0.0
@@ -769,8 +773,8 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     # B10 step 4: the token binding.  Proving that the emitted token *is* the argmax
     # means showing no other logit is larger, which is one comparison per
     # vocabulary entry per token -- the max argument's own per-value price.  The
-    # `lm_head` walk and its dequant are already charged (`walk` counts
-    # `vocab * d` weights through `n_params`, `limbs` counts `vocab`
+    # `lm_head` Freivalds check and its dequant are already charged (`freivalds`
+    # counts `vocab * d` weights through `n_params`, `limbs` counts `vocab`
     # accumulators); this is the term neither of them covers.
     argmax = vocab * MAXARG_CELLS if seq else 0.0
     # B5: the committed quantized KV cache and queries, and their range checks
@@ -796,17 +800,17 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     # router's `experts` logits (`ROUTE_MAX_CELLS`, B6.5's max argument).
     route = (L * (topk * ROUTE_SEL_CELLS + experts * ROUTE_MAX_CELLS)
              if experts > 1 else 0.0)
-    total = (acc + act + nl + attn + logup + walk + rng + limbs + kv + softmax_rows
+    total = (acc + act + nl + attn + logup + freivalds + rng + limbs + kv + softmax_rows
              + attn_out + requant + argmax + route)
     return dict(acc=acc, act=act, nl=nl, attn=attn, logup=logup, n_lookups=n_lookups,
-                walk=walk, range=rng, limbs=limbs, kv=kv, softmax_rows=softmax_rows,
+                freivalds=freivalds, range=rng, limbs=limbs, kv=kv, softmax_rows=softmax_rows,
                 attn_out=attn_out, requant=requant, argmax=argmax, route=route,
                 bands=attn, band_saturated=band_saturated, legacy_alpha=legacy_alpha,
                 dequant_per_acc=per_acc,
                 head_per_acc=head_acc, n_acc=acc, n_acc_layer=acc_layer,
-                flat=acc + act + nl, total=total, walked_params=params,
+                flat=acc + act + nl, total=total, freivalds_params=params,
                 tokens_per_proof=tokens,
-                # committed offline, but read once per proof by the walk
+                # committed offline, but read once per proof by the Freivalds check
                 preprocessed=PREPROCESSED_PER_WEIGHT * params / tokens if seq else 0.0)
 
 
@@ -815,8 +819,8 @@ def lm_head_chunk(cfg, seq, seq_batch=1):
 
     One chunk after the final norm, covering `seq` decoded tokens:
 
-      * the **walk** over `vocab x d` weights -- once per chunk, not per token,
-        which is the whole reason the head is its own chunk;
+      * the **Freivalds check** over `vocab x d` weights -- once per chunk, not
+        per token, which is the whole reason the head is its own chunk;
       * the **dequant** of `vocab x seq` accumulators, at whichever rung the head
         ends up on -- `HEAD_DEQUANT_PER_ACC`, a knob, not a settled number.  B8's
         attribution puts the head on `Pow2` and every layer matmul on the chain;
@@ -835,38 +839,38 @@ def lm_head_chunk(cfg, seq, seq_batch=1):
         is free per entry and is not a line here.
 
     Returned per chunk, not per token: the head is amortised over `seq` and
-    reading it per token is how the walk term gets mis-stated.
+    reading it per token is how the Freivalds term gets mis-stated.
     """
     _, d, _, _, _, _, vocab = cfg
     weights = vocab * d
     accs = vocab * seq * seq_batch
-    walk = weights * WEIGHT_WALK_CELLS_PER_WEIGHT
+    freivalds = weights * WEIGHT_FREIVALDS_CELLS_PER_WEIGHT
     pre = weights * PREPROCESSED_PER_WEIGHT
     deq = accs * HEAD_DEQUANT_PER_ACC
     arg = accs * MAXARG_CELLS
-    return dict(weights=weights, accumulators=accs, walk=walk, preprocessed=pre,
-                dequant=deq, argmax=arg, fresh=walk + deq + arg,
-                per_token=(walk + deq + arg) / (seq * seq_batch))
+    return dict(weights=weights, accumulators=accs, freivalds=freivalds, preprocessed=pre,
+                dequant=deq, argmax=arg, fresh=freivalds + deq + arg,
+                per_token=(freivalds + deq + arg) / (seq * seq_batch))
 
 
-def n_params(cfg, experts=1, topk=1, walked=False, head=True,
+def n_params(cfg, experts=1, topk=1, freivalds=False, head=True,
              attn_params_per_layer=None):
-    """Weights in the shape.  `walked=True` returns what one *proof* walks -- every
-    expert in full, because the walk is per weight and does not amortise over the
-    tokens that used it (B9 probe 2).  `walked=False` returns the **active**
+    """Weights in the shape.  `freivalds=True` returns what one *proof* covers -- every
+    expert in full, because the Freivalds check is per weight and does not amortise
+    over the tokens that used it (B9 probe 2).  `freivalds=False` returns the **active**
     parameters, `topk` experts per token, which is the number a serving system
     quotes and the one a like-for-like dense comparison uses."""
     L, d, nh, nkv, hd, dff, vocab = cfg
     attn = (attn_params_per_layer if attn_params_per_layer is not None
             else d * nh * hd + 2 * d * nkv * hd + nh * hd * d)
-    n_ffn = experts if walked else topk
+    n_ffn = experts if freivalds else topk
     return (vocab * d if head else 0) + L * (attn + n_ffn * 3 * d * dff)
 
 
 def ops_per_token(cfg, ctx, seq, experts=1, topk=1, seq_batch=1):
     """In-circuit M31 multiplies, the E6b Freivalds model (freivalds.py)."""
     L, d, nh, nkv, hd, dff, vocab = cfg
-    params = n_params(cfg, experts=experts, walked=True)
+    params = n_params(cfg, experts=experts, freivalds=True)
     dff_active = topk * dff
     mats = [(d, (nh + 2 * nkv) * hd), (nh * hd, d), (d, 2 * dff_active), (dff_active, d)]
     io = sum(a + b for a, b in mats)
@@ -921,12 +925,12 @@ def report():
         print(f"  LogUp batch {b} into 2^{logup['result']['log_table']} table      "
               f"{LOGUP_MARGINAL[b]:.0f} extra cells/lookup, {LOGUP_NS[b]:.0f} ns/lookup")
     if B3C:
-        print(f"  r^T W walk    B3, {B3C['weights_per_row']} weights/row     "
-              f"{WEIGHT_WALK_CELLS_PER_WEIGHT:.3f} fresh cells/weight "
+        print(f"  Freivalds     B3, {B3C['weights_per_row']} weights/row     "
+              f"{WEIGHT_FREIVALDS_CELLS_PER_WEIGHT:.3f} fresh cells/weight "
               f"(12/p; {PREPROCESSED_PER_WEIGHT:.2f} preprocessed cells/weight read per proof)")
     else:
-        print("  r^T W walk    NOT MEASURED -- run experiments/b3/run_all.sh; "
-              "the walk is charged 0 cells below")
+        print("  Freivalds     NOT MEASURED -- run experiments/b3/run_all.sh; "
+              "the Freivalds check is charged 0 cells below")
     if B4C:
         print(f"  limb decomp   B4, variant {B4C['limb_variant']:<9}      "
               f"{B4C['cells_per_acc']:.2f} cells/accumulator "
@@ -998,7 +1002,7 @@ def report():
               f"(attention {c['attn'] / c['total'] * 100:.0f}%, "
               f"LogUp columns {c['logup'] / c['total'] * 100:.0f}%, "
               f"layer I/O {c['flat'] / c['total'] * 100:.0f}%, "
-              f"weight walk {c['walk'] / c['total'] * 100:.0f}%, "
+              f"weight Freivalds check {c['freivalds'] / c['total'] * 100:.0f}%, "
               f"int8 range {c['range'] / c['total'] * 100:.0f}%, "
               f"dequant {c['limbs'] / c['total'] * 100:.0f}%, "
               f"requant {c['requant'] / c['total'] * 100:.0f}%, "
@@ -1029,10 +1033,11 @@ def report():
           f"= {o['naive_cells'] * TARGET_TOKS * 4 / 1e12:,.1f} TB/s of trace  ->  impossible")
     if B3C:
         print()
-        print(f"B3's weight walk, folded in (measured on {B3C['shape']} at S={B3C['s']}):")
-        print(f"  {WEIGHT_WALK_CELLS_PER_WEIGHT:.3f} fresh cells/weight at "
+        print(f"B3's weight Freivalds check, folded in "
+              f"(measured on {B3C['shape']} at S={B3C['s']}):")
+        print(f"  {WEIGHT_FREIVALDS_CELLS_PER_WEIGHT:.3f} fresh cells/weight at "
               f"{B3C['weights_per_row']} weights/row  ->  "
-              f"{g(c['walk'])}cells/token, {c['walk'] / c['total'] * 100:.1f}% of the total")
+              f"{g(c['freivalds'])}cells/token, {c['freivalds'] / c['total'] * 100:.1f}% of the total")
         print("  the whole measured trade-off (cells/weight, fresh cells/token):")
         print("    " + "  ".join(f"{cw:.3f}->{g(fpt)}" for cw, fpt in B3C["range_all"]))
         print(f"  int8 byte-range checks add {g(c['range'])}cells/token "
@@ -1058,10 +1063,10 @@ def report():
             print("  B6's normalisation recovers K <= 66,572 for free: the sign is an "
                   "explicit committed bit there, so the whole 2^30 window is magnitude")
         print(f"  plan's threshold was 0.25 cells/weight for the 181 M picture to stand: "
-              f"{'stands' if WEIGHT_WALK_CELLS_PER_WEIGHT <= 0.25 else 'DOES NOT stand'}")
+              f"{'stands' if WEIGHT_FREIVALDS_CELLS_PER_WEIGHT <= 0.25 else 'DOES NOT stand'}")
         print(f"  on top, {g(c['preprocessed'])}cells/token of preprocessed weight trace are "
               f"read per proof")
-        print(f"  ({(c['preprocessed'] + c['total']) / c['total'] - 1:.0%} more cells to walk than "
+        print(f"  ({(c['preprocessed'] + c['total']) / c['total'] - 1:.0%} more cells to check than "
               f"the fresh count if a preprocessed cell costs the same as a fresh one; its "
               f"interpolate/LDE/Merkle share is offline, only quotients and OODS are not)")
     if B6C:
@@ -1207,7 +1212,8 @@ def report():
           f"{g(c['requant'])}cells/token")
     print(f"  are already charged for it ({REQUANT_CELLS:.2f}/value on every distinct matmul "
           "input), and wiring it")
-    print("  between a dequant's output and a walk's input is AIR work, not trace")
+    print("  between a dequant's output and a Freivalds check's input is AIR work, "
+          "not trace")
 
     # --- B10 step 4: the `lm_head` chunk and the token binding -------------------------
     print()
@@ -1226,11 +1232,11 @@ def report():
     print("  the vocabulary instead of a matmul input's row, but not this build of it")
     print("  (the binding `sum_i sel_i * i` rides free on a column the argument already commits)")
     print()
-    print(f"  {'model':<10} {'vocab':>9} {'walk':>10} {'dequant':>10} {'argmax':>10} "
+    print(f"  {'model':<10} {'vocab':>9} {'freivalds':>10} {'dequant':>10} {'argmax':>10} "
           f"{'fresh':>10} {'preproc':>10}")
     for name, cfg in (("Qwen-0.5B", QWEN), ("Llama-8B", LLAMA8B), ("Gemma-27B", GEMMA)):
         h = lm_head_chunk(cfg, SEQ)
-        print(f"  {name:<10} {cfg[6]:>9,} {g(h['walk']):>10} {g(h['dequant']):>10} "
+        print(f"  {name:<10} {cfg[6]:>9,} {g(h['freivalds']):>10} {g(h['dequant']):>10} "
               f"{g(h['argmax']):>10} {g(h['fresh']):>10} {g(h['preprocessed']):>10}")
     h8 = lm_head_chunk(LLAMA8B, SEQ)
     print(f"  at 8B the dequant is {h8['dequant'] / h8['fresh']:.0%} of the chunk and the "

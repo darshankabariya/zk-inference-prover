@@ -1482,8 +1482,8 @@ pub fn cmd(args: &[String]) {
         for i in 0..b.mats.len() {
             go!(format!("dequant{i}"), &b.mats[i]);
         }
-        for i in 0..b.walks.len() {
-            go!(format!("walk{i}"), &b.walks[i]);
+        for i in 0..b.freivalds.len() {
+            go!(format!("freivalds{i}"), &b.freivalds[i]);
         }
         go!("exp_table".to_string(), &b.exp_t);
         for i in 0..b.tables.len() {
@@ -2492,16 +2492,16 @@ fn fill_binding_claims(plan: &crate::compose::Plan, claims: &mut crate::compose:
     claims.head_tok = vec![felt()];
     // Stream QQ (log row 61): stream II's four claim vectors. Leaving them
     // empty is what cost the wired C=4K chunk ten of its thirteen `kernel
-    // fallback:` lines -- `deq_sc` and `walk_qx` are read through
+    // fallback:` lines -- `deq_sc` and `freivalds_qx` are read through
     // `.get(..).unwrap_or(zero)`, the zero folds, and the emitted dequant and
-    // walk shapes came out two instructions and one slot short of every shape
+    // Freivalds shapes came out two instructions and one slot short of every shape
     // a real chunk asks for. Sized from the plan, exactly as the ones above.
     //
     // A vector is filled here whether or not this design point reads it: an
     // unread placeholder changes nothing, and the rule "every claim vector is
     // filled" is one a later stream can keep without knowing which regions
     // read which claim. `compose::claim_at` is the backstop that says so.
-    claims.walk_qx = plan.walks.iter().map(|_| felt()).collect();
+    claims.freivalds_qx = plan.freivalds.iter().map(|_| felt()).collect();
     claims.deq_sc = plan.mat_lays.iter().map(|_| felt()).collect();
     claims.rq_in = plan.rqs.iter().map(|_| felt()).collect();
     claims.rq_out = plan.rqs.iter().map(|_| felt()).collect();
@@ -2632,8 +2632,8 @@ pub fn emit_cmd(args: &[String]) {
         for i in 0..b.gtables.len() {
             go!(b.gtables[i], format!("gtable{i}"));
         }
-        for i in 0..b.walks.len() {
-            go!(b.walks[i], format!("walk{i}"));
+        for i in 0..b.freivalds.len() {
+            go!(b.freivalds[i], format!("freivalds{i}"));
         }
         // Stream QQ (log row 61): the requantize seams and their tables.
         // `BuiltComponents::fp_rows` has walked them since stream EE and
@@ -2915,7 +2915,7 @@ pub fn frac_at(
 
 /// One component's LogUp columns, built from its fraction IR.
 ///
-/// This is the generic form of `mat_logup`, `walk_interaction`'s LogUp half and
+/// This is the generic form of `mat_logup`, `freivalds_interaction`'s LogUp half and
 /// every other hand-written fraction builder in the crate: the lookups, their
 /// order, their columns and their relation elements all come from the AIR
 /// itself, so there is nothing per-family left to write. The output is fed to
@@ -3021,8 +3021,8 @@ pub fn logup_cmd(args: &[String]) {
     for i in 0..b.mats.len() {
         go!(format!("dequant{i}"), &b.mats[i]);
     }
-    for i in 0..b.walks.len() {
-        go!(format!("walk{i}"), &b.walks[i]);
+    for i in 0..b.freivalds.len() {
+        go!(format!("freivalds{i}"), &b.freivalds[i]);
     }
     go!("exp_table".to_string(), &b.exp_t);
     for i in 0..b.tables.len() {
@@ -3179,7 +3179,7 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch, s
     // kernel handed the same columns in the same order reads the same cells.
     // What it does not pin is how many columns the component around that
     // computation names, and two components that share a shape may name
-    // different totals -- the three `qkv`/`o`/`gateup` walk regions lower to
+    // different totals -- the three `qkv`/`o`/`gateup` Freivalds regions lower to
     // one shape and carry 412, 140 and 276 preprocessed weight columns, none
     // of which the fractions read, and a dequant region's fraction evaluator
     // leaves off the output and scale sides, whose selectors it carries but
@@ -3400,7 +3400,7 @@ pub fn gen_emit_cmd(args: &[String]) {
     // IR and `emit_frac_family` asserts on it (open item 3).  Undo the ablation
     // for the lowering: these are the shapes the feed will ask for.
     if params.gkr_bands || params.gkr_dequant || params.gkr_residual_stream
-        || params.gkr_walks || params.gkr_attnout
+        || params.gkr_freivalds || params.gkr_attnout
     {
         eprintln!(
             "genemit: a GKR design point lowers the flag-off fractions -- \
@@ -3409,7 +3409,7 @@ pub fn gen_emit_cmd(args: &[String]) {
         params.gkr_bands = false;
         params.gkr_dequant = false;
         params.gkr_residual_stream = false;
-        params.gkr_walks = false;
+        params.gkr_freivalds = false;
         params.gkr_attnout = false;
     }
     let params = params;
@@ -3545,8 +3545,8 @@ pub fn gen_emit_cmd(args: &[String]) {
         for i in 0..b.gtables.len() {
             go!(b.gtables[i], format!("gtable{i}"));
         }
-        for i in 0..b.walks.len() {
-            go!(b.walks[i], format!("walk{i}"));
+        for i in 0..b.freivalds.len() {
+            go!(b.freivalds[i], format!("freivalds{i}"));
         }
         // Stream QQ (log row 61): the requantize seams and their tables, so
         // `--families b65_requant_eval` can reach them at all.
@@ -3562,11 +3562,11 @@ pub fn gen_emit_cmd(args: &[String]) {
         }
         // Stream NN, added at its merge: the quantize regions' fraction half,
         // in the same commit as the constraint half above -- adding a family to
-        // one walk alone is exactly the gap stream BB's comment below names.
+        // one Freivalds check alone is exactly the gap stream BB's comment below names.
         for i in 0..b.quants.len() {
             go!(b.quants[i], format!("quant{i}"));
         }
-        // B11 stream BB: the same two families here. This walk is the one the
+        // B11 stream BB: the same two families here. This Freivalds check is the one the
         // argmax is missing from (`$FAMS` names ten families and not
         // `b65_argmax_eval`), which is why both arms are written in one commit.
         if let Some(em) = &b.embed {

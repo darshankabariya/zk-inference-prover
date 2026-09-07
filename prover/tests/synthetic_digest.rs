@@ -16,7 +16,7 @@ const SYN: &[&str] = &[
 const RESIDUAL_STREAM: &[&str] =
     &["--nout", "64", "--residual-stream-a", "32", "--kmax", "16", "--synth-residual-stream"];
 const GKR5: &[&str] =
-    &["--gkr-bands", "--gkr-dequant", "--gkr-residual-stream", "--gkr-walks", "--gkr-attnout"];
+    &["--gkr-bands", "--gkr-dequant", "--gkr-residual-stream", "--gkr-freivalds", "--gkr-attnout"];
 const SKIP_RS: &str = "--unsound-skip-residual-stream";
 const SKIP_LB: &str = "--unsound-skip-layer-boundary";
 const SKIP_KV: &str = "--unsound-skip-kv-boundary";

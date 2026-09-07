@@ -1,6 +1,6 @@
 //! B6.5 — the composed layer proof: one FS transcript over the attention bands,
 //! the seven matmuls' dequant regions, the attention-output fold and the r^T W
-//! walks, with the shared tables committed once — and the trust boundary closed.
+//! Freivalds checks, with the shared tables committed once — and the trust boundary closed.
 //!
 //! The **statement** is two serialized documents:
 //!
@@ -57,15 +57,15 @@ use crate::dequant::{
     range_widths,
 };
 use crate::layer::{
-    AoLayout, Layer, MatLayout, Tables, WALK_GROUPS, WalkLayout, ao_interaction, ao_region,
-    mat_interaction, mat_region, walk_interaction, walk_region,
+    AoLayout, FREIVALDS_GROUPS, FreivaldsLayout, Layer, MatLayout, Tables, ao_interaction,
+    ao_region, freivalds_interaction, freivalds_region, mat_interaction, mat_region,
 };
 use crate::residual_stream::{self, Binding, BindingKind, GKind, GTableEval, Kind, Prog,
                   ResidualStreamEval, ResidualStreamRels, ResidualStreamTables, TieSpec, Tiling,
                   UnKind};
 use crate::layout::Shape;
-use crate::walk_air::{AO_SEL, AttnOutEval, EPOW_COLS, WALK_SEL, WalkEval, ao_chan, ao_sel,
-                      walk_sel, walk_w};
+use crate::freivalds::{AO_SEL, AttnOutEval, EPOW_COLS, FREIVALDS_SEL, FreivaldsEval, ao_chan,
+                       ao_sel, freivalds_sel, freivalds_w};
 
 // ---------------------------------------------------------------- relations ----
 
@@ -268,7 +268,7 @@ pub struct Params {
     pub fold_rem_bits: u32,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub fold_alpha: u32,
-    pub walk_p: usize,
+    pub freivalds_p: usize,
     /// B10 step 2.  Absent on a witness `extract.py --residual-stream` did not write.
     #[serde(default)]
     pub residual_stream: Option<ResidualStreamParams>,
@@ -295,10 +295,10 @@ pub struct Params {
     /// batched GKR, under `--gkr-residual-stream`. Composes with `--gkr-bands` and, like
     /// dequant's, is a loud configuration error without it.
     pub gkr_residual_stream: bool,
-    /// B11 stream V, lever 4: the walks' 8-bit activation range checks, and the
-    /// attention-output region's three lookups per slot, under `--gkr-walks`
+    /// B11 stream V, lever 4: the Freivalds checks' 8-bit activation range checks, and the
+    /// attention-output region's three lookups per slot, under `--gkr-freivalds`
     /// and `--gkr-attnout`. Both compose with `--gkr-bands`.
-    pub gkr_walks: bool,
+    pub gkr_freivalds: bool,
     pub gkr_attnout: bool,
     /// Stream H: the layer's residual-stream input and output are each committed
     /// in a tree of their own, so that two chunks' boundaries can be compared
@@ -505,15 +505,15 @@ pub struct Claims {
     /// Stream JJ (E11): the attention-output region's claim over its *own
     /// output* -- the signed requantized value `qm (1 - 2 sg)`, folded under
     /// exactly `ao_out`'s weights.  `AttnOutEval` is the requantization of the
-    /// attention output, so this is the value the `o` walk's committed
+    /// attention output, so this is the value the `o` Freivalds check's committed
     /// activations equal row for row; the equality is stream II's to add.  A
     /// `Vec` so a statement written before this stream still parses.
     #[serde(default)]
     pub ao_q: Vec<[u32; 4]>,
     /// per matmul: the dequant region's Freivalds side
     pub mat_h: Vec<[u32; 4]>,
-    /// per walk group, per matmul: the walk's side
-    pub walk_acc: Vec<Vec<[u32; 4]>>,
+    /// per Freivalds group, per matmul: the Freivalds check's side
+    pub freivalds_acc: Vec<Vec<[u32; 4]>>,
     /// per component with lookups, in component order
     pub use_sums: Vec<[u32; 4]>,
     /// per table component, in table order
@@ -574,19 +574,19 @@ pub struct Claims {
     #[serde(default)]
     pub rq_in: Vec<[u32; 4]>,
     /// stream II: the same seam's claim over the signed integers it derived --
-    /// equal to `walk_qx[the group]` is what says the walk multiplied *those*
+    /// equal to `freivalds_qx[the group]` is what says the Freivalds check multiplied *those*
     /// activations.
     #[serde(default)]
     pub rq_out: Vec<[u32; 4]>,
-    /// stream II: per walk group, its own claim over its committed activations
+    /// stream II: per Freivalds group, its own claim over its committed activations
     /// in the canonical channel-major order.
     #[serde(default)]
-    pub walk_qx: Vec<[u32; 4]>,
+    pub freivalds_qx: Vec<[u32; 4]>,
     /// Stream II (E11): the requantize↔dequant scale binding.  `rq_sc` is one claim
     /// per seam over the scale that seam pinned to the attained maximum;
     /// `deq_sc` is one per *matmul* over the x-side scale its dequant used, and
     /// is empty on a chunk with no seams.  Indexed by matmul so the verifier
-    /// reads a consumer's entry straight off the walk group's mat list.
+    /// reads a consumer's entry straight off the Freivalds group's mat list.
     #[serde(default)]
     pub rq_sc: Vec<[u32; 4]>,
     #[serde(default)]
@@ -614,7 +614,7 @@ pub fn qm(v: SecureField) -> [u32; 4] {
 /// real chunk asks for, and the component takes the announced scalar fallback
 /// for the life of the store. It happened once on `b65_key_eval` (open item 21,
 /// the other direction: a claim the *witness* drove to zero) and again on
-/// `deq_sc` and `walk_qx`, which stream II added without extending
+/// `deq_sc` and `freivalds_qx`, which stream II added without extending
 /// `fill_binding_claims` -- ten of the wired C=4K chunk's thirteen fallback lines.
 ///
 /// So on the emit path the missing case panics and names the vector. On the
@@ -661,7 +661,7 @@ impl Claims {
         v.push(unqm(self.ao_out));
         v.push(unqm(self.ao_den));
         v.extend(self.mat_h.iter().map(|x| unqm(*x)));
-        for w in &self.walk_acc {
+        for w in &self.freivalds_acc {
             v.extend(w.iter().map(|x| unqm(*x)));
         }
         v.extend(self.use_sums.iter().map(|x| unqm(*x)));
@@ -687,7 +687,7 @@ impl Claims {
         // seams, so the transcript is unchanged without them
         v.extend(self.rq_in.iter().map(|x| unqm(*x)));
         v.extend(self.rq_out.iter().map(|x| unqm(*x)));
-        v.extend(self.walk_qx.iter().map(|x| unqm(*x)));
+        v.extend(self.freivalds_qx.iter().map(|x| unqm(*x)));
         v.extend(self.rq_sc.iter().map(|x| unqm(*x)));
         v.extend(self.deq_sc.iter().map(|x| unqm(*x)));
         // stream NN, appended last for the same reason
@@ -972,7 +972,7 @@ pub struct QuantPlan {
 }
 
 /// Stream II: one requantize seam -- a producing region's bf16 output, the
-/// integers a walk group multiplies, and the region that proves one is the
+/// integers a Freivalds group multiplies, and the region that proves one is the
 /// requantize of the other.
 ///
 /// There are three: `norm1`'s norm scale feeds the q/k/v group, `norm2`'s feeds
@@ -981,10 +981,10 @@ pub struct QuantPlan {
 /// commits `qm` and `sg` and pins them by the exact-rounding identity -- so
 /// what `o` needs is a claim on that region and not a second gadget.
 pub struct RqPlan {
-    /// the walk group's name, which is also the region's tag
+    /// the Freivalds group's name, which is also the region's tag
     pub name: String,
-    /// index into `Plan::walks`
-    pub walk: usize,
+    /// index into `Plan::freivalds`
+    pub freivalds: usize,
     /// `(residual-stream region, binding)` publishing the bf16 side
     pub producer: (usize, usize),
     pub n: usize,
@@ -993,10 +993,10 @@ pub struct RqPlan {
     pub v: crate::requant::SVariant,
 }
 
-pub struct WalkPlan {
+pub struct FreivaldsPlan {
     pub name: String,
     pub mats: Vec<usize>,
-    pub lay: WalkLayout,
+    pub lay: FreivaldsLayout,
     /// Stream Z: the group's committed-activation range width -- 8 everywhere,
     /// `ao_q_bits + 1` on `o`'s group when the attention output is widened.
     pub act_bits: u32,
@@ -1557,7 +1557,7 @@ pub struct Plan {
     pub specs: Vec<Spec>,
     pub mat_lays: Vec<MatLayout>,
     pub ao_lay: AoLayout,
-    pub walks: Vec<WalkPlan>,
+    pub freivalds: Vec<FreivaldsPlan>,
     /// Stream II: the requantize seams, empty on a chunk with no wiring family.
     pub rqs: Vec<RqPlan>,
     /// the scale variants those seams use, deduplicated and in a fixed order --
@@ -1703,8 +1703,8 @@ impl Plan {
                 "--gkr-dequant composes with --gkr-bands; it does not replace it");
         assert!(!p.gkr_residual_stream || p.gkr_bands,
                 "`--gkr-residual-stream` extends the bands' GKR arm; it needs `--gkr-bands`");
-        assert!(!p.gkr_walks || p.gkr_bands,
-                "`--gkr-walks` extends the bands' GKR arm; it needs `--gkr-bands`");
+        assert!(!p.gkr_freivalds || p.gkr_bands,
+                "`--gkr-freivalds` extends the bands' GKR arm; it needs `--gkr-bands`");
         assert!(!p.gkr_attnout || p.gkr_bands,
                 "`--gkr-attnout` extends the bands' GKR arm; it needs `--gkr-bands`");
         // Stream AA left `--kv-boundary` and `--gkr-bands` asserted apart, because
@@ -1849,8 +1849,8 @@ impl Plan {
             mat_lays.push(lay);
         }
         let ao_lay = AoLayout::choose(p.nh, p.s, p.hd, p.ao_target);
-        let mut walks = vec![];
-        for (name, members) in WALK_GROUPS {
+        let mut freivalds = vec![];
+        for (name, members) in FREIVALDS_GROUPS {
             let idx: Vec<usize> = members
                 .iter()
                 .filter_map(|n| p.mats.iter().position(|m| m.name == *n))
@@ -1860,10 +1860,10 @@ impl Plan {
             }
             let n_in = p.mats[idx[0]].n_in;
             let n_out_max = idx.iter().map(|i| p.mats[*i].n_out).max().unwrap();
-            walks.push(WalkPlan {
+            freivalds.push(FreivaldsPlan {
                 name: name.to_string(),
                 mats: idx.clone(),
-                lay: WalkLayout::choose(n_in, n_out_max, p.mats[idx[0]].tokens, p.walk_p),
+                lay: FreivaldsLayout::choose(n_in, n_out_max, p.mats[idx[0]].tokens, p.freivalds_p),
                 // stream Z: the widened attention output is `o`'s committed input
                 act_bits: if name == "o" && p.ao_q_bits > 7 { p.ao_q_bits + 1 } else { 8 },
             });
@@ -1883,7 +1883,7 @@ impl Plan {
         let mut rq_vars: Vec<crate::requant::SVariant> = vec![];
         if let Some(g) = residual_stream.as_ref() {
             // stream II: on the head chunk the only producer is the final
-            // norm's scale and the only consumer is the head's own walk, so the
+            // norm's scale and the only consumer is the head's own Freivalds check, so the
             // seam list is one entry and the layer's three are absent -- there
             // is no layer here to have produced them.
             let seams: Vec<(&str, (usize, usize), usize)> = if g.head_norm {
@@ -1897,9 +1897,9 @@ impl Plan {
                 ]
             };
             for (name, producer, n) in seams {
-                let Some(wi) = walks.iter().position(|w| w.name == name) else { continue };
-                let m0 = &p.mats[walks[wi].mats[0]];
-                assert_eq!(m0.n_in, n, "the {name} walk's input width is not its producer's");
+                let Some(wi) = freivalds.iter().position(|w| w.name == name) else { continue };
+                let m0 = &p.mats[freivalds[wi].mats[0]];
+                assert_eq!(m0.n_in, n, "the {name} Freivalds check's input width is not its producer's");
                 let v = if m0.variant == "pow2" {
                     crate::requant::SVariant::Pow2
                 } else {
@@ -1910,7 +1910,7 @@ impl Plan {
                 }
                 rqs.push(RqPlan {
                     name: name.to_string(),
-                    walk: wi,
+                    freivalds: wi,
                     producer,
                     n,
                     tokens: m0.tokens,
@@ -2063,7 +2063,7 @@ impl Plan {
         };
         let q_nz_bits = q_tabs.last().copied().unwrap_or(0);
         Self { p: p.clone(), attn_variant, round, shapes, lays, cfg, head_offsets, corner, specs,
-               mat_lays, ao_lay, walks, rqs, rq_vars, quants, q_tabs, q_nz_bits,
+               mat_lays, ao_lay, freivalds, rqs, rq_vars, quants, q_tabs, q_nz_bits,
                nn_bands, nn_qbands,
                widths, log_norm,
                log_frac, log_mul,
@@ -2310,15 +2310,15 @@ impl Plan {
                 }
             }
         }
-        for w in &self.walks {
+        for w in &self.freivalds {
             for (mi, _) in w.mats.iter().enumerate() {
                 for pp in 0..w.lay.pk {
-                    put(walk_w(&w.name, mi, pp), "walk/weight", w.lay.g.log_rows,
+                    put(freivalds_w(&w.name, mi, pp), "freivalds/weight", w.lay.g.log_rows,
                         PreNeeds::Model, PreVaries::Layer);
                 }
             }
-            for n in WALK_SEL {
-                put(walk_sel(&w.name, n), "walk/sel", w.lay.g.log_rows, PreNeeds::Params,
+            for n in FREIVALDS_SEL {
+                put(freivalds_sel(&w.name, n), "freivalds/sel", w.lay.g.log_rows, PreNeeds::Params,
                     PreVaries::Layer);
             }
         }
@@ -2644,13 +2644,13 @@ impl Plan {
                 ids.extend(crate::dequant::DEQ_OSEL.iter().map(|n| deq_sel(&m.name, n)));
             }
         }
-        for w in &self.walks {
+        for w in &self.freivalds {
             for (mi, _) in w.mats.iter().enumerate() {
                 for pp in 0..w.lay.pk {
-                    ids.push(walk_w(&w.name, mi, pp));
+                    ids.push(freivalds_w(&w.name, mi, pp));
                 }
             }
-            ids.extend(WALK_SEL.iter().map(|n| walk_sel(&w.name, n)));
+            ids.extend(FREIVALDS_SEL.iter().map(|n| freivalds_sel(&w.name, n)));
         }
         if let Some(g) = &self.residual_stream {
             for r in &g.regions {
@@ -2754,7 +2754,7 @@ impl Plan {
             + 1
             // B11 stream U, lever 3: the same for the dequant family
             + if self.p.gkr_dequant { 0 } else { self.p.mats.len() }
-            + if self.p.gkr_walks { 0 } else { self.walks.len() }
+            + if self.p.gkr_freivalds { 0 } else { self.freivalds.len() }
             // B11 stream V, levers 3 and 4: and the same for residual stream and attnout
             + if self.p.gkr_residual_stream { 0 }
               else { self.residual_stream.as_ref().map(|g| g.regions.len()).unwrap_or(0) }
@@ -2833,7 +2833,7 @@ pub struct BuiltComponents {
     pub link_binding: Option<crate::gkrlink::LinkTie>,
     pub ao: FrameworkComponent<AttnOutEval>,
     pub mats: Vec<FrameworkComponent<DequantEval>>,
-    pub walks: Vec<FrameworkComponent<WalkEval>>,
+    pub freivalds: Vec<FrameworkComponent<FreivaldsEval>>,
     pub residual_stream: Vec<FrameworkComponent<ResidualStreamEval>>,
     pub exp_t: FrameworkComponent<ExpTableEval>,
     pub tables: Vec<FrameworkComponent<TableEval>>,
@@ -2886,7 +2886,7 @@ impl BuiltComponents {
             let e = &c.eval;
             tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
         }
-        for c in &self.walks {
+        for c in &self.freivalds {
             let e = &c.eval;
             tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
         }
@@ -2999,8 +2999,8 @@ impl BuiltComponents {
         for i in 0..self.gtables.len() {
             v.push(crate::cudagen::fp_row(&self.gtables[i].eval, &format!("gtable{i}")));
         }
-        for i in 0..self.walks.len() {
-            v.push(crate::cudagen::fp_row(&self.walks[i].eval, &format!("walk{i}")));
+        for i in 0..self.freivalds.len() {
+            v.push(crate::cudagen::fp_row(&self.freivalds[i].eval, &format!("freivalds{i}")));
         }
         v.push(crate::cudagen::fp_row(&self.exp_t.eval, "exp_table"));
         for i in 0..self.tables.len() {
@@ -3048,7 +3048,7 @@ impl BuiltComponents {
         for m in &self.mats {
             v.push(m);
         }
-        for w in &self.walks {
+        for w in &self.freivalds {
             v.push(w);
         }
         for g in &self.residual_stream {
@@ -3106,7 +3106,7 @@ impl BuiltComponents {
         for m in &self.mats {
             v.push(m);
         }
-        for w in &self.walks {
+        for w in &self.freivalds {
             v.push(w);
         }
         for g in &self.residual_stream {
@@ -3365,7 +3365,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 // there: the two have to agree or the AIR reads an interaction
                 // column the fill never wrote.
                 sside: (plan.rqs.iter()
-                        .any(|rp| plan.walks[rp.walk].mats.contains(&mi))
+                        .any(|rp| plan.freivalds[rp.freivalds].mats.contains(&mi))
                         && plan.specs[mi].variant != DeqVariant::Fold)
                     .then(|| crate::dequant::SSide {
                         mu: w_residual_stream,
@@ -3385,13 +3385,13 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     }
 
 
-    let mut walks = vec![];
-    for (wi, w) in plan.walks.iter().enumerate() {
+    let mut freivalds = vec![];
+    for (wi, w) in plan.freivalds.iter().enumerate() {
         let (rv_pow, rv_step) = powers(rv, w.lay.pk);
         let (s_pow, s_step) = powers(s, w.lay.pq);
-        walks.push(FrameworkComponent::<WalkEval>::new(
+        freivalds.push(FrameworkComponent::<FreivaldsEval>::new(
             alloc,
-            WalkEval {
+            FreivaldsEval {
                 tag: w.name.clone(),
                 g: w.lay.g,
                 pk: w.lay.pk,
@@ -3401,11 +3401,11 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 rv_step,
                 s_pow,
                 s_step,
-                claimed: claims.walk_acc[wi].iter().map(|x| unqm(*x)).collect(),
+                claimed: claims.freivalds_acc[wi].iter().map(|x| unqm(*x)).collect(),
                 rel_act: rels.range(w.act_bits).clone(),
                 act_off: 1 << (w.act_bits - 1),
                 range_check: true,
-                gkr: p.gkr_walks,
+                gkr: p.gkr_freivalds,
                 // stream II: the group's own claim over its committed
                 // activations, in the canonical channel-major order.  Present
                 // exactly when the chunk carries the wiring family, so a chunk
@@ -3413,7 +3413,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 qx: plan.residual_stream.as_ref().map(|_| {
                     let m0 = &p.mats[w.mats[0]];
                     let nn = (m0.tokens * m0.n_in) as i128;
-                    let claimed = claim_at(claims.walk_qx.get(wi).copied(), "walk_qx");
+                    let claimed = claim_at(claims.freivalds_qx.get(wi).copied(), "freivalds_qx");
                     // Stream II (E11), at the JJ merge: the `o` group folds
                     // under the *attnout* region's weights, not the wiring
                     // family's.  Every other group's counterparty is a
@@ -3430,14 +3430,14 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     // the `chunks - 1` in-channel steps of that channel undone.
                     if w.name == "o" {
                         let (spow, sstep) = powers(s, w.lay.pq);
-                        return crate::walk_air::WalkQx {
+                        return crate::freivalds::FreivaldsQx {
                             w: spow,
                             m_in: sstep,
                             m_bd: rv * sstep.inverse().pow(w.lay.g.chunks as u128 - 1),
                             claimed,
                         };
                     }
-                    crate::walk_air::WalkQx {
+                    crate::freivalds::FreivaldsQx {
                         w: (0..w.lay.pq).map(|pp| wpow(w_residual_stream, nn - 1 - pp as i128)).collect(),
                         m_in: wpow(w_residual_stream, -(w.lay.pq as i128)),
                         m_bd: wpow(w_residual_stream, (w.lay.pq as i128) * (w.lay.g.chunks as i128 - 1)
@@ -3446,11 +3446,11 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     }
                 }),
             },
-            if p.gkr_walks { SecureField::zero() } else { next_use(claims) },
+            if p.gkr_freivalds { SecureField::zero() } else { next_use(claims) },
         ));
     }
 
-    // B10 step 2: the wiring family, between the walks and the shared tables --
+    // B10 step 2: the wiring family, between the Freivalds checks and the shared tables --
     // the order the prover commits its columns in, so the two cannot diverge
     let mut residual_stream = vec![];
     if let (Some(gp), Some(gr)) = (&plan.residual_stream, &rels.residual_stream) {
@@ -3560,12 +3560,12 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         terms.push((tree, gi, *w));
                         continue;
                     }
-                    Reg::Walk(k) => {
-                        let RCol::Walk(i) = c else {
-                            panic!("a non-walk column named on a walk region")
+                    Reg::Freivalds(k) => {
+                        let RCol::Freivalds(i) = c else {
+                            panic!("a non-Freivalds column named on a Freivalds region")
                         };
                         terms.push((crate::common::BASE_TREE,
-                                    span_of(walks[*k].trace_locations(), crate::common::BASE_TREE) + i, *w));
+                                    span_of(freivalds[*k].trace_locations(), crate::common::BASE_TREE) + i, *w));
                         continue;
                     }
                     Reg::Ao => {
@@ -3880,7 +3880,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     };
 
 
-    BuiltComponents { chans, keys, rows, links, link_binding, ao, mats, walks, residual_stream, exp_t, tables,
+    BuiltComponents { chans, keys, rows, links, link_binding, ao, mats, freivalds, residual_stream, exp_t, tables,
                       gtables, argmax, embed, emb_tab, rqs: rq_comps, quants: quant_comps,
                       rq_tabs, pows,
                       has_rows: plan.rows_band.clone() }
@@ -3920,7 +3920,7 @@ pub struct Composed {
     pub interaction_secs: f64,
     pub ref_bad: usize,
     pub off_table: usize,
-    /// fresh cells by family: bands, attnout, dequant, walks, residual stream, tables
+    /// fresh cells by family: bands, attnout, dequant, freivalds, residual stream, tables
     pub family_cells: Value,
     pub n_columns: [usize; 3],
     /// B10 step 2: the residual-stream regions' own reference and B1 comparisons, and the
@@ -4007,12 +4007,12 @@ pub struct ProverTamper {
     /// quotient by +1 (the high remainder leaves its range); `fold_dent`
     /// doubles one row's committed `dent` (the `denp14 = dent pj` pin fails);
     /// `ao_clamp` pushes one attnout quotient past the pair table's domain;
-    /// `walk_over` sets one committed activation of the widened walk to
+    /// `freivalds_over` sets one committed activation of the widened Freivalds check to
     /// `2^act_bits`, one past its range table.
     pub fold_qm: Option<usize>,
     pub fold_dent: Option<usize>,
     pub ao_clamp: Option<usize>,
-    pub walk_over: Option<usize>,
+    pub freivalds_over: Option<usize>,
     /// Stream JJ (witness-slack section 7 item 1): round one *non-last* row of
     /// the attention output against `den - 1`, self-consistently -- the whole
     /// row's `denp`, `qm`, `sg` and `d` are rederived from it, so every
@@ -4068,7 +4068,7 @@ pub struct Gen {
     pub band_pre: Vec<Option<crate::devpre::DevPreBand>>,
     pub aor: crate::layer::AoRegion,
     pub mat_regions: Vec<crate::layer::MatRegion>,
-    pub walk_regions: Vec<crate::layer::WalkRegion>,
+    pub freivalds_regions: Vec<crate::layer::FreivaldsRegion>,
     // The residual-stream family, which postdates the split: its regions, the owned
     // columns of its shared tables, and its against-B1 summary.
     pub residual_stream_regions: Vec<crate::residual_stream::ResidualStreamRegion>,
@@ -4182,10 +4182,10 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // stream BB: the embedding gadget has no device fill either, and
             // its `ef` range checks bump the layer's own 8-bit table on the host
             || plan.emb.is_some()
-            // stream Z: the fold region and the widened attention output's walk
+            // stream Z: the fold region and the widened attention output's Freivalds check
             // both fill on the host, whatever the switches say
             || plan.specs.iter().any(|s| s.variant == DeqVariant::Fold)
-            || plan.walks.iter().any(|w| w.act_bits != 8)
+            || plan.freivalds.iter().any(|w| w.act_bits != 8)
             // stream JJ (E11): an armed attnout tamper does too -- `ao_region`
             // sets its own mode to 0 because the device fill has no `corrupt`
             // path -- so its counters are the host's and the shared
@@ -4340,13 +4340,13 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     crate::util::m4_add("gen/embed", m4_t.elapsed().as_secs_f64());
 
     let m4_t = std::time::Instant::now();
-    let mut walk_regions = vec![];
-    for w in &plan.walks {
-        let r = walk_region(layer, &w.name, &w.mats, p.walk_p, w.act_bits, &mut tables,
-                            None, tamper.walk_over.filter(|_| w.act_bits != 8));
-        walk_regions.push(r);
+    let mut freivalds_regions = vec![];
+    for w in &plan.freivalds {
+        let r = freivalds_region(layer, &w.name, &w.mats, p.freivalds_p, w.act_bits, &mut tables,
+                                 None, tamper.freivalds_over.filter(|_| w.act_bits != 8));
+        freivalds_regions.push(r);
     }
-    crate::util::m4_add("gen/walks", m4_t.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/freivalds", m4_t.elapsed().as_secs_f64());
 
     let m4_t = std::time::Instant::now();
     // ---- B10 step 2: the wiring family -------------------------------------
@@ -4768,7 +4768,7 @@ different rotation", inv.len(), 2 * hd * p.s);
     //
     // Each reads its producing region's *computed* output -- not a column of
     // the dump -- so what the seam requantizes is what the wiring family just
-    // proved, and the binding is what says the walk multiplied the result.  The
+    // proved, and the binding is what says the Freivalds check multiplied the result.  The
     // per-token scale is the dump's own `jx`/`sx`, i.e. the same field element
     // the matmul's dequant region commits, which is what leaves the remaining
     // scale seam a one-constraint job.
@@ -4782,7 +4782,7 @@ different rotation", inv.len(), 2 * hd * p.s);
         } else {
             g.t.unlay(&reg.outs[0])
         };
-        let m0 = &layer.mats[plan.walks[rp.walk].mats[0]];
+        let m0 = &layer.mats[plan.freivalds[rp.freivalds].mats[0]];
         let r = crate::requant::rq_region(
             &rp.name, &x, &m0.qx, &m0.jx.iter().map(|v| *v as i64).collect::<Vec<_>>(),
             &m0.sx, rp.tokens, rp.n, rp.v, rp.lay, &mut tables,
@@ -5038,8 +5038,8 @@ different rotation", inv.len(), 2 * hd * p.s);
             pre_counters[2].push(&d.m_mul);
             pre_counters[r8].push(&d.m_r8);
         }
-        for r in &walk_regions {
-            let d = r.dev.as_ref().expect("B7_M4_WFILL=1 but a walk group is host-built");
+        for r in &freivalds_regions {
+            let d = r.dev.as_ref().expect("B7_M4_WFILL=1 but a Freivalds group is host-built");
             pre_counters[r8].push(&d.m_r8);
         }
         let d = aor.dev.as_ref().expect("B7_M4_WFILL=1 but the attnout is host-built");
@@ -5134,7 +5134,7 @@ different rotation", inv.len(), 2 * hd * p.s);
     let trace_secs = t0.elapsed().as_secs_f64();
     let residual_stream_tamper_fired = tamper.residual_stream
         .map(|_| residual_stream_regions.iter().map(|r| r.fired).sum::<usize>());
-    Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
+    Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, freivalds_regions,
           residual_stream_regions, residual_stream_tcols, residual_stream_mcols,
           residual_stream_b1, am_region, emb_region, rq_regions,
           q_regions, n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
@@ -5145,7 +5145,7 @@ different rotation", inv.len(), 2 * hd * p.s);
 /// B7b (README 26): the second half -- the session, the three commits, the
 /// interaction, the components and the proof.
 pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
-    let Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, walk_regions,
+    let Gen { plan, tables, band_committed, band_dev, band_pre, aor, mat_regions, freivalds_regions,
               residual_stream_regions, residual_stream_tcols, residual_stream_mcols,
               residual_stream_b1, am_region, emb_region, rq_regions,
               q_regions, n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
@@ -5155,7 +5155,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let t0 = std::time::Instant::now();
 
     // The two trees, as references, in the order the owned vectors used to be
-    // filled: every band, then attnout, then the matmuls, then the walks, then
+    // filled: every band, then attnout, then the matmuls, then the Freivalds checks, then
     // the shared tables and their multiplicities. `Op::Tree`'s column order is
     // part of the transcript, so this order is load-bearing and `proof_sha256`
     // is what checks it.
@@ -5205,7 +5205,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             }
         }
     }
-    for r in &walk_regions {
+    for r in &freivalds_regions {
         match &r.dev {
             Some(d) => {
                 let l = r.lay.g.log_rows;
@@ -5218,7 +5218,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             }
         }
     }
-    // The residual-stream regions' columns follow the walks, as they did when the lists
+    // The residual-stream regions' columns follow the Freivalds checks, as they did when the lists
     // were built by value. B11 stream M: and they are on the card under
     // `B7_M4_RESIDUAL_STREAM_FILL=1`, where the fill left them.
     for r in &residual_stream_regions {
@@ -5602,10 +5602,10 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             out.push(crate::gkrlink::affinity_of(
                 "residual_stream", &format!("residual_stream/{}", reg.tag), &ir));
         }
-        for (wi, reg) in walk_regions.iter().enumerate() {
-            let ir = crate::devfrac::ir_of(&m4e_air.walks[wi].eval, reg.lay.g.log_rows);
+        for (wi, reg) in freivalds_regions.iter().enumerate() {
+            let ir = crate::devfrac::ir_of(&m4e_air.freivalds[wi].eval, reg.lay.g.log_rows);
             out.push(crate::gkrlink::affinity_of(
-                "walks", &format!("walk/{}", reg.name), &ir));
+                "freivalds", &format!("freivalds/{}", reg.name), &ir));
         }
         let ir = crate::devfrac::ir_of(&m4e_air.ao.eval, aor.lay.log_rows);
         out.push(crate::gkrlink::affinity_of("attnout", "attnout", &ir));
@@ -5767,19 +5767,19 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
         crate::util::m4_add("int/residual_stream_gkr", m4_t.elapsed().as_secs_f64());
     }
-    // B11 stream V, lever 4: the walks, then attnout -- memo section 8's order,
+    // B11 stream V, lever 4: the Freivalds checks, then attnout -- memo section 8's order,
     // which is `sites_of`'s and the order the interaction loop reaches them in.
     // Both evaluators are the components' own with the ablation undone, as the
     // residual-stream family's is.
-    if p.gkr_walks {
-        let g = gkr.as_mut().expect("--gkr-walks needs --gkr-bands");
+    if p.gkr_freivalds {
+        let g = gkr.as_mut().expect("--gkr-freivalds needs --gkr-bands");
         let m4_t = std::time::Instant::now();
-        for (wi, reg) in walk_regions.iter().enumerate() {
-            let mut ev = m4e_air.walks[wi].eval.clone();
+        for (wi, reg) in freivalds_regions.iter().enumerate() {
+            let mut ev = m4e_air.freivalds[wi].eval.clone();
             ev.gkr = false;
-            crate::gkrband::walk_site(g, wi, &ev, reg);
+            crate::gkrband::freivalds_site(g, wi, &ev, reg);
         }
-        crate::util::m4_add("int/walk_gkr", m4_t.elapsed().as_secs_f64());
+        crate::util::m4_add("int/freivalds_gkr", m4_t.elapsed().as_secs_f64());
     }
     if p.gkr_attnout {
         let g = gkr.as_mut().expect("--gkr-attnout needs --gkr-bands");
@@ -5869,12 +5869,12 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                     _ => panic!("a non-residual-stream column named on a residual-stream region"),
                 };
             }
-            if let Reg::Walk(w) = reg {
-                let r = &walk_regions[w];
+            if let Reg::Freivalds(w) = reg {
+                let r = &freivalds_regions[w];
                 return match (c, &r.dev) {
-                    (RCol::Walk(i), Some(d)) => Src::Dev(d.base[*i].device_ptr),
-                    (RCol::Walk(i), None) => Src::Host(&r.base[*i]),
-                    _ => panic!("a non-walk column named on a walk region"),
+                    (RCol::Freivalds(i), Some(d)) => Src::Dev(d.base[*i].device_ptr),
+                    (RCol::Freivalds(i), None) => Src::Host(&r.base[*i]),
+                    _ => panic!("a non-Freivalds column named on a Freivalds region"),
                 };
             }
             if let Reg::Ao = reg {
@@ -5936,16 +5936,16 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             let is_residual_stream = |w: &(crate::gkrlink::Reg, crate::gkrlink::RCol, SecureField)| {
                 matches!(w.0, crate::gkrlink::Reg::ResidualStream(_))
             };
-            let is_walk = |w: &(crate::gkrlink::Reg, crate::gkrlink::RCol, SecureField)| {
-                matches!(w.0, crate::gkrlink::Reg::Walk(_))
+            let is_freivalds = |w: &(crate::gkrlink::Reg, crate::gkrlink::RCol, SecureField)| {
+                matches!(w.0, crate::gkrlink::Reg::Freivalds(_))
             };
             let is_ao = |w: &(crate::gkrlink::Reg, crate::gkrlink::RCol, SecureField)| {
                 matches!(w.0, crate::gkrlink::Reg::Ao)
             };
-            let (at, w) = if spec == "walks" {
-                let at = hl.iter().position(|h| h.weights.iter().any(is_walk))
-                    .expect("linkmut: the fold carries no walk column to bend");
-                (at, hl[at].weights.iter().position(is_walk).unwrap())
+            let (at, w) = if spec == "freivalds" {
+                let at = hl.iter().position(|h| h.weights.iter().any(is_freivalds))
+                    .expect("linkmut: the fold carries no Freivalds column to bend");
+                (at, hl[at].weights.iter().position(is_freivalds).unwrap())
             } else if spec == "attnout" {
                 let at = hl.iter().position(|h| h.weights.iter().any(is_ao))
                     .expect("linkmut: the fold carries no attnout column to bend");
@@ -6030,7 +6030,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // wants `es` committed beside `dent` with a power-of-two lookup pinning
         // the one to the other, which is a column and a table this stream did
         // not add.
-        let sc = (plan.rqs.iter().any(|rp| plan.walks[rp.walk].mats.contains(&mi))
+        let sc = (plan.rqs.iter().any(|rp| plan.freivalds[rp.freivalds].mats.contains(&mi))
                   && plan.specs[mi].variant != DeqVariant::Fold)
             .then_some((w_residual_stream, lam_residual_stream));
         let it = mat_interaction(m, reg, rv, s, &rels, ow.as_ref(), p.gkr_dequant, sc);
@@ -6097,27 +6097,27 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     crate::util::m4_add("int/dequant", m4_t.elapsed().as_secs_f64());
     let m4_t = std::time::Instant::now();
-    for (wi, reg) in walk_regions.iter().enumerate() {
+    for (wi, reg) in freivalds_regions.iter().enumerate() {
         let t_iw = std::time::Instant::now();
-        let it = walk_interaction(layer, reg, rv, s, &rels, true,
-                                  &m4e_air.walks[wi].eval, p.gkr_walks);
-        crate::util::m4_add("int/walks_build", t_iw.elapsed().as_secs_f64());
+        let it = freivalds_interaction(layer, reg, rv, s, &rels, true,
+                                       &m4e_air.freivalds[wi].eval, p.gkr_freivalds);
+        crate::util::m4_add("int/freivalds_build", t_iw.elapsed().as_secs_f64());
         inter_all.extend(it.cols);
-        inter_mark(&format!("walk/{}", reg.name), &inter_all, &mut inter_seen,
+        inter_mark(&format!("freivalds/{}", reg.name), &inter_all, &mut inter_seen,
                    &mut inter_split);
-        claims.walk_acc.push(it.claimed.iter().map(|v| qm(*v)).collect());
+        claims.freivalds_acc.push(it.claimed.iter().map(|v| qm(*v)).collect());
         // stream II: and the group's claim over its own committed activations,
         // pushed for every group whether or not a seam consumes it -- `o`'s
         // counterparty is stream JJ's to publish, and this is the half of that
         // seam II owns.
         if plan.residual_stream.is_some() {
-            claims.walk_qx.push(qm(it.qx_claim));
+            claims.freivalds_qx.push(qm(it.qx_claim));
         }
-        if !p.gkr_walks {
+        if !p.gkr_freivalds {
             claims.use_sums.push(qm(it.use_sum));
         }
     }
-    crate::util::m4_add("int/walks", m4_t.elapsed().as_secs_f64());
+    crate::util::m4_add("int/freivalds", m4_t.elapsed().as_secs_f64());
     let m4_t = std::time::Instant::now();
     // the residual-stream regions' bindings and lookups, in component order
     if let (Some(gp), Some(gr)) = (&plan.residual_stream, &rels.residual_stream) {
@@ -6480,7 +6480,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }).sum::<usize>(),
         "attnout": aor.base_cells(),
         "dequant": n_deq_base,
-        "walks": walk_regions.iter().map(|w| w.base_cells()).sum::<usize>(),
+        "freivalds": freivalds_regions.iter().map(|w| w.base_cells()).sum::<usize>(),
         "residual_stream": residual_stream_regions.iter().map(|g| g.base_cells()).sum::<usize>(),
         "residual_stream_regions": residual_stream_regions.iter().map(|g| json!({
             "tag": g.tag, "rows": g.rows, "log_rows": g.log_rows,
@@ -6589,7 +6589,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         })).collect::<Vec<_>>(),
         // stream II: what each requantize seam costs and, the number that
         // matters, how many of the integers it *derived* from the producer's
-        // output equal the activation the walk actually committed.  On a real
+        // output equal the activation the Freivalds check actually committed.  On a real
         // dump that is a B1 reference check: a non-zero count is the two sides
         // disagreeing about the forward pass, which the binding then rejects.
         "requant": rq_regions.iter().zip(&plan.rqs).map(|(r, rp)| json!({
@@ -6604,7 +6604,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             "cells": {"preprocessed": r.pre_cells(), "base": r.base_cells()},
             "cells_per_value": r.base_cells() as f64 / (r.tokens * r.n) as f64,
             "off_table": r.off_table,
-            "checked": r.ref_n, "matches_walk_qx": r.ref_ok,
+            "checked": r.ref_n, "matches_freivalds_qx": r.ref_ok,
             "mismatch": r.ref_n - r.ref_ok,
         })).collect::<Vec<_>>(),
         "requant_tables": {
@@ -6619,7 +6619,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         "interaction_split": inter_split,
         "interaction_by_family": inter_by_family,
         // B11 stream X, lever 2: the tables' own sides as a family block, the
-        // shape `mats` and `walk_weights` have, and the heights the link pays
+        // shape `mats` and `freivalds_weights` have, and the heights the link pays
         // for at this configuration. The second is what turns the first into a
         // decision: a family joins a height the link already carries for
         // nothing, and pays 16 committed columns over 2^h for a height it
@@ -6634,7 +6634,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // are the same question from the two sides.
         "gkr": gkr_proved.as_ref().map(|p| p.cost.json()),
         "preprocessed": m4_pre_cells,
-        "walk_weights": walk_regions.iter().map(|w| json!({
+        "freivalds_weights": freivalds_regions.iter().map(|w| json!({
             "group": w.name, "weights": w.n_weights, "lead": w.lay.g.lead,
             "pk": w.lay.pk, "pq": w.lay.pq, "log_rows": w.lay.g.log_rows,
             "pre_cells": w.pre_cells(),
@@ -6854,7 +6854,7 @@ pub struct Verdict {
     pub den_ok: Vec<bool>,
     pub av_ok: bool,
     pub den_link_ok: bool,
-    pub walk_ok: Vec<bool>,
+    pub freivalds_ok: Vec<bool>,
     pub sizes_ok: bool,
     /// B10 step 2, one per equality of the residual-stream plan: `gn1.roots == gn1b.in`,
     /// `gn1.xmid == gn2.in`, `gn2.roots == gn2b.in` -- the residual stream is
@@ -6888,7 +6888,7 @@ pub struct Verdict {
     /// off and nothing is published.
     pub head_tok_ok: bool,
     /// stream II: per requantize seam, "the matmul's input is the producer's
-    /// output", and "the walk multiplied the integers this seam derived"
+    /// output", and "the Freivalds check multiplied the integers this seam derived"
     pub rq_in_ok: Vec<bool>,
     pub rq_out_ok: Vec<bool>,
     /// Stream II (E11): per (seam, consuming matmul) pair, in plan order -- "the
@@ -6901,7 +6901,7 @@ pub struct Verdict {
     /// language; these are named rather than counted.
     pub rq_scale_open: Vec<String>,
     /// Stream II (E11): true when this chunk publishes both the attnout
-    /// region's `ao_q` and the `o` walk's `qX` but its `o` matmul does not read
+    /// region's `ao_q` and the `o` Freivalds check's `qX` but its `o` matmul does not read
     /// `nh * hd` channels -- so the two folds are over different sequences and
     /// `ao_q_ok` says nothing.  A desk shape, never a real layer; reported so a
     /// reader cannot mistake a vacuous `ao_q_ok` for a checked seam.
@@ -6971,7 +6971,7 @@ impl Verdict {
             && self.sums_cancel && self.av_ok && self.den_link_ok
             && self.sizes_ok && self.qk_ok.iter().all(|x| *x) && self.den_ok.iter().all(|x| *x)
 
-            && self.walk_ok.iter().all(|x| *x) && self.residual_stream_ok.iter().all(|x| *x)
+            && self.freivalds_ok.iter().all(|x| *x) && self.residual_stream_ok.iter().all(|x| *x)
             && self.deq_out_ok.iter().all(|x| *x) && self.head_binding_ok && self.embed_ok
             && self.embed_tok_ok && self.head_tok_ok
             && self.rq_in_ok.iter().all(|x| *x) && self.rq_out_ok.iter().all(|x| *x)
@@ -6982,7 +6982,7 @@ impl Verdict {
     fn rejected(msg: &str) -> Self {
         Self { stark_ok: false, root_ok: false, model_root_ok: false,
                sums_cancel: false, qk_ok: vec![],
-               den_ok: vec![], av_ok: false, den_link_ok: false, walk_ok: vec![],
+               den_ok: vec![], av_ok: false, den_link_ok: false, freivalds_ok: vec![],
                sizes_ok: false, residual_stream_ok: vec![false], deq_out_ok: vec![false],
                deq_out_open: vec![], head_binding_ok: false, embed_ok: false,
                embed_tok_ok: false, head_tok_ok: false,
@@ -7017,8 +7017,8 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // the claims' shape must match the plan before anything indexes into them
     let n_residual_stream = plan.residual_stream.as_ref().map(|g| g.regions.len()).unwrap_or(0);
     if claims.bands.len() != plan.shapes.len() || claims.mat_h.len() != p.mats.len()
-        || claims.walk_acc.len() != plan.walks.len()
-        || claims.walk_acc.iter().zip(&plan.walks).any(|(c, w)| c.len() != w.mats.len())
+        || claims.freivalds_acc.len() != plan.freivalds.len()
+        || claims.freivalds_acc.iter().zip(&plan.freivalds).any(|(c, w)| c.len() != w.mats.len())
         || claims.use_sums.len() != plan.n_use()
         || claims.table_sums.len() != plan.n_table_sums()
         || claims.stream_bindings.len() != n_residual_stream
@@ -7031,12 +7031,12 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         || claims.embed_tok.len() != usize::from(plan.emb.is_some())
         // stream KK: the head's token claim, exactly when the argmax is composed
         || claims.head_tok.len() != usize::from(plan.argmax_mat().is_some())
-        // stream II: one claim per seam per side, and one per walk group when
+        // stream II: one claim per seam per side, and one per Freivalds group when
         // the chunk carries the wiring family
         || claims.rq_in.len() != plan.rqs.len()
         || claims.rq_out.len() != plan.rqs.len()
-        || claims.walk_qx.len()
-            != if plan.residual_stream.is_some() { plan.walks.len() } else { 0 }
+        || claims.freivalds_qx.len()
+            != if plan.residual_stream.is_some() { plan.freivalds.len() } else { 0 }
         // stream II: the scale binding -- one per seam, and one per matmul when the
         // chunk carries any seam at all
         || claims.rq_sc.len() != plan.rqs.len()
@@ -7211,14 +7211,14 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         .collect();
     let av_ok = av_sum == unqm(claims.ao_out);
     let den_link_ok = az_sum == unqm(claims.ao_den);
-    let walk_ok: Vec<bool> = plan
-        .walks
+    let freivalds_ok: Vec<bool> = plan
+        .freivalds
         .iter()
         .enumerate()
         .flat_map(|(wi, w)| {
             w.mats.iter().enumerate().map(move |(k, mi)| (wi, k, *mi))
         })
-        .map(|(wi, k, mi)| unqm(claims.walk_acc[wi][k]) == unqm(claims.mat_h[mi]))
+        .map(|(wi, k, mi)| unqm(claims.freivalds_acc[wi][k]) == unqm(claims.mat_h[mi]))
         .collect();
 
     // B10 step 2: the wiring family's equalities, from the parsed claims alone.
@@ -7296,8 +7296,8 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // claims the statement already carries: the seam's input claim against the
     // producing region's `Out(0)`, which says the matmul's input is the bf16
     // value the wiring family proved; and the seam's output claim against the
-    // walk group's own claim over its committed activations, which says the
-    // walk multiplied *those* integers.  With the requantize's own constraints
+    // Freivalds group's own claim over its committed activations, which says the
+    // Freivalds check multiplied *those* integers.  With the requantize's own constraints
     // in between -- the division table, the attained maximum and the scale
     // lookup -- the pair is "the activation is the requantize of the producer's
     // output under the pinned per-token scale".
@@ -7317,7 +7317,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         .rqs
         .iter()
         .enumerate()
-        .map(|(k, rp)| claims.rq_out.get(k).copied() == claims.walk_qx.get(rp.walk).copied())
+        .map(|(k, rp)| claims.rq_out.get(k).copied() == claims.freivalds_qx.get(rp.freivalds).copied())
         .collect();
     // Stream II (E11): the scale binding.  The per-token activation scale is
     // committed twice and, before this, never compared: once by the requantize
@@ -7334,7 +7334,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let mut rq_scale_ok: Vec<bool> = vec![];
     let mut rq_scale_open: Vec<String> = vec![];
     for (k, rp) in plan.rqs.iter().enumerate() {
-        for mi in &plan.walks[rp.walk].mats {
+        for mi in &plan.freivalds[rp.freivalds].mats {
             // stream SS: a folded matmul publishes no x-side scale -- its shared
             // columns are `(ms, dent)` and not `(ms, es)` -- so it is named,
             // not counted as a pass by silence (stream JJ's `deq_out_open`
@@ -7349,21 +7349,21 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // Stream II, the `o` seam.  `AttnOutEval` is the attention output's own
     // requantize, so what closes it is one claim on that region -- stream JJ's
     // `claims.ao_q`, a Horner fold over the signed `qm (1 - 2 sg)` -- against
-    // the `o` walk's activation claim.  Both now fold the same values in the
-    // same order under the same weights: the walk's `WalkQx` for the `o` group
+    // the `o` Freivalds check's activation claim.  Both now fold the same values in the
+    // same order under the same weights: the Freivalds check's `FreivaldsQx` for the `o` group
     // carries `rv^k s^t` (see `build_components`), and its fold is over
     // `a - act_off`, which is the signed value the attnout region publishes.
     //
     // Live on every chunk that publishes both claims.  A chunk with no wiring
-    // family publishes no `walk_qx` at all and there is nothing to compare; a
+    // family publishes no `freivalds_qx` at all and there is nothing to compare; a
     // chunk with **no attention** -- the `lm_head` chunk, whose only matmul is
-    // the head -- has no `o` walk, so the attnout region is absent, `ao_q` is
+    // the head -- has no `o` Freivalds check, so the attnout region is absent, `ao_q` is
     // empty and the seam is vacuous.  Both report `true`, and neither is a
     // skipped check: in both cases the statement contains no `o` matmul whose
     // input could be wrong.
     //
     // The third case is a shape, not a statement: a *synthetic* layer whose `o`
-    // walk is not `nh * hd` channels wide folds a different sequence from the
+    // Freivalds check is not `nh * hd` channels wide folds a different sequence from the
     // attnout region's, and the equality is not statable there.  The witness
     // builder wires `o` from `AttnOut::q_ref` exactly when the widths line up
     // (`Layer::synth_residual_stream`), so on any shape a gate proves this is either live
@@ -7371,13 +7371,13 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // pass.
     //
     // The width test is the statement's own: the attention output is `nh * hd`
-    // channels and the `o` walk reads `n_in` of them, and both are `Params`.  A
+    // channels and the `o` Freivalds check reads `n_in` of them, and both are `Params`.  A
     // shape where they disagree is not a layer of any transformer -- its `o`
     // matmul does not consume the attention output at all -- so the two folds
     // run over different sequences and the equality is not statable.  That case
     // is *reported*, in `ao_q_open`, and never counted as a pass by silence;
     // it is stream JJ's `deq_out_open` convention, for the same reason.
-    let ao_q_at = plan.walks.iter().position(|w| w.name == "o").filter(|_| {
+    let ao_q_at = plan.freivalds.iter().position(|w| w.name == "o").filter(|_| {
         plan.residual_stream.is_some() && !claims.ao_q.is_empty()
     });
     let ao_q_wide = p.mats.iter().find(|m| m.name == "o")
@@ -7385,7 +7385,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let ao_q_open = ao_q_at.is_some() && !ao_q_wide;
     let ao_q_ok = match ao_q_at {
         Some(wi) if ao_q_wide => {
-            claims.ao_q.first().copied() == claims.walk_qx.get(wi).copied()
+            claims.ao_q.first().copied() == claims.freivalds_qx.get(wi).copied()
         }
         _ => true,
     };
@@ -7502,7 +7502,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     }).collect();
 
     Verdict { stark_ok, root_ok, model_root_ok,
-              sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, walk_ok, deq_out_ok,
+              sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, freivalds_ok, deq_out_ok,
               deq_out_open, head_binding_ok, embed_ok, embed_tok_ok, head_tok_ok,
               rq_in_ok, rq_out_ok, rq_scale_ok, rq_scale_open, ao_q_open, ao_q_ok,
               nn_in_ok, nn_out_ok, nn_pos_ok, nn_q_ok, nn_open,
@@ -7565,9 +7565,10 @@ impl Plan {
     /// for the same edge -- the residual-stream equalities (`residual_stream.eqs`), the
     /// requantize seams (`rqs`), the dequant output bindings (`residual_stream.output_bindings`), the
     /// quantize regions and their key tiles (`quants`, `nn_bands`), the `o`
-    /// walk's width, the boundary trees (`bounds`, `kv`), the embedding layout
-    /// (`emb`) and the argmax (`argmax_mat`).  `layer` is the segment's unchecked
-    /// layer coordinate, which decides whether the embedding edge applies.
+    /// Freivalds check's width, the boundary trees (`bounds`, `kv`), the
+    /// embedding layout (`emb`) and the argmax (`argmax_mat`).  `layer` is the
+    /// segment's unchecked layer coordinate, which decides whether the embedding
+    /// edge applies.
     ///
     /// The table is a report on the statement and enters nothing: not the
     /// transcript, not a claim, not the proof.
@@ -7673,9 +7674,9 @@ impl Plan {
             put(4, Absent, if head { head_only() } else { Some("no attention".into()) });
         }
 
-        // 5: the attention output's requantize against the `o` walk's
+        // 5: the attention output's requantize against the `o` Freivalds check's
         // activations (`ao_q_ok`, `ao_q_open`)
-        match self.walks.iter().position(|w| w.name == "o") {
+        match self.freivalds.iter().position(|w| w.name == "o") {
             None => put(5, Absent, if head { head_only() } else { Some("no o matmul".into()) }),
             Some(_) if g.is_none() => put(5, Unbound, no_family()),
             Some(_) if head => put(5, Absent, head_only()),
@@ -7715,8 +7716,8 @@ impl Plan {
         }
 
         // 12: every matmul is a Freivalds check over the pinned weights
-        // (`walk_ok`)
-        if self.walks.is_empty() {
+        // (`freivalds_ok`)
+        if self.freivalds.is_empty() {
             put(12, Absent, Some("no matmul".into()));
         } else {
             put(12, Bound, None);

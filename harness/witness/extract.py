@@ -11,7 +11,7 @@ the composed proof's regions read:
     of heads from it;
   * **the matmul accumulators and scales**, as in B6 -- the dequant regions;
   * **new against B6**: the quantized weights `qw_*.i8` (the preprocessed side of
-    the r^T W walk), the quantized activations `qx_*.i8` (the walk's committed
+    the r^T W Freivalds check), the quantized activations `qx_*.i8` (the Freivalds check's committed
     side), the bf16 input patterns `x_*.u16` (the requantize / max-argument
     witnesses), and the attention-output fold's scale exponents `jo.i32` (the
     per-token power-of-two `s_o`) and `jv.i32` (the per-(head, channel)
@@ -548,7 +548,7 @@ if __name__ == "__main__":
             e_min = int(jv.min()) - int(jo.max())
             e_max = int(jv.max()) - int(jo.min())
 
-            # ---- the accumulators the dequant rounds, and the walk's operands -------
+            # ---- the accumulators the dequant rounds, and the Freivalds check's operands -------
             accs = {}
             for name in mats:
                 key = f"L{L}.{name}/acc"

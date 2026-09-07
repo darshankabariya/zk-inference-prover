@@ -529,7 +529,7 @@ fn probe_one<E: FrameworkEval>(
             "max_degree_bound": ra.degree_bounds.iter().max().copied().unwrap_or(0),
             "degree_bounds": ra.degree_bounds,
         },
-        "walk": ra.stats.json(pre.len()),
+        "freivalds": ra.stats.json(pre.len()),
         "constants": {
             "qm31_total": ra.stats.qm31_consts.len(),
             "qm31_runtime_derived": moved,
@@ -558,8 +558,8 @@ pub fn probe(a: &BuiltComponents, b: &BuiltComponents) -> Value {
     for i in 0..a.mats.len() {
         rows.push(probe_one("dequant", format!("dequant{i}"), &a.mats[i], &b.mats[i]));
     }
-    for i in 0..a.walks.len() {
-        rows.push(probe_one("walk", format!("walk{i}"), &a.walks[i], &b.walks[i]));
+    for i in 0..a.freivalds.len() {
+        rows.push(probe_one("freivalds", format!("freivalds{i}"), &a.freivalds[i], &b.freivalds[i]));
     }
     rows.push(probe_one("exp_table", "exp_table".into(), &a.exp_t, &b.exp_t));
     for i in 0..a.tables.len() {
@@ -586,14 +586,14 @@ pub fn probe(a: &BuiltComponents, b: &BuiltComponents) -> Value {
         let f = r["family"].as_str().unwrap().to_string();
         let logn = r["max_constraint_log_degree_bound"].as_u64().unwrap_or(0) as u32;
         let n_rows = (1u64 << logn) as f64;
-        let mul = r["walk"]["ops"]["m31_mul"].as_u64().unwrap_or(0) as f64;
-        let add = r["walk"]["ops"]["m31_add"].as_u64().unwrap_or(0) as f64;
-        let loads = r["walk"]["loads_per_row_with_preprocessed"].as_u64().unwrap_or(0) as f64;
+        let mul = r["freivalds"]["ops"]["m31_mul"].as_u64().unwrap_or(0) as f64;
+        let add = r["freivalds"]["ops"]["m31_add"].as_u64().unwrap_or(0) as f64;
+        let loads = r["freivalds"]["loads_per_row_with_preprocessed"].as_u64().unwrap_or(0) as f64;
         let e = by_family.entry(f).or_default();
         e.0 += 1; // components
-        e.1 += r["walk"]["dag_nodes"].as_u64().unwrap_or(0) as usize;
+        e.1 += r["freivalds"]["dag_nodes"].as_u64().unwrap_or(0) as usize;
         e.2 += r["constants"]["qm31_runtime_derived"].as_u64().unwrap_or(0) as usize;
-        e.3 = e.3.max(r["walk"]["depth"].as_u64().unwrap_or(0) as usize);
+        e.3 = e.3.max(r["freivalds"]["depth"].as_u64().unwrap_or(0) as usize);
         e.4 += mul * n_rows;
         e.5 += loads * 4.0 * n_rows;
         total_mul += mul * n_rows;
@@ -607,8 +607,8 @@ pub fn probe(a: &BuiltComponents, b: &BuiltComponents) -> Value {
     for r in &rows {
         let key = format!(
             "{}|{}|{}|{}|{:?}|{:?}",
-            r["family"], r["expr"]["n_constraints"], r["walk"]["dag_nodes"],
-            r["info"]["logup_fracs_per_row"], r["walk"]["cols_per_interaction"],
+            r["family"], r["expr"]["n_constraints"], r["freivalds"]["dag_nodes"],
+            r["info"]["logup_fracs_per_row"], r["freivalds"]["cols_per_interaction"],
             r["expr"]["degree_bounds"],
         );
         shapes
@@ -664,7 +664,7 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
     };
     let nb = plan.shapes.len();
     let nm = plan.mat_lays.len();
-    let nw = plan.walks.len();
+    let nw = plan.freivalds.len();
     crate::compose::Claims {
         bands: (0..nb).map(|_| std::array::from_fn(|_| felt())).collect(),
         ao_out: felt(),
@@ -672,12 +672,12 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         // stream JJ: a binding claim like the others -- a zero here would fold away
         ao_q: vec![felt()],
         mat_h: (0..nm).map(|_| felt()).collect(),
-        walk_acc: plan
-            .walks
+        freivalds_acc: plan
+            .freivalds
             .iter()
             .map(|w| (0..w.mats.len()).map(|_| felt()).collect())
             .collect(),
-        // 3 per band + attnout + one per matmul + one per walk, and a margin.
+        // 3 per band + attnout + one per matmul + one per Freivalds check, and a margin.
         use_sums: (0..(3 * nb + 1 + nm + nw + 16)).map(|_| felt()).collect(),
         // exp + norm/frac/mul/qnz + one per range width, and a margin (the
         // residual stream's table sides come out of the same margin).
@@ -707,11 +707,11 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
         head_tok: vec![felt()],
         // stream BB: the embedding gadget's two
         embed_out: vec![felt()], embed_tok: vec![felt()],
-        // stream II: the requantize seams' three, the walks' and the matmuls'
+        // stream II: the requantize seams' three, the Freivalds checks' and the matmuls'
         rq_in: (0..plan.rqs.len()).map(|_| felt()).collect(),
         rq_out: (0..plan.rqs.len()).map(|_| felt()).collect(),
         rq_sc: (0..plan.rqs.len()).map(|_| felt()).collect(),
-        walk_qx: (0..nw).map(|_| felt()).collect(),
+        freivalds_qx: (0..nw).map(|_| felt()).collect(),
         deq_sc: (0..nm).map(|_| felt()).collect(),
         // stream NN: the rotation's quantize regions and the bands' own K/Q/V
         nn_in: (0..plan.quants.len()).map(|_| felt()).collect(),

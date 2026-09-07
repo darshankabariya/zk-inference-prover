@@ -38,7 +38,7 @@ mod layout;
 mod plogup;
 mod requant;
 mod rope;
-mod walk_air;
+mod freivalds;
 mod witread;
 mod spans;
 mod util;
@@ -844,7 +844,7 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     // Stream Z: exercise the widened attention output on a synthetic layer --
     // a real dump declares its width in the manifest, a synthetic one takes it
     // here.  The int8-calibrated synthetic data stays complete at any wider
-    // width, so this widens only the table domain and the o walk.
+    // width, so this widens only the table domain and the o Freivalds check.
     l.attn_out_bits = arg_scalar(args, "--synth-ao-bits", l.attn_out_bits);
     // Stream II: the wiring family on a synthetic layer.  A witness-construction
     // switch and not a statement one -- without it a synthetic layer has no
@@ -1156,7 +1156,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
             Some((alpha, _)) => arg_scalar(args, "--fold-alpha", alpha),
             None => 0,
         },
-        walk_p: arg_scalar(args, "--p", 136usize),
+        freivalds_p: arg_scalar(args, "--p", 136usize),
         // B10 step 2: the wiring family rides on a witness `extract.py --residual-stream`
         // wrote, and on nothing else -- a dump without those columns composes
         // exactly as it did before.  `--residual-stream-a` is how many rows one token's
@@ -1202,7 +1202,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         gkr_bands: flag(args, "--gkr-bands"),
         gkr_dequant: flag(args, "--gkr-dequant"),
         gkr_residual_stream: flag(args, "--gkr-residual-stream"),
-        gkr_walks: flag(args, "--gkr-walks"),
+        gkr_freivalds: flag(args, "--gkr-freivalds"),
         gkr_attnout: flag(args, "--gkr-attnout"),
         // Stream BB (E11): the embedding gadget.  `--embed` needs the wiring
         // columns (its binding's counterparty is their `stream_in` claim) and the
@@ -1810,7 +1810,7 @@ fn compose_cmd(args: &[String]) {
                         ("--corrupt-ao-jo-tok", &mut tamper.ao_jo_tok),
                         // stream TT (log row 73): the magnitude window's own
                         ("--corrupt-ao-mag", &mut tamper.ao_mag),
-                        ("--corrupt-walk-act", &mut tamper.walk_over)] {
+                        ("--corrupt-freivalds-act", &mut tamper.freivalds_over)] {
         if let Some(i) = arg_str(args, key) {
             *slot = Some(i.parse().unwrap_or_else(|_| panic!("{key} wants an index")));
             eprintln!("compose: bend {key} at {i} armed (a rejection is the pass)");
@@ -1819,7 +1819,7 @@ fn compose_cmd(args: &[String]) {
     let params = expect_root_params(&l, args, &vname);
     eprintln!("compose: {} bands={:?} variant={} kmax={} rem={} p={} jv=[{},{}] jo=[{},{}] \
 acc={}+{}",
-              l.source, l.band_sizes, vname, params.kmax, params.ao_rem_bits, params.walk_p,
+              l.source, l.band_sizes, vname, params.kmax, params.ao_rem_bits, params.freivalds_p,
               params.ao_jv_min, params.ao_jv_max, params.ao_jo_min, params.ao_jo_max,
               params.ao_acc_lo_bits, params.ao_acc_hi_bits);
     if params.ao_acc_mag {
@@ -1895,7 +1895,7 @@ fn psweep_cmd(args: &[String]) {
     let mut points = vec![];
     for p in arg_list(args, "--p-sweep", &[32usize, 64, 136, 272, 541]) {
         let mut params = params_of(&l, args, &vname);
-        params.walk_p = p;
+        params.freivalds_p = p;
         eprintln!("psweep p={p}");
         let (mut j, accepts) = compose_once(&l, &params, &Default::default(), None);
         assert!(accepts, "honest composed proof rejected at p={p}");
@@ -1906,11 +1906,11 @@ fn psweep_cmd(args: &[String]) {
 }
 
 /// Stream II, the requantize seams' output-side control.  One committed
-/// activation of a walk group is moved to another legal value and the layer's
+/// activation of a Freivalds group is moved to another legal value and the layer's
 /// exact accumulators move with it, so the chunk proves an honest matmul of
 /// the changed input: no tamper, no inconsistent region, just a prover that
 /// multiplied activations of its own choosing -- which is what
-/// `witness-slack.md` section 1d says the walk used to allow.
+/// `witness-slack.md` section 1d says the Freivalds check used to allow.
 ///
 /// The element is the one whose bend disturbs the fewest *dequantized* outputs
 /// of its token, because those are what the rest of the chunk consumes: one
@@ -1918,8 +1918,8 @@ fn psweep_cmd(args: &[String]) {
 /// the search usually finds an element the consumers cannot see at all and the
 /// seam's own output binding is then the only thing that can reject.  Returns the
 /// element and how many dequantized outputs it did move.
-fn bend_walk_qx(l: &mut layer::Layer, specs: &[dequant::Spec], mats: &[usize],
-                start: usize) -> Option<(usize, usize)> {
+fn bend_freivalds_qx(l: &mut layer::Layer, specs: &[dequant::Spec], mats: &[usize],
+                     start: usize) -> Option<(usize, usize)> {
     let m0 = &l.mats[mats[0]];
     let (n_in, tokens) = (m0.n_in, m0.tokens);
     if n_in * tokens == 0 {
@@ -1943,7 +1943,7 @@ fn bend_walk_qx(l: &mut layer::Layer, specs: &[dequant::Spec], mats: &[usize],
             }).count()
         }).sum()
     };
-    // any other legal activation: the walks range check `qx + 2^(bits-1)`, and
+    // any other legal activation: the Freivalds checks range check `qx + 2^(bits-1)`, and
     // both neighbours of an interior value are inside that window
     let dir = |l: &layer::Layer, idx: usize| -> i64 {
         if l.mats[mats[0]].qx[idx] < 126 { 1 } else { -1 }
@@ -1964,7 +1964,7 @@ fn bend_walk_qx(l: &mut layer::Layer, specs: &[dequant::Spec], mats: &[usize],
     let (t, k) = (idx / n_in, idx % n_in);
     for mi in mats {
         let m = &mut l.mats[*mi];
-        assert_eq!(m.n_in, n_in, "walk group mixes input widths");
+        assert_eq!(m.n_in, n_in, "Freivalds group mixes input widths");
         m.qx[idx] = (m.qx[idx] as i64 + d) as i32;
         let n_out = m.n_out;
         for c in 0..n_out {
@@ -2308,15 +2308,15 @@ fn compose_probes_cmd(args: &[String]) {
             // accumulators move with it, so every constraint and every other
             // equality in the chunk still holds -- an honest matmul of the
             // prover's own choice of input, which is exactly what
-            // `witness-slack.md` section 1d says the walk used to allow.
+            // `witness-slack.md` section 1d says the Freivalds check used to allow.
             let mut lb = layer_of(args).0;
-            let bent = bend_walk_qx(&mut lb, &rplan.specs, &rplan.walks[rp.walk].mats, 41)
+            let bent = bend_freivalds_qx(&mut lb, &rplan.specs, &rplan.freivalds[rp.freivalds].mats, 41)
                 .unwrap_or_else(|| panic!("requant {n}: the output-side control bent nothing"));
             eprintln!("  {n}: activation {} bent, {} dequantized outputs moved with it",
                       bent.0, bent.1);
             assert!(!probe(&format!("requant {n}: one activation the requantize did not derive"),
                            &lb, &Default::default(),
-                           &format!("the binding rq_out[{k}] == walk_qx[{}]", rp.walk)),
+                           &format!("the binding rq_out[{k}] == freivalds_qx[{}]", rp.freivalds)),
                     "an activation the requantize did not derive accepted");
             assert!(!probe(&format!("requant {n}: the per-token scale, one step up"), &l,
                            &compose::ProverTamper {
@@ -2334,7 +2334,7 @@ fn compose_probes_cmd(args: &[String]) {
         // is `[down]` alone, so its own pair is not separable by a witness bend
         // and would need a committed-column tamper instead.
         for (k, rp) in rplan.rqs.iter().enumerate() {
-            let mats = &rplan.walks[rp.walk].mats;
+            let mats = &rplan.freivalds[rp.freivalds].mats;
             let Some(mi) = mats.get(1).copied() else { continue };
             let mut lb = layer_of(args).0;
             let name = lb.mats[mi].name.clone();
@@ -2343,7 +2343,7 @@ fn compose_probes_cmd(args: &[String]) {
                 requant::SVariant::Bf16 => lb.mats[mi].sx[0].1 += 1,
             }
             let at = mats.iter().position(|x| *x == mi).unwrap();
-            let base: usize = rplan.rqs[..k].iter().map(|q| rplan.walks[q.walk].mats.len()).sum();
+            let base: usize = rplan.rqs[..k].iter().map(|q| rplan.freivalds[q.freivalds].mats.len()).sum();
             assert!(!probe(&format!("requant {}: {name} dequantized by another scale",
                                     rp.name),
                            &lb, &Default::default(),
@@ -2357,8 +2357,8 @@ fn compose_probes_cmd(args: &[String]) {
         // the three above's output side and no tamper either: one `o`
         // activation the attention output did not produce, with the `o` matmul's
         // own accumulator moved to match, so the matmul is honestly proved and
-        // only `claims.ao_q` against the walk's `qX` can see it.
-        if let Some(wi) = rplan.walks.iter().position(|w| w.name == "o") {
+        // only `claims.ao_q` against the Freivalds check's `qX` can see it.
+        if let Some(wi) = rplan.freivalds.iter().position(|w| w.name == "o") {
             let mut lb = layer_of(args).0;
             let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
             let bent = lb.residual_stream.is_some().then(|| {
@@ -2370,11 +2370,11 @@ fn compose_probes_cmd(args: &[String]) {
                     eprintln!("  o seam: activation {at} bent, the whole layer rebuilt around it");
                     assert!(!probe("o seam: one activation the attention output did not produce",
                                    &lb, &Default::default(),
-                                   &format!("the binding ao_q == walk_qx[{wi}]")),
+                                   &format!("the binding ao_q == freivalds_qx[{wi}]")),
                             "an o activation the attnout region did not requantize accepted");
                 }
                 None => eprintln!("  o seam: SKIP -- this shape has no wiring family, or its o \
-walk is not nh*hd wide, so the two folds are over different sequences and `ao_q_ok` is not \
+Freivalds check is not nh*hd wide, so the two folds are over different sequences and `ao_q_ok` is not \
 statable here"),
             }
         }
@@ -2681,11 +2681,11 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
         //
         // Stream JJ ran this and it accepted, and its record said what would
         // pin it: the consumer-side binding on `claims.ao_q`, which was stream II's
-        // to add.  With that binding live it *does* pin it -- the `o` walk's
+        // to add.  With that binding live it *does* pin it -- the `o` Freivalds check's
         // committed activations are the pre-bend integers and the attnout
         // region's fold is over the post-bend ones, so `ao_q_ok` alone rejects.
         //
-        // On a chunk with no wiring family the `o` walk publishes no `qX` at
+        // On a chunk with no wiring family the `o` Freivalds check publishes no `qX` at
         // all, so there is no consumer and this still accepts.  That is not a
         // hole this control can close: `jo` is the prover's choice and a chunk
         // whose attention output nothing downstream reads has nothing to
@@ -2696,7 +2696,7 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
         let jo_tok = probe("attnout: a whole token's jo moved by one", &l,
                            &compose::ProverTamper { ao_jo_tok: Some(1),
                                                     ..Default::default() },
-                           if seam_live { "the o seam, `ao_q` against the walk's qX" }
+                           if seam_live { "the o seam, `ao_q` against the Freivalds check's qX" }
                            else { "nothing -- this chunk has no consumer for it" });
         assert_eq!(!jo_tok, seam_live,
                    "a whole token's jo must reject exactly when the o seam is live: \

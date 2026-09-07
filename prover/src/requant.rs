@@ -76,7 +76,7 @@ pub fn rq_sel(tag: &str, name: &str) -> PreProcessedColumnId {
 /// Stream II: `(sm, m7, sg)` over every legal signed significand -- 257 rows.
 /// The requantize keys its own lookups on the magnitude pair `(ef, m7)`, but a
 /// binding to a producing region has to speak the wiring family's `(sm, ef)`
-/// language and the walk's `qX` needs a sign.  One lookup per element pins both
+/// language and the Freivalds check's `qX` needs a sign.  One lookup per element pins both
 /// derived fields from one committed `sm`, which is cheaper than a 2^15 pair
 /// table and keeps the binding's folded value degree 1.
 pub const RQV_COLS: [&str; 3] = ["b65_rqv_sm", "b65_rqv_m7", "b65_rqv_sg"];
@@ -173,7 +173,7 @@ pub fn rqv_at(sm: i64) -> Option<usize> {
 /// map, so they share one weight set -- what differs is only what each folds:
 /// the input side folds the producer's `(sm, ef)` pair under the wiring
 /// family's own `lam`, the output side folds the signed integer `q (1 - 2 sg)`
-/// the walk commits.
+/// the Freivalds check commits.
 #[derive(Clone)]
 pub struct RqTie {
     pub w: Vec<SecureField>,
@@ -1180,7 +1180,7 @@ pub struct RqRegion {
     /// the same, for the signed integer the output side folds
     pub out_nat: Vec<i64>,
     pub off_table: usize,
-    /// how many of the derived integers equal the walk's committed activation
+    /// how many of the derived integers equal the Freivalds check's committed activation
     pub ref_ok: usize,
     pub ref_n: usize,
     pub m_rq: Vec<u32>,
@@ -1200,7 +1200,7 @@ impl RqRegion {
 }
 
 /// Build one seam's columns.  `x` is the producer's bf16 output in
-/// `(token, channel)` order, `qx` the walk's committed activations, and
+/// `(token, channel)` order, `qx` the Freivalds check's committed activations, and
 /// `jx`/`sx` the per-token scale the *dequant* already commits -- so the scale
 /// this region pins to the attained maximum is the same field element the
 /// matmul's own region carries, which is what makes the remaining scale seam a

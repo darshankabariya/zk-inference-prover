@@ -305,18 +305,18 @@ def cfg_of(shape, grp):
             grp["dff"], shape["vocab"])
 
 
-def params_of(shape, walked=False, embedding=False):
+def params_of(shape, freivalds=False, embedding=False):
     """Weights the *proof* sees: the `lm_head`, the attention, and either every
-    expert (`walked=True`) or the top-k a token actually uses.
+    expert (`freivalds=True`) or the top-k a token actually uses.
 
-    `embedding=True` adds the input embedding table.  The proof never walks it --
+    `embedding=True` adds the input embedding table.  The proof never covers it --
     it is a lookup, not a matmul, and the cost model has always excluded it -- but
     a vendor's published parameter count includes it, so the shape checks add it
     back to compare like with like."""
     tot = shape["vocab"] * shape["d"] * (2 if embedding else 1)
     for grp in shape["groups"]:
         tot += cm.n_params(cfg_of(shape, grp), experts=grp["experts"],
-                           topk=grp["topk"], walked=walked, head=False,
+                           topk=grp["topk"], freivalds=freivalds, head=False,
                            attn_params_per_layer=grp.get("attn_params_per_layer"))
     return tot
 
@@ -515,10 +515,10 @@ def gg_point(path):
     fam = p["family_cells"]
     return dict(
         h=p["params"]["log_table"], cells=p["cells"],
-        # the walked weights of this chunk's layer, and the preprocessed trace
+        # the weights this chunk's layer covers, and the preprocessed trace
         # they actually commit (`pre_cells`), group by group
-        walk_weights=sum(w["weights"] for w in fam["walk_weights"]),
-        walk_pre=sum(w["pre_cells"] for w in fam["walk_weights"]),
+        freivalds_weights=sum(w["weights"] for w in fam["freivalds_weights"]),
+        freivalds_pre=sum(w["pre_cells"] for w in fam["freivalds_weights"]),
         # trees 0 and 1, as far as they are resident on the device before commit
         devcopy_cells=p["upload"]["devcopy_bytes"] // 4,
         fill_resident=fill["pool_used"] - p["upload"]["devcopy_bytes"],
@@ -571,14 +571,14 @@ def memory_coeffs():
         fresh_h_cols=fresh_cols, pre_h_cols=pre_cols, base_h_cols=base_cols,
         inter_h_cols=inter_cols, dev_h_cols=dev_cols, fill_h_bytes=fill_bytes_cols,
         fill_fixed=fill_a - fill_bytes_cols * 2 ** a["h"],
-        # the walk's OWN preprocessed trace, per walked weight, as the composed
-        # chunk commits it.  B3's `preprocessed_per_weight` is a standalone
+        # the Freivalds check's OWN preprocessed trace, per covered weight, as the
+        # composed chunk commits it.  B3's `preprocessed_per_weight` is a standalone
         # width-sweep slope and does not carry the composed chunk's padding.
-        pre_per_weight=a["walk_pre"] / a["walk_weights"],
+        pre_per_weight=a["freivalds_pre"] / a["freivalds_weights"],
         b3_pre_per_weight=cm.PREPROCESSED_PER_WEIGHT,
-        # everything in tree 0 that is not the walk: the shared lookup tables and
-        # the per-region preprocessed columns
-        pre_shared_fixed=pre_a - a["walk_pre"] - pre_cols * 2 ** a["h"],
+        # everything in tree 0 that is not the Freivalds check: the shared lookup
+        # tables and the per-region preprocessed columns
+        pre_shared_fixed=pre_a - a["freivalds_pre"] - pre_cols * 2 ** a["h"],
         pre_host_built=pre_a - (dev_a - a["cells"]["base"]),
         # base's share of the height-independent trace, used to split a modelled
         # fresh count into the base half the device fills clone and the
@@ -588,8 +588,8 @@ def memory_coeffs():
         driver_bytes=max(a["driver"], b["driver"]),
         slack_bytes=max(a["slack"], b["slack"]),
         card_total=a["card_total"],
-        weights_per_walk_row=(cm.WEIGHT_WALK_CELLS_PER_WEIGHT
-                              and 12.0 / cm.WEIGHT_WALK_CELLS_PER_WEIGHT))
+        weights_per_freivalds_row=(cm.WEIGHT_FREIVALDS_CELLS_PER_WEIGHT
+                                   and 12.0 / cm.WEIGHT_FREIVALDS_CELLS_PER_WEIGHT))
 
 
 def chunk_memory(mc, fresh, weights, h, measured=None):
@@ -597,8 +597,9 @@ def chunk_memory(mc, fresh, weights, h, measured=None):
 
     `fresh` is the chunk's fresh cells as the cost model gives them (which is the
     h = 23 convention, since that is the height every seq5 artifact was taken at);
-    `weights` is what the chunk's walk covers -- for an MoE layer, EVERY expert,
-    which is why the preprocessed term is the one that moves the MoE rows.
+    `weights` is what the chunk's Freivalds check covers -- for an MoE layer,
+    EVERY expert, which is why the preprocessed term is the one that moves the
+    MoE rows.
 
     `measured=<point>` replaces the modelled cell counts with that run's own, so
     the same function serves the calibration check and the frontier rows."""
@@ -641,16 +642,16 @@ def head_cross_check(mc, ref):
         cells=d["cells"], devcopy_cells=d["upload"]["devcopy_bytes"] // 4))
     card = got["card"]
     return dict(source=rel(p), h=h, cells=d["cells"],
-                walk_weights=sum(w["weights"] for w in fam["walk_weights"]),
-                walk_pre=sum(w["pre_cells"] for w in fam["walk_weights"]),
+                freivalds_weights=sum(w["weights"] for w in fam["freivalds_weights"]),
+                freivalds_pre=sum(w["pre_cells"] for w in fam["freivalds_weights"]),
                 measured_mib=ref["peak_mib"], model_mib=card / 2 ** 20,
                 delta=card / 2 ** 20 / ref["peak_mib"] - 1.0)
 
 
-def walk_matrices(shape, grp):
-    """The weights of each matrix one layer's walk covers, biggest first.
+def freivalds_matrices(shape, grp):
+    """The weights of each matrix one layer's Freivalds check covers, biggest first.
 
-    Only the biggest matters here: a walk group's row count is the next power of
+    Only the biggest matters here: a Freivalds group's row count is the next power of
     two above `weights / p` for the widest matrix in it (B3's design point `p`),
     and that row count is the only thing in a layer chunk that could out-grow the
     shared exponent table and take over `h`."""
@@ -666,12 +667,12 @@ def walk_matrices(shape, grp):
     return sorted(mats, reverse=True)
 
 
-def walk_height(mc, shape, grp):
-    """`ceil(log2(widest matrix / p))` -- the tallest column the walk can build."""
-    p = mc["weights_per_walk_row"]
+def freivalds_height(mc, shape, grp):
+    """`ceil(log2(widest matrix / p))` -- the tallest column the check builds."""
+    p = mc["weights_per_freivalds_row"]
     if not p:
         return None
-    return math.ceil(math.log2(max(walk_matrices(shape, grp)) / p))
+    return math.ceil(math.log2(max(freivalds_matrices(shape, grp)) / p))
 
 
 # ------------------------------------- what LDE-only residency changes (HH) --
@@ -942,9 +943,9 @@ def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
     """The reusable per-shape row.  Everything the table prints comes from here."""
     usd = usd or {}
     row = dict(name=shape["name"], tag=shape["tag"],
-               params_total=params_of(shape, walked=True, embedding=True),
+               params_total=params_of(shape, freivalds=True, embedding=True),
                params_active=params_of(shape, embedding=True),
-               params_walked=params_of(shape, walked=True),
+               params_freivalds=params_of(shape, freivalds=True),
                check_total=shape.get("check_total"), check_active=shape.get("check_active"),
                source=shape["source"], seq=seq, seq_batch=seq_batch, contexts={})
     n_chunks = sum(grp["layers"] for grp in shape["groups"]) + 1
@@ -988,7 +989,8 @@ def moe_ratio(shape, ctx, alpha, seq=TOKENS, seq_batch=1, ref_batch=1, batch=Non
 
     With `ref_batch=1` the reference is fixed, which is what section 6.4's counter
     claims: at `B ~ E/k` the batched MoE proof costs what the unbatched dense proof
-    costs, because each expert is again amortising its walk over S tokens."""
+    costs, because each expert is again amortising its Freivalds check over S
+    tokens."""
     dense = dense_twin(shape)
     a = model_cells(shape, ctx, seq=seq, seq_batch=seq_batch, alpha=alpha, batch=batch)
     b = model_cells(dense, ctx, seq=seq, seq_batch=ref_batch, alpha=alpha, batch=batch)
@@ -1174,7 +1176,7 @@ def main(argv=None):
     # --- the shapes ----------------------------------------------------------
     print("\n(1) the shapes, and each one's own parameter check")
     print("  the check: the model's own arithmetic over the fetched config, plus the input")
-    print("  embedding (which the proof never walks), against the vendor's published counts.")
+    print("  embedding (which the proof never covers), against the vendor's published counts.")
     print(f"  {'model':<18} {'L':>4} {'d':>6} {'nh':>4} {'dff':>7} {'E':>5} {'k':>3} "
           f"{'total (model)':>14} {'published':>10} {'d':>7} "
           f"{'active (model)':>15} {'published':>10} {'d':>7}")
@@ -1185,7 +1187,7 @@ def main(argv=None):
         E = moe[0]["experts"] if moe else 1
         k = moe[0]["topk"] if moe else 1
         dff = moe[0]["dff"] if moe else shape["groups"][0]["dff"]
-        tot = params_of(shape, walked=True, embedding=True)
+        tot = params_of(shape, freivalds=True, embedding=True)
         act = params_of(shape, embedding=True)
         dt = tot / shape["check_total"] - 1 if shape.get("check_total") else None
         da = act / shape["check_active"] - 1 if shape.get("check_active") else None
@@ -1197,7 +1199,7 @@ def main(argv=None):
         rows.append(dict(shape=shape, total=tot, active=act, d_total=dt, d_active=da,
                          flagged=bad))
     print("  E and k include the shared expert where the architecture has one "
-          "(always walked, always active).")
+          "(always covered, always active).")
     for r in rows:
         if r["flagged"]:
             print(f"  [check] {r['shape']['name']}: total {r['d_total']:+.0%}, "
@@ -1217,12 +1219,12 @@ def main(argv=None):
     print(f"\n(2) committed cells per token, S={args.seq} tokens/chunk, B={args.seq_batch} "
           "sequence(s)/proof")
     print(f"  {'model':<18} {'C=4K fresh':>12} {'C=16K fresh':>12} {'C=4K pre':>10} "
-          f"{'C=16K pre':>10} {'walk %':>7} {'grid %':>7} {'chunks':>7}")
+          f"{'C=16K pre':>10} {'freivalds %':>11} {'grid %':>7} {'chunks':>7}")
     for r in priced:
         a, b = r["contexts"][4096], r["contexts"][16384]
         print(f"  {r['name']:<18} {g(a['cells_per_token']):>12} {g(b['cells_per_token']):>12} "
               f"{g(a['preprocessed_per_token']):>10} {g(b['preprocessed_per_token']):>10} "
-              f"{a['parts']['walk']/a['cells_per_token']*100:>6.1f}% "
+              f"{a['parts']['freivalds']/a['cells_per_token']*100:>10.1f}% "
               f"{a['parts']['attn']/a['cells_per_token']*100:>6.1f}% {a['chunks']:>7}")
     print("  `pre` is the preprocessed weight trace, committed offline but read once per")
     print("  proof.  It is NOT in the fresh count the measured rates divide, and it is")
@@ -1336,11 +1338,12 @@ def main(argv=None):
 
     # --- MoE and the batch knob ----------------------------------------------
     print("\n(4) MoE against a dense model with the same *active* parameters, C=4K")
-    print("  the mechanism (B9 probe 2): a proof walks every expert in full, and the walk")
-    print("  is per weight -- exactly invariant to how many tokens used it.  So the weight")
-    print("  side is x E while the accumulators are only x k.  B batches sequences into one")
-    print("  proof; at B ~ E/k every expert sees S tokens again and the walk amortises")
-    print("  exactly as a dense matmul's does at B = 1.")
+    print("  the mechanism (B9 probe 2): a proof covers every expert in full, and the")
+    print("  Freivalds check is per weight -- exactly invariant to how many tokens used")
+    print("  it.  So the weight side is x E while the accumulators are only x k.  B")
+    print("  batches sequences into one proof; at B ~ E/k every expert sees S tokens")
+    print("  again and the Freivalds check amortises exactly as a dense matmul's does")
+    print("  at B = 1.")
     moes = [s for s in SHAPES if any(grp["experts"] > 1 for grp in s["groups"])]
     BS = (1, 4, 16, 64, 256)
     print("  the reference is the dense twin at B=1, held fixed, so the column reads")
@@ -1364,7 +1367,7 @@ def main(argv=None):
               + f"{at_ek['ratio']:>9.3f}x")
     print("  It crosses 1.00 at B ~ E/k, which is the whole of section 6.4's counter, and")
     print("  keeps going: past B = E/k a batched MoE proof is *cheaper* than the unbatched")
-    print("  dense proof the paper prices today, because the walk it inflated has gone.")
+    print("  dense proof the paper prices today, because the Freivalds check it inflated has gone.")
     print("\n  the same rows counting the preprocessed weight trace, which the measured")
     print("  boundary rates do NOT count:")
     for s in moes:
@@ -1479,7 +1482,7 @@ def main(argv=None):
         fits[s["name"]] = dict(cells=per_layer, gib=gib)
         print(f"  {s['name']:<18} {per_layer/1e9:>20.2f} {gib:>12.1f} "
               f"{'yes' if gib < 80 else 'NO':>7} {'yes' if gib < 141 else 'NO':>7}")
-    print("  A chunk that does not fit forces a smaller S, which raises the walk term")
+    print("  A chunk that does not fit forces a smaller S, which raises the Freivalds term")
     print("  (~1/S) and multiplies the proof bytes -- the frontier rows above assume the")
     print("  measured S=512 and are optimistic wherever this column says NO.")
 
@@ -1508,12 +1511,12 @@ def main(argv=None):
               "of boundary-tree Merkle")
         print(f"    + {mc['driver_bytes'] / GIB:.3f} GiB the driver holds outside the pool"
               f", + {mc['slack_bytes'] / 2 ** 20:.0f} MiB of pool slack")
-        print(f"  the walk commits {mc['pre_per_weight']:.4f} preprocessed cells per "
-              f"walked weight in the composed chunk,")
+        print(f"  the Freivalds check commits {mc['pre_per_weight']:.4f} preprocessed cells per "
+              f"covered weight in the composed chunk,")
         print(f"  against B3's standalone-sweep {mc['b3_pre_per_weight']:.4f} that this "
               "module's `pre` column uses")
         print(f"  ({mc['pre_per_weight'] / mc['b3_pre_per_weight'] - 1:+.1%}: the composed "
-              "walk pads each group to a power-of-two row count).")
+              "Freivalds check pads each group to a power-of-two row count).")
         print(f"  Held constant when the shape changes, all read at 8B: "
               f"{g(mc['pre_shared_fixed'])} shared")
         print(f"  preprocessed cells (the lookup tables and the per-region columns), "
@@ -1531,7 +1534,7 @@ def main(argv=None):
                                 seq_batch=args.seq_batch, alpha=alpha, batch=batch,
                                 with_head=False)["total"] * args.seq / cal_grp["layers"]
         cal_w = cm.n_params(cfg_of(cal8b, cal_grp), experts=cal_grp["experts"],
-                            topk=cal_grp["topk"], walked=True, head=False,
+                            topk=cal_grp["topk"], freivalds=True, head=False,
                             attn_params_per_layer=cal_grp.get("attn_params_per_layer")
                             ) / cal_grp["layers"]
         for run, tag in zip(mc["runs"], ("L16", "L0")):
@@ -1557,8 +1560,8 @@ def main(argv=None):
             print(f"  read from ({rel(head['source'])}, H200, its own cells) prices at "
                   f"{head['model_mib']:,.0f} MiB")
             print(f"  against the {head['measured_mib']:,.0f} MiB seq5 sampled, "
-                  f"{head['delta']:+.2%}.  Its walk commits")
-            print(f"  {head['walk_pre'] / head['walk_weights']:.4f} preprocessed cells "
+                  f"{head['delta']:+.2%}.  Its Freivalds check commits")
+            print(f"  {head['freivalds_pre'] / head['freivalds_weights']:.4f} preprocessed cells "
                   f"per weight against the layer chunk's "
                   f"{mc['pre_per_weight']:.4f}: one wide")
             print("  matrix pads better than a layer's four groups, so the frontier "
@@ -1581,12 +1584,12 @@ def main(argv=None):
                                     seq_batch=args.seq_batch, alpha=alpha, batch=batch,
                                     with_head=False)["total"] * args.seq / grp["layers"]
                 w = cm.n_params(cfg_of(s, grp), experts=grp["experts"],
-                                topk=grp["topk"], walked=True, head=False,
+                                topk=grp["topk"], freivalds=True, head=False,
                                 attn_params_per_layer=grp.get("attn_params_per_layer")
                                 ) / grp["layers"]
                 at = {h: chunk_memory(mc, fresh, w, h) for h in (23, 25)}
                 row = dict(fresh=fresh, weights=w, at=at,
-                           walk_h=walk_height(mc, s, grp))
+                           freivalds_h=freivalds_height(mc, s, grp))
                 if best is None or at[23]["card"] > best["at"][23]["card"]:
                     best = row
             best["fits"] = {name: {h: best["at"][h]["card"] / GIB < gib
@@ -1599,19 +1602,19 @@ def main(argv=None):
                   f"{best['at'][23]['pre'] / 1e9:>8.2f} "
                   f"{best['at'][23]['card'] / GIB:>9.1f} "
                   f"{best['at'][25]['card'] / GIB:>9.1f} {cells}")
-        tall = [n for n, r in mem.items() if r["walk_h"] and r["walk_h"] > 25]
+        tall = [n for n, r in mem.items() if r["freivalds_h"] and r["freivalds_h"] > 25]
         print(f"  budgets: {' and '.join(f'{c} = {gib:.1f} GiB' for c, gib in CARDS)}"
               " (vendor totals); our own H100 leaves a")
         print(f"  context {mc['card_total'] / GIB:.2f} GiB, so read a row inside "
               "0.5 GiB of the 80 GB line as at it.")
-        print(f"  tallest walk column over the eight shapes: 2^"
-              f"{max(r['walk_h'] for r in mem.values())}, so the exponent table "
+        print(f"  tallest Freivalds column over the eight shapes: 2^"
+              f"{max(r['freivalds_h'] for r in mem.values())}, so the exponent table "
               "still sets h everywhere")
         print("  " + (f"except {', '.join(tall)}." if tall
                       else "and the h = 23..25 bracket holds for every row."))
         print("  The preprocessed term is per CHUNK, so an MoE layer chunk carries "
               "every expert's")
-        print("  walk trace; splitting such a layer into per-expert chunks divides it, "
+        print("  Freivalds trace; splitting such a layer into per-expert chunks divides it, "
               "and this")
         print("  table prices section (7)'s layer-chunk convention, not the smallest "
               "feasible chunk.")
@@ -1938,7 +1941,7 @@ def main(argv=None):
         shapes=[dict(name=s["name"], tag=s["tag"], source=s["source"],
                      groups=s["groups"], d=s["d"], nh=s["nh"], nkv=s["nkv"],
                      hd=s["hd"], vocab=s["vocab"],
-                     params_total=params_of(s, walked=True), params_active=params_of(s),
+                     params_total=params_of(s, freivalds=True), params_active=params_of(s),
                      check_total=s.get("check_total"), check_active=s.get("check_active"))
                 for s in SHAPES],
         rows=priced,
@@ -1962,7 +1965,7 @@ def main(argv=None):
             cards={c: gib for c, gib in CARDS},
             rows={n: dict(fresh=r["at"][23]["fresh"], preprocessed=r["at"][23]["pre"],
                           device_resident=r["at"][23]["dev"], weights=r["weights"],
-                          walk_log_rows=r["walk_h"],
+                          freivalds_log_rows=r["freivalds_h"],
                           at={str(h): dict(pool=r["at"][h]["pool"],
                                            card=r["at"][h]["card"],
                                            cells_bytes=r["at"][h]["cells_bytes"],

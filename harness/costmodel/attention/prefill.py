@@ -95,7 +95,7 @@ def load(s):
     return dict(s=s, src=p.name, accepts=d["accepts"], off_table=d["off_table"],
                 fresh=d["cells"]["fresh"], pre=d["cells"]["preprocessed"],
                 bands=fc["bands"], dequant=fc["dequant"], inter=fc["interaction"],
-                walks=fc["walks"],
+                freivalds=fc["freivalds"],
                 leads=sorted({(l["chan"], l["key"], l["out"]) for l in fc["band_leads"]}),
                 wall=d["phases"]["wall_secs"])
 
@@ -309,7 +309,8 @@ print("  alone cannot express chunked prefill at all, where every chunk has its 
 
 # --- the whole chunk, in (S, C) ----------------------------------------------
 # `rest` is everything the band family does not cover: the mats, the dequant, the
-# walks, the attnout region and the tables.  Every one of them is per-token or
+# Freivalds checks, the attnout region and the tables.  Every one of them is
+# per-token or
 # fixed -- none carries a C, because a chunk computes S new keys whatever its
 # prefix -- so a linear fit of `rest` in S is structurally the right shape.  It
 # is still a two-point fit, and that is where the remaining uncertainty lives.
@@ -506,7 +507,7 @@ print("time.  At the target rate the same counts give x35-x56 at 27B, at or belo
 print("band's low end, and E6c's own 1-POPS baseline moves it back above -- so the")
 print("absolute ratio is a baseline choice.  The term that moved is not attention: it")
 print("is that **prefill in this scheme costs a full decode-token's trace per token**.")
-print("The weight walk")
+print("The weight Freivalds check")
 print("amortises over the batch, which is what 'x100 on input' assumed; the per-token")
 print("terms -- the dequant at 33% of the budget, the accumulators, the requantize -- do")
 print("not amortise at all, and they are the budget.  Prefill is not cheap here because")

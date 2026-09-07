@@ -1,6 +1,6 @@
 //! The two region evals B6.5 adds to compose a layer proof.
 //!
-//! `WalkEval` is B3's r^T W walk, on B6's ChanEval skeleton: one row group per
+//! `FreivaldsEval` is B3's r^T W Freivalds check, on B6's ChanEval skeleton: one row group per
 //! *input* channel `k`, chunked; `pk` preprocessed weights and `pq` committed
 //! activation bytes per row; `v = sum_t s^t qX[k, t]` shared by every matmul of
 //! the group (q/k/v share one input, so do gate/up), one `u_m = sum_i rv^i W_m[i, k]`
@@ -39,12 +39,12 @@ use crate::layout::Grid;
 pub fn id(s: impl Into<String>) -> PreProcessedColumnId {
     PreProcessedColumnId { id: s.into() }
 }
-pub const WALK_SEL: [&str; 4] = ["nofirst", "last", "notzero", "end"];
-pub fn walk_sel(tag: &str, name: &str) -> PreProcessedColumnId {
-    id(format!("b65_walk{tag}_{name}"))
+pub const FREIVALDS_SEL: [&str; 4] = ["nofirst", "last", "notzero", "end"];
+pub fn freivalds_sel(tag: &str, name: &str) -> PreProcessedColumnId {
+    id(format!("b65_freivalds{tag}_{name}"))
 }
-pub fn walk_w(tag: &str, mat: usize, p: usize) -> PreProcessedColumnId {
-    id(format!("b65_walk{tag}_w{mat}_{p:04}"))
+pub fn freivalds_w(tag: &str, mat: usize, p: usize) -> PreProcessedColumnId {
+    id(format!("b65_freivalds{tag}_w{mat}_{p:04}"))
 }
 pub const AO_SEL: [&str; 6] = ["nofirst", "last", "m1", "m2", "m3", "end"];
 pub fn ao_sel(name: &str) -> PreProcessedColumnId {
@@ -61,12 +61,12 @@ pub fn ao_chan(kind: &str, slot: usize) -> PreProcessedColumnId {
 /// AIR rather than in tree 0.
 pub const EPOW_COLS: [&str; 3] = ["b65_epow_e", "b65_epow_n", "b65_epow_p"];
 
-/// Stream II: the walk's own Horner claim over its committed activations, in
+/// Stream II: the Freivalds check's own Horner claim over its committed activations, in
 /// the canonical channel-major stream order `q = c * tokens + t`, so that a
 /// producing region's claim over the same sequence is comparable to it value
 /// for value.
 ///
-/// The walk's grid runs `(input channel, token chunk)` down the rows with the
+/// The Freivalds check's grid runs `(input channel, token chunk)` down the rows with the
 /// tokens in the slots, so the row step takes two values -- `m_in` inside one
 /// channel's chunks and `m_bd` at a channel boundary -- which is the shape
 /// `dequant::OutputClaim` already runs at.  Both selectors it needs are ones this
@@ -75,7 +75,7 @@ pub const EPOW_COLS: [&str; 3] = ["b65_epow_e", "b65_epow_n", "b65_epow_p"];
 /// `notzero - nofirst` is exactly "this row begins a channel and is not row 0".
 /// No new preprocessed column.
 #[derive(Clone)]
-pub struct WalkQx {
+pub struct FreivaldsQx {
     /// one weight per token slot
     pub w: Vec<SecureField>,
     pub m_in: SecureField,
@@ -83,10 +83,10 @@ pub struct WalkQx {
     pub claimed: SecureField,
 }
 
-// ------------------------------------------------------------- the weight walk --
+// -------------------------------------------------- the weight Freivalds check --
 
 #[derive(Clone)]
-pub struct WalkEval {
+pub struct FreivaldsEval {
     pub tag: String,
     pub g: Grid,
     /// weights per row per matmul — B3's packing knob `p`
@@ -103,7 +103,7 @@ pub struct WalkEval {
     /// one claimed inner product per matmul
     pub claimed: Vec<SecureField>,
     pub rel_act: RangeRel,
-    /// The committed activations' offset: 128 for the int8 walks, 2^11 for the
+    /// The committed activations' offset: 128 for the int8 Freivalds checks, 2^11 for the
     /// widened attention output's group (stream Z), whose activations are one
     /// cell in `[1, 2^12)` against a 12-bit range table rather than two limbs.
     pub act_off: u32,
@@ -116,10 +116,10 @@ pub struct WalkEval {
     pub gkr: bool,
     /// Stream II: the activation claim, or `None` on a chunk with no wiring
     /// family -- which is what keeps such a chunk's proof exactly what it was.
-    pub qx: Option<WalkQx>,
+    pub qx: Option<FreivaldsQx>,
 }
 
-impl FrameworkEval for WalkEval {
+impl FrameworkEval for FreivaldsEval {
     /// milestone 2b: the flat parameter block for the generated
     /// constraint kernel (`gpu/m2b/cudagen.rs`).
     fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
@@ -128,7 +128,7 @@ impl FrameworkEval for WalkEval {
 
     /// milestone 2a: no kernel is registered under this name, so the
     /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "b65_walk_eval" }
+    fn cuda_eval_name(&self) -> &'static str { "b65_freivalds_eval" }
 
     fn log_size(&self) -> u32 {
         self.g.log_rows
@@ -137,16 +137,16 @@ impl FrameworkEval for WalkEval {
         self.g.log_rows + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let sel: Vec<E::F> = WALK_SEL
+        let sel: Vec<E::F> = FREIVALDS_SEL
             .iter()
-            .map(|n| eval.get_preprocessed_column(walk_sel(&self.tag, n)))
+            .map(|n| eval.get_preprocessed_column(freivalds_sel(&self.tag, n)))
             .collect();
         let (nofirst, last, notzero, end) =
             (sel[0].clone(), sel[1].clone(), sel[2].clone(), sel[3].clone());
         let ws: Vec<Vec<E::F>> = (0..self.n_mats)
             .map(|m| {
                 (0..self.pk)
-                    .map(|p| eval.get_preprocessed_column(walk_w(&self.tag, m, p)))
+                    .map(|p| eval.get_preprocessed_column(freivalds_w(&self.tag, m, p)))
                     .collect()
             })
             .collect();
@@ -225,7 +225,7 @@ pub struct AttnOutEval {
     /// Stream JJ (E11), for stream II: the region's *own output* -- the signed
     /// requantized attention output `q = qm (1 - 2 sg)`, folded under exactly
     /// the weights `claimed_out` uses.  `AttnOutEval` is the requantization of
-    /// the attention output, so this is what the `o` walk's `qX` has to equal
+    /// the attention output, so this is what the `o` Freivalds check's `qX` has to equal
     /// and there is no requant region between them; the `eqs` entry that says
     /// so is II's.
     pub claimed_q: SecureField,
@@ -254,7 +254,7 @@ pub struct AttnOutEval {
     /// -- the width `AttnOut::rem_bits` was derived from -- and buys the bit
     /// `Plan::new`'s quotient assert is short at `attn_out_bits` 12.
     pub denp2: bool,
-    /// B11 stream V, lever 4: as `WalkEval::gkr`.
+    /// B11 stream V, lever 4: as `FreivaldsEval::gkr`.
     pub gkr: bool,
 }
 

@@ -319,10 +319,10 @@ pub enum RCol {
     /// own `pre` list and is named by `residual_stream::residual_stream_pre_col(tag, i, k)`. The only
     /// preprocessed column a residual-stream lookup reads.
     ResidualStreamPre(usize, usize),
-    /// B11 stream V: a walk group's `i`-th trace mask. The activations are the
+    /// B11 stream V: a Freivalds group's `i`-th trace mask. The activations are the
     /// region's first `pq` committed columns, which is the slice
-    /// `walk_interaction`'s builder range-checks.
-    Walk(usize),
+    /// `freivalds_interaction`'s builder range-checks.
+    Freivalds(usize),
     /// B11 stream V: the attention-output region's `i`-th trace mask.
     Ao(usize),
     /// Stream JJ (E11): the attention-output region's slot-`i` preprocessed
@@ -349,8 +349,8 @@ pub enum Reg {
     Deq(usize),
     /// B11 stream V: residual-stream region `g`, in the plan's region order
     ResidualStream(usize),
-    /// B11 stream V: walk group `w`, in the plan's walk order
-    Walk(usize),
+    /// B11 stream V: Freivalds group `w`, in the plan's Freivalds order
+    Freivalds(usize),
     /// B11 stream V: the attention-output region, of which there is one
     Ao,
 }
@@ -369,7 +369,7 @@ impl Reg {
             Reg::Band(b) => format!("band{b}"),
             Reg::Deq(m) => format!("deq{m}"),
             Reg::ResidualStream(g) => format!("residual_stream{g}"),
-            Reg::Walk(w) => format!("walk{w}"),
+            Reg::Freivalds(w) => format!("freivalds{w}"),
             Reg::Ao => "attnout".to_string(),
         }
     }
@@ -547,8 +547,8 @@ pub fn link_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels) -> V
     if plan.p.gkr_residual_stream {
         out.extend(residual_stream_looks(plan, rels));
     }
-    if plan.p.gkr_walks {
-        out.extend(walk_looks(plan, rels));
+    if plan.p.gkr_freivalds {
+        out.extend(freivalds_looks(plan, rels));
     }
     if plan.p.gkr_attnout {
         out.extend(ao_looks(plan, rels));
@@ -824,23 +824,23 @@ pub fn residual_stream_looks(plan: &crate::compose::Plan, rels: &crate::compose:
     out
 }
 
-/// The walks' lookup sites as affine forms.
+/// The Freivalds checks' lookup sites as affine forms.
 ///
 /// B11 stream V, lever 4. One 8-bit range check per query slot, over the
 /// region's first `pq` committed columns -- which is exactly what
-/// `layer::walk_interaction`'s `fr` reads and what `WalkEval::evaluate` adds.
-/// Every numerator is the literal one, so every walk instance is
+/// `layer::freivalds_interaction`'s `fr` reads and what `FreivaldsEval::evaluate` adds.
+/// Every numerator is the literal one, so every Freivalds instance is
 /// `Layer::LogUpSingles`. This is the whole family: the `v`, `u` and `acc`
 /// columns beside them are Horner accumulators, they are 38.9% of this family's
 /// interaction cells, and none of them is a lookup.
-pub fn walk_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
-                  -> Vec<SiteLooks> {
+pub fn freivalds_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
+                       -> Vec<SiteLooks> {
     let one = SecureField::one();
-    plan.walks
+    plan.freivalds
         .iter()
         .enumerate()
         .map(|(w, wp)| SiteLooks {
-            reg: Reg::Walk(w),
+            reg: Reg::Freivalds(w),
             which: 0,
             log_rows: wp.lay.g.log_rows,
             looks: (0..wp.lay.pq)
@@ -848,7 +848,7 @@ pub fn walk_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
                     num: None,
                     // stream Z: the widened attention output's group ranges its
                     // activations at act_bits, not 8
-                    den: range_den(rels.range(wp.act_bits), Affine::col(RCol::Walk(i), one)),
+                    den: range_den(rels.range(wp.act_bits), Affine::col(RCol::Freivalds(i), one)),
                 })
                 .collect(),
         })

@@ -1,4 +1,4 @@
-// B7a milestone 4 (section 3 row 1): the walk, attnout and band fills, on the
+// B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and band fills, on the
 // device.
 //
 // 20.6's row 1 -- "the other three fills, 0.975 s, and none of them needs a new
@@ -66,11 +66,11 @@ struct B65Mult {
     unsigned n;
 };
 
-// ------------------------------------------------------------------ walk --
+// ------------------------------------------------------- Freivalds check --
 
-// `walk_region`: activations committed with the +128 offset, weights
+// `freivalds_region`: activations committed with the +128 offset, weights
 // preprocessed, one 8-bit range bump per committed cell.
-struct B65WalkCfg {
+struct B65FreivaldsCfg {
     B65Grid g;
     unsigned pq;       // activation slots per row
     unsigned pk;       // weight slots per row, per matmul
@@ -80,12 +80,12 @@ struct B65WalkCfg {
     unsigned mutate;
 };
 
-extern "C" void b65_fill_walk(const signed char *qx,
-                              const signed char *const *qw, const unsigned *n_out,
-                              m31 *const *base_cols, unsigned n_base,
-                              m31 *const *pre_cols, unsigned n_pre,
-                              B65Mult m_r8, unsigned *counts,
-                              B65WalkCfg cfg);
+extern "C" void b65_fill_freivalds(const signed char *qx,
+                                   const signed char *const *qw, const unsigned *n_out,
+                                   m31 *const *base_cols, unsigned n_base,
+                                   m31 *const *pre_cols, unsigned n_pre,
+                                   B65Mult m_r8, unsigned *counts,
+                                   B65FreivaldsCfg cfg);
 
 // --------------------------------------------------------------- attnout --
 

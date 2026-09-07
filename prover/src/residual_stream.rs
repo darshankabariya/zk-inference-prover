@@ -11,7 +11,7 @@
 //!   (b) SwiGLU    y_i = bf16(silu(g_i) u_i)
 //!   (c) residual  x' = bf16(x + o),  x'' = bf16(x' + down)
 //!   (d) the requantize's placement -- B6.5's gadget between a dequant's output
-//!       and a walk's input; no new cell, only wiring
+//!       and a Freivalds check's input; no new cell, only wiring
 //! ```
 //!
 //! Three primitives cover (a)-(c): a bf16 **unary** table (B4: a unary bf16 op
@@ -1458,7 +1458,7 @@ pub fn residual_stream_region(w: &ResidualStreamWitness, prog: &Prog, round: Rou
         // stream II: `FSlot` has no encoding for a preprocessed operand -- a
         // `Src::Pre` lowers to `(NONE, NONE)`, which the kernel reads as the
         // constant zero -- so a region with one takes the host fill whatever the
-        // switch says, as a wide walk group already does.  Announced, because a
+        // switch says, as a wide Freivalds group already does.  Announced, because a
         // device fill that silently multiplied by zero would look like a bad
         // witness.
         eprintln!("residual_stream_fill-dev: {tag}: the region reads preprocessed values, \

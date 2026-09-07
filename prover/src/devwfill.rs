@@ -1,17 +1,17 @@
-//! B7a milestone 4 (section 3 row 1): the walk, attnout and band fills, on the
+//! B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and band fills, on the
 //! device.
 //!
 //! 20.6's row 1, and 20.1's design three more times. What it moves, per family:
 //!
 //! | | host today | here |
 //! |---|---|---|
-//! | walks | `walk_region` over 2^15-2^16 rows, 0.532 s | two kernels, one thread per committed row |
+//! | Freivalds checks | `freivalds_region` over 2^15-2^16 rows, 0.532 s | two kernels, one thread per committed row |
 //! | bands | `commit_base` over three grids and a token block, 0.401 s | four kernels per band |
 //! | attnout | `ao_region`, 0.042 s | one kernel |
 //! | all three | `eval_of` on 59 M cells | nothing: the thread owns the output index |
 //!
 //! **What is uploaded is the witness, and for two of the three it is much
-//! smaller than the columns it replaces.** The walks upload `qx` and `qw` as
+//! smaller than the columns it replaces.** The Freivalds checks upload `qx` and `qw` as
 //! *int8*, four to a word, because that is how the witness is quantized in the
 //! first place: 34 MB against 168 MB of committed and preprocessed cells. The
 //! attnout uploads 3.7 MB against 17.7 MB. The bands are the honest exception
@@ -35,7 +35,7 @@ use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
 use crate::attn_trace::{Cfg, Layouts};
 use crate::attn_witness::{Attn, Variant};
 use crate::common::Eval;
-use crate::layer::{AoLayout, AttnOut, Layer, Tables, WalkLayout};
+use crate::layer::{AoLayout, AttnOut, FreivaldsLayout, Layer, Tables};
 
 // ---------------------------------------------------------------- the FFI shapes --
 
@@ -85,7 +85,7 @@ impl FMult {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct FWalkCfg {
+pub struct FFreivaldsCfg {
     pub g: FGrid,
     pub pq: u32,
     pub pk: u32,
@@ -149,7 +149,7 @@ pub struct FBandCfg {
 }
 
 unsafe extern "C" {
-    fn b65_fill_walk(
+    fn b65_fill_freivalds(
         qx: *const i8,
         qw: *const *const i8,
         n_out: *const u32,
@@ -159,7 +159,7 @@ unsafe extern "C" {
         n_pre: u32,
         m_r8: FMult,
         counts: *mut u32,
-        cfg: FWalkCfg,
+        cfg: FFreivaldsCfg,
     );
     fn b65_fill_attnout(
         acc: *const u32,
@@ -225,7 +225,7 @@ unsafe extern "C" {
 /// Which family a fill belongs to, so a control can be aimed at one of them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fam {
-    Walk,
+    Freivalds,
     Ao,
     Band,
 }
@@ -233,7 +233,7 @@ pub enum Fam {
 impl Fam {
     fn name(self) -> &'static str {
         match self {
-            Fam::Walk => "walk",
+            Fam::Freivalds => "freivalds",
             Fam::Ao => "ao",
             Fam::Band => "band",
         }
@@ -244,9 +244,9 @@ impl Fam {
 /// check has negative controls. The names are the kernel's.
 ///
 /// **The `:family` suffix matters, and 19.6 is why.** The bands are checked
-/// before the attnout and the walks, so an unscoped mutation always panics at
+/// before the attnout and the Freivalds checks, so an unscoped mutation always panics at
 /// the *bands* and the run says nothing about whether the other two families'
-/// checks would have caught the same defect. `B7_M4_WFILLMUT=chan:walk` aims it
+/// checks would have caught the same defect. `B7_M4_WFILLMUT=chan:freivalds` aims it
 /// at one family, so each check is shown to bite on its own rather than
 /// inheriting the bands' evidence.
 pub fn wfill_mut(fam: Fam) -> u32 {
@@ -257,7 +257,7 @@ pub fn wfill_mut(fam: Fam) -> u32 {
         None => (raw, None),
     };
     if let Some(f) = want {
-        assert!(["walk", "ao", "band"].contains(&f),
+        assert!(["freivalds", "ao", "band"].contains(&f),
                 "unknown B7_M4_WFILLMUT family {f:?}");
         if f != fam.name() {
             return 0;
@@ -283,15 +283,15 @@ pub fn wfill_mut(fam: Fam) -> u32 {
 
 /// B11 stream L: the band fill's own switch, defaulting to `B7_M4_WFILL`.
 ///
-/// `B7_M4_WFILL` turns on three device generation paths at once -- the walk
+/// `B7_M4_WFILL` turns on three device generation paths at once -- the Freivalds check
 /// regions, the attnout, and every non-corner band. Stream L measured them
 /// apart on the sequence's own witness and they are not in the same state: the
-/// walk and attnout fills reproduce the host cell for cell, while the band fill
+/// Freivalds check and attnout fills reproduce the host cell for cell, while the band fill
 /// disagrees with the host on the grid region and the proof is then rejected
 /// (`off_table` bumps that the host never makes). One switch cannot express
 /// that, so the band gate becomes its own three-value variable which falls back
 /// to `B7_M4_WFILL` when it is not set. `B7_M4_WFILL=1 B7_M4_WFILL_BAND=0` is
-/// the configuration that takes the walks' win and leaves the bands on the host
+/// the configuration that takes the Freivalds checks' win and leaves the bands on the host
 /// until the fill is fixed.
 pub fn band_mode() -> u32 {
     match std::env::var("B7_M4_WFILL_BAND") {
@@ -693,10 +693,10 @@ fn add_into(dst: &mut [u32], src: &[u32]) {
     dst.par_iter_mut().zip(src.par_iter()).for_each(|(d, s)| *d += *s);
 }
 
-// ================================================================= the walks ==
+// ====================================================== the Freivalds checks ==
 
-/// One walk group's columns, on the device, in committed order.
-pub struct DevWalk {
+/// One Freivalds group's columns, on the device, in committed order.
+pub struct DevFreivalds {
     pub pre: Vec<BaseFieldVec>,
     pub base: Vec<BaseFieldVec>,
     pub log_rows: u32,
@@ -705,42 +705,42 @@ pub struct DevWalk {
     pub m_r8: Uint32Vec,
 }
 
-/// Build one walk group's region on the device.
+/// Build one Freivalds group's region on the device.
 ///
 /// `tables` is read for the 8-bit range table's length and *written* for its
 /// multiplicities: the counters come back and are added in, which is the same
 /// arithmetic the host's serial bumps do and in an order that cannot matter,
 /// because counting is commutative.
-pub fn walk_region_dev(
+pub fn freivalds_region_dev(
     layer: &Layer,
     mat_idx: &[usize],
-    lay: &WalkLayout,
+    lay: &FreivaldsLayout,
     tables: &mut Tables,
-) -> DevWalk {
+) -> DevFreivalds {
     let m0 = &layer.mats[mat_idx[0]];
     let rows = 1usize << lay.g.log_rows;
     let t_up = std::time::Instant::now();
 
-    // The quantised weights are the walk's bytes (stream F: 231.7 MB a chunk,
+    // The quantised weights are the Freivalds check's bytes (stream F: 231.7 MB a chunk,
     // 218.10 of it `qw`), and their pack is a four-to-a-word narrowing -- the
     // case the pinned pool is for.
-    let d_qx = timed_up_into("gen/wfill_walk_pack", "gen/wfill_walk_h2d", "walk/qx",
+    let d_qx = timed_up_into("gen/wfill_freivalds_pack", "gen/wfill_freivalds_h2d", "freivalds/qx",
                              m0.qx.len().div_ceil(4),
-                             |d| pack_i8_into(d, &m0.qx, "walk qx"),
-                             || pack_i8(&m0.qx, "walk qx"));
+                             |d| pack_i8_into(d, &m0.qx, "freivalds qx"),
+                             || pack_i8(&m0.qx, "freivalds qx"));
     let d_qw: Vec<Uint32Vec> = mat_idx
         .iter()
         .map(|i| {
             let qw = &layer.mats[*i].qw;
-            timed_up_into("gen/wfill_walk_pack", "gen/wfill_walk_h2d", "walk/qw",
+            timed_up_into("gen/wfill_freivalds_pack", "gen/wfill_freivalds_h2d", "freivalds/qw",
                           qw.len().div_ceil(4),
-                          |d| pack_i8_into(d, qw, "walk qw"),
-                          || pack_i8(qw, "walk qw"))
+                          |d| pack_i8_into(d, qw, "freivalds qw"),
+                          || pack_i8(qw, "freivalds qw"))
         })
         .collect();
     let qw_ptrs: Vec<*const i8> = d_qw.iter().map(|d| d.device_ptr as *const i8).collect();
     let n_out: Vec<u32> = mat_idx.iter().map(|i| layer.mats[*i].n_out as u32).collect();
-    crate::util::m4_add("gen/wfill_walk_up", t_up.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/wfill_freivalds_up", t_up.elapsed().as_secs_f64());
 
     let t_alloc = std::time::Instant::now();
     let base = uninit(lay.pq, rows);
@@ -752,19 +752,19 @@ pub fn walk_region_dev(
     let counts = zeroes(3);
     crate::util::m4_add("gen/wfill_alloc", t_alloc.elapsed().as_secs_f64());
 
-    let cfg = FWalkCfg {
+    let cfg = FFreivaldsCfg {
         g: FGrid::of(&lay.g),
         pq: lay.pq as u32,
         pk: lay.pk as u32,
         n_in: m0.n_in as u32,
         tokens: m0.tokens as u32,
         n_mats: mat_idx.len() as u32,
-        mutate: wfill_mut(Fam::Walk),
+        mutate: wfill_mut(Fam::Freivalds),
     };
 
     let t_k = std::time::Instant::now();
     unsafe {
-        b65_fill_walk(
+        b65_fill_freivalds(
             d_qx.device_ptr as *const i8,
             qw_ptrs.as_ptr(),
             n_out.as_ptr(),
@@ -777,7 +777,7 @@ pub fn walk_region_dev(
             cfg,
         );
     }
-    crate::util::m4_add("gen/wfill_walk_kernel", t_k.elapsed().as_secs_f64());
+    crate::util::m4_add("gen/wfill_freivalds_kernel", t_k.elapsed().as_secs_f64());
 
     let t_d = std::time::Instant::now();
     let got = counts.to_vec();
@@ -787,7 +787,7 @@ pub fn walk_region_dev(
     tables.off_table += got[0] as usize;
     crate::util::m4_add("gen/wfill_counters", t_d.elapsed().as_secs_f64());
 
-    DevWalk { pre, base, log_rows: lay.g.log_rows, m_r8 }
+    DevFreivalds { pre, base, log_rows: lay.g.log_rows, m_r8 }
 }
 
 // =============================================================== the attnout ==

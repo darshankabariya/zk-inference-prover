@@ -463,15 +463,15 @@ extern "C" void b65_acc_tok(const m31 *const *max_cols, const m31 *const *z_cols
     cuda_free_memory(d_sr);
 }
 
-// ================================================================= the walks ==
+// ====================================================== the Freivalds checks ==
 
-__global__ void b65a_walk_kernel(const m31 *const *__restrict__ base_cols,
-                                 const m31 *const *__restrict__ pre_cols,
-                                 const qm31 *__restrict__ s_pow,
-                                 const qm31 *__restrict__ rv_pow, qm31 s_step,
-                                 qm31 rv_step, unsigned *__restrict__ flags,
-                                 qm31 *__restrict__ a, qm31 *__restrict__ b,
-                                 const B65AccWalk cfg) {
+__global__ void b65a_freivalds_kernel(const m31 *const *__restrict__ base_cols,
+                                      const m31 *const *__restrict__ pre_cols,
+                                      const qm31 *__restrict__ s_pow,
+                                      const qm31 *__restrict__ rv_pow, qm31 s_step,
+                                      qm31 rv_step, unsigned *__restrict__ flags,
+                                      qm31 *__restrict__ a, qm31 *__restrict__ b,
+                                      const B65AccFreivalds cfg) {
     const unsigned j = blockIdx.x * blockDim.x + threadIdx.x;
     if (j >= cfg.g.rows) {
         return;
@@ -495,10 +495,10 @@ __global__ void b65a_walk_kernel(const m31 *const *__restrict__ base_cols,
     }
 }
 
-extern "C" void b65_acc_walk(const m31 *const *base_cols, const m31 *const *pre_cols,
-                             const qm31 *s_pow, const qm31 *rv_pow, qm31 s_step,
-                             qm31 rv_step, unsigned *flags, qm31 *a, qm31 *b,
-                             B65AccWalk cfg) {
+extern "C" void b65_acc_freivalds(const m31 *const *base_cols, const m31 *const *pre_cols,
+                                  const qm31 *s_pow, const qm31 *rv_pow, qm31 s_step,
+                                  qm31 rv_step, unsigned *flags, qm31 *a, qm31 *b,
+                                  B65AccFreivalds cfg) {
     const m31 **d_base =
         clone_to_device<const m31 *>(const_cast<const m31 **>(base_cols), cfg.pq);
     const m31 **d_pre = clone_to_device<const m31 *>(
@@ -506,7 +506,7 @@ extern "C" void b65_acc_walk(const m31 *const *base_cols, const m31 *const *pre_
     qm31 *d_s = clone_to_device<qm31>(const_cast<qm31 *>(s_pow), cfg.pq);
     qm31 *d_rv = clone_to_device<qm31>(const_cast<qm31 *>(rv_pow), cfg.pk);
     const unsigned bw = cfg.g.rows < B65A_BLOCK ? cfg.g.rows : B65A_BLOCK;
-    b65a_walk_kernel<<<(cfg.g.rows + bw - 1u) / bw, bw>>>(
+    b65a_freivalds_kernel<<<(cfg.g.rows + bw - 1u) / bw, bw>>>(
         d_base, d_pre, d_s, d_rv, s_step, rv_step, flags, a, b, cfg);
     ASSERT_CUDA_SUCCESS(cudaDeviceSynchronize());
     ASSERT_CUDA_SUCCESS(cudaGetLastError());

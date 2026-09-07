@@ -11,7 +11,7 @@
 //! | 3 bands x per-token | `am`, `az` | the row maxima and denominators |
 //! | 7 dequant regions | `z`, `h` | the Freivalds claimed side |
 //! | attnout | `z`, `h`, `dz` | the output and denominator claims |
-//! | 4 walk groups | `v`, `us[m]`, `accs[m]` | `r^T W` per matmul |
+//! | 4 Freivalds groups | `v`, `us[m]`, `accs[m]` | `r^T W` per matmul |
 //!
 //! **They are one primitive, six times.** Every one is `x[j] = a[j] x[j-1] +
 //! b[j]` down the *coset* rows of a region, with `b[j]` an inner Horner over
@@ -33,7 +33,7 @@
 //! where it is not are the four the controls are aimed at:
 //!
 //!  * the channel region commits `kk + off_k` and `qq + off_q` (`nooffset`),
-//!    the grid commits `vv + 128` and the walks `qx + 128`;
+//!    the grid commits `vv + 128` and the Freivalds checks `qx + 128`;
 //!  * the grid's key column commits the shift **scaled** to the master exp
 //!    table's exponent, `d delta`, while the score accumulator wants `d`
 //!    (`nodelta` -- the same preprocessed inverse the AIR divides by);
@@ -165,7 +165,7 @@ pub struct FAccTok {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct FAccWalk {
+pub struct FAccFreivalds {
     pub g: FGridA,
     pub pq: u32,
     pub pk: u32,
@@ -215,10 +215,10 @@ unsafe extern "C" {
     fn b65_acc_tok(max_cols: *const *const u32, z_cols: *const *const u32,
                    sr_pow: *const u32, sr_step: [u32; 4], mu: [u32; 4],
                    flags: *const u32, a: *mut u32, b: *mut u32, cfg: FAccTok);
-    fn b65_acc_walk(base_cols: *const *const u32, pre_cols: *const *const u32,
-                    s_pow: *const u32, rv_pow: *const u32, s_step: [u32; 4],
-                    rv_step: [u32; 4], flags: *mut u32, a: *mut u32, b: *mut u32,
-                    cfg: FAccWalk);
+    fn b65_acc_freivalds(base_cols: *const *const u32, pre_cols: *const *const u32,
+                         s_pow: *const u32, rv_pow: *const u32, s_step: [u32; 4],
+                         rv_step: [u32; 4], flags: *mut u32, a: *mut u32, b: *mut u32,
+                         cfg: FAccFreivalds);
     fn b65_acc_deq(acc_cols: *const *const u32, rv_pow: *const u32, rv_step: [u32; 4],
                    flags: *mut u32, a: *mut u32, b: *mut u32, cfg: FAccDeq);
     fn b65_acc_ao(den_col: *const u32, acc_cols: *const *const u32, rv_pow: *const u32,
@@ -247,7 +247,7 @@ pub enum Reg {
     Chan,
     Grid,
     Tok,
-    Walk,
+    Freivalds,
     Deq,
     Ao,
     /// B11 stream N: the residual-stream region's Horner bindings, the seventh region and the
@@ -261,7 +261,7 @@ impl Reg {
             Reg::Chan => "chan",
             Reg::Grid => "grid",
             Reg::Tok => "tok",
-            Reg::Walk => "walk",
+            Reg::Freivalds => "freivalds",
             Reg::Deq => "deq",
             Reg::Ao => "ao",
             Reg::ResidualStreamBinding => "residual_stream_bind",
@@ -274,7 +274,7 @@ impl Reg {
 /// **The suffix is section 5 rule 5, again.** The bands are built first and the
 /// channel region first of all, so an unaimed defect always panics at `chan
 /// band0` and the run says nothing about whether the grid, the per-token block,
-/// the walks, the dequant or the attnout would have caught the same thing.
+/// the Freivalds checks, the dequant or the attnout would have caught the same thing.
 pub fn accmut(reg: Reg) -> u32 {
     let raw = std::env::var("B7_M4_ACCMUT").unwrap_or_default();
     let (name, want) = match raw.split_once(':') {
@@ -282,7 +282,7 @@ pub fn accmut(reg: Reg) -> u32 {
         None => (raw, None),
     };
     if let Some(r) = want.as_deref() {
-        assert!(["chan", "grid", "tok", "walk", "deq", "ao", "residual_stream_bind"].contains(&r),
+        assert!(["chan", "grid", "tok", "freivalds", "deq", "ao", "residual_stream_bind"].contains(&r),
                 "unknown B7_M4_ACCMUT region {r:?}");
         if r != reg.name() {
             return 0;
@@ -337,7 +337,7 @@ struct Acc {
     /// to `devpre` now -- one array per sub-region, written by
     /// `b65_flags_band` at fill time, read both by the selector columns
     /// `commit_pre` used to build on the host and by the segmentation here. The
-    /// walk, dequant and attnout regions have no preprocessed selectors left on
+    /// Freivalds check, dequant and attnout regions have no preprocessed selectors left on
     /// the host, so they still own theirs. `own` keeps a borrowed array's owner
     /// honest: it outlives this `Acc` because it is the caller's.
     own: Option<Uint32Vec>,
@@ -657,24 +657,24 @@ pub fn tok(base: &[BaseFieldVec], at: &[usize], log_row: u32, rw: usize, a: &Att
     DevAccCols { cols, claims: vec![claims[0], claims[1]], log_rows: log_row }
 }
 
-// ================================================================= the walks ==
+// ====================================================== the Freivalds checks ==
 
 /// `v`, then `us[m]` and `accs[m]` per matmul, in the order the host commits
 /// them. The activations are the committed side and the weights the
-/// preprocessed one, both already on the device from 21's walk fill.
-pub fn walk(dev: &crate::devwfill::DevWalk, lay: &crate::layer::WalkLayout,
-            n_mats: usize, rv: SecureField, s_ch: SecureField) -> DevAccCols {
+/// preprocessed one, both already on the device from 21's Freivalds fill.
+pub fn freivalds(dev: &crate::devwfill::DevFreivalds, lay: &crate::layer::FreivaldsLayout,
+                n_mats: usize, rv: SecureField, s_ch: SecureField) -> DevAccCols {
     let t = std::time::Instant::now();
-    let mutate = accmut(Reg::Walk);
-    assert_eq!(dev.base.len(), lay.pq, "the walk region's committed column count");
-    assert_eq!(dev.pre.len(), n_mats * lay.pk + 4, "the walk region's weight columns");
+    let mutate = accmut(Reg::Freivalds);
+    assert_eq!(dev.base.len(), lay.pq, "the Freivalds region's committed column count");
+    assert_eq!(dev.pre.len(), n_mats * lay.pk + 4, "the Freivalds region's weight columns");
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, lay.pk);
     let (s_pow, s_step) = crate::attn_air::powers(s_ch, lay.pq);
     let base = ptrs(&dev.base);
     let pre = ptrs(&dev.pre[..n_mats * lay.pk]);
     let acc = Acc::new(lay.g.log_rows, 1 + 2 * n_mats);
     let (sp, rp) = (pows(&s_pow), pows(&rv_pow));
-    let cfg = FAccWalk {
+    let cfg = FAccFreivalds {
         g: FGridA::of(&lay.g),
         pq: lay.pq as u32,
         pk: lay.pk as u32,
@@ -683,13 +683,13 @@ pub fn walk(dev: &crate::devwfill::DevWalk, lay: &crate::layer::WalkLayout,
         mutate,
     };
     unsafe {
-        b65_acc_walk(base.as_ptr(), pre.as_ptr(), sp.as_ptr() as *const u32,
-                     rp.as_ptr() as *const u32, q4(s_step), q4(rv_step), acc.fp(),
-                     acc.ap(), acc.bp(), cfg);
+        b65_acc_freivalds(base.as_ptr(), pre.as_ptr(), sp.as_ptr() as *const u32,
+                          rp.as_ptr() as *const u32, q4(s_step), q4(rv_step), acc.fp(),
+                          acc.ap(), acc.bp(), cfg);
     }
     acc.scan(0, 1 + n_mats, mutate);
     // `accs[m][j] = accs[m][j-1] + (last ? us[m][j] v[j] : 0)`: a plain sum, no
-    // per-instance weight, because a walk group is one instance.
+    // per-instance weight, because a Freivalds group is one instance.
     let s2: Vec<FAccS2> = (0..n_mats)
         .map(|m| FAccS2 { dst: (1 + n_mats + m) as u32, src0: (1 + m) as u32, src1: 0,
                           sel_i: 0, m_i: qone(), m_l: qone(), m_n: qone() })
@@ -703,7 +703,7 @@ pub fn walk(dev: &crate::devwfill::DevWalk, lay: &crate::layer::WalkLayout,
         order.push((1 + n_mats + m) as u32);
     }
     let cols = acc.split(&order, mutate);
-    note(Reg::Walk, "group", cols.len(), acc.rows, t.elapsed().as_secs_f64());
+    note(Reg::Freivalds, "group", cols.len(), acc.rows, t.elapsed().as_secs_f64());
     DevAccCols {
         cols,
         claims: (0..n_mats).map(|m| claims[1 + n_mats + m]).collect(),

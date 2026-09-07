@@ -184,7 +184,7 @@ staying on the pageable path",
         // control that has never fired is not a control (B7A section 5 rule 5).
         // This changes one word of one staged array after the pack has written
         // it and before the copy reads it -- the exact failure the pool makes
-        // possible, and the narrowest version of it. The band and walk mirrors
+        // possible, and the narrowest version of it. The band and Freivalds mirrors
         // must panic under it; if they do not, they are not covering the pool.
         if mutate() {
             let k = words / 2;

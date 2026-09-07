@@ -59,7 +59,7 @@ and a model tree whose root is compared with the published model commitment).
 The synthetic shapes share one base command and differ in the flags after it.
 `RESIDUAL_STREAM` builds the residual-stream components on the synthetic
 segment and `GKR5` stands for the five flags
-`--gkr-bands --gkr-dequant --gkr-residual-stream --gkr-walks --gkr-attnout`.
+`--gkr-bands --gkr-dequant --gkr-residual-stream --gkr-freivalds --gkr-attnout`.
 
 ```sh
 SYN="--round away --variants intsplit6 --table-bits 16 --s 32 --ctx 128 --hd 32"

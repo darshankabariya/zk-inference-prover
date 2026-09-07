@@ -98,7 +98,7 @@ impl Site {
                 format!("band{b}/{}", ["chan", "key", "out", "row"][self.which]),
             crate::gkrlink::Reg::Deq(m) => format!("deq{m}"),
             crate::gkrlink::Reg::ResidualStream(g) => format!("residual_stream{g}"),
-            crate::gkrlink::Reg::Walk(w) => format!("walk{w}"),
+            crate::gkrlink::Reg::Freivalds(w) => format!("freivalds{w}"),
             crate::gkrlink::Reg::Ao => "attnout".to_string(),
         }
     }
@@ -536,17 +536,17 @@ pub fn residual_stream_site(
     }, eval);
 }
 
-/// B11 stream V, lever 4: one walk group's range checks.
-pub fn walk_site(
+/// B11 stream V, lever 4: one Freivalds group's range checks.
+pub fn freivalds_site(
     c: &mut Collect,
     reg: usize,
-    eval: &crate::walk_air::WalkEval,
-    r: &crate::layer::WalkRegion,
+    eval: &crate::freivalds::FreivaldsEval,
+    r: &crate::layer::FreivaldsRegion,
 ) {
     fam_site(c, FamSite {
-        reg: crate::gkrlink::Reg::Walk(reg),
-        tag: format!("walk/{}", r.name),
-        mut_env: "B11_WALKMUT",
+        reg: crate::gkrlink::Reg::Freivalds(reg),
+        tag: format!("freivalds/{}", r.name),
+        mut_env: "B11_FREIVALDSMUT",
         mut_key: reg,
         log_rows: r.lay.g.log_rows,
         unit: vec![true; r.lay.pq],
@@ -562,7 +562,7 @@ pub fn walk_site(
 /// two limbs to `denp`'s own range check.
 pub fn ao_site(
     c: &mut Collect,
-    eval: &crate::walk_air::AttnOutEval,
+    eval: &crate::freivalds::AttnOutEval,
     r: &crate::layer::AoRegion,
 ) {
     fam_site(c, FamSite {
@@ -1681,7 +1681,7 @@ pub fn mix_shape(channel: &mut impl Channel, sites: &[Site]) {
             crate::gkrlink::Reg::Band(b) => (0u32, b as u32),
             crate::gkrlink::Reg::Deq(m) => (1u32, m as u32),
             crate::gkrlink::Reg::ResidualStream(g) => (2u32, g as u32),
-            crate::gkrlink::Reg::Walk(w) => (3u32, w as u32),
+            crate::gkrlink::Reg::Freivalds(w) => (3u32, w as u32),
             crate::gkrlink::Reg::Ao => (4u32, 0u32),
         };
         felts.push(SecureField::from_u32_unchecked(
@@ -1964,12 +1964,12 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
             }
         }
     }
-    // ---- B11 stream V, lever 4: the walks, then attnout -- memo section 8's
+    // ---- B11 stream V, lever 4: the Freivalds checks, then attnout -- memo section 8's
     // order again. Both are all-unit and both counts come from the plan.
-    if plan.p.gkr_walks {
-        for (w, wp) in plan.walks.iter().enumerate() {
+    if plan.p.gkr_freivalds {
+        for (w, wp) in plan.freivalds.iter().enumerate() {
             out.push(Site {
-                reg: crate::gkrlink::Reg::Walk(w),
+                reg: crate::gkrlink::Reg::Freivalds(w),
                 which: 0,
                 log_rows: wp.lay.g.log_rows,
                 unit: vec![true; wp.lay.pq],

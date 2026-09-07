@@ -1,7 +1,7 @@
 //! The layer witness B6.5 composes into one proof, and the trace builders for
 //! the regions B6 did not have: the per-matmul dequant regions (with the
 //! Freivalds claimed side riding on the same committed accumulators), the
-//! attention-output region, and the r^T W walk regions.
+//! attention-output region, and the r^T W Freivalds regions.
 //!
 //! Layouts, once, because every builder and every selector has to agree:
 //!
@@ -14,7 +14,7 @@
 //!   chunks descending, with `lead` inert rows *first* (nh*S*chunks is not a power
 //!   of two); inert rows commit `den = 1` and zeros, which satisfies every
 //!   constraint and looks up real table rows.
-//! * **walk region** (one per input): `layout::Grid` over input channels, `pk`
+//! * **Freivalds region** (one per input): `layout::Grid` over input channels, `pk`
 //!   preprocessed weights per row per matmul and `pq` committed activation bytes.
 
 use rand::rngs::SmallRng;
@@ -68,7 +68,7 @@ pub fn frac_shared_refusal(man: &serde_json::Value) -> Option<String> {
 
 // ------------------------------------------------------------------ the witness --
 
-/// One matmul's dequant + walk witness.
+/// One matmul's dequant + Freivalds witness.
 pub struct Mat {
     pub name: String,
     pub variant: DeqVariant,
@@ -824,11 +824,11 @@ pub fn mat_variants(layout: &str) -> [(&str, DeqVariant); 7] {
     }
 }
 
-/// The walk groups: matmuls sharing one committed input.
+/// The Freivalds groups: matmuls sharing one committed input.
 /// B10 step 4: `lm_head` is its own group.  It shares no committed input with the
 /// layer's matmuls -- its input is the *final* norm's output, not any layer's --
-/// so it walks alone, over `d` input channels like every other group.
-pub const WALK_GROUPS: [(&str, &[&str]); 5] =
+/// so it Freivalds checks alone, over `d` input channels like every other group.
+pub const FREIVALDS_GROUPS: [(&str, &[&str]); 5] =
     [("qkv", &["q", "k", "v"]), ("o", &["o"]), ("gateup", &["gate", "up"]),
      ("down", &["down"]), ("head", &["lm_head"])];
 
@@ -2002,7 +2002,7 @@ unmoved (a rejection is the pass)");
         }
         let band_sizes_all = sizes;
         let mut mats = vec![];
-        // matmuls in one walk group share one committed input, as the real layer's do
+        // matmuls in one Freivalds group share one committed input, as the real layer's do
         let mut group_qx: std::collections::HashMap<&str, Vec<i32>> = Default::default();
         for (name, var) in mat_variants(&cfg.layout) {
             let (ni, no) = if name == "down" { (n_out, n_in) } else { (n_in, n_out) };
@@ -2019,7 +2019,7 @@ unmoved (a rejection is the pass)");
                     })
                 })
                 .unwrap_or((ni, no));
-            let gname = WALK_GROUPS.iter().find(|(_, ms)| ms.contains(&name)).unwrap().0;
+            let gname = FREIVALDS_GROUPS.iter().find(|(_, ms)| ms.contains(&name)).unwrap().0;
             let qx: Vec<i32> = group_qx
                 .entry(gname)
                 .or_insert_with(|| (0..s * ni).map(|_| rng.random_range(-127..=127)).collect())
@@ -2172,7 +2172,7 @@ impl Layer {
     /// an honest proof of a layer whose attention output is not the one the
     /// attnout region requantized, and only `ao_q_ok` can see it.
     ///
-    /// Returns `None` when this shape's `o` walk is not `nh * hd` wide, which
+    /// Returns `None` when this shape's `o` Freivalds check is not `nh * hd` wide, which
     /// is the shape on which the seam is not statable at all.
     pub fn synth_residual_stream_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
                                       idx: usize) -> Option<usize> {
@@ -2263,7 +2263,7 @@ impl Layer {
             t.unlay(&out[0])
         };
 
-        // one walk group's input, scale and accumulators, from a bf16 column
+        // one Freivalds group's input, scale and accumulators, from a bf16 column
         let mut wire = |me: &mut Self, names: &[&str], x: &[u16], n: usize| {
             let v = match me.mats.iter().find(|m| names.contains(&m.name.as_str())) {
                 Some(m) if m.variant == DeqVariant::Pow2 => crate::requant::SVariant::Pow2,
@@ -2273,7 +2273,7 @@ impl Layer {
             for name in names {
                 let Some(mi) = me.mats.iter().position(|m| m.name == *name) else { continue };
                 let m = &mut me.mats[mi];
-                assert_eq!(m.n_in, n, "{name}: the walk's input width is not its producer's");
+                assert_eq!(m.n_in, n, "{name}: the Freivalds check's input width is not its producer's");
                 m.qx = qx.clone();
                 m.jx = jx.iter().map(|j| *j as i32).collect();
                 m.sx = sx.clone();
@@ -2349,7 +2349,7 @@ impl Layer {
         // requantize -- so on a synthetic layer, where the `o` activations are
         // otherwise drawn at random, the seam can only be honest if the witness
         // says so.  Wired exactly when the widths line up: the attention output
-        // is `nh * hd` channels wide and the `o` walk reads `n_in` of them.  A
+        // is `nh * hd` channels wide and the `o` Freivalds check reads `n_in` of them.  A
         // shape where they disagree leaves `o` untied and `ao_q_ok` reports it
         // as unstatable rather than passing quietly.
         let o_wired = {
@@ -2371,7 +2371,7 @@ impl Layer {
                 }
                 if let Some(at) = o_bend {
                     // any other legal activation: both neighbours of an
-                    // interior value are inside the walk's range window
+                    // interior value are inside the Freivalds check's range window
                     let w = at % qx.len();
                     qx[w] += if qx[w] < 126 { 1 } else { -1 };
                 }
@@ -2591,15 +2591,15 @@ impl AoLayout {
     }
 }
 
-/// One walk region's layout: `Grid` over input channels.
+/// One Freivalds region's layout: `Grid` over input channels.
 #[derive(Clone, Copy, Debug)]
-pub struct WalkLayout {
+pub struct FreivaldsLayout {
     pub g: Grid,
     pub pk: usize,
     pub pq: usize,
 }
 
-impl WalkLayout {
+impl FreivaldsLayout {
     pub fn choose(n_in: usize, n_out_max: usize, tokens: usize, p_target: usize) -> Self {
         // pick the chunk count whose weights-per-row is closest to the target,
         // preferring fewer padded rows on bindings
@@ -2623,7 +2623,7 @@ impl WalkLayout {
                 best = Some((score, pad, Self { g, pk, pq }));
             }
         }
-        best.expect("no walk layout").2
+        best.expect("no Freivalds layout").2
     }
 }
 
@@ -4062,7 +4062,7 @@ fn mat_logup(m: &Mat, r: &MatRegion, rv: SecureField, s_ch: SecureField,
 
 pub struct AoRegion {
     pub lay: AoLayout,
-    /// as `WalkRegion`'s: the mirror under `B7_M4_WFILL=1`
+    /// as `FreivaldsRegion`'s: the mirror under `B7_M4_WFILL=1`
     pub pre: Vec<Eval>,
     pub base: Vec<Eval>,
     /// B7a milestone 4 (section 3 row 1): the same columns, born on the device.
@@ -4528,7 +4528,7 @@ pub struct AoInteraction {
     pub claimed_out: SecureField,
     pub claimed_den: SecureField,
     /// Stream JJ (E11): the region's own requantized output, folded under
-    /// `claimed_out`'s weights -- what the `o` walk's `qX` equals.
+    /// `claimed_out`'s weights -- what the `o` Freivalds check's `qX` equals.
     pub claimed_q: SecureField,
     pub use_sum: SecureField,
 }
@@ -4536,7 +4536,7 @@ pub struct AoInteraction {
 #[allow(clippy::too_many_arguments)]
 pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureField,
                       rv: SecureField, c_ctx: usize, rels: &crate::compose::Rels,
-                      air: &crate::walk_air::AttnOutEval, gkr: bool) -> AoInteraction {
+                      air: &crate::freivalds::AttnOutEval, gkr: bool) -> AoInteraction {
     use stwo::prover::backend::simd::qm31::PackedQM31;
     use stwo_constraint_framework::Relation;
     let lay = r.lay;
@@ -4625,7 +4625,7 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
     //
     // `z`/`h`'s shape exactly, over `q = qm (1 - 2 sg)` instead of over `acc`.
     // `AttnOutEval` *is* the requantization of the attention output, so this
-    // claim is what the `o` walk's committed activations have to equal, row for
+    // claim is what the `o` Freivalds check's committed activations have to equal, row for
     // row -- `q_out` below is the same value this folds.  The `eqs` entry that
     // compares them is stream II's, on the consumer's side.
     let (mut zq, mut hq) = (vec![SecureField::zero(); n_rows],
@@ -4713,7 +4713,7 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
             }
         }
     };
-    // B11 stream V, lever 4: as the walks, and for the same reason. The `z`,
+    // B11 stream V, lever 4: as the Freivalds checks, and for the same reason. The `z`,
     // `h` and `dz` accumulators stay.
     if gkr {
         let _ = fr;
@@ -4737,26 +4737,26 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoRegion, rr: SecureField, s_ch: SecureF
     AoInteraction { cols: cols.into_inner(), claimed_out, claimed_den, claimed_q, use_sum }
 }
 
-// ------------------------------------------------------------------ walk regions --
+// ------------------------------------------------------------- Freivalds regions --
 
-pub struct WalkRegion {
+pub struct FreivaldsRegion {
     pub name: String,
-    pub lay: WalkLayout,
+    pub lay: FreivaldsLayout,
     pub mats: Vec<usize>,
     /// Stream Z: the activation cells' range width (8, or 12 for the widened
     /// attention output's group).  The offset is `2^(act_bits - 1)`.
     pub act_bits: u32,
     /// Under `B7_M4_WFILL=1` these are the *mirror* -- the device columns, back
-    /// on the host, because `walk_interaction` still reads them there. The
+    /// on the host, because `freivalds_interaction` still reads them there. The
     /// commitment takes `dev`, so they never go back up.
     pub pre: Vec<Eval>,
     pub base: Vec<Eval>,
     pub n_weights: usize,
     /// B7a milestone 4 (section 3 row 1): the same columns, born on the device.
-    pub dev: Option<crate::devwfill::DevWalk>,
+    pub dev: Option<crate::devwfill::DevFreivalds>,
 }
 
-impl WalkRegion {
+impl FreivaldsRegion {
     pub fn base_cells(&self) -> usize {
         let n = match &self.dev { Some(d) => d.base.len(), None => self.base.len() };
         n << self.lay.g.log_rows
@@ -4767,24 +4767,24 @@ impl WalkRegion {
     }
 }
 
-/// Build one walk group's region: activations committed (offset
+/// Build one Freivalds group's region: activations committed (offset
 /// `2^(act_bits-1)`), weights preprocessed, range multiplicities bumped at
 /// `act_bits` -- 8 everywhere but the widened attention output's group.
-pub fn walk_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: usize,
-                   act_bits: u32, tables: &mut Tables,
-                   corrupt_qx: Option<usize>, oversize_qx: Option<usize>) -> WalkRegion {
+pub fn freivalds_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: usize,
+                        act_bits: u32, tables: &mut Tables,
+                        corrupt_qx: Option<usize>, oversize_qx: Option<usize>) -> FreivaldsRegion {
     let m0 = &layer.mats[mat_idx[0]];
     let n_in = m0.n_in;
     let tokens = m0.tokens;
     let n_out_max = mat_idx.iter().map(|i| layer.mats[*i].n_out).max().unwrap();
-    let lay = WalkLayout::choose(n_in, n_out_max, tokens, p_target);
+    let lay = FreivaldsLayout::choose(n_in, n_out_max, tokens, p_target);
     let rows = 1usize << lay.g.log_rows;
     let off = 1i32 << (act_bits - 1);
     let qmax = off - 1;
     for i in mat_idx {
-        assert_eq!(layer.mats[*i].n_in, n_in, "walk group mixes input widths");
+        assert_eq!(layer.mats[*i].n_in, n_in, "Freivalds group mixes input widths");
         // q/k/v (and gate/up) must share one committed input
-        assert_eq!(layer.mats[*i].qx, m0.qx, "walk group inputs differ");
+        assert_eq!(layer.mats[*i].qx, m0.qx, "Freivalds group inputs differ");
     }
 
     // B7a milestone 4 (section 3 row 1): which fill runs. 1 is the device's
@@ -4797,13 +4797,13 @@ pub fn walk_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: usize
     // is told in `generate`.
     let m4d = if act_bits == 8 { crate::util::m4b_mode("B7_M4_WFILL") } else { 0 };
     assert!(m4d == 0 || corrupt_qx.is_none(),
-            "{name}: the device walk fill has no `corrupt_qx` path");
+            "{name}: the device Freivalds fill has no `corrupt_qx` path");
     if m4d == 1 {
-        let dev = crate::devwfill::walk_region_dev(layer, mat_idx, &lay, tables);
-        // B7a milestone 4 (section 3 row 1): no mirror. `walk_interaction` reads
+        let dev = crate::devwfill::freivalds_region_dev(layer, mat_idx, &lay, tables);
+        // B7a milestone 4 (section 3 row 1): no mirror. `freivalds_interaction` reads
         // the device columns now, and nothing else reads a device region's host
         // columns -- `base_cells` counts them off `dev`.
-        return WalkRegion { name: name.into(), lay, mats: mat_idx.to_vec(), act_bits,
+        return FreivaldsRegion { name: name.into(), lay, mats: mat_idx.to_vec(), act_bits,
                             pre: vec![], base: vec![],
                             n_weights: mat_idx.iter().map(|i| layer.mats[*i].qw.len()).sum(),
                             dev: Some(dev) };
@@ -4871,22 +4871,22 @@ pub fn walk_region(layer: &Layer, name: &str, mat_idx: &[usize], p_target: usize
         // the check with teeth, before any column has changed hands
         let after = m4d_snap(tables);
         let before = m4d_before.unwrap();
-        let dev = crate::devwfill::walk_region_dev(layer, mat_idx, &lay, tables);
-        crate::devwfill::check_cols(&format!("walk {name} base"), &base, &dev.base);
-        crate::devwfill::check_cols(&format!("walk {name} pre"), &pre, &dev.pre);
+        let dev = crate::devwfill::freivalds_region_dev(layer, mat_idx, &lay, tables);
+        crate::devwfill::check_cols(&format!("freivalds {name} base"), &base, &dev.base);
+        crate::devwfill::check_cols(&format!("freivalds {name} pre"), &pre, &dev.pre);
         let r8 = tables.ridx(8);
-        crate::devwfill::check_delta(&format!("walk {name} m_r8"), &before.0, &after.0,
+        crate::devwfill::check_delta(&format!("freivalds {name} m_r8"), &before.0, &after.0,
                                      &sub_slice(&tables.m_r[r8], &after.0));
         assert_eq!(tables.off_table - after.1, after.1 - before.1,
-                   "walk {name}: off-table bumps differ");
+                   "freivalds {name}: off-table bumps differ");
         // the device's own bumps are the check's, not the proof's
         tables.m_r[r8].copy_from_slice(&after.0);
         tables.off_table = after.1;
-        eprintln!("wfill-dev: walk {name} -- {} base and {} pre columns, {} cells, \
+        eprintln!("wfill-dev: freivalds {name} -- {} base and {} pre columns, {} cells, \
 the 8-bit range multiplicities all match",
                   base.len(), pre.len(), (base.len() + pre.len()) << lay.g.log_rows);
     }
-    WalkRegion { name: name.into(), lay, mats: mat_idx.to_vec(), act_bits, pre, base,
+    FreivaldsRegion { name: name.into(), lay, mats: mat_idx.to_vec(), act_bits, pre, base,
                  n_weights: mat_idx.iter().map(|i| layer.mats[*i].qw.len()).sum(),
                  dev: None }
 }
@@ -4897,7 +4897,7 @@ fn sub_slice(a: &[u32], b: &[u32]) -> Vec<u32> {
     a.iter().zip(b).map(|(x, y)| x - y).collect()
 }
 
-pub struct WalkInteraction {
+pub struct FreivaldsInteraction {
     pub cols: Vec<crate::device::AnyCol<'static>>,
     pub claimed: Vec<SecureField>,
     pub use_sum: SecureField,
@@ -4906,9 +4906,9 @@ pub struct WalkInteraction {
     pub qx_claim: SecureField,
 }
 
-pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: SecureField,
-                        rels: &crate::compose::Rels, range_check: bool,
-                        air: &crate::walk_air::WalkEval, gkr: bool) -> WalkInteraction {
+pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsRegion, rv: SecureField, s_ch: SecureField,
+                             rels: &crate::compose::Rels, range_check: bool,
+                             air: &crate::freivalds::FreivaldsEval, gkr: bool) -> FreivaldsInteraction {
     use stwo::prover::backend::simd::qm31::PackedQM31;
     use stwo_constraint_framework::Relation;
     let lay = r.lay;
@@ -4917,7 +4917,7 @@ pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: Se
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, lay.pk);
     let (s_pow, s_step) = crate::attn_air::powers(s_ch, lay.pq);
 
-    // B7a milestone 4 (section 3 row 1): the walks' v, us and accs, on the same
+    // B7a milestone 4 (section 3 row 1): the Freivalds checks' v, us and accs, on the same
     // three-value mode every fill in this series uses.
     let m4g = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
     let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
@@ -4975,7 +4975,7 @@ pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: Se
     let mut cols = crate::device::ColSink::new();
     let claimed: Vec<SecureField> = match m4g {
         Some(d) => {
-            let got = crate::devacc::walk(d, &lay, r.mats.len(), rv, s_ch);
+            let got = crate::devacc::freivalds(d, &lay, r.mats.len(), rv, s_ch);
             let hh = m4g_host.then(|| {
                 let mut e = crate::attn_trace::secure_cols_pub(lay.g.log_rows, &v);
                 for m in 0..r.mats.len() {
@@ -4984,7 +4984,7 @@ pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: Se
                 }
                 (e, accs.iter().map(|a| a[rows - 1]).collect::<Vec<_>>())
             });
-            crate::devacc::place(&format!("walk {} 2^{}", r.name, lay.g.log_rows), got,
+            crate::devacc::place(&format!("freivalds {} 2^{}", r.name, lay.g.log_rows), got,
                                  hh, &mut cols)
         }
         None => {
@@ -5043,7 +5043,7 @@ pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: Se
         cols.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &xs));
     }
     let mut use_sum = SecureField::zero();
-    // B11 stream V, lever 4: under `--gkr-walks` this group's range checks were
+    // B11 stream V, lever 4: under `--gkr-freivalds` this group's range checks were
     // handed to the collector before the GKR proof ran, in `compose`'s own pass,
     // so there are no running-sum columns to build and no claimed sum to carry.
     // The `v`, `u` and `acc` columns above stay: they are Horner accumulators
@@ -5053,7 +5053,7 @@ pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: Se
         let fr = |i: usize, vr: usize|
             (one, rels.range(r.act_bits).combine(&[r.base[i].data[vr]]));
         let (lcols, s) = crate::devfrac::frac_cols(
-            air, &format!("walk {}", r.name), lay.g.log_rows,
+            air, &format!("freivalds {}", r.name), lay.g.log_rows,
             crate::devfrac::cols_of(&r.pre, r.dev.as_ref().map(|d| &d.pre[..])),
             crate::devfrac::cols_of(&r.base, r.dev.as_ref().map(|d| &d.base[..])),
             || {
@@ -5063,5 +5063,5 @@ pub fn walk_interaction(layer: &Layer, r: &WalkRegion, rv: SecureField, s_ch: Se
         cols.extend_any(lcols);
         use_sum = s;
     }
-    WalkInteraction { cols: cols.into_inner(), claimed, use_sum, qx_claim }
+    FreivaldsInteraction { cols: cols.into_inner(), claimed, use_sum, qx_claim }
 }

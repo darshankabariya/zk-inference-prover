@@ -11,7 +11,7 @@
 //! ```
 //!
 //! with `E` the model's embedding matrix, committed in tree 0 beside the
-//! weights the walks already pin there, and `tok` committed in tree 1 -- before
+//! weights the Freivalds checks already pin there, and `tok` committed in tree 1 -- before
 //! any relation challenge is drawn, which is what makes the lookup below bind
 //! it.
 //!
@@ -25,7 +25,7 @@
 //! table side is `V` rows wide in the vocabulary and the pass is `V x d`.
 //!
 //! What that pass costs is almost all *preprocessed*: `V x d` cells in tree 0,
-//! the same kind of cell the `head` walk group already spends 570 M of on
+//! the same kind of cell the `head` Freivalds group already spends 570 M of on
 //! `lm_head`'s weight matrix.  The fresh cost -- what a chunk pays again -- is
 //! one multiplicity cell and one LogUp column per table row, which is
 //! `5 V d / pe` cells at `pe` channels per row, plus the use side's own copy of
@@ -1124,7 +1124,7 @@ mod tests {
             // quotient bound, which is what every statement that composed
             // before these two fields existed carries.
             ao_acc_mag: false, ao_denp2: false,
-            fold_rem_bits: 0, fold_alpha: 0, walk_p: 136,
+            fold_rem_bits: 0, fold_alpha: 0, freivalds_p: 136,
             residual_stream: Some(crate::compose::ResidualStreamParams {
                 // stream II: the two additive regions are unconditional, so this
                 // fixture carries a real `dff` and the model's two norm
@@ -1135,7 +1135,7 @@ mod tests {
                 inv_d: crate::bf16::from_f64(1.0 / 64.0),
             }),
             corner: false, gkr_bands: false, gkr_dequant: false, gkr_residual_stream: false,
-            gkr_walks: false, gkr_attnout: false, layer_boundary: false, kv_boundary: false,
+            gkr_freivalds: false, gkr_attnout: false, layer_boundary: false, kv_boundary: false,
             logits_claim: false, prove_argmax: false, prove_argmax_lax: false,
             embed_vocab: if embed { 300 } else { 0 },
             embed_per_row: if embed { 32 } else { 0 },

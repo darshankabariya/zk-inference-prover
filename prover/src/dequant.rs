@@ -454,7 +454,7 @@ impl Map {
 
 /// The composed region's Freivalds claimed side: a Horner over the committed
 /// accumulators, `h = sum_{t,i} s^t rv^i acc[t,i]`, which the verifier compares
-/// against the r^T W walk's `acc` claim.  Rows are (token, channel-chunk), chunks
+/// against the r^T W Freivalds check's `acc` claim.  Rows are (token, channel-chunk), chunks
 /// and tokens descending, exactly tiled -- so `z` closes each token's inner sum
 /// and `h` folds tokens by `s`.
 #[derive(Clone)]
@@ -527,7 +527,7 @@ pub struct OutputClaim {
 /// its consumer.
 ///
 /// `lam` folds the bf16 variant's `(ms, es)` into one field element, exactly as
-/// the output side folds `(sm, ef)`.  `None` on a region whose walk group has
+/// the output side folds `(sm, ef)`.  `None` on a region whose Freivalds group has
 /// no requantize seam, and on every region of a chunk with no wiring family.
 #[derive(Clone)]
 pub struct SSide {
@@ -858,7 +858,7 @@ impl FrameworkEval for DequantEval {
             }
         }
         // The composed proof's claimed side: one Horner over the committed
-        // accumulators, so the matmul identity the r^T W walk closes reads the
+        // accumulators, so the matmul identity the r^T W Freivalds check closes reads the
         // *same* cells the dequant rounds -- nothing is committed twice.
         if let Some(y) = &self.yside {
             let sel: Vec<E::F> = DEQ_SEL

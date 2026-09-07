@@ -21,8 +21,8 @@
 //! accepts; two structurally equal quantities (the eval computing `z` twice)
 //! match at fill time and are equal on every chunk.
 //!
-//! The *shape* is not the family name (section 5 rule 9: the four walk groups
-//! share `b65_walk_eval` and differ in how many matmuls they carry). The probe
+//! The *shape* is not the family name (section 5 rule 9: the four Freivalds groups
+//! share `b65_freivalds_eval` and differ in how many matmuls they carry). The probe
 //! also hashes the eval's structure as it runs -- every mask, preprocessed,
 //! relation and constraint call, every base-field constant's value, every
 //! arithmetic step's kind, and, per extension constant, everything the lowering

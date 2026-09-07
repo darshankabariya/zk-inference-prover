@@ -21,7 +21,7 @@
 //! **The 10 multiplicities are 23.1's counter trick, nine more times.** Every
 //! one of them is already a device counter that a fill scatter-added into:
 //! `b65_fill_dequant` bumps `m_norm`, `m_frac`, `m_mul` and the 8-bit range,
-//! `b65_fill_walk` the 8-bit range, `b65_fill_attnout` `m_qnz` and the
+//! `b65_fill_freivalds` the 8-bit range, `b65_fill_attnout` `m_qnz` and the
 //! remainder range, `b65_fill_band_chan` the key and query ranges,
 //! `b65_fill_band_grid` `m_exp`, the auxiliary range and the value range, and
 //! `b65_fill_band_tok` the two `z` ranges. They came back to the host only to
@@ -202,7 +202,7 @@ pub fn premut() -> (u32, u32) {
 /// which fills on the host whatever `B7_M4_WFILL_BAND` says because the device
 /// fill has no notion of its layout. `fills_dev` has to know, and it is asked
 /// from inside the fills themselves (`merge_counters` is read by
-/// `mat_region_dev`, `walk_region_dev` and `commit_base_dev`), none of which
+/// `mat_region_dev`, `freivalds_region_dev` and `commit_base_dev`), none of which
 /// has the layer in hand. So the layer's answer is recorded once, before the
 /// first fill runs, and read from here.
 ///

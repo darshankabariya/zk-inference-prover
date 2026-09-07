@@ -219,7 +219,7 @@ def load(path):
         s=p["s"], c=p["c"], accepts=d["accepts"], off_table=d["off_table"],
         fresh=d["cells"]["fresh"], base=d["cells"]["base"],
         inter=d["cells"]["interaction"], pre=d["cells"]["preprocessed"],
-        bands=fc["bands"], dequant=fc["dequant"], walks=fc["walks"],
+        bands=fc["bands"], dequant=fc["dequant"], freivalds=fc["freivalds"],
         attnout=fc["attnout"],
         band_inter=(fc.get("interaction_by_family", {}).get("bands", {}) or {}).get("cells"),
         band_leads=[(l["chan"], l["key"], l["out"]) for l in fc["band_leads"]],
@@ -407,7 +407,7 @@ def report():
     # -- the one confound §5.1 named: `ao_rem_bits` is data-derived and moved
     #    17 -> 18 -> 20 across the family.  Pinning it at one value above every
     #    point's own makes the family parameter identical.  It widens the
-    #    attnout region and the `o` walk table, so `fresh` must move and `bands`
+    #    attnout region and the `o` Freivalds table, so `fresh` must move and `bands`
     #    must NOT -- which is the check.
     pinned, pinned_fit = [], None
     if got["ddpin"]:

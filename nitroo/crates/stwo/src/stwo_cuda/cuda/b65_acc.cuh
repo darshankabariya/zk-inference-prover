@@ -17,7 +17,7 @@
 // | band channel | `u` (r), `v` (s) | `acc` = sum of `u v`, folded by `r^C` per instance |
 // | band grid | `zs`, `zn` (s), `wv` (rv) | `hs` (Horner in r), `av` = sum `wv zn`, `sn` = sum `zn` |
 // | band per-token | `am`, `az` (s, `mu` at an instance start) | -- |
-// | walk group | `v` (s), `us[m]` (rv) | `accs[m]` = sum of `us[m] v` |
+// | Freivalds group | `v` (s), `us[m]` (rv) | `accs[m]` = sum of `us[m] v` |
 // | dequant | `z` (rv) | `h` (Horner in s) |
 // | attnout | `z` (rv), `den` (raw) | `h`, `dz` (Horner in s, `mu` at a head start) |
 //
@@ -77,7 +77,7 @@
 #define B65A_NOFIRST 2u
 #define B65A_LAST 4u
 // The row where this lane's Horner picks up its per-instance weight. Each
-// region defines it: an instance start for the bands and the walks, a head
+// region defines it: an instance start for the bands and the Freivalds checks, a head
 // start for the attnout, never for the dequant.
 #define B65A_ISTART 8u
 
@@ -236,7 +236,7 @@ struct B65AccTok {
     unsigned mutate;
 };
 
-struct B65AccWalk {
+struct B65AccFreivalds {
     B65AccGrid g;
     unsigned pq;      // activations per row (the committed side)
     unsigned pk;      // weights per row, per matmul (the preprocessed side)
@@ -348,10 +348,10 @@ extern "C" void b65_acc_tok(const m31 *const *max_cols, const m31 *const *z_cols
                             const unsigned *flags, qm31 *a, qm31 *b,
                             B65AccTok cfg);
 
-extern "C" void b65_acc_walk(const m31 *const *base_cols, const m31 *const *pre_cols,
-                             const qm31 *s_pow, const qm31 *rv_pow, qm31 s_step,
-                             qm31 rv_step, unsigned *flags, qm31 *a, qm31 *b,
-                             B65AccWalk cfg);
+extern "C" void b65_acc_freivalds(const m31 *const *base_cols, const m31 *const *pre_cols,
+                                  const qm31 *s_pow, const qm31 *rv_pow, qm31 s_step,
+                                  qm31 rv_step, unsigned *flags, qm31 *a, qm31 *b,
+                                  B65AccFreivalds cfg);
 
 extern "C" void b65_acc_deq(const m31 *const *acc_cols, const qm31 *rv_pow,
                             qm31 rv_step, unsigned *flags, qm31 *a, qm31 *b,

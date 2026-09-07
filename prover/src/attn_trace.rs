@@ -572,7 +572,7 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     //
     // B11 stream L: the switch read here is the band fill's own
     // (`B7_M4_WFILL_BAND`, defaulting to `B7_M4_WFILL`), because the band fill
-    // and the walk fill are not in the same state -- see `devwfill::band_mode`.
+    // and the Freivalds fill are not in the same state -- see `devwfill::band_mode`.
     //
     // B11 stream M: and the corner override above is now that function's twin,
     // `devwfill::band_fill_mode`, because `devpre::fills_dev` has to reach the

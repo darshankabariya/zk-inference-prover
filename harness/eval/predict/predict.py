@@ -92,7 +92,7 @@ REF8B_SOURCE = "experiments/b10/out/seq5/seq_c{4096,16384}_L16.json (result.poin
 #           at both contexts.  So the E4 claim on this half is exact, not
 #           bracketed.
 #
-#   rest    everything else in a layer chunk: the dequant, the walk, the
+#   rest    everything else in a layer chunk: the dequant, the Freivalds check, the
 #           requantize, the int8 range checks, the attention-output fold and
 #           the residual stream.  Pure arithmetic in the 7-tuple, from the B2-B10 gadget
 #           marginals.  This is the half that can be wrong at a new scale.
@@ -360,7 +360,7 @@ def frozen_inputs():
         "model_constants.dequant_chain_cells_per_acc",
         "model_constants.dequant_pow2_cells_per_acc",
         "model_constants.attnout_int8_cells_per_acc",
-        "model_constants.weight_walk_cells_per_weight",
+        "model_constants.weight_freivalds_cells_per_weight",
         "model_constants.logup_marginal_cells_per_lookup",
         "model_constants.nonlinear_cells_per_application",
         "model_constants.default_logup_lookup_batch",

@@ -1,4 +1,4 @@
-// B7a milestone 4 (section 3 row 1): the walk, attnout and band fills, on the
+// B7a milestone 4 (section 3 row 1): the Freivalds check, attnout and band fills, on the
 // device.
 #include "fields.cuh"
 #include "utils.cuh"
@@ -146,15 +146,15 @@ __device__ __forceinline__ bool b65w_drop(unsigned mutate, unsigned i) {
     return mutate == B65W_MUT_NOBUMP && (i & 1023u) == 0u;
 }
 
-// ============================================================== the walk fill ==
+// ========================================================= the Freivalds fill ==
 
-// `walk_region`'s committed half: `pq` activation columns, every cell bumped
+// `freivalds_region`'s committed half: `pq` activation columns, every cell bumped
 // into the 8-bit range table (padding included -- the host bumps outside the
 // match, and a padded slot commits the offset 128, which is a real table row).
-__global__ void b65w_walk_base(const signed char *__restrict__ qx,
-                               m31 *const *__restrict__ base_cols,
-                               B65Mult m_r8, unsigned *__restrict__ counts,
-                               const B65WalkCfg cfg) {
+__global__ void b65w_freivalds_base(const signed char *__restrict__ qx,
+                                    m31 *const *__restrict__ base_cols,
+                                    B65Mult m_r8, unsigned *__restrict__ counts,
+                                    const B65FreivaldsCfg cfg) {
     const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= cfg.g.rows) {
         return;
@@ -180,14 +180,14 @@ __global__ void b65w_walk_base(const signed char *__restrict__ qx,
     }
 }
 
-// `walk_region`'s preprocessed half: the weights of every matmul in the group,
+// `freivalds_region`'s preprocessed half: the weights of every matmul in the group,
 // then the four selectors. `chan` is the control for the slot-to-channel map --
 // a consistently misaddressed weight is a consistent witness for the wrong
 // matmul, and the AIR cannot catch it on its own.
-__global__ void b65w_walk_pre(const signed char *const *__restrict__ qw,
-                              const unsigned *__restrict__ n_out,
-                              m31 *const *__restrict__ pre_cols,
-                              const B65WalkCfg cfg) {
+__global__ void b65w_freivalds_pre(const signed char *const *__restrict__ qw,
+                                   const unsigned *__restrict__ n_out,
+                                   m31 *const *__restrict__ pre_cols,
+                                   const B65FreivaldsCfg cfg) {
     const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= cfg.g.rows) {
         return;
@@ -217,7 +217,7 @@ __global__ void b65w_walk_pre(const signed char *const *__restrict__ qw,
     }
 
     if (blockIdx.y == 0u) {
-        // the four selectors, in `walk_region`'s order
+        // the four selectors, in `freivalds_region`'s order
         pre_cols[n_w + 0u][i] = (live && chunk + 1u < cfg.g.chunks) ? 1u : 0u;
         pre_cols[n_w + 1u][i] = (live && chunk == 0u) ? 1u : 0u;
         pre_cols[n_w + 2u][i] = (j > 0u) ? 1u : 0u;
@@ -225,12 +225,12 @@ __global__ void b65w_walk_pre(const signed char *const *__restrict__ qw,
     }
 }
 
-extern "C" void b65_fill_walk(const signed char *qx,
-                              const signed char *const *qw, const unsigned *n_out,
-                              m31 *const *base_cols, unsigned n_base,
-                              m31 *const *pre_cols, unsigned n_pre,
-                              B65Mult m_r8, unsigned *counts,
-                              B65WalkCfg cfg) {
+extern "C" void b65_fill_freivalds(const signed char *qx,
+                                   const signed char *const *qw, const unsigned *n_out,
+                                   m31 *const *base_cols, unsigned n_base,
+                                   m31 *const *pre_cols, unsigned n_pre,
+                                   B65Mult m_r8, unsigned *counts,
+                                   B65FreivaldsCfg cfg) {
     m31 **d_base = clone_to_device<m31 *>(const_cast<m31 **>(base_cols), n_base);
     m31 **d_pre = clone_to_device<m31 *>(const_cast<m31 **>(pre_cols), n_pre);
     signed char **d_qw =
@@ -238,10 +238,10 @@ extern "C" void b65_fill_walk(const signed char *qx,
     unsigned *d_nout = clone_to_device<unsigned>(const_cast<unsigned *>(n_out), cfg.n_mats);
     const unsigned bx = (cfg.g.rows + B65W_BLOCK - 1u) / B65W_BLOCK;
     dim3 gb(bx, (cfg.pq + B65W_TILE - 1u) / B65W_TILE);
-    b65w_walk_base<<<gb, B65W_BLOCK>>>(qx, d_base, m_r8, counts, cfg);
+    b65w_freivalds_base<<<gb, B65W_BLOCK>>>(qx, d_base, m_r8, counts, cfg);
     const unsigned n_w = cfg.n_mats * cfg.pk;
     dim3 gp(bx, (n_w + B65W_TILE - 1u) / B65W_TILE);
-    b65w_walk_pre<<<gp, B65W_BLOCK>>>(d_qw, d_nout, d_pre, cfg);
+    b65w_freivalds_pre<<<gp, B65W_BLOCK>>>(d_qw, d_nout, d_pre, cfg);
     ASSERT_CUDA_SUCCESS(cudaDeviceSynchronize());
     ASSERT_CUDA_SUCCESS(cudaGetLastError());
     cuda_free_memory(d_base);
