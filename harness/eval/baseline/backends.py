@@ -320,7 +320,7 @@ def measure(be, prompts, n_new, reps, warmup):
 
       decode-only   (n_new - 1) / decode_s.  The prompt is excluded on BOTH
                     sides: our proved seconds never contain the prompt either
-                    (`scope.prefill_status` -- the prefix is declared, not
+                    (`scope.prefill_status` -- the prefix is unchecked, not
                     proven).  This is the v1 statement's comparison.
       e11           (n_prompt + n_new) / total_s.  ALL positions of the
                     concatenated prompt+output pass, over the whole wall of that

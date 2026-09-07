@@ -119,7 +119,7 @@ def head_line(hdir, htb, tag="head", extra="", layer=None, block=None):
     4 -- its norm's output is nobody's residual -- so the head is the last chunk
     of the layer axis and never a producer.  A head dump too old to carry the
     final norm has no wiring family and commits nothing here; the grid reports
-    that as a declared end rather than as a link that failed.
+    that as an unchecked end rather than as a link that failed.
     """
     coord = ""
     if layer is not None:
@@ -163,7 +163,7 @@ def main():
                          "position before the first generated one needs a head chunk too "
                          "-- for the 9-block C=4K sequence (8 prompt blocks + 1 decode "
                          "block) that is block 7, and '--head-blocks 7,8' is what makes "
-                         "`boundary-grid --verify` report no declared generated position")
+                         "`boundary-grid --verify` report no unchecked generated position")
     ap.add_argument("--emit-out", default="",
                     help="also write the distinct emit shapes, one representative plan line "
                          "each, for `emitset` to walk instead of the plan")
@@ -214,7 +214,7 @@ def main():
                          "(one `extract.py --blocks 7,8 --head --corner` pass writes both)")
     ap.add_argument("--table-bits-map", default="",
                     help="a JSON {\"<layer>\": bits, ...} (and optionally \"head\") giving "
-                         "each layer's declared master table width, instead of the shape "
+                         "each layer's stated master table width, instead of the shape "
                          "table's. The shape table carries the EXTRACTION's "
                          "`master_table_bits`, which stream J measured 1-3 bits loose, and "
                          "declaring that without --tight-table put the C=4096 grid 137.9 GB "

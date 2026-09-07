@@ -205,11 +205,11 @@ pub struct Layer {
     pub bands: Vec<Attn>,
     pub band_sizes: Vec<usize>,
     pub head_offsets: Vec<usize>,
-    /// Stream AA (E11): how many bands one head band group's declared prefix is
+    /// Stream AA (E11): how many bands one head band group's unchecked prefix is
     /// tiled into.  1 everywhere before this stream and without `--kv-boundary`;
     /// `C / S` with it, which is what makes a consumer's sub-band the same
     /// `Shape` as the producer's corner; 0 on block 0 of a sequence, which has
-    /// no declared prefix and so no prefix band.  `params_of` reads it back to
+    /// no unchecked prefix and so no prefix band.  `params_of` reads it back to
     /// recover the chunk's real context and its head band list.
     pub nsub: usize,
     pub mats: Vec<Mat>,
@@ -890,7 +890,7 @@ impl Layer {
         // site stream P left (`briefs/p-witread.md` (6) item 1).  Nothing
         // about the bytes or the layout changed; the same gathers now run over
         // one image instead of over three copies of it.
-        // Open item 1: block 0 of a sequence has no declared prefix, so `c == 0`,
+        // Open item 1: block 0 of a sequence has no unchecked prefix, so `c == 0`,
         // `kk.i16` is empty and there is no prefix half to read and no prefix
         // band to build -- the corner is the group's only band and carries its
         // per-token region (`compose.rs`'s `rows_band`, `Powers::as_solo_corner`).
@@ -904,7 +904,7 @@ impl Layer {
         let mut head_offsets = vec![];
         let mut sizes = vec![];
         let mut off = 0usize;
-        // Stream AA (E11), layout design A: with `--kv-boundary` the declared prefix
+        // Stream AA (E11), layout design A: with `--kv-boundary` the unchecked prefix
         // is loaded as `c / s` sub-bands of exactly `S` keys each rather than as
         // one rectangle, because that is what makes a consumer's sub-band `b`
         // the same `Shape` -- and so the same `LayoutKey`, and so a column of
@@ -1226,7 +1226,7 @@ impl Layer {
     ///   `ao_acc_*_bits` come off the activations -- so `zk-prover expect-root
     ///   --weights-only` requires `--params FILE`, the statement's own
     ///   `Fixed.params`, and that is the right shape for the check anyway: the
-    ///   verifier derives the root from *the statement's* declared shape and the
+    ///   verifier derives the root from *the statement's* own shape and the
     ///   model, not from the prover's re-derivation of either;
     /// * the table size must be pinned (the manifest's `master_table_bits` or
     ///   `--table-bits N`), because `--tight-table` sizes it off the witness's
@@ -4374,7 +4374,7 @@ pub fn ao_region(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: u32
                     assert!(corrupt_mag == Some(idx)
                                 || (ao_v >= 0
                                     && ao_v < 1i64 << (acc_lo_bits + acc_hi_bits)),
-                            "attnout: |acc| outside its declared window: {a}");
+                            "attnout: |acc| outside its stated window: {a}");
                     // the limbs are of the *field* representative, so a bent
                     // negative magnitude decomposes the way the AIR reads it
                     let fv = if ao_v < 0 { ((1i64 << 31) - 1) + ao_v } else { ao_v };

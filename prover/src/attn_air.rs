@@ -243,7 +243,7 @@ impl Powers {
         self
     }
 
-    /// The **solo** corner's powers: block 0 of a sequence has no declared
+    /// The **solo** corner's powers: block 0 of a sequence has no unchecked
     /// prefix, so its corner is its head band group's only band and it carries
     /// the per-token region itself (CC deliverable 4, option A).
     ///
@@ -350,7 +350,7 @@ pub struct ChanEval {
     /// the relation entries nor the interaction masks they would allocate.
     pub gkr: bool,
     /// Stream AA: the K/V boundary trees this band's committed **keys** are
-    /// copied into -- 0, 1 or 2 of them (a declared-prefix sub-band writes both
+    /// copied into -- 0, 1 or 2 of them (an unchecked-prefix sub-band writes both
     /// its group's out and in sides; the chunk's own block writes the out side
     /// alone).  Empty on a chunk proved with `--kv-boundary` off, which is why that
     /// chunk's constraint IR, its kernel fingerprint and its proof are

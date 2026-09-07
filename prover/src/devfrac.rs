@@ -14,7 +14,7 @@
 //!   shifted row or the interaction trace, and that the bands read the base
 //!   tree alone. A component still *declares* its preprocessed columns and the
 //!   generated kernel still checks the count, so `Cols::Unread` supplies a null
-//!   per declared-but-unread column and `assert_supplied` checks, per shape and
+//!   per named-but-unread column and `assert_supplied` checks, per shape and
 //!   per witness, that no column the IR loads is one of them. That is what lets
 //!   a band's interaction run without its preprocessed columns being uploaded
 //!   -- which would put back exactly the 4a bytes this row removes.
@@ -88,7 +88,7 @@ impl Cols<'_> {
             Cols::Dev(_) => panic!("a device column has no host slice"),
         }
     }
-    /// Device pointers, with a null per declared-but-unread column.
+    /// Device pointers, with a null per named-but-unread column.
     fn ptrs(&self, n: usize, up: &[BaseFieldVec]) -> Vec<*const u32> {
         match self {
             Cols::Dev(v) => v.iter().map(|c| c.device_ptr).collect(),

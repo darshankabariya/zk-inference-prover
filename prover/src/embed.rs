@@ -1,8 +1,8 @@
 //! Stream BB (E11) -- the embedding gadget: token ids in, residual stream out.
 //!
-//! Today the layer chain's first chunk begins at a *declared* residual-stream
+//! Today the layer chain's first chunk begins at an *unchecked* residual-stream
 //! input: `briefs/h-bounds.md` records it as "the first chunk's `bin` is the
-//! embedding's output ... declared".  This module closes that end.  The
+//! embedding's output ... unchecked".  This module closes that end.  The
 //! statement it adds is
 //!
 //! ```text

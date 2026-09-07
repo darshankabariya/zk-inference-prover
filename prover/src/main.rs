@@ -154,7 +154,7 @@ pub fn src_of(args: &[String]) -> Src {
         // B10 step 3: prove the band as the causal corner instead of the prefix
         // rectangle.  `--ctx` must equal `--s`; the mask is `key <= token`.
         corner: args.iter().any(|a| a == "--corner"),
-        // Stream AA (E11): `--kv-boundary` also tiles the declared prefix into
+        // Stream AA (E11): `--kv-boundary` also tiles the unchecked prefix into
         // blocks of S keys, which is a witness-side decision as much as a plan
         // one -- see `briefs/aa-kvbind.md`.
         // On by default wherever the chunk has its own block (`--corner`): a
@@ -742,7 +742,7 @@ fn embed_probes_cmd(args: &[String]) {
 /// synthetic layer has `glue: None`, so a gate pointed at a dump the box did
 /// not hold came back `rc=0` with the whole glue battery skipped -- a pass that
 /// measured nothing (open item 17).
-/// Stream KK: the chunk's declared coordinate, `--layer N` / `--block N` over
+/// Stream KK: the chunk's unchecked coordinate, `--layer N` / `--block N` over
 /// the manifest's own.
 ///
 /// Not a switch on a check: the coordinate goes into the statement either way
@@ -811,7 +811,7 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
                 // Stream LL: the one stand-in the statement has to choose.
                 // `jo` is the attention output's per-token scale exponent --
                 // committed data, not model data, so the model-only load has
-                // none -- and the AO region admits it only inside the declared
+                // none -- and the AO region admits it only inside the stated
                 // window (`joff = jo_max - jo >= 0`, `layer.rs`'s "attnout: jo
                 // above the window's top").  The window's *floor* is the safe
                 // end: it makes `e = jv - jo` non-negative, so the fold's `pj`
@@ -919,7 +919,7 @@ pub fn plan_params(args: &[String]) -> (String, compose::Params) {
 /// `zk-prover compose` derives them from the witness, as it always has. `zk-prover
 /// expect-root` may instead be handed `--params FILE` -- a `Fixed` or a bare
 /// `Params`, `plan_params`' own two shapes -- and then the plan is built from
-/// *the statement's* declared shape rather than from a re-derivation of it.
+/// *the statement's* own shape rather than from a re-derivation of it.
 /// That is the shape the check wants: the verifier holds the statement, and
 /// four of the fields (`ao_jo_min` / `ao_jo_max` and `ao_acc_lo_bits` /
 /// `ao_acc_hi_bits`) are read off activations a verifier does not have, so
@@ -992,7 +992,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
              --embed), so the residual stream it consumes cannot be bound to the embedding \
              rows of its ids; pass --unsound-skip-embedding to prove the unbound statement");
     let embed = has_embed && !skip("embedding");
-    // Stream AA (E11): with the K/V boundary the declared prefix is `l.nsub` bands of
+    // Stream AA (E11): with the K/V boundary the unchecked prefix is `l.nsub` bands of
     // `S` keys per head band group, so the chunk's context is the sub-band's
     // times `nsub` and the head band list takes every `nsub`-th entry.  Both are
     // the identity when `nsub == 1`, which is every run without the flag.
@@ -1451,7 +1451,7 @@ fn pre_split_cmd(args: &[String]) {
 /// `ao_jo_min`/`ao_jo_max` and `ao_acc_lo_bits`/`ao_acc_hi_bits` are read off
 /// activations, so they cannot be re-derived here -- and taking them from the
 /// statement is what the check wants anyway, since it is the statement's
-/// declared shape a verifier holds.
+/// own shape a verifier holds.
 ///
 /// **Stream PP (E11): `--shape-only` is the committed-model verifier's form.**
 /// It stops one tree earlier -- after the shape tree and before the model tree

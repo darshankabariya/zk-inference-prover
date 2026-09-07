@@ -82,7 +82,7 @@ def accounting(spec="b6-design-p2o"):
             gen_mean=statistics.mean(x.get("n_gen", 0) for x in r),
             gen_max=max(x.get("n_gen", 0) for x in r),
             # decode-only (v1): 1 proved position for a multiple-choice item
-            # (the answer position, on a declared prefix); n_gen for IFEval.
+            # (the answer position, on an unchecked prefix); n_gen for IFEval.
             decode=len(r) if task != "ifeval" else sum(x["n_gen"] for x in r),
             # E11: every position of the concatenated prompt+output.
             e11=sum(x["n_prompt"] + x.get("n_gen", 0) for x in r),
@@ -155,7 +155,7 @@ def band_fresh(m, S, C):
 
 def cells_decode_item(m, n_prompt, n_gen, fixed=None):
     """One proof of one item under the v1 decode-only statement: n_gen decoded
-    positions (1 for a multiple-choice item) over a DECLARED band of n_prompt
+    positions (1 for a multiple-choice item) over an UNCHECKED band of n_prompt
     keys, plus the corner in which those positions attend to each other.  The
     per-chunk shared tables are paid once per layer, per item."""
     Sn = max(n_gen, 1)

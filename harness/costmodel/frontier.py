@@ -466,7 +466,7 @@ def e11_factor(fit, n_positions, n_output, s_chunk, layers=32):
     """The full prompt+output statement (E11, decided 2026-08-31), as a multiple of
     today's decode-only statement, from B9's measured fit at the 8B shape.
 
-    Today: `n_output` positions proven, each against a declared C-key prefix.
+    Today: `n_output` positions proven, each against an unchecked C-key prefix.
     E11:   all `n_positions` proven from the embedding up, as a chunked rectangle
            of layer x token-block chunks of `s_chunk` tokens.
 

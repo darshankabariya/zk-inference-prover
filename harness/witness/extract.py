@@ -897,7 +897,7 @@ if __name__ == "__main__":
                 # all seven, which is the layout B8 licensed and the denominator
                 # charges.  The witness says so, so a prover cannot compose it under
                 # the other layout by accident.
-                # B10 step 4: `lm_head` is declared beside the seven, because the head
+                # B10 step 4: `lm_head` is named beside the seven, because the head
                 # chunk's dequant is 79% of it and the two rungs differ by 52% -- a
                 # prover must not have to guess (rule 1).  Note that `b10-design` puts
                 # it on the *chain*, while `b2/cost_model.py` prices the design B8

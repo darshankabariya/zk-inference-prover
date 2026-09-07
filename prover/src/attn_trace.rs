@@ -579,7 +579,7 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     // same answer before any fill has run.
     // Stream AA: `with_rows` used to *be* `!a.corner`, because the only band
     // that rode on another's per-token region was the causal corner.  With
-    // `--kv-boundary` the declared prefix is tiled into sub-bands of `S` keys and
+    // `--kv-boundary` the unchecked prefix is tiled into sub-bands of `S` keys and
     // the group's one region lives on its first sub-band, so a band with
     // `corner == false` and `with_rows == false` is now a legal and ordinary
     // thing.  The implication that survives is the one that matters here, and

@@ -92,7 +92,7 @@ impl EvalAtRow for RelationProbe {
     ) {
         // `combine` is linear in its values, so two evaluations per element
         // recover the element: `combine(0) = -z` and `combine(e_j) = alpha_j - z`.
-        // Probe at the relation's declared width and record every alpha; the
+        // Probe at the relation's stated width and record every alpha; the
         // lowering only asks for the ones the symbolic expression names, so any
         // extra are simply unused. Reaching the relation needs the accessor
         // `gpu/m2b_fork.py` adds.
@@ -807,7 +807,7 @@ impl Lower {
                     });
                     assert_eq!(rest, r.name, "relation name {rest:?} != entry {:?}", r.name);
                     let i: usize = i.parse().unwrap();
-                    assert!(i < r.alphas.len(), "alpha{i} beyond {} declared", r.alphas.len());
+                    assert!(i < r.alphas.len(), "alpha{i} beyond {} stated", r.alphas.len());
                     r.alphas[i]
                 };
                 self.scalar(v)
@@ -3174,7 +3174,7 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch, s
     let nl: Vec<String> = shapes.iter().map(|(_, i)| format!("{}u", i.fracs.len())).collect();
     // B7a milestone 4 (section 3 row 1): a shape's column count is checked only
     // for a tree the kernel actually *loads* from. `Ir::fingerprint` is the
-    // signature of the computation and a declared-but-unread column is not part
+    // signature of the computation and a named-but-unread column is not part
     // of it -- the three `qkv`/`o`/`gateup` walk regions lower to one shape and
     // declare 412, 140 and 276 preprocessed weight columns, none of which the
     // fractions read. `~0u` is "this shape reads no column of this tree", and

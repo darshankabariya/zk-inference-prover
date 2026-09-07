@@ -264,7 +264,7 @@ impl Axis {
     }
 }
 
-/// The axis an ordered pair sits on, from the two statements' declared token
+/// The axis an ordered pair sits on, from the two statements' unchecked token
 /// count and prefix width and nothing else.
 ///
 /// `s_a != s_b` is not an edge at all: the two chunks decode different numbers
@@ -294,7 +294,7 @@ pub struct ChainVerdict {
     pub present: bool,
     /// the two statements agree on everything that fixes the boundary layout
     pub shape_ok: bool,
-    /// Stream KK: the two statements' declared coordinates are the ones the
+    /// Stream KK: the two statements' unchecked coordinates are the ones the
     /// pair's own axis implies -- `layer_b == layer_a + 1` and one block on a
     /// layer edge, one layer and `block_b == block_a + 1` on a token edge.
     /// True when neither statement declares a coordinate (every proof written
@@ -365,7 +365,7 @@ impl ChainVerdict {
                                             and no output side")
                 .or_else(|| need(v.shape_ok, "the two statements disagree about the residual \
                                               boundary's layout"))
-                .or_else(|| need(v.coord_ok, "the two statements' declared (layer, block) \
+                .or_else(|| need(v.coord_ok, "the two statements' unchecked (layer, block) \
                                               coordinates are not a layer edge"))
                 .or_else(|| need(v.roots_equal, "the first chunk's residual out root is not the \
                                                  second's in root")),
@@ -373,7 +373,7 @@ impl ChainVerdict {
                                                statements (`--kv-boundary` was off)")
                 .or_else(|| need(v.kv_shape_ok, "the two statements disagree about the K/V \
                                                  boundary's layout"))
-                .or_else(|| need(v.coord_ok, "the two statements' declared (layer, block) \
+                .or_else(|| need(v.coord_ok, "the two statements' unchecked (layer, block) \
                                               coordinates are not a token edge"))
                 .or_else(|| need(v.kv_roots_equal, "a head band group's out root is not its \
                                                     successor's in root")),
@@ -411,7 +411,7 @@ impl ChainVerdict {
 /// made to panic by a malformed statement the way `Plan::new` can.  The layout
 /// it derives is the one `Plan::new` builds -- stream H's two glue sides first,
 /// then, per head band group, the out side and (unless the chunk is block 0,
-/// which has no declared prefix) the in side.
+/// which has no unchecked prefix) the in side.
 #[derive(Clone, Copy, Debug)]
 pub struct KvLayout {
     pub first: usize,
@@ -448,10 +448,10 @@ fn glue_sides(p: &crate::compose::Params) -> usize {
 
 /// Stream UU: does this statement commit a residual **input** side at all?
 ///
-/// This is what says whether the edge into a chunk is a link or a declared end,
+/// This is what says whether the edge into a chunk is a link or an unchecked end,
 /// and it is deliberately a fact about the statement and not about the flag: a
 /// head chunk proved with `--bounds` from a dump that carries no final norm has
-/// `glue: None`, commits nothing, and must still be reported as a declared end
+/// `glue: None`, commits nothing, and must still be reported as an unchecked end
 /// rather than as a link that failed.
 pub fn has_in_side(p: &crate::compose::Params) -> bool {
     glue_sides(p) >= 1
@@ -642,7 +642,7 @@ pub fn chain_of(
     };
     let axis = axis_of(&fa.params, &fb.params);
     // Stream KK: the coordinate the statement declares, compared on the pair's
-    // own axis.  `pre_root` is what would binding a declared layer to the model
+    // own axis.  `pre_root` is what would binding an unchecked layer to the model
     // (stream LL); until then this says the two chunks agree about which edge
     // they are, which is what the tag used to say on its own.
     let step = |a: Option<usize>, b: Option<usize>, d: usize| match (a, b) {
@@ -889,7 +889,7 @@ pub fn cmd(args: &[String]) {
 /// verifier-side question, over bytes that were on disk before it started.
 ///
 /// The two ends of the chain are not links and are not checked here -- the first
-/// chunk's input and the last chunk's output are declared inputs under the v1
+/// chunk's input and the last chunk's output are unchecked inputs under the v1
 /// ground rule, so a sequence of `n` chunks has `n - 1` links.
 pub fn chain_cmd(args: &[String]) {
     let dir = crate::arg_str(args, "--dir").expect("boundary-chain needs --dir <serialized dir>");
@@ -1037,7 +1037,7 @@ struct GridChunk {
     roots: Vec<String>,
     /// stream KK: the `lm_head` chunk of its block.  It is on the grid -- it
     /// has a coordinate and it is verified like every other chunk -- but it
-    /// carries no residual boundary today, so the link into it is a declared
+    /// carries no residual boundary today, so the link into it is an unchecked
     /// end and not a link that failed (`notes/witness-slack.md` section 5 item
     /// 3).
     is_head: bool,
@@ -1055,14 +1055,14 @@ struct GridChunk {
 ///   --expect-layer-links N      pin the implied count from outside
 ///   --expect-token-links N
 ///   --verify                    also run `verify_composed` on every chunk proof
-///   --prompt FILE               the declared prompt's ids (a JSON list, or an `ids` field)
+///   --prompt FILE               the prompt's ids (a JSON list, or an `ids` field)
 ///   --expect-pre-roots FILE     the shape root each (layer, prefix) must declare
 ///   --expect-model-roots FILE   the model commitment each layer must declare
 /// ```
 ///
 /// Exit status 0 only when every implied link ran and chained on its own
 /// axis, every tag sits where its statement says it sits, every position's id
-/// is the declared prompt's or the previous position's proved argmax, the
+/// is the prompt's or the previous position's proved argmax, the
 /// pinned counts (if given) are met, and -- under `--verify` -- every chunk
 /// proof verifies; 1 otherwise, after the JSON is written.
 ///
@@ -1078,7 +1078,7 @@ struct GridChunk {
 /// The token axis of the *sequence* -- as distinct from the K/V axis of the
 /// grid -- is checked here too, and unconditionally: every position of every
 /// block whose layer-0 chunk carries the embedding gadget is either a prompt
-/// position, whose id must equal the declared prompt's, or a generated one,
+/// position, whose id must equal the prompt's, or a generated one,
 /// whose id must equal the token the `lm_head` chunk proved for the position
 /// before it (within a block, and across the block seam at `t = 0`).  Both
 /// vectors are published in the statements and pinned there by
@@ -1133,7 +1133,7 @@ pub fn grid_cmd(args: &[String]) {
             .clone()
     });
     if verify && prompt.is_none() {
-        eprintln!("grid: --verify needs --prompt <file>: without the declared prompt no \
+        eprintln!("grid: --verify needs --prompt <file>: without the prompt no \
                    position's id can be checked against anything, and a run that skipped \
                    the check would read as one that made it");
         std::process::exit(1);
@@ -1208,31 +1208,31 @@ pub fn grid_cmd(args: &[String]) {
         // tag put it, so that the links into and out of that cell are run and
         // answered by the pair check -- the tag is the plan's claim, and the
         // grid checks the claim against the statement *and* the neighbours.
-        let declared = (s > 0 && c % s == 0).then(|| c / s);
-        let Some(declared) = declared else {
+        let unchecked_block = (s > 0 && c % s == 0).then(|| c / s);
+        let Some(unchecked_block) = unchecked_block else {
             failures.push(format!("{tag}: the statement declares c = {c}, s = {s}, which is not \
                                    a whole number of blocks"));
             continue;
         };
-        if let Some(b) = tagged_block.filter(|b| *b != declared) {
+        if let Some(b) = tagged_block.filter(|b| *b != unchecked_block) {
             failures.push(format!("{tag}: the tag names block {b} but the statement declares \
-                                   block {declared} (c = {c} = {declared} x {s})"));
+                                   block {unchecked_block} (c = {c} = {unchecked_block} x {s})"));
         }
-        if let Some(b) = fixed.block.filter(|b| *b != declared) {
-            failures.push(format!("{tag}: the statement's declared block {b} is not the block \
-                                   its own prefix implies (c = {c} = {declared} x {s})"));
+        if let Some(b) = fixed.block.filter(|b| *b != unchecked_block) {
+            failures.push(format!("{tag}: the statement's block {b} is not the block \
+                                   its own prefix implies (c = {c} = {unchecked_block} x {s})"));
         }
-        let block = tagged_block.or(fixed.block).unwrap_or(declared);
+        let block = tagged_block.or(fixed.block).unwrap_or(unchecked_block);
         let is_head = fixed.params.prove_argmax;
         chunk_rows.push(json!({
             "tag": tag,
             "block": block,
             "block_tagged": tagged_block,
-            "block_declared": declared,
-            "block_tag_ok": block == declared,
+            "block_unchecked": unchecked_block,
+            "block_tag_ok": block == unchecked_block,
             "layer": layer,
-            "layer_declared": fixed.layer,
-            "block_declared": fixed.block,
+            "layer_unchecked": fixed.layer,
+            "block_unchecked": fixed.block,
             "c": c, "s": s,
             "trees": fixed.sizes.len(),
             "layer_boundary": fixed.params.layer_boundary,
@@ -1266,13 +1266,13 @@ pub fn grid_cmd(args: &[String]) {
     // link and is run below with every other one.  `head_end` is what is left of
     // stream KK's rule: a head chunk that committed no input side -- `--bounds`
     // off, or a dump too old to carry the final norm, so `glue` is null -- is
-    // still a declared end and not a link that ran and failed.
+    // still an unchecked end and not a link that ran and failed.
     let head_end = |i: &usize| {
         chunks[*i].is_head && !has_in_side(&chunks[*i].fixed.params)
     };
-    let mut declared: Vec<Value> = vec![];
+    let mut unchecked: Vec<Value> = vec![];
     // Stream UU: edges the grid's shape suggests and the statement does not
-    // imply.  Distinct from `declared_ends`: a declared end is a boundary that
+    // imply.  Distinct from `unchecked_ends`: an unchecked end is a boundary that
     // exists and is taken on trust, and this is a pair with no boundary between
     // them to take on trust in the first place.
     let mut not_implied: Vec<Value> = vec![];
@@ -1285,7 +1285,7 @@ pub fn grid_cmd(args: &[String]) {
             if w[1] == w[0] + 1 {
                 let (i, j) = (layers[&w[0]], layers[&w[1]]);
                 if head_end(&j) {
-                    declared.push(json!({
+                    unchecked.push(json!({
                         "what": "the lm_head chunk's input",
                         "block": b, "from": chunks[i].tag, "to": chunks[j].tag,
                         "why": "this head chunk committed no residual input side (the layer boundary \
@@ -1315,7 +1315,7 @@ pub fn grid_cmd(args: &[String]) {
             if w[1] == w[0] + 1 {
                 let (i, j) = (blocks[&w[0]], blocks[&w[1]]);
                 if chunks[i].is_head || chunks[j].is_head {
-                    // Stream UU: not a declared end.  A head chunk attends to
+                    // Stream UU: not an unchecked end.  A head chunk attends to
                     // nothing, so it holds no K/V cache and there is no state
                     // for two blocks' heads to hand over: its input is the
                     // block's own residual (bound on the layer axis above) and
@@ -1466,8 +1466,8 @@ pub fn grid_cmd(args: &[String]) {
         let s_blk = chunks.iter().find(|c| c.tag == **tag).map(|c| c.fixed.params.s).unwrap_or(0);
         for (t, got) in tin.iter().enumerate() {
             let pos = b * s_blk + t;
-            let declared_id = prompt.as_ref().and_then(|p| p.get(pos).copied());
-            if let Some(want) = declared_id {
+            let prompt_id = prompt.as_ref().and_then(|p| p.get(pos).copied());
+            if let Some(want) = prompt_id {
                 n_prompt += 1;
                 if want != *got {
                     bad_ids.push(json!({"kind": "prompt", "block": b, "t": t, "pos": pos,
@@ -1498,7 +1498,7 @@ pub fn grid_cmd(args: &[String]) {
                 None => unbacked.push(json!({"block": b, "t": t, "pos": pos, "tag": tag,
                                              "why": "no lm_head chunk on this grid \
                                                      proves the argmax at the position \
-                                                     before it, and the declared prompt \
+                                                     before it, and the prompt \
                                                      does not reach it"})),
             }
         }
@@ -1507,34 +1507,34 @@ pub fn grid_cmd(args: &[String]) {
         failures.push(format!("the id at position {} is not the one that reaches it: {e}",
                               e["pos"]));
     }
-    // Without a declared prompt nothing says where the prompt ends, so a
-    // position with no argmax behind it is reported as declared rather than
+    // Without a prompt nothing says where the prompt ends, so a
+    // position with no argmax behind it is reported as unchecked rather than
     // failed; `--verify` demands the prompt and then it is a hole.
     if prompt.is_some() {
         for u in &unbacked {
             failures.push(format!("position {} is generated and unbacked: {u}", u["pos"]));
         }
     } else if !unbacked.is_empty() {
-        declared.push(json!({"what": "the ids of positions with no argmax behind them",
-                             "positions": unbacked.len(),
-                             "why": "no --prompt was given, so these are declared"}));
+        unchecked.push(json!({"what": "the ids of positions with no argmax behind them",
+                              "positions": unbacked.len(),
+                              "why": "no --prompt was given, so these are unchecked"}));
     }
     if prompt.is_none() && !ids.is_empty() {
-        declared.push(json!({"what": "the prompt",
-                             "why": "no --prompt was given: every published id was \
-                                     compared only against an argmax, where one exists"}));
+        unchecked.push(json!({"what": "the prompt",
+                              "why": "no --prompt was given: every published id was \
+                                      compared only against an argmax, where one exists"}));
     }
-    // Stream LL: declared only where no derived table was handed in.  With
+    // Stream LL: unchecked only where no derived table was handed in.  With
     // `--expect-pre-roots` the grid compares every chunk's `pre_root` against a
     // root derived from the model and the chunk's own coordinates, so the roots
     // stop being an input the verifier takes on trust and become a check --
     // which is the whole of `notes/witness-slack.md` section 5 item 1.
     if expect_pre.is_none() {
-        declared.push(json!({"what": "one tree-0 root per chunk", "chunks": chunks.len(),
-                             "why": "root_ok compares the proof's commitment 0 against its \
-                                     own statement's pre_root; that the root is the model's, \
-                                     for this layer and this shape, is the verifier's \
-                                     declaration"}));
+        unchecked.push(json!({"what": "one tree-0 root per chunk", "chunks": chunks.len(),
+                              "why": "root_ok compares the proof's commitment 0 against its \
+                                      own statement's pre_root; that the root is the model's, \
+                                      for this layer and this shape, is the verifier's \
+                                      declaration"}));
     }
     let ids_ok = bad_ids.is_empty() && (prompt.is_none() || unbacked.is_empty());
 
@@ -1549,10 +1549,10 @@ pub fn grid_cmd(args: &[String]) {
     // or whose one layer carries two model hashes, is a named rejection.
     let mut models: BTreeMap<usize, (String, String)> = BTreeMap::new();
     let mut all_models: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut undeclared_model: Vec<String> = vec![];
+    let mut missing_model: Vec<String> = vec![];
     for ch in &chunks {
         let Some(m) = ch.fixed.model.clone() else {
-            undeclared_model.push(ch.tag.clone());
+            missing_model.push(ch.tag.clone());
             continue;
         };
         all_models.entry(m.clone()).or_default().push(ch.tag.clone());
@@ -1571,14 +1571,14 @@ pub fn grid_cmd(args: &[String]) {
     // is the manifest `zk-prover model-roots` writes, which asserts one hash per
     // layer and names them all; the grid's own check is the per-layer one
     // above, which is what section 5 item 1's last sentence asks for.
-    if !undeclared_model.is_empty() {
-        declared.push(json!({"what": "which model these chunks used",
-                             "chunks": undeclared_model.len(),
-                             "why": "their statements predate Fixed.model, so nothing \
-                                     compares their weights against the rest of the grid"}));
+    if !missing_model.is_empty() {
+        unchecked.push(json!({"what": "which model these chunks used",
+                              "chunks": missing_model.len(),
+                              "why": "their statements predate Fixed.model, so nothing \
+                                      compares their weights against the rest of the grid"}));
     }
 
-    // ---- stream KK: the declared tree-0 roots, against a derived table ------
+    // ---- stream KK: the statements' tree-0 roots, against a derived table ---
     //
     // Stream LL fills the table: `zk-prover model-roots --plan PLAN` runs
     // `zk-prover expect-root` per plan line and writes one row per `(layer, c)`.  A
@@ -1607,7 +1607,7 @@ pub fn grid_cmd(args: &[String]) {
             let model_ok = match (want_model, ch.fixed.model.as_deref()) {
                 (Some(a), Some(b)) => a == b,
                 // a row or a statement written without one: the root comparison
-                // above is what stands, and the gap is declared below
+                // above is what stands, and the gap is reported as unchecked below
                 _ => true,
             };
             if !model_ok {
@@ -1635,11 +1635,11 @@ pub fn grid_cmd(args: &[String]) {
                 missing.len(), missing.join(", ")));
         }
     } else {
-        declared.push(json!({"what": "which model each chunk's shape root is",
-                             "why": "no --expect-pre-roots table was given, so every \
-                                     chunk's pre_root is compared only against its own \
-                                     proof; `zk-prover model-roots --plan PLAN` derives the \
-                                     table from the model"}));
+        unchecked.push(json!({"what": "which model each chunk's shape root is",
+                              "why": "no --expect-pre-roots table was given, so every \
+                                      chunk's pre_root is compared only against its own \
+                                      proof; `zk-prover model-roots --plan PLAN` derives the \
+                                      table from the model"}));
     }
 
     // ---- stream PP: the model tree's root, against the published manifest ---
@@ -1696,12 +1696,12 @@ pub fn grid_cmd(args: &[String]) {
                 missing.len(), missing.join(", ")));
         }
     } else {
-        declared.push(json!({"what": "the model each chunk proves against",
-                             "chunks": chunks.len(),
-                             "why": "no --expect-model-roots manifest was given, so every \
-                                     chunk's model_root is compared only against its own \
-                                     proof; `zk-prover model-roots --plan PLAN` publishes the \
-                                     manifest from the weights"}));
+        unchecked.push(json!({"what": "the model each chunk proves against",
+                              "chunks": chunks.len(),
+                              "why": "no --expect-model-roots manifest was given, so every \
+                                      chunk's model_root is compared only against its own \
+                                      proof; `zk-prover model-roots --plan PLAN` publishes the \
+                                      manifest from the weights"}));
     }
 
     let all_layer = run[0] == want_layer && passed[0] == run[0];
@@ -1763,11 +1763,11 @@ pub fn grid_cmd(args: &[String]) {
                        "per_layer": models.iter()
                            .map(|(l, (m, _))| json!({"layer": l, "model": m}))
                            .collect::<Vec<_>>(),
-                       "undeclared": undeclared_model},
-            "declared_ends": declared,
+                       "missing": missing_model},
+            "unchecked_ends": unchecked,
             // stream UU: pairs the grid's shape puts next to each other and the
             // statements imply no edge between -- not slack, and not counted as
-            // a declared end
+            // an unchecked end
             "not_implied": not_implied,
             "failures": failures,
             "all_chain": all_chain,
@@ -1796,7 +1796,7 @@ pub fn grid_cmd(args: &[String]) {
 //    the group's band components; the tree's column order is therefore the
 //    component-registration order, `[band's K][band's V]` band by band.
 //  * a chunk commits an **out** side over its whole key set and an **in** side
-//    over its declared prefix, and the chain is `out(L, b) == in(L, b+1)` -- so
+//    over its unchecked prefix, and the chain is `out(L, b) == in(L, b+1)` -- so
 //    every prefix key is committed twice.
 //
 // That duplicate is not an economy that was missed.  K and V feed LogUp range
@@ -1835,7 +1835,7 @@ pub struct KvBand {
     /// which head band group the band belongs to
     pub group: usize,
     /// the group's own block (`c = S` over the chunk's own decoded tokens)
-    /// rather than one of its declared-prefix sub-bands
+    /// rather than one of its unchecked-prefix sub-bands
     pub corner: bool,
     pub pk: usize,
     pub pv: usize,
@@ -1850,7 +1850,7 @@ pub struct KvSide {
     /// which head band group's keys this side carries
     pub group: usize,
     /// the **out** side carries the group's whole key set, the chunk's own
-    /// block included; the **in** side carries its declared prefix alone
+    /// block included; the **in** side carries its unchecked prefix alone
     pub out: bool,
     /// the bands that write it, ascending -- which is component-registration
     /// order, and therefore the tree's column order
@@ -1866,7 +1866,7 @@ pub struct KvSide {
 /// the other's tree indices.
 ///
 /// The **out** side comes first in each group.  Block 0 of a sequence has no
-/// declared prefix and so no in side at all, and it must not commit an empty
+/// unchecked prefix and so no in side at all, and it must not commit an empty
 /// tree -- `verify_ex` requires every committed tree to be read by at least one
 /// component -- so ordering out first means block 0 drops a *trailing* side and
 /// every other side keeps its index.
@@ -2023,7 +2023,7 @@ mod tests {
     use super::*;
     use crate::compose::{Fixed, GlueParams, Params};
 
-    /// A statement for one chunk: `c` keys of declared prefix, `s` decoded
+    /// A statement for one chunk: `c` keys of unchecked prefix, `s` decoded
     /// tokens, stream H's boundary always on, `--kv-boundary` optional.
     fn fixed(c: usize, s: usize, kv: bool) -> Fixed {
         let params = Params {
@@ -2053,8 +2053,8 @@ mod tests {
             // per-layer comparison through `--expect-model-roots`
             model_root: "model".into(),
             // stream KK: the tests below drive the coordinate comparison
-            // through `at`, which sets these; undeclared is the pre-KK case and
-            // the default here so every existing test keeps asking what it asked
+            // through `at`, which sets these; no coordinate is the pre-KK case
+            // and the default here so every existing test keeps asking what it asked
             layer: None,
             block: None,
             model: None,
@@ -2063,7 +2063,7 @@ mod tests {
         }
     }
 
-    /// Stream KK: the same statement with a declared coordinate.
+    /// Stream KK: the same statement with an unchecked coordinate.
     fn at(mut f: Fixed, layer: usize, block: usize) -> Fixed {
         f.layer = Some(layer);
         f.block = Some(block);
@@ -2251,12 +2251,12 @@ mod tests {
         assert!(v.chains(), "reason: {:?}", v.reason);
     }
 
-    /// Stream KK: two honest, accepted, root-equal chunks whose *declared*
+    /// Stream KK: two honest, accepted, root-equal chunks whose *unchecked*
     /// coordinates are not a layer edge.  Before the coordinate went into the
     /// statement, the layer index lived in the plan tag alone and this pair
     /// chained.
     #[test]
-    fn layer_edge_rejects_declared_coordinates_that_do_not_step() {
+    fn layer_edge_rejects_unchecked_coordinates_that_do_not_step() {
         let (a, b) = (fixed(1024, 512, false), fixed(1024, 512, false));
         let (ra, rb) = roots(&a, &b, false, true);
         // the honest pair: layer 8 -> layer 9 of block 2
@@ -2281,7 +2281,7 @@ mod tests {
 
     /// The same on the token axis: the block steps, the layer does not.
     #[test]
-    fn token_edge_rejects_declared_coordinates_that_do_not_step() {
+    fn token_edge_rejects_unchecked_coordinates_that_do_not_step() {
         let (a, b) = (fixed(1024, 512, true), fixed(1536, 512, true));
         let (ra, rb) = roots(&a, &b, true, false);
         let v = chain_of(&at(a.clone(), 8, 2), &ra, &at(b.clone(), 8, 3), &rb);
@@ -2369,7 +2369,7 @@ mod tests {
     }
 
     #[test]
-    fn a_head_chunk_without_a_wiring_family_is_still_a_declared_end() {
+    fn a_head_chunk_without_a_wiring_family_is_still_an_unchecked_end() {
         // a dump too old to carry the final norm: `glue` is null, so no input
         // side exists however the flag was set
         let mut h = head_fixed(1024, 512);

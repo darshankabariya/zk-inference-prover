@@ -311,7 +311,7 @@ pub struct Params {
     /// `(L, b)` proved" is checkable from serialized bytes by root equality --
     /// the token axis's version of what `bounds` does for the layer axis.
     ///
-    /// It implies `corner`, and it *tiles the declared prefix into sub-bands of
+    /// It implies `corner`, and it *tiles the unchecked prefix into sub-bands of
     /// exactly `S` keys* (layout design A), because a V column's height is a
     /// function of the chunk's own `C` and a producer's corner V column and a
     /// consumer's untiled prefix V column can therefore never be equal.  So the
@@ -456,7 +456,7 @@ pub struct Fixed {
     /// compares it against the published manifest and derives nothing.
     pub model_root: String,
     /// Stream KK: which layer of the model this chunk proves, and which token
-    /// block.  Declared -- like `pre_root`, and pinned to the model only when
+    /// block.  Unchecked -- like `pre_root`, and pinned to the model only when
     /// stream LL derives the expected tree-0 root per (layer, shape) -- but
     /// *compared*: `boundary::chain_of` demands `layer_b == layer_a + 1` on a
     /// layer edge and `block_b == block_a + 1` on a token edge, and
@@ -469,7 +469,7 @@ pub struct Fixed {
     pub block: Option<usize>,
     /// Stream LL (E11), `notes/witness-slack.md` section 5 item 1's last
     /// sentence: the content hash of the model data tree 0 reads
-    /// (`Layer::model_hash`).  Declared, like `pre_root` and like `layer` --
+    /// (`Layer::model_hash`).  Unchecked, like `pre_root` and like `layer` --
     /// but *compared*: `boundary-grid` refuses a grid whose chunks name two
     /// different models, and refuses two chunks at the same layer whose model
     /// hashes differ, so "two blocks of one layer used different weights" is
@@ -1634,7 +1634,7 @@ impl Plan {
             z_hi_bits: p.z_hi_bits,
             z_min: p.z_min,
         };
-        // Stream AA (E11), layout design A: with `--kv-boundary` the declared
+        // Stream AA (E11), layout design A: with `--kv-boundary` the unchecked
         // prefix is tiled into `c / s` sub-bands of exactly `S` keys each -- the
         // shape the corner band already has -- instead of one rectangle of `c`
         // keys.  The tiling is not an optimisation, it is the precondition for
@@ -1653,7 +1653,7 @@ impl Plan {
                 p.c, p.s);
         // with the flag off this is 1, so the loop below builds exactly the one
         // prefix band per head band it always built
-        // Open item 1 / CC deliverable 4: block 0 of a sequence has no declared
+        // Open item 1 / CC deliverable 4: block 0 of a sequence has no unchecked
         // prefix, so `c == 0` and there is no prefix band to build.  Without
         // this the `else` arm built one anyway and `Grid::new` divided by
         // `groups = c * insts = 0`.  With `nsub == 0` the loop below builds no
@@ -1688,7 +1688,7 @@ impl Plan {
                 shapes.push(Shape { s: p.s, c: p.s, hd: p.hd, insts: *insts });
                 corner.push(true);
                 group.push(g);
-                // block 0 of a sequence has no declared prefix at all, so its
+                // block 0 of a sequence has no unchecked prefix at all, so its
                 // solo corner is the group's only band and carries the region
                 rows_band.push(nsub == 0);
             }
@@ -7051,7 +7051,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     config.mix_into(&mut ch);
     let mut vcs = CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
     let root_ok = format!("{:?}", proof.commitments[0]) == fixed.pre_root;
-    // stream PP: the model tree's root is the second declared one -- a
+    // stream PP: the model tree's root is the second unchecked one -- a
     // *declaration* here, like `pre_root`; what pins it to a model is
     // `boundary-grid --expect-model-roots` against the published manifest.
     let model_root_ok = format!("{:?}", proof.commitments[1]) == fixed.model_root;
@@ -7554,7 +7554,7 @@ impl Plan {
     /// requantize seams (`rqs`), the dequant output bindings (`glue.output_bindings`), the
     /// quantize regions and their key tiles (`quants`, `nn_bands`), the `o`
     /// walk's width, the boundary trees (`bounds`, `kv`), the embedding layout
-    /// (`emb`) and the argmax (`argmax_mat`).  `layer` is the segment's declared
+    /// (`emb`) and the argmax (`argmax_mat`).  `layer` is the segment's unchecked
     /// layer coordinate, which decides whether the embedding edge applies.
     ///
     /// The table is a report on the statement and enters nothing: not the

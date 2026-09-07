@@ -146,7 +146,7 @@ def run_one(a, be, context, batch, purpose):
         "counting_conventions": {
             "decode_only": "(new_tokens - 1) / decode_s. The v1 comparison: our "
                            "proved seconds cover only the 512 decoded positions "
-                           "(scope.prefill_status -- the prefix is declared, not "
+                           "(scope.prefill_status -- the prefix is unchecked, not "
                            "proven), so the baseline excludes prefill too. "
                            "Excluding prefill makes the unproved rate LARGER, so "
                            "this choice makes the reported overhead LARGER.",
