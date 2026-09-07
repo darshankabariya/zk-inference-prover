@@ -6904,11 +6904,15 @@ pub struct Verdict {
     /// component's `ao_q` and the `o` Freivalds check's `qX` but its `o` matmul does not read
     /// `nh * hd` channels -- so the two folds are over different sequences and
     /// `ao_q_ok` says nothing.  A desk shape, never a real layer; reported so a
-    /// reader cannot mistake a vacuous `ao_q_ok` for a checked seam.
+    /// reader cannot mistake a vacuous `ao_q_ok` for a checked seam.  False on a
+    /// chunk whose family is the head's final norm: there the seam is absent and
+    /// not open.
     pub ao_q_open: bool,
     /// stream II: the `o` seam, once stream JJ publishes `ao_q`.  True while
     /// that claim is absent -- an equality nobody can state yet is not a
-    /// failure, and the record says so rather than the verdict pretending.
+    /// failure, and the record says so rather than the verdict pretending -- and
+    /// true on a chunk whose family is the head's final norm, which builds no
+    /// `o` seam (issue #58).  The binding table says which case a chunk is in.
     pub ao_q_ok: bool,
     /// Stream NN, per quantize component in `q`, `k`, `v` order: "the value this
     /// component rounded is the value the rotation produced" (or, for `v`, the
@@ -7355,13 +7359,28 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // carries `rv^k s^t` (see `build_components`), and its fold is over
     // `a - act_off`, which is the signed value the attnout component publishes.
     //
-    // Live on every chunk that publishes both claims.  A chunk with no wiring
-    // family publishes no `freivalds_qx` at all and there is nothing to compare; a
-    // chunk with **no attention** -- the `lm_head` chunk, whose only matmul is
-    // the head -- has no `o` Freivalds check, so the attnout component is absent, `ao_q` is
-    // empty and the seam is vacuous.  Both report `true`, and neither is a
-    // skipped check: in both cases the statement contains no `o` matmul whose
-    // input could be wrong.
+    // Live on every chunk whose family is a *layer's*.  A chunk with no wiring
+    // family publishes no `freivalds_qx` at all and there is nothing to compare.
+    //
+    // The `lm_head` chunk is the other absent case, and it is absent for the
+    // family it carries rather than for the matmuls it has not got (issue #58).
+    // Its family is the final norm (`ResidualStreamPlan::head`), which builds
+    // one requantize seam, the head's, and no `o` seam at all -- while the dump
+    // it is loaded from carries that layer's own `o` matmul and its attention
+    // columns, so `plan.residual_stream` is `Some`, `ao_q` is published by
+    // `ao_interaction` unconditionally and `freivalds_qx[o]` exists.  The two
+    // folds are then over sequences this statement never binds to each other,
+    // which is not an equality a verifier can state; on the honest head chunk of
+    // a sequence it is simply false, and before this filter it rejected the
+    // chunk.  `rope` reads the same field two hundred lines earlier
+    // (`residual_stream.as_ref().filter(|g| !g.head)`, in `Layer`).
+    //
+    // Absent and not skipped: what a head chunk states is the residual it
+    // consumed, the final norm over it, the head matmul and the argmax, and it
+    // commits no residual-stream out side (`boundary::sides` gives it the in
+    // side alone), so nothing downstream reads an `o` output of a head chunk and
+    // no layer chunk can present itself as one to get past this.  The binding
+    // table reports edge 5 absent on a head chunk for the same reason.
     //
     // The third case is a shape, not a statement: a *synthetic* layer whose `o`
     // Freivalds check is not `nh * hd` channels wide folds a different sequence from the
@@ -7379,7 +7398,7 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     // is *reported*, in `ao_q_open`, and never counted as a pass by silence;
     // it is stream JJ's `deq_out_open` convention, for the same reason.
     let ao_q_at = plan.freivalds.iter().position(|w| w.name == "o").filter(|_| {
-        plan.residual_stream.is_some() && !claims.ao_q.is_empty()
+        plan.residual_stream.as_ref().is_some_and(|g| !g.head_norm) && !claims.ao_q.is_empty()
     });
     let ao_q_wide = p.mats.iter().find(|m| m.name == "o")
         .is_some_and(|m| m.n_in == p.nh * p.hd);

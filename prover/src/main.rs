@@ -2361,7 +2361,10 @@ fn compose_probes_cmd(args: &[String]) {
         if let Some(wi) = rplan.freivalds.iter().position(|w| w.name == "o") {
             let mut lb = layer_of(args).0;
             let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
-            let bent = lb.residual_stream.is_some().then(|| {
+            // On a layer chunk only: the head chunk's family builds no `o` seam,
+            // so there is nothing there for this bend to be seen by (issue #58).
+            let layer_family = lb.residual_stream.as_ref().is_some_and(|g| !g.head);
+            let bent = layer_family.then(|| {
                 lb.synth_residual_stream_bent(src_of(args).seed, arg_scalar(args, "--residual-stream-a", 32usize),
                                               round, 41)
             }).flatten();
@@ -2373,9 +2376,9 @@ fn compose_probes_cmd(args: &[String]) {
                                    &format!("the binding ao_q == freivalds_qx[{wi}]")),
                             "an o activation the attnout component did not requantize accepted");
                 }
-                None => eprintln!("  o seam: SKIP -- this shape has no wiring family, or its o \
-Freivalds check is not nh*hd wide, so the two folds are over different sequences and `ao_q_ok` is not \
-statable here"),
+                None => eprintln!("  o seam: SKIP -- this shape has no wiring family, or its \
+family is the head's final norm, or its o Freivalds check is not nh*hd wide, so the two folds are \
+over different sequences and `ao_q_ok` is not statable here"),
             }
         }
 
@@ -2691,7 +2694,10 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
         // whose attention output nothing downstream reads has nothing to
         // compare it against.  Both cases are run, and the assert is the
         // chunk's own shape rather than a constant.
-        let seam_live = compose::Plan::new(&params).residual_stream.is_some()
+        // The head chunk's family builds no `o` seam, so the seam is not live
+        // there either (issue #58) -- one more chunk with no consumer for `jo`.
+        let seam_live = compose::Plan::new(&params).residual_stream
+                .as_ref().is_some_and(|g| !g.head_norm)
             && l.mats.iter().any(|m| m.name == "o" && m.n_in == l.ao.nh * l.ao.hd);
         let jo_tok = probe("attnout: a whole token's jo moved by one", &l,
                            &compose::ProverTamper { ao_jo_tok: Some(1),
