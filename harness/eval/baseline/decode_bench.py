@@ -73,7 +73,9 @@ TIMING_SCOPE = {
     ],
     "excludes": [
         "process start, weight load and any compile/CUDA-graph capture "
-        "(a warmup pass precedes every timed repetition)",
+        "(the warmup passes run before the timed repetitions and make the same "
+        "two calls, generating the same token count, so no timed repetition is "
+        "the first full-length decode of the process)",
         "tokenization of the prompt (built once, outside the timed region)",
     ],
     "comparable_to": (
@@ -226,6 +228,42 @@ def selftest_rates():
     return bad
 
 
+def selftest_warmup():
+    """The warmup pass makes the same calls a timed repetition makes.
+
+    A warmup that generated fewer tokens than the timed repetitions left the
+    first timed repetition the first full-length decode of the process, and
+    every point then reported that cold pass as its spread (zk-prover #106).
+    So the shape of the calls is checked, not asserted in prose.
+    """
+    class Recorder(B.MockBackend):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.calls = []
+
+        def generate(self, prompts, n_new):
+            self.calls.append(n_new)
+            return super().generate(prompts, n_new)
+
+    n_prompt, n_new, reps, warmup = 32, 16, 2, 1
+    be = Recorder("MOCK/none", "main", "bfloat16", "cpu", None)
+    B.measure(be, [[1] * n_prompt], n_new, reps=reps, warmup=warmup)
+    rep = [1, n_new]
+    cases = [
+        ("the warmup generates the token count the timed repetitions generate",
+         be.calls[:len(rep)] == rep),
+        ("no timed repetition is the first full-length decode of the process",
+         be.calls.count(n_new) == reps + warmup),
+        ("the warmup is one untimed repetition and nothing else",
+         be.calls == rep * (warmup + reps)),
+    ]
+    bad = 0
+    for label, ok in cases:
+        bad += not ok
+        print(f"{'OK  ' if ok else 'FAIL'}  {label}")
+    return bad
+
+
 def selftest_check(card):
     """The like-for-like checker has teeth, on synthetic run blocks."""
     base = {
@@ -275,6 +313,8 @@ def selftest_check(card):
 
 def selftest(have_constants):
     bad = selftest_rates()
+    print()
+    bad += selftest_warmup()
     print()
     if not have_constants:
         print("no --constants PATH (a zk-results constants.json) and no ZK_CONSTANTS: "
@@ -329,7 +369,9 @@ def main():
     p.add_argument("--batch", type=int, action="append",
                    help="batch size; repeatable. default 1")
     p.add_argument("--reps", type=int, default=3)
-    p.add_argument("--warmup", type=int, default=1)
+    p.add_argument("--warmup", type=int, default=1,
+                   help="untimed repetitions before the timed ones; each makes the "
+                        "same two calls a timed repetition makes")
     p.add_argument("--tag", default=None)
     p.add_argument("--out", default=None)
     p.add_argument("--selftest", action="store_true",

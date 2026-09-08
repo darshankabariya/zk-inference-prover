@@ -323,6 +323,14 @@ def measure(be, prompts, n_new, reps, warmup):
       a full `n_new`-token call, whose wall-clock time is the pass END TO END:
       it prefills the same prompt again and then decodes.
 
+    A warmup pass makes those SAME two calls, untimed, and generates the same
+    `n_new` tokens.  It has to: an engine's first full-length decode costs
+    several times what every later one costs, so a warmup that generated a
+    handful of tokens warmed the prefill and left the first timed repetition
+    the first long decode of the process.  The median survived that, but the
+    recorded spread was the cold pass rather than the run's own variation
+    (zk-prover #106).
+
     The DECODE's own wall-clock time is the difference, which is the `n_new - 1`
     decode steps after the first generated position.
 
@@ -348,7 +356,8 @@ def measure(be, prompts, n_new, reps, warmup):
     n_prompt = len(prompts[0])
     per_rep = []
     for _ in range(warmup):
-        be.generate(prompts, min(8, n_new))
+        be.generate(prompts, 1)
+        be.generate(prompts, n_new)
     be.sync()
     gen_sha = None
     for _ in range(reps):
