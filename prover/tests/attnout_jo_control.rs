@@ -15,7 +15,16 @@
 //! cannot state is skipped by name with its reason in the record rather than
 //! crashing. A crash is never a pass.
 //!
-//! These run on the default (SIMD) backend, like the digest test beside them.
+//! These run on the SIMD build alone. A binary built with `--features cuda`
+//! takes the device path, where `devfrac` demands a generated kernel for the
+//! lowering it is about to prove; the suite restates the claim for every
+//! control it runs, so the fingerprints it asks for are not the ones `genemit`
+//! emitted for the pinned shapes, and the run dies in "no generation kernel"
+//! with no verdict at all -- on a host whose kernel store reproduces every
+//! pinned digest beside it (issue #104). So both tests are ignored under the
+//! feature, by name and with their reason in the run's own output, rather than
+//! only saying here which backend they want. The pinned digests beside them
+//! are the test that runs on both.
 
 use std::process::Command;
 
@@ -66,11 +75,17 @@ fn probes(name: &str, args: &[String]) -> Vec<serde_json::Value> {
         .env("RAYON_NUM_THREADS", "4")
         .output()
         .expect("run the prover binary");
+    let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
-        "{name}: zk-prover {} failed:\n{}",
+        "{name}: zk-prover {} failed:\n{err}{}",
         args.join(" "),
-        String::from_utf8_lossy(&out.stderr)
+        if err.contains("no generation kernel") {
+            "\nthat is a CUDA build with no kernel for this lowering, not a suite that ran \
+             and disagreed: this test wants the SIMD build"
+        } else {
+            ""
+        }
     );
     let v: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("one JSON document on stdout");
@@ -84,6 +99,9 @@ fn probe_named<'a>(ps: &'a [serde_json::Value], name: &str) -> &'a serde_json::V
 }
 
 #[test]
+#[cfg_attr(feature = "cuda", ignore = "the jo controls run on the SIMD build: a CUDA build \
+                                       has no generation kernel for the shapes the suite \
+                                       restates")]
 fn the_control_suite_reaches_its_own_json_on_every_sound_shape() {
     for (name, flags, jo_statable) in SHAPES {
         let ps = probes(name, &args_of(flags));
@@ -135,6 +153,9 @@ fn the_control_suite_reaches_its_own_json_on_every_sound_shape() {
 /// seam is not live on this shape, so a whole token's `jo` is the one control
 /// whose pass is an acceptance.
 #[test]
+#[cfg_attr(feature = "cuda", ignore = "the jo controls run on the SIMD build: a CUDA build \
+                                       has no generation kernel for the shapes the suite \
+                                       restates")]
 fn a_jo_window_with_room_states_both_controls() {
     let mut args = args_of(SHAPES[0].1);
     args.extend(["--ao-jo-max", "-9", "--probe", "jo moved by one"].iter().map(|s| s.to_string()));
