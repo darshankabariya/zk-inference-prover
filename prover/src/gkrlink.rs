@@ -1638,6 +1638,16 @@ impl Component for LinkTie {
             // the base columns -- as polynomials, checked at the OODS point
             let mut binding_coeff = ext(t.coeff_at) - t.konst;
             for (tree, col, w) in &t.terms {
+                // `[0]` is the column's value at its *first* sampled offset,
+                // and the weight beside it is the one a look that reads the
+                // column at offset 0 produced -- so this line is right only
+                // where offset 0 is the first offset the owning component
+                // sampled. It is: `aff_nodes` refuses to link a look that
+                // loads at any other offset, and the one linkable column that
+                // is read at two offsets, the attention output's `joff`, is
+                // read `[0, -1]` for exactly this reason. `check_mask_offsets`
+                // is that sentence as a refusal, run by the prover and by the
+                // verifier on the components they both build.
                 binding_coeff -= *w * mask[*tree][*col][0];
             }
             evaluation_accumulator.accumulate(denom_inverse * binding_coeff);
@@ -1665,6 +1675,89 @@ impl<B: stwo::prover::backend::Backend> ComponentProver<B> for LinkTie {
         // consume the accumulator coefficients and add nothing
         evaluation_accumulator.skip_coeffs(self.n_constraints());
     }
+}
+
+// ------------------------------------------------------------------------
+// Open question 7.3: the offset a named column is read at
+// ------------------------------------------------------------------------
+
+/// Every column a link names is sampled at the offset the link reads.
+///
+/// `LinkTie` resolves a named column as `mask[tree][col][0]` -- the value at the
+/// column's *first* sampled offset -- while the weight it multiplies comes from
+/// a look that reads that column at offset 0 and at no other: `aff_nodes`
+/// refuses to link a look that loads at any other offset, and refuses an
+/// interaction tree outright. The two sides mean the same value only when the
+/// component that owns the column put offset 0 first in its own mask, and that
+/// is a property of how each linked evaluator happens to be written rather than
+/// of a check. It holds today, and one comment is what holds it: the attention
+/// output reads `den` at `[-1, 0]` and `joff` at `[0, -1]`, and `joff` is the
+/// linked one. A lookup added over a column whose component reads the previous
+/// row first would have the link compare the previous row's value against this
+/// row's claim -- which agrees on a witness whose column is constant down the
+/// rows and on no other, so the backend would accept or reject by the data.
+///
+/// The check is over the sampled *points*, which is what the offsets become: a
+/// column read at offsets `o_0, o_1, ...` is sampled at `point + step o_i` in
+/// that order, so `points[0] == point` says exactly "the first sampled offset
+/// is 0". The point is arbitrary here -- offset to point is injective at any
+/// point, for every offset smaller than the step's order -- so this runs off the
+/// component list alone, before a proof and before a verification, and both
+/// sides run it because both build the same components.
+///
+/// The two preprocessed trees are not checked and need none: the verifier
+/// samples every preprocessed column a component names at the row point and at
+/// nothing else (`Components::mask_points` gives each of them the one point),
+/// so `[0]` is that column's value at the row by construction.
+pub fn check_mask_offsets(tie: &LinkTie, components: &[&dyn Component]) -> Result<(), String> {
+    let max_log = components
+        .iter()
+        .map(|c| c.max_constraint_log_degree_bound())
+        .max()
+        .unwrap_or(1);
+    let point = CirclePoint::<SecureField>::zero();
+    let pts = TreeVec::concat_cols(components.iter().map(|c| c.mask_points(point, max_log)));
+    check_mask_points(tie, &pts, point)
+}
+
+/// `check_mask_offsets` against a sampling already built, so a control can hand
+/// it the two offset orders and see which of them is refused.
+pub fn check_mask_points(
+    tie: &LinkTie,
+    pts: &TreeVec<ColumnVec<Vec<CirclePoint<SecureField>>>>,
+    point: CirclePoint<SecureField>,
+) -> Result<(), String> {
+    let at = |what: String, tree: usize, col: usize| -> Result<(), String> {
+        if tree < crate::common::BASE_TREE {
+            return Ok(());
+        }
+        let ps = pts.get(tree).and_then(|t| t.get(col)).ok_or_else(|| format!(
+            "{what}: tree {tree} column {col} is sampled by no component, so the link \
+             would read a value the proof never opened"))?;
+        match ps.first() {
+            Some(p) if *p == point => Ok(()),
+            Some(_) => Err(format!(
+                "{what}: tree {tree} column {col} is sampled at {} offsets and offset 0 is \
+                 not the first of them, so the link would read a neighbouring row where its \
+                 weight is this row's -- the owning evaluator has to read this column at \
+                 offset 0 first",
+                ps.len())),
+            None => Err(format!("{what}: tree {tree} column {col} is sampled at no offset")),
+        }
+    };
+    for t in &tie.heights {
+        for (tree, col, _) in &t.terms {
+            at(format!("height {}", t.h), *tree, *col)?;
+        }
+        // the two committed quadruples this height's bindings read, on the same
+        // rule and by the same indexing
+        for (what, c0) in [("the carry quotient", t.q_at), ("the coefficient", t.coeff_at)] {
+            for k in 0..4 {
+                at(format!("height {}, {what}", t.h), INTERACTION_TRACE_IDX, c0 + k)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Placeholder link parameters for the emit path: the heights are the plan's
@@ -2042,5 +2135,77 @@ pub mod dev {
         eprintln!("linkcolcheck 2^{}: {} columns, {} mismatching cells shown",
                   hl.h, cols.len(), bad);
         assert_eq!(bad, 0, "the link's device columns disagree with the host builder");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One height naming one base column, and the two committed quadruples at
+    /// the front of the interaction tree.
+    fn tie_naming(col: usize) -> LinkTie {
+        LinkTie {
+            heights: vec![TieHeight {
+                h: 4,
+                // any point whose coordinates are neither 0 nor 1: the eq
+                // carry quotients divide by `eq(0, p)` and `eq(1, p)`
+                mle_point: MleEvalPoint::new(
+                    &std::array::from_fn::<_, 4, _>(|i| {
+                        SecureField::from(M31::from_u32_unchecked(i as u32 + 2))
+                    })),
+                konst: SecureField::zero(),
+                terms: vec![(crate::common::BASE_TREE, col, SecureField::one())],
+                q_at: 0,
+                coeff_at: 4,
+            }],
+            pre_idx: vec![],
+        }
+    }
+
+    /// What the framework samples for a column read at these offsets, in the
+    /// order it reads them -- `FrameworkComponent::mask_points`, by hand.
+    fn sampling(max_log: u32, base: &[&[isize]])
+                -> (CirclePoint<SecureField>, TreeVec<ColumnVec<Vec<CirclePoint<SecureField>>>>) {
+        let point = CirclePoint::<SecureField>::zero();
+        let step = CanonicCoset::new(max_log).step();
+        let of = |offs: &[isize]| -> Vec<CirclePoint<SecureField>> {
+            offs.iter().map(|o| point + step.mul_signed(*o).into_ef()).collect()
+        };
+        let mut trees: Vec<ColumnVec<Vec<CirclePoint<SecureField>>>> = vec![vec![]; 4];
+        trees[crate::common::BASE_TREE] = base.iter().map(|o| of(o)).collect();
+        // the eight interaction columns the two quadruples take, all at offset 0
+        trees[INTERACTION_TRACE_IDX] = (0..8).map(|_| of(&[0])).collect();
+        (point, TreeVec::new(trees))
+    }
+
+    /// Open question 7.3. The attention output reads its two masked base
+    /// columns in opposite orders on purpose: `den` at `[-1, 0]`, because
+    /// nothing links it, and `joff` at `[0, -1]`, because the link reads a
+    /// named column at its first sampled offset. Naming the first is the
+    /// control; naming the second is the shape the prover actually builds.
+    #[test]
+    fn a_linked_column_read_at_the_previous_row_first_is_refused() {
+        let (point, pts) = sampling(6, &[&[-1, 0], &[0, -1], &[0]]);
+
+        // column 1 is `joff`'s order, and column 2 a column read at this row
+        // and nowhere else, which is every other linked column there is
+        for ok in [1usize, 2] {
+            assert_eq!(check_mask_points(&tie_naming(ok), &pts, point), Ok(()),
+                       "column {ok} is read at offset 0 first, so the link may name it");
+        }
+
+        // column 0 is `den`'s order: the link's weight is this row's and the
+        // value it would multiply is the row before
+        let e = check_mask_points(&tie_naming(0), &pts, point)
+            .expect_err("a column whose first sampled offset is not 0 must be refused");
+        assert!(e.contains("offset 0 is not the first"), "the refusal must say why: {e}");
+        assert!(e.contains("column 0"), "the refusal must name the column: {e}");
+
+        // and a column no component sampled at all is refused rather than
+        // indexed into
+        let e = check_mask_points(&tie_naming(3), &pts, point)
+            .expect_err("a column nothing sampled must be refused");
+        assert!(e.contains("sampled by no component"), "{e}");
     }
 }

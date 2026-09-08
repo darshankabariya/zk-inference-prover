@@ -3969,10 +3969,21 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                1 + tables.len() + gtables.len() + rq_tabs.len() + usize::from(emb_tab.is_some()),
                plan.n_table_sums());
 
-    BuiltComponents { chans, keys, rows, links, link_binding, ao, mats, freivalds, residual_stream, exp_t, tables,
+    let built = BuiltComponents { chans, keys, rows, links, link_binding, ao, mats, freivalds, residual_stream, exp_t, tables,
                       gtables, argmax, embed, emb_tab, rqs: rq_comps, quants: quant_comps,
                       rq_tabs, pows,
-                      has_rows: plan.rows_key_tile.clone() }
+                      has_rows: plan.rows_key_tile.clone() };
+    // Open question 7.3: the link reads a named column at the column's first
+    // sampled offset, and its weight is the one a look that reads the column at
+    // offset 0 produced.  The two are the same value only where the owning
+    // component sampled offset 0 first, which is a property of that evaluator
+    // and not of anything checked -- so it is checked here, on the components
+    // the prover and the verifier both build, before either uses the link.
+    if let Some(tie) = &built.link_binding {
+        crate::gkrlink::check_mask_offsets(tie, &built.components())
+            .unwrap_or_else(|e| panic!("the GKR link names a column it cannot read: {e}"));
+    }
+    built
 }
 
 /// Stream E: the argmax side's binding weights -- the mirror of the head dequant's
