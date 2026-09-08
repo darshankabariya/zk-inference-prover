@@ -21,7 +21,6 @@ export OMP_NUM_THREADS=${OMP_NUM_THREADS:-2}
 export TOKENIZERS_PARALLELISM=false
 PY=${PYTHON:-uv run python}
 BENCH="$PY -m harness.eval.baseline.decode_bench --constants $CONSTANTS"
-LADDER="$PY -m harness.eval.baseline.ladder --constants $CONSTANTS"
 
 # 1. the checker has teeth, with no model and no GPU at all
 $BENCH --selftest
@@ -50,8 +49,10 @@ fi
 
 # 3. the parts only an 8B box run would otherwise reach -- the 512-token count at
 #    both real contexts, the batch sweep and its OOM stop, both counting
-#    conventions, the whole ladder -- on the SYNTHETIC backend.  These artifacts
-#    live in $OUT/mock/ and the ladder drops them by default; see step 5.
+#    conventions -- on the SYNTHETIC backend.  These artifacts live in $OUT/mock/,
+#    away from the real-model runs; every one of them is stamped `synthetic: true`,
+#    which is blocking on the like-for-like check, so none of them can be read as
+#    a measurement.
 ZK_BASELINE_OUT=$OUT/mock $BENCH --backend mock --model MOCK/none \
   --device cpu --dtype bfloat16 --tag mock --new-tokens 512 \
   --context 4096 --context 16384 --batch 1 --reps 2 --warmup 1
@@ -62,18 +63,5 @@ ZK_BASELINE_OUT=$OUT/mock $BENCH --backend mock --model MOCK/none \
 ZK_BASELINE_OUT=$OUT/mock $BENCH --backend mock --model MOCK/none \
   --device cpu --dtype bfloat16 --tag mock --new-tokens 512 --context 16384 \
   --batch 2 --batch 4 --batch 8 --batch 16 --batch 32 --reps 1 --warmup 0
-
-# 4. the real-model ladder: no run in $OUT is at a measured context on the measured card,
-#    so every cell that needs one must come out null and say why.
-$LADDER --outdir $OUT --out $OUT/ladder.json --markdown \
-  | tee $OUT/ladder.md
-
-# 5. the ladder driven all the way through, on synthetic seconds.  The header
-#    says NOT PUBLISHABLE and the freeze rows come out `NOT_QUOTABLE.`-prefixed
-#    with null grades -- that refusal is what is being validated.
-$LADDER --outdir $OUT/mock --allow-synthetic \
-  --out $OUT/mock/ladder.json --markdown | tee $OUT/mock/ladder.md
-$LADDER --outdir $OUT/mock --allow-synthetic --emit-constants \
-  > $OUT/mock/constants_rows.json
 
 echo "E2VAL DONE"

@@ -18,8 +18,8 @@ It never returns a number.
 
 A third backend, `mock`, exists only to exercise the harness where no card and
 no model are available.  It produces SYNTHETIC seconds and every run it writes
-is stamped `synthetic: true`, which `lfl.py` treats as a BLOCKING dimension and
-`ladder.py` refuses outright.  A synthetic number can never reach a table.
+is stamped `synthetic: true`, which `lfl.py` treats as a BLOCKING dimension.
+A synthetic number can never reach a table.
 """
 
 import hashlib
@@ -227,14 +227,14 @@ class MockBackend:
 
     Exists so the parts of this harness that only a full 8B run would otherwise
     exercise -- the batch sweep and its OOM-is-a-result path, the exact-token
-    assertion, the two-call timing protocol, both counting conventions, and the
-    whole ladder including its dollar block -- can be run on a laptop in
-    seconds.  Its seconds come from a crude arithmetic model (a per-token cost
-    plus a per-key attention term); they are NOT a prediction of anything.  It
-    OOMs on a configurable KV budget so the sweep's stop path is real code.
+    assertion, the two-call timing protocol and both counting conventions -- can
+    be run on a laptop in seconds.  Its seconds come from a crude arithmetic
+    model (a per-token cost plus a per-key attention term); they are NOT a
+    prediction of anything.  It OOMs on a configurable KV budget so the sweep's
+    stop path is real code.
 
-    Everything it writes carries `synthetic: true`.  `lfl.check` makes that a
-    BLOCKING dimension and `ladder.py` drops synthetic runs before it picks.
+    Everything it writes carries `synthetic: true`, and `lfl.check` makes that a
+    BLOCKING dimension.
     """
 
     name = "mock"
