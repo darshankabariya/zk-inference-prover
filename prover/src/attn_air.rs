@@ -594,6 +594,20 @@ impl FrameworkEval for KeyEval {
         // because `msk` is built from `Grid::row(j)` and so is already zero
         // wherever `act` is, and the subtraction keeps the factor degree 1, so the
         // fold's degree is the one `max_constraint_log_degree_bound` promises.
+        //
+        // Open question 7.7: that "already zero wherever `act` is" is not left to
+        // the reader.  `attn_trace::commit_pre` asserts it where the two columns
+        // are built, over exactly the rows `act` is zero on and with the same
+        // `masked` predicate that fills the mask columns, so the check and the
+        // construction cannot drift apart.  A mask set on such a row would make
+        // this factor `-1` instead of `0` and the fold would subtract a row the
+        // grid does not hold.  One assertion covers both backends: the mask
+        // columns exist only on a diagonal block key tile and `devpre::key_tile_dev`
+        // is never one.  Both columns are the shape tree's, so they are a function
+        // of the public parameters and not a value a prover picks inside an
+        // accepted proof -- what a verifier compares them through is that tree's
+        // root, which one proof takes from its own statement and a grid run pins
+        // with `--expect-pre-roots`.
         let nvis = |i: usize| -> E::F {
             match msk.get(i) {
                 Some(m) => act.clone() - m.clone(),

@@ -50,7 +50,17 @@ the residual it consumed, committed as the in side of the last layer link.
 the residual stream the segment committed, not a copy: the norm's reduction
 tree and the residual add are bound by an equality the verifier checks from
 the claims. Unbound, the prover could normalise any vector it liked and
-present the result as the norm of the residual.
+present the result as the norm of the residual. Each reduction's second level
+publishes its answer, the mean of squares, and that list of equalities is the
+only thing that reads it: one entry says the value the norm took the reciprocal
+square root of is that answer, and a proof is accepted only if every entry
+holds. An answer no entry named would be a value the prover could choose, so
+the plan refuses to state one. The lookup tables this arithmetic reads are
+padded to a power of two by repeating their last real row, so a row past a
+table's real ones carries the same key and the same value as a real one; that a
+proof puts no use on such a row is asserted by the prover and checked by
+nothing, and it needs no check, because a use there would be answered with the
+value of the row it copies.
 
 **The requantize seams (2, 8, 10).** Every matmul consumes an int8
 activation. The seam proves that activation is the requantization of the
@@ -78,7 +88,13 @@ and the o matmul each prove the wrong thing correctly.
 seams but the components themselves: the softmax identities and the
 accumulation are constraints of one AIR, and each matmul is a Freivalds check
 against the committed weights. They have no skip; a statement without them
-is not a statement about a transformer.
+is not a statement about a transformer. The causal mask and the marker for the
+rows a key grid really holds are both derived from the public parameters rather
+than chosen by the prover, and the component subtracts the one from the other,
+which is the same as gating on both only while the mask is clear on every row of
+unconstrained padding. The code that builds the two columns asserts that, over
+exactly those rows and with the predicate that writes them, on the one path that
+builds them for either backend.
 
 **The boundaries (13, 14).** The residual stream leaving a segment and the
 keys and values a block writes are committed as their own trees, and

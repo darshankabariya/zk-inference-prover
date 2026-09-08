@@ -2306,7 +2306,48 @@ pub fn residual_stream_table_cols(t: &ResidualStreamTables) -> Vec<Eval> {
 }
 
 /// Their multiplicity columns, in the same order.
+///
+/// Open question 7.5: nothing in the AIR forces a multiplicity to zero past a
+/// table's real rows -- `GTableEval` commits it as a bare mask with no row
+/// selector -- and `POW`'s real rows end at 273 of the 512 it is committed at.
+/// Two facts answer that, and this is where the second one is checked.
+///
+///  * A padding row is a **duplicate of the last real row**, not a zero row
+///    (`residual_stream_table_cols`). A key and its value together are the whole
+///    row, so a lookup answered from a padding row is answered with the value the
+///    row it copies holds, and multiplicity moved onto one is multiplicity split
+///    between two rows that give the same answer. LogUp's argument is over
+///    distinct keys and the padding adds none, so no constraint is needed. Zero
+///    padding would not have been safe, and the note above says why: `(0, 0)`
+///    beside the real `u = 0` row `(0, 1)` is two legal rows for one key.
+///  * An honest witness puts no multiplicity there at all. Every index the
+///    components scatter into comes from a search over the real rows
+///    (`pow_at`, `val_at`, `smul_at`), so the tail is zero. That is asserted here,
+///    and checked by nothing -- it does not have to be, by the point above. Both
+///    backends reach the same vectors, the device counters having been merged
+///    into them before this runs, so the assertion covers the CUDA path too.
+///
+/// The assertion also refuses the one way the padding rule could degenerate: an
+/// empty table has no last real row to repeat and would be padded with zeros.
 pub fn residual_stream_mult_cols(t: &ResidualStreamTables) -> Vec<Eval> {
+    let mut named: Vec<(&str, usize, &[u32])> = vec![
+        ("POW", t.pow.len(), &t.m_pow),
+        ("SMUL", t.smul.len(), &t.m_smul),
+        ("VAL", t.val.len(), &t.m_val),
+    ];
+    for ((k, u), m) in t.uns.iter().zip(&t.un).zip(&t.m_un) {
+        named.push((k.name(), u.len(), m));
+    }
+    for (name, real, m) in &named {
+        assert!(*real > 0,
+                "the {name} table has no rows, so its committed column would be padded with \
+                 zeros instead of with its last real row");
+        assert!(*real <= m.len(), "the {name} table is taller than its multiplicity column");
+        if let Some(j) = m[*real..].iter().position(|v| *v != 0) {
+            panic!("the {name} table's multiplicity is {} on padding row {} of {}, past its \
+                    {real} real rows", m[*real + j], *real + j, m.len());
+        }
+    }
     let mut out = vec![
         eval_of(t.log_pow, t.m_pow.iter().map(|m| m31_u32(*m)).collect()),
         eval_of(t.log_smul, t.m_smul.iter().map(|m| m31_u32(*m)).collect()),
@@ -2832,4 +2873,57 @@ pub fn norm_drift(dir: &str, d: usize, tokens_cap: usize, round: Round, which: &
               "two_level_checked": component_n, "two_level_matches_tree_sum": component_same,
               "note": "B1's fp32 reduction against the balanced bf16 tree the AIR proves; \
                        two_level_* compares the composed components' root with tree_sum's own"}))
+}
+
+// ------------------------------------------------------------------- tests ---
+//
+// Open question 7.5: the multiplicity past a table's real rows.  The tables are
+// a function of `round` and `kmax` alone, so the check `residual_stream_mult_cols`
+// makes can be exercised without a witness, a plan or a proof.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tables at the smallest `kmax` the add's exponent range allows.
+    fn tables() -> ResidualStreamTables {
+        ResidualStreamTables::new(DMAX + 1, crate::bf16::Round::Away, &[UnKind::Square])
+    }
+
+    #[test]
+    fn the_pow_table_is_273_rows_committed_at_512() {
+        let t = tables();
+        assert_eq!(t.pow.len(), 273);
+        assert_eq!(t.m_pow.len(), 512);
+        // the padding repeats the last real row, which is what makes a
+        // multiplicity there harmless rather than a second key
+        let cols = residual_stream_table_cols(&t);
+        let _ = cols;
+    }
+
+    #[test]
+    fn an_honest_witness_leaves_every_tables_padding_rows_unused() {
+        // nothing has scattered into the counters, so this is the state the
+        // check demands and it must pass
+        residual_stream_mult_cols(&tables());
+    }
+
+    /// The control: one count on the first padding row of `POW`.
+    #[test]
+    #[should_panic(expected = "on padding row 273")]
+    fn a_multiplicity_past_the_pow_tables_rows_is_refused() {
+        let mut t = tables();
+        t.m_pow[273] = 1;
+        residual_stream_mult_cols(&t);
+    }
+
+    /// And on a unary table, whose rows are the `VAL` keys.
+    #[test]
+    #[should_panic(expected = "the square table's multiplicity")]
+    fn a_multiplicity_past_a_unary_tables_rows_is_refused() {
+        let mut t = tables();
+        let real = t.un[0].len();
+        t.m_un[0][real] = 3;
+        residual_stream_mult_cols(&t);
+    }
 }

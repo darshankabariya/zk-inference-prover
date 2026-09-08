@@ -1127,6 +1127,37 @@ pub struct OutputBinding {
     pub key_tile: bool,
 }
 
+/// Open question 7.6: the second-level reductions whose answer no equality reads.
+///
+/// `gn1b`, `gn2b` and the head's `gnfb` are the second level of an RMSNorm's
+/// reduction, and their `Out(0)` is the mean of squares. Nothing in the AIR ties
+/// one component's published claim to another's: the plan's equality list is the
+/// only mechanism, `verify_composed` checks it from the claims alone and
+/// `accepts` requires every entry of it. So a second level whose `Out(0)` no
+/// equality names is a claim the prover may choose freely, and the norm scale
+/// would take the reciprocal square root of a sum of squares nobody summed --
+/// the equality `nt.In(1) == G * gnb.Out(0)` is what forbids that, and it being
+/// present was true by construction and checked nowhere.
+///
+/// Returns the tags of the components in that state. Both constructors assert
+/// the list is empty, and `verify_composed` builds the plan, so the check is on
+/// the verifier's side too.
+fn second_level_unread(components: &[ResidualStreamComponentPlan], eqs: &[ResidualStreamEq])
+                       -> Vec<String> {
+    components
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| matches!(r.tag.as_str(), "gn1b" | "gn2b" | "gnfb"))
+        .filter(|(i, r)| {
+            let at = r.bindings.iter().position(|(k, _, _)| *k == BindingKind::Out(0))
+                .unwrap_or_else(|| panic!("the second-level reduction {} publishes no output \
+                                           claim", r.tag));
+            !eqs.iter().any(|e| e.a == (*i, at) || e.b == (*i, at))
+        })
+        .map(|(_, r)| r.tag.clone())
+        .collect()
+}
+
 impl ResidualStreamPlan {
     /// Stream II (E11): the `lm_head` chunk's wiring family -- the final
     /// RMSNorm, and nothing else.
@@ -1189,6 +1220,11 @@ impl ResidualStreamPlan {
         let eqs = vec![ResidualStreamEq::plain((0, 1), (1, 0)),
                        ResidualStreamEq::plain((2, 0), (0, 0)),
                        ResidualStreamEq { a: (2, 1), b: (1, 1), scale: g_scale }];
+        // open question 7.6
+        let unread = second_level_unread(&components, &eqs);
+        assert!(unread.is_empty(),
+                "a second-level reduction's mean of squares is a claim no equality reads, so \
+                 the prover may put anything in it: {}", unread.join(", "));
         Self { t, tff: None, components, eqs, uns, stream_in: (0, 0), stream_out: (2, 2),
                norm_scales: vec![2], swiglu: None, output_bindings: vec![], head_norm: true,
                ropes: vec![] }
@@ -1428,6 +1464,11 @@ impl ResidualStreamPlan {
                 key_tile: false,
             })
             .collect();
+        // open question 7.6, after every equality this plan states
+        let unread = second_level_unread(&components, &eqs);
+        assert!(unread.is_empty(),
+                "a second-level reduction's mean of squares is a claim no equality reads, so \
+                 the prover may put anything in it: {}", unread.join(", "));
         Self {
             t,
             tff,
@@ -7966,6 +8007,31 @@ mod tests {
         assert_eq!(got[3], (4, Bound));
         assert_eq!(got[11], (12, Bound));
         assert_eq!(got[13], (14, Bound));
+    }
+
+    // ---- open question 7.6: the second-level reductions' answers ----------
+
+    /// The equality list is the only thing that reads a second level's mean of
+    /// squares, so the plan asserts every one of them is in it.  This is that
+    /// check on the pinned wired shape, and the control that drops the one
+    /// equality reading `gn1b`.
+    #[test]
+    fn a_second_level_reduction_whose_answer_no_equality_reads_is_named() {
+        let plan = plan_of(argv(&["--head-groups", "2,1", "--nout", "64", "--residual-stream-a", "32",
+                                  "--kmax", "16", "--synth-residual-stream", "--diagonal-block"]));
+        let g = plan.residual_stream.as_ref().expect("the pinned shape carries the residual stream");
+        assert_eq!(g.components[1].tag, "gn1b");
+        assert!(second_level_unread(&g.components, &g.eqs).is_empty());
+        // `nt1.In(1) == G * gn1b.Out(0)` is the entry; without it the norm's
+        // reciprocal square root would be over a sum of squares nobody summed
+        let at = g.components[1].bindings.iter()
+            .position(|(k, _, _)| *k == BindingKind::Out(0)).unwrap();
+        let eqs: Vec<ResidualStreamEq> = g.eqs.iter()
+            .filter(|e| e.a != (1, at) && e.b != (1, at))
+            .cloned()
+            .collect();
+        assert!(eqs.len() < g.eqs.len(), "the equality was there to drop");
+        assert_eq!(second_level_unread(&g.components, &eqs), vec!["gn1b".to_string()]);
     }
 
     #[test]
