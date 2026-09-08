@@ -839,7 +839,10 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
         let loaded = if weights_only {
             layer::Layer::load_weights(dir, &src, &head_groups, variant)
         } else {
-            layer::Layer::load(dir, &src, &head_groups, variant)
+            // Issue #53: `--round` is not a free choice on a dump -- it is the
+            // mode the dump was quantized under, and the loader compares the two.
+            layer::Layer::load(dir, &src, &head_groups, variant,
+                               Round::parse(&arg_strs(args, "--round", &["even"])[0]))
         };
         match loaded {
             Ok(mut l) => {

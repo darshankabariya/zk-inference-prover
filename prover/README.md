@@ -162,14 +162,14 @@ The dump carries its own diagonal block and the residual-stream columns, so
 every binding gadget the defaults switch on is stated on it and the proof
 needs no skip flag. Two flags on the prover side are not free choices.
 `--round even` is the dump's own mode: `b10-final` rounds a half to even and
-the dump's `dequant_round` says so, the prover does not read that field, and a
-command naming the other mode builds tables whose keys this witness's values
-miss, so the honest proof is rejected. The five GKR reductions are on because
-without them this segment's interaction tree is 93,184 columns wide, and the
-vendored library's out-of-domain sampling puts the polynomial count in a
-thread block grid's y dimension, which a device caps at 65,535: the CUDA
-backend stops in `eval_at_point.cu` with an invalid configuration argument.
-With them the interaction tree is 5,600 columns.
+the dump's `dequant_round` says so, the loader compares the two and refuses a
+command naming the other mode, which would build tables whose keys this
+witness's values miss and be rejected after the whole prove. The five GKR
+reductions are on because without them this segment's interaction tree is
+93,184 columns wide, and the vendored library's out-of-domain sampling puts
+the polynomial count in a thread block grid's y dimension, which a device caps
+at 65,535: the CUDA backend stops in `eval_at_point.cu` with an invalid
+configuration argument. With them the interaction tree is 5,600 columns.
 
 **The reference's unbound predecessor.** The dump below was extracted without
 its own diagonal block and predates the embedding rows, so under the defaults
@@ -184,7 +184,8 @@ record of what that configuration gave.
 That command names `--round away` while `b10-final` rounds a half to even, so
 either the dump was written under an earlier quantization configuration or the
 row's command and its dump never matched. Nothing on any host can settle it,
-and no page here should read the row as an extraction recipe.
+and no page here should read the row as an extraction recipe: the loader now
+refuses that pairing.
 
 The synthetic cases need nothing but the binary and take seconds each. Older
 values of the 8B digest (`6c3fb61524dee2ec` before the binding work,

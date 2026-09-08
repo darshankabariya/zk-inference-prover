@@ -66,6 +66,36 @@ pub fn frac_shared_refusal(man: &serde_json::Value) -> Option<String> {
         else { man["frac_shared_per_head"].to_string() }))
 }
 
+/// Issue #53: the dump's own rounding against `--round`.
+///
+/// A dump is quantized under one rounding mode; the prover builds its dequant
+/// tables under the one the line names. Where the two disagree the witness's
+/// values miss the rows the tables hold, the LogUp sums do not cancel, and the
+/// honest proof is rejected after the whole prove -- a dump/command mismatch
+/// that costs a proof to find and reads as a prover defect. `extract.py` writes
+/// the mode it used into the manifest, so the two are compared here instead.
+///
+/// A manifest that does not say (a dump older than the field) is not refused:
+/// there is nothing to compare `--round` with. `Some(why)` is the refusal,
+/// naming both modes.
+pub fn round_refusal(man: &serde_json::Value, round: bf16::Round) -> Option<String> {
+    let dump = man["dequant_round"].as_str()?;
+    // both spellings `Round::parse` takes for each mode
+    let same = matches!((dump, round),
+                        ("even" | "rne", bf16::Round::Even)
+                        | ("away" | "hafz", bf16::Round::Away)
+                        | ("zero" | "trunc", bf16::Round::Zero));
+    if same {
+        return None;
+    }
+    Some(format!(
+        "manifest: dequant_round is {dump:?} and the line says --round {} -- this dump's \
+         values were rounded one way and the dequant tables would be built the other, \
+         so every value that misses a row falls off the table and the honest proof is \
+         rejected. Prove this dump with --round {dump}.",
+        round.name()))
+}
+
 // ------------------------------------------------------------------ the witness --
 
 /// One matmul's dequant + Freivalds witness.
@@ -894,9 +924,14 @@ pub const FREIVALDS_GROUPS: [(&str, &[&str]); 5] =
      ("down", &["down"]), ("head", &["lm_head"])];
 
 impl Layer {
-    pub fn load(dir: &str, cfg: &Src, key_tile_sizes: &[usize], variant: Variant)
-                -> Result<Self, String> {
+    pub fn load(dir: &str, cfg: &Src, key_tile_sizes: &[usize], variant: Variant,
+                round: bf16::Round) -> Result<Self, String> {
         let man: serde_json::Value = witread::read_json(&format!("{dir}/manifest.json"))?;
+        // Issue #53: before the dump is read at all, let alone committed -- the
+        // rounding the line names has to be the one this dump was written under.
+        if let Some(why) = round_refusal(&man, round) {
+            return Err(why);
+        }
         let g = |k: &str| man[k].as_u64().ok_or(format!("manifest: missing {k}"));
         let (nh, s, c, hd) = (g("heads")? as usize, g("s")? as usize,
                               g("c")? as usize, g("hd")? as usize);
@@ -5210,6 +5245,8 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// Issue #72: `--table-bits` sizes a synthetic layer's master exp table.
     ///
     /// The rotation rebuilds every key tile and sizes the table again from the
@@ -5233,5 +5270,41 @@ mod tests {
         assert!(l.key_bits() <= bits,
                 "keys of {} bits against a table of 2^{bits} rows", l.key_bits());
         assert_eq!(l.key_tiles.iter().map(|b| b.off_table).sum::<usize>(), 0);
+    }
+
+    /// Issue #53: a dump whose rounding disagrees with `--round` is refused at
+    /// load, before the first commitment.
+    ///
+    /// `b10-final` rounds a half to even and its manifest says so. Proved with
+    /// `--round away` -- the mode the old reference row named -- the dequant
+    /// tables are built for the other rounding, 797 of the dump's values fall
+    /// off them, and the honest proof was made in full and then rejected.
+    #[test]
+    fn a_dump_rounded_the_other_way_is_refused_at_load() {
+        let man = serde_json::json!({"dequant_round": "even"});
+        let why = round_refusal(&man, bf16::Round::Away).expect("the mismatch must be refused");
+        assert!(why.contains("dequant_round is \"even\""), "{why}");
+        assert!(why.contains("--round away"), "{why}");
+        assert!(why.contains("--round even"), "{why}");
+        // the dump's own mode passes, under either spelling of it
+        assert_eq!(round_refusal(&man, bf16::Round::Even), None);
+        assert_eq!(round_refusal(&serde_json::json!({"dequant_round": "rne"}),
+                                 bf16::Round::Even), None);
+        // and a dump that does not say is not refused: there is nothing to compare
+        assert_eq!(round_refusal(&serde_json::json!({"s": 512}), bf16::Round::Away), None);
+
+        // the loader refuses before it reads anything else: this directory holds a
+        // manifest and no dump at all, and the error is the rounding and not a
+        // missing field or a missing file
+        let dir = std::env::temp_dir().join(format!("zk-prover-round-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory to hold the manifest");
+        std::fs::write(dir.join("manifest.json"), man.to_string()).expect("write the manifest");
+        let cfg = Src { dir: None, head: 0, q_bits: 12, k_bits: 11, nmax: 511, log_table: 0,
+                        seed: 7, layout: String::new(), diagonal_block: false, tile: false };
+        let err = Layer::load(dir.to_str().unwrap(), &cfg, &[2, 1], Variant::IntExp,
+                              bf16::Round::Away)
+            .err().expect("the loader must refuse this dump");
+        assert!(err.contains("dequant_round"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
