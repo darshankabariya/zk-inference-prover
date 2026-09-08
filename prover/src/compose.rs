@@ -1668,6 +1668,69 @@ pub struct Plan {
     pub emb: Option<crate::embed::EmbLayout>,
 }
 
+/// Issue #19: the attention output's no-wrap window, as two numbers rather than
+/// as an assertion alone.
+///
+/// The rounding identity multiplies `2 mag num`, and it is an identity over the
+/// integers only while that product stays under `p = 2^31 - 1`.  `mag` is
+/// bounded by the accumulator's two limbs and `num` by the `EPOW` table's own
+/// domain, so the product's bit length is `1 + lo + hi + max(e_hi, 0)`.  This
+/// returns what that comes to and what is left of the field's 31 -- the
+/// **margin**: how many bits a wider context, another model or a different
+/// quantization may add before the segment stops composing.
+///
+/// Every term is widened to `i64` first, and that is a fix and not a
+/// tidy-up. `1 + lo + hi + e_hi` was `u32` arithmetic, and a release build --
+/// which is every build that has recorded a digest -- wraps rather than panics,
+/// so a statement naming a limb width near `u32::MAX` came out of the sum as a
+/// small number and the window accepted it. `Fixed.params` is deserialized
+/// before `verify_composed` builds its plan, so that reading was the verifier's
+/// as well as the prover's.
+pub fn ao_wrap_window(p: &Params) -> (i64, i64) {
+    let used = 1 + i64::from(p.ao_acc_lo_bits) + i64::from(p.ao_acc_hi_bits)
+        + ao_e_hi(p).max(0);
+    (used, 31 - used)
+}
+
+/// The top of the exponent window, `e_hi = jv_max - jo_min`, in `i64` for the
+/// same reason.
+pub fn ao_e_hi(p: &Params) -> i64 {
+    i64::from(p.ao_jv_max) - i64::from(p.ao_jo_min)
+}
+
+/// Issue #19: the sibling bound of the same identity -- `d + (2 qm - 1) denp`,
+/// bounded by `q_bits + rem_bits` against 30, or against 31 in the `denp2`
+/// form. It has its own margin and it runs out at the same wall, so a segment
+/// that reports one reports both.
+pub fn ao_quotient_window(p: &Params) -> (i64, i64) {
+    let used = i64::from(p.ao_q_bits) + i64::from(p.ao_rem_bits);
+    (used, if p.ao_denp2 { 31 } else { 30 } - used)
+}
+
+/// Issue #19, the acceptance criterion: the window and its margin, per segment,
+/// in the run's own JSON.
+pub fn ao_wrap_json(p: &Params) -> Value {
+    let (used, margin) = ao_wrap_window(p);
+    let (q_used, q_margin) = ao_quotient_window(p);
+    json!({
+        "bits": used,
+        "limit": 31,
+        "margin": margin,
+        "acc_lo_bits": p.ao_acc_lo_bits,
+        "acc_hi_bits": p.ao_acc_hi_bits,
+        "e_hi": ao_e_hi(p).max(0),
+        "form": if p.ao_acc_mag { "magnitude" } else { "offset" },
+        "quotient": {
+            "bits": q_used,
+            "limit": if p.ao_denp2 { 31 } else { 30 },
+            "margin": q_margin,
+            "q_bits": p.ao_q_bits,
+            "rem_bits": p.ao_rem_bits,
+            "form": if p.ao_denp2 { "denp2" } else { "plain" },
+        },
+    })
+}
+
 impl Plan {
     pub fn new(p: &Params) -> Self {
         let attn_variant = AttnVariant::parse(&p.variant);
@@ -1772,8 +1835,10 @@ impl Plan {
         // has always needed and never said out loud.
         assert!(p.ao_jv_min <= p.ao_jv_max, "the jv window is empty");
         assert!(p.ao_jo_min <= p.ao_jo_max, "the jo window is empty");
-        let e_hi = p.ao_jv_max - p.ao_jo_min;
-        let e_lo = p.ao_jv_min - p.ao_jo_max;
+        // Issue #19: `i64`, because these two are differences of statement
+        // fields and an `i32` difference wraps in a release build.
+        let e_hi = ao_e_hi(p);
+        let e_lo = i64::from(p.ao_jv_min) - i64::from(p.ao_jo_max);
         assert!(e_hi <= 30 && -e_lo <= 30,
                 "the attention output's exponent window does not fit in the field:                  e in [{e_lo}, {e_hi}]");
         assert!(p.ao_acc_lo_bits >= crate::common::MIN_LOG_ROWS
@@ -1793,10 +1858,28 @@ impl Plan {
         // the window and the magnitude form reads off `sg`.  `params_of` sizes
         // the limbs at `acc_bits() + 1` for the first and `acc_bits()` for the
         // second, and takes the second only when the first does not fit here.
-        assert!(1 + p.ao_acc_lo_bits + p.ao_acc_hi_bits + e_hi.max(0) as u32 <= 31,
-                "the attention output's no-wrap window does not fit:                  1 + {} + {} + {} > 31{}",
-                p.ao_acc_lo_bits, p.ao_acc_hi_bits, e_hi.max(0),
-                if p.ao_acc_mag { " (magnitude form)" } else { "" });
+        //
+        // Issue #19: the same bound, over `i64` and with its margin named. At
+        // layer 0 under the paper's quantization the magnitude form is the one
+        // that fits and it lands on 31 exactly, so the margin there is **zero
+        // bits** and the next wider context, model or quantization is refused
+        // here. There is no third decomposition to reach for: however many
+        // limbs the range check is split into they must together cover `|acc|`,
+        // and `e_hi` is the `EPOW` table's own domain, so what the refusal
+        // offers is the one bit the magnitude form is worth and after that a
+        // narrower shape.
+        let (used, margin) = ao_wrap_window(p);
+        assert!(margin >= 0,
+                "the attention output's no-wrap window does not fit:                  1 + {} + {} + {} = {used} > 31 (over by {}){}.                  The two limbs must together cover |acc| and the exponent window must                  cover e = jv - jo, so no wider decomposition of either recovers a bit;                  what is left is {}",
+                p.ao_acc_lo_bits, p.ao_acc_hi_bits, e_hi.max(0), -margin,
+                if p.ao_acc_mag { " (magnitude form)" } else { "" },
+                if p.ao_acc_mag {
+                    "a narrower context, a quantization whose accumulator is narrower, \
+                     or a third form of this bound (issue #19)"
+                } else {
+                    "the magnitude form, which is worth one bit and which `params_of` \
+                     takes for a witness the offset form does not fit"
+                });
         // Stream OO (E11): the same term, at the bound the identity actually
         // needs.  The error identity is
         // `d = 2 mag num - (2 qm - 1) denp`, and what makes it an *integer*
@@ -1831,15 +1914,19 @@ impl Plan {
         // `11 + 20 = 31` and is the reason it exists; `params_of` takes the
         // form only when the plain one does not fit, so no statement that
         // composed before this moves.
+        // Issue #19: over `i64`, and with its own margin named -- the sibling
+        // bound lands on its cap at layer 0 too, in the `denp2` form.
         let qcap = if p.ao_denp2 { 31 } else { 30 };
-        assert!(p.ao_q_bits + p.ao_rem_bits <= qcap,
-                "the attention output's quotient term does not fit: {} + {} > {qcap}{}",
-                p.ao_q_bits, p.ao_rem_bits,
+        let (q_used, q_margin) = ao_quotient_window(p);
+        assert!(q_margin >= 0,
+                "the attention output's quotient term does not fit: {} + {} = {q_used} > \
+                 {qcap} (over by {}){}",
+                p.ao_q_bits, p.ao_rem_bits, -q_margin,
                 if p.ao_denp2 { " (denp2 form)" } else { "" });
         // The inert lead row commits `denp = 2^max(-e_lo, 0)`, forced by the
         // `EPOW` lookup at key 0, so the `denp2` form needs twice that to still
         // be a row of the range table.
-        assert!(!p.ao_denp2 || 1 + (-e_lo).max(0) as u32 <= p.ao_rem_bits,
+        assert!(!p.ao_denp2 || 1 + (-e_lo).max(0) <= i64::from(p.ao_rem_bits),
                 "the denp2 form needs 2^(1 + {}) inside the {}-bit remainder table",
                 (-e_lo).max(0), p.ao_rem_bits);
         let mut widths = vec![p.k_bits, p.q_bits, 8, p.z_lo_bits, p.z_hi_bits, p.ao_rem_bits,
@@ -8301,6 +8388,58 @@ mod tests {
         let out = rows.iter().find(|r| r.claim == "gn2.Out(1)").expect("the layer's output claim");
         assert_eq!(out.readers, vec!["boundary/out (not committed)".to_string()]);
         assert_eq!(states(&plan, None)[12], (13, EdgeState::Unbound));
+    }
+
+    /// Issue #19: the no-wrap window on the shape the placeholder counts are
+    /// pinned on. `1 + 16 + 4 + 4` is 25 of the field's 31 bits, so this shape
+    /// has six bits of margin -- and that margin is the whole of what a wider
+    /// context, another model or a different quantization has to stay inside.
+    #[test]
+    fn the_no_wrap_window_reports_its_margin() {
+        let p = crate::exprprobe::tests::params_no_prefix();
+        assert_eq!(ao_wrap_window(&p), (25, 6));
+        let j = ao_wrap_json(&p);
+        assert_eq!(j["bits"], json!(25));
+        assert_eq!(j["margin"], json!(6));
+        assert_eq!(j["limit"], json!(31));
+        assert_eq!(j["form"], json!("offset"));
+        // the sibling bound of the same identity is reported beside it
+        assert_eq!(j["quotient"]["bits"], json!(15));
+        assert_eq!(j["quotient"]["margin"], json!(15));
+        // the margin spent down to nothing still composes: the bound is `<= 31`,
+        // and zero margin is where layer 0 sits under the paper's quantization
+        let tight = Params { ao_acc_hi_bits: 10, ..p.clone() };
+        assert_eq!(ao_wrap_window(&tight), (31, 0));
+        assert_eq!(ao_wrap_json(&tight)["margin"], json!(0));
+        let _ = Plan::new(&tight);
+    }
+
+    /// One bit past the field and the plan refuses -- with the numbers, so a
+    /// reader of the refusal can see by how much and in which form.
+    #[test]
+    #[should_panic(expected = "1 + 16 + 11 + 4 = 32 > 31 (over by 1)")]
+    fn one_bit_past_the_no_wrap_window_is_refused_with_its_numbers() {
+        let p = crate::exprprobe::tests::params_no_prefix();
+        let _ = Plan::new(&Params { ao_acc_hi_bits: 11, ..p });
+    }
+
+    /// And the width that used to get past it. The sum was `u32` arithmetic and
+    /// a release build wraps rather than panicking, so a limb this wide came out
+    /// of `1 + lo + hi + e_hi` as a small number and the window accepted it.
+    /// The terms are `i64` now and this is the ordinary refusal.
+    #[test]
+    #[should_panic(expected = "no-wrap window does not fit")]
+    fn a_limb_width_that_wraps_a_u32_is_refused() {
+        let p = crate::exprprobe::tests::params_no_prefix();
+        let _ = Plan::new(&Params { ao_acc_lo_bits: u32::MAX - 20, ..p });
+    }
+
+    /// The same hole in the sibling bound: `q_bits + rem_bits` wrapped too.
+    #[test]
+    #[should_panic(expected = "quotient term does not fit")]
+    fn a_remainder_width_that_wraps_a_u32_is_refused() {
+        let p = crate::exprprobe::tests::params_no_prefix();
+        let _ = Plan::new(&Params { ao_rem_bits: u32::MAX - 6, ..p });
     }
 
     #[test]

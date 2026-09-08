@@ -1443,6 +1443,10 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
         // issue #18: the per-layer calibration the shape root is a function of
         // beside the statement, and what the shape-root cache did with it
         "shape": crate::shaperoot::shape_json(),
+        // issue #19: the attention output's no-wrap window and what is left of
+        // it, per segment -- at layer 0 under the paper's quantization the
+        // margin is zero bits and this is where that is visible
+        "ao_wrap": compose::ao_wrap_json(&out.fixed.params),
     });
     (j, accepts)
 }
