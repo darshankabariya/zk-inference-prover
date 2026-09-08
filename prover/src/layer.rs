@@ -1813,41 +1813,64 @@ unmoved (a rejection is the pass)");
         }
         let frac = probe.iter().flatten().map(|b| b.frac).fold(f64::MIN, f64::max).ceil();
         let d_bits = probe.iter().flatten().map(|b| b.d_bits()).max().unwrap() + 1;
-        let log_table = d_bits.clamp(4, 22);
+        // Issue #72: the rotation rewrites q, k and v, so the master exp table is
+        // sized again from the new data -- and what bounds that size is
+        // `--table-bits N` where the line gave one.  The key tiles carry it,
+        // `Layer::synthetic` having built them under it; without one the bound is
+        // the 2^22 rows `Attn::build` caps its own default at, past which the table
+        // dominates a single-key-tile benchmark.  At the 8B model's attention width
+        // the data needs 24 bits of key, and clamping to 2^22 here left them off
+        // the table, where only a rejected proof reported them.
+        let ceiling = self.key_tiles.iter().map(|b| b.log_table).max().unwrap_or(0).max(22);
+        let mut log_table = d_bits.clamp(4, ceiling);
         // pass 2: the joint row maximum per group -- over every sub-key-tile and the
-        // diagonal block -- then all of them under it
-        for g in 0..groups {
-            let idx = gidx(g);
-            let mm: Vec<i64> = probe[g].iter().skip(1)
-                .fold(probe[g][0].mm.clone(), |acc, b| {
-                    acc.iter().zip(&b.mm).map(|(x, y)| *x.max(y)).collect()
-                });
-            for (n, b) in idx.iter().copied().enumerate() {
-                let a = &self.key_tiles[b];
-                let sh = a.shape;
-                let off = self.head_offsets[b];
-                let q = take_q(qq, off, sh.insts, sh.s, !a.diagonal_block && g == 0 && n == 0);
-                let (k, v) = if a.diagonal_block {
-                    (take(kk, off, sh.insts, sh.c), take(vv, off, sh.insts, sh.c))
-                } else {
-                    (a.kk.clone(), a.vv.clone())
-                };
-                let (variant, qb, kb, nmax, src) =
-                    (a.variant, a.q_bits, a.k_bits, a.nmax, a.source.clone());
-                let diagonal_block = a.diagonal_block;
-                self.key_tiles[b] = Attn::from_qkv(sh, variant, q, k, v, qb, kb, nmax, log_table,
-                                               Some(vec![frac; sh.insts]), Some(frac), src,
-                                               diagonal_block, Some(mm.clone()));
+        // diagonal block -- then all of them under it.  Issue #72: `d_bits` is the
+        // shift before that joint maximum widens it, so it can fall short of the
+        // keys the rebuilt key tiles look up; where it does, they are counted and
+        // pass 2 is taken again at the size they need.
+        loop {
+            for g in 0..groups {
+                let idx = gidx(g);
+                let mm: Vec<i64> = probe[g].iter().skip(1)
+                    .fold(probe[g][0].mm.clone(), |acc, b| {
+                        acc.iter().zip(&b.mm).map(|(x, y)| *x.max(y)).collect()
+                    });
+                for (n, b) in idx.iter().copied().enumerate() {
+                    let a = &self.key_tiles[b];
+                    let sh = a.shape;
+                    let off = self.head_offsets[b];
+                    let q = take_q(qq, off, sh.insts, sh.s, !a.diagonal_block && g == 0 && n == 0);
+                    let (k, v) = if a.diagonal_block {
+                        (take(kk, off, sh.insts, sh.c), take(vv, off, sh.insts, sh.c))
+                    } else {
+                        (a.kk.clone(), a.vv.clone())
+                    };
+                    let (variant, qb, kb, nmax, src) =
+                        (a.variant, a.q_bits, a.k_bits, a.nmax, a.source.clone());
+                    let diagonal_block = a.diagonal_block;
+                    self.key_tiles[b] =
+                        Attn::from_qkv(sh, variant, q, k, v, qb, kb, nmax, log_table,
+                                       Some(vec![frac; sh.insts]), Some(frac), src,
+                                       diagonal_block, Some(mm.clone()));
+                }
+                // the group's denominator: the pair's total, which every sub-key-tile's
+                // `zz` is a partial sum of.  It lives on the key tile that carries the
+                // per-token component -- the first sub-key-tile when there is a prefix, and
+                // the diagonal block itself when there is none.
+                let total: Vec<i64> = idx.iter().skip(1)
+                    .fold(self.key_tiles[idx[0]].zz.clone(), |acc, b| {
+                        acc.iter().zip(&self.key_tiles[*b].zz).map(|(x, y)| x + y).collect()
+                    });
+                self.key_tiles[idx[0]].zz_total = Some(total);
             }
-            // the group's denominator: the pair's total, which every sub-key-tile's
-            // `zz` is a partial sum of.  It lives on the key tile that carries the
-            // per-token component -- the first sub-key-tile when there is a prefix, and
-            // the diagonal block itself when there is none.
-            let total: Vec<i64> = idx.iter().skip(1)
-                .fold(self.key_tiles[idx[0]].zz.clone(), |acc, b| {
-                    acc.iter().zip(&self.key_tiles[*b].zz).map(|(x, y)| x + y).collect()
-                });
-            self.key_tiles[idx[0]].zz_total = Some(total);
+            let need = self.key_bits();
+            if need <= log_table {
+                break;
+            }
+            assert!(need <= ceiling,
+                    "the rotated key tiles look up an exp table key of {need} bits and \
+--table-bits gives at most {ceiling}: pass --table-bits {need}");
+            log_table = need;
         }
         // the attention output follows the key tiles: its accumulator and
         // denominator *are* their sums, and the per-token output scale is the
@@ -5183,4 +5206,32 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
         use_sum = s;
     }
     FreivaldsInteraction { cols: cols.into_inner(), claimed, use_sum, qx_claim }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Issue #72: `--table-bits` sizes a synthetic layer's master exp table.
+    ///
+    /// The rotation rebuilds every key tile and sizes the table again from the
+    /// rebuilt data.  That second sizing was clamped to 2^22 rows whatever the
+    /// line said, so a shape whose keys need more -- this one needs 23 bits at a
+    /// 128-token block, and the 8B model's attention width needs 24 -- left them
+    /// off the table, where only a rejected proof reported them.
+    #[test]
+    fn table_bits_sizes_the_rotated_synthetic_table() {
+        let argv = |extra: &[&str]| -> Vec<String> {
+            ["compose", "--round", "even", "--numbits", "9", "--z-hi-bits", "7",
+             "--variants", "intexp", "--hd", "32", "--head-groups", "2,2",
+             "--nin", "128", "--nout", "128", "--residual-stream-a", "32", "--kmax", "16",
+             "--synth-residual-stream", "--diagonal-block", "--s", "128", "--ctx", "128"]
+                .iter().chain(extra.iter()).map(|s| s.to_string()).collect()
+        };
+        let (l, _) = crate::layer_of(&argv(&["--table-bits", "23"]));
+        let bits = l.key_tiles[0].log_table;
+        assert!(bits > 22, "the exp table is still clamped to 2^{bits} rows");
+        assert!(l.key_tiles.iter().all(|b| b.log_table == bits), "key tiles disagree on table rows");
+        assert!(l.key_bits() <= bits,
+                "keys of {} bits against a table of 2^{bits} rows", l.key_bits());
+        assert_eq!(l.key_tiles.iter().map(|b| b.off_table).sum::<usize>(), 0);
+    }
 }
