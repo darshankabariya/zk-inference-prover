@@ -43,6 +43,18 @@ the recorded C=4,096 set sits at `11 + 20 = 31` of 31, which composes and admits
 nothing wider.  The layer's own value is legal, so what the refusal names is
 `plan.py --ao-rem-per-line`, which writes it on that layer's own line.
 
+**Issue #121: the other half, where the row states it.**  The bound has two
+halves and only the quotient one moves with the pin; the window half,
+`1 + lo + hi + e_hi`, is the dump's own accumulator and its own exponents.  A
+dump records all three (`ao_acc_bits`, `jv_max` and `jo_min`, in the manifest's
+`attn_out` block), `shape_of` carries them onto the row, and every row that
+states them is evaluated on both halves here and in the plan writer -- so a
+shape that does not compose is refused at plan time and not by `Plan::new`.  A
+row extracted before the extractor recorded the accumulator width states no
+`ao_acc_bits`, and its window half is then **not checked** rather than checked
+against a guess: the tables print how many rows that was.  The recorded
+4,096-token set's 288 rows are all of that kind, so its plan is unchanged.
+
     ... shapes --selftest                     the bound and its refusal, no dump
 """
 import argparse
@@ -163,6 +175,49 @@ def ao_no_wrap_refusal(w, where):
     return ao_quotient_refusal(w["quotient"], where)
 
 
+# ---- issue #121: the window half, where the row states it -------------------
+# `ao_no_wrap` above needs three numbers no pin moves: the accumulator's bit
+# length and the two exponent extremes.  All three are the dump's own and all
+# three are in its manifest, so a shape row can carry them and the table and the
+# plan writer can evaluate the window half at the same time as the quotient one.
+# The two exponents have been in the manifest all along; `ao_acc_bits` was
+# computed during extraction and thrown away until #121, so a row read off an
+# older dump states no accumulator width.  The window half is then NOT CHECKED,
+# and said to be: an accumulator guessed from a default would refuse a set that
+# composes or admit one that does not, and either is worse than the silence the
+# reader can see.
+
+
+def ao_row_of(man):
+    """The three window-half numbers a shape row takes from a dump manifest.
+
+    `ao_acc_bits` is `None` on a dump extracted before the extractor recorded
+    it.  The row keys are the prover's own field names for these
+    (`prover/src/compose.rs`'s `Params`), so the shape table, the plan and the
+    statement say them the same way.
+    """
+    ao = man.get("attn_out") or {}
+    return dict(ao_acc_bits=ao.get("ao_acc_bits"),
+                ao_jv_max=ao.get("jv_max"), ao_jo_min=ao.get("jo_min"))
+
+
+def ao_states_window(r):
+    """Does this row state the window half at all?"""
+    return all(r.get(k) is not None for k in ("ao_acc_bits", "ao_jv_max", "ao_jo_min"))
+
+
+def ao_row_window(r, rem_bits):
+    """One row's whole bound at `rem_bits`, or `None` if it states no window.
+
+    The returned window is the row's own and does not depend on `rem_bits`;
+    only the `quotient` inside it does.
+    """
+    if not ao_states_window(r):
+        return None
+    return ao_no_wrap(r["ao_acc_bits"], r["ao_jv_max"], r["ao_jo_min"],
+                      r.get("attn_out_bits", 8), rem_bits)
+
+
 # ---- issue #118: the bound under the pins this table writes -----------------
 # `ao_rem_bits` below is a model-wide maximum, and it goes on the chunk loop's
 # command line, so every layer of every block is proved at it.  A layer whose
@@ -190,14 +245,25 @@ def ao_pin(rows):
 
 
 def ao_pin_row(r, rem_bits):
-    """One row's quotient window at `rem_bits`, and what it is refused with.
+    """One row's two windows at `rem_bits`, and what it is refused with.
 
-    The refusal names the layer and the numbers, and then says which of the two
-    it is: a pin this layer cannot take although its own divisor range fits, or
-    a shape that does not compose at any pin.
+    Issue #121: both halves, where the row states the window one.  The window
+    half comes first because no pin moves it -- a refusal there is a shape that
+    does not compose, and naming `--ao-rem-per-line` for it would name a flag
+    that cannot help.  The quotient half is the one the pin moves, and its
+    refusal says which of the two it is: a pin this layer cannot take although
+    its own divisor range fits, or a shape that does not compose at any pin.
+
+    The returned window is the quotient one, as it was before #121, with the
+    row's whole bound under `window` (`None` when the row states none).
     """
-    q = ao_quotient(r.get("attn_out_bits", 8), rem_bits)
-    msg = ao_quotient_refusal(q, ao_where(r))
+    where = ao_where(r)
+    w = ao_row_window(r, rem_bits)
+    q = dict(w["quotient"] if w else ao_quotient(r.get("attn_out_bits", 8), rem_bits),
+             window=w)
+    if w is not None and w["margin"] < 0:
+        return q, ao_no_wrap_refusal(w, where)
+    msg = ao_quotient_refusal(q, where)
     if msg is None:
         return q, None
     own = ao_quotient(r.get("attn_out_bits", 8), r["ao_rem_bits"])
@@ -247,6 +313,28 @@ def ao_pin_report(rows, rem_bits):
             f"at {ao_where(r)}{tail}")
 
 
+def ao_window_report(rows):
+    """Issue #121: the line a table prints about the window half.
+
+    No pin moves it, so it is one line per table rather than one per pin: the
+    tightest window over the rows that state it, and how many stated none.
+    """
+    have = [(r, ao_row_window(r, r["ao_rem_bits"])) for r in rows if ao_states_window(r)]
+    if not have:
+        return (f"attention output: none of the {len(rows)} rows states ao_acc_bits, so "
+                f"the no-wrap window half was NOT CHECKED -- these rows were read off "
+                f"dumps extracted before the extractor recorded the accumulator width "
+                f"(zk-prover #121). A re-extracted set carries it and gets both halves.")
+    r, w = min(have, key=lambda t: t[1]["margin"])
+    tail = ("; a wider context, another model or a different quantization adds a bit "
+            "and this layer stops composing" if w["margin"] == 0 else "")
+    if len(have) < len(rows):
+        tail += (f". {len(rows) - len(have)} of the {len(rows)} rows state no "
+                 f"ao_acc_bits and their window half was NOT CHECKED")
+    return (f"attention output: the tightest no-wrap window is {w['bits']}/{w['limit']} "
+            f"bits, margin {w['margin']} ({w['form']} form), at {ao_where(r)}{tail}")
+
+
 def shape_of(d):
     # Stream DD: imported here rather than at the top so the merge mode, which
     # reads JSON and nothing else, runs where numpy is not installed (the desk
@@ -274,6 +362,9 @@ def shape_of(d):
         d_bits=man["d_bits"], z_max=man["z_max"],
         ao_rem_bits=int(rem).bit_length(),
         attn_out_bits=man.get("attn_out_bits", 8),
+        # issue #121: the window half's own three numbers, so this table and the
+        # plan writer evaluate both halves and not just the one the pin moves
+        **ao_row_of(man),
         kmax_needed=max(v["kmax_needed"] for v in accs.values()),
         kmax_blind=max(v["kmax_worst_case"] for v in accs.values()),
         fold_q_max=man["attn_out"]["fold_q_max"],
@@ -317,10 +408,17 @@ def worst_of(rows):
     return worst, tb
 
 
-def _row(layer, rem, bits=12, block=None, table_bits=23):
-    """A shape table row with the fields the pins are taken over."""
+def _row(layer, rem, bits=12, block=None, table_bits=23, acc=None, jv=-6, jo=-10):
+    """A shape table row with the fields the pins are taken over.
+
+    Issue #121: `acc` is the accumulator's bit length, and `None` -- the
+    default -- is a row read off a dump that recorded none, whose window half
+    is not checked.
+    """
     return dict(layer=layer, block=block, c=512, s=512, table_bits=table_bits,
                 spread=0.0, d_bits=16, z_max=1, ao_rem_bits=rem, attn_out_bits=bits,
+                ao_acc_bits=acc, ao_jv_max=(jv if acc else None),
+                ao_jo_min=(jo if acc else None),
                 kmax_needed=19, kmax_blind=19, fold_q_max=(1 << (bits - 1)) - 1,
                 fold_rem_bits=15, fold_gt_min=8, fold_gc_min=8, slim=True)
 
@@ -385,6 +483,55 @@ def selftest():
           and got[-1].startswith("layer 2: ") and "no pin recovers it" in got[-1])
     case("one block's table names the layer, and each case", ok, got[0].split(".")[0])
 
+    # ---- issue #121: the other half, where the row states it ----------------
+    # A row that carries `ao_acc_bits` and the two exponents is evaluated on the
+    # window half as well, and the accumulator's width is the only input to it a
+    # quantization moves.
+
+    # the recorded set's rows say nothing about the accumulator, so the window
+    # half is not checked and the table says which rows those were
+    rows = [_row(k, r, block=b) for b in (0, 1)
+            for k, r in enumerate((14, 15, 19) if b == 0 else (15, 16, 20))]
+    got = ao_window_report(rows)
+    ok = ("NOT CHECKED" in got and "none of the 6 rows states ao_acc_bits" in got
+          and worst_of(rows)[0]["ao_rem_bits"] == 20)
+    case("a row that states no accumulator is not checked", ok, got.split(" -- ")[0])
+
+    # the same set re-extracted: 19 bits of accumulator against the synthetic
+    # shape's window is 25 of 31, and both halves are evaluated at the pin
+    rows = [_row(k, r, block=b, acc=19) for b in (0, 1)
+            for k, r in enumerate((14, 15, 19) if b == 0 else (15, 16, 20))]
+    worst, _ = worst_of(rows)
+    _, q, refusals = ao_pin_check(rows, worst["ao_rem_bits"])
+    got = ao_window_report(rows)
+    ok = (not refusals and q["window"]["bits"] == 25 and q["window"]["margin"] == 6
+          and "NOT CHECKED" not in got and "25/31 bits, margin 6 (offset form)" in got)
+    case("a re-extracted set is checked on both halves", ok, got)
+
+    # and the layer the window half exists for: an accumulator one bit past it.
+    # No pin moves the window, so the refusal names neither the pin nor
+    # `--ao-rem-per-line`, which could not recover a bit of it.
+    rows[-1] = _row(2, 20, block=1, acc=27)
+    try:
+        worst_of(rows)
+        got = "NOT refused"
+    except AssertionError as e:
+        got = str(e).splitlines()[0]
+    ok = (got.startswith("block 1 layer 2: ") and "no-wrap window does not fit" in got
+          and "1 + 16 + 11 + 4 = 32 > 31 (over by 1, magnitude form)" in got
+          and "--ao-rem-per-line" not in got)
+    case("an accumulator past the window half is refused", ok, got.split(".")[0])
+
+    # a set half re-extracted: the rows that state it are checked, the rest are
+    # counted, and the pin is taken over all of them either way
+    rows = ([_row(k, r, block=0, acc=19) for k, r in enumerate((14, 15, 19))]
+            + [_row(k, r, block=1) for k, r in enumerate((15, 16, 20))])
+    got = ao_window_report(rows)
+    ok = ("margin 6 (offset form), at block 0 layer 0" in got
+          and "3 of the 6 rows state no ao_acc_bits" in got
+          and not ao_pin_check(rows, worst_of(rows)[0]["ao_rem_bits"])[2])
+    case("a set half re-extracted says how many were not", ok, got.split(". ")[-1])
+
     return 1 if bad else 0
 
 
@@ -405,6 +552,7 @@ def merge_tables(paths, out):
     print(f"merged {len(paths)} tables, {len(rows)} rows, blocks {blocks}")
     print(f"worst case: {json.dumps(worst)}")
     print(ao_pin_report(rows, worst["ao_rem_bits"]))
+    print(ao_window_report(rows))
     print(f"-> {out}")
 
 
@@ -438,6 +586,7 @@ if __name__ == "__main__":
     one = per[max(tb)] * len(rows)
     print(f"\nworst case: {json.dumps(worst)}")
     print(ao_pin_report(rows, worst["ao_rem_bits"]))
+    print(ao_window_report(rows))
     print(f"master table, per-layer {own / 1e9:.3f} G cells vs one shape at 2^{max(tb)} "
           f"{one / 1e9:.3f} G = x{one / own:.2f}")
     # Stream DD: the output path.  Pre-DD it was `<dir>/shapes.json` and with two

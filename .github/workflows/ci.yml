@@ -104,4 +104,6 @@ jobs:
         working-directory: harness
         run: |
           uv run python -m harness.witness.extract --selftest
+          uv run python -m harness.witness.shapes --selftest
+          uv run python -m harness.witness.plan --selftest
           uv run python -m harness.eval.baseline.decode_bench --selftest

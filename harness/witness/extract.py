@@ -51,7 +51,8 @@ from .model import BF16, Cache, Model, Recorder  # noqa: E402
 from .quant import pow2_ceil, round_hafz  # noqa: E402
 # issue #118: the bound below is the shape table's too, so it is defined once,
 # in the module that has no torch and no numpy at import time
-from .shapes import ao_no_wrap, ao_no_wrap_refusal  # noqa: E402
+from .shapes import (ao_no_wrap, ao_no_wrap_refusal, ao_row_of,  # noqa: E402
+                     ao_row_window, ao_states_window)
 
 OUT = os.path.join(HERE, "out", "witness")
 MATS = ["q", "k", "v", "o", "gate", "up", "down"]
@@ -466,6 +467,28 @@ def no_wrap_selftest():
         bad += not ok
         print(f"{'OK  ' if ok else 'FAIL'}  {label:<52s} -> "
               f"{'refused: ' + want if ok else 'NOT refused: ' + got}")
+    # Issue #121: and the same window off the manifest this extraction writes.
+    # The check above runs on numbers that are in memory; the shape table and
+    # the plan writer run on the manifest, so what the manifest carries has to
+    # come back as the same window -- otherwise the two evaluate different
+    # bounds and only the one nobody reads is right.
+    acc, jv_max, jo_min, out_bits, rem = 19, -6, -10, 8, 8
+    man = dict(attn_out=dict(jo_min=jo_min, jo_max=-10, jv_min=-8, jv_max=jv_max,
+                             fold_q_max=127, ao_acc_bits=acc))
+    row = dict(ao_row_of(man), attn_out_bits=out_bits, ao_rem_bits=rem)
+    w, direct = ao_row_window(row, rem), ao_no_wrap(acc, jv_max, jo_min, out_bits, rem)
+    ok = ao_states_window(row) and w == direct
+    bad += not ok
+    print(f"{'OK  ' if ok else 'FAIL'}  {'the manifest block is the same window':<52s} -> "
+          f"{w['bits']}/{w['limit']} margin {w['margin']} ({w['form']})")
+    # and a manifest written before this field existed states no window at all,
+    # which is the case the shape table reports rather than guesses
+    old_man = dict(attn_out={k: v for k, v in man["attn_out"].items() if k != "ao_acc_bits"})
+    old_row = dict(ao_row_of(old_man), attn_out_bits=out_bits, ao_rem_bits=rem)
+    ok = not ao_states_window(old_row) and ao_row_window(old_row, rem) is None
+    bad += not ok
+    print(f"{'OK  ' if ok else 'FAIL'}  {'a manifest without it states no window':<52s} -> "
+          f"ao_acc_bits {old_row['ao_acc_bits']}")
     return bad
 
 
@@ -1182,7 +1205,16 @@ if __name__ == "__main__":
                               # pass's masked output
                               jo_fwd_min=int(jo_fwd.min()), jo_fwd_max=int(jo_fwd.max()),
                               jo_tokens_bumped=jo_bumped, jo_tokens=int(S),
-                              fold_q_max=int(q_rect.max())),
+                              fold_q_max=int(q_rect.max()),
+                              # Issue #121: the accumulator's bit length, beside
+                              # the two exponent extremes above.  The check
+                              # below evaluates the window half here, where
+                              # every input is on the desk; the shape table and
+                              # the plan writer evaluate it again under the pins
+                              # THEY write, and until this was recorded they had
+                              # no accumulator to evaluate it with and could
+                              # only do the quotient half.
+                              ao_acc_bits=ao_acc_bits),
                 accumulators=accs,
                 # B10 step 0: which dequant gadget each matmul needs is a property of
                 # the *spec*, not of the prover's build.  `b65-design` puts the

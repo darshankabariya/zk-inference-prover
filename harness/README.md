@@ -45,8 +45,12 @@ what is left of the field, the margin: zero margin is a layer that composes and
 admits nothing wider, which is where layer 0 sits under the paper's
 quantization. A plan that pins wider model-wide widths than a dump's own can
 only spend more of the window, so a dump refused here is refused under every
-plan. `witness/extract.py --selftest` checks the arithmetic, with no model and
-no card, against the shape the prover pins its own window on.
+plan. Each layer's manifest records the three numbers the first of the two
+windows is decided by -- the accumulator's bit length and the two exponent
+extremes -- so the shape table and the plan writer evaluate that window too,
+under the pins they write. `witness/extract.py --selftest` checks the
+arithmetic, with no model and no card, against the shape the prover pins its own
+window on, and checks that the manifest block comes back as the same window.
 
 ## What the shape table and the plan writer refuse
 
@@ -66,6 +70,18 @@ own value on that layer's line, and a line's arguments are read after the shared
 ones. Every table and every plan also prints the tightest window and its margin.
 The recorded 4,096-token set sits at `11 + 20 = 31` of 31, which composes and
 admits nothing wider, and its plan is unchanged line for line.
+
+The other of the two bounds, `1 + lo + hi + e_hi`, moves with no pin: it is the
+dump's own accumulator and its own exponents. A row that carries those three
+numbers is evaluated on it here as well, so a shape that does not compose is
+refused before a plan file is written rather than by the loop's first chunk, and
+the refusal names what would have to move instead -- a per-line pin recovers no
+bit of that window. A row read off a dump extracted before the accumulator's
+width was recorded states none, and then that window is **not checked**: a table
+and a plan say how many rows that was rather than checking them against a
+guessed accumulator, which would refuse a set that composes or admit one that
+does not. The recorded 4,096-token table's 288 rows are all of that kind; a
+re-extracted set carries the width and gets both windows.
 `witness/shapes.py --selftest` and `witness/plan.py --selftest` check the
 arithmetic and both refusals, with no model and no card.
 

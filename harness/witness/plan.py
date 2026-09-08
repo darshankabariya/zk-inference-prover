@@ -78,6 +78,16 @@ not checked: its pin is `--head-flags`' and the shape table has no row for it.
 
     python -m harness.witness.plan --selftest     the check itself, no witness set
 
+**Issue #121: both halves of the bound, where the row states them.**  The pin a
+line resolves moves only the quotient half.  The window half is the dump's own
+accumulator and its own exponents, and a shape table whose rows carry the three
+numbers is evaluated on it here too, so a shape that does not compose is refused
+before the plan file is written instead of by `Plan::new` at the loop's first
+chunk.  A row read off a dump extracted before the extractor recorded the
+accumulator width states none, and the window half is then not checked: the plan
+says so rather than checking it against a guess, and the recorded 4,096-token
+plan is unchanged line for line.
+
 **Stream MM (E11): what the model manifest needs of a plan.**  `zk-prover
 model-roots` requires `master_table_bits` to be **one value per layer across
 blocks** -- `table/exp` is `1 << log_table` rows, so a layer whose blocks
@@ -104,7 +114,7 @@ import os
 import sys
 import tempfile
 
-from .shapes import ao_pin, ao_pin_refusals, ao_pin_row, ao_where
+from .shapes import ao_pin, ao_pin_refusals, ao_pin_row, ao_where, ao_window_report
 
 
 def read_rows(path):
@@ -419,6 +429,8 @@ def main():
         print(f"attention output: at --ao-rem-bits {q['rem_bits']}{own} the tightest "
               f"quotient window is {q['bits']}/{q['limit']} bits, margin {q['margin']} "
               f"({q['form']} form), at {ao_where(r)}")
+        # issue #121: and the half no pin moves, over the same rows
+        print(ao_window_report([row for row, _ in checked]))
     elif pin is None:
         print("attention output: the shape tables carry no ao_rem_bits, so the pin the "
               "loop is launched with is not checked here")
@@ -435,17 +447,24 @@ def main():
               f"x{n_rows / max(len(emit), 1):.1f} fewer cudaemit launches)")
 
 
-def _shape_table(d, b, rems, bits=12):
+def _shape_table(d, b, rems, bits=12, acc=None):
     """One block's shape table, with only the fields a plan reads.
 
     `bits` is the fold's target width, one value or one per row: a set whose
     layers were not all extracted at the same width is what `--l0-dir` points a
     plan at, and it is where the model-wide pin and a layer's own cap part.
+
+    Issue #121: `acc` is the accumulator's bit length, one value or one per row,
+    and `None` -- the default -- is the recorded set, whose rows state none.
     """
     if isinstance(bits, int):
         bits = [bits] * len(rems)
+    if not isinstance(acc, list):
+        acc = [acc] * len(rems)
     rows = [dict(layer=k, block=b, c=512, table_bits=23, ao_rem_bits=rem,
-                 attn_out_bits=w) for k, (rem, w) in enumerate(zip(rems, bits))]
+                 attn_out_bits=w, ao_acc_bits=a,
+                 ao_jv_max=(-6 if a else None), ao_jo_min=(-10 if a else None))
+            for k, (rem, w, a) in enumerate(zip(rems, bits, acc))]
     with open(os.path.join(d, f"shapes_B{b}.json"), "w") as f:
         json.dump(dict(rows=rows, block=b), f)
 
@@ -602,6 +621,37 @@ def selftest():
               and sum(l in el for l in hl) == 1)
         case("two head dumps of one prefix are one shape", ok,
              f"{len(hl)} head chunks, {len(el)} emit shapes")
+
+        # ---- issue #121: the half no pin moves ---------------------------
+        # 9. the recorded set: its rows carry no accumulator width, so the plan
+        #    is written and says which half of the bound it could not check
+        _shape_table(d, 0, [14, 15, 19])
+        _shape_table(d, 1, [15, 16, 20])
+        printed, refusal = _plan(args)
+        ok = (refusal is None and "none of the 6 rows states ao_acc_bits" in printed
+              and "NOT CHECKED" in printed and os.path.exists(out))
+        case("a table with no accumulator width says so", ok, last(printed, refusal))
+
+        # 10. the same set re-extracted: the rows state it and both halves are
+        #    evaluated, at the pin each line resolves
+        _shape_table(d, 0, [14, 15, 19], acc=19)
+        _shape_table(d, 1, [15, 16, 20], acc=19)
+        printed, refusal = _plan(args)
+        ok = (refusal is None and "NOT CHECKED" not in printed
+              and "the tightest no-wrap window is 25/31 bits, margin 6" in printed
+              and "margin 0 (denp2 form)" in printed)
+        case("a re-extracted table is checked on both halves", ok, last(printed, refusal))
+
+        # 11. and a shape whose window half does not fit: refused before the file
+        #    is written, and not by naming a pin, which cannot recover a bit of it
+        _shape_table(d, 1, [15, 16, 20], acc=[19, 19, 27])
+        os.remove(out)
+        printed, refusal = _plan(args)
+        ok = (refusal is not None and refusal.startswith("block 1 layer 2: ")
+              and "no-wrap window does not fit" in refusal
+              and "1 + 16 + 11 + 4 = 32 > 31 (over by 1, magnitude form)" in refusal
+              and "--ao-rem-per-line" not in refusal and not os.path.exists(out))
+        case("a window half past the field is refused", ok, last(printed, refusal))
 
     return 1 if bad else 0
 
