@@ -496,6 +496,50 @@ pub fn kv_layout(p: &crate::compose::Params) -> Option<KvLayout> {
     })
 }
 
+/// Which key blocks one head key tile group's side names, in its own committed
+/// column order -- open question 7.4's answer, as arithmetic on `Params`.
+///
+/// The two sides of the K/V link are lists of *columns*, and root equality only
+/// says "your list and mine hold the same values". What makes that the statement
+/// "the keys you attended to are the keys I wrote" is that column `j` of the
+/// producer's out side and column `j` of the consumer's in side name the same
+/// key. That was a property of the honest tiling and of nothing the pair check
+/// compared; five facts make it one now.
+///
+///  * every key tile of a `--kv-boundary` chunk has the same `Shape { s, c: S,
+///    hd, insts }`, so `LayoutChan` and `LayoutKey` -- and with them `pk`, `pv`
+///    and what each column of a key tile means -- are the same on a prefix
+///    sub-key-tile and on a diagonal block. A key tile is therefore one *key
+///    block* of `S` keys, and a side is a list of key blocks.
+///  * a side's columns are its key tiles' in ascending registration order
+///    (`kv_sides`, and the commit loop in `compose.rs` reads `side.key_tiles`),
+///    and a group's key tiles are its prefix sub-key-tiles followed by its own
+///    diagonal block -- `kv_sides` asserts exactly that.
+///  * a chunk at context `c` therefore names key blocks `0 .. c / S` on its out
+///    side (its own block last) and `0 .. c / S` exclusive on its in side, which
+///    is what this function returns.
+///  * the two lists are equal exactly when `c_a + S == c_b` and both prefixes are
+///    whole blocks; `chain_of` compares the lists rather than deriving that
+///    again, so a statement whose prefix is not a whole number of blocks is
+///    refused by name instead of being compared through.
+///  * with the lists equal, root equality gives column `j` against column `j`,
+///    so the consumer's `k`th prefix key block is the producer's `k`th, and its
+///    last one is the producer's *own* block -- which edge 3 binds to that
+///    chunk's projections. Down the chain of blocks that makes every prefix key
+///    the key some earlier block computed for that position, which is what edge
+///    14 claims.
+///
+/// `None` when the statement commits no such side: no K/V boundary, no diagonal
+/// block, a prefix that is not a whole number of blocks, or the in side of block
+/// 0, which has no unchecked prefix.
+pub fn kv_side_blocks(p: &crate::compose::Params, out: bool) -> Option<Vec<usize>> {
+    if !p.kv_boundary || !p.diagonal_block || p.s == 0 || p.c % p.s != 0 {
+        return None;
+    }
+    let n = p.c / p.s + usize::from(out);
+    (n > 0).then(|| (0..n).collect())
+}
+
 /// The number of committed trees a statement claims, and whether it has a
 /// boundary at all.
 fn tree_count(f: &Fixed) -> usize {
@@ -622,12 +666,24 @@ pub fn chain_of(
                 && p.0.grid_target == p.1.grid_target
                 && ka.groups == kb.groups
                 && kb.with_in
-                && p.0.c + p.0.s == p.1.c;
+                && p.0.c + p.0.s == p.1.c
+                // Open question 7.4: and the two sides name the same key blocks
+                // in the same order.  See `kv_side_blocks` for why that is the
+                // whole of "the two column lists denote the same keys", and why
+                // the size comparison below is its consequence rather than its
+                // ground.
+                && matches!((kv_side_blocks(p.0, true), kv_side_blocks(p.1, false)),
+                            (Some(x), Some(y)) if x == y);
             let mut links = vec![];
             let mut sizes_ok = true;
             if ok {
                 for g in 0..ka.groups {
                     let (to, ti) = (ka.out_tree(g), kb.in_tree(g).expect("with_in"));
+                    // the two sides' widths.  Since the key-block lists above
+                    // agree and every key tile of either chunk has the same
+                    // `Shape`, this is implied -- it is kept as the check that
+                    // the two proofs' trees are as wide as their statements say,
+                    // not as the ground for "the same keys" (open question 7.4).
                     sizes_ok &= fa.sizes[to] == fb.sizes[ti];
                     let (ro, ri) = (roots_a[to].clone(), roots_b[ti].clone());
                     links.push(KvLink { group: g, out_tree: to, in_tree: ti,
@@ -1880,13 +1936,33 @@ pub fn kv_sides(first_tree: usize, key_tiles: &[KvKeyTile]) -> Vec<KvSide> {
     let ngroups = key_tiles.iter().map(|b| b.group + 1).max().unwrap_or(0);
     let mut sides: Vec<KvSide> = vec![];
     for g in 0..ngroups {
-        for out in [true, false] {
-            let idx: Vec<usize> = key_tiles
-                .iter()
-                .enumerate()
-                .filter(|(_, b)| b.group == g && (out || !b.diagonal_block))
-                .map(|(i, _)| i)
-                .collect();
+        let all: Vec<usize> = key_tiles
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.group == g)
+            .map(|(i, _)| i)
+            .collect();
+        let pre: Vec<usize> = all.iter().copied().filter(|i| !key_tiles[*i].diagonal_block).collect();
+        // Open question 7.4: this is the shape the two sides' column lists agree
+        // on, and it is asserted here rather than left to the honest tiling.  A
+        // group's key tiles must be its unchecked prefix sub-key-tiles, in
+        // registration order, followed by the group's own diagonal block and
+        // nothing else.  `kv_side_blocks` reads the same fact off `Params`, and
+        // the two together are what say the producer's out side and the
+        // consumer's in side name the same keys in the same order: drop the
+        // trailing diagonal block and the two lists coincide key tile for key
+        // tile.  A registration order that puts the diagonal block anywhere but
+        // last -- or a group with two of them -- would slide every column of the
+        // producer's side one key block against the consumer's, and the roots
+        // would compare a permutation of the right values.
+        assert!(all.len() == pre.len()
+                    || (all.len() == pre.len() + 1
+                        && all[..pre.len()] == pre[..]
+                        && key_tiles[all[pre.len()]].diagonal_block),
+                "head key tile group {g}'s key tiles are not its unchecked prefix followed by \
+                 its own diagonal block, so the K/V sides' column lists name different keys");
+        for (out, idx) in [(true, &all), (false, &pre)] {
+            let idx = idx.clone();
             if idx.is_empty() {
                 continue;
             }
@@ -2237,6 +2313,72 @@ mod tests {
         assert_eq!(v.axis, Axis::Token);
         assert!(!v.kv_present);
         assert!(!v.chains(), "a token edge without the K/V boundary must not chain");
+    }
+
+    // ---- open question 7.4: do the two sides name the same keys? -----------
+    //
+    // The answer is in `kv_side_blocks`.  These four exercise it: the honest
+    // pair's lists agree, a prefix that is not a whole number of blocks is
+    // refused, and the registration order the lists rest on is asserted where
+    // the sides are built, with a control that permutes one side's key tiles.
+
+    /// One head key tile group's key tiles, `nsub` prefix sub-key-tiles and the
+    /// group's own diagonal block, in the order `Plan::new` registers them.
+    fn kv_key_tiles(nsub: usize) -> Vec<KvKeyTile> {
+        let one = |diagonal_block: bool| KvKeyTile {
+            group: 0, diagonal_block, pk: 2, pv: 3, chan_rows: 8, key_rows: 16,
+        };
+        (0..nsub).map(|_| one(false)).chain(std::iter::once(one(true))).collect()
+    }
+
+    #[test]
+    fn the_two_kv_sides_name_the_same_key_blocks() {
+        let (a, b) = (fixed(1024, 512, true), fixed(1536, 512, true));
+        assert_eq!(kv_side_blocks(&a.params, true), Some(vec![0, 1, 2]));
+        assert_eq!(kv_side_blocks(&b.params, false), Some(vec![0, 1, 2]));
+        // block 0 writes its own block and reads no prefix at all
+        let z = fixed(0, 512, true);
+        assert_eq!(kv_side_blocks(&z.params, true), Some(vec![0]));
+        assert_eq!(kv_side_blocks(&z.params, false), None);
+        assert_eq!(kv_side_blocks(&fixed(512, 512, true).params, false), Some(vec![0]));
+    }
+
+    #[test]
+    fn a_prefix_that_is_not_whole_blocks_does_not_chain() {
+        // the tile counts and the two trees' widths still agree -- 700 / 512 + 1
+        // is 1212 / 512 -- so this is the pair the size comparison lets through
+        // and the key-block lists refuse
+        let (a, b) = (fixed(700, 512, true), fixed(1212, 512, true));
+        let (ra, rb) = roots(&a, &b, true, false);
+        let v = chain_of(&a, &ra, &b, &rb);
+        assert_eq!(v.axis, Axis::Token);
+        assert_eq!(kv_side_blocks(&a.params, true), None);
+        assert!(!v.kv_shape_ok, "the two sides do not name the same key blocks");
+        assert!(!v.chains(), "a prefix that is not a whole number of blocks must not chain");
+        assert!(v.reason.as_deref().is_some_and(|r| r.contains("K/V boundary's layout")),
+                "reason: {:?}", v.reason);
+    }
+
+    #[test]
+    fn a_group_is_its_prefix_then_its_own_block() {
+        let sides = kv_sides(FIRST_TREE, &kv_key_tiles(2));
+        assert_eq!(sides.len(), 2);
+        assert!(sides[0].out && !sides[1].out);
+        // the out side is the in side's key tiles with the diagonal block appended,
+        // which is what makes column `j` of the two sides the same key block
+        assert_eq!(sides[1].key_tiles, vec![0, 1]);
+        assert_eq!(sides[0].key_tiles, vec![0, 1, 2]);
+    }
+
+    /// The control: one side's key tiles permuted, so the diagonal block is no
+    /// longer last and the producer's columns would name the consumer's keys
+    /// shifted by one block.
+    #[test]
+    #[should_panic(expected = "not its unchecked prefix followed by")]
+    fn a_permuted_key_tile_order_is_refused() {
+        let mut key_tiles = kv_key_tiles(2);
+        key_tiles.swap(1, 2);
+        kv_sides(FIRST_TREE, &key_tiles);
     }
 
     #[test]
