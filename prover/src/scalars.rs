@@ -500,7 +500,7 @@ fn cache() -> &'static Mutex<HashMap<Key, Entry>> {
 }
 
 pub fn mode() -> u32 {
-    crate::util::m4b_mode("ZK_LOWERING_CACHE")
+    crate::util::path_mode("ZK_LOWERING_CACHE")
 }
 
 /// `ZK_MUT_LOWERING_CACHE`, aimed (rule 5): `shift` replays every slot's provenance one

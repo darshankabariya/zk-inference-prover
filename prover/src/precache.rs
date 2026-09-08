@@ -63,7 +63,7 @@ fn cache() -> &'static Mutex<HashMap<u64, Entry>> {
 }
 
 pub fn mode() -> u32 {
-    crate::util::m4b_mode("ZK_PREPROCESSED_TREE_CACHE")
+    crate::util::path_mode("ZK_PREPROCESSED_TREE_CACHE")
 }
 
 fn key(k: Option<u64>) -> Option<u64> {

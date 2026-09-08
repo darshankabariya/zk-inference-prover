@@ -1477,7 +1477,7 @@ pub fn build_height_cols(hl: &HeightLink, coeff_col: SecureColumn) -> Vec<Eval> 
     // coeff * eq (upstream `build_trace`, function for function)
     let t = std::time::Instant::now();
     let eq_mle = SimdBackend::gen_eq_evals(&hl.point, SecureField::one());
-    crate::util::m4_add("int/link_eq", t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/link_eq", t.elapsed().as_secs_f64());
     assert_eq!(eq_mle.len(), 1usize << h);
     let t = std::time::Instant::now();
     // B11 stream T: one packed multiply per lane group, in parallel -- the same
@@ -1499,25 +1499,25 @@ pub fn build_height_cols(hl: &HeightLink, coeff_col: SecureColumn) -> Vec<Eval> 
     let shift = PackedSecureField::broadcast(hl.shift);
     terms.par_iter_mut().for_each(|t| *t -= shift);
     let shifted = SecureColumn { data: terms, length: 1 << h };
-    crate::util::m4_add("int/link_terms", t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/link_terms", t.elapsed().as_secs_f64());
     let t = std::time::Instant::now();
     let prefix_coords = shifted
         .into_secure_column_by_coords()
         .columns
         .map(inclusive_prefix_sum);
     let prefix = SecureColumnByCoords { columns: prefix_coords };
-    crate::util::m4_add("int/link_prefix", t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/link_prefix", t.elapsed().as_secs_f64());
 
     let t = std::time::Instant::now();
     let q = gen_carry_quotient_col(&hl.mle_point);
-    crate::util::m4_add("int/link_q", t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/link_q", t.elapsed().as_secs_f64());
 
     let t = std::time::Instant::now();
     let mut out = coords_to_evals(h, q);
     out.extend(coords_to_evals(h, coeff_col.into_secure_column_by_coords()));
     out.extend(coords_to_evals(h, eq_mle.into_evals().into_secure_column_by_coords()));
     out.extend(coords_to_evals(h, prefix));
-    crate::util::m4_add("int/link_split", t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/link_split", t.elapsed().as_secs_f64());
     check_height_cols(hl, &out);
     out
 }
@@ -1899,10 +1899,10 @@ pub fn height_cols<'a, F: Fn(Comp, &RCol) -> Src<'a>>(
     }
     let t = std::time::Instant::now();
     let coeff = fold_coeff(hl, src_of);
-    crate::util::m4_add("int/link_fold", t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/link_fold", t.elapsed().as_secs_f64());
     let t = std::time::Instant::now();
     let cols = build_height_cols(hl, coeff);
-    crate::util::m4_add("int/link_cols", t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/link_cols", t.elapsed().as_secs_f64());
     crate::device::host_cols(cols)
 }
 
@@ -2042,13 +2042,13 @@ pub mod dev {
         let t = std::time::Instant::now();
         let coeff = fold(hl, src_of);
         sync();
-        crate::util::m4_add("int/link_fold", t.elapsed().as_secs_f64());
+        crate::util::add_phase("int/link_fold", t.elapsed().as_secs_f64());
 
         let cols_t = std::time::Instant::now();
         let t = std::time::Instant::now();
         let eq = eq_col(hl);
         sync();
-        crate::util::m4_add("int/link_eq", t.elapsed().as_secs_f64());
+        crate::util::add_phase("int/link_eq", t.elapsed().as_secs_f64());
 
         // the products, and the prefix sum's boundary asserted where the host
         // builder asserts it: a weight bug fails the prover, not just the
@@ -2058,7 +2058,7 @@ pub mod dev {
         let total = terms_of(&coeff, &eq, hl.shift, Some(&terms), n);
         assert_eq!(total, hl.claim,
                    "the folded coefficient column disagrees with the GKR claim at height {h}");
-        crate::util::m4_add("int/link_terms", t.elapsed().as_secs_f64());
+        crate::util::add_phase("int/link_terms", t.elapsed().as_secs_f64());
 
         let t = std::time::Instant::now();
         let prefix = quad(n);
@@ -2068,7 +2068,7 @@ pub mod dev {
         }
         sync();
         drop(terms);
-        crate::util::m4_add("int/link_prefix", t.elapsed().as_secs_f64());
+        crate::util::add_phase("int/link_prefix", t.elapsed().as_secs_f64());
 
         let t = std::time::Instant::now();
         let (half0, half1) = gen_half_coset_carry_quotients(&hl.mle_point);
@@ -2080,7 +2080,7 @@ pub mod dev {
                            q[3].device_ptr);
         }
         sync();
-        crate::util::m4_add("int/link_q", t.elapsed().as_secs_f64());
+        crate::util::add_phase("int/link_q", t.elapsed().as_secs_f64());
 
         let t = std::time::Instant::now();
         let coeff4 = quad(n);
@@ -2094,9 +2094,9 @@ pub mod dev {
         sync();
         drop(coeff);
         drop(eq);
-        crate::util::m4_add("int/link_split", t.elapsed().as_secs_f64());
+        crate::util::add_phase("int/link_split", t.elapsed().as_secs_f64());
 
-        crate::util::m4_add("int/link_cols", cols_t.elapsed().as_secs_f64());
+        crate::util::add_phase("int/link_cols", cols_t.elapsed().as_secs_f64());
         let mut out: Vec<AnyCol<'static>> = Vec::with_capacity(16);
         for group in [q, coeff4, eq4, prefix] {
             out.extend(group.into_iter().map(|c| AnyCol::OwnedDev(c, h)));

@@ -4237,9 +4237,9 @@ fn emit_shape_root(plan: &Plan, layer: &Layer, pre_root: &str, cached: bool,
 /// transcript.
 pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: Option<u64>)
                 -> Gen {
-    let m4_t = std::time::Instant::now();
-    crate::util::m4_touch_device();
-    crate::util::m4_add("wall/cuda_init", m4_t.elapsed().as_secs_f64());
+    let phase_t = std::time::Instant::now();
+    crate::util::touch_device();
+    crate::util::add_phase("wall/cuda_init", phase_t.elapsed().as_secs_f64());
     // B12 stream GG: the context, before any column.
     crate::device::mem_mark("init");
     let t0 = std::time::Instant::now();
@@ -4302,7 +4302,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // device. Parallel to `key_tile_committed` because `Committed` belongs to the
     // standalone path too and has no business knowing about a backend.
     let mut key_tile_dev: Vec<Option<crate::dev_attention_freivalds_witness_gen::DevKeyTile>> = vec![];
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     // B11 stream M: before the first witness generation, because the witness generations read the answer.
     //
     // `devpre::witness_gen_dev` decides whether the ten multiplicity columns are
@@ -4388,13 +4388,13 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     }
     tables.m_exp = mult_exp;
     tables.m_r = mult_r;
-    crate::util::m4_add("gen/key_tiles", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/key_tiles", phase_t.elapsed().as_secs_f64());
 
     // B7a milestone 4 (section 3 row 1): the flags, and the 48 selector columns
     // built out of them. The flags are wanted whenever the accumulators will
     // run -- which is whenever the key tile's witness generation was on the device -- so this
     // happens one line after that witness generation and not inside the switch.
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let pre_mode = crate::devpre::mode();
     // The shared tables' 31 columns share one flat list with `x`, `y` and
     // `m_exp`, so there is no configuration where this row's half of it is on
@@ -4425,18 +4425,18 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             crate::devpre::check_run(&format!("key_tile{b} selectors"), &h, &d.cols);
         }
     }
-    crate::util::m4_add("gen/pre_key_tiles", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/pre_key_tiles", phase_t.elapsed().as_secs_f64());
 
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let aor = ao_component(&layer.ao, p.ao_target, p.ao_q_bits, p.ao_rem_bits,
                         (p.ao_acc_lo_bits, p.ao_acc_hi_bits), p.ao_acc_mag, p.ao_denp2,
                         p.ao_jv_min, p.ao_jo_max,
                         &mut tables, None, tamper.ao_clamp, tamper.ao_den, tamper.ao_jo,
                         tamper.ao_num, tamper.ao_acc, tamper.ao_jo_tok, tamper.ao_mag);
 
-    crate::util::m4_add("gen/attnout", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/attnout", phase_t.elapsed().as_secs_f64());
 
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let mut mat_components = vec![];
     for (mi, (m, sp)) in layer.mats.iter().zip(&plan.specs).enumerate() {
         let r = mat_component(m, sp, &mut tables, plan.has_output_claim(&m.name),
@@ -4450,13 +4450,13 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         .map(|r| r.base_cells())
         .sum();
 
-    crate::util::m4_add("gen/dequant", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/dequant", phase_t.elapsed().as_secs_f64());
 
     // Stream E: the argmax component, on the head dequant's own layout so the binding
     // is positionwise.  Its range lookups go on the layer's 16-bit table, so its
     // multiplicities are bumped into that table's vector the way the wiring
     // family's go into `NORM` and `FRAC`.
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let am_component = plan.argmax_mat().map(|mi| {
         let m = &plan.p.mats[mi];
         let keys = layer.head_keys.as_ref().expect("the argmax needs key_head.u16");
@@ -4473,7 +4473,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         tables.off_table += r.off_table;
         r
     });
-    crate::util::m4_add("gen/argmax", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/argmax", phase_t.elapsed().as_secs_f64());
 
     // Stream BB: the embedding gadget.  Its use side commits the layer's own
     // residual-stream input -- the wiring family's `gn1` group 0, value for
@@ -4481,7 +4481,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // publishes are two claims over the same sequence.  Its `ef` range lookups
     // go on the layer's 8-bit table, exactly as the argmax's go on the 16-bit
     // one.
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let emb_component = plan.emb.map(|l| {
         let gc = layer.residual_stream.as_ref()
             .expect("`--embed` bindings to the wiring family; extract with `--residual-stream`");
@@ -4499,18 +4499,18 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         tables.off_table += r.off_table;
         r
     });
-    crate::util::m4_add("gen/embed", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/embed", phase_t.elapsed().as_secs_f64());
 
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let mut freivalds_components = vec![];
     for w in &plan.freivalds {
         let r = freivalds_component(layer, &w.name, &w.mats, p.freivalds_p, w.act_bits, &mut tables,
                                  None, tamper.freivalds_over.filter(|_| w.act_bits != 8));
         freivalds_components.push(r);
     }
-    crate::util::m4_add("gen/freivalds", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/freivalds", phase_t.elapsed().as_secs_f64());
 
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     // ---- B10 step 2: the wiring family -------------------------------------
     // The residual stream's `NORM`/`FRAC` uses are *moved into* the layer's own multiplicity
     // vectors and moved back, so the two families' lookups land in one column
@@ -4586,7 +4586,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             let tam1 = tamper.residual_stream.filter(|(ri, _)| *ri == i1).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
             let r1 = crate::residual_stream::residual_stream_component(&w1, &prog1, plan.round, &tag1, &mut gt, tam1);
-            crate::util::m4_add("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
+            crate::util::add_phase("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
             // what the component computed is what the next one reads: that is what
             // the binding says, and it is checked against B1's own column here.
             // The head chunk's level 1 has no add, so there is no second output
@@ -4615,7 +4615,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             let tam2 = tamper.residual_stream.filter(|(ri, _)| *ri == i1 + 1).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
             let r2 = crate::residual_stream::residual_stream_component(&w2, &prog2, plan.round, &tag2, &mut gt, tam2);
-            crate::util::m4_add("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
+            crate::util::add_phase("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
             ms_out.push(r2.outs[0][..t.tokens].to_vec());
             if !gp.head_norm {
                 stream = t.lay(&got);
@@ -4663,14 +4663,14 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 wblk[at] ^= 1;
                 eprintln!("compose: norm weight cell {at} of {tag} bent (a rejection is the pass)");
             }
-            crate::util::m4_add("gen/residual_stream_wblk", t_wb.elapsed().as_secs_f64());
+            crate::util::add_phase("gen/residual_stream_wblk", t_wb.elapsed().as_secs_f64());
             let w = crate::residual_stream::ResidualStreamWitness::with_pre(
                 rows1, vec![norm_scale_in[k].clone(), msblk], wblk, &prog, plan.round,
                 format!("B1 norm{} scale [{} x {}]", k + 1, t.tokens, t.d));
             let tam = tamper.residual_stream.filter(|(ri, _)| *ri == i).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
             let r = crate::residual_stream::residual_stream_component(&w, &prog, plan.round, &tag, &mut gt, tam);
-            crate::util::m4_add("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
+            crate::util::add_phase("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
             // the norm scale's output is the q/k/v (resp. gate/up) matmuls' own bf16
             // input column, so B1 has already written down what it must be
             let t_b1 = std::time::Instant::now();
@@ -4707,7 +4707,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                                      "mismatch": serde_json::Value::Null,
                                      "note": "the dump does not carry this column"}));
             }
-            crate::util::m4_add("gen/residual_stream_b1", t_b1.elapsed().as_secs_f64());
+            crate::util::add_phase("gen/residual_stream_b1", t_b1.elapsed().as_secs_f64());
             residual_stream_components.push(r);
         }
         // ---- stream E: silu(gate) * up --------------------------------------
@@ -4743,7 +4743,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                         u[c] = crate::layer::deq_ref(&layer.mats[ui], &plan.specs[ui], t, c);
                     }
                 });
-            crate::util::m4_add("gen/residual_stream_deqref", t_dq.elapsed().as_secs_f64());
+            crate::util::add_phase("gen/residual_stream_deqref", t_dq.elapsed().as_secs_f64());
             // Stream JJ (E11): the SwiGLU seam's control.  One of the component's
             // two committed input copies is bent and the product is recomputed
             // from it, so every constraint inside the component still holds and
@@ -4763,7 +4763,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             let tam = tamper.residual_stream.filter(|(ri, _)| *ri == i).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
             let r = crate::residual_stream::residual_stream_component(&w, &prog, plan.round, &tag, &mut gt, tam);
-            crate::util::m4_add("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
+            crate::util::add_phase("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
             let n = tf.tokens * tf.d;
             let cmp = |got: &[u16], want: &[u16]| -> usize {
                 (0..n)
@@ -4793,7 +4793,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 mismatch.push(json!({"column": "x_down", "values": n,
                                      "mismatch": cmp(&tf.unlay(&r.outs[0]), v)}));
             }
-            crate::util::m4_add("gen/residual_stream_b1", t_b1.elapsed().as_secs_f64());
+            crate::util::add_phase("gen/residual_stream_b1", t_b1.elapsed().as_secs_f64());
             residual_stream_components.push(r);
         }
         // ---- stream NN: the rotation ----------------------------------------
@@ -4838,7 +4838,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                         a.iter().zip(&b).filter(|(x, y)| x != y).count()
                     })
                     .sum();
-                crate::util::m4_add("gen/rope_invref", t_iv.elapsed().as_secs_f64());
+                crate::util::add_phase("gen/rope_invref", t_iv.elapsed().as_secs_f64());
                 assert_eq!(cells, 0,
                            "the angle table the statement builds differs from the dump's \
 inv_freq in {cells} of {} committed bf16 cells: the rotation this chunk would prove is not \
@@ -4865,7 +4865,7 @@ different rotation", inv.len(), 2 * hd * p.s);
                         *slot = crate::layer::deq_ref(&layer.mats[mi], &plan.specs[mi], t, c);
                     }
                 });
-                crate::util::m4_add("gen/rope_deqref", t_dq.elapsed().as_secs_f64());
+                crate::util::add_phase("gen/rope_deqref", t_dq.elapsed().as_secs_f64());
                 // the control on the producer side: one dequant output copy
                 // bent, the whole rotation recomputed around it, so every
                 // constraint inside both components still holds and only the binding
@@ -4926,7 +4926,7 @@ different rotation", inv.len(), 2 * hd * p.s);
                                         residual_stream_components.iter().map(|r| r.bad_exp).sum::<usize>()});
         gtables = Some(gt);
     }
-    crate::util::m4_add("gen/residual_stream", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/residual_stream", phase_t.elapsed().as_secs_f64());
 
     // ---- stream II: the requantize seams ------------------------------------
     //
@@ -4936,7 +4936,7 @@ different rotation", inv.len(), 2 * hd * p.s);
     // per-token scale is the dump's own `jx`/`sx`, i.e. the same field element
     // the matmul's dequant component commits, which is what leaves the remaining
     // scale seam a one-constraint job.
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let mut rq_components: Vec<crate::requant::RqComponent> = vec![];
     for (k, rp) in plan.rqs.iter().enumerate() {
         let g = plan.residual_stream.as_ref().expect("a requantize seam needs the wiring family");
@@ -4953,7 +4953,7 @@ different rotation", inv.len(), 2 * hd * p.s);
             tamper.rq.filter(|(i, _)| *i == k).map(|(_, t)| t));
         rq_components.push(r);
     }
-    crate::util::m4_add("gen/requant", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/requant", phase_t.elapsed().as_secs_f64());
 
     // ---- stream NN: the three quantize components -------------------------------
     //
@@ -4962,7 +4962,7 @@ different rotation", inv.len(), 2 * hd * p.s);
     // column of the dump, so the input binding compares two folds of one sequence.
     // `want` is the key tiles' own committed integers, gathered onto the query-head
     // grid -- a reference count and nothing the AIR reads.
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let mut q_components: Vec<crate::rope::QComponent> = vec![];
     let nn_cols = (!plan.quants.is_empty()).then(|| nn_key_tile_cols(&plan, layer));
     for (k, qp) in plan.quants.iter().enumerate() {
@@ -5001,9 +5001,9 @@ different rotation", inv.len(), 2 * hd * p.s);
             tamper.quant.filter(|(i, _)| *i == k).map(|(_, t)| t));
         q_components.push(r);
     }
-    crate::util::m4_add("gen/quant", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/quant", phase_t.elapsed().as_secs_f64());
 
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     // ---- shared tables (tree 0 tail) and their multiplicities (tree 1 tail) --
     // The residual stream's shared tables, built once and owned here: the tree assembly
     // below references them last (the order the by-value witness generation used), and the
@@ -5160,13 +5160,13 @@ different rotation", inv.len(), 2 * hd * p.s);
     mult_logs.push(log_epow);
     base_mults.push(Some(eval_of(log_epow,
                                  tables.m_epow.iter().map(|m| m31_u32(*m)).collect())));
-    crate::util::m4_add("gen/tables", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/tables", phase_t.elapsed().as_secs_f64());
 
     // B7a milestone 4 (section 3 row 1): the shared tables' columns, uploaded
     // once. Both trees take them from here and so do the table families'
     // fraction kernels, so 4a counts each of these columns exactly once -- the
     // same column `take_all` used to upload, moved earlier.
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let m4e_tabdev = tab_mode >= 1;
     // B7a milestone 4 (section 3 row 1): the three closed-form columns, built
     // where they are used. The other 31 are uploaded exactly as 22.4 uploaded
@@ -5294,7 +5294,7 @@ different rotation", inv.len(), 2 * hd * p.s);
         } else {
             (vec![], vec![])
         };
-    crate::util::m4_add("gen/tables_up", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/tables_up", phase_t.elapsed().as_secs_f64());
     let trace_secs = t0.elapsed().as_secs_f64();
     let residual_stream_tamper_fired = tamper.residual_stream
         .map(|_| residual_stream_components.iter().map(|r| r.fired).sum::<usize>());
@@ -5323,7 +5323,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // the shared tables and their multiplicities. `Op::Tree`'s column order is
     // part of the transcript, so this order is load-bearing and `proof_sha256`
     // is what checks it.
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     use crate::device::AnyCol;
     let mut pre_all: Vec<AnyCol> = vec![];
     let mut base_all: Vec<AnyCol> = vec![];
@@ -5515,31 +5515,31 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 .into_iter().map(crate::device::AnyCol::OwnedHost));
         }
     }
-    crate::util::m4_add("gen/refs", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/refs", phase_t.elapsed().as_secs_f64());
     let trace_secs = trace_secs + t0.elapsed().as_secs_f64();
 
     // ---- one transcript -------------------------------------------------------
     let widest = pre_all.iter().chain(base_all.iter())
         .map(|c| c.log_size()).max().unwrap();
-    let m4_t = std::time::Instant::now();
-    crate::util::m4_touch_device();
-    crate::util::m4_add("wall/cuda_init", m4_t.elapsed().as_secs_f64());
+    let phase_t = std::time::Instant::now();
+    crate::util::touch_device();
+    crate::util::add_phase("wall/cuda_init", phase_t.elapsed().as_secs_f64());
     // B12 stream GG: after every witness generation and upload, before the transcript --
     // what the device-generated columns and their staging hold.
     crate::device::mem_mark("after_witness_gen");
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let tw = twiddles(widest);
-    crate::util::m4_add("wall/twiddles", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("wall/twiddles", phase_t.elapsed().as_secs_f64());
     crate::device::mem_mark("after_twiddles");
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let mut sess = Session::new(&tw);
-    crate::util::m4_add("wall/session_new", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("wall/session_new", phase_t.elapsed().as_secs_f64());
     // B7a milestone 4 (18.5): the trees take the columns by reference.
     // `ZK_COMMIT_BY_REFERENCE=0` commits from a clone of both lists instead, which is
     // the cost this change removes.
-    let m4_pre_cells: usize = pre_all.iter().map(|c| c.size()).sum();
-    let m4_refs = crate::util::m4_switch("ZK_COMMIT_BY_REFERENCE");
-    let m4_t = std::time::Instant::now();
+    let preprocessed_cells: usize = pre_all.iter().map(|c| c.size()).sum();
+    let by_reference = crate::util::switch_on("ZK_COMMIT_BY_REFERENCE");
+    let phase_t = std::time::Instant::now();
     // B7b (README 26): tree 0 from the cache when this layer and shape have
     // committed it before (`ZK_PREPROCESSED_TREE_CACHE=1`); otherwise committed here and,
     // with the cache on, kept -- or, in mode 2, checked against what is kept.
@@ -5567,7 +5567,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     assert_eq!(model_sizes, plan.model_sizes(),
                "pre_split disagrees with the committed model tree");
     let commit_one = |sess: &mut Session, cols: Vec<crate::device::AnyCol>| {
-        if m4_refs {
+        if by_reference {
             sess.commit_any(cols);
         } else {
             sess.commit(cols.iter().map(|c| c.host().clone()).collect());
@@ -5580,7 +5580,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         None => commit_one(&mut sess, shape_all),
     }
     let pp_shape_secs = shape_t.elapsed().as_secs_f64();
-    crate::util::m4_add("wall/commit_shape", pp_shape_secs);
+    crate::util::add_phase("wall/commit_shape", pp_shape_secs);
     // Issue #18: the root this run derived, under the key noted in `generate`.
     // Storing it here and not at the stop below is what lets a full `compose`
     // run -- which needs the tree and cannot stop -- pay for the derivations a
@@ -5597,15 +5597,15 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     match cached {
         Some((_, model_tree)) => {
             sess.commit_cached(model_tree, model_sizes.clone());
-            crate::util::m4_add("wall/commit_pre_cached", m4_t.elapsed().as_secs_f64());
+            crate::util::add_phase("wall/commit_pre_cached", phase_t.elapsed().as_secs_f64());
         }
         None => {
             commit_one(&mut sess, model_all);
             crate::precache::fill(pre_key, &sess);
         }
     }
-    let ll_pre_secs = m4_t.elapsed().as_secs_f64();
-    crate::util::m4_add("wall/commit_pre", ll_pre_secs);
+    let ll_pre_secs = phase_t.elapsed().as_secs_f64();
+    crate::util::add_phase("wall/commit_pre", ll_pre_secs);
     // Stream LL (E11), `notes/witness-slack.md` section 5 item 1: `zk-prover
     // expect-root` wants tree 0's root and nothing after it.  The stop is here
     // rather than in a second builder so that the derived root is the prover's
@@ -5647,13 +5647,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }));
         std::process::exit(0);
     }
-    let m4_t = std::time::Instant::now();
-    if m4_refs {
+    let phase_t = std::time::Instant::now();
+    if by_reference {
         sess.commit_any(base_all);
     } else {
         sess.commit(base_all.iter().map(|c| c.host().clone()).collect());
     }
-    crate::util::m4_add("wall/commit_base", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("wall/commit_base", phase_t.elapsed().as_secs_f64());
     let widths = plan.widths.clone();
     let rels = {
         let exp = sess.draw_relation(ExpRel::draw);
@@ -5719,10 +5719,10 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // lookup. `Ir::fingerprint` records the number of scalars and not their
     // values, so the shape a component lowers to here is the shape `genemit`
     // compiled from the same design point.
-    let m4e_t = std::time::Instant::now();
+    let air_t = std::time::Instant::now();
     let m4e_air = build_components(&plan, &rels, r, s, rv, r_diagonal_block, w_residual_stream, lam_residual_stream,
                                    &crate::exprprobe::claims_for(&plan, 0x0b65_4b05));
-    crate::util::m4_add("int/air", m4e_t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/air", air_t.elapsed().as_secs_f64());
 
     // B11 stream V, lever 2: whether each family's looks can be linked at all,
     // decided from the same fraction IR the generated kernel runs.
@@ -5753,10 +5753,10 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     .chain(plan.widths.iter().map(|w| (format!("table/range{w}"), *w)))
     .chain(std::iter::once(("table/epow".to_string(), plan.log_epow())))
     .collect();
-    let affinity: Vec<crate::gkrlink::Affinity> = if crate::util::m4_switch_off("ZK_GKR_AFFINITY") {
+    let affinity: Vec<crate::gkrlink::Affinity> = if crate::util::switch_off("ZK_GKR_AFFINITY") {
         vec![]
     } else {
-        let m4a_t = std::time::Instant::now();
+        let affine_t = std::time::Instant::now();
         let mut out = vec![];
         for (m, reg) in layer.mats.iter().zip(&mat_components) {
             let ev = crate::layer::deq_logup_eval(m, reg, rv, s, &rels);
@@ -5789,7 +5789,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             let ir = crate::devfrac::ir_of(&ev.eval, tr.1);
             out.push(crate::gkrlink::affinity_of("table", &tr.0, &ir));
         }
-        crate::util::m4_add("int/affine", m4a_t.elapsed().as_secs_f64());
+        crate::util::add_phase("int/affine", affine_t.elapsed().as_secs_f64());
         out
     };
 
@@ -5817,7 +5817,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         g.replace = true;
         Box::new(g)
     });
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let mut row_i = 0usize;
     for (b, a) in layer.key_tiles.iter().enumerate() {
         let l = &plan.lays[b];
@@ -5872,7 +5872,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                                                &key_tile_committed[b], &plan.widths, false,
                                                plan.rows_key_tile[b], air.as_ref(),
                                                gkr.as_deref_mut(), nn_bind.as_ref());
-        crate::util::m4_add("int/key_tiles_build", t_ib.elapsed().as_secs_f64());
+        crate::util::add_phase("int/key_tiles_build", t_ib.elapsed().as_secs_f64());
         inter_all.extend(it.cols);
         inter_mark(&format!("key_tile{b}{}", if a.diagonal_block { " (diagonal block)" } else { "" }),
                    &inter_all, &mut inter_seen, &mut inter_split);
@@ -5887,7 +5887,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
         claims.use_sums.extend(it.use_sums.iter().map(|v| qm(*v)));
     }
-    crate::util::m4_add("int/key_tiles", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/key_tiles", phase_t.elapsed().as_secs_f64());
     // B11 stream U, lever 3: the dequant family's sites, collected here rather
     // than where its interaction columns are built.
     //
@@ -5905,12 +5905,12 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // `attnout`, in both flag configurations.
     if p.gkr_dequant {
         let g = gkr.as_mut().expect("--gkr-dequant needs --gkr-key-tiles");
-        let m4_t = std::time::Instant::now();
+        let phase_t = std::time::Instant::now();
         for (mi, (m, reg)) in layer.mats.iter().zip(&mat_components).enumerate() {
             let eval = crate::layer::deq_logup_eval(m, reg, rv, s, &rels);
             crate::gkr_key_tile::deq_site(g, mi, &eval, reg);
         }
-        crate::util::m4_add("int/deq_gkr", m4_t.elapsed().as_secs_f64());
+        crate::util::add_phase("int/deq_gkr", phase_t.elapsed().as_secs_f64());
     }
     // B11 stream V, lever 3: the residual-stream family's sites, collected here for the
     // same reason -- the GKR proof lands before the interaction tree's own
@@ -5926,13 +5926,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // the property `ZK_GENERATED_LOGUP=2` exists to check for the committed half.
     if p.gkr_residual_stream {
         let g = gkr.as_mut().expect("--gkr-residual-stream needs --gkr-key-tiles");
-        let m4_t = std::time::Instant::now();
+        let phase_t = std::time::Instant::now();
         for (i, reg) in residual_stream_components.iter().enumerate() {
             let mut ev = m4e_air.residual_stream[i].eval.clone();
             ev.gkr = false;
             crate::gkr_key_tile::residual_stream_site(g, i, &ev, reg);
         }
-        crate::util::m4_add("int/residual_stream_gkr", m4_t.elapsed().as_secs_f64());
+        crate::util::add_phase("int/residual_stream_gkr", phase_t.elapsed().as_secs_f64());
     }
     // B11 stream V, lever 4: the Freivalds checks, then attnout -- memo section 8's order,
     // which is `sites_of`'s and the order the interaction loop reaches them in.
@@ -5940,21 +5940,21 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // residual-stream family's is.
     if p.gkr_freivalds {
         let g = gkr.as_mut().expect("--gkr-freivalds needs --gkr-key-tiles");
-        let m4_t = std::time::Instant::now();
+        let phase_t = std::time::Instant::now();
         for (wi, reg) in freivalds_components.iter().enumerate() {
             let mut ev = m4e_air.freivalds[wi].eval.clone();
             ev.gkr = false;
             crate::gkr_key_tile::freivalds_site(g, wi, &ev, reg);
         }
-        crate::util::m4_add("int/freivalds_gkr", m4_t.elapsed().as_secs_f64());
+        crate::util::add_phase("int/freivalds_gkr", phase_t.elapsed().as_secs_f64());
     }
     if p.gkr_attnout {
         let g = gkr.as_mut().expect("--gkr-attnout needs --gkr-key-tiles");
-        let m4_t = std::time::Instant::now();
+        let phase_t = std::time::Instant::now();
         let mut ev = m4e_air.ao.eval.clone();
         ev.gkr = false;
         crate::gkr_key_tile::ao_site(g, &ev, &aor);
-        crate::util::m4_add("int/ao_gkr", m4_t.elapsed().as_secs_f64());
+        crate::util::add_phase("int/ao_gkr", phase_t.elapsed().as_secs_f64());
     }
     // B11 stream Q: the key tiles' fractional sums, proved by one batched GKR at the
     // transcript position the verifier will replay -- after tree 1 and the
@@ -5971,7 +5971,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             .expect("`gkr_key_tile::sites_of` disagrees with the key tiles' own lookup sites");
         let t = std::time::Instant::now();
         let mut pr = crate::gkr_key_tile::prove_collected(&mut sess.channel, *g);
-        crate::util::m4_add("int/gkr", t.elapsed().as_secs_f64());
+        crate::util::add_phase("int/gkr", t.elapsed().as_secs_f64());
         pr.cost.total_secs = t.elapsed().as_secs_f64();
         pr
     });
@@ -6001,7 +6001,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // the link components allocate their spans.
     let mut link_hl: Option<Vec<crate::gkrlink::HeightLink>> = None;
     if let Some(pr) = gkr_proved.as_ref() {
-        let m4_t = std::time::Instant::now();
+        let phase_t = std::time::Instant::now();
         let alpha = sess.draw_felts(1)[0];
         let mut hl = crate::gkrlink::link_params(&plan, &rels, &pr.insts, &pr.artifact, alpha)
             .expect("the prover's own GKR artifact fails the link derivation");
@@ -6160,10 +6160,10 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             inter_all.extend(crate::gkrlink::height_cols(l, &src_of));
         }
         inter_mark("gkrlink", &inter_all, &mut inter_seen, &mut inter_split);
-        crate::util::m4_add("int/link", m4_t.elapsed().as_secs_f64());
+        crate::util::add_phase("int/link", phase_t.elapsed().as_secs_f64());
         link_hl = Some(hl);
     }
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let aoi = ao_interaction(&layer.ao, &aor, r, s, rv, plan.head_weight_c(), &rels,
                             &m4e_air.ao.eval,
                             p.gkr_attnout);
@@ -6175,8 +6175,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     if !p.gkr_attnout {
         claims.use_sums.push(qm(aoi.use_sum));
     }
-    crate::util::m4_add("int/attnout", m4_t.elapsed().as_secs_f64());
-    let m4_t = std::time::Instant::now();
+    crate::util::add_phase("int/attnout", phase_t.elapsed().as_secs_f64());
+    let phase_t = std::time::Instant::now();
     claims.deq_sc = vec![[0u32; 4]; if plan.rqs.is_empty() { 0 } else { layer.mats.len() }];
     for (mi, (m, reg)) in layer.mats.iter().zip(&mat_components).enumerate() {
         // stream E: the output side rides on the wiring family's binding challenge,
@@ -6262,13 +6262,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             });
         }
     }
-    crate::util::m4_add("int/dequant", m4_t.elapsed().as_secs_f64());
-    let m4_t = std::time::Instant::now();
+    crate::util::add_phase("int/dequant", phase_t.elapsed().as_secs_f64());
+    let phase_t = std::time::Instant::now();
     for (wi, reg) in freivalds_components.iter().enumerate() {
         let t_iw = std::time::Instant::now();
         let it = freivalds_interaction(layer, reg, rv, s, &rels, true,
                                        &m4e_air.freivalds[wi].eval, p.gkr_freivalds);
-        crate::util::m4_add("int/freivalds_build", t_iw.elapsed().as_secs_f64());
+        crate::util::add_phase("int/freivalds_build", t_iw.elapsed().as_secs_f64());
         inter_all.extend(it.cols);
         inter_mark(&format!("freivalds/{}", reg.name), &inter_all, &mut inter_seen,
                    &mut inter_split);
@@ -6284,8 +6284,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             claims.use_sums.push(qm(it.use_sum));
         }
     }
-    crate::util::m4_add("int/freivalds", m4_t.elapsed().as_secs_f64());
-    let m4_t = std::time::Instant::now();
+    crate::util::add_phase("int/freivalds", phase_t.elapsed().as_secs_f64());
+    let phase_t = std::time::Instant::now();
     // the residual-stream components' bindings and lookups, in component order
     if let (Some(gp), Some(gr)) = (&plan.residual_stream, &rels.residual_stream) {
         let blank = Claims::default();
@@ -6295,7 +6295,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             let it = crate::residual_stream::residual_stream_interaction(
                 reg, gr, Some(&specs[i]), &m4e_air.residual_stream[i].eval,
                 p.gkr_residual_stream);
-            crate::util::m4_add("int/residual_stream_build", t_ig.elapsed().as_secs_f64());
+            crate::util::add_phase("int/residual_stream_build", t_ig.elapsed().as_secs_f64());
             inter_all.extend(it.cols);
             inter_mark(&format!("residual_stream/{}", reg.tag), &inter_all, &mut inter_seen,
                        &mut inter_split);
@@ -6308,7 +6308,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             }
         }
     }
-    crate::util::m4_add("int/residual_stream", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/residual_stream", phase_t.elapsed().as_secs_f64());
 
     // B11 stream X, lever 2: one entry per table component, in the order the
     // interaction pass emits them. `interaction_split` already records what
@@ -6319,7 +6319,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // block `key_tile_split.py`'s family model needs and the only one the tables
     // did not have, and it is metadata: nothing reads it back.
     let mut table_components: Vec<Value> = vec![];
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     // the tables' own sides, in table order
     {
         // The two table families go the same route as the other six: their
@@ -6446,13 +6446,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             }
         }
     }
-    crate::util::m4_add("int/tables", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/tables", phase_t.elapsed().as_secs_f64());
 
     // stream II: the requantize seams' interaction columns, before the two ends'.  Within
     // a seam the AIR reads its two Horner accumulators before it finalizes its
     // LogUp, so the binding columns come before the fraction columns here too; the
     // seams' shared tables follow, in `Plan::pre_ids`' order.
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     if let Some(rr) = rels.rq.as_ref() {
         for (k, reg) in rq_components.iter().enumerate() {
             let binding = rq_binding_w(w_residual_stream, lam_residual_stream, &plan.rqs[k],
@@ -6551,7 +6551,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
         inter_mark("requant/tables", &inter_all, &mut inter_seen, &mut inter_split);
     }
-    crate::util::m4_add("int/requant", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/requant", phase_t.elapsed().as_secs_f64());
     // Stream E: the argmax's interaction columns come *after* the tables' own
     // sides, because the framework hands out interaction spans in component
     // order and the argmax component is last of all.  Appended earlier, this
@@ -6561,7 +6561,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
 
     // stream E: the argmax's binding column then its lookups, the order the AIR
     // reads them, and its use sum last of all -- the component is last too
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     if let (Some(r), Some(mi)) = (am_component.as_ref(), plan.argmax_mat()) {
         let m = &plan.p.mats[mi];
         let binding = crate::argmax::ArgmaxBinding {
@@ -6581,14 +6581,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         claims.use_sums.push(qm(use_sum));
         inter_mark("argmax", &inter_all, &mut inter_seen, &mut inter_split);
     }
-    crate::util::m4_add("int/argmax", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/argmax", phase_t.elapsed().as_secs_f64());
 
     // stream BB: the embedding gadget's interaction columns, last of all,
     // because its two components are last of all.  Within the use component the
     // AIR reads the two Horner accumulators before it finalizes its LogUp, so
     // the binding columns come before the fraction columns here too; the table
     // component's single column follows, matching the component order.
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     if let (Some(r), Some(er)) = (emb_component.as_ref(), rels.emb.as_ref()) {
         let mut binding = crate::embed::binding_w(w_residual_stream, lam_residual_stream, r.d, r.tokens, &r.lay);
         let (tcols, hc, gc) = crate::embed::binding_cols(r, &binding);
@@ -6606,7 +6606,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         claims.table_sums.push(qm(tab_sum));
         inter_mark("embed", &inter_all, &mut inter_seen, &mut inter_split);
     }
-    crate::util::m4_add("int/embed", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/embed", phase_t.elapsed().as_secs_f64());
 
     // an independent recomputation of every binding claim, from the component's witness
     // rather than from its trace: a binding is only worth something if it is checkable
@@ -6800,7 +6800,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // the flag off. Reported beside `interaction_by_family` because the two
         // are the same question from the two sides.
         "gkr": gkr_proved.as_ref().map(|p| p.cost.json()),
-        "preprocessed": m4_pre_cells,
+        "preprocessed": preprocessed_cells,
         "freivalds_weights": freivalds_components.iter().map(|w| json!({
             "group": w.name, "weights": w.n_weights, "lead": w.lay.g.lead,
             "pk": w.lay.pk, "pq": w.lay.pq, "log_rows": w.lay.g.log_rows,
@@ -6821,14 +6821,14 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                           "q_bits": aor.q_bits, "rem_bits": aor.rem_bits,
                           "clamp_edge_count": clamp_edge},
     });
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     sess.commit_any(inter_all);
-    crate::util::m4_add("wall/commit_inter", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("wall/commit_inter", phase_t.elapsed().as_secs_f64());
     // Stream H: the boundary sides, one tree each, committed after the
     // interaction tree and before the claims are mixed.  Nothing is drawn
     // between them and nothing reads them but the equality constraints, which
     // is what the note argues makes this position sound.
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let layer_boundary_report = if plan.layer_sides.is_empty() {
         json!(null)
     } else {
@@ -6893,16 +6893,16 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         }
         crate::boundary::kv_report(&plan.kv)
     };
-    crate::util::m4_add("wall/commit_boundary", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("wall/commit_boundary", phase_t.elapsed().as_secs_f64());
     // B12 stream GG: the boundary trees, one mark for all of them.
     sess.mark_boundary();
     sess.mix(&claims.flat());
 
     // ---- components, prove ----------------------------------------------------
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let built = build_components_linked(&plan, &rels, r, s, rv, r_diagonal_block, w_residual_stream, lam_residual_stream,
                                         &claims, link_hl.as_deref());
-    crate::util::m4_add("wall/build_components", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("wall/build_components", phase_t.elapsed().as_secs_f64());
     // Stream EE (open item 21): `--fp-out FILE` writes the fingerprint set this
     // chunk will look up, for the pre-run comparison against `cudaemit
     // --fp-out` on the same plan line. `--fp-only` stops here: the components
@@ -6929,13 +6929,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     let n_columns = [sizes[0].len() + sizes[1].len(), sizes[2].len(), n_inter];
     // B7a milestone 3: the lowering, off the prove loop's critical path.
     #[cfg(feature = "cuda")]
-    if crate::util::m3_switch("ZK_PREWARM") {
+    if crate::util::switch_on("ZK_PREWARM") {
         built.prewarm_blobs();
     }
     let provers = built.provers();
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let (res, stats) = sess.prove_raw(&provers);
-    crate::util::m4_add("wall/prove_raw", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("wall/prove_raw", phase_t.elapsed().as_secs_f64());
     // B12 stream GG: proof in hand, the session consumed -- what `prove`
     // freed on return, and what the generation still holds.
     crate::device::mem_mark("after_prove");

@@ -1,8 +1,9 @@
-"""B7a milestone 4 (18.7): install the generated *generation* kernels into the fork.
+"""Install the generated witness-generation kernels into the fork (B7a milestone 4, 18.7).
 
-The counterpart of `m2b_kernels.py`, and simpler than it, because the fork does
-not dispatch these: our own crate calls `gen_zk_dispatch` directly, so there is
-no case to add to `evaluate_constraints.cu` and no `cuda_eval_name` to key on.
+The counterpart of `install_constraint_kernels.py`, and simpler than it,
+because the fork does not dispatch these: our own crate calls
+`gen_zk_dispatch` directly, so there is no case to add to
+`evaluate_constraints.cu` and no `cuda_eval_name` to key on.
 Two asserted, idempotent edits:
 
   1. copy `gen_zk_*.cu` / `.cuh` (from `zk-prover genemit`) and the hand-written
@@ -11,7 +12,7 @@ Two asserted, idempotent edits:
 
 `--undo` removes both.
 
-    python3 m4b_kernels.py --fork DIR --gen DIR [--src DIR] [--undo]
+    python3 install_witness_gen_kernels.py --fork DIR --gen DIR [--src DIR] [--undo]
 """
 import json
 import shutil
@@ -60,7 +61,7 @@ if UNDO:
         f.unlink()
     print("  removed the generation sources")
     replace_block("CMakeLists.txt", BEGIN, END, "", ANCHOR)
-    print("m4b_kernels: undone")
+    print("install_witness_gen_kernels: undone")
     raise SystemExit(0)
 
 man = json.loads((GEN / "gen_manifest.json").read_text())
@@ -89,6 +90,6 @@ print(f"  copied {len(srcs)} generation sources into {CUDA}")
 replace_block("CMakeLists.txt", BEGIN, END, "".join(f"        {s}\n" for s in srcs), ANCHOR)
 lines = sum(f["cu_lines"] for f in man["families"])
 print(
-    f"m4b_kernels: {len(fams)} families, {man['shapes']} fraction shapes, "
+    f"install_witness_gen_kernels: {len(fams)} families, {man['shapes']} fraction shapes, "
     f"{lines} lines of generated CUDA plus the four hand-written phases"
 )

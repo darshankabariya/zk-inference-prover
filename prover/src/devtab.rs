@@ -74,7 +74,7 @@ unsafe extern "C" {
 
 /// `ZK_DEVICE_TABLES`: 0 the host, 1 the device, 2 both with every cell asserted.
 pub fn mode() -> u32 {
-    crate::util::m4b_mode("ZK_DEVICE_TABLES")
+    crate::util::path_mode("ZK_DEVICE_TABLES")
 }
 
 /// `ZK_MUT_TABLES`, `name` or `name:column`. Unaimed, every defect shows at `x`,
@@ -226,20 +226,20 @@ pub fn table_cols_dev(a: &Attn, log_rows: u32, exp: &[u32],
     let tp = two_pow(a);
     let map = crate::bf16::exp_bf16_table(a.nmax);
     let (pidx, pval) = exp_patch(a, exp, &map, tp);
-    crate::util::m4_add("gen/tab_map", t_m.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/tab_map", t_m.elapsed().as_secs_f64());
 
     let t_u = std::time::Instant::now();
     let d_map = up_u32(map);
     let n_patch = pidx.len();
     let d_pidx = up_u32(if pidx.is_empty() { vec![0u32] } else { pidx });
     let d_pval = up_u32(if pval.is_empty() { vec![0u32] } else { pval });
-    crate::util::m4_add("gen/tab_up", t_u.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/tab_up", t_u.elapsed().as_secs_f64());
 
     let t_a = std::time::Instant::now();
     let x = BaseFieldVec::new_uninitialized(rows);
     let y = BaseFieldVec::new_uninitialized(rows);
     let m = (!counters.is_empty()).then(|| BaseFieldVec::new_uninitialized(rows));
-    crate::util::m4_add("gen/tab_alloc", t_a.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/tab_alloc", t_a.elapsed().as_secs_f64());
 
     let cptr: Vec<*const u32> = counters
         .iter()
@@ -276,7 +276,7 @@ pub fn table_cols_dev(a: &Attn, log_rows: u32, exp: &[u32],
             cfg,
         );
     }
-    crate::util::m4_add("gen/tab_kernel", t_k.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/tab_kernel", t_k.elapsed().as_secs_f64());
     eprintln!(
         "tab-dev: 2^{log_rows} -- x, y{} from {} exp counters, patch {} rows, kernel {:.4} s",
         if m.is_some() { ", m_exp" } else { "" },

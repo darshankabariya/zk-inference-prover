@@ -123,13 +123,13 @@ mod pinned {
     static PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
     pub fn enabled() -> bool {
-        crate::util::m4b_mode("ZK_DEVICE_STAGING_POOL") != 0
+        crate::util::path_mode("ZK_DEVICE_STAGING_POOL") != 0
     }
 
     /// `ZK_MUT_STAGING_POOL=1`: the pool's deliberate defect, aimed at the staged
     /// bytes themselves. Off unless set, and it never runs in a timed loop.
     pub fn mutate() -> bool {
-        crate::util::m4b_mode("ZK_MUT_STAGING_POOL") != 0
+        crate::util::path_mode("ZK_MUT_STAGING_POOL") != 0
     }
 
     pub fn peak_bytes() -> usize {
@@ -320,7 +320,7 @@ mod marks {
     // two chunks interleave on one stderr, and under `ZK_PIPELINE=1` they
     // interleave in time as well -- chunk k+1's `after_witness_gen` lands between
     // chunk k's `commit_inter` and its `prove_values`. The tag is the plan
-    // line's `--ser-tag`, set per thread the way `m4_set_chunk` is, so a mark
+    // line's `--ser-tag`, set per thread the way `set_chunk` is, so a mark
     // says which chunk made it and the reporter can split the run.
     thread_local! {
         static TAG: std::cell::RefCell<Option<String>> =
@@ -395,7 +395,7 @@ pub fn install_mem_hook() {
 }
 
 /// Name the chunk whose marks this thread is about to take: the plan line's
-/// `--ser-tag`. Thread-local, like `util::m4_set_chunk`, so the pipelined
+/// `--ser-tag`. Thread-local, like `util::set_chunk`, so the pipelined
 /// loop's generation and prove threads tag their own.
 #[cfg(feature = "cuda")]
 pub fn set_mem_tag(tag: &str) {

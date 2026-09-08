@@ -150,7 +150,7 @@ const SHAPE_TOK: u32 = 2;
 
 /// `ZK_DEVICE_PREPROCESSED`: 0 the host, 1 the device, 2 both with every cell asserted.
 pub fn mode() -> u32 {
-    crate::util::m4b_mode("ZK_DEVICE_PREPROCESSED")
+    crate::util::path_mode("ZK_DEVICE_PREPROCESSED")
 }
 
 /// `ZK_MUT_PREPROCESSED`, `name` or `name:target`. Unaimed, every defect shows at the
@@ -217,11 +217,11 @@ fn host_witness_gen_map() -> &'static Mutex<std::collections::BTreeMap<u64, bool
 
 /// Record this chunk's answer. Called once, before the first witness generation.
 pub fn note_host_witness_gen(v: bool) {
-    host_witness_gen_map().lock().unwrap().insert(crate::util::m4_chunk(), v);
+    host_witness_gen_map().lock().unwrap().insert(crate::util::current_chunk(), v);
 }
 
 fn host_witness_gen() -> bool {
-    host_witness_gen_map().lock().unwrap().get(&crate::util::m4_chunk()).copied().unwrap_or(false)
+    host_witness_gen_map().lock().unwrap().get(&crate::util::current_chunk()).copied().unwrap_or(false)
 }
 
 /// Did every witness generation that bumps one of the ten multiplicity counters run on the
@@ -242,8 +242,8 @@ pub fn witness_gen_dev() -> bool {
     // met this for the tenth counter, `m_exp`, and fixed it there alone
     // (`dev_attention_freivalds_witness_gen::exp_mult_on_host`); this is the same predicate asked of all
     // ten.
-    crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_DEQUANT") == 1
-        && crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS") == 1
+    crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_DEQUANT") == 1
+        && crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS") == 1
         && crate::dev_attention_freivalds_witness_gen::key_tile_mode() == 1
         && !host_witness_gen()
 }
@@ -414,7 +414,7 @@ pub fn tables_dev(t: &Tables, log_norm: u32, log_frac: u32, log_mul: u32, q_bits
         let got = [r.a, r.b, r.m7, r.carry];
         (mul_closed(i, t.round) != got).then(|| got.to_vec())
     });
-    crate::util::m4_add("gen/pre_diff", t_d.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/pre_diff", t_d.elapsed().as_secs_f64());
     let patched = norm_p.0.len() + frac_p.0.len() + mul_p.0.len();
 
     let t_u = std::time::Instant::now();
@@ -426,7 +426,7 @@ pub fn tables_dev(t: &Tables, log_norm: u32, log_frac: u32, log_mul: u32, q_bits
              up_u32(if v.is_empty() { vec![0] } else { v }), n)
         })
         .collect();
-    crate::util::m4_add("gen/pre_up", t_u.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/pre_up", t_u.elapsed().as_secs_f64());
 
     let t_a = std::time::Instant::now();
     let pre: Vec<Vec<BaseFieldVec>> = shapes
@@ -443,7 +443,7 @@ pub fn tables_dev(t: &Tables, log_norm: u32, log_frac: u32, log_mul: u32, q_bits
     } else {
         vec![]
     };
-    crate::util::m4_add("gen/pre_alloc", t_a.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/pre_alloc", t_a.elapsed().as_secs_f64());
 
     let t_k = std::time::Instant::now();
     for (k, s) in shapes.iter().enumerate() {
@@ -489,7 +489,7 @@ pub fn tables_dev(t: &Tables, log_norm: u32, log_frac: u32, log_mul: u32, q_bits
             );
         }
     }
-    crate::util::m4_add("gen/pre_kernel", t_k.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/pre_kernel", t_k.elapsed().as_secs_f64());
     eprintln!(
         "pre-dev: {} shared tables -- {} preprocessed and {} multiplicity columns, \
          patch {} rows, kernels {:.4} s",
@@ -604,7 +604,7 @@ pub fn key_tile_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> 
             f
         })
         .collect();
-    crate::util::m4_add("gen/pre_flags", t_f.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/pre_flags", t_f.elapsed().as_secs_f64());
 
     let mut cols: Vec<BaseFieldVec> = vec![];
     let mut logs: Vec<u32> = vec![];
@@ -636,7 +636,7 @@ pub fn key_tile_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> 
         logs.extend(std::iter::repeat(g.log_rows).take(*n_cols));
         cols.extend(mine);
     }
-    crate::util::m4_add("gen/pre_sel", t_s.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/pre_sel", t_s.elapsed().as_secs_f64());
     DevPreKeyTile { flags, cols, logs }
 }
 

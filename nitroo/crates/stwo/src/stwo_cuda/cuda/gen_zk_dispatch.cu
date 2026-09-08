@@ -2,7 +2,8 @@
 // links on a fork that has not had `zk-prover genemit`'s output installed yet. It is
 // what the generator emits for zero families: any call aborts loudly, which
 // can only happen with a `ZK_DEVICE_*` device switch on and no kernels installed.
-// `m4b_kernels.py` replaces this file with the real generated dispatcher.
+// `install_witness_gen_kernels.py` replaces this file with the real generated
+// dispatcher.
 #include <cstdio>
 #include <cstdlib>
 #include "gen_zk_dispatch.cuh"
@@ -16,7 +17,7 @@ extern "C" void gen_zk_dispatch(
     unsigned, unsigned) {
     std::fprintf(stderr,
                  "gen_zk_dispatch: no generation kernel for family %s -- run "
-                 "`zk-prover genemit` and install it (m4b_kernels.py) first\n",
+                 "`zk-prover genemit` and install it (install_witness_gen_kernels.py) first\n",
                  family);
     std::abort();
 }
@@ -37,7 +38,7 @@ extern "C" void gen_zk_feed_dispatch(
     unsigned, unsigned) {
     std::fprintf(stderr,
                  "gen_zk_feed_dispatch: no feed kernel for family %s -- run "
-                 "`zk-prover genemit` and install it (m4b_kernels.py) first\n",
+                 "`zk-prover genemit` and install it (install_witness_gen_kernels.py) first\n",
                  family);
     std::abort();
 }

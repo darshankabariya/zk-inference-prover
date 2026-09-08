@@ -309,7 +309,7 @@ pub fn witness_gen_mut(fam: Fam) -> u32 {
 pub fn key_tile_mode() -> u32 {
     match std::env::var("ZK_DEVICE_WITNESS_GEN_KEY_TILE") {
         Ok(v) => v.parse().unwrap_or(0),
-        Err(_) => crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS"),
+        Err(_) => crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS"),
     }
 }
 
@@ -409,22 +409,22 @@ fn timed_up(
     let t = std::time::Instant::now();
     let v = f();
     let pack = t.elapsed().as_secs_f64();
-    crate::util::m4_add(pack_tag, pack);
+    crate::util::add_phase(pack_tag, pack);
     let bytes = (v.len() * 4) as u64;
     let t = std::time::Instant::now();
     let d = Uint32Vec::from_vec(v);
     let el = t.elapsed().as_secs_f64();
     crate::device::note_witness(bytes, el);
-    crate::util::m4_add(h2d_tag, el);
-    crate::util::m4_bytes(h2d_tag, bytes);
-    crate::util::m4_bytes(byte_tag, bytes);
+    crate::util::add_phase(h2d_tag, el);
+    crate::util::add_bytes(h2d_tag, bytes);
+    crate::util::add_bytes(byte_tag, bytes);
     // Per array as well as per family. Which arrays a device-side generation
     // path stops uploading is the whole question, and the seconds it leaves
     // behind have to be measured in the loop rather than divided out of an
     // aggregate rate -- so the per-array line is the *copy*, which is what such
     // a path still pays; its pack, which it does not, is in `_pack`.
     let _ = pack;
-    crate::util::m4_add(byte_tag, el);
+    crate::util::add_phase(byte_tag, el);
     d
 }
 
@@ -452,12 +452,12 @@ fn timed_up_into(
         return timed_up(pack_tag, h2d_tag, byte_tag, f);
     };
     let bytes = (words * 4) as u64;
-    crate::util::m4_add(pack_tag, pack);
+    crate::util::add_phase(pack_tag, pack);
     crate::device::note_witness(bytes, copy);
-    crate::util::m4_add(h2d_tag, copy);
-    crate::util::m4_bytes(h2d_tag, bytes);
-    crate::util::m4_bytes(byte_tag, bytes);
-    crate::util::m4_add(byte_tag, copy);
+    crate::util::add_phase(h2d_tag, copy);
+    crate::util::add_bytes(h2d_tag, bytes);
+    crate::util::add_bytes(byte_tag, bytes);
+    crate::util::add_phase(byte_tag, copy);
     d
 }
 
@@ -753,7 +753,7 @@ pub fn freivalds_component_dev(
         .collect();
     let qw_ptrs: Vec<*const i8> = d_qw.iter().map(|d| d.device_ptr as *const i8).collect();
     let n_out: Vec<u32> = mat_idx.iter().map(|i| layer.mats[*i].n_out as u32).collect();
-    crate::util::m4_add("gen/witness_gen_freivalds_up", t_up.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/witness_gen_freivalds_up", t_up.elapsed().as_secs_f64());
 
     let t_alloc = std::time::Instant::now();
     let base = uninit(lay.pq, rows);
@@ -763,7 +763,7 @@ pub fn freivalds_component_dev(
     let r8 = tables.ridx(8);
     let m_r8 = zeroes(tables.m_r[r8].len());
     let counts = zeroes(3);
-    crate::util::m4_add("gen/witness_gen_alloc", t_alloc.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/witness_gen_alloc", t_alloc.elapsed().as_secs_f64());
 
     let cfg = FFreivaldsCfg {
         g: FGrid::of(&lay.g),
@@ -790,7 +790,7 @@ pub fn freivalds_component_dev(
             cfg,
         );
     }
-    crate::util::m4_add("gen/witness_gen_freivalds_kernel", t_k.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/witness_gen_freivalds_kernel", t_k.elapsed().as_secs_f64());
 
     let t_d = std::time::Instant::now();
     let got = counts.to_vec();
@@ -798,7 +798,7 @@ pub fn freivalds_component_dev(
         add_into(&mut tables.m_r[r8], &m_r8.to_vec());
     }
     tables.off_table += got[0] as usize;
-    crate::util::m4_add("gen/witness_gen_counters", t_d.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/witness_gen_counters", t_d.elapsed().as_secs_f64());
 
     DevFreivalds { pre, base, log_rows: lay.g.log_rows, m_r8 }
 }
@@ -844,7 +844,7 @@ pub fn ao_component_dev(
                         || pack_i32_from_i32(&ao.jo));
     let d_jv = timed_up("gen/witness_gen_ao_pack", "gen/witness_gen_ao_h2d", "ao/jv",
                         || pack_i32_from_i32(&ao.jv));
-    crate::util::m4_add("gen/witness_gen_ao_up", t_up.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/witness_gen_ao_up", t_up.elapsed().as_secs_f64());
 
     let t_alloc = std::time::Instant::now();
     let base = uninit(2 + 9 * pr, rows);
@@ -860,7 +860,7 @@ pub fn ao_component_dev(
     let counts = zeroes(3);
     let q_out = zeroes(ao.nh * ao.s * ao.hd);
     let want = with_want.then(|| zeroes(rows * pr));
-    crate::util::m4_add("gen/witness_gen_alloc", t_alloc.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/witness_gen_alloc", t_alloc.elapsed().as_secs_f64());
 
     assert_eq!(tables.m_qnz.len(), 1usize << q_bits, "attnout qnz table width");
     let cfg = FAoCfg {
@@ -906,7 +906,7 @@ pub fn ao_component_dev(
             cfg,
         );
     }
-    crate::util::m4_add("gen/witness_gen_ao_kernel", t_k.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/witness_gen_ao_kernel", t_k.elapsed().as_secs_f64());
 
     let t_d = std::time::Instant::now();
     let got = counts.to_vec();
@@ -942,7 +942,7 @@ pub fn ao_component_dev(
     tables.off_table += got[0] as usize;
     let q_out: Vec<i64> = q_out.to_vec().into_iter().map(|v| v as i32 as i64).collect();
     let want = want.map(|d| d.to_vec());
-    crate::util::m4_add("gen/witness_gen_counters", t_d.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/witness_gen_counters", t_d.elapsed().as_secs_f64());
 
     DevAo { pre, base, log_rows: lay.log_rows, m_qnz, m_rem, m_acc_lo, m_acc_hi,
             ref_bad: got[1] as usize, q_out, want }
@@ -1071,7 +1071,7 @@ pub fn commit_base_dev(
     let d_xx = bf16x.then(|| key_tile_up("key_tile/xx", || pack_u16_raw(&a.xx)));
     let d_sc = bf16x.then(|| key_tile_up("key_tile/sc", || pack_i64(&a.sc)));
     let d_out = with_out.then(|| key_tile_up("key_tile/out", || pack_i64(&a.out)));
-    crate::util::m4_add("gen/witness_gen_key_tile_up", t_up.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/witness_gen_key_tile_up", t_up.elapsed().as_secs_f64());
 
     let (variant, split_k) = match a.variant {
         Variant::Bf16x => (0u32, 0u32),
@@ -1122,7 +1122,7 @@ pub fn commit_base_dev(
     } else {
         (zeroes(1), zeroes(1))
     };
-    crate::util::m4_add("gen/witness_gen_alloc", t_alloc.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/witness_gen_alloc", t_alloc.elapsed().as_secs_f64());
 
     let t_k = std::time::Instant::now();
     unsafe {
@@ -1224,7 +1224,7 @@ pub fn commit_base_dev(
         (zeroes(mult_r[ridx(cfg.z_lo_bits)].len()), zeroes(mult_r[ridx(cfg.z_hi_bits)].len()))
     };
     at.push(base.len());
-    crate::util::m4_add("gen/witness_gen_key_tile_kernel", t_k.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/witness_gen_key_tile_kernel", t_k.elapsed().as_secs_f64());
 
     // ---- the counters, back to the host ------------------------------------
     let t_d = std::time::Instant::now();
@@ -1252,7 +1252,7 @@ pub fn commit_base_dev(
         }
     }
     *off_table += got[0] as usize;
-    crate::util::m4_add("gen/witness_gen_counters", t_d.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/witness_gen_counters", t_d.elapsed().as_secs_f64());
 
     DevKeyTile { base, logs, at, m_exp, m_k: mk, m_q: mq, m_v,
               m_aux: matches!(a.variant, Variant::IntSplit(_)).then_some(m_aux),
@@ -1276,7 +1276,7 @@ pub fn commit_base_dev(
 /// printed before the panic, so one run answers that instead of one bisect per
 /// column.
 fn diff_survey() -> bool {
-    crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_DIFF") != 0
+    crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_DIFF") != 0
 }
 
 pub fn check_cols(what: &str, host: &[Eval], got: &[BaseFieldVec]) {

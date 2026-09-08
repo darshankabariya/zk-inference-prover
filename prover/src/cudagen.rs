@@ -2431,7 +2431,7 @@ fn blob_lower<E: FrameworkEval>(eval: &E) -> Option<Vec<u8>> {
         // counting on one), so `ZK_KERNEL_FALLBACK=1` lets a component with no
         // generated kernel run on the fork's scalar CPU fallback -- the same
         // bytes, announced per component, never silent.
-        None if crate::util::m4_switch("ZK_KERNEL_FALLBACK") => {
+        None if crate::util::switch_on("ZK_KERNEL_FALLBACK") => {
             eprintln!("kernel fallback: {name} fingerprint {fp:#010x} \
                        ({} instructions) evaluates on the CPU", ir.ops.len());
             return None;

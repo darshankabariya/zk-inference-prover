@@ -1,7 +1,8 @@
 // The declaration of the per-family generation dispatcher. The definition in
 // this tree is the pre-emit stand-in (see gen_zk_dispatch.cu); running
-// `zk-prover genemit` and installing its output (m4b_kernels.py) replaces both
-// files with the generated dispatcher and its family kernels.
+// `zk-prover genemit` and installing its output
+// (install_witness_gen_kernels.py) replaces both files with the generated
+// dispatcher and its family kernels.
 #ifndef GEN_ZK_DISPATCH_CUH
 #define GEN_ZK_DISPATCH_CUH
 #include "fields.cuh"

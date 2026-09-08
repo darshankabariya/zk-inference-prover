@@ -267,7 +267,7 @@ pub fn frac_cols<E: FrameworkEval>(
     host: impl FnOnce() -> (Vec<Eval>, SecureField),
 ) -> (Vec<AnyCol<'static>>, SecureField) {
     let on_dev = base.is_dev() || pre.is_dev();
-    let mode = crate::util::m4b_mode("ZK_GENERATED_LOGUP");
+    let mode = crate::util::path_mode("ZK_GENERATED_LOGUP");
     if !on_dev && mode == 0 {
         let (cols, sum) = host();
         return (crate::device::host_cols(cols), sum);
@@ -275,7 +275,7 @@ pub fn frac_cols<E: FrameworkEval>(
     let t = std::time::Instant::now();
     // B7b (README 26): by shape, with this chunk's scalars replayed.
     let ir = crate::scalars::cached_ir(eval, log_rows, log_rows, true, || ir_of(eval, log_rows));
-    crate::util::m4_add("int/frac_lower", t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/frac_lower", t.elapsed().as_secs_f64());
     let family = eval.cuda_eval_name();
     assert!(!ir.fracs.is_empty(), "{tag}: {family} has no lookups");
     assert_supplied(family, &ir, &pre, &base);
@@ -299,7 +299,7 @@ pub fn frac_cols<E: FrameworkEval>(
     } else {
         match shape_opt(family, &ir) {
             Some(s) => s,
-            None if crate::util::m4_switch("ZK_KERNEL_FALLBACK") => {
+            None if crate::util::switch_on("ZK_KERNEL_FALLBACK") => {
                 eprintln!(
                     "kernel fallback: {tag}: {family} fraction fingerprint {:#010x} \
                      ({} lookups) builds on the host",
@@ -315,11 +315,11 @@ pub fn frac_cols<E: FrameworkEval>(
     let t = std::time::Instant::now();
     let (up_pre, up_base) = (pre.upload(), base.upload());
     let (pp, bp) = (pre.ptrs(ir.cols[0], &up_pre), base.ptrs(ir.cols[1], &up_base));
-    crate::util::m4_add("int/frac_up", t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/frac_up", t.elapsed().as_secs_f64());
     let t = std::time::Instant::now();
     let (dev, sum) =
         crate::devlogup::logup_cols_dev_ptrs(&ir, family, shape, log_rows, &pp, &bp);
-    crate::util::m4_add("int/frac_kernel", t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/frac_kernel", t.elapsed().as_secs_f64());
     if on_dev {
         // The columns were computed where they will be committed, so they stay.
         assert!(
@@ -340,7 +340,7 @@ pub fn frac_cols<E: FrameworkEval>(
             )
         })
         .collect();
-    crate::util::m4_add("int/frac_down", t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/frac_down", t.elapsed().as_secs_f64());
     if mode == 4 {
         compare(tag, family, &cols, sum, host());
     }

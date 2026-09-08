@@ -6,7 +6,7 @@
 //! section 5's headline is built from. Each chunk is `compose::generate` then
 //! `compose::prove_gen` -- the two halves of `prove_layer` -- and is reported
 //! exactly as `compose` reports a proof, with its own `host_phases` (the
-//! accumulator is keyed by chunk, `util::m4_set_chunk`) and its own digest.
+//! accumulator is keyed by chunk, `util::set_chunk`) and its own digest.
 //!
 //! The layers a chunk proves: one (`--witness` or the synthetic shape), cycled;
 //! or several, `--witnesses a,b,c` (real) or `--seeds 7,8,9` (synthetic), so a
@@ -471,7 +471,7 @@ struct Row {
 fn write_ser(dir: &str, tag: &str, ser: &crate::Ser) {
     let t = Instant::now();
     crate::ser_write(dir, tag, ser);
-    crate::util::m4_add("wall/ser_write", t.elapsed().as_secs_f64());
+    crate::util::add_phase("wall/ser_write", t.elapsed().as_secs_f64());
 }
 
 pub fn chunks_cmd(args: &[String]) {
@@ -480,7 +480,7 @@ pub fn chunks_cmd(args: &[String]) {
     // than per chunk, and without this the work would be timed by nothing.
     let snap_setup = crate::witread::snapshot();
     let tamper = ProverTamper::default();
-    let pipe = crate::util::m4b_mode("ZK_PIPELINE") == 1;
+    let pipe = crate::util::path_mode("ZK_PIPELINE") == 1;
     let ser_dir = arg_str(args, "--ser-dir");
 
     let src = match arg_str(args, "--plan") {
@@ -533,7 +533,7 @@ pub fn chunks_cmd(args: &[String]) {
     let t_loop = Instant::now();
     if !pipe {
         for k in 0..n {
-            crate::util::m4_set_chunk(k as u64);
+            crate::util::set_chunk(k as u64);
             crate::device::set_mem_tag(&src.tag(k));
             if k > 0 {
                 crate::device::reset();
@@ -593,7 +593,7 @@ pub fn chunks_cmd(args: &[String]) {
             let (src, tamper) = (&src, &tamper);
             s.spawn(move || {
                 for k in 0..n {
-                    crate::util::m4_set_chunk(k as u64);
+                    crate::util::set_chunk(k as u64);
                     crate::device::set_mem_tag(&src.tag(k));
                     let t = Instant::now();
                     let snap = crate::witread::snapshot();
@@ -615,7 +615,7 @@ pub fn chunks_cmd(args: &[String]) {
                 let SendGen { g, k: kk, built, build_secs, split, gen_secs } =
                     rx.recv().expect("the generation thread died");
                 assert_eq!(k, kk);
-                crate::util::m4_set_chunk(k as u64);
+                crate::util::set_chunk(k as u64);
                 crate::device::set_mem_tag(&src.tag(k));
                 let pkey = src.pre_key(k, &built);
                 let t = Instant::now();
@@ -686,7 +686,7 @@ pub fn chunks_cmd(args: &[String]) {
     let head_vname = rows[0].vname.clone();
     let head_params = rows[0].params.clone();
     for r in rows {
-        crate::util::m4_set_chunk(r.k as u64);
+        crate::util::set_chunk(r.k as u64);
         ser_bytes_held += r.ser.claims_bytes.len()
             + r.ser.fixed_bytes.len()
             + r.ser.proof_bytes.as_ref().map_or(0, |b| b.len());

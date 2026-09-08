@@ -238,7 +238,7 @@ const ONE_SRC: u32 = u32::MAX;
 
 /// `ZK_DEVICE_ACCUMULATORS`: 0 the host, 1 the device, 2 both with every cell asserted.
 pub fn mode() -> u32 {
-    crate::util::m4b_mode("ZK_DEVICE_ACCUMULATORS")
+    crate::util::path_mode("ZK_DEVICE_ACCUMULATORS")
 }
 
 /// Which component an accumulator belongs to, so a control can be aimed at one.
@@ -450,7 +450,7 @@ impl DevAccCols {
 }
 
 fn note(reg: Comp, tag: &str, n_cols: usize, rows: usize, secs: f64) {
-    crate::util::m4_add("int/acc_kernel", secs);
+    crate::util::add_phase("int/acc_kernel", secs);
     if mode() == 2 {
         eprintln!("acc-dev: {} {tag} -- {n_cols} columns, {} cells, kernel {secs:.4} s",
                   reg.name(), n_cols * rows);
@@ -810,10 +810,10 @@ pub fn ao(dev: &crate::dev_attention_freivalds_witness_gen::DevAo, lay: &crate::
 /// `ZK_DEVICE_RESIDUAL_STREAM_BINDING`: 0 the host, 1 the device, 2 both with every cell asserted.
 ///
 /// B11 stream N. Born off, like every path before it: this switch joins the
-/// default table in `util::m4b_default` in the same commit that lands its
+/// default table in `util::default_path_mode` in the same commit that lands its
 /// digest gate, and not before.
 pub fn binding_mode() -> u32 {
-    crate::util::m4b_mode("ZK_DEVICE_RESIDUAL_STREAM_BINDING")
+    crate::util::path_mode("ZK_DEVICE_RESIDUAL_STREAM_BINDING")
 }
 
 /// One residual-stream component's Horner bindings, on their way into the tree.

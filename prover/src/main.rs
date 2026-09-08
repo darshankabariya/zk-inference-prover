@@ -1336,14 +1336,14 @@ pub struct Ser {
 /// and no harness has ever timed it. B7b (26): on its own, so the chunk loop
 /// serializes inside the wall and verifies after it.
 pub fn compose_ser(out: &compose::Composed) -> Ser {
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let claims_bytes = serde_json::to_vec(&out.claims).unwrap();
     let fixed_bytes = serde_json::to_vec(&out.fixed).unwrap();
-    crate::util::m4_add("wall/ser_statement", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("wall/ser_statement", phase_t.elapsed().as_secs_f64());
     let proof_bytes = out.proof.as_ref().map(|pf| {
-        let m4_t = std::time::Instant::now();
+        let phase_t = std::time::Instant::now();
         let b = serde_json::to_vec(pf).unwrap();
-        crate::util::m4_add("wall/ser_proof", m4_t.elapsed().as_secs_f64());
+        crate::util::add_phase("wall/ser_proof", phase_t.elapsed().as_secs_f64());
         b
     });
     Ser { claims_bytes, fixed_bytes, proof_bytes }
@@ -1429,10 +1429,10 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
         "peak_rss_bytes": out.stats.peak_rss,
         "preprocessed_is_widest": out.stats.pre_ok,
         "phases": out.stats.phases,
-        "host_phases": crate::util::m4_report(),
+        "host_phases": crate::util::phases_report(),
         // B11 stream F: the bytes the named phases moved, so a phase's GB/s is
         // read off the same dump as its seconds
-        "host_bytes": crate::util::m4_bytes_report(),
+        "host_bytes": crate::util::bytes_report(),
         "proof_sha256": proof_sha256,
         "proof_ser_bytes": proof_ser_bytes,
         // milestone 2a: what the host->device crossing cost (README 10.2)

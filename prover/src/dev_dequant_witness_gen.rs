@@ -213,7 +213,7 @@ pub fn mat_component_dev(
     // this stays exactly the count `zk_witness_gen_dequant` has always been handed.
     let n_pre = chan_w * lay.per_row + 5;
     let do_ref = spec.round == crate::bf16::Round::Even
-        && crate::util::m4_switch("ZK_KERNEL_REFERENCE_CHECK");
+        && crate::util::switch_on("ZK_KERNEL_REFERENCE_CHECK");
 
     // `norm_at` bounds `k` by the *table's* kmax and `normalise` by the
     // spec's; the kernel carries one number, so the two have to be the one
@@ -245,7 +245,7 @@ pub fn mat_component_dev(
         "{}: an accumulator does not fit i32; the kmax window cannot hold it either",
         m.name
     );
-    crate::util::m4_add("gen/deq_dev_acc", t_up.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/deq_dev_acc", t_up.elapsed().as_secs_f64());
     let t_h2d = std::time::Instant::now();
     let d_acc = up_u32(acc32);
     let (d_jx, d_jw, d_sx, d_sw) = match spec.variant {
@@ -264,7 +264,7 @@ pub fn mat_component_dev(
         _ => unreachable!("matmul components are pow2 or chain"),
     };
 
-    crate::util::m4_add("gen/deq_dev_h2d", t_h2d.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/deq_dev_h2d", t_h2d.elapsed().as_secs_f64());
 
     // the columns, in committed order, uninitialised because the witness generation writes
     // every cell of every one of them
@@ -283,8 +283,8 @@ pub fn mat_component_dev(
     let m_r8 = Uint32Vec::new_zeroes(tables.m_r[r8].len());
     let counts = Uint32Vec::new_zeroes(3);
     let want = (with_want && do_ref).then(|| Uint32Vec::new_zeroes(rows * lay.per_row));
-    crate::util::m4_add("gen/deq_dev_alloc", t_alloc.elapsed().as_secs_f64());
-    crate::util::m4_add("gen/deq_dev_up", t_up.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/deq_dev_alloc", t_alloc.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/deq_dev_up", t_up.elapsed().as_secs_f64());
 
     let cfg = WitnessGenCfg {
         variant: u32::from(spec.variant == DeqVariant::Chain),
@@ -347,7 +347,7 @@ pub fn mat_component_dev(
         );
     }
     let kernel_secs = t_k.elapsed().as_secs_f64();
-    crate::util::m4_add("gen/deq_dev_kernel", kernel_secs);
+    crate::util::add_phase("gen/deq_dev_kernel", kernel_secs);
 
     // ---- stream M: the o-side trio, in the host's order --------------------
     // `layer.rs`'s `if output_claim` block, cell for cell. `oin` is an ordinary step
@@ -371,7 +371,7 @@ pub fn mat_component_dev(
         pre.push(sel(&|j| j > 0 && lay.at_opt(m.tokens, j).is_some() && !first(j)));
         pre.push(sel(&|j| j > 0 && first(j)));
         pre.push(sel(&|j| lay.at_opt(m.tokens, j).is_some()));
-        crate::util::m4_add("gen/deq_dev_output_claim", t_o.elapsed().as_secs_f64());
+        crate::util::add_phase("gen/deq_dev_output_claim", t_o.elapsed().as_secs_f64());
     }
 
     // the counters, back to the host: a few hundred kB, and 4a forbids H2D of
@@ -391,7 +391,7 @@ pub fn mat_component_dev(
     }
     tables.off_table += got[0] as usize;
     let want = want.map(|d| d.to_vec());
-    crate::util::m4_add("gen/deq_dev_counters", t_d.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/deq_dev_counters", t_d.elapsed().as_secs_f64());
     eprintln!(
         "witness-gen-dev: {} {} shape 2^{} x {} slots -- {} base and {} pre columns, \
          kernel {:.4} s",

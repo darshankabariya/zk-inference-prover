@@ -367,7 +367,7 @@ impl Collect {
 /// agree with it, because the base columns the kernel reads are named by it.
 #[allow(clippy::too_many_arguments)]
 /// `ZK_GKR_FEED_CHECK=1`: run the feed beside the host builder and compare. Opt-in,
-/// spelled the way `ZK_LINK_CHECK` is -- `util::m4_switch` reads "on unless set
+/// spelled the way `ZK_LINK_CHECK` is -- `util::switch_on` reads "on unless set
 /// to 0", which is the wrong default for a probe that costs an upload and a
 /// full cell-for-cell comparison.
 fn feedcheck_on() -> bool {
@@ -1406,7 +1406,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             // name, because until this stream nothing asked *when* the card was
             // fullest. Every input layer is resident here; the towers are not
             // built yet.
-            crate::util::m4_mark("gkr/inputs_resident");
+            crate::util::mark_timeline("gkr/inputs_resident");
             // Once per process in production -- the pool keeps its high-water
             // mark across chunks -- so it is timed and reported, not counted
             // among the backend's per-chunk adds. Before the reshape, so no later
@@ -1424,7 +1424,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             } else {
                 0.0
             };
-            crate::util::m4_mark("gkr/prewarmed");
+            crate::util::mark_timeline("gkr/prewarmed");
             prof::reset();
             // B11 stream X, lever 1: the fork's own split of what `prove_batch`
             // spends *between* the backend's four phases -- towers, oracles,
@@ -1441,7 +1441,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             // `Refeed::droppable` says no and they are held as stream Q held
             // them. `ZK_GKR_REFEED=0` puts every input layer back for the
             // whole run: the same binary, the before against the after.
-            let refeed = crate::util::m4_switch("ZK_GKR_REFEED")
+            let refeed = crate::util::switch_on("ZK_GKR_REFEED")
                 .then(|| feedimpl::Refeed::new(&c.feeds, n_instances));
             let (proof, artifact) = stwo::prover::lookups::gkr_prover::prove_batch_refeed(
                 channel,
@@ -1451,7 +1451,7 @@ pub fn prove_collected(channel: &mut impl Channel, c: Collect) -> Proved {
             dev::sync();
             let prove_secs = t1.elapsed().as_secs_f64();
             let refeeds = refeed.as_ref().map(|r| r.calls.get()).unwrap_or(0);
-            crate::util::m4_mark("gkr/proved");
+            crate::util::mark_timeline("gkr/proved");
             let phases = prof::on().then(|| {
                 let mut v = prof::snapshot();
                 v.extend(stwo::prover::lookups::gkr_prover::roundprof::snapshot());
@@ -1725,7 +1725,7 @@ pub fn cmd(args: &[String]) {
 
     // The first CUDA call in the process pays context creation and the fatbin
     // load; on the cuda build the sumcheck below must not be billed for it.
-    crate::util::m4_touch_device();
+    crate::util::touch_device();
 
     let src = crate::src_of(args);
     let sh = Shape {

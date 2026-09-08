@@ -122,7 +122,7 @@ unsafe extern "C" {
 
 /// `ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM`: 0 the host, 1 the device, 2 both with every cell asserted.
 pub fn mode() -> u32 {
-    crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM")
+    crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_RESIDUAL_STREAM")
 }
 
 /// Whether anything on the host will read the two natural arrays.
@@ -380,7 +380,7 @@ pub fn residual_stream_component_dev(w: &ResidualStreamWitness, prog: &Prog, rou
     let d_out_slot = up_u32(out_slot.clone());
     let tbl = dev_gtables(tables);
     let un_ptrs = tbl.un_ptrs();
-    crate::util::m4_add("gen/residual_stream_witness_gen_up", t_up.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/residual_stream_witness_gen_up", t_up.elapsed().as_secs_f64());
 
     // ---- the columns and the counters --------------------------------------
     let t_alloc = std::time::Instant::now();
@@ -400,7 +400,7 @@ pub fn residual_stream_component_dev(w: &ResidualStreamWitness, prog: &Prog, rou
     let d_out_pat = Uint32Vec::new_zeroes(rows * out_w.max(1));
     let d_out_nat = Uint32Vec::new_zeroes(rows * out_w.max(1) * 2);
     let d_in_nat = Uint32Vec::new_zeroes(rows * n_leaves * 2);
-    crate::util::m4_add("gen/residual_stream_witness_gen_alloc", t_alloc.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/residual_stream_witness_gen_alloc", t_alloc.elapsed().as_secs_f64());
 
     let cfg = FResidualStreamCfg {
         log_rows,
@@ -446,7 +446,7 @@ pub fn residual_stream_component_dev(w: &ResidualStreamWitness, prog: &Prog, rou
         );
     }
     let kernel_secs = t_k.elapsed().as_secs_f64();
-    crate::util::m4_add("gen/residual_stream_witness_gen_kernel", kernel_secs);
+    crate::util::add_phase("gen/residual_stream_witness_gen_kernel", kernel_secs);
 
     // ---- back to the host: the counters and the three natural arrays -------
     let t_d = std::time::Instant::now();
@@ -514,7 +514,7 @@ pub fn residual_stream_component_dev(w: &ResidualStreamWitness, prog: &Prog, rou
             }
         }
     }
-    crate::util::m4_add("gen/residual_stream_witness_gen_d2h", t_d.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/residual_stream_witness_gen_d2h", t_d.elapsed().as_secs_f64());
 
     // ---- the two preprocessed selectors, which are row-index functions -----
     let t_p = std::time::Instant::now();
@@ -526,7 +526,7 @@ pub fn residual_stream_component_dev(w: &ResidualStreamWitness, prog: &Prog, rou
         .into_iter()
         .map(|c| crate::device::upload_col(&eval_of(log_rows, c)))
         .collect();
-    crate::util::m4_add("gen/residual_stream_witness_gen_pre", t_p.elapsed().as_secs_f64());
+    crate::util::add_phase("gen/residual_stream_witness_gen_pre", t_p.elapsed().as_secs_f64());
 
     eprintln!(
         "residual_stream_witness_gen-dev: {} 2^{} x {} slots -- {} base and {} pre columns, {} cells, \

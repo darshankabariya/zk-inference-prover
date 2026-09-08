@@ -1,4 +1,4 @@
-"""B7a milestone 2b step 3: install the generated constraint kernels into the fork.
+"""Install the generated constraint kernels into the fork (B7a milestone 2b, step 3).
 
 Reads `$ZK_KERNEL_STORE/manifest.json` (written by `zk-prover cudaemit`) and applies three
 asserted, idempotent edits to the fork's CUDA tree:
@@ -16,7 +16,7 @@ asserted, idempotent edits to the fork's CUDA tree:
 Re-running after a fresh `cudaemit` refreshes the files and leaves the edits
 alone. `--undo` removes all three, restoring the pristine `41c2a05` dispatch.
 
-    python3 m2b_kernels.py --fork DIR --gen DIR [--undo]
+    python3 install_constraint_kernels.py --fork DIR --gen DIR [--undo]
 """
 import json
 import shutil
@@ -75,7 +75,7 @@ if UNDO:
     replace_block("evaluate_constraints.cu", INC_BEGIN, INC_END, "",
                   "bool g_should_accumulate_host = true;")
     replace_block("evaluate_constraints.cu", CASE_BEGIN, CASE_END, "", "        default:\n")
-    print("m2b_kernels: undone")
+    print("install_constraint_kernels: undone")
     raise SystemExit(0)
 
 man = json.loads((GEN / "manifest.json").read_text())
@@ -105,5 +105,5 @@ replace_block(
     "        default:\n",
 )
 lines = sum(f["cu_lines"] for f in man["families"])
-print(f"m2b_kernels: {len(fams)} families, {man['kernels']} kernels, "
+print(f"install_constraint_kernels: {len(fams)} families, {man['kernels']} kernels, "
       f"{man['instructions']} instructions, {lines} lines of CUDA")

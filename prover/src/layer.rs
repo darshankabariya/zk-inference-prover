@@ -3173,7 +3173,7 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
     let m4c = if spec.variant == DeqVariant::Fold {
         0
     } else {
-        crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_DEQUANT")
+        crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_DEQUANT")
     };
     let m4c_want = m4c == 2;
     if m4c == 1 {
@@ -3795,7 +3795,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
     let n_rows = rows;
     let rows = if m4g_host { rows } else { 0 };
     // the Horner accumulators, inner sums in parallel, carries serial
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let inner: Vec<SecureField> = (0..rows)
         .into_par_iter()
         .map(|j| {
@@ -3811,15 +3811,15 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
             zf
         })
         .collect();
-    crate::util::m4_add("int/deq_inner", m4_t.elapsed().as_secs_f64());
-    let m4_t = std::time::Instant::now();
+    crate::util::add_phase("int/deq_inner", phase_t.elapsed().as_secs_f64());
+    let phase_t = std::time::Instant::now();
     let (mut z, mut h) = (vec![SecureField::zero(); rows], vec![SecureField::zero(); rows]);
     // B7a milestone 4 (18.4): the two accumulators, each with its own
     // dependency structure honoured rather than one serial pass over both.
     // The lead prefix keeps this exact: `inner` is zero on every lead row, so
     // the scan's extra `s_ch` steps there multiply zero — but only when the
     // lead is chunk-aligned, so the guard falls back to the serial loop if not.
-    if crate::util::m4_switch("ZK_PARALLEL_SCAN") && lay.chunks > 0 && rows % lay.chunks == 0
+    if crate::util::switch_on("ZK_PARALLEL_SCAN") && lay.chunks > 0 && rows % lay.chunks == 0
         && lay.lead % lay.chunks == 0 {
         z.par_chunks_mut(lay.chunks).enumerate().for_each(|(c, zc)| {
             let base = c * lay.chunks;
@@ -3857,8 +3857,8 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
             }
         }
     }
-    crate::util::m4_add("int/deq_carry", m4_t.elapsed().as_secs_f64());
-    let m4_t = std::time::Instant::now();
+    crate::util::add_phase("int/deq_carry", phase_t.elapsed().as_secs_f64());
+    let phase_t = std::time::Instant::now();
     let mut sink = crate::device::ColSink::new();
     let claimed_h = match m4g {
         Some(d) => {
@@ -3878,7 +3878,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
         }
     };
     let mut cols = sink.into_inner();
-    crate::util::m4_add("int/deq_cols", m4_t.elapsed().as_secs_f64());
+    crate::util::add_phase("int/deq_cols", phase_t.elapsed().as_secs_f64());
 
     // stream E: the output side, between the claimed side's columns and the
     // LogUp columns -- the order the AIR reads them in.
@@ -3966,7 +3966,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
 
     // the LogUp columns, in the exact order the AIR adds lookups -- or, under
     // the flag, the same fractions handed to the GKR collector instead
-    let m4_t = std::time::Instant::now();
+    let phase_t = std::time::Instant::now();
     let use_sum = if gkr {
         // the fractions were handed to the collector before the GKR proof ran,
         // in `compose`'s own pass -- see the comment there for why the two are
@@ -3974,7 +3974,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
         SecureField::zero()
     } else {
         let (lcols, use_sum) = mat_logup(m, r, rv, s_ch, rels);
-        crate::util::m4_add("int/deq_logup", m4_t.elapsed().as_secs_f64());
+        crate::util::add_phase("int/deq_logup", phase_t.elapsed().as_secs_f64());
         cols.extend(lcols);
         use_sum
     };
@@ -4118,7 +4118,7 @@ fn mat_logup(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
     let m4b = if r.spec.variant == DeqVariant::Fold {
         0
     } else {
-        crate::util::m4b_mode("ZK_GENERATED_LOGUP")
+        crate::util::path_mode("ZK_GENERATED_LOGUP")
     };
     let from_ir = (m4b > 0).then(|| mat_logup_ir(m, r, rv, s_ch, rels, m4b >= 3));
     // 2 checks the interpreter against the hand-written builder, 4 the kernel.
@@ -4336,7 +4336,7 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
                  || acc_mag || denp2 {
         0
     } else {
-        crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS")
+        crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS")
     };
     assert!(m4d == 0 || corrupt.is_none(),
             "attnout: the device witness generation has no `corrupt` path");
@@ -4972,7 +4972,7 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
     // table in its kernel, so a wide group takes the host witness generation whatever the
     // switch says -- the diagonal block key tiles' pattern, and `devpre::note_host_witness_gen`
     // is told in `generate`.
-    let m4d = if act_bits == 8 { crate::util::m4b_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS") } else { 0 };
+    let m4d = if act_bits == 8 { crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS") } else { 0 };
     assert!(m4d == 0 || corrupt_qx.is_none(),
             "{name}: the device Freivalds witness generation has no `corrupt_qx` path");
     if m4d == 1 {

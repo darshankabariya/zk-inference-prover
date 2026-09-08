@@ -102,8 +102,8 @@ pub fn eval_of(log_size: u32, mut vals: Vec<M31>) -> Eval {
     // B7a milestone 4 (18.3): the shuffle and the repack as one parallel
     // out-of-place gather straight into the packed lanes. `ZK_PARALLEL_GATHER=0`
     // restores the serial in-place pair below.
-    if crate::util::m4_switch("ZK_PARALLEL_GATHER")
-        && log_size >= LOG_N_LANES.max(crate::util::m4_parmin())
+    if crate::util::switch_on("ZK_PARALLEL_GATHER")
+        && log_size >= LOG_N_LANES.max(crate::util::parallel_gather_min())
     {
         m4_perm_selfcheck();
         let t = std::time::Instant::now();
@@ -119,7 +119,7 @@ pub fn eval_of(log_size: u32, mut vals: Vec<M31>) -> Eval {
                 PackedM31::from_array(lanes)
             })
             .collect();
-        crate::util::m4_add("evalof/fused", t.elapsed().as_secs_f64());
+        crate::util::add_phase("evalof/fused", t.elapsed().as_secs_f64());
         return CircleEvaluation::new(
             CanonicCoset::new(log_size).circle_domain(),
             BaseColumn::from_simd(data),
@@ -129,10 +129,10 @@ pub fn eval_of(log_size: u32, mut vals: Vec<M31>) -> Eval {
     // column is two passes, and they are timed apart.
     let t = std::time::Instant::now();
     bit_reverse_coset_to_circle_domain_order(&mut vals);
-    crate::util::m4_add("evalof/bitrev", t.elapsed().as_secs_f64());
+    crate::util::add_phase("evalof/bitrev", t.elapsed().as_secs_f64());
     let t = std::time::Instant::now();
     let col = BaseColumn::from_iter(vals);
-    crate::util::m4_add("evalof/pack", t.elapsed().as_secs_f64());
+    crate::util::add_phase("evalof/pack", t.elapsed().as_secs_f64());
     CircleEvaluation::new(CanonicCoset::new(log_size).circle_domain(), col)
 }
 
@@ -202,13 +202,13 @@ impl<'a> Session<'a> {
         // of one barycentric kernel launch per (column, point). See
         // gpu/m3_patch.py; ZK_STORE_COEFFICIENTS=0 restores the old path.
         let mut cs = CommitmentSchemeProver::<PcsB, Blake2sM31MerkleChannel>::new(config, tw);
-        if crate::util::m3_store_coeffs() {
+        if crate::util::store_coeffs() {
             cs.set_store_polynomials_coefficients();
         }
         // B12 stream HH: drop each tree's blown-up evaluations after its root
-        // is mixed and rebuild them per phase. `m3_lde_only` refuses when the
+        // is mixed and rebuild them per phase. `lde_only` refuses when the
         // coefficients are off, so this is reached only when they are on.
-        if crate::util::m3_lde_only() {
+        if crate::util::lde_only() {
             cs.set_lde_only();
         }
         Self {

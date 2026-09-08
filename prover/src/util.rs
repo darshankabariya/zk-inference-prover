@@ -27,36 +27,37 @@ pub fn pcs_config() -> PcsConfig {
     cfg
 }
 
-/// B7a milestone 3's switches, read once. `=0` turns one off; the default is on.
-pub fn m3_switch(name: &str) -> bool {
+/// An on-by-default switch, read once. `=0` turns it off; anything else, the
+/// unset environment included, is on.
+pub fn switch_on(name: &str) -> bool {
     std::env::var(name).map(|v| v != "0").unwrap_or(true)
 }
 
-pub fn m3_store_coeffs() -> bool {
-    m3_switch("ZK_STORE_COEFFICIENTS")
+pub fn store_coeffs() -> bool {
+    switch_on("ZK_STORE_COEFFICIENTS")
 }
 
 /// B12 stream HH: keep every committed column's coefficients and drop its
 /// blown-up evaluations once the tree's root is mixed, rebuilding them per
-/// phase. Opt-in, unlike `m3_switch`'s opt-out switches, because it is a
+/// phase. Opt-in, unlike the on-by-default switches, because it is a
 /// residency trade and not a default.
 ///
 /// It refuses loudly when the coefficients are off: they are the only thing a
 /// dropped extension can be rebuilt from, and a run that proved anyway would be
 /// reading a configuration it did not have.
-pub fn m3_lde_only() -> bool {
+pub fn lde_only() -> bool {
     let on = std::env::var("ZK_LDE_ONLY")
         .map(|v| v != "0")
         .unwrap_or(false);
     assert!(
-        !on || m3_store_coeffs(),
+        !on || store_coeffs(),
         "ZK_LDE_ONLY=1 needs ZK_STORE_COEFFICIENTS on: the coefficients are the only \
          thing the dropped evaluations can be rebuilt from"
     );
     on
 }
 
-/// B7a milestone 4: the host-side timeline (18.2).
+/// The host-side timeline (B7a milestone 4, 18.2).
 ///
 /// One named accumulator, reported as `host_phases` in every JSON, so where
 /// the wall goes *outside* `prove_ex` is a measurement rather than an estimate.
@@ -64,44 +65,44 @@ pub fn m3_lde_only() -> bool {
 /// never per row; at the design point that is ~8k locks against a 5 s wall.
 ///
 /// B7b (README 26): keyed by chunk. A thread names the chunk it is working on
-/// (`m4_set_chunk`) and every phase it adds lands under that chunk, so a
+/// (`set_chunk`) and every phase it adds lands under that chunk, so a
 /// pipelined loop -- chunk k proving on one thread while chunk k+1 generates on
 /// another -- still reports each chunk's phases as its own. A single proof is
 /// chunk 0 and sees no difference.
-type M4Map = std::collections::BTreeMap<&'static str, (u64, f64)>;
-static M4_ACC: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::BTreeMap<u64, M4Map>>,
+type PhaseMap = std::collections::BTreeMap<&'static str, (u64, f64)>;
+static PHASE_ACC: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::BTreeMap<u64, PhaseMap>>,
 > = std::sync::OnceLock::new();
 
 thread_local! {
-    static M4_CHUNK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static CHUNK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-pub fn m4_set_chunk(k: u64) {
-    M4_CHUNK.with(|c| c.set(k));
+pub fn set_chunk(k: u64) {
+    CHUNK.with(|c| c.set(k));
 }
 
-pub fn m4_chunk() -> u64 {
-    M4_CHUNK.with(|c| c.get())
+pub fn current_chunk() -> u64 {
+    CHUNK.with(|c| c.get())
 }
 
-fn m4_acc() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, M4Map>> {
-    M4_ACC.get_or_init(|| std::sync::Mutex::new(Default::default()))
+fn phase_acc() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, PhaseMap>> {
+    PHASE_ACC.get_or_init(|| std::sync::Mutex::new(Default::default()))
 }
 
-type M4BMap = std::collections::BTreeMap<&'static str, u64>;
-static M4B_ACC: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::BTreeMap<u64, M4BMap>>,
+type ByteMap = std::collections::BTreeMap<&'static str, u64>;
+static BYTE_ACC: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::BTreeMap<u64, ByteMap>>,
 > = std::sync::OnceLock::new();
 
-fn m4b_acc() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, M4BMap>> {
-    M4B_ACC.get_or_init(|| std::sync::Mutex::new(Default::default()))
+fn byte_acc() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, ByteMap>> {
+    BYTE_ACC.get_or_init(|| std::sync::Mutex::new(Default::default()))
 }
 
-pub fn m4_add(name: &'static str, secs: f64) {
-    let k = m4_chunk();
+pub fn add_phase(name: &'static str, secs: f64) {
+    let k = current_chunk();
     // B11 stream V, lever 1: the same call that accumulates a phase's seconds
-    // stamps its *end* on the memory timeline. `m4_add` already runs once per
+    // stamps its *end* on the memory timeline. `add_phase` already runs once per
     // phase and never per row, and it already carries the names the wall report
     // uses, so the timeline needs no second set of boundaries -- a phase's
     // bracket is this mark and the one before it. Off (no `ZK_MEMORY_TIMELINE`) this
@@ -109,7 +110,7 @@ pub fn m4_add(name: &'static str, secs: f64) {
     if stwo::prover::lookups::gkr_prover::memmark::on() {
         stwo::prover::lookups::gkr_prover::memmark::mark(&format!("{name} {secs:.6}"));
     }
-    let mut g = m4_acc().lock().unwrap();
+    let mut g = phase_acc().lock().unwrap();
     let e = g.entry(k).or_default().entry(name).or_insert((0, 0.0));
     e.0 += 1;
     e.1 += secs;
@@ -117,29 +118,29 @@ pub fn m4_add(name: &'static str, secs: f64) {
 
 /// One boundary on the memory timeline that is not a phase's end.
 ///
-/// `m4_add` covers every phase the wall report names; this is for the few
+/// `add_phase` covers every phase the wall report names; this is for the few
 /// places where the interesting instant is a *start* -- the GKR's input layers
 /// arriving on the card, say -- or where a phase is not timed at all.
-pub fn m4_mark(name: &str) {
+pub fn mark_timeline(name: &str) {
     stwo::prover::lookups::gkr_prover::memmark::mark(name);
 }
 
 /// B11 stream F: the byte counter beside the timer.
 ///
 /// A phase's achieved GB/s is only readable off one dump if the bytes it moved
-/// are recorded where its seconds are. Same keying as `m4_add` -- per chunk,
+/// are recorded where its seconds are. Same keying as `add_phase` -- per chunk,
 /// per name -- reported as `host_bytes`.
-pub fn m4_bytes(name: &'static str, bytes: u64) {
-    let k = m4_chunk();
-    let mut g = m4b_acc().lock().unwrap();
+pub fn add_bytes(name: &'static str, bytes: u64) {
+    let k = current_chunk();
+    let mut g = byte_acc().lock().unwrap();
     let e = g.entry(k).or_default().entry(name).or_insert(0);
     *e += bytes;
 }
 
 /// The current chunk's byte counters.
-pub fn m4_bytes_report() -> Value {
-    let k = m4_chunk();
-    let g = m4b_acc().lock().unwrap();
+pub fn bytes_report() -> Value {
+    let k = current_chunk();
+    let g = byte_acc().lock().unwrap();
     let mut o = serde_json::Map::new();
     if let Some(m) = g.get(&k) {
         for (k, b) in m.iter() {
@@ -150,9 +151,9 @@ pub fn m4_bytes_report() -> Value {
 }
 
 /// The current chunk's phases.
-pub fn m4_report() -> Value {
-    let k = m4_chunk();
-    let g = m4_acc().lock().unwrap();
+pub fn phases_report() -> Value {
+    let k = current_chunk();
+    let g = phase_acc().lock().unwrap();
     let mut o = serde_json::Map::new();
     if let Some(m) = g.get(&k) {
         for (k, (n, s)) in m.iter() {
@@ -165,7 +166,7 @@ pub fn m4_report() -> Value {
 /// The first CUDA call in the process pays for context creation and the
 /// fatbin load. Attributing that to the twiddles would make a per-process cost
 /// look like a per-proof one, so it is drawn out on its own line.
-pub fn m4_touch_device() {
+pub fn touch_device() {
     #[cfg(feature = "cuda")]
     let _ = stwo::stwo_cuda::base_field_vec::BaseFieldVec::from_vec(
         vec![stwo::core::fields::m31::M31::from_u32_unchecked(0); 1],
@@ -177,31 +178,27 @@ pub fn m4_touch_device() {
 /// Default 16, swept in 18.4: below 2^16 rows rayon's per-column cost exceeds
 /// what the gather saves, and at the design point 2,641 of the 4,612 columns
 /// are that small. `=0` is every column, which is what 18.3 measured.
-pub fn m4_parmin() -> u32 {
+pub fn parallel_gather_min() -> u32 {
     std::env::var("ZK_PARALLEL_GATHER_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(16)
-}
-
-/// Milestone 4's switches, read once. `=0` turns one off; the default is on.
-pub fn m4_switch(name: &str) -> bool {
-    std::env::var(name).map(|v| v != "0").unwrap_or(true)
 }
 
 /// The opposite default: a switch that is off unless the environment asks for
 /// it. True means "not asked for", so a caller reads it as the early return.
-pub fn m4_switch_off(name: &str) -> bool {
+pub fn switch_off(name: &str) -> bool {
     !std::env::var(name).map(|v| v != "0").unwrap_or(false)
 }
 
-/// Milestone 4's tri-state modes, read once. A mode selects a path that has
-/// still to prove itself equal to the one it replaces, and the default has to
-/// be the proven one -- so a mode is born off, and then, in the same commit
-/// that lands its digest gate, its default flips to the value that gated.
-/// `m4b_default` is that table.
-pub fn m4b_mode(name: &str) -> u32 {
+/// A path's tri-state mode, read once: 0 the host path, 1 the device path, 2
+/// both, with every cell of the second asserted against the first. A mode
+/// selects a path that has still to prove itself equal to the one it replaces,
+/// and the default has to be the proven one -- so a mode is born off, and
+/// then, in the same commit that lands its digest gate, its default flips to
+/// the value that gated. `default_path_mode` is that table.
+pub fn path_mode(name: &str) -> u32 {
     std::env::var(name)
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| m4b_default(name))
+        .unwrap_or_else(|| default_path_mode(name))
 }
 
 /// The proven default for each tri-state mode, on the CUDA build.
@@ -223,7 +220,7 @@ pub fn m4b_mode(name: &str) -> u32 {
 /// exactly as before, and graduates into this table in the commit that lands
 /// its own gate.
 #[cfg(feature = "cuda")]
-fn m4b_default(name: &str) -> u32 {
+fn default_path_mode(name: &str) -> u32 {
     match name {
         // The component witness generations, the shared tables, the pinned
         // staging pool, the preprocessed columns, the accumulators and the
@@ -260,7 +257,7 @@ fn m4b_default(name: &str) -> u32 {
         // +832 MiB at C=4096 and +2,560 MiB at C=16384 against a 143,771 MiB
         // card, measured, and the worst pair the sequence contains (L0 and L1
         // at C=16384, 76,823 MiB apiece on their own) peaked at 76,823 MiB
-        // together. The reference backend is untouched -- `m4b_default` is
+        // together. The reference backend is untouched -- `default_path_mode` is
         // all-zero without the `cuda` feature -- so the digest comparison
         // still has something to be a comparison against.
         "ZK_PIPELINE" => 1,
@@ -276,7 +273,7 @@ fn m4b_default(name: &str) -> u32 {
 /// every digest comparison is made against, and a device default on that backend
 /// would call FFI stubs. The reference backend is untouched by construction.
 #[cfg(not(feature = "cuda"))]
-fn m4b_default(_name: &str) -> u32 {
+fn default_path_mode(_name: &str) -> u32 {
     0
 }
 
@@ -312,7 +309,7 @@ pub fn modes_json() -> Value {
         "ZK_PREPROCESSED_TREE_CACHE",
         "ZK_LOWERING_CACHE",
     ] {
-        put(name, m4b_mode(name));
+        put(name, path_mode(name));
     }
     // `ZK_DEVICE_WITNESS_GEN_KEY_TILE` is the one mode whose fallback is another mode
     // rather than the table, so it is asked for through its own reader. This
@@ -327,11 +324,11 @@ pub fn modes_json() -> Value {
     // object. All of them default on and all of them predate this stream.
     for name in ["ZK_PARALLEL_GATHER", "ZK_COMMIT_BY_REFERENCE", "ZK_PARALLEL_SCAN",
                  "ZK_KERNEL_REFERENCE_CHECK"] {
-        put(name, u32::from(m4_switch(name)));
+        put(name, u32::from(switch_on(name)));
     }
     // B12 stream HH: an opt-in switch, off unless the env asks for it, so every
     // run JSON says which residency regime it ran under.
-    put("ZK_LDE_ONLY", u32::from(m3_lde_only()));
+    put("ZK_LDE_ONLY", u32::from(lde_only()));
     Value::Object(modes)
 }
 
@@ -348,11 +345,11 @@ pub fn config_json() -> Value {
         "hash": "Blake2s (Blake2sM31MerkleChannel)",
         // B7a milestone 3: which of the three changes this run had on.
         "m3": {
-            "store_coeffs": m3_switch("ZK_STORE_COEFFICIENTS"),
-            "device_merkle_reduce": m3_switch("ZK_DEVICE_MERKLE"),
-            "fri_gather": m3_switch("ZK_FRI_GATHER"),
-            "prewarm": m3_switch("ZK_PREWARM"),
-            "lde_only": m3_lde_only(),
+            "store_coeffs": switch_on("ZK_STORE_COEFFICIENTS"),
+            "device_merkle_reduce": switch_on("ZK_DEVICE_MERKLE"),
+            "fri_gather": switch_on("ZK_FRI_GATHER"),
+            "prewarm": switch_on("ZK_PREWARM"),
+            "lde_only": lde_only(),
             "merkle_mode": std::env::var("ZK_DEVICE_MERKLE").unwrap_or_else(|_| "1".into()),
             "launch_sync": std::env::var("ZK_LAUNCH_SYNC").is_ok()
         },
