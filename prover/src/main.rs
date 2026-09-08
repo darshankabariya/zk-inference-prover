@@ -441,6 +441,39 @@ fn probes_cmd(args: &[String]) {
 }
 
 // -------------------------------------------------------------------- pack ----
+/// The packed key tile at `sh`, with an exp table that holds every key it looks up.
+///
+/// The table is sized from the witness and capped at 2^22 rows, past which the
+/// table dominates a single-key-tile benchmark.  One master exponent serves the
+/// whole key tile, so every instance below it has its shift scaled up to that
+/// exponent by a public power of two, and the wider the key tile the wider that
+/// spread: at 8 and 16 instances of this sweep's shape the scaled index is one
+/// bit past the cap.  The keys past it were left off the table, where only the
+/// rejected proof at the end of the run reported them (#89).
+///
+/// `--table-bits N` bounds the size where the line gives one, which is what it
+/// does for a synthetic layer's table; it never lowers the bound below the 2^22
+/// rows the sizing has always been capped at, so the counts at the instance
+/// counts that already fit do not move under the flag.  Where the bound cannot
+/// hold the keys the sweep refuses, before the first commitment, with the number
+/// to pass.
+fn packed_key_tile(src: &Src, sh: Shape, variant: attn_witness::Variant) -> Attn {
+    let ceiling = src.log_table.max(22);
+    // pass 1: the witness's own sizing, capped as it always was
+    let a = Attn::get(&Src { log_table: 0, ..src.clone() }, sh, variant);
+    let need = a.key_bits();
+    if need <= a.log_table {
+        return a;
+    }
+    assert!(need <= ceiling,
+            "the packed key tile at insts={} looks up an exp table key of {need} bits \
+and --table-bits gives at most {ceiling}: pass --table-bits {need}", sh.insts);
+    // pass 2: the keys are counted and the table is sized to hold them.  A key is the
+    // shift scaled by a public power of two, and neither of those depends on how many
+    // rows the table has, so one repeat is enough.
+    Attn::get(&Src { log_table: need, ..src.clone() }, sh, variant)
+}
+
 /// The column budget: what packing `insts` heads onto one column set buys.
 ///
 /// This is the question B6 exists to answer.  B5 proved one head at ~1,200 columns
@@ -460,10 +493,11 @@ fn pack_cmd(args: &[String]) {
     for insts in arg_list(args, "--insts", &[1usize, 2, 4, 8, 16]) {
         assert!(insts.is_power_of_two(), "insts must be a power of two (see layout.rs)");
         let sh = Shape { s, c, hd, insts };
-        let a = Attn::get(&src, sh, v);
+        let a = packed_key_tile(&src, sh, v);
         let mut runs = vec![];
         for rep in 0..reps.max(1) {
-            eprintln!("pack {} {} (rep {})", sh.label(), v.name(), rep + 1);
+            eprintln!("pack {} {} (rep {}, exp table 2^{} rows)",
+                      sh.label(), v.name(), rep + 1, a.log_table);
             let o = attn_run::run(&a, &cfg);
             if !o.accepts() {
                 eprintln!("  REJECTED: stark={} qk={} av={} den={} sums={} off={}",
@@ -3685,5 +3719,54 @@ fn main() {
                        compose|pre-split|expect-root|model-roots|compose-probes|boundary-chain|boundary-grid|psweep|requant|requant-probes|residual-stream|residual-stream-probes|selftest");
             std::process::exit(2);
         }
+    }
+}
+
+// ------------------------------------------------------------------- tests ----
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sweep's own shape, and the flags `src_of` reads off a `pack` line.
+    fn packed(extra: &[&str], insts: usize) -> Attn {
+        let argv: Vec<String> = ["pack", "--s", "512", "--ctx", "1024", "--hd", "64",
+                                 "--variants", "intexp"]
+            .iter().chain(extra.iter()).map(|s| s.to_string()).collect();
+        packed_key_tile(&src_of(&argv), Shape { s: 512, c: 1024, hd: 64, insts },
+                        attn_witness::Variant::IntExp)
+    }
+
+    /// Issue #89: `--table-bits` bounds the packed key tile's exp table.
+    ///
+    /// One master exponent serves the whole key tile, so the wider the key tile
+    /// the further the lower instances' shifts are scaled up to reach it.  At 8
+    /// instances of the sweep's shape that puts the largest key one bit past the
+    /// 2^22 rows the sizing is capped at, and the keys past it were left off the
+    /// table, where only a rejected proof reported them.  At 1 instance the keys
+    /// sit exactly at the cap, and the flag must not move that.
+    #[test]
+    fn table_bits_sizes_the_packed_key_tile() {
+        let one = packed(&[], 1);
+        assert_eq!(one.log_table, 22, "the table at 1 instance is no longer 2^22 rows");
+        assert_eq!(one.off_table, 0, "{} keys off the table at 1 instance", one.off_table);
+        assert_eq!(packed(&["--table-bits", "23"], 1).log_table, one.log_table,
+                   "--table-bits moved the table at 1 instance");
+
+        let eight = packed(&["--table-bits", "23"], 8);
+        assert_eq!(eight.log_table, 23, "the table at 8 instances was not grown");
+        assert!(eight.key_bits() <= eight.log_table,
+                "keys of {} bits against a table of 2^{} rows",
+                eight.key_bits(), eight.log_table);
+        assert_eq!(eight.off_table, 0, "{} keys off the table at 8 instances",
+                   eight.off_table);
+    }
+
+    /// The same shape with no bound on the line: the keys do not fit, and the
+    /// refusal comes before the first commitment and names the number to pass.
+    #[test]
+    #[should_panic(expected = "pass --table-bits 23")]
+    fn the_packed_key_tile_refuses_keys_past_the_bound() {
+        packed(&[], 8);
     }
 }
