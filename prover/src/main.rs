@@ -1536,7 +1536,16 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
         // Stream EE: the residual pair is found by its label, not by tree index,
         // so this JSON keeps H's shape while the statement may carry any number
         // of sides; `boundary_sides` is every side with its label.
-        "boundary_roots": verdict.as_ref().map(|v| json!({
+        //
+        // Issue #119: the pair went in under `boundary_roots` too -- the rename
+        // of `bound_roots` gave it the name the ordered list already had and
+        // `json!` keeps the last, so the pair never reached the document. The
+        // three keys are three views of one set of roots, and the one a reader
+        // trusts is `boundary_sides`, the labelled one: `boundary_roots` is the
+        // same roots in the prover's commit order, which is the plan's order and
+        // not a fixed one, and `layer_boundary_roots` is the pair the chain
+        // check compares, pulled out by label.
+        "layer_boundary_roots": verdict.as_ref().map(|v| json!({
             "in": v.side_root(boundary::Axis::Layer, "in", None),
             "out": v.side_root(boundary::Axis::Layer, "out", None)})),
         "boundary_roots": verdict.as_ref().map(|v| v.boundary_roots.clone()),
@@ -1567,6 +1576,66 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
         "ao_wrap": compose::ao_wrap_json(&out.fixed.params),
     });
     (j, accepts)
+}
+
+/// Issue #119: one key per value in the run JSON, pinned where the object is
+/// written. `json!` keeps the last of two equal keys, so a rename that lands on
+/// a name the object already carries drops a value and reports nothing -- twice
+/// now, in the grid report (#39) and here. The object is a literal, so the check
+/// reads the source it is written in.
+#[cfg(test)]
+mod run_json_keys {
+    /// Every key of the run JSON's own object, in the order it is written.
+    fn keys() -> Vec<&'static str> {
+        let src = include_str!("main.rs");
+        let mut out = vec![];
+        let mut inside = false;
+        for line in src.lines() {
+            if !inside {
+                inside = line == "    let j = json!({";
+                continue;
+            }
+            if line == "    });" {
+                break;
+            }
+            // A key of the object itself starts at the object's own
+            // indentation. A nested object opens on the line of the key it
+            // belongs to, so on such a line only the first key is this
+            // object's; a line that opens none carries this object's keys and
+            // nothing else.
+            if !line.starts_with("        \"") {
+                continue;
+            }
+            let flat = !line.contains('{');
+            let mut rest = &line[8..];
+            while let Some(i) = rest.find('"') {
+                let after = &rest[i + 1..];
+                let Some(j) = after.find('"') else { break };
+                if after[j + 1..].starts_with(':') {
+                    out.push(&after[..j]);
+                    if !flat {
+                        break;
+                    }
+                }
+                rest = &after[j + 1..];
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_run_json_writes_every_key_once() {
+        let ks = keys();
+        // the last of the four shares its line with the key before it
+        for k in ["boundary_roots", "layer_boundary_roots", "boundary_sides", "interaction_secs"] {
+            assert!(ks.contains(&k), "the scan found the run JSON's object; it read {ks:?}");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for k in &ks {
+            assert!(seen.insert(*k),
+                    "the run JSON writes {k:?} twice and `json!` keeps the last");
+        }
+    }
 }
 
 /// Stream LL (E11), `notes/witness-slack.md` section 5 item 1, deliverable 1:
