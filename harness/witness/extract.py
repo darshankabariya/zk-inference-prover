@@ -221,15 +221,67 @@ def pow2_exponent(t):
     return np.where(exact, np.round(j), -1000).astype(np.int32)
 
 
+def dump_dir(base, block, layer, *, tag_blocks, tag_layer):
+    """The directory one (block, layer) dump is written to.
+
+    Both axes are in the *name* and nowhere else: the prover knows no directory
+    grammar (`grep -rn "witness_L" prover/` returns nothing; every path is
+    `format!("{dir}/<literal>")`), so a block is a directory and a layer is a
+    directory.  `_B<b>` goes before `_L<k>`, which is the order `shapes.py`
+    walks (`shape_of(f"{base}{k}")` over `<out>_B<b>_L`) and the order
+    `plan.py` builds (`wpre = f"{a.dir}/witness_B{b}_L"`).
+
+    The layer is tagged whenever `--layers` chose it, one layer or eight.  A
+    sequence extraction has to run layer 0 in a pass of its own -- `--embed`
+    writes the embedding table into every dump of the pass it is given, and the
+    prover turns the embedding gadget on for any dump that carries one -- so a
+    one-layer pass is the normal case, not the odd one, and it is named like
+    every other.  `--layer N`, the singular form the head and the reference
+    dumps use, is untagged as it was.
+    """
+    d = f"{base}_B{block}" if tag_blocks else base
+    return f"{d}_L{layer}" if tag_layer else d
+
+
+def selftest():
+    """The directory grammar, against the two readers.  No model, no card."""
+    base = "out/witness"
+    cases = [
+        # (the call, block-tagged, layer-tagged, block, layer, the name)
+        ("--layers 0 --blocks all --embed", True, True, 0, 0, "out/witness_B0_L0"),
+        ("the same pass, last block", True, True, 8, 0, "out/witness_B8_L0"),
+        ("--layers 1,2,3,4,5,6,7 --blocks all", True, True, 0, 7, "out/witness_B0_L7"),
+        ("--layers 12, last block only", False, True, 0, 12, "out/witness_L12"),
+        ("--layer 12 --blocks all", True, False, 3, 12, "out/witness_B3"),
+        ("--layer 12, the reference dump", False, False, 0, 12, "out/witness"),
+    ]
+    bad = 0
+    for label, tag_blocks, tag_layer, b, k, want in cases:
+        got = dump_dir(base, b, k, tag_blocks=tag_blocks, tag_layer=tag_layer)
+        bad += got != want
+        print(f"{'OK  ' if got == want else 'FAIL'}  {label:<40s} -> {got}")
+    # The claim the defect broke: a 32-layer shape table over a block reads
+    # exactly what 32 one-layer passes wrote, and layer 0 is one of them.
+    n = 32
+    read = [f"{base}_B0_L{k}" for k in range(n)]
+    wrote = [dump_dir(base, 0, k, tag_blocks=True, tag_layer=True) for k in range(n)]
+    ok = read == wrote
+    bad += not ok
+    print(f"{'OK  ' if ok else 'FAIL'}  {n} one-layer passes == what shapes.py and "
+          f"plan.py read over <base>_B0_L")
+    return 1 if bad else 0
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--tokens", type=int, default=1536)
     p.add_argument("--chunk", type=int, default=512)
     p.add_argument("--layer", type=int, default=12)
-    # B7b: several layers from one forward pass, each to `<out>_L<k>`; with one
-    # layer the output directory is unchanged
+    # B7b: several layers from one forward pass, each to `<out>_L<k>`, and one
+    # layer is named the same way -- see `dump_dir`
     p.add_argument("--layers", default=None,
-                   help="comma-separated layer indices (overrides --layer)")
+                   help="comma-separated layer indices (overrides --layer); every "
+                        "layer of the pass is written to <out>[_B<b>]_L<k>")
     p.add_argument("--out", default=OUT, help="output directory (base, for --layers)")
     p.add_argument("--spec", default="b65-design")
     p.add_argument("--mats", default=",".join(MATS))
@@ -271,11 +323,17 @@ if __name__ == "__main__":
                    help="also dump B10 step 3's diagonal block (the S decoded tokens "
                         "against each other): one joint row maximum, the total "
                         "denominator, and the diagonal block's own keys and values")
+    p.add_argument("--selftest", action="store_true",
+                   help="check the output-directory grammar against what the shape "
+                        "table and the plan read; no model and no card")
     a = p.parse_args()
+    if a.selftest:
+        sys.exit(selftest())
     SLIM = a.slim
     SLIM_NUM = a.slim_num
     setup()
     layers = [int(x) for x in a.layers.split(",")] if a.layers else [a.layer]
+    TAG_LAYER = a.layers is not None
     OUT_BASE = a.out
     spec = SPECS[a.spec]
     assert spec.int_softmax, f"{a.spec} is not an integer-softmax spec"
@@ -359,14 +417,7 @@ if __name__ == "__main__":
         global OUT, SHARE
 
         for L in layers:
-            # Stream DD: the block axis, and it is entirely in the *name*.  The
-            # prover knows no directory grammar (`grep -rn "witness_L" prover/`
-            # returns nothing; every path is `format!("{dir}/<literal>")`), so a
-            # block is a directory and nothing else.  `_B<b>` goes before the
-            # `_L<k>` the shape table already walks, which is what lets
-            # `shapes32.py <base>_B<b>_L 32` read one block unchanged.
-            base_dir = f"{OUT_BASE}_B{bi}" if tag_blocks else OUT_BASE
-            OUT = base_dir if len(layers) == 1 else f"{base_dir}_L{L}"
+            OUT = dump_dir(OUT_BASE, bi, L, tag_blocks=tag_blocks, tag_layer=TAG_LAYER)
             SHARE = os.path.join(a.share, f"L{L}") if a.share else None
             os.makedirs(OUT, exist_ok=True)
             print(f"block {bi} layer {L} -> {OUT}")
