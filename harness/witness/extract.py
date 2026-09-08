@@ -49,6 +49,9 @@ from .. import provenance  # noqa: E402
 from .common import MODEL, SPECS, setup, tokens  # noqa: E402
 from .model import BF16, Cache, Model, Recorder  # noqa: E402
 from .quant import pow2_ceil, round_hafz  # noqa: E402
+# issue #118: the bound below is the shape table's too, so it is defined once,
+# in the module that has no torch and no numpy at import time
+from .shapes import ao_no_wrap, ao_no_wrap_refusal  # noqa: E402
 
 OUT = os.path.join(HERE, "out", "witness")
 MATS = ["q", "k", "v", "o", "gate", "up", "down"]
@@ -172,101 +175,6 @@ def parse_blocks(spec, n):
 
 def bits_for(v):
     return int(v).bit_length()
-
-
-# ---- the attention output's no-wrap bound (issue #111) ----------------------
-# The rounding identity the attention-output fold proves multiplies `2 mag num`,
-# and it is an identity over the integers only while that product stays under
-# the field's `2^31 - 1`.  `prover/src/main.rs`'s `params_of` sizes the two
-# accumulator limbs and picks the form off this dump's own numbers, and
-# `Plan::new` (`prover/src/compose.rs`, after zk-prover PR #110) refuses a
-# statement whose window does not fit -- at proving time, hours after the
-# extraction that decided it.  The three functions below are that arithmetic,
-# so the extraction refuses instead.
-#
-# `MIN_LOG_ROWS` is `prover/src/common.rs`: a range table is its own `1 << bits`
-# rows and the LogUp builder has no shorter column, so no limb is narrower.
-MIN_LOG_ROWS = 4
-# `p = 2^31 - 1`, so the product has 31 bits to fit in.  The sibling bound's cap
-# is 30 in the plain form and the same 31 in the `denp2` form.
-NO_WRAP_BITS = 31
-
-
-def ao_acc_split(need):
-    """`params_of`'s two accumulator limbs for a witness needing `need` bits.
-
-    The low limb takes what it can up to 16, the widest range table the layer
-    already builds; the high limb takes the rest; neither goes below the
-    shortest column the builder has.
-    """
-    lo = min(max(need, MIN_LOG_ROWS), 16)
-    return lo, max(need - lo, MIN_LOG_ROWS)
-
-
-def ao_no_wrap(acc_bits, jv_max, jo_min, attn_out_bits, rem_bits):
-    """The attention output's no-wrap bound, in the two forms the prover uses.
-
-    The accumulator's two limbs bound one factor of `2 mag num` and the exponent
-    table's own domain bounds the other, so what has to hold is
-    `1 + lo + hi + e_hi <= 31` with `e_hi = jv_max - jo_min`.  The offset form
-    spends the accumulator's sign bit on the offset and the magnitude form
-    spends it on the window instead, which is worth one bit and no more;
-    `params_of` takes the magnitude form exactly when the offset form does not
-    fit, so that every dump that composed before it existed keeps its columns.
-
-    The sibling bound of the same identity is `q_bits + rem_bits`, against 30 in
-    the plain form and `q_bits + rem_bits <= 31` in the `denp2` form -- the same
-    one bit, taken the same way.
-
-    Returns what each window comes to, its limit and its **margin**: how many
-    bits a wider context, another model or a different quantization may add
-    before this layer stops composing.  A negative margin is a dump that would
-    not prove.
-    """
-    e_hi = max(jv_max - jo_min, 0)
-    lo_off, hi_off = ao_acc_split(acc_bits + 1)
-    lo_mag, hi_mag = ao_acc_split(acc_bits)
-    mag = 1 + lo_off + hi_off + e_hi > NO_WRAP_BITS
-    lo, hi = (lo_mag, hi_mag) if mag else (lo_off, hi_off)
-    bits = 1 + lo + hi + e_hi
-    q_bits = attn_out_bits - 1
-    denp2 = q_bits + rem_bits > 30
-    q_limit = NO_WRAP_BITS if denp2 else 30
-    return dict(
-        bits=bits, limit=NO_WRAP_BITS, margin=NO_WRAP_BITS - bits,
-        acc_bits=acc_bits, acc_lo_bits=lo, acc_hi_bits=hi, e_hi=e_hi,
-        form="magnitude" if mag else "offset",
-        quotient=dict(bits=q_bits + rem_bits, limit=q_limit,
-                      margin=q_limit - (q_bits + rem_bits),
-                      q_bits=q_bits, rem_bits=rem_bits,
-                      form="denp2" if denp2 else "plain"),
-    )
-
-
-def ao_no_wrap_refusal(w, where):
-    """What `where`'s window is refused with, or `None` if it fits.
-
-    The message carries the numbers, because there is nothing to widen: the two
-    limbs must together cover `|acc|` however many of them there are, and `e_hi`
-    is the exponent table's own domain, so what is left is a narrower shape.
-    """
-    if w["margin"] < 0:
-        return (f"{where}: the attention output's no-wrap window does not fit: "
-                f"1 + {w['acc_lo_bits']} + {w['acc_hi_bits']} + {w['e_hi']} = {w['bits']} "
-                f"> {w['limit']} (over by {-w['margin']}, {w['form']} form). The two limbs "
-                f"must together cover |acc| ({w['acc_bits']} bits) and the exponent window "
-                f"must cover e = jv - jo, so no wider decomposition of either recovers a "
-                f"bit, and the one bit the magnitude form is worth is already taken. What "
-                f"is left is a narrower context or a quantization whose accumulator is "
-                f"narrower.")
-    q = w["quotient"]
-    if q["margin"] < 0:
-        return (f"{where}: the attention output's quotient term does not fit: "
-                f"{q['q_bits']} + {q['rem_bits']} = {q['bits']} > {q['limit']} (over by "
-                f"{-q['margin']}, {q['form']} form). `q_bits` is the fold's target width "
-                f"minus one and `rem_bits` is this dump's own divisor range, and the one "
-                f"bit the `denp2` form is worth is already taken.")
-    return None
 
 
 def bf16_parts(t):

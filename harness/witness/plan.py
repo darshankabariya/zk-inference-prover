@@ -58,6 +58,21 @@ layer-0 re-extract with `--embed`).  The E11 plan at C=4096 is
 part of its emit key, so the emit set grows by the lines whose flags make a
 new kernel shape and by nothing else.
 
+**Issue #118: the pin every line is proved at.**  `--ao-rem-bits` is one number
+for the whole loop, taken over every row of every block, and a layer whose fold
+is wide can be pushed past the quotient cap by it -- `q_bits + rem_bits`, 30 in
+the plain form and 31 in the `denp2` form (`Plan::new`) -- although its own
+divisor range fits.  So each layer line's pin is resolved here as the loop will
+resolve it (the shared one, unless the line carries one of its own, which is
+what `--ao-rem-per-line` writes), the bound is evaluated at it, and a plan with a
+layer over the cap is refused with the layer and the numbers instead of being
+written and refused four hours later at the loop's first chunk.  What every plan
+prints is the tightest window and what is left of it; the recorded C=4,096 plan
+sits at `11 + 20 = 31` of 31 and is unchanged, line for line.  The head line is
+not checked: its pin is `--head-flags`' and the shape table has no row for it.
+
+    python -m harness.witness.plan --selftest     the check itself, no witness set
+
 **Stream MM (E11): what the model manifest needs of a plan.**  `zk-prover
 model-roots` requires `master_table_bits` to be **one value per layer across
 blocks** -- `table/exp` is `1 << log_table` rows, so a layer whose blocks
@@ -77,8 +92,14 @@ one `extract.py --blocks 7,8 --head --diagonal-block` pass (stream OO).
 """
 
 import argparse
+import contextlib
+import io
 import json
 import os
+import sys
+import tempfile
+
+from .shapes import ao_pin, ao_pin_refusals, ao_pin_row, ao_where
 
 
 def read_rows(path):
@@ -100,6 +121,22 @@ def want_layers(spec, rows):
 
 def layer_line(tb, wdir, tag, extra=""):
     return f"--table-bits {tb}{extra} --witness {wdir} --ser-tag {tag}"
+
+
+def ao_rem_of(extra, pin):
+    """Issue #118: the `--ao-rem-bits` this line is proved at.
+
+    A line's arguments are placed after the shared ones (`chunks.rs::plan_of`)
+    and `arg_scalar` takes the last match, so a pin on the line wins over the
+    shared one and the shared one is what a line that names none is proved at.
+    `--ao-rem-per-line` puts one there, and so may `--layer-flags` or
+    `--l0-flags`; whichever is last on the line is the one the chunk gets.
+    """
+    parts = extra.split()
+    for i in range(len(parts) - 1, 0, -1):
+        if parts[i - 1] == "--ao-rem-bits":
+            return int(parts[i])
+    return pin
 
 
 def head_line(hdir, htb, tag="head", extra="", layer=None, block=None):
@@ -237,6 +274,23 @@ def main():
     else:
         blocks = list(range(int(a.blocks)))
 
+    # the blocks whose layer lines this plan writes: block 0's are skipped
+    # unless it is asked for, and what it asked for is then not this plan's
+    written = [b for b in blocks if not (b == 0 and not a.with_block_0)]
+    tables = {}
+
+    def table_path(b):
+        return f"{a.dir}/shapes.json" if b is None else f"{a.dir}/shapes_B{b}.json"
+
+    def has_table(b):
+        return os.path.exists(table_path(b))
+
+    def table(b):
+        """One block's shape table, read once."""
+        if b not in tables:
+            tables[b] = read_rows(table_path(b))
+        return tables[b]
+
     # stream KK: which blocks carry a head chunk.  `None` keeps the pre-KK rule
     # (the last block, tagged `head`); a list tags them `B<b>head` unless there
     # is only one.
@@ -248,8 +302,7 @@ def main():
         head_blocks = None
     # the layer coordinate the head chunk sits at: one past the last layer the
     # plan writes, read off the dump's own shapes rather than assumed to be 32
-    n_layers = 1 + max(read_rows(f"{a.dir}/shapes.json" if blocks == [None]
-                                 else f"{a.dir}/shapes_B{blocks[-1]}.json"))
+    n_layers = 1 + max(table(None if blocks == [None] else blocks[-1]))
 
     # stream MM: the widest `table_bits` any block of a layer asked for, so one
     # model root per layer exists.  Built over the blocks the plan actually
@@ -259,28 +312,34 @@ def main():
         m = json.load(open(a.table_bits_map))
         widest = {int(k): int(v) for k, v in m.items() if k != "head"}
     elif a.table_bits_per_layer:
-        for b in blocks:
-            if b is None:
-                rows_b = read_rows(f"{a.dir}/shapes.json")
-            else:
-                if b == 0 and not a.with_block_0:
-                    continue
-                rows_b = read_rows(f"{a.dir}/shapes_B{b}.json")
-            for k, r in rows_b.items():
+        for b in written:
+            for k, r in table(b).items():
                 widest[k] = max(widest.get(k, 0), r["table_bits"])
+
+    # ---- issue #118: the pin a line that names none is proved at ------------
+    # `--ao-rem-bits` is one number for the whole loop and the drivers read it
+    # off the shape table's worst case, which is `worst_of`'s maximum over every
+    # row of every block -- a block whose lines this plan skips included, since
+    # the pin is on the loop's command line and not on a line.  So it is taken
+    # here over every block that has a table, and a table too old to carry
+    # `ao_rem_bits` is not checked at all rather than checked against a default.
+    pin_rows = [r for b in blocks if has_table(b) for r in table(b).values()]
+    pin = (ao_pin(pin_rows) if pin_rows and all(r.get("ao_rem_bits") for r in pin_rows)
+           else None)
+    checked, refused = [], []
 
     lines, emit = [], {}
     n_rows, n_layer_rows = 0, 0
     for b in blocks:
         if b is None:
-            rows = read_rows(f"{a.dir}/shapes.json")
+            rows = table(None)
             pre, wpre = "", f"{a.dir}/witness_L"
         else:
             if b == 0 and not a.with_block_0:
                 lines.append("# block 0 skipped: c = 0 is the diagonal-block-only chunk (stream CC); "
                              "pass --with-block-0 once it composes")
                 continue
-            rows = read_rows(f"{a.dir}/shapes_B{b}.json")
+            rows = table(b)
             pre, wpre = f"B{b}", f"{a.dir}/witness_B{b}_L"
             lines.append(f"# block {b}: prefix c = {rows[sorted(rows)[0]]['c']}")
         want = want_layers(a.layers, rows)
@@ -291,6 +350,14 @@ def main():
                 rem = rows[k].get("ao_rem_bits")
                 assert rem, f"--ao-rem-per-line: {a.dir}'s shape table has no ao_rem_bits"
                 extra += f" --ao-rem-bits {rem}"
+            # issue #118: what this line will be proved at, before it is
+            # written -- the shared pin unless the line carries one of its own
+            if pin is not None:
+                row = rows[k] if b is None else dict(rows[k], block=b)
+                q, msg = ao_pin_row(row, ao_rem_of(extra, pin))
+                checked.append((row, q))
+                if msg:
+                    refused.append(msg)
             wdir = f"{wpre}{k}"
             if k == 0 and a.l0_dir:
                 wdir = f"{a.l0_dir}/{os.path.basename(wpre)}{k}"
@@ -319,6 +386,11 @@ def main():
             lines.append(hl)
             n_rows += 1
             emit.setdefault((None, htb, True, hf), hl)
+    # issue #118: refused here, with the layer and the numbers, and before the
+    # plan file is written -- a plan that would be refused by `Plan::new` at the
+    # first chunk of the loop is not written at all
+    assert not refused, ao_pin_refusals(refused)
+
     lines.insert(0, f"# stream O: {n_layer_rows} layer chunks from {a.dir}"
                     if blocks == [None] else
                     f"# stream DD: {n_layer_rows} layer chunks over {len(blocks)} token "
@@ -328,6 +400,15 @@ def main():
     with open(a.out, "w") as f:
         f.write("\n".join(lines) + "\n")
     print(f"{a.out}: {n_rows} chunks")
+    if checked:
+        r, q = min(checked, key=lambda t: t[1]["margin"])
+        own = " (the line's own)" if a.ao_rem_per_line else ""
+        print(f"attention output: at --ao-rem-bits {q['rem_bits']}{own} the tightest "
+              f"quotient window is {q['bits']}/{q['limit']} bits, margin {q['margin']} "
+              f"({q['form']} form), at {ao_where(r)}")
+    elif pin is None:
+        print("attention output: the shape tables carry no ao_rem_bits, so the pin the "
+              "loop is launched with is not checked here")
 
     if a.emit_out:
         el = [f"# stream DD: {len(emit)} distinct emit shapes for the {n_rows} chunks of "
@@ -341,5 +422,129 @@ def main():
               f"x{n_rows / max(len(emit), 1):.1f} fewer cudaemit launches)")
 
 
+def _shape_table(d, b, rems, bits=12):
+    """One block's shape table, with only the fields a plan reads.
+
+    `bits` is the fold's target width, one value or one per row: a set whose
+    layers were not all extracted at the same width is what `--l0-dir` points a
+    plan at, and it is where the model-wide pin and a layer's own cap part.
+    """
+    if isinstance(bits, int):
+        bits = [bits] * len(rems)
+    rows = [dict(layer=k, block=b, c=512, table_bits=23, ao_rem_bits=rem,
+                 attn_out_bits=w) for k, (rem, w) in enumerate(zip(rems, bits))]
+    with open(os.path.join(d, f"shapes_B{b}.json"), "w") as f:
+        json.dump(dict(rows=rows, block=b), f)
+
+
+def _plan(argv):
+    """`main()` on `argv`: (what it printed, or the refusal it raised)."""
+    buf = io.StringIO()
+    argv0 = sys.argv
+    try:
+        sys.argv = ["plan"] + argv
+        with contextlib.redirect_stdout(buf):
+            main()
+    except AssertionError as e:
+        return None, str(e)
+    finally:
+        sys.argv = argv0
+    return buf.getvalue(), None
+
+
+def selftest():
+    """Issue #118: the pin every line is proved at, and the layer it refuses.
+
+    No dump, no model and no card: the shape tables are written here with the
+    numbers the recorded C=4,096 set carries -- `attn_out_bits` 12, so `q_bits`
+    11, and divisor ranges up to the 20 whose `denp2` window is the field's 31
+    exactly.  The layer this check exists for is the one whose own range fits
+    and whose model-wide pin does not, which is what `--ao-rem-per-line` is for
+    and what the refusal names.
+    """
+    bad = 0
+
+    def case(label, ok, note):
+        nonlocal bad
+        bad += not ok
+        print(f"{'OK  ' if ok else 'FAIL'}  {label:<52s} -> {note}")
+
+    def last(printed, refusal):
+        return (printed.strip().splitlines()[-1] if printed
+                else (refusal or "NOT refused").split(".")[0])
+
+    # 1. which pin a line resolves to: the shared one, unless the line names one
+    got = (ao_rem_of(" --round even", 20), ao_rem_of(" --round even --ao-rem-bits 19", 20),
+           ao_rem_of(" --ao-rem-bits 19 --ao-rem-bits 17", 20))
+    case("a line's pin wins over the shared one, last first", got == (20, 19, 17), got)
+
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "plan.txt")
+        args = ["--dir", d, "--blocks", "2", "--with-block-0", "--out", out]
+
+        # 2. the recorded set's own numbers: the pin is 20, `11 + 20 = 31` is the
+        #    denp2 form's cap exactly, and the lines carry no pin of their own
+        _shape_table(d, 0, [14, 15, 19])
+        _shape_table(d, 1, [15, 16, 20])
+        printed, refusal = _plan(args)
+        body = [l for l in open(out).read().splitlines() if not l.startswith("#")]
+        ok = (refusal is None and len(body) == 6 and "--ao-rem-bits" not in "".join(body)
+              and body[0] == f"--table-bits 23 --witness {d}/witness_B0_L0 --ser-tag B0L0"
+              and "margin 0 (denp2 form)" in printed)
+        case("the recorded pin composes, and adds nothing to a line", ok,
+             last(printed, refusal))
+
+        # 3. the layer this check exists for: one layer of the set was extracted
+        #    at the narrower fold width and its own divisor range is 23, so the
+        #    model-wide pin is 23 and every 12-bit layer is over the cap at it --
+        #    although every one of them fits at its own
+        _shape_table(d, 1, [15, 16, 23], bits=[12, 12, 8])
+        os.remove(out)          # a refused plan is not written at all
+        printed, refusal = _plan(args)
+        ok = (refusal is not None and refusal.startswith("block 0 layer 0: ")
+              and "11 + 23 = 34 > 31 (over by 3, denp2 form)" in refusal
+              and "does fit" in refusal and "--ao-rem-per-line" in refusal
+              and not os.path.exists(out))
+        case("a merged pin past a layer's cap is refused", ok, last(printed, refusal))
+
+        # 4. and the per-line pin is what admits it, which is what the refusal
+        #    named: every line is proved at its own range
+        printed, refusal = _plan(args + ["--ao-rem-per-line"])
+        body = [l for l in open(out).read().splitlines() if not l.startswith("#")]
+        ok = (refusal is None and len(body) == 6
+              and body[0] == (f"--table-bits 23 --ao-rem-bits 14 --witness "
+                              f"{d}/witness_B0_L0 --ser-tag B0L0")
+              and body[-1] == (f"--table-bits 23 --ao-rem-bits 23 --witness "
+                               f"{d}/witness_B1_L2 --ser-tag B1L2"))
+        case("--ao-rem-per-line writes each layer's own", ok, last(printed, refusal))
+
+        # 5. a layer whose own range does not fit either: no pin recovers it,
+        #    and the message says so rather than naming a flag that cannot help
+        _shape_table(d, 1, [15, 16, 22])
+        printed, refusal = _plan(args + ["--ao-rem-per-line"])
+        ok = (refusal is not None and refusal.startswith("block 1 layer 2: ")
+              and "11 + 22 = 33 > 31 (over by 2, denp2 form)" in refusal
+              and "no pin recovers it" in refusal)
+        case("a shape that fits at no pin says so", ok, last(printed, refusal))
+
+        # 6. the two forms, at the fold's int8 width: `7 + 23 = 30` is the plain
+        #    form's cap, and the bit past it is the denp2 form's, taken the way
+        #    `params_of` takes it
+        _shape_table(d, 0, [20, 20, 20], bits=8)
+        _shape_table(d, 1, [20, 20, 23], bits=8)
+        printed, refusal = _plan(args)
+        ok = refusal is None and "30/30 bits, margin 0 (plain form)" in printed
+        case("the plain form's cap, spent to zero", ok, last(printed, refusal))
+
+        _shape_table(d, 1, [20, 20, 24], bits=8)
+        printed, refusal = _plan(args)
+        ok = refusal is None and "31/31 bits, margin 0 (denp2 form)" in printed
+        case("and the denp2 form's one bit past it", ok, last(printed, refusal))
+
+    return 1 if bad else 0
+
+
 if __name__ == "__main__":
-    main()
+    # the self-test takes no other argument, and is read before the parser so
+    # that --dir and --out stay required of a plan
+    sys.exit(selftest() if "--selftest" in sys.argv[1:] else main())

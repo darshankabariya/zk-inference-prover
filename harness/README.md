@@ -48,6 +48,27 @@ only spend more of the window, so a dump refused here is refused under every
 plan. `witness/extract.py --selftest` checks the arithmetic, with no model and
 no card, against the shape the prover pins its own window on.
 
+## What the shape table and the plan writer refuse
+
+`--ao-rem-bits` is one number for a whole chunk loop. The shape table takes it
+over every layer of every token block and the drivers put that worst case on the
+loop's command line, so a layer is proved at the model-wide value and not at its
+own -- and the second of the two bounds above, `q_bits + rem_bits` against 30 in
+the plain form and 31 in the `denp2` form, has `q_bits` from the layer's own fold
+width. A layer can therefore be pushed past that cap by a pin another layer
+needed, although its own divisor range fits inside it. `witness/shapes.py`
+evaluates the bound under the pin it writes and `witness/plan.py` under the pin
+each line will resolve -- the shared one, unless the line carries one of its own
+-- and both refuse, with the layer named and the numbers, rather than leaving
+that to the loop's first chunk hours later. The layer's own value is legal, so
+the refusal names what admits it: `plan.py --ao-rem-per-line` writes each layer's
+own value on that layer's line, and a line's arguments are read after the shared
+ones. Every table and every plan also prints the tightest window and its margin.
+The recorded 4,096-token set sits at `11 + 20 = 31` of 31, which composes and
+admits nothing wider, and its plan is unchanged line for line.
+`witness/shapes.py --selftest` and `witness/plan.py --selftest` check the
+arithmetic and both refusals, with no model and no card.
+
 ## The unproved baseline
 
 `eval/baseline` measures how fast the same model runs when nothing is proved,
