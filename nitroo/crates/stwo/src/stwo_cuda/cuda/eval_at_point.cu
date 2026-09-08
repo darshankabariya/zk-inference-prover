@@ -173,19 +173,27 @@ qm31 eval_at_point(m31 *coeffs, int coeffs_size, qm31 point_x, qm31 point_y) {
 // Batched evaluation: evaluate N same-size polynomials at the same point
 // =============================================================================
 
+// The polynomial index rides the grid's y dimension, which a device caps at
+// 65,535 blocks, so a batch wider than that is launched in slices of at most
+// this many polynomials. Each slice passes the index of its first polynomial as
+// `poly_offset` and the kernels add it back, so every index computed is the one
+// a single launch would have computed and the results keep their order.
+static const int MAX_GRID_DIM_Y = 65535;
+
 // Batched first pass: evaluates N polynomials simultaneously.
-// Grid: dim3(blocks_per_poly, num_polys), Block: 256
+// Grid: dim3(blocks_per_poly, polys_in_slice), Block: 256
 // Each block handles one chunk of one polynomial.
-// blockIdx.x = block within the polynomial, blockIdx.y = polynomial index.
+// blockIdx.x = block within the polynomial, poly_offset + blockIdx.y = polynomial index.
 __global__ void batch_eval_at_point_first_pass(
     m31 **coeffs_ptrs,       // [num_polys] array of device pointers to polynomial coefficients
     qm31 *temp,              // Flat temp buffer
     qm31 *factors,           // Shared circle power mappings
     int coeffs_size,         // All polys have the same size
     int factors_size,
-    int temp_stride           // Number of blocks per polynomial in this level
+    int temp_stride,          // Number of blocks per polynomial in this level
+    int poly_offset           // Index of the first polynomial of this slice
 ) {
-    int poly_idx = blockIdx.y;
+    int poly_idx = poly_offset + blockIdx.y;
     int block_in_poly = blockIdx.x;
     int idx = threadIdx.x;
 
@@ -244,7 +252,7 @@ __global__ void batch_eval_at_point_first_pass(
 }
 
 // Batched second pass: hierarchical reduction for N polynomials.
-// Grid: dim3(new_blocks_per_poly, num_polys), Block: 256
+// Grid: dim3(new_blocks_per_poly, polys_in_slice), Block: 256
 __global__ void batch_eval_at_point_second_pass(
     qm31 *temp,
     qm31 *factors,
@@ -253,9 +261,10 @@ __global__ void batch_eval_at_point_second_pass(
     int input_stride,         // Stride between polynomials in the input level
     int output_stride,        // Stride between polynomials in the output level
     int input_offset,         // Offset in temp for the start of input data
-    int output_offset         // Offset in temp for the start of output data
+    int output_offset,        // Offset in temp for the start of output data
+    int poly_offset           // Index of the first polynomial of this slice
 ) {
-    int poly_idx = blockIdx.y;
+    int poly_idx = poly_offset + blockIdx.y;
     int block_in_poly = blockIdx.x;
     int idx = threadIdx.x;
 
@@ -371,12 +380,20 @@ void batch_eval_at_points(
     int bpp = first_num_blocks; // blocks per polynomial
     // Shared memory: 512 m31 coefficients (2048B) + 256 qm31 reduction entries (4096B) = 6144B
     int shared_memory_bytes = 512 * 4 + 512 * 8;
-    dim3 grid(bpp, num_polys);
 
-    batch_eval_at_point_first_pass<<<grid, block_dim, shared_memory_bytes>>>(
-        coeffs_ptrs, temp, device_mappings, coeffs_size, log_coeffs_size, level_sizes[0]
-    );
-    ASSERT_CUDA_SUCCESS(cudaGetLastError());
+    for (int poly_offset = 0; poly_offset < num_polys; poly_offset += MAX_GRID_DIM_Y) {
+        int polys_in_slice = num_polys - poly_offset;
+        if (polys_in_slice > MAX_GRID_DIM_Y) {
+            polys_in_slice = MAX_GRID_DIM_Y;
+        }
+        dim3 grid(bpp, polys_in_slice);
+
+        batch_eval_at_point_first_pass<<<grid, block_dim, shared_memory_bytes>>>(
+            coeffs_ptrs, temp, device_mappings, coeffs_size, log_coeffs_size, level_sizes[0],
+            poly_offset
+        );
+        ASSERT_CUDA_SUCCESS(cudaGetLastError());
+    }
 
     // 6. Reduction passes (stream ordering handles inter-pass dependencies)
     int mappings_offset = log_coeffs_size - 1;
@@ -387,15 +404,22 @@ void batch_eval_at_points(
         int new_num_blocks = level_sizes[lvl];
         int shared_mem = 512 * 4 * 4;  // 512 qm31 entries
 
-        dim3 grid2(new_num_blocks, num_polys);
-        batch_eval_at_point_second_pass<<<grid2, block_dim, shared_mem>>>(
-            temp, device_mappings, current_num_blocks, mappings_offset,
-            level_sizes[lvl - 1],  // input stride per poly
-            level_sizes[lvl],      // output stride per poly
-            level_offsets[lvl - 1], // input offset
-            level_offsets[lvl]      // output offset
-        );
-        ASSERT_CUDA_SUCCESS(cudaGetLastError());
+        for (int poly_offset = 0; poly_offset < num_polys; poly_offset += MAX_GRID_DIM_Y) {
+            int polys_in_slice = num_polys - poly_offset;
+            if (polys_in_slice > MAX_GRID_DIM_Y) {
+                polys_in_slice = MAX_GRID_DIM_Y;
+            }
+            dim3 grid2(new_num_blocks, polys_in_slice);
+            batch_eval_at_point_second_pass<<<grid2, block_dim, shared_mem>>>(
+                temp, device_mappings, current_num_blocks, mappings_offset,
+                level_sizes[lvl - 1],  // input stride per poly
+                level_sizes[lvl],      // output stride per poly
+                level_offsets[lvl - 1], // input offset
+                level_offsets[lvl],     // output offset
+                poly_offset
+            );
+            ASSERT_CUDA_SUCCESS(cudaGetLastError());
+        }
         current_num_blocks = new_num_blocks;
     }
 

@@ -7,7 +7,7 @@ built against. It is committed as source so that the whole prover — our crate
 in `../prover` plus the fork it builds on — is reproducible from this repo
 alone, with no patch scripts and no reliance on any host's checkout.
 
-Three changes are applied on top of the pristine import, each as its own commit
+Four changes are applied on top of the pristine import, each as its own commit
 so the delta to upstream stays readable in `git log -- nitroo/`:
 
 1. **B7a milestone 2b** (formerly a patch script): `RelationEntry`
@@ -29,6 +29,20 @@ so the delta to upstream stays readable in `git log -- nitroo/`:
    two synthetic reference digests of that day on both backends (both are
    history now; `../prover/README.md` lists the current pins); the 8B
    regression was not run for this change.
+4. **The out-of-domain sampling kernel above 65,535 polynomials**
+   (2026-09-08): `batch_eval_at_points` in `crates/stwo` launches the
+   polynomial axis in slices of at most 65,535 polynomials instead of one grid
+   whose y dimension carries them all, which a device caps at that many blocks.
+   Each slice passes the index of its first polynomial and the two kernels add
+   it back, so every index is the one a single launch computed and the results
+   keep their order. Before this, sampling a tree wider than 65,535 columns
+   stopped in `cuda/eval_at_point.cu` with an invalid configuration argument;
+   the 8B reference segment without the five GKR reductions is 93,184 columns
+   wide. Digest-neutral by construction: the arithmetic and the order of the
+   results are unchanged, and the SIMD backend does not run this kernel. Gated
+   on the pinned digests of `../prover/README.md` on the SIMD backend; the CUDA
+   backend was built and its digests were not run for this change, because the
+   machine that made it has no GPU.
 
 The patch scripts themselves are retired; their docstrings survive in the two
 commit messages' file diffs and in git history.
