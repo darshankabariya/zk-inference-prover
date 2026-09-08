@@ -2014,6 +2014,10 @@ fn bend_freivalds_qx(l: &mut layer::Layer, specs: &[dequant::Spec], mats: &[usiz
     Some((idx, moved))
 }
 
+/// Issue #17: the model tree's control, named once -- the probe, the skip and
+/// the test in `prover/tests/model_tree_control.rs` all read it by this name.
+pub const MODEL_SWAP: &str = "model tree: this segment under another layer's weights";
+
 fn compose_probes_cmd(args: &[String]) {
     let (l, vname) = layer_of(args);
     let params = params_of(&l, args, &vname);
@@ -2081,7 +2085,7 @@ fn compose_probes_cmd(args: &[String]) {
         (l.ao.jo_bend_site(&lay, params.ao_jo_max, e_lo, e_hi),
          l.ao.jo_tok_site(params.ao_jo_max, e_lo, e_hi))
     };
-    let unstatable: Vec<(&str, String)> = [("attnout: one row's jo", jo_row_site.is_none(), "row"),
+    let mut unstatable: Vec<(&str, String)> = [("attnout: one row's jo", jo_row_site.is_none(), "row"),
                                            ("attnout: a whole token's jo", jo_tok_site.is_none(),
                                             "token")]
         .iter()
@@ -2092,6 +2096,22 @@ fn compose_probes_cmd(args: &[String]) {
              before the joff pin it tests can see it; a run with --ao-jo-max above the \
              witness's own jo states it")))
         .collect();
+    // Issue #17: the model tree's control rebuilds this segment's activations
+    // around a second draw of the model half, which is the synthetic
+    // construction's to do -- a dump's model half is the dump's, and a rebuild
+    // of it here would be a witness this repository invented.  A shape with no
+    // residual-stream family has nothing to rebuild with either.
+    if arg_str(args, "--witness").is_some() {
+        unstatable.push((MODEL_SWAP,
+            "a dump carries its own model half, and rebuilding this segment's activations \
+             around a second draw is the synthetic construction's; on a dump the swap would \
+             be a witness nothing wrote".into()));
+    } else if l.residual_stream.is_none() {
+        unstatable.push((MODEL_SWAP,
+            "this shape carries no residual-stream family, so there is nothing to rebuild \
+             the segment around the swapped weights with".into()));
+    }
+    let unstatable = unstatable;
     let statable = |name: &str| !unstatable.iter().any(|(w, _)| name.contains(*w));
     let mut probe = |name: &str, l2: &layer::Layer, t: &compose::ProverTamper,
                      expect: &str| -> bool {
@@ -2589,6 +2609,28 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
                 }
             }
         }
+    }
+
+    // Issue #17: the model tree's own control -- a whole-layer swap, not one
+    //     cell.  The half of the model tree that hangs off the segment's second
+    //     norm (the `gate`, `up` and `down` weights, their weight scales and
+    //     that norm's own weight; on a head chunk the final norm's weight and
+    //     `lm_head`) is taken from a second draw and the whole layer is rebuilt
+    //     around it.  What is proved is an honest segment under another layer's
+    //     weights -- every constraint, every equality and both boundaries hold
+    //     -- so the pinned model root is the only thing that can reject, and
+    //     the record says which of the two preprocessed roots moved.
+    if statable(MODEL_SWAP) {
+        let mut lm = layer_of(args).0;
+        let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
+        let (seed, ga) = (src_of(args).seed, arg_scalar(args, "--residual-stream-a", 32usize));
+        lm.synth_model_swap(seed, ga, round, seed ^ 0x0000_0017);
+        assert!(!probe(MODEL_SWAP, &lm, &Default::default(), "the pinned model root"),
+                "a segment proved under another layer's weights accepted");
+        drop(lm);
+    } else {
+        // `probe` writes the skip and its reason into the record itself
+        probe(MODEL_SWAP, &l, &Default::default(), "the pinned model root");
     }
 
     // 16. stream E: the head binding.  One committed key of the argmax component is

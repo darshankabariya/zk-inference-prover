@@ -2201,7 +2201,7 @@ impl Layer {
     /// requantize and its claim is stream JJ's, so there is nothing here for a
     /// consistent witness to satisfy yet.
     pub fn synth_residual_stream(&mut self, seed: u64, a: usize, round: bf16::Round) {
-        self.synth_family(seed, a, round, 0, None, None);
+        self.synth_family(seed, a, round, 0, None, None, None);
     }
 
     /// Stream NN, the key tile side's control.  The same layer with **one** key tile
@@ -2211,7 +2211,7 @@ impl Layer {
     /// quantize component's output.  `which` picks Q, K or V.
     pub fn synth_residual_stream_key_tile_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
                                            which: usize, idx: usize) {
-        self.synth_family(seed, a, round, 0, None, Some((which, idx)));
+        self.synth_family(seed, a, round, 0, None, Some((which, idx)), None);
     }
 
     /// Stream NN (NN-2), the prefix key tile's control.  The same layer with **one**
@@ -2222,7 +2222,7 @@ impl Layer {
     /// it is `nn_q_ok`.
     pub fn synth_residual_stream_prefix_q_bent(&mut self, seed: u64, a: usize, round: bf16::Round,
                                                idx: usize) {
-        self.synth_family(seed, a, round, 0, None, Some((3, idx)));
+        self.synth_family(seed, a, round, 0, None, Some((3, idx)), None);
     }
 
     /// Stream II (E11), the `o` seam's control.  The same layer, with **one**
@@ -2248,7 +2248,7 @@ impl Layer {
         // and set `head`, so pass a nonzero vocabulary to keep the head branch.
         // `synth_family` reads only the sign of it.
         let vocab = usize::from(self.residual_stream.as_ref().is_some_and(|g| g.head));
-        self.synth_family(seed, a, round, vocab, Some(at), None);
+        self.synth_family(seed, a, round, vocab, Some(at), None, None);
         Some(at)
     }
 
@@ -2280,11 +2280,58 @@ impl Layer {
                 .collect(),
             jv2: vec![],
         });
-        self.synth_family(seed, a, round, vocab, None, None);
+        self.synth_family(seed, a, round, vocab, None, None, None);
+    }
+
+    /// Issue #17: the model tree's own control -- a whole-layer swap.
+    ///
+    /// The model tree carries the matmul weights, their weight scales, the norm
+    /// weights, `jv` and the embedding table.  This takes the half of it that
+    /// hangs off the segment's **second** norm -- the `gate`, `up` and `down`
+    /// weights and weight scales, and that norm's own weight -- from a second
+    /// draw and rebuilds the whole layer around them, exactly as
+    /// `synth_residual_stream_bent` rebuilds it around one activation.  What
+    /// comes out is an honest proof of this segment under another layer's
+    /// weights: every constraint holds, every equality holds, both boundaries
+    /// hold, and the pinned model root is the only thing that can tell.  On a
+    /// head chunk the same half is the final norm's weight and `lm_head`.
+    ///
+    /// The attention half is left alone on purpose.  `q`, `k`, `v`, `o` and the
+    /// first norm's weight decide the key tiles and the attention output, and a
+    /// statement pins that output's exponent windows from the honest data
+    /// (`ao_jv_min`, `ao_jo_max`, `ao_rem_bits` and the rest) -- so a second
+    /// draw there would leave those windows and be refused by the `EPOW`
+    /// lookup before the root it is aimed at could see it, which is a control
+    /// that no longer isolates the model tree.  A fold matmul keeps its own for
+    /// the same kind of reason: stream Z draws its weight scale inside a window
+    /// derived from the accumulators this layer drew.
+    pub fn synth_model_swap(&mut self, seed: u64, a: usize, round: bf16::Round, swap: u64) {
+        let head = self.residual_stream.as_ref().is_some_and(|g| g.head);
+        let names: &[&str] = if head { &["lm_head"] } else { &["gate", "up", "down"] };
+        let mut rng = SmallRng::seed_from_u64(swap);
+        for m in self.mats.iter_mut() {
+            if !names.contains(&m.name.as_str()) || m.variant == DeqVariant::Fold {
+                continue;
+            }
+            for w in m.qw.iter_mut() {
+                *w = rng.random_range(-127..=127);
+            }
+            for j in m.jw.iter_mut() {
+                *j = -(rng.random_range(14..20) as i32);
+            }
+            for sc in m.sw.iter_mut() {
+                *sc = (rng.random_range(0..128), rng.random_range(100..120));
+            }
+        }
+        // which family this layer carries is the witness's to say, and a
+        // rebuild must not change it -- `synth_family` reads only the sign
+        let vocab = usize::from(head);
+        self.synth_family(seed, a, round, vocab, None, None, Some(swap));
     }
 
     fn synth_family(&mut self, seed: u64, a: usize, round: bf16::Round, head_vocab: usize,
-                    o_bend: Option<usize>, rope_bend: Option<(usize, usize)>) {
+                    o_bend: Option<usize>, rope_bend: Option<(usize, usize)>,
+                    model_swap: Option<u64>) {
         use crate::residual_stream::{Kind, Prog, Tiling, UnKind, canon, reference};
         let head = head_vocab > 0;
         let tokens = self.ao.s;
@@ -2357,6 +2404,25 @@ impl Layer {
         };
 
         let mut gc = gc;
+        // Issue #17, the model tree's control: the norm weight that feeds the
+        // swapped matmuls, re-drawn.  It is drawn here with the residual
+        // stream, so this is where it is taken -- from the same distribution
+        // the honest draw uses, and everything below is rebuilt from it.
+        // The *other* norm's weight is left alone for the reason
+        // `synth_model_swap` gives: it feeds the attention, whose output
+        // windows this shape's statement pins from the honest data.
+        if let Some(sw) = model_swap {
+            let mut rng = SmallRng::seed_from_u64(sw ^ 0x0017_0017);
+            let mut draw = || {
+                let e: i32 = rng.random_range(-2..2);
+                let m: f64 = rng.random_range(-2.0f64..2.0);
+                canon(bf16::from_f64(m * (e as f64).exp2()))
+            };
+            let w = if head { &mut gc.w1 } else { &mut gc.w2 };
+            for x in w.iter_mut() {
+                *x = draw();
+            }
+        }
         // the dequant reference of one matmul's output, under the spec the
         // plan builds for it -- `deq_ref` reads only `variant` and `round`
         let sp = |m: &Mat| crate::dequant::Spec {
