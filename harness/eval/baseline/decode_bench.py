@@ -39,6 +39,8 @@ from harness import constants
 from . import backends as B
 from . import lfl
 
+from harness import provenance
+
 HERE = Path(__file__).resolve().parent
 
 SCHEMA = "e2h/decode-throughput/2"
@@ -231,6 +233,23 @@ def selftest():
     return 1 if bad else 0
 
 
+
+def _provenance(a, extra=None):
+    """The block every record here carries.
+
+    A decode benchmark makes no proof: it times the unproved forward pass the
+    proved one is compared against.  So the block says `kind` `harness`, carries
+    no binding table and no proof digest, and names what it did run -- the
+    model, its revision, the backend, the arithmetic and the device.
+    """
+    return provenance.block(
+        model=a.model, device=a.device,
+        threads=int(os.environ.get("ZK_THREADS", 0) or 0),
+        module="harness.eval.baseline.decode_bench",
+        decode_backend=a.backend, dtype=a.dtype, attention=a.attn,
+        model_revision_requested=a.revision, **(extra or {}))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -277,6 +296,7 @@ def main():
                                              "reason": str(e)},
                "measured": None,
                "note": "Backend unavailable. NO number is produced; do not substitute one."}
+        rec["provenance"] = _provenance(a)
         path = OUT / f"{a.backend}_unavailable.json"
         path.write_text(json.dumps(rec, indent=2))
         print(f"backend {a.backend} unavailable: {e}", file=sys.stderr)
@@ -303,6 +323,7 @@ def main():
                                "successful batch is the one to quote."}
                 print(f"C={c} batch={b}: FAILED ({type(e).__name__}) -- recorded, not skipped",
                       file=sys.stderr)
+            rec["provenance"] = _provenance(a)
             path = OUT / f"{tag}_{a.backend}_c{c}_b{b}_n{a.new_tokens}.json"
             path.write_text(json.dumps(rec, indent=2))
             results.append((path, rec))
