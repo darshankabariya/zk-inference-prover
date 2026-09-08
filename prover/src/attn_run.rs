@@ -150,6 +150,10 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
     let tw = twiddles(widest);
     let mut sess = Session::new(&tw);
     sess.commit(com.pre.clone());
+    // A gadget on its own has no model column, but the tree layout is the
+    // same for every proof this crate makes: the empty model tree keeps the
+    // base trace at the index every component's mask names.
+    sess.commit_model_empty();
     sess.commit(com.base.clone());
     let rel_exp = sess.draw_relation(ExpRel::draw);
     let rels: Vec<RangeRel> = widths.iter().map(|_| sess.draw_relation(RangeRel::draw)).collect();

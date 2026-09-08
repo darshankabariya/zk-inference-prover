@@ -898,6 +898,10 @@ pub fn run(w: &RWitness, v: SVariant, with_max: bool, per_row_target: usize,
     let tw = twiddles(max_log);
     let mut sess = Session::new(&tw);
     sess.commit(pre.clone());
+    // A gadget on its own has no model column, but the tree layout is the
+    // same for every proof this crate makes: the empty model tree keeps the
+    // base trace at the index every component's mask names.
+    sess.commit_model_empty();
     sess.commit(base.clone());
     let qnz = sess.draw_relation(PairRel::draw);
     let rq3 = sess.draw_relation(FracRel::draw);

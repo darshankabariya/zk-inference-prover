@@ -838,6 +838,10 @@ pub fn run(w: &EWitness, target: usize, bad: Option<Tamper>) -> (Outcome, EmbLay
     pre_all.extend(r.tab_pre.iter().cloned());
     pre_all.push(tbl_ef.clone());
     sess.commit(pre_all.clone());
+    // A gadget on its own has no model column, but the tree layout is the
+    // same for every proof this crate makes: the empty model tree keeps the
+    // base trace at the index every component's mask names.
+    sess.commit_model_empty();
     let mut base_all: Vec<Eval> = r.base.clone();
     base_all.push(r.tab_mult.clone());
     base_all.push(mult_ef.clone());

@@ -240,6 +240,21 @@ impl<'a> Session<'a> {
         self.mark_tree();
     }
 
+    /// Stream PP (E11): the model tree, with no column in it.
+    ///
+    /// The tree layout is the same for every proof this crate makes -- shape,
+    /// model, base, interaction -- because the constraint framework names the
+    /// base trace `ORIGINAL_TRACE_IDX = 2` and the interaction trace
+    /// `INTERACTION_TRACE_IDX = 3` in every component's mask, whether or not
+    /// that component reads a model column. A gadget built on its own has no
+    /// model column, so it commits this tree empty rather than leaving it out:
+    /// without it the base trace lands at index 1, every component's trace
+    /// location names a tree one past the end of what was committed, and
+    /// `TreeVec::sub_tree` panics before the first constraint is evaluated.
+    pub fn commit_model_empty(&mut self) {
+        self.commit(vec![]);
+    }
+
     /// B7a milestone 4 (18.5): commit a tree whose columns the caller still
     /// needs. The flat list is a list of references into the components, so
     /// building it costs nothing; see gpu/m4_refs.py.

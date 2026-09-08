@@ -709,6 +709,10 @@ pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
     let tw = twiddles(widest);
     let mut sess = Session::new(&tw);
     sess.commit(vec![pre[0].clone(), pre[1].clone(), pre[2].clone(), tbl.clone()]);
+    // A gadget on its own has no model column, but the tree layout is the
+    // same for every proof this crate makes: the empty model tree keeps the
+    // base trace at the index every component's mask names.
+    sess.commit_model_empty();
     let mut base_all = base.clone();
     base_all.push(mult.clone());
     sess.commit(base_all.clone());
