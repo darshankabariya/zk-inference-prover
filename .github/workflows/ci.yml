@@ -79,3 +79,29 @@ jobs:
       - uses: actions/checkout@v4
       - name: banned words in durable prose
         run: python3 tools/words.py README.md GLOSSARY.md docs/ prover/README.md prover/kernels/README.md harness/README.md nitroo/README.md
+
+  harness:
+    # The harness's own self-tests.  Every one of them runs on the CPU: no card,
+    # no weights and nothing downloaded, which is what lets CI run them at all.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: harness/uv.lock
+      - name: install
+        working-directory: harness
+        # The default group is the CPU build of torch (harness/README.md).
+        run: uv sync --frozen
+      - name: every module byte-compiles
+        working-directory: harness
+        run: uv run python -m compileall -q .
+      - name: eval self-test on the CPU
+        working-directory: harness
+        run: uv run python -m harness.eval.selftest --cpu
+      - name: witness and unproved-baseline self-tests
+        working-directory: harness
+        run: |
+          uv run python -m harness.witness.extract --selftest
+          uv run python -m harness.eval.baseline.decode_bench --selftest

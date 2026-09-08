@@ -6,6 +6,13 @@ directory, after `uv sync`:
 
     uv run python -m harness.witness.selftest
 
+Every self-test runs on the CPU, and CI runs the four: `witness.selftest` on the
+small model, `eval.selftest --cpu` on a model with no weights (the task loaders,
+the decode the task runner drives, the scoring and the two report writers),
+`witness.extract --selftest` and `eval.baseline.decode_bench --selftest` on
+neither. `eval.selftest` without `--cpu` is the model's own row and needs a card
+and the 8B weights.
+
 The witness package also holds the statement's token generator
 (`gen_ids`, a greedy continuation under the proved variant, and `shift_ids`),
 the shape table (`shapes`) and the plan writer (`plan`) the results drivers
