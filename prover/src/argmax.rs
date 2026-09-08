@@ -793,4 +793,118 @@ mod tests {
             assert_eq!(acc, claimed, "tokens={tokens} vocab={vocab} target={target}");
         }
     }
+
+    // ------------------------------------------------- one shape per layout ----
+
+    /// `compose::argmax_binding_w`, at the size a test picks: the binding's
+    /// weights are challenge powers whose exponents the layout fixes, which is
+    /// the half of the lowering's input that is *not* a claim.
+    fn binding_of(wch: SecureField, tokens: usize, vocab: usize, per_row: usize) -> ArgmaxBinding {
+        use stwo::core::fields::FieldExpOps;
+        let pw = |e: i128| if e >= 0 { wch.pow(e as u128) } else { wch.pow((-e) as u128).inverse() };
+        let n = (tokens * vocab) as i128;
+        let (tk, pr, v) = (tokens as i128, per_row as i128, vocab as i128);
+        ArgmaxBinding {
+            w: (0..per_row).map(|sl| pw(n - 1 - (v - pr) * tk - sl as i128 * tk)).collect(),
+            k_in: pw(pr * tk),
+            k_bd: pw(-((v - pr) * tk + 1)),
+            claimed: SecureField::zero(),
+            k_tok: wch,
+            claimed_tok: SecureField::zero(),
+            tag: "lm_head".into(),
+        }
+    }
+
+    /// What the kernel store is keyed on, and the two counts a fold would move.
+    fn shape(ev: &ArgmaxEval) -> (u32, usize, usize) {
+        let ir = crate::cudagen::lower(ev, SecureField::zero(), ev.log_size(),
+                                       ev.max_constraint_log_degree_bound());
+        (ir.fingerprint(), ir.ops.len(), ir.scalars.len())
+    }
+
+    /// The component this witness composes to, with the claims it publishes.
+    fn composed(w: &AWitness, lay: MatLayout, rk: &RangeRel, wch: SecureField) -> ArgmaxEval {
+        let mut m_rk = vec![0u32; 1 << KEY_BITS];
+        let r = component(w, false, lay, &mut m_rk, None);
+        let mut binding = binding_of(wch, w.tokens, w.vocab, lay.per_row);
+        let (_, claimed, claimed_tok) = binding_col(&r, w.tokens, &binding);
+        binding.claimed = claimed;
+        binding.claimed_tok = claimed_tok;
+        ArgmaxEval { log_rows: lay.log_rows, per_row: lay.per_row, lax: false,
+                     rk: rk.clone(), binding: Some(binding) }
+    }
+
+    /// A block whose maximum is column 0 on every row, so every emitted token is
+    /// zero and the token claim closes on exactly zero -- the shape of the
+    /// model-only stand-in `Layer::from_dir` writes, and the value a fold reads
+    /// as nothing at all.  `ties` rows get a second entry at that maximum.
+    fn first_column_wins(tokens: usize, vocab: usize, ties: usize) -> AWitness {
+        let mut key = vec![1u32; tokens * vocab];
+        for t in 0..tokens {
+            key[t * vocab] = 2;
+            if t < ties {
+                key[t * vocab + vocab - 1] = 2;
+            }
+        }
+        AWitness::from_cols(tokens, vocab, key, vec![0u32; tokens])
+            .expect("column 0 is the first maximum of every row")
+    }
+
+    /// Issue #25: what this component lowers to is a fact about its layout, and
+    /// about nothing the witness decides.
+    ///
+    /// How many rows have two entries at the maximum reaches the lowering
+    /// through exactly two values -- the key claim and the token claim this
+    /// component publishes -- and through nothing else: every other scalar the
+    /// lowering sees is a challenge power whose exponent the layout fixes.  Both
+    /// go in through `EvalAtRow::claim`, so each takes a slot of its own by
+    /// occurrence, four limbs wide, never folded and never shared by value.
+    ///
+    /// Read as ordinary constants instead, a block with no co-maximal row and a
+    /// block with many would ask the kernel store for two different shapes, and
+    /// the one the store was not emitted from would take the announced host
+    /// fallback for every head segment of the run.  The degenerate blocks below
+    /// are the two that used to move it: a token claim of exactly zero, which a
+    /// fold reads as nothing at all, and two claims that coincide, which used to
+    /// share one slot and one instruction.
+    #[test]
+    fn the_co_maximum_count_is_not_a_shape_fact() {
+        use stwo::core::channel::{Blake2sM31Channel, Channel};
+        for (tokens, vocab, target) in [(8usize, 32usize, 8usize), (16, 97, 16), (4, 300, 32)] {
+            let lay = MatLayout::choose_padded(vocab, tokens, target);
+            let mut ch = Blake2sM31Channel::default();
+            Channel::mix_u64(&mut ch, 0x2500 + tokens as u64);
+            let rk = RangeRel::draw(&mut ch);
+            let wch = Channel::draw_secure_felts(&mut ch, 1)[0];
+            let want = shape(&composed(&AWitness::synthetic(tokens, vocab, 0.0, 11), lay, &rk, wch));
+
+            let mut counts = vec![];
+            for frac in [0.0f64, 0.25, 0.5, 1.0] {
+                let w = AWitness::synthetic(tokens, vocab, frac, 11);
+                counts.push(w.co_max_rows);
+                assert_eq!(shape(&composed(&w, lay, &rk, wch)), want,
+                           "{} of {tokens} rows co-maximal", w.co_max_rows);
+            }
+            assert!(counts.iter().any(|c| *c > 0) && counts.contains(&0),
+                    "the case needs blocks that differ in their co-maximum count, got {counts:?}");
+
+            // the token claim is exactly zero on both of these, and they differ
+            // in how many rows carry a second entry at the maximum
+            for ties in [0usize, tokens] {
+                let w = first_column_wins(tokens, vocab, ties);
+                let ev = composed(&w, lay, &rk, wch);
+                assert_eq!(ev.binding.as_ref().unwrap().claimed_tok, SecureField::zero(),
+                           "every emitted token is zero, so the token claim is");
+                assert_eq!(shape(&ev), want, "a token claim of zero, {ties} rows co-maximal");
+            }
+
+            // and the pair a chunk cannot rule out: two claims with one value
+            let w = AWitness::synthetic(tokens, vocab, 0.5, 11);
+            let mut ev = composed(&w, lay, &rk, wch);
+            let t = ev.binding.as_mut().unwrap();
+            t.claimed_tok = t.claimed;
+            assert_eq!(shape(&ev), want, "two claims that coincide");
+        }
+    }
 }
+
