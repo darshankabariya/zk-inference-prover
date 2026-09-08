@@ -1822,21 +1822,14 @@ impl Layer {
         }
         let nkv = nk / hd;
         let rep = nh / nkv;
-        // NN-2: and the components have to *tile* the shape, not only fit its
-        // widths.  A rotation component's rows are `tokens * heads` and a quantize
-        // component's are `q_layout`'s, and both must be an exact power of two --
-        // `ResidualStreamPlan::new` and `q_layout` assert it.  Stream II's synthetic gate
-        // shape is `nh = nkv = 3` at `hd = 32`, so `nq = nk = nv = 96` passes
-        // the width test above and `tokens * nh = 96` fails the tiling one:
-        // before this the family turned on where nobody meant it to and the run
-        // panicked.  A shape the components cannot tile leaves the family off and
-        // reports `nn_open`, which is what the width test already does.
-        if !(tokens * nh).is_power_of_two() || !(tokens * nkv).is_power_of_two() {
-            return off(&format!("the rotation's rows do not tile: tokens={tokens} nh={nh} nkv={nkv}"));
-        }
-        if !crate::rope::q_tiles(nq, hd, tokens) || !crate::rope::q_tiles(nk, hd, tokens) {
-            return off("a quantize component cannot tile this shape");
-        }
+        // NN-2 used to ask a second question here: whether the components could
+        // *tile* the shape and not only fit its widths.  A rotation component's
+        // rows are `tokens * heads` and a quantize component's are `q_layout`'s,
+        // and both had to be an exact power of two, which refused every head
+        // count with an odd factor at every block length (#73).  Since the
+        // decision of 2026-09-08 both round their row count up and carry the
+        // slack as inert lead rows, so any shape whose widths line up tiles and
+        // the widths above are the whole test.
         let b0 = &self.key_tiles[0];
         let (q_bits, k_bits) = (b0.q_bits, b0.k_bits);
         let (qmax_q, qmax_k) = ((1i64 << (q_bits - 1)) - 1, (1i64 << (k_bits - 1)) - 1);

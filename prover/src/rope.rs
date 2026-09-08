@@ -550,7 +550,6 @@ pub const Q_PER_SLOT: usize = 7; // ef, m7, q, nz, sm, sg, cl
 pub fn q_component(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, tokens: usize,
                 n: usize, hd: usize, bits: u32, nz_bits: u32, lay: MatLayout,
                 tables: &mut crate::layer::Tables, tamper: Option<QTamper>) -> QComponent {
-    assert_eq!(lay.lead, 0, "a quantize component needs an exact tiling ({tag})");
     assert_eq!(jj.len(), n, "{tag}: one exponent per channel");
     assert_eq!(hd % lay.per_row, 0,
                "{tag}: a quantize row must sit inside one head ({} does not divide {hd})",
@@ -628,11 +627,23 @@ the probe would move the output too");
     let mut in_nat: Vec<(i64, i64)> = Vec::with_capacity(rows * pr);
     let mut out_nat: Vec<i64> = Vec::with_capacity(rows * pr);
     for j in 0..rows {
-        let (t, b) = lay.at(tokens, j);
+        // An inert lead row carries a zero bf16 pattern in every slot, read
+        // against token 0's own scale exponents -- `witness_gen_mat_row`'s
+        // pattern.  A zero value is an ordinary case this component already
+        // proves (`nz = 0`, `q = 0`, the pattern comparison against `s / 2`),
+        // so every constraint holds and every lookup lands on a real table row;
+        // and it folds zero into both Horner sums, so a lead row is invisible to
+        // the two bindings unless the prover puts something else there, which is
+        // what makes the padding checked rather than merely inert.
+        let (t, b, inert) = match lay.at_opt(tokens, j) {
+            Some((t, b)) => (t, b, false),
+            None => (0, 0, true),
+        };
         for sl in 0..pr {
             let c = b * pr + sl;
             let gi = t * n + c;
-            let (sm, ef) = crate::residual_stream::split(bend(gi));
+            let (sm, ef) =
+                if inert { (0i64, 0u32) } else { crate::residual_stream::split(bend(gi)) };
             let m7 = if sm == 0 { 0 } else { sm.unsigned_abs() as u32 - 128 };
             let sg = u32::from(sm < 0);
             let pat = ef as i64 * 128 + m7 as i64;
@@ -681,7 +692,7 @@ the probe would move the output too");
                 }
             }
             if let Some(QTamper::Out(tt)) = tamper {
-                if tt % (tokens * n) == gi && clc == 0 {
+                if !inert && tt % (tokens * n) == gi && clc == 0 {
                     q = if (q as i64) < qmax { q + 1 } else { q - 1 };
                     fired += 1;
                 }
@@ -705,9 +716,11 @@ the probe would move the output too");
             in_nat.push((sm, ef as i64));
             out_nat.push(signed);
             if let Some(wv) = want {
-                ref_n += 1;
-                if signed == wv[gi] {
-                    ref_ok += 1;
+                if !inert {
+                    ref_n += 1;
+                    if signed == wv[gi] {
+                        ref_ok += 1;
+                    }
                 }
             }
         }
@@ -721,11 +734,18 @@ the probe would move the output too");
         eval_of(lay.log_rows, (0..rows).map(|j| m31_u32(f(j) as u32)).collect())
     };
     let m = (hd / pr).max(1);
-    let mut pre = vec![sel(&|j| j > 0), sel(&|j| j + 1 == rows), sel(&|j| j > 0 && j % m == 0)];
+    // `nn_q_hstart` marks the row *after* one that begins a kv head, counted from
+    // the first real row: the lead is a whole number of them (it is
+    // `tokens (next_pow2(chunks) - chunks)` rows, and `m` divides `chunks`), so
+    // this is `j % m == 0` again wherever the lead is empty.  A lead row is
+    // neither a head start nor row zero, so the output accumulator is multiplied
+    // by the ordinary step there, which is exact while it is still zero.
+    let hstart = |j: usize| j > lay.lead && (j - lay.lead) % m == 0;
+    let mut pre = vec![sel(&|j| j > 0), sel(&|j| j + 1 == rows), sel(&hstart)];
     for sl in 0..pr {
         pre.push(eval_of(lay.log_rows, (0..rows)
             .map(|j| {
-                let (_, b) = lay.at(tokens, j);
+                let b = lay.at_opt(tokens, j).map_or(0, |(_, b)| b);
                 m31_of(je[b * pr + sl])
             })
             .collect()));
@@ -770,9 +790,11 @@ pub fn q_interaction(r: &QComponent, binding: &QTie, hd: usize, qnz: &PairRel, r
                 };
                 f += val * wk;
             }
+            // the same rows `nn_q_hstart` marks, counted from the first real
+            // row so that a padded layout's inert lead does not shift them
             let step = if side == 0 {
                 binding.step_in
-            } else if j % m == 0 {
+            } else if j > lay.lead && (j - lay.lead) % m == 0 {
                 binding.step_out_h
             } else {
                 binding.step_out
@@ -818,8 +840,18 @@ pub fn q_interaction(r: &QComponent, binding: &QTie, hd: usize, qnz: &PairRel, r
 
 /// The quantize component's tiling.  `per_row` must divide `hd`, so that a row
 /// never straddles two heads and the GQA replication weight is a per-slot
-/// constant; and the tiling must be exact, because a padded row would commit a
-/// bf16 pattern nobody produced and the input binding would carry it.
+/// constant.
+///
+/// An exact tiling is preferred, and every shape recorded before the decision
+/// of 2026-09-08 has one, so this picks what it always picked for them.  A head
+/// count with an odd factor has none at any width -- `tokens (n / pr)` carries
+/// that factor whatever `pr` divides `hd` -- so the row count is rounded up to
+/// a power of two and the slack is carried as **inert lead rows**, which is
+/// what `MatLayout` has always done for a vocabulary.  A lead row commits a
+/// zero bf16 pattern against token 0's own scale exponent, which is an ordinary
+/// case this component already proves; it folds zero into both Horner sums, and
+/// because the lead is at the front the weight of a real value is the one it had
+/// before.
 pub fn q_layout(n: usize, hd: usize, tokens: usize, target: usize) -> MatLayout {
     let mut best: Option<MatLayout> = None;
     for pr in 1..=hd {
@@ -828,31 +860,20 @@ pub fn q_layout(n: usize, hd: usize, tokens: usize, target: usize) -> MatLayout 
         }
         let chunks = n / pr;
         let active = tokens * chunks;
-        if !active.is_power_of_two() || active < (1 << crate::layer::MIN_MAT_LOG_ROWS) {
-            continue;
-        }
-        let l = MatLayout { per_row: pr, chunks, log_rows: active.trailing_zeros(), lead: 0 };
+        let log_rows = crate::common::log_rows_for(active, 1);
+        let l = MatLayout { per_row: pr, chunks, log_rows, lead: (1usize << log_rows) - active };
+        // an exact tiling beats a padded one however far its width is from the
+        // target, so no recorded shape's layout can move; among equals the width
+        // nearest the target wins, as before
         let better = best.as_ref().is_none_or(|b| {
-            (pr as isize - target as isize).abs() < (b.per_row as isize - target as isize).abs()
+            (usize::from(l.lead > 0), (pr as isize - target as isize).abs())
+                < (usize::from(b.lead > 0), (b.per_row as isize - target as isize).abs())
         });
         if better {
             best = Some(l);
         }
     }
-    best.unwrap_or_else(|| panic!("no exact quantize tiling for n={n} hd={hd} tokens={tokens}"))
-}
-
-/// NN-2: does a quantize component tile this shape at all?  `q_layout` panics when
-/// it does not, and the witness generator has to ask before it turns the family
-/// on -- a shape whose widths line up but whose rows do not tile leaves the
-/// rotation off and reports `nn_open`, exactly as a shape whose widths do not.
-pub fn q_tiles(n: usize, hd: usize, tokens: usize) -> bool {
-    (1..=hd).any(|pr| {
-        hd % pr == 0 && n % pr == 0 && {
-            let active = tokens * (n / pr);
-            active.is_power_of_two() && active >= (1 << crate::layer::MIN_MAT_LOG_ROWS)
-        }
-    })
+    best.unwrap_or_else(|| panic!("no quantize tiling for n={n} hd={hd} tokens={tokens}"))
 }
 
 /// The reference: `round_half_away(x / 2^j)`, clamped, as B1's `quantize` does

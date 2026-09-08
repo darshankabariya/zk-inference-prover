@@ -1102,6 +1102,9 @@ pub struct RopeComponents {
     pub heads: usize,
     pub hd: usize,
     pub tokens: usize,
+    /// inert lead rows: `2^log_rows - tokens * heads`, zero wherever the head
+    /// count tiles a power of two on its own
+    pub lead: usize,
     /// component indices inside `ResidualStreamPlan::components`
     pub mul: usize,
     pub add: usize,
@@ -1411,10 +1414,24 @@ impl ResidualStreamPlan {
                 let m = &p.mats[mi];
                 assert_eq!(m.n_out, heads * hd,
                            "the {name} matmul is {} wide, not {heads} x {hd}", m.n_out);
+                // The rows are one per (token, head), **padded up to a power of
+                // two** with inert lead rows -- the decision of 2026-09-08.  A
+                // head count with an odd factor (Qwen2.5-14B's 40) can tile no
+                // power of two at any block length, and this used to assert and
+                // refuse the layer (#73).  A lead row commits a zero bf16
+                // pattern in every leaf and every preprocessed operand, so the
+                // rotation it proves is `0 * 0 + 0 * 0 = 0` and every
+                // constraint holds on it; the lead sits at the *front*, which
+                // is where `MatLayout` has always put its own, so the Horner
+                // accumulator carries a zero through it and the weight of a
+                // real value is the one it had before -- the canonical position
+                // `t n_out + c` over the real stream, and nothing in
+                // `output_claim_w_tok` moves.  A nonzero lead row would change
+                // this component's claim and no other, so the binding against
+                // the matmul's own dequant output is what checks the padding is
+                // zero.
                 let rows = m.tokens * heads;
                 let lr = crate::common::log_rows_for(rows, 1);
-                assert_eq!(1usize << lr, rows,
-                           "the rotation's rows must tile exactly: {rows} is not a power of two");
                 let n_all = m.tokens * m.n_out;
                 // `w[k] = w^(width - 1 - k)`, `step = w^width`: the flat Horner
                 // over the stream, rows ascending in (token, head)
@@ -1443,7 +1460,7 @@ impl ResidualStreamPlan {
                 output_claim_at.push((name, Some((mul, 0))));
                 let _ = n_all;
                 ropes.push(RopeComponents { name, mat: mi, heads, hd, tokens: m.tokens,
-                                         mul, add });
+                                         lead: (1usize << lr) - rows, mul, add });
             }
             // v is not rotated: its dequant output goes straight into the
             // quantize gadget, whose input claim `verify_composed` compares
@@ -4941,7 +4958,7 @@ different rotation", inv.len(), 2 * hd * p.s);
                 let mi = layer.mats.iter().position(|m| m.name == rr.name)
                     .unwrap_or_else(|| panic!("--rope needs the {} matmul", rr.name));
                 let n_out = rr.heads * hd;
-                let rows = rr.tokens * rr.heads;
+                let rows = rr.tokens * rr.heads + rr.lead;
                 // the dequant component's own reference, which is exactly what its
                 // `Out(0)` claim folds -- so the binding below is between two folds
                 // of one sequence and not between two computations of it
@@ -4963,7 +4980,7 @@ different rotation", inv.len(), 2 * hd * p.s);
                         deq[vi % n] ^= 1;
                     }
                 }
-                let mut pre = vec![0u16; rows * 2 * hd];
+                let mut pre = vec![0u16; rr.tokens * rr.heads * 2 * hd];
                 pre.par_chunks_mut(2 * hd).enumerate().for_each(|(j, row)| {
                     row.copy_from_slice(&crate::rope::pre_row(&inv, hd, rp.pos0 + j / rr.heads));
                 });
@@ -4981,6 +4998,16 @@ different rotation", inv.len(), 2 * hd * p.s);
                                "the rope angle probe did not fire at cell {at}");
                     eprintln!("compose: rope angle cell {at} of rp{}m bent {was:#06x} -> \
 {:#06x} (a rejection is the pass)", rr.name, pre[at]);
+                }
+                // the inert lead rows: zero leaves against zero angles, at the
+                // front, so the rotation the component proves on them is
+                // `0 * 0 + 0 * 0 = 0` and the Horner carries a zero into the
+                // first real row (`ResidualStreamPlan::new`'s note).  The probes
+                // above aim at the *real* stream, which is why they run before
+                // this.
+                if rr.lead > 0 {
+                    deq.splice(0..0, std::iter::repeat_n(0u16, rr.lead * hd));
+                    pre.splice(0..0, std::iter::repeat_n(0u16, rr.lead * 2 * hd));
                 }
                 let mprog = gp.components[rr.mul].prog.clone();
                 let mtag = gp.components[rr.mul].tag.clone();
@@ -5056,7 +5083,14 @@ different rotation", inv.len(), 2 * hd * p.s);
         let mi = layer.mats.iter().position(|m| m.name == qp.name)
             .unwrap_or_else(|| panic!("--rope needs the {} matmul", qp.name));
         let x: Vec<u16> = match qp.producer {
-            Some((ri, _)) => residual_stream_components[ri].outs[0].clone(),
+            // the rotation's own inert lead rows are at the front of `outs[0]`,
+            // and this component reads the *real* `tokens x n` stream, so the
+            // tail is what it takes.  Equal to the whole vector wherever the
+            // head count tiles a power of two on its own.
+            Some((ri, _)) => {
+                let o = &residual_stream_components[ri].outs[0];
+                o[o.len() - qp.tokens * qp.n..].to_vec()
+            }
             None => {
                 let mut v = vec![0u16; qp.tokens * qp.n];
                 let n_out = qp.n;
@@ -7946,7 +7980,22 @@ impl Plan {
                 put(3, Unbound, Some("no quantize component bindings the rotated q, k, v to the \
                                       key tiles' columns".into()));
             } else {
-                put(3, Bound, None);
+                // the decision of 2026-09-08: a head count that tiles no power
+                // of two is padded rather than refused, and the table says so
+                // wherever the padding is there to say
+                let pad: usize = g.ropes.iter().map(|r| r.lead).sum::<usize>()
+                    + self.quants.iter().map(|q| q.lay.lead).sum::<usize>();
+                let why = (pad > 0).then(|| {
+                    let sides: Vec<String> = g.ropes.iter()
+                        .map(|r| format!("{} {} -> {}", r.name, r.tokens * r.heads,
+                                         r.tokens * r.heads + r.lead))
+                        .collect();
+                    format!("the rotation and the quantize pad their rows up to a power of two \
+                             ({}): the padded rows are unconstrained padding, checked to be \
+                             zero by the same two Horner claims that bind the real rows, and \
+                             no other component reads them", sides.join(", "))
+                });
+                put(3, Bound, why);
             }
         } else {
             put(3, Unbound, no_family());
