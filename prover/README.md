@@ -90,15 +90,32 @@ zk-prover compose $SYN <flags>
 
 **The sound defaults.** Three heads of 32 over 64-wide matmuls cannot state the
 rotation or the o seam (edges 3 and 5 stay unbound on that shape, as the
-binding table says); four heads over 128-wide matmuls bind every layer edge.
+binding table says); four heads over 128-wide matmuls bind every layer edge, and
+so do five heads over 160-wide ones, which is the shape whose head count tiles
+no power of two.
 
 | shape | flags after `$SYN` | digest (first 16 hex) | unbound edges | recorded |
 |---|---|---|---|---|
 | `sound` | `--head-groups 2,1 $RESIDUAL_STREAM --diagonal-block` | `82085896a8408f36` | 3, 5 | both backends, 2026-09-07; pinned in `tests/` |
 | `sound_gkrfive` | `--head-groups 2,1 $RESIDUAL_STREAM --diagonal-block GKR5` | `6bee5972d6f616aa` | 3, 5 | same |
 | `sound_aligned` | `--head-groups 2,2 --nin 128 --nout 128 --residual-stream-a 32 --kmax 16 --synth-residual-stream --diagonal-block` | `9c3cdebd97a7d57b` | none | same |
+| `sound_padded` | `--head-groups 4,1 --nin 160 --nout 160 --residual-stream-a 32 --kmax 16 --synth-residual-stream --diagonal-block` | `284e5f3d24ad2c52` | none | SIMD backend, 2026-09-08; pinned in `tests/`; **new**, not moved |
 
-Reading these three on the CUDA backend took one fix in the kernel emitter. A
+**The padded head count.** `sound_padded` is the last row's shape and is new
+here, not a moved digest: five heads of 32 over 160-wide matmuls. Thirty-two
+tokens times five heads is 160, and no block length makes that a power of two,
+so before the decision of 2026-09-08 the rotation refused the layer outright
+(issue #73, and Qwen2.5-14B's 40 query heads are the same arithmetic). The
+rotation now holds 256 rows for its 160 real ones and each quantize component
+512 for its 320, with the difference carried at the front as unconstrained
+padding: rows that hold zero, that no constraint says anything about, and that
+the two Horner comparisons binding the real rows check are zero. Every layer
+edge is bound on this shape and the binding table's edge 3 says what the padding
+is; the padded rows are 37.5% of the rotation's and the quantize's own committed
+cells, which is 230,400 cells of the segment's 7,066,144. The three rows above
+tile exactly, take the same path they always did, and their digests do not move.
+
+Reading the first three on the CUDA backend took one fix in the kernel emitter. A
 generated LogUp kernel used to ask for exactly as many preprocessed columns as
 the evaluator it was emitted from carries, and the evaluator the prover lowers
 for these lookups leaves off two accumulator sides whose selectors no lookup

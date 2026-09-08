@@ -46,6 +46,16 @@ const CASES: &[Case] = &[
            flags: &["--head-groups", "2,2", "--nin", "128", "--nout", "128", "--residual-stream-a", "32",
                     "--kmax", "16", "--synth-residual-stream", "--diagonal-block"],
            unbound: &[] },
+    // five heads of 32 over 160-wide matmuls (issue #77).  Thirty-two tokens
+    // times five heads is 160, which is a power of two at no block length, so
+    // the rotation and the quantize round their row counts up to 256 and 512
+    // and carry the difference as padded rows that hold zero.  Every layer edge
+    // is bound all the same, and the binding table names the padding.
+    Case { name: "sound_padded", digest: "284e5f3d24ad2c52",
+           flags: &["--head-groups", "4,1", "--nin", "160", "--nout", "160",
+                    "--residual-stream-a", "32", "--kmax", "16", "--synth-residual-stream",
+                    "--diagonal-block"],
+           unbound: &[] },
     // the unbound configuration (recorded 2026-09-06 on the SIMD backend; the sound
     // shapes above on 2026-09-07)
     Case { name: "diagonal_block", digest: "164079c6a045df22",
@@ -213,4 +223,48 @@ fn a_repeated_flag_resolves_the_same_way_in_compose_and_in_the_loop() {
     assert_eq!(one, many,
                "the loop and the one-shot disagree on the same plan line: `zk-prover {}`",
                loop_args.join(" "));
+
+/// The padded shape's own record: what the padding is, and that the statement
+/// says so (issue #77, the decision of 2026-09-08).
+///
+/// The digest is pinned beside the other sound shapes above; this pins the two
+/// things a reader of the binding table needs. The rotation's rows are one per
+/// (token, head) rounded up to a power of two -- 160 to 256 on both rotated
+/// sides -- and each quantize component's layout carries a nonzero lead, which
+/// is where its own padding sits. Edge 3 stays bound, and its `why` names the
+/// padded rows as unconstrained padding checked to be zero.
+#[test]
+fn the_padded_head_count_shape_names_its_padding_in_the_binding_table() {
+    let args = args_of(&["--head-groups", "4,1", "--nin", "160", "--nout", "160",
+                         "--residual-stream-a", "32", "--kmax", "16", "--synth-residual-stream",
+                         "--diagonal-block"]);
+    let v = prove(&args);
+    let point = &v["result"]["point"];
+    assert_eq!(point["accepts"], serde_json::Value::Bool(true),
+               "the padded shape must verify: zk-prover {}", args.join(" "));
+    let edge3 = point["binding"]["edges"].as_array().expect("binding.edges")
+        .iter().find(|e| e["n"] == 3).expect("edge 3");
+    assert_eq!(edge3["state"], "bound", "the padded shape binds edge 3");
+    let why = edge3["why"].as_str().unwrap_or("");
+    assert!(why.contains("unconstrained padding") && why.contains("q 160 -> 256")
+                && why.contains("k 160 -> 256"),
+            "edge 3 must name the padded rows: {why}");
+    // the rotation's four components, at 256 rows for 160 real ones
+    let rope: Vec<&serde_json::Value> = point["family_cells"]["residual_stream_components"]
+        .as_array().expect("residual_stream_components").iter()
+        .filter(|c| c["tag"].as_str().is_some_and(|t| t.starts_with("rp"))).collect();
+    assert_eq!(rope.len(), 4, "two components per rotated side");
+    for c in &rope {
+        assert_eq!(c["rows"], 256, "{}: the rotation's rows are padded up", c["tag"]);
+    }
+    // and the quantize's own, as lead rows of its layout
+    let quant = point["family_cells"]["quant"].as_array().expect("quant");
+    assert_eq!(quant.len(), 3, "one quantize component per q, k, v");
+    for q in quant {
+        assert_eq!(q["layout"]["lead"], 192, "{}: the quantize's padded rows", q["component"]);
+        assert_eq!(q["layout"]["log_rows"], 9, "{}: 320 real rows of 512", q["component"]);
+        assert_eq!(q["mismatch"], 0, "{}: every integer matches the key tile's", q["component"]);
+    }
+    assert_eq!(point["off_table"], 0, "no lookup off its table on the padded rows");
+    assert_eq!(v["provenance"]["unsound_skips"], serde_json::json!([]));
 }
