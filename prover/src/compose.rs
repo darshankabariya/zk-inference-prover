@@ -8062,6 +8062,20 @@ mod tests {
                 "each diagonal block carries its group's per-token component");
         let mut ch = stwo::core::channel::Blake2sM31Channel::default();
         Channel::mix_u64(&mut ch, 0x0b65_5900);
+        let rels = Rels::draw(&mut ch, &plan.widths,
+                              plan.residual_stream.as_ref().map(|g| g.uns.as_slice()),
+                              plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
+                              plan.q_tabs.len());
+        let f = ch.draw_secure_felts(6);
+        let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_5900);
+        claims.use_sums.truncate(plan.n_use());
+        assert_eq!(claims.use_sums.len(), plan.n_use());
+        let b = build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
+        assert_eq!(b.chans.len(), plan.shapes.len());
+        assert_eq!(b.rows.len(), plan.shapes.len(),
+                   "every key tile of this chunk carries a per-token component");
+    }
+
     /// What `Plan::n_table_sums` counts is what `build_components` built, on the
     /// chunk that has no slack: a layer segment carrying one of every table a
     /// plan can carry, which is one more than the formula the placeholder used
@@ -8079,13 +8093,6 @@ mod tests {
                               plan.emb.map(|l| l.arity()), plan.needs_rq_rels(),
                               plan.q_tabs.len());
         let f = ch.draw_secure_felts(6);
-        let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_5900);
-        claims.use_sums.truncate(plan.n_use());
-        assert_eq!(claims.use_sums.len(), plan.n_use());
-        let b = build_components(&plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
-        assert_eq!(b.chans.len(), plan.shapes.len());
-        assert_eq!(b.rows.len(), plan.shapes.len(),
-                   "every key tile of this chunk carries a per-token component");
         let claims = crate::exprprobe::claims_for(&plan, 0x0b64_5900);
         assert_eq!(claims.table_sums.len(), plan.n_table_sums(),
                    "the placeholder is the plan's own count");
