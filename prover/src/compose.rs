@@ -7676,6 +7676,18 @@ pub struct Edge {
     pub why: Option<String>,
 }
 
+/// Issue #96: one claim the residual stream publishes, and the mechanisms of
+/// this statement that read it.  An empty reader list is a value the prover
+/// picks freely; `Plan::claims_census` is where the list is built and what the
+/// six mechanisms are.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaimRow {
+    /// the publishing component's tag and the binding's kind: `gn1.In(0)`
+    pub claim: String,
+    /// every mechanism that names the claim, in the order the plan states them
+    pub readers: Vec<String>,
+}
+
 /// The edges the binding table reports: the fourteen of one layer segment, in
 /// the order of the move brief's section 11, then the two ends of the
 /// sequence.
@@ -7949,6 +7961,113 @@ impl Plan {
             "absent": of(EdgeState::Absent),
         })
     }
+
+    /// The census of published claims: every Horner claim the residual stream
+    /// publishes and the mechanisms that read it.
+    ///
+    /// A residual-stream component publishes one claim per binding --
+    /// `claims.stream_bindings[component][binding]` -- and a claim nothing reads
+    /// is a value the prover picks freely.  Open question 7.6 was one instance of
+    /// that question asked about one component (`second_level_unread`); this is
+    /// the same question asked about every claim, from the same plan fields
+    /// `verify_composed` reads:
+    ///
+    ///  * the verifier's equality list (`residual_stream.eqs`, `residual_stream_ok`):
+    ///    each entry reads both of its sides;
+    ///  * the dequant output bindings (`residual_stream.output_bindings`,
+    ///    `deq_out_ok`): a matmul's own published output against the wiring
+    ///    family's copy of it;
+    ///  * the requantize seams (`rqs`, `rq_in_ok`): each names the component
+    ///    whose `Out(0)` its matmul group consumed;
+    ///  * the quantize components (`quants`, `nn_in_ok`): the rotation's `Out(0)`
+    ///    against the bf16 values `q` and `k` rounded;
+    ///  * the boundary sides (`residual_stream.stream_in` and `stream_out`),
+    ///    which `boundary::sides` turns into the trees the grid's chain check
+    ///    compares;
+    ///  * the embedding gadget (`emb`, `embed_ok`), which reads `stream_in` a
+    ///    second time on a layer-0 segment.
+    ///
+    /// The head chunk declares no output side (`boundary::sides` gives it the
+    /// input side alone), so `stream_out` is not named as a boundary there -- its
+    /// reader is the head's own requantize seam.  Where a layer chunk asked for
+    /// no boundary tree the side is still what names the claim, and the reader
+    /// says `not committed`: what the missing tree costs is the binding table's
+    /// edges 13 and 14 and the grid's unchecked ends, and saying it twice in two
+    /// vocabularies would make the census a second, weaker copy of that report.
+    ///
+    /// A report and not an assertion.  A shape whose matmul group is absent
+    /// legitimately loses the seam that read its producer's output -- the seam
+    /// list skips a group the statement has not got -- so the empty list is a
+    /// property of the shapes we record and not of every shape that can be
+    /// stated.  `claims.unread` carries it per run and the unit test is what
+    /// fails if a claim loses its reader.
+    pub fn claims_census(&self) -> Vec<ClaimRow> {
+        let Some(g) = self.residual_stream.as_ref() else { return vec![] };
+        let starts: Vec<usize> = g
+            .components
+            .iter()
+            .scan(0usize, |a, r| {
+                let s = *a;
+                *a += r.bindings.len();
+                Some(s)
+            })
+            .collect();
+        let name = |(ci, bi): (usize, usize)| -> String {
+            let r = &g.components[ci];
+            match r.bindings[bi].0 {
+                BindingKind::In(k) => format!("{}.In({k})", r.tag),
+                BindingKind::Out(k) => format!("{}.Out({k})", r.tag),
+            }
+        };
+        let mut rows: Vec<ClaimRow> = (0..g.components.len())
+            .flat_map(|ci| (0..g.components[ci].bindings.len()).map(move |bi| (ci, bi)))
+            .map(|at| ClaimRow { claim: name(at), readers: vec![] })
+            .collect();
+        let mut read = |at: (usize, usize), by: String| rows[starts[at.0] + at.1].readers.push(by);
+        for e in &g.eqs {
+            read(e.a, format!("equality {}", name(e.b)));
+            read(e.b, format!("equality {}", name(e.a)));
+        }
+        for t in &g.output_bindings {
+            if let Some(at) = t.at {
+                read(at, format!("deq_out/{}", t.name));
+            }
+        }
+        for rp in &self.rqs {
+            read(rp.producer, format!("requant/{}", rp.name));
+        }
+        for qp in &self.quants {
+            if let Some(at) = qp.producer {
+                read(at, format!("quant/{}", qp.name));
+            }
+        }
+        let side = |committed: bool, s: &str| {
+            if committed { format!("boundary/{s}") } else { format!("boundary/{s} (not committed)") }
+        };
+        read(g.stream_in, side(!self.layer_sides.is_empty(), "in"));
+        if !g.head_norm {
+            read(g.stream_out, side(self.layer_sides.len() > 1, "out"));
+        }
+        if self.emb.is_some() {
+            read(g.stream_in, "embed".to_string());
+        }
+        rows
+    }
+
+    /// `claims_census` as the run JSON's `claims` block: how many claims the
+    /// residual stream publishes, the ones no mechanism reads, and the readers
+    /// of each.  Empty on a chunk with no wiring family, which publishes none.
+    pub fn claims_json(&self) -> Value {
+        let rows = self.claims_census();
+        let unread: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.readers.is_empty())
+            .map(|r| r.claim.as_str())
+            .collect();
+        let readers: serde_json::Map<String, Value> =
+            rows.iter().map(|r| (r.claim.clone(), json!(r.readers))).collect();
+        json!({"published": rows.len(), "unread": unread, "readers": readers})
+    }
 }
 
 #[cfg(test)]
@@ -8061,6 +8180,79 @@ mod tests {
             .collect();
         assert!(eqs.len() < g.eqs.len(), "the equality was there to drop");
         assert_eq!(second_level_unread(&g.components, &eqs), vec!["gn1b".to_string()]);
+    }
+
+    // ---- issue #96: the census of published claims ------------------------
+
+    /// The four synthetic shapes the digest gate proves, with the argument
+    /// widened from one component to every claim: on each of them, every claim
+    /// the residual stream publishes is read by one of the mechanisms
+    /// `verify_composed` checks, so `claims.unread` is empty.
+    #[test]
+    fn every_published_claim_has_a_reader_on_the_recorded_shapes() {
+        let wired = ["--head-groups", "2,1", "--nout", "64", "--residual-stream-a", "32",
+                     "--kmax", "16", "--synth-residual-stream", "--diagonal-block"];
+        let aligned = ["--head-groups", "2,2", "--nin", "128", "--nout", "128",
+                       "--residual-stream-a", "32", "--kmax", "16", "--synth-residual-stream",
+                       "--diagonal-block"];
+        let head = ["--head-groups", "2,1", "--nout", "64", "--residual-stream-a", "32",
+                    "--kmax", "16", "--synth-head", "--synth-vocab", "256", "--diagonal-block",
+                    "--unsound-skip-argmax"];
+        let no_bounds = ["--head-groups", "2,1", "--nout", "64", "--residual-stream-a", "32",
+                         "--kmax", "16", "--synth-residual-stream", "--diagonal-block",
+                         "--unsound-skip-layer-boundary", "--unsound-skip-kv-boundary"];
+        for extra in [&wired[..], &aligned[..], &head[..], &no_bounds[..]] {
+            let plan = plan_of(argv(extra));
+            let rows = plan.claims_census();
+            assert!(!rows.is_empty(), "{extra:?}: the shape carries the residual stream");
+            let unread: Vec<&str> = rows.iter().filter(|r| r.readers.is_empty())
+                .map(|r| r.claim.as_str()).collect();
+            assert!(unread.is_empty(), "{extra:?}: claims no mechanism reads: {unread:?}");
+            let j = plan.claims_json();
+            assert_eq!(j["unread"], json!([]), "{extra:?}");
+            assert_eq!(j["published"], json!(rows.len()), "{extra:?}");
+        }
+        // a chunk with no wiring family publishes no claim at all, so the census
+        // is empty rather than unread
+        let bare = plan_of(argv(&["--head-groups", "2,1", "--diagonal-block",
+                                  "--unsound-skip-residual-stream"]));
+        assert_eq!(bare.claims_json(), json!({"published": 0, "unread": [], "readers": {}}));
+    }
+
+    /// The control: mask one reader and the census names the claim it left
+    /// behind.  The requantize seam is the only thing that reads the first
+    /// norm scale's output -- without it the q, k, v matmuls' int8 input would
+    /// be the requantize of a bf16 value no one published.
+    #[test]
+    fn a_published_claim_whose_reader_is_masked_is_named() {
+        let mut plan = plan_of(argv(&["--head-groups", "2,1", "--nout", "64",
+                                      "--residual-stream-a", "32", "--kmax", "16",
+                                      "--synth-residual-stream", "--diagonal-block"]));
+        let readers = |p: &Plan, claim: &str| -> Vec<String> {
+            p.claims_census().iter().find(|r| r.claim == claim)
+                .unwrap_or_else(|| panic!("{claim} is published")).readers.clone()
+        };
+        assert_eq!(readers(&plan, "nt1.Out(0)"), vec!["requant/qkv".to_string()]);
+        let before = plan.rqs.len();
+        plan.rqs.retain(|r| r.name != "qkv");
+        assert_eq!(plan.rqs.len(), before - 1, "the seam was there to drop");
+        assert_eq!(plan.claims_json()["unread"], json!(["nt1.Out(0)"]));
+    }
+
+    /// A boundary side the statement did not commit still names the claim, and
+    /// says it did not commit it: what the missing tree costs is edge 13 or 14
+    /// of the binding table and the grid's unchecked end, and the census is not
+    /// a second report of it.
+    #[test]
+    fn a_boundary_side_with_no_tree_is_named_as_not_committed() {
+        let plan = plan_of(argv(&["--head-groups", "2,1", "--nout", "64",
+                                  "--residual-stream-a", "32", "--kmax", "16",
+                                  "--synth-residual-stream", "--diagonal-block",
+                                  "--unsound-skip-layer-boundary", "--unsound-skip-kv-boundary"]));
+        let rows = plan.claims_census();
+        let out = rows.iter().find(|r| r.claim == "gn2.Out(1)").expect("the layer's output claim");
+        assert_eq!(out.readers, vec!["boundary/out (not committed)".to_string()]);
+        assert_eq!(states(&plan, None)[12], (13, EdgeState::Unbound));
     }
 
     #[test]

@@ -664,6 +664,12 @@ pub enum BindingKind {
 /// carries it -- which is what makes `resid.h_out == norm.h_in` mean "the same
 /// values, in the same positions", however differently the two components tile the
 /// stream into rows.
+///
+/// Issue #96: what a claim means is settled by whoever reads it, and a claim
+/// nothing reads is a value the prover picks freely.  Every claim published this
+/// way is counted at plan time by `compose::Plan::claims_census`, which names
+/// the reading mechanism of each and reports the ones with none as
+/// `claims.unread` in the run JSON.
 #[derive(Clone, Debug)]
 pub struct TieSpec {
     pub kind: BindingKind,

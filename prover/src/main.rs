@@ -1365,7 +1365,14 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
     };
     let accepts = verdict.as_ref().map(|v| v.accepts()).unwrap_or(false);
     // the binding table of this statement, from the plan the verifier rebuilds
-    let binding = compose::Plan::new(&out.fixed.params).binding_json(out.fixed.layer);
+    let plan_of_statement = compose::Plan::new(&out.fixed.params);
+    let binding = plan_of_statement.binding_json(out.fixed.layer);
+    // issue #96: and the census of published claims from the same plan -- every
+    // claim the residual stream publishes and which mechanism reads it.  A
+    // report: a shape whose matmul group is absent loses the seam that read its
+    // producer's output, so `unread` is empty on the shapes we record and not
+    // by a blanket assertion.
+    let claims_census = plan_of_statement.claims_json();
     if !proof_sha256.is_empty() {
         crate::util::prov_note_proof(&proof_sha256, binding.clone());
     }
@@ -1376,6 +1383,9 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
         "prove_error": out.prove_error,
         "proof_bytes": proof_bytes_len,
         "statement_bytes": {"fixed": fixed_bytes.len(), "claims": claims_bytes.len()},
+        // issue #96: the census of published claims -- `unread` is the claims no
+        // mechanism of this statement reads, `readers` names them claim by claim
+        "claims": claims_census,
         "pre_root": out.fixed.pre_root,
         // stream PP: the per-layer model commitment this chunk proves against
         "model_root": out.fixed.model_root,
