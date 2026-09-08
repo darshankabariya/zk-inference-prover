@@ -1,7 +1,9 @@
 """E4 -- the unfitted-scale prediction, registered BEFORE it is measured.
 
-    uv run python e4/predict.py            # print the registration
-    uv run python e4/predict.py --json     # rewrite e4/out/registration.json
+    uv run python -m harness.eval.predict.predict --constants PATH \
+        --artifacts DIR --inputs DIR          # print the registration
+    uv run python -m harness.eval.predict.predict ... --json   # and rewrite
+                                              # out/registration.json
 
 What this is.  `experiments/b2/cost_model.py` was built from gadget marginals
 measured at exactly two model scales: Qwen2.5-0.5B (B1-B6.5) and Llama-3.1-8B
@@ -25,6 +27,7 @@ import os
 import sys
 
 from harness import constants
+from harness import inputs
 from harness.constants import get, value
 from harness.costmodel import cost_model as cm
 
@@ -67,19 +70,35 @@ SHAPES = {
 CONTEXTS = (4096, 16384)
 
 
+_SEQ5 = {}
+
+
 def _seq5(ctx, layer=16):
     """One measured 8B layer chunk, for scaling only (memory, ratios).
 
-    Not a frozen constant -- `paper/constants.json` freezes the 32-layer sums and
-    the per-token figures, not L16 alone -- so it is read from the artifact and
-    cited as such.
+    Not a frozen constant -- `constants.json` freezes the 32-layer sums and the
+    per-token figures, not L16 alone -- so it is read from the artifact and
+    cited as such.  Nothing measured lives in this repository, so the artifact
+    comes from `--artifacts DIR` (or `ZK_ARTIFACTS`), the directory the rest of
+    the cost model already reads run outputs from, laid out as
+    `<DIR>/seq5/seq_c<C>_L<k>.json`.  It is read when a caller asks for it and
+    not when this module is imported.
     """
-    p = os.path.join(EXP, "b10", "out", "seq5", f"seq_c{ctx}_L{layer}.json")
-    return json.load(open(p))["result"]["point"]
+    if (ctx, layer) not in _SEQ5:
+        f = inputs.artifacts_dir() / "seq5" / f"seq_c{ctx}_L{layer}.json"
+        if not f.exists():
+            raise SystemExit(f"missing {f}: the measured 8B layer chunk at C={ctx}, "
+                             "layer 16, which the shape ratios are stated against")
+        _SEQ5[(ctx, layer)] = json.loads(f.read_text())["result"]["point"]
+    return _SEQ5[(ctx, layer)]
 
 
-REF8B = {c: _seq5(c)["cells"]["fresh"] for c in CONTEXTS}
-REF8B_SOURCE = "experiments/b10/out/seq5/seq_c{4096,16384}_L16.json (result.point.cells.fresh)"
+def ref8b():
+    """The 8B L16 chunk's fresh cells at both contexts: the scaling reference."""
+    return {c: _seq5(c)["cells"]["fresh"] for c in CONTEXTS}
+
+
+REF8B_SOURCE = "<--artifacts>/seq5/seq_c{4096,16384}_L16.json (result.point.cells.fresh)"
 
 # --------------------------------------------------------------------------
 # The predictor.  Two halves, deliberately kept apart because they have very
@@ -270,6 +289,7 @@ def canonical(block):
 
 def build():
     reg = {}
+    ref8b_cells = ref8b()
     for name, meta in SHAPES.items():
         cfg = meta["cfg"]
         L, d, nh, nkv, hd, dff, vocab = cfg
@@ -284,7 +304,7 @@ def build():
             p = predict(cfg, ctx)
             # caveat 1: what the refuted `p * S^2` reading's base slope would do
             hi = predict(cfg, ctx, base_slope=72.083 / 32.0)
-            ref8 = REF8B[ctx]
+            ref8 = ref8b_cells[ctx]
             entry["contexts"][str(ctx)] = dict(
                 cells_per_token_layers=p["total"],
                 cells_per_token_layers_key_tiles=p["key_tiles"],
@@ -443,6 +463,7 @@ def main():
     ap.add_argument("--json", action="store_true", help="rewrite the registration file")
     constants.add_argument(ap)
     ap.add_argument("--inputs", metavar="DIR", help="cost-model inputs (read at import; or set ZK_COSTMODEL_INPUTS)")
+    inputs.add_arguments(ap)
     a = ap.parse_args()
     constants.load(a.constants)
 
@@ -462,7 +483,7 @@ def main():
                prediction_block_sha256=digest,
                implied_tok_s_secondary=implied_tok_s(reg),
                integrator_notes=integrator_notes(reg),
-               reference_8b_chunk=dict(cells=REF8B, source=REF8B_SOURCE))
+               reference_8b_chunk=dict(cells=ref8b(), source=REF8B_SOURCE))
 
     print("=" * 78)
     print("E4 -- unfitted-scale prediction, registered before measurement")
