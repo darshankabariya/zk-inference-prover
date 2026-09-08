@@ -2610,9 +2610,45 @@ pub fn emit_cmd(args: &[String]) {
                 add($c.eval.cuda_eval_name(), $name, ir);
             }};
         }
+        // Issue #117: and the store must hold *one* shape per key tile, whatever
+        // its numerator column carries. `KeyEval`'s `claimed_av` and
+        // `claimed_sn` are both folds of the numerator accumulator, so both are
+        // exactly zero on a key tile whose numerator column is identically zero
+        // -- an ordinary witness, not a coincidence: `commit_base` writes a zero
+        // numerator wherever a key's shift is off the exp table, and at a long
+        // prefix a whole `S`-key sub-key-tile can be off it for every token of
+        // the chunk. Read as ordinary constants the pair folded `x - 0` out of
+        // the IR and the collapsed key tile asked for a shape no emit had
+        // produced: the C=16384 E11 run met that on layer 2 of blocks 17-32,
+        // where the prover asked for `zk_key_eval 0x67c40d82` at 744
+        // instructions against the 748 of every emitted shape of that key tile,
+        // and 16 chunks took the announced scalar fallback. Read through
+        // `EvalAtRow::claim` each takes a slot of its own by occurrence and the
+        // shape stops seeing them. That is stream RR's
+        // rule, and this is where the store is built, so this is where it is
+        // checked: the same eval with the pair driven onto zero must lower to
+        // the fingerprint just installed, or the emit stops.
+        //
+        // Stream EE checked it the other way round -- it built the whole
+        // component set a second time with the pair zeroed and installed
+        // whatever that lowering produced. Since the rule holds, that costs a
+        // `build_components_linked` per emit run and installs nothing; and if
+        // the rule were ever undone it would install the second shape rather
+        // than say so, so the store would grow quietly.
+        let key_fp = |e: &crate::attn_air::KeyEval| {
+            lower(e, SecureField::zero(), e.log_size(), e.max_constraint_log_degree_bound())
+                .fingerprint()
+        };
         for i in 0..b.chans.len() {
             go!(b.chans[i], format!("chan_key_tile{i}"));
             go!(b.keys[i], format!("key_key_tile{i}"));
+            let mut probe = b.keys[i].eval.clone();
+            probe.claimed_av = SecureField::zero();
+            probe.claimed_sn = SecureField::zero();
+            assert_eq!(key_fp(&probe), key_fp(&b.keys[i].eval),
+                       "zk_key_eval, key tile {i}: a key tile whose numerator column is \
+                        identically zero lowers to another shape, so the store this emit \
+                        writes would miss it and the chunk would take the host fallback");
         }
         // a diagonal block key tile has no row component (B10 step 3): `rows` is shorter
         // than `chans`, so it is walked on its own
@@ -2708,43 +2744,6 @@ pub fn emit_cmd(args: &[String]) {
         }
         if let Some(et) = &b.emb_tab {
             go!(et, "emb_table".to_string());
-        }
-
-        // Stream EE (open item 21): the **collapsed** grid key tiles.
-        //
-        // `Lower::ext` folds `x - 0` and `schedule` then drops the dead scalar
-        // slot with it, so a claim a witness drives to exactly zero takes two
-        // instructions out of the IR and the component lowers to a fingerprint
-        // these placeholder claims never produce -- `exprprobe::claims_for`
-        // hands out four nonzero limbs per claim, and `fill_binding_claims` is the
-        // same hazard already found on the binding claims.
-        //
-        // The grid component has one such pair.  `KeyEval`'s `claimed_av` and
-        // `claimed_sn` are both folds of the numerator accumulator `zn`
-        // (`attn_air.rs`'s `av`/`sn` constraints), so both are exactly zero on
-        // a key tile whose numerator column is identically zero -- and that is an
-        // ordinary witness, not a coincidence: `commit_base` writes a zero
-        // numerator wherever a key's shift is off the exp table, and at a long
-        // prefix a whole `S`-key sub-key-tile can be off it for every token of the
-        // chunk.  The C=16384 E11 run met exactly that on layer 2 of blocks
-        // 17-32: the prover asked for `zk_key_eval 0x67c40d82` at **744**
-        // instructions where every emitted shape of that key tile is **748**, and
-        // 16 chunks took the announced scalar fallback.
-        //
-        // So the emitter lowers every key tile a second time with that pair zeroed
-        // and installs whatever shape is new.  It is additive -- no fingerprint
-        // an earlier emit produced moves -- and value-preserving: the kernel is
-        // chosen by shape and the blob still replays the proof's own scalars,
-        // so a collapsed key tile computes `av - 0` exactly as the fallback did.
-        let mut zclaims = claims.clone();
-        for bc in zclaims.key_tiles.iter_mut() {
-            bc[2] = [0; 4];
-            bc[3] = [0; 4];
-        }
-        let bz = crate::compose::build_components_linked(&plan, &rels, f[0], f[1], f[2], f[3],
-                                                         f[4], f[5], &zclaims, link.as_deref());
-        for i in 0..bz.keys.len() {
-            go!(bz.keys[i], format!("key_key_tile{i}_zav"));
         }
     }
 
@@ -3863,5 +3862,62 @@ mod tests {
         let ir = lower(&Claims { a: ext(7), b: ext(7) }, SecureField::zero(), 4, 5);
         assert_eq!(ir.claim_slots.len(), 2, "coinciding claims still get a slot each");
         assert_eq!(ir.scalars.iter().filter(|v| **v == ext(7)).count(), 2);
+    }
+
+    /// #117, on the real component and through the whole construction path.
+    /// `cudaemit` asserts this on the plan it emits, by driving `KeyEval`'s
+    /// `claimed_av` and `claimed_sn` onto zero on the eval it has just lowered.
+    /// Here the pair is zeroed in the `Claims` the components are built from,
+    /// which is the way a collapsed key tile reaches the lowering in a real
+    /// chunk, on both key tile kinds and without an emit run. Before stream RR
+    /// the pair folded `x - 0` out of the IR and a key tile with an all-zero
+    /// numerator asked for a shape no emit had produced; a claim now takes a
+    /// slot by occurrence, so its value cannot move a shape.
+    #[test]
+    fn a_key_tiles_zeroed_claims_are_not_a_shape_fact() {
+        let with_prefix = {
+            let mut p = crate::exprprobe::tests::params_no_prefix();
+            // the same chunk read against a committed prefix, so this covers
+            // the prefix key tiles as well as the diagonal block's
+            p.c = 128;
+            p
+        };
+        for (what, params) in
+            [("no prefix", crate::exprprobe::tests::params_no_prefix()), ("a prefix", with_prefix)]
+        {
+            let plan = crate::compose::Plan::new(&params);
+            let mut ch = stwo::core::channel::Blake2sM31Channel::default();
+            stwo::core::channel::Channel::mix_u64(&mut ch, 0x0b65_2b03);
+            let rels = crate::compose::Rels::draw(
+                &mut ch, &plan.widths,
+                plan.residual_stream.as_ref().map(|g| g.uns.as_slice()),
+                plan.emb.map(|l| l.arity()), plan.needs_rq_rels(), plan.q_tabs.len());
+            let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
+            let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_2b03);
+            // the emitter's own placeholders, so this lowers what `cudaemit` lowers
+            fill_binding_claims(&plan, &mut claims, 0x7135_2b03);
+            let shapes = |c: &crate::compose::Claims| {
+                let b = crate::compose::build_components_linked(
+                    &plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], c, None);
+                b.keys
+                    .iter()
+                    .map(|k| {
+                        let ir = lower(&k.eval, SecureField::zero(), k.eval.log_size(),
+                                       k.eval.max_constraint_log_degree_bound());
+                        (ir.fingerprint(), ir.ops.len(), ir.scalars.len())
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let want = shapes(&claims);
+            assert!(!want.is_empty(), "{what}: the plan carries key tiles");
+            let mut zeroed = claims.clone();
+            for bc in zeroed.key_tiles.iter_mut() {
+                bc[2] = [0; 4];
+                bc[3] = [0; 4];
+            }
+            assert_eq!(shapes(&zeroed), want,
+                       "{what}: a key tile whose numerator column is identically zero lowers \
+                        to a shape of its own");
+        }
     }
 }
