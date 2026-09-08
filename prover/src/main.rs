@@ -1189,9 +1189,6 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
                 dff: g.dff,
                 eps: g.eps,
                 inv_d: g.inv_d,
-                // Stream JJ (E11): the dequant output bindings are unconditional
-                // too; the field stays in the statement's serialization.
-                bind_matmul_outputs: true,
                 // stream II: which family this chunk carries is the witness's
                 // to say, not the command line's
                 head_norm: g.head,

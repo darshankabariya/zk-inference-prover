@@ -481,7 +481,6 @@ fn residual_stream_layout_eq(a: &crate::compose::Params, b: &crate::compose::Par
                 && ga.a == gb.a
                 && ga.eps == gb.eps
                 && ga.inv_d == gb.inv_d
-                && ga.bind_matmul_outputs == gb.bind_matmul_outputs
                 && (gb.head_norm || ga.dff == gb.dff)
         }
         _ => false,

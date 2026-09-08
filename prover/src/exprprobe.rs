@@ -834,7 +834,7 @@ pub(crate) mod tests {
             ao_acc_mag: false, ao_denp2: false,
             fold_rem_bits: 0, fold_alpha: 0, freivalds_p: 136,
             residual_stream: Some(crate::compose::ResidualStreamParams {
-                d: 64, a: 4, dff: 64, bind_matmul_outputs: false, head_norm: false,
+                d: 64, a: 4, dff: 64, head_norm: false,
                 eps: crate::bf16::from_f64(1e-5),
                 inv_d: crate::bf16::from_f64(1.0 / 64.0),
             }),
@@ -920,7 +920,7 @@ pub(crate) mod tests {
             ao_acc_mag: false, ao_denp2: false,
             fold_rem_bits: 0, fold_alpha: 0, freivalds_p: 136,
             residual_stream: Some(crate::compose::ResidualStreamParams {
-                d: 128, a: 4, dff: 128, bind_matmul_outputs: true, head_norm: false,
+                d: 128, a: 4, dff: 128, head_norm: false,
                 eps: crate::bf16::from_f64(1e-5),
                 inv_d: crate::bf16::from_f64(1.0 / 128.0),
             }),

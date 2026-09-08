@@ -403,6 +403,11 @@ impl RopeParams {
 /// residual stream occupies at the reduction's first level: `tree_sum` groups the
 /// channels by residue mod `a`, so a row's committed leaves are the channels
 /// `r, r+a, ...` and the second level is one row per token over the `a` roots.
+///
+/// A statement written before 2026-09-08 also names `bind_matmul_outputs`, the
+/// switch the dequant output bindings had before they became unconditional
+/// (issue #21).  Nothing here refuses a member it does not know, so such a
+/// statement still parses and the retired one is dropped on the way in.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ResidualStreamParams {
     pub d: usize,
@@ -417,10 +422,6 @@ pub struct ResidualStreamParams {
     /// pinned as the parameters the verifier builds it from.
     pub eps: u16,
     pub inv_d: u16,
-    /// Stream E: make `o_out` and `d_out` the `o` and `down` dequant components'
-    /// own published outputs, bound to the copies the wiring family commits.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub bind_matmul_outputs: bool,
     /// Stream II (E11), stream KK's finding: this chunk is the `lm_head` chunk,
     /// so its wiring family is the *final* RMSNorm and nothing else -- one
     /// reduction pair and one norm scale, whose input is the last layer's committed
@@ -8167,5 +8168,19 @@ mod tests {
                        + usize::from(b.emb_tab.is_some()),
                    plan.n_table_sums(),
                    "every component that carries a table takes one claimed sum");
+    }
+
+    /// Issue #21: the retired `bind_matmul_outputs` is not a member any more,
+    /// and a statement that still names it parses all the same -- the field was
+    /// always `true` and nothing read it, so dropping it loses nothing.
+    #[test]
+    fn a_statement_that_still_names_the_retired_dequant_switch_parses() {
+        let old = r#"{"d":64,"a":4,"dff":64,"eps":1,"inv_d":2,"bind_matmul_outputs":true}"#;
+        let p: ResidualStreamParams =
+            serde_json::from_str(old).expect("a statement from before the field was retired");
+        assert_eq!((p.d, p.a, p.dff), (64, 4, 64));
+        assert!(!p.head_norm);
+        // and it is gone from what this crate writes
+        assert!(!serde_json::to_string(&p).unwrap().contains("bind_matmul_outputs"));
     }
 }

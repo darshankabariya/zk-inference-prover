@@ -1130,7 +1130,7 @@ mod tests {
                 // fixture carries a real `dff` and the model's two norm
                 // constants.  A mechanical update, not a change of what the
                 // test asserts -- both plans it compares gain the same columns.
-                d: 64, a: 4, dff: 64, bind_matmul_outputs: false, head_norm: false,
+                d: 64, a: 4, dff: 64, head_norm: false,
                 eps: crate::bf16::from_f64(1e-5),
                 inv_d: crate::bf16::from_f64(1.0 / 64.0),
             }),
