@@ -30,6 +30,24 @@ Scripts that read measured numbers take `--constants PATH` (a zk-results
 Nothing measured lives in this repository. `witness/text.txt` is the fixed
 evaluation corpus (Pride and Prejudice, Project Gutenberg #1342).
 
+## What the extractor refuses
+
+The attention output's rounding identity multiplies `2 mag num`, and it is an
+identity over the integers only while that product stays under the field's
+`2^31 - 1`. The prover states that as `1 + lo + hi + e_hi <= 31` over the
+accumulator's two limbs and the exponent window, with `q_bits + rem_bits <= 31`
+beside it, and refuses a statement that does not fit. Both are decided by the
+dump's own accumulator and per-head exponents, so `witness/extract.py` evaluates
+them as it writes each layer and refuses a dump that would not compose --
+naming the block, the layer and the numbers -- instead of leaving that to a
+proving run hours later. Each layer prints what its two windows come to and
+what is left of the field, the margin: zero margin is a layer that composes and
+admits nothing wider, which is where layer 0 sits under the paper's
+quantization. A plan that pins wider model-wide widths than a dump's own can
+only spend more of the window, so a dump refused here is refused under every
+plan. `witness/extract.py --selftest` checks the arithmetic, with no model and
+no card, against the shape the prover pins its own window on.
+
 ## The unproved baseline
 
 `eval/baseline` measures how fast the same model runs when nothing is proved,
