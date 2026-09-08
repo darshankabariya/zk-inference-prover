@@ -1,27 +1,35 @@
-"""E2h: the unproved decode-throughput harness.
+"""The unproved baseline: how fast the same model runs when nothing is proved.
 
-Measures tokens/second for unproved autoregressive decode, in the shape our
-proved numbers are quoted in, so that `unproved / proved` is an overhead
-multiple and not a category error.  This is the denominator of the correction to
-the community's 500,000x figure (Baker et al., arXiv:2507.15916 fn. 170); the
-numerator is frozen in `experiments/paper/constants.json` and is never
-re-derived here.
+Three numbers per point, each positions per second over the positions IT covers
+(the decision of 2026-09-08 in zk-results, `docs/decisions/
+2026-09-08-cost-per-proved-position-not-an-overhead-multiple.md`):
+
+  prefill      the prompt's positions over the prefill's wall-clock time
+  decode       the generated positions over the decode's wall-clock time
+  end to end   both, over the whole pass's wall-clock time
+
+None of the three is an "overhead" denominator, and no headline rate subtracts
+the prompt out. The paper quotes a cost per proved position and the reader
+applies their own mix of prompt and generated positions, so the comparison --
+when a constants file is given -- puts the proved cost per position beside the
+unproved cost per position of each of the three, and never one multiple.
 
 Two rows, because the belief being corrected mixes them:
-  single-stream  -- batch 1, greedy, 512 tokens: the like-for-like latency row.
-  batched        -- a batch sweep: the production-serving row that gives $/token.
+  single-stream  -- batch 1, greedy: the like-for-like latency row.
+  batched        -- a batch sweep: the production-serving row.
 Two backends, for the same reason: `hf` (what a non-specialist gets) and `vllm`
-(what the 668 tok/s in the belief actually means).
+(what a production serving figure actually means).
 
-Every like-for-like dimension is checked in `e2/lfl.py` and the verdict is
-written into the run's own JSON.  A dimension that cannot be matched is recorded
-with the direction it pushes the answer.
+Every like-for-like dimension is checked in `lfl.py` and the verdict is written
+into the run's own JSON. A dimension that cannot be matched is recorded with the
+direction it pushes the answer. The record is written whether or not the
+comparison could be made: the measurement is this run's product, and the
+comparison is a later reading of it against numbers this repository does not
+hold.
 
-Usage (see e2/run.sh for the exact box invocation):
-
-    uv run python e2/decode_bench.py --backend hf --context 4096 --batch 1
-    uv run python e2/decode_bench.py --selftest        # no model, no GPU
-    uv run python e2/decode_bench.py --probe           # backend availability
+    uv run python -m harness.eval.baseline.decode_bench --backend hf --context 4096 --batch 1
+    uv run python -m harness.eval.baseline.decode_bench --selftest   # no model, no GPU
+    uv run python -m harness.eval.baseline.decode_bench --probe      # backend availability
 """
 
 import argparse
@@ -43,36 +51,52 @@ from harness import provenance
 
 HERE = Path(__file__).resolve().parent
 
-SCHEMA = "e2h/decode-throughput/2"
+SCHEMA = "e2h/decode-throughput/3"
 OUT = Path(os.environ.get("ZK_BASELINE_OUT", "out"))
 
-# What the unproved seconds contain, written into every run so the ratio can be
-# audited without re-running anything.  The proved side's four boundaries live in
-# `constants.json`'s `_boundaries`; this is the FIFTH thing a reader needs, and
-# it is the unproved side's own boundary.
-BOUNDARY = {
-    "name": "unproved decode wall, weights resident",
+# What the unproved seconds contain, written into every run so a reading can be
+# audited without re-running anything.  The proved side's timing scopes are in
+# `constants.json`'s `_timing_scopes`; this is the unproved side's own.
+TIMING_SCOPE = {
+    "name": "unproved inference, weights resident",
+    "parts": {
+        "prefill": "one `max_new_tokens=1` call: the whole prompt read, and the "
+                   "first generated position emitted",
+        "decode": "the rest of the full call, by difference: the remaining "
+                  "generated positions, one step each",
+        "end_to_end": "the full call on its own: the prompt prefilled and every "
+                      "generated position decoded, as one wall-clock time",
+    },
     "includes": [
-        "the forward passes that produce the measured tokens",
+        "the forward passes that produce the measured positions",
         "sampling/argmax, KV-cache growth, the engine's own scheduling",
     ],
     "excludes": [
         "process start, weight load and any compile/CUDA-graph capture "
-        "(a warmup pass precedes every timed rep)",
+        "(a warmup pass precedes every timed repetition)",
         "tokenization of the prompt (built once, outside the timed region)",
-        "the prefill -- for the decode-only rate ONLY; it is measured by a "
-        "separate max_new_tokens=1 call and subtracted. The e11 rate includes it.",
     ],
     "comparable_to": (
-        "the proved side's per-chunk boundaries. NOTE: none of the four proved "
-        "boundaries contains an inference pass -- `whole wall` is trace gen + "
-        "stwo + serialization, and even `loop_secs`, which adds the witness READ "
-        "and the layer build, reads a witness that a prior extraction produced. "
-        "So every ratio here is prover-seconds against inference-seconds, which "
-        "is exactly the quantity fn. 170 computed (zkLLM's 803 s against 668 "
-        "tok/s). An end-to-end deployment that must both infer and prove costs "
-        "(1 + ratio), not (ratio) -- immaterial at x25-40, and stated anyway."),
+        "the proved side's timing scopes, with one thing said out loud: none of "
+        "them contains an inference pass. `whole wall` is trace generation, "
+        "interaction generation, stwo and serialization; `loop`, which adds the "
+        "witness read and the layer build, still reads a witness a prior "
+        "extraction produced. So a proved cost per position is prover-seconds "
+        "and an unproved one is inference-seconds, and a deployment that must "
+        "both infer and prove pays the sum of the two."),
 }
+
+# What the three rates count, written into every record.
+COUNTING = (
+    "Each rate is positions per second over the positions it covers: the prompt "
+    "over the prefill's wall-clock time, the generated positions over the "
+    "decode's, and both over the whole pass's. The parts fall one position short "
+    "of the end-to-end count, because the first generated position is produced "
+    "inside the prefill call and is charged to neither part. None of the three "
+    "is an overhead denominator: the paper quotes a cost per proved position and "
+    "the reader applies their own mix of prompt and generated positions. See the "
+    "decisions of 2026-09-08 in zk-results on the unproved baseline and on cost "
+    "per proved position.")
 
 
 def device_block(device):
@@ -127,43 +151,20 @@ def run_one(a, be, context, batch, purpose):
         return {k: (v * batch if isinstance(v, float) and k != "spread_pct" else v)
                 for k, v in st.items()}
 
-    dec = _stats(per_rep, "tok_s_decode_per_stream")
-    e11 = _stats(per_rep, "tok_s_e11_all_positions_per_stream")
     measured = {
         "per_rep": per_rep,
+        # The positions each rate is over, per stream.
+        "positions": {"prefill": context, "decode": a.new_tokens - 1,
+                      "end_to_end": context + a.new_tokens},
         "prefill_s": _stats(per_rep, "prefill_s"),
         "decode_s": _stats(per_rep, "decode_s"),
-        "total_s": _stats(per_rep, "total_s"),
-        # --- counting convention 1: decode only, prefill excluded (v1) -------
-        "tok_s_decode_per_stream": dec,
-        "tok_s_decode_aggregate": _agg(dec),
-        # --- counting convention 2: every position of the concatenated pass --
-        #     (E11 / DeepProve TPM). Prefill INCLUDED on both sides.
-        "tok_s_e11_all_positions_per_stream": e11,
-        "tok_s_e11_all_positions_aggregate": _agg(e11),
-        "e11_positions_per_stream": context + a.new_tokens,
-        # --- reported, used by neither ladder row ----------------------------
-        "tok_s_wall_per_stream": _stats(per_rep, "tok_s_wall_per_stream"),
-        "ttft_s": _stats(per_rep, "prefill_s"),
-        "counting_conventions": {
-            "decode_only": "(new_tokens - 1) / decode_s. The v1 comparison: our "
-                           "proved seconds cover only the 512 decoded positions "
-                           "(scope.prefill_status -- the prefix is unchecked, not "
-                           "proven), so the baseline excludes prefill too. "
-                           "Excluding prefill makes the unproved rate LARGER, so "
-                           "this choice makes the reported overhead LARGER.",
-            "e11": "(prompt_tokens + new_tokens) / total_s. Every position of the "
-                   "concatenated prompt+output pass over that pass's whole wall -- "
-                   "the convention DeepProve's TPM uses and the one our own "
-                   "statement needs once E11 proves the prompt. At C=4096 it "
-                   "counts 4608 positions, not 512, so the unproved rate is much "
-                   "larger and the multiple grows with C.",
-        },
-        "ladder_uses": "tok_s_decode_per_stream.median for the single-stream "
-                       "latency row; tok_s_decode_aggregate.median for the batched "
-                       "$/token row; tok_s_e11_all_positions_*.median for the E11 "
-                       "arm",
+        "wall_s": _stats(per_rep, "wall_s"),
+        "counting": COUNTING,
     }
+    for part in lfl.PARTS:
+        st = _stats(per_rep, f"pos_s_{part}")
+        measured[f"pos_s_{part}_per_stream"] = st
+        measured[f"pos_s_{part}_aggregate"] = _agg(st)
     return {
         "schema": SCHEMA,
         "recorded_utc": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
@@ -171,28 +172,75 @@ def run_one(a, be, context, batch, purpose):
                     "available": True, "reason": None,
                     "synthetic": bool(getattr(be, "synthetic", False))},
         "purpose": purpose,
-        "boundary": BOUNDARY,
+        "timing_scope": TIMING_SCOPE,
         "run": run,
         "measured": measured,
-        "like_for_like": lfl.check(run, context=context, batch_size=batch, purpose=purpose),
     }
 
 
-def selftest():
-    """The like-for-like checker has teeth: prove it on synthetic run blocks,
-    with no model and no GPU."""
+def comparison(rec, *, context, batch, purpose, have_constants):
+    """The like-for-like check and the cost per position, when constants exist.
+
+    The record is written either way.  A measurement is this run's product; a
+    comparison is a reading of it against numbers this repository does not hold,
+    so a missing constants file, a missing key and a null value are all recorded
+    as the reason no comparison was made, and none of them costs the run.
+    """
+    if not have_constants:
+        return {"made": False,
+                "why": "no --constants PATH (a zk-results constants.json) and no "
+                       "ZK_CONSTANTS; the measurement stands on its own"}
+    if not rec.get("measured"):
+        return {"made": False, "why": "this point produced no number"}
+    try:
+        return {"made": True,
+                "like_for_like": lfl.check(rec["run"], context=context,
+                                           batch_size=batch, purpose=purpose),
+                "cost_per_position": lfl.compare(rec["measured"], context=context)}
+    except (KeyError, ValueError, OSError, SystemExit) as e:
+        return {"made": False, "why": f"{type(e).__name__}: {e}"}
+
+
+def selftest_rates():
+    """The three rates, on the mock backend: no model, no card, no constants."""
+    be = B.MockBackend("MOCK/none", "main", "bfloat16", "cpu", None)
+    n_prompt, n_new = 64, 8
+    per_rep, _ = B.measure(be, [[1] * n_prompt], n_new, reps=1, warmup=0)
+    r = per_rep[0]
+    cases = [
+        ("the decode's time is the full call's minus the prefill call's",
+         abs(r["wall_s"] - (r["prefill_s"] + r["decode_s"])) < 1e-9),
+        ("prefill: the prompt's positions over the prefill's wall-clock time",
+         abs(r["pos_s_prefill"] - n_prompt / r["prefill_s"]) < 1e-6),
+        ("decode: the generated positions over the decode's wall-clock time",
+         abs(r["pos_s_decode"] - (n_new - 1) / r["decode_s"]) < 1e-6),
+        ("end to end: prompt plus generated over the whole wall-clock time",
+         abs(r["pos_s_end_to_end"] - (n_prompt + n_new) / r["wall_s"]) < 1e-6),
+        ("no rate subtracts the prompt out of the positions it counts",
+         r["pos_s_end_to_end"] > r["pos_s_decode"]),
+    ]
+    bad = 0
+    for label, ok in cases:
+        bad += not ok
+        print(f"{'OK  ' if ok else 'FAIL'}  {label}")
+    return bad
+
+
+def selftest_check(card):
+    """The like-for-like checker has teeth, on synthetic run blocks."""
     base = {
         "model": {"id": "unsloth/Llama-3.1-8B-Instruct",
                   "revision": "4699cc75b550f9c6f3173fb80f4703b62d946aa5"},
         "tokenizer": {"from_repo": "unsloth/Llama-3.1-8B-Instruct",
                       "class": "PreTrainedTokenizerFast", "vocab_size": 128256},
         "dtype": "bfloat16",
-        "device": {"kind": "cuda", "name": "NVIDIA H200", "count": 1},
+        "device": {"kind": "cuda", "name": f"NVIDIA {card}", "count": 1},
         "context_keys": 4096, "new_tokens": 512,
         "decoding": {"greedy": True},
     }
+    other = "H100" if "h100" not in card.lower() else "H200"
     cases = [
-        ("the 8B single-stream row the box must produce", base, 1, "single-stream",
+        ("the 8B single-stream row the host must produce", base, 1, "single-stream",
          "like-for-like with stated mismatches", True),
         ("the same row batched (production, not latency)", base, 32, "batched",
          "like-for-like with stated mismatches", True),
@@ -207,31 +255,47 @@ def selftest():
          "NOT-LIKE-FOR-LIKE", False),
         ("right everything, sampled not greedy", {**base, "decoding": {"greedy": False}},
          1, "single-stream", "NOT-LIKE-FOR-LIKE", False),
-        ("right everything, H100 not H200", {**base,
-            "device": {"kind": "cuda", "name": "NVIDIA H100 80GB HBM3", "count": 1}},
+        (f"right everything, {other} not the proved {card}", {**base,
+            "device": {"kind": "cuda", "name": f"NVIDIA {other} 80GB HBM3", "count": 1}},
          1, "single-stream", "NOT-LIKE-FOR-LIKE", False),
         ("right everything, but SYNTHETIC seconds", {**base, "synthetic": True},
          1, "single-stream", "NOT-LIKE-FOR-LIKE", False),
     ]
     bad = 0
     for label, run, batch, purpose, want_verdict, want_quotable in cases:
-        r = lfl.check(run, context=run["context_keys"] if run["context_keys"] in lfl.CONTEXTS
-                      else 4096, batch_size=batch, purpose=purpose)
+        r = lfl.check(run, context=4096, batch_size=batch, purpose=purpose)
         ok = r["verdict"] == want_verdict and r["quotable"] == want_quotable
         bad += not ok
         print(f"{'OK  ' if ok else 'FAIL'}  {label:46s} -> {r['verdict']} "
               f"(quotable={r['quotable']})")
         for b in r["blocking"]:
             print(f"          blocking: {b}")
-    print()
-    print("proved denominators the ladder will divide into:")
-    for c in lfl.CONTEXTS:
-        for row in lfl.proved_rows(c):
-            v = "NULL -- " + row["blocked_by"] if row["tok_s"] is None else f"{row['tok_s']:.3f} tok/s"
-            print(f"  C={c:<6d} {row['boundary']:<11s} {'headless' if row['headless'] else 'full  '}"
-                  f"  {v}")
-    return 1 if bad else 0
+    return bad
 
+
+def selftest(have_constants):
+    bad = selftest_rates()
+    print()
+    if not have_constants:
+        print("no --constants PATH (a zk-results constants.json) and no ZK_CONSTANTS: "
+              "the like-for-like cases and the proved rows were NOT checked.")
+        return 1 if bad else 0
+    rows = {c: lfl.proved_rows(c) for c in lfl.CONTEXTS}
+    resolved = [r for c in lfl.CONTEXTS for r in rows[c] if r["blocked_by"] is None]
+    if not resolved:
+        print("this constants file carries no proved row at any measured context; "
+              "the checker's cases cannot be stated against one.")
+        return 1
+    bad += selftest_check(resolved[0]["card"])
+    print()
+    print("the proved rows a cost per position is read beside:")
+    for c in lfl.CONTEXTS:
+        for row in rows[c]:
+            v = ("blocked -- " + row["blocked_by"] if row["blocked_by"]
+                 else f"{row['pos_s']:.5f} positions/s = "
+                      f"{row['secs_per_position']:.4f} s/position")
+            print(f"  C={c:<6d} {row.get('timing_scope', '?'):<11s} {v}")
+    return 1 if bad else 0
 
 
 def _provenance(a, extra=None):
@@ -268,15 +332,23 @@ def main():
     p.add_argument("--warmup", type=int, default=1)
     p.add_argument("--tag", default=None)
     p.add_argument("--out", default=None)
-    p.add_argument("--selftest", action="store_true")
+    p.add_argument("--selftest", action="store_true",
+                   help="the three rates and the like-for-like checker, with no model "
+                        "and no card; the checker's half needs --constants")
     p.add_argument("--probe", action="store_true")
     p.add_argument("--max-model-len", type=int, default=None)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.90)
     constants.add_argument(p)
     a = p.parse_args()
+    # The constants file is read once, here, and only if one was named.  A
+    # measurement is this run's product and does not need it; the comparison
+    # does, and says so in the record when there is none.
+    have_constants = bool(a.constants)
+    if have_constants:
+        constants.load(a.constants)
 
     if a.selftest:
-        sys.exit(selftest())
+        sys.exit(selftest(have_constants))
     if a.probe:
         print(json.dumps({n: B.probe(n) for n in sorted(B.BACKENDS)}, indent=2))
         sys.exit(0)
@@ -296,6 +368,7 @@ def main():
                                              "reason": str(e)},
                "measured": None,
                "note": "Backend unavailable. NO number is produced; do not substitute one."}
+        rec["comparison"] = {"made": False, "why": "the backend did not run"}
         rec["provenance"] = _provenance(a)
         path = OUT / f"{a.backend}_unavailable.json"
         path.write_text(json.dumps(rec, indent=2))
@@ -323,17 +396,22 @@ def main():
                                "successful batch is the one to quote."}
                 print(f"C={c} batch={b}: FAILED ({type(e).__name__}) -- recorded, not skipped",
                       file=sys.stderr)
+            rec["comparison"] = comparison(rec, context=c, batch=b, purpose=purpose,
+                                           have_constants=have_constants)
             rec["provenance"] = _provenance(a)
             path = OUT / f"{tag}_{a.backend}_c{c}_b{b}_n{a.new_tokens}.json"
             path.write_text(json.dumps(rec, indent=2))
             results.append((path, rec))
             m = rec.get("measured")
             if m:
-                lf = rec["like_for_like"]
-                print(f"C={c:<6d} batch={b:<4d} {a.backend:<5s} "
-                      f"per-stream {m['tok_s_decode_per_stream']['median']:9.3f} tok/s   "
-                      f"aggregate {m['tok_s_decode_aggregate']['median']:10.3f} tok/s   "
-                      f"ttft {m['ttft_s']['median']:7.3f}s   [{lf['verdict']}]")
+                cmp_ = rec["comparison"]
+                verdict = (cmp_["like_for_like"]["verdict"] if cmp_["made"]
+                           else "no comparison: " + cmp_["why"])
+                print(f"C={c:<6d} batch={b:<4d} {a.backend:<5s} positions/s per stream: "
+                      f"prefill {m['pos_s_prefill_per_stream']['median']:11.2f}  "
+                      f"decode {m['pos_s_decode_per_stream']['median']:9.3f}  "
+                      f"end to end {m['pos_s_end_to_end_per_stream']['median']:11.3f}   "
+                      f"[{verdict}]")
             print(f"  -> {path}")
             if rec.get("failure", {}).get("oom"):
                 print("  batch sweep stopped: out of memory", file=sys.stderr)

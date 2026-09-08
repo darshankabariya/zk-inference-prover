@@ -16,6 +16,27 @@ Scripts that read measured numbers take `--constants PATH` (a zk-results
 Nothing measured lives in this repository. `witness/text.txt` is the fixed
 evaluation corpus (Pride and Prejudice, Project Gutenberg #1342).
 
+## The unproved baseline
+
+`eval/baseline` measures how fast the same model runs when nothing is proved,
+in two backends, and records three numbers per point, each positions per second
+over the positions it covers: the prompt's prefill, the decode of the generated
+positions, and the two end to end over the whole pass's wall-clock time. None of
+the three is an overhead denominator. The paper quotes a cost per proved
+position and the reader applies their own mix of prompt and generated positions,
+so `--constants PATH` makes the record carry the proved cost per position beside
+the unproved cost per position of each of the three, and never one multiple.
+
+The record is written whether or not that comparison could be made. The
+measurement is the run's product and carries a provenance block either way; the
+comparison is a later reading of it against numbers this repository does not
+hold, and a missing constants file, a missing key and a null value are each
+recorded as the reason there is none.
+
+    uv run python -m harness.eval.baseline.decode_bench --selftest
+    uv run python -m harness.eval.baseline.decode_bench --backend hf \
+        --context 4096 --batch 1 --constants PATH
+
 ## torch on a GPU host
 
 `uv sync` installs the CPU build of torch. That is the default everywhere: the
@@ -33,8 +54,8 @@ The lockfile pins both builds, so neither `uv sync` resolves anything.
 
 ## The vLLM baseline's environment
 
-`eval/baseline` measures the unproved decode baseline in two backends. The `hf`
-backend runs in this environment. vLLM cannot share it (it pins its own CUDA
-torch), so it gets a separate virtual environment that is never committed:
+The two backends do not share one environment. The `hf` backend runs in this
+one. vLLM cannot share it (it pins its own CUDA torch), so it gets a separate
+virtual environment that is never committed:
 `uv venv .venv-vllm && uv pip install --python .venv-vllm vllm`, then run
 `decode_bench --backend vllm` with `.venv-vllm/bin/python -m harness.eval.baseline.decode_bench`.

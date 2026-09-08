@@ -8,10 +8,10 @@ that estimate of doing.  So:
   hf    -- `transformers.generate()`: what a non-specialist gets.
   vllm  -- a production serving engine: what the belief's denominator means.
 
-Both are measured by the SAME protocol (see `measure`): a prefill-only call to
-get time-to-first-token, then a full call for N tokens, decode seconds by
-subtraction.  Identical protocol on both backends is itself a like-for-like
-property -- the two rows differ in engine, in nothing else.
+Both are measured by the SAME protocol (see `measure`): a prefill-only call,
+then a full call for N tokens, the decode's own seconds by difference.
+Identical protocol on both backends is itself a like-for-like property -- the
+two rows differ in engine, in nothing else.
 
 A backend that is not installed reports `available: false` with the import error.
 It never returns a number.
@@ -313,24 +313,37 @@ def probe(name):
 # --- the protocol both backends are measured by ---------------------------
 
 def measure(be, prompts, n_new, reps, warmup):
-    """TTFT from a 1-token call, total from an N-token call, decode by
-    subtraction.  Identical on every backend.
+    """The three wall-clock times of one repetition.  Identical on every backend.
 
-    TWO rates come out of one run, because the denominator has a fork in it:
+    A warmup pass, then per repetition two calls:
 
-      decode-only   (n_new - 1) / decode_s.  The prompt is excluded on BOTH
-                    sides: our proved seconds never contain the prompt either
-                    (`scope.prefill_status` -- the prefix is unchecked, not
-                    proven).  This is the v1 statement's comparison.
-      e11           (n_prompt + n_new) / total_s.  ALL positions of the
-                    concatenated prompt+output pass, over the whole wall of that
-                    pass -- the convention DeepProve's TPM uses, and the one our
-                    own statement needs once E11 proves the prompt.
+      a `max_new_tokens=1` call, whose wall-clock time is the PREFILL's -- it
+      reads the whole prompt and emits the first generated position;
 
-    Both are recorded on every run; `ladder.py` names which one each row uses.
-    Neither is an end-to-end user wall: model load and weight residency sit
-    outside both, on both sides, as does the witness extraction on the proved
-    side.  See `ladder.py`'s `what_neither_side_counts`.
+      a full `n_new`-token call, whose wall-clock time is the pass END TO END:
+      it prefills the same prompt again and then decodes.
+
+    The DECODE's own wall-clock time is the difference, which is the `n_new - 1`
+    decode steps after the first generated position.
+
+    Three rates come out of that, each over the positions IT covers, and the
+    positions of the parts fall one short of the end-to-end count because the
+    first generated position is produced inside the prefill and is charged to
+    neither part:
+
+      prefill      n_prompt / prefill_s
+      decode       (n_new - 1) / decode_s
+      end to end   (n_prompt + n_new) / wall_s
+
+    None of the three is an "overhead" denominator, and no headline rate
+    subtracts the prompt out any more: the paper quotes a cost per proved
+    position and the reader applies their own mix of prompt and generated
+    positions (the decision of 2026-09-08 in zk-results, `docs/decisions/
+    2026-09-08-cost-per-proved-position-not-an-overhead-multiple.md`).
+
+    None of the three is an end-to-end user wall-clock time either: model load
+    and weight residency sit outside all of them, on both sides, as does the
+    witness extraction on the proved side.
     """
     n_prompt = len(prompts[0])
     per_rep = []
@@ -347,17 +360,20 @@ def measure(be, prompts, n_new, reps, warmup):
         got = be.generate(prompts, n_new)
         be.sync()
         t2 = time.perf_counter()
-        prefill_s, total_s = t1 - t0, t2 - t1
-        decode_s = total_s - prefill_s
+        prefill_s, wall_s = t1 - t0, t2 - t1
+        decode_s = wall_s - prefill_s
+        if decode_s <= 0:
+            raise RuntimeError(
+                f"the {n_new}-token call took {wall_s:.4f}s and the prefill call "
+                f"{prefill_s:.4f}s, so the decode's own time is not positive. The "
+                "two calls are not measuring what this protocol says they are; no "
+                "rate is reported from them.")
         gen_sha = _sha(got)
         per_rep.append({
-            "prefill_s": prefill_s, "total_s": total_s, "decode_s": decode_s,
-            # steady-state decode: the first token came out of the prefill call.
-            "tok_s_decode_per_stream": (n_new - 1) / decode_s,
-            "tok_s_wall_per_stream": n_new / total_s,
-            # E11 counting: every position of the concatenated pass, over the
-            # wall of that pass.  Prefill INCLUDED, on purpose.
-            "tok_s_e11_all_positions_per_stream": (n_prompt + n_new) / total_s,
+            "prefill_s": prefill_s, "decode_s": decode_s, "wall_s": wall_s,
+            "pos_s_prefill": n_prompt / prefill_s,
+            "pos_s_decode": (n_new - 1) / decode_s,
+            "pos_s_end_to_end": (n_prompt + n_new) / wall_s,
             "generated_sha256_16": gen_sha,
         })
     return per_rep, gen_sha
