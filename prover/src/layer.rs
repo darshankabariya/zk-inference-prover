@@ -1545,6 +1545,244 @@ impl Layer {
         })
     }
 
+    /// Issue #112: the segment, from the **statement and the calibration**, with
+    /// no dump on disk.
+    ///
+    /// `Layer::load_weights` reads no activation and, under `--shape-only`, no
+    /// model file either -- but it still opens `manifest.json`, and it still
+    /// builds the exponent table and every stand-in array off what it reads
+    /// there. This builds the same segment from `Fixed.params` and the
+    /// per-layer calibration instead, so `zk-prover expect-root --shape-only`
+    /// and `zk-prover model-roots` derive a shape root with no dump in reach.
+    /// A verifier holds both of those (issue #95): the statement is what it
+    /// verifies against, and the calibration is what the model manifest
+    /// publishes per layer.
+    ///
+    /// **What it is a function of is issue #18's answer, used as a
+    /// constructor.** The shape tree is a function of the statement, which
+    /// `Plan::new` turns into every layout and every table's width, and of the
+    /// per-key-tile calibration -- the master exponent, the per-head exponents
+    /// cycled into that key tile's instances, and the scale each of those gives
+    /// (`shaperoot::Calibration`). Those are exactly the two things this takes.
+    /// Everything else a segment carries -- its activations, its weights, its
+    /// `jv`, its norm weights, its embedding table -- reaches the *model* tree
+    /// and no column of the shape tree, so each is allocated at the shape the
+    /// statement gives and left at the same well-formed constant
+    /// `load_weights` leaves it at under `--shape-only`.
+    ///
+    /// Three consequences, all checked rather than assumed:
+    ///
+    /// * the key tiles are `Plan::new`'s own `shapes`, `head_offsets` and
+    ///   `diagonal_block`, so the decomposition cannot disagree with the plan
+    ///   the derivation then builds;
+    /// * a calibration that does not describe this statement's key tiles is
+    ///   refused by name -- the wrong number of key tiles, the wrong number of
+    ///   instances, or a `delta` that is not the one the master exponent gives;
+    /// * `jo` is committed data and no shape column reads it, so it stands in
+    ///   at the statement's own `ao_jo_min` -- the window's floor, which is
+    ///   where `expect-root --weights-only` already puts it.
+    ///
+    /// This derives a root; it does not check one. Whether a verifier compares
+    /// the root it derives with the statement's is issue #95's question.
+    pub fn from_params(p: &crate::compose::Params,
+                       calib: &crate::shaperoot::Calibration) -> Self {
+        let plan = crate::compose::Plan::new(p);
+        let variant = Variant::parse(&p.variant);
+        let (nh, s, hd) = (p.nh, p.s, p.hd);
+        assert_eq!(calib.0.len(), plan.shapes.len(),
+                   "the calibration names {} key tiles and this statement has {}",
+                   calib.0.len(), plan.shapes.len());
+        let mut key_tiles: Vec<Attn> = vec![];
+        for (b, sh) in plan.shapes.iter().enumerate() {
+            let k = &calib.0[b];
+            let fracs: Vec<f64> = k.frac_per_inst.iter().map(|f| f64::from_bits(*f)).collect();
+            assert_eq!(fracs.len(), sh.insts,
+                       "key tile {b}: the calibration names {} instances and the statement {}",
+                       fracs.len(), sh.insts);
+            let frac = f64::from_bits(k.frac);
+            let a = Attn::weights_only(
+                *sh, variant, p.q_bits, p.k_bits, p.nmax, p.log_table,
+                fracs, Some(frac), plan.diagonal_block[b],
+                format!("from params [key tile {b}, heads {}..+{}, {} keys{}]",
+                        plan.head_offsets[b], sh.insts, sh.c,
+                        if plan.diagonal_block[b] { ", diagonal block" } else { "" }));
+            // the scale the master exponent gives is `Attn::build`'s own
+            // expression, so a calibration whose `delta` is not that is a
+            // calibration of some other key tile and not of this one
+            assert_eq!(a.delta, k.delta,
+                       "key tile {b}: the calibration's delta is not the one its master \
+                        exponent {frac} gives");
+            key_tiles.push(a);
+        }
+        let key_tile_sizes: Vec<usize> = plan.shapes.iter().map(|sh| sh.insts).collect();
+        // `Layer::load`'s own accumulation over the stand-in denominators: the
+        // group's per-token component commits the total, so the total has to be
+        // the sum of the parts here too or the attention-output fold divides by
+        // the wrong one.
+        if p.diagonal_block {
+            for b in 0..key_tiles.len() {
+                if !plan.rows_key_tile[b] {
+                    continue;
+                }
+                let mut tot = vec![0i64; key_tiles[b].zz.len()];
+                for other in 0..key_tiles.len() {
+                    if plan.group[other] == plan.group[b] {
+                        for (a, x) in tot.iter_mut().zip(&key_tiles[other].zz) {
+                            *a += x;
+                        }
+                    }
+                }
+                key_tiles[b].zz_total = Some(tot);
+            }
+        }
+        let mats: Vec<Mat> = p.mats.iter().map(|m| {
+            let variant = DeqVariant::parse(&m.variant);
+            Mat {
+                name: m.name.clone(), variant, n_in: m.n_in, n_out: m.n_out, tokens: m.tokens,
+                acc: vec![0i64; m.tokens * m.n_out],
+                qx: vec![0i32; m.tokens * m.n_in],
+                qw: vec![0i32; m.n_in * m.n_out],
+                jx: vec![0i32; m.tokens],
+                jw: vec![0i32; m.n_out],
+                // a per-token scale of 1.0, not of zero, exactly as the
+                // model-only load leaves it: `fold_gt` reads the biased
+                // exponent and a subnormal there is not a shape the dequant
+                // gadget is built for
+                sx: vec![(0u32, 127u32); m.tokens],
+                sw: vec![(0u32, 0u32); m.n_out],
+                jv2: if variant == DeqVariant::Fold { vec![0i32; m.n_out] } else { vec![] },
+            }
+        }).collect();
+        let (acc, mut den) = (vec![0i64; nh * s * hd], vec![0i64; nh * s]);
+        for (bi, b) in key_tiles.iter().enumerate() {
+            for i in 0..key_tile_sizes[bi] {
+                let h = plan.head_offsets[bi] + i;
+                for t in 0..s {
+                    den[h * s + t] += b.zz[i * s + t];
+                }
+            }
+        }
+        let residual_stream = p.residual_stream.as_ref().map(|g| {
+            let head = g.head_norm;
+            let col = |n: usize| if head { vec![] } else { vec![0u16; n] };
+            ResidualStreamCols {
+                d: g.d,
+                dff: if head { 0 } else { g.dff },
+                tokens: s,
+                xin: vec![0u16; s * g.d],
+                o_out: col(s * g.d),
+                xmid: col(s * g.d),
+                d_out: col(s * g.d),
+                xout: col(s * g.d),
+                r1: vec![0u16; s],
+                r2: col(s),
+                w1: vec![0u16; g.d],
+                w2: col(g.d),
+                h1: None,
+                h2: None,
+                silu_in: None,
+                silu_out: None,
+                x_down: None,
+                eps: g.eps,
+                inv_d: g.inv_d,
+                // a report of the extraction's own reduction, which no
+                // component reads and no statement carries
+                reduce: String::new(),
+                head,
+            }
+        });
+        let embed_tab = (p.embed_vocab > 0).then(|| {
+            let d = p.residual_stream.as_ref().map(|g| g.d)
+                .expect("the embedding gadget needs the residual-stream family");
+            vec![0u16; p.embed_vocab * d]
+        });
+        // stream E's order key is a committed column carrying an argmax claim,
+        // so the stand-in has to have a unique maximum per row or the head
+        // segment's argmax component has no answer to give. Column 0 wins on
+        // every row, and `head_tok` says so.
+        let vocab = (p.logits_claim || p.prove_argmax)
+            .then(|| p.mats.iter().find(|m| m.name == "lm_head").map(|m| m.n_out))
+            .flatten();
+        Self {
+            key_tiles,
+            key_tile_sizes,
+            head_offsets: plan.head_offsets.clone(),
+            nsub: if p.c == 0 { 0 } else if p.kv_boundary { p.c / p.s } else { 1 },
+            mats,
+            ao: AttnOut {
+                nh, s, hd, acc, den,
+                // the window's floor: it makes `e = jv - jo` non-negative, so
+                // the fold's `pj` is 1 and `denp` stays small. No shape column
+                // reads it.
+                jo: vec![p.ao_jo_min; s],
+                jv: vec![0i32; nh * hd],
+            },
+            source: "B6.5 from params".to_string(),
+            residual_stream,
+            head_keys: vocab.map(|v| {
+                let mut k = vec![1u16; s * v];
+                for t in 0..s {
+                    k[t * v] = 2;
+                }
+                k
+            }),
+            head_tok: vocab.map(|_| vec![0u32; s]),
+            attn_out_bits: p.ao_q_bits + 1,
+            tok_in: embed_tab.as_ref().map(|_| vec![0u32; s]),
+            embed_tab,
+            layer: None,
+            block: None,
+            rope: p.rope.as_ref().map(|r| RopeCols {
+                nkv: r.nkv,
+                pos0: r.pos0,
+                theta: f64::from_bits(r.theta),
+                rope_type: r.rope_type.clone(),
+                rope_scale: r.rope_scale.iter().map(|b| f64::from_bits(*b)).collect(),
+                // the dump's own `inv_freq` is a reference the derivation
+                // compares against, and there is no dump here: the angle table
+                // is built from the statement, which is what makes it a shape
+                // column at all
+                inv_ref: None,
+                jq: vec![0i32; nh * hd],
+                jk: vec![0i32; nh * hd],
+                jv: vec![0i32; nh * hd],
+            }),
+        }
+    }
+
+    /// Issue #112: the calibration of a segment whose per-head exponents are
+    /// `frac_per_head` -- the per-layer calibration `zk-prover model-roots`
+    /// publishes, and the form `extract.py` writes into a dump's manifest.
+    ///
+    /// It is `Layer::load_weights`' own two rules and no others: a key tile's
+    /// instances take the exponents of the heads it covers, cycled, and the
+    /// master exponent is the largest over the whole layer -- one master for
+    /// every key tile, which is what makes one exponent table serve them all.
+    pub fn calibration_of(p: &crate::compose::Params, frac_per_head: &[f64])
+                          -> crate::shaperoot::Calibration {
+        assert!(frac_per_head.len() >= p.nh,
+                "the calibration names {} heads and this statement has {}",
+                frac_per_head.len(), p.nh);
+        let master = frac_per_head[..p.nh].iter().copied().fold(f64::MIN, f64::max);
+        let plan = crate::compose::Plan::new(p);
+        crate::shaperoot::Calibration(
+            plan.shapes.iter().enumerate().map(|(b, sh)| {
+                let per_inst: Vec<f64> = (0..sh.insts)
+                    .map(|i| frac_per_head[(plan.head_offsets[b] + i) % p.nh])
+                    .collect();
+                crate::shaperoot::KeyTileCalibration {
+                    frac: master.to_bits(),
+                    frac_per_inst: per_inst.iter().map(|f| f.to_bits()).collect(),
+                    // `Attn::weights_only`'s own expression, which is
+                    // `Attn::build`'s; `from_params` asserts the key tile it
+                    // builds against it, so the two cannot drift apart
+                    delta: per_inst.iter()
+                        .map(|f| 1i64 << ((master - f).round().max(0.0) as u32).min(30))
+                        .collect(),
+                }
+            }).collect())
+    }
+
     /// Stream NN: derive the key tiles' Q, K and V from this layer's own `q`, `k`
     /// and `v` matmuls, and rebuild the key tiles from them.
     ///

@@ -794,11 +794,129 @@ fn coord_of(l: &mut layer::Layer, args: &[String]) {
     }
 }
 
+/// Issue #112: the per-layer calibration a parameter-only load takes, and the
+/// switch that turns that load on.
+///
+/// Two forms, and each of them is a thing this repository already publishes:
+///
+/// * `--frac-per-head a,b,c` -- the per-layer calibration, one exponent per
+///   head. It is what each `zk-prover model-roots` row carries and what
+///   `extract.py` writes into a dump's manifest, and `Layer::calibration_of`
+///   cycles it into the key tiles exactly as the model-only load does.
+/// * `--calibration FILE` -- a JSON document carrying either that same
+///   `frac_per_head` (a dump's `manifest.json`, or one row of a model
+///   manifest) or the per-key-tile `calibration` block every run publishes as
+///   `result.shape` (issue #18). The second form is the general one: a segment
+///   whose key tiles are not one exponent per head -- a synthetic segment is
+///   such a segment -- has no `frac_per_head` and this names its calibration
+///   exactly.
+///
+/// Either flag is both the switch and the input: with one of them on the line
+/// the segment is built from the statement, and the only files opened are the
+/// two the line names.
+fn calibration_of_args(args: &[String], p: &compose::Params)
+                       -> Option<shaperoot::Calibration> {
+    let fracs = arg_str(args, "--frac-per-head").map(|_| {
+        let v = arg_list::<f64>(args, "--frac-per-head", &[]);
+        assert!(!v.is_empty(), "--frac-per-head wants a comma-separated list of exponents");
+        v
+    });
+    let doc = arg_str(args, "--calibration").map(|f| {
+        let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--calibration {f}: {e}"));
+        let v: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("--calibration {f}: not JSON: {e}"));
+        (f, v)
+    });
+    assert!(fracs.is_none() || doc.is_none(),
+            "--frac-per-head and --calibration are two names for one input: pass one");
+    if let Some(v) = fracs {
+        return Some(layer::Layer::calibration_of(p, &v));
+    }
+    let (f, v) = doc?;
+    // the per-key-tile block first: it is the exact form, and a document that
+    // carries both is a run's own report, where the block is what the root was
+    // taken over
+    let per_key_tile = if v.is_array() { v.clone() } else { v["calibration"].clone() };
+    if let Some(rows) = per_key_tile.as_array() {
+        assert!(!rows.is_empty(), "--calibration {f}: the calibration names no key tile");
+        return Some(shaperoot::Calibration(rows.iter().map(|k| {
+            let bits = |x: &Value, name: &str| -> u64 {
+                x.as_u64().unwrap_or_else(|| panic!("--calibration {f}: {name} is not a bit \
+                                                     pattern"))
+            };
+            // the bit patterns are what the key is taken over, so they are what
+            // is read; the decimal fields beside them are a reader's copy
+            let frac = match (&k["frac_bits"], &k["frac"]) {
+                (Value::Null, x) => x.as_f64()
+                    .unwrap_or_else(|| panic!("--calibration {f}: a key tile names no frac"))
+                    .to_bits(),
+                (x, _) => bits(x, "frac_bits"),
+            };
+            let frac_per_inst: Vec<u64> = match (&k["frac_per_inst_bits"], &k["frac_per_inst"]) {
+                (Value::Null, x) => x.as_array()
+                    .unwrap_or_else(|| panic!("--calibration {f}: a key tile names no \
+                                              frac_per_inst"))
+                    .iter().map(|v| v.as_f64().unwrap_or(0.0).to_bits()).collect(),
+                (x, _) => x.as_array()
+                    .unwrap_or_else(|| panic!("--calibration {f}: frac_per_inst_bits is not a \
+                                              list"))
+                    .iter().map(|v| bits(v, "frac_per_inst_bits")).collect(),
+            };
+            let delta: Vec<i64> = k["delta"].as_array()
+                .unwrap_or_else(|| panic!("--calibration {f}: a key tile names no delta"))
+                .iter().map(|v| v.as_i64().unwrap_or(0)).collect();
+            shaperoot::KeyTileCalibration { frac, frac_per_inst, delta }
+        }).collect()));
+    }
+    let v = v["frac_per_head"].as_array()
+        .unwrap_or_else(|| panic!("--calibration {f}: carries neither a `calibration` block \
+                                   nor `frac_per_head`"));
+    let fracs: Vec<f64> = v.iter()
+        .map(|x| x.as_f64().unwrap_or_else(|| panic!("--calibration {f}: frac_per_head is not \
+                                                      a list of numbers")))
+        .collect();
+    Some(layer::Layer::calibration_of(p, &fracs))
+}
+
 pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     let vname = arg_strs(args, "--variants", &["intsplit6"])[0].clone();
     let variant = attn_witness::Variant::parse(&vname);
     let head_groups = arg_list(args, "--head-groups", &[8usize, 4, 2]);
     let src = src_of(args);
+    // Issue #112: the parameter-only load, before the dump's -- the statement
+    // and the calibration, and no dump on disk. It derives the **shape** root:
+    // it holds no model, so the model tree it would commit is a tree of
+    // stand-ins and `--shape-only` is what stops before it.
+    if flag(args, "--calibration") || flag(args, "--frac-per-head") {
+        assert!(compose::SHAPE_ONLY.load(std::sync::atomic::Ordering::Relaxed),
+                "the parameter-only load holds no model, so it can derive the shape root \
+                 and not the model root: pass `expect-root --shape-only`");
+        assert!(src.dir.is_none(),
+                "--calibration builds the segment from the statement alone: drop --witness, \
+                 or drop --calibration and let the model-only load read the dump");
+        assert!(arg_str(args, "--params").is_some(),
+                "the parameter-only load needs --params FILE (the segment's own \
+                 `Fixed.params`): every layout, every table and every selector comes off \
+                 the statement");
+        let (_, p) = plan_params(args);
+        let calib = calibration_of_args(args, &p).expect("the calibration");
+        let mut l = layer::Layer::from_params(&p, &calib);
+        // the statement's own coordinate, when `--params` is a `Fixed` and not
+        // a bare `Params`; `--layer` / `--block` override it as they do a
+        // manifest's, through `coord_of` below
+        if let Some(f) = arg_str(args, "--params") {
+            if let Ok(v) = serde_json::from_slice::<Value>(&std::fs::read(&f).unwrap_or_default()) {
+                l.layer = v["layer"].as_u64().map(|x| x as usize);
+                l.block = v["block"].as_u64().map(|x| x as usize);
+            }
+        }
+        eprintln!("expect-root: the segment from the statement and the calibration \
+(no dump: {} key tiles, c={} s={} log_table={})",
+                  l.key_tiles.len(), p.c, p.s, p.log_table);
+        coord_of(&mut l, args);
+        let vname = p.variant.clone();
+        return (l, vname);
+    }
     if let Some(dir) = &src.dir {
         // Stream LL (E11): the verifier's load.  Only the model half of the dump
         // is read; see `layer::Layer::load_weights`.  `--tight-table` sizes the
@@ -1519,9 +1637,23 @@ fn pre_split_cmd(args: &[String]) {
 /// `Fixed.params` and of the per-layer calibration the model manifest
 /// publishes, so the root it derives is one no weight can move: the desk gate
 /// derives it at two seeds, and the two agree while the model roots differ.
-/// On a real dump the loader is still `--weights-only`'s, so the *files* are
-/// still opened; a `Layer::from_params` that opens none is the box half's, and
-/// this brief's Record names it.
+///
+/// **Issue #112: `--calibration` is the form that opens no dump at all.**
+///
+///     zk-prover expect-root --shape-only --params <tag>.fixed.json \
+///                     --frac-per-head <the layer's exponents>
+///     zk-prover expect-root --shape-only --params <tag>.fixed.json \
+///                     --calibration <a manifest, or a run's own result.shape>
+///
+/// `--shape-only` above still loads the dump -- under it the model files are
+/// not opened, but `manifest.json` is, and the loader builds the exponent table
+/// and every stand-in array before the derivation starts. With `--calibration`
+/// or `--frac-per-head` the segment is `Layer::from_params` instead: the
+/// statement gives every layout and every table, the calibration gives the two
+/// shape columns the statement does not, and there is no dump on disk. A
+/// verifier holds both (issue #95), so this is the derivation it could make.
+/// It refuses `--witness` and needs `--params`, and it derives the shape root
+/// only: a segment built from parameters carries no model.
 ///
 /// **Issue #18: `--shape-cache DIR` is the derivation, done once.** The shape
 /// tree is a function of `Fixed.params` and of the per-layer calibration and of
@@ -1546,7 +1678,16 @@ fn expect_root_cmd(args: &[String]) {
 ///
 ///     zk-prover model-roots --plan PLAN [--pins "..."] [--out FILE] [--limit N]
 ///                     [--weights-only --params-dir DIR]
+///                     [--from-params --params-dir DIR --calibration MANIFEST]
 ///                     [--shape-cache DIR] [--shape-cache-verify]
+///
+/// Issue #112: `--from-params --params-dir DIR --calibration MANIFEST` derives
+/// every row's shape root from the statements and the calibration a model
+/// manifest already published, with no dump on disk: each line's `--witness` is
+/// dropped, its statement is `DIR/<ser-tag>.fixed.json` and its calibration is
+/// the manifest row of the same tag. It implies `--shape-only` -- a segment
+/// built from parameters holds no model -- so the rows it writes carry a shape
+/// root and no model root.
 ///
 /// `PLAN` is an `o_plan.py` plan file: one `compose` argument line per chunk.
 /// A plan line carries only the chunk's *own* arguments, so `--pins` supplies
@@ -1602,6 +1743,31 @@ fn model_roots_cmd(args: &[String]) {
     assert!(!weights_only || params_dir.is_some(),
             "model-roots --weights-only needs --params-dir DIR (the serialized \
              statements: DIR/<ser-tag>.fixed.json)");
+    // Issue #112: the rows derived from the statements and the published
+    // calibration, with no dump on disk. `--calibration FILE` is a model
+    // manifest -- the rows `--out` wrote on a run that had the dumps -- and
+    // every line takes its own row's `frac_per_head` by `--ser-tag`. It implies
+    // `--shape-only`, because a segment built from parameters holds no model
+    // and the model root it would derive would be a root of stand-ins.
+    let from_params = flag(args, "--from-params");
+    let calibration: Option<Vec<Value>> = arg_str(args, "--calibration").map(|f| {
+        let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--calibration {f}: {e}"));
+        let v: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("--calibration {f}: not JSON: {e}"));
+        let rows = if v.is_array() { v } else { v["rows"].clone() };
+        rows.as_array()
+            .unwrap_or_else(|| panic!("--calibration {f}: not a model manifest's rows"))
+            .clone()
+    });
+    assert!(!from_params || params_dir.is_some(),
+            "model-roots --from-params needs --params-dir DIR (the serialized statements: \
+             DIR/<ser-tag>.fixed.json)");
+    assert!(!from_params || calibration.is_some(),
+            "model-roots --from-params needs --calibration FILE (a model manifest, whose \
+             rows carry each segment's own `frac_per_head`)");
+    assert!(!from_params || !weights_only,
+            "--from-params and --weights-only are two loads: the first opens no dump, the \
+             second reads the dump's model half");
     // Issue #18: the shape-root cache the children share.
     let shape_cache = arg_str(args, "--shape-cache");
     let shape_cache_verify = flag(args, "--shape-cache-verify");
@@ -1640,7 +1806,38 @@ fn model_roots_cmd(args: &[String]) {
                 tag = it.next().unwrap_or("").to_string();
                 continue;
             }
+            // issue #112: the parameter-only load opens no dump, so the line's
+            // own `--witness` is dropped rather than passed to a child that
+            // would refuse it
+            if from_params && w == "--witness" {
+                it.next();
+                continue;
+            }
             a.push(w.to_string());
+        }
+        // Issue #112: the statement and the published calibration, in place of
+        // the dump. `--shape-only` is not optional here and is added rather
+        // than required of the caller: a segment built from parameters has no
+        // model, so the shape root is the whole of what it can derive.
+        let mut fracs: Vec<f64> = vec![];
+        if from_params {
+            let d = params_dir.as_ref().unwrap();
+            let f = format!("{d}/{tag}.fixed.json");
+            if !std::path::Path::new(&f).exists() {
+                missing.push(tag.clone());
+                continue;
+            }
+            fracs = calibration.as_ref().unwrap().iter()
+                .find(|r| r["tag"].as_str() == Some(tag.as_str()))
+                .and_then(|r| r["frac_per_head"].as_array().cloned())
+                .map(|v| v.iter().filter_map(|x| x.as_f64()).collect())
+                .unwrap_or_else(|| panic!("model-roots --from-params: the calibration names \
+                                           no frac_per_head for {tag}"));
+            a.push("--params".into());
+            a.push(f);
+            a.push("--shape-only".into());
+            a.push("--frac-per-head".into());
+            a.push(fracs.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(","));
         }
         // Issue #18: each line runs in a process of its own, so an in-process
         // cache cannot cross them and the directory the caller named is what
@@ -1724,7 +1921,9 @@ fn model_roots_cmd(args: &[String]) {
             "shape_key": r["shape"]["key"],
             // stream PP: the per-layer calibration the shape derivation needs,
             // published beside the root rather than read off the dump
-            "frac_per_head": field("frac_per_head"),
+            // issue #112: and with no dump to read it off, it is the one this
+            // loop passed the child -- the manifest's own, republished
+            "frac_per_head": if from_params { json!(fracs) } else { field("frac_per_head") },
             "frac_shared_per_head": field("frac_shared_per_head"),
             "master_table_bits": field("master_table_bits"),
             // stream PP: the per-layer model commitment.  The shape root is
@@ -1822,6 +2021,9 @@ fn model_roots_cmd(args: &[String]) {
             .map(|r| r["model"].as_str().unwrap_or("").to_string())
             .collect::<std::collections::BTreeSet<String>>().len(),
         "weights_only": weights_only,
+        // issue #112: whether these rows were derived from the statements and
+        // the published calibration alone, with no dump on disk
+        "from_params": from_params,
         "no_statement": missing,
         "table_bits_by_layer": tb.iter()
             .map(|(l, m)| json!({"layer": l,
