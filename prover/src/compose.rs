@@ -4186,6 +4186,17 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // both generate its witness on the host, whatever the switches say
             || plan.specs.iter().any(|s| s.variant == DeqVariant::Fold)
             || plan.freivalds.iter().any(|w| w.act_bits != 8)
+            // Stream II (E11), issue #75: a requantize seam is host-built on both
+            // backends -- `rq_component` has no device witness generation at all -- and it
+            // bumps two of the shared counters, `m_qnz` and the 15-bit range.
+            // Until the head chunk this was never visible, because every chunk
+            // that carried a seam carried a diagonal block key tile as well and the
+            // first line of this predicate was already true; a head chunk has a
+            // seam and no diagonal block, so it is the first chunk on which the two
+            // come apart, and its 2,048 `qnz` bumps and its range bumps were
+            // dropped -- accepted by every other check and rejected by
+            // `sums_cancel`, on the CUDA backend alone.
+            || !plan.rqs.is_empty()
             // stream JJ (E11): an armed attnout tamper does too -- `ao_component`
             // sets its own mode to 0 because the device witness generation has no `corrupt`
             // path -- so its counters are the host's and the shared
