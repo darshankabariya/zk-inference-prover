@@ -20,7 +20,13 @@
 //! is a separate defect from the tree layout this test pins, it is older than
 //! the split, and it is not fixed here; the case below runs 1 and 2.
 //!
-//! These run on the default (SIMD) backend, like the pinned digests beside them.
+//! These run on the SIMD build alone. The seven subcommands are host-only by
+//! design -- the micro-benchmark campaign runs them untimed on the host -- and
+//! their synthetic shapes are in no kernel store, so a binary built with
+//! `--features cuda` takes the device path and ends every one of them in
+//! `devfrac`'s "no generation kernel" before a cell is counted. So the test is
+//! ignored under the feature, by name and with its reason in the run's own
+//! output, rather than only saying here which backend it wants.
 
 use std::process::Command;
 
@@ -61,11 +67,17 @@ fn run(args: &[&str]) -> serde_json::Value {
         .env("RAYON_NUM_THREADS", "4")
         .output()
         .expect("run the prover binary");
+    let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
-        "zk-prover {} failed:\n{}",
+        "zk-prover {} failed:\n{err}{}",
         args.join(" "),
-        String::from_utf8_lossy(&out.stderr)
+        if err.contains("no generation kernel") {
+            "\nthat is a CUDA build with no kernel for this shape, not a subcommand that \
+             ran and disagreed: this test wants the SIMD build"
+        } else {
+            ""
+        }
     );
     serde_json::from_slice(&out.stdout).expect("one JSON document on stdout")
 }
@@ -91,6 +103,8 @@ fn u64_at(v: &serde_json::Value, key: &str) -> Option<u64> {
 }
 
 #[test]
+#[cfg_attr(feature = "cuda", ignore = "the cell-cost subcommands are host-only: a CUDA build \
+                                       has no generation kernel for their synthetic shapes")]
 fn the_cell_cost_subcommands_run_and_report_their_cells() {
     for c in CASES {
         let v = run(c.args);
