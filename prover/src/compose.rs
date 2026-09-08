@@ -330,8 +330,11 @@ pub struct Params {
     /// key claim.  Implies `logits_claim` -- that claim is its counterparty.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub prove_argmax: bool,
-    /// the weaker statement ("the token attains the maximum"), which is what the
-    /// binding probe separates from the strict one
+    /// The weaker statement ("the token attains the maximum"), which is what the
+    /// binding probe separates from the strict one.  It is a control: the
+    /// default is the strict form ("the token is the lowest-indexed maximum",
+    /// the model's own decoding rule), `--unsound-argmax-lax` is the only way
+    /// to this one, and the binding table marks edge 16 unbound while it is on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub prove_argmax_lax: bool,
     /// Stream BB (E11): the embedding gadget's vocabulary, and zero when the
@@ -7896,7 +7899,17 @@ impl Plan {
         }
 
         // 16: the argmax over the head's logits (`head_binding_ok`, `head_tok_ok`)
-        if self.argmax_mat().is_some() {
+        if self.argmax_mat().is_some() && p.prove_argmax_lax {
+            // the lax form is a weaker statement, not the same one proved
+            // cheaply, so the edge it states is not the edge this table means by
+            // bound: see `crate::ARGMAX_LAX`
+            put(16, Unbound, Some("the argmax is proved in its lax form \
+                                   (--unsound-argmax-lax): it binds the emitted token to a \
+                                   maximum of the logits and not to the lowest-indexed \
+                                   maximum the model decodes by, so on a row whose two \
+                                   highest logits are co-maximal the prover may emit either \
+                                   of them and this statement admits both".into()));
+        } else if self.argmax_mat().is_some() {
             put(16, Bound, None);
         } else if has_mat("lm_head") {
             put(16, Unbound, Some("the head chunk publishes no argmax \
@@ -7932,9 +7945,13 @@ mod tests {
     use super::*;
 
     /// The binding table, on the synthetic shapes the digest gate pins.
+    fn params_of(args: &[String]) -> Params {
+        let (l, vname) = crate::layer_of(args);
+        crate::params_of(&l, args, &vname)
+    }
+
     fn plan_of(args: Vec<String>) -> Plan {
-        let (l, vname) = crate::layer_of(&args);
-        Plan::new(&crate::params_of(&l, &args, &vname))
+        Plan::new(&params_of(&args))
     }
 
     fn states(plan: &Plan, layer: Option<usize>) -> Vec<(u8, EdgeState)> {
@@ -8071,6 +8088,68 @@ mod tests {
         assert_eq!(got[12], (13, Bound));
         assert_eq!(got[14], (15, Absent));
         assert_eq!(got[15], (16, Unbound));
+    }
+
+    /// The head shape's argmax edge, at both strengths (issue #13).
+    ///
+    /// The lax argmax proves "the emitted token attains the maximum" where the
+    /// default proves "the emitted token is the lowest-indexed maximum", which
+    /// is the rule the model decodes by. It is a weaker statement and the table
+    /// has to say so in the row's own words, or a run that used it reads as a
+    /// statement about a forward pass.
+    ///
+    /// The two plans below are the synthetic head shape of `prover/README.md`
+    /// with the argmax stated -- which is what a head dump gives and what a
+    /// synthetic head, carrying no `key_head.u16`, cannot state on its own.
+    #[test]
+    fn the_lax_argmax_is_an_unbound_token_edge_and_the_table_says_why() {
+        use EdgeState::*;
+        let head = params_of(&argv(&["--head-groups", "2,1", "--nout", "64",
+                                     "--residual-stream-a", "32", "--kmax", "16", "--synth-head",
+                                     "--synth-vocab", "256", "--unsound-skip-argmax"]));
+        let mut strict = head.clone();
+        strict.logits_claim = true;
+        strict.prove_argmax = true;
+        let mut lax = strict.clone();
+        lax.prove_argmax_lax = true;
+
+        let rows = Plan::new(&strict).binding(Some(32));
+        assert_eq!((rows[15].n, rows[15].state), (16, Bound),
+                   "the strict argmax binds the token edge");
+        assert_eq!(rows[15].why, None);
+        assert_eq!(Plan::new(&strict).binding_json(Some(32))["all_bound"], json!(true));
+
+        let rows = Plan::new(&lax).binding(Some(32));
+        assert_eq!((rows[15].n, rows[15].state), (16, Unbound),
+                   "the lax argmax is a weaker statement, so the token edge is not bound");
+        let why = rows[15].why.as_deref().expect("the lax row says why");
+        for want in ["--unsound-argmax-lax", "lowest-indexed", "co-maximal", "either"] {
+            assert!(why.contains(want), "the lax row's reason must say {want:?}, got: {why}");
+        }
+        let j = Plan::new(&lax).binding_json(Some(32));
+        assert_eq!(j["all_bound"], json!(false), "a lax run is visibly a control");
+        assert_eq!(j["unbound"], json!([16]));
+    }
+
+    /// The lax form weakens the argmax, so it needs an argmax to weaken: on a
+    /// shape that states none, asking for it is an error and not a run that
+    /// proves the strict statement under a control's command line.
+    #[test]
+    #[should_panic(expected = "--unsound-argmax-lax")]
+    fn the_lax_argmax_is_refused_where_no_argmax_is_stated() {
+        plan_of(argv(&["--head-groups", "2,1", "--nout", "64", "--residual-stream-a", "32",
+                       "--kmax", "16", "--synth-head", "--synth-vocab", "256",
+                       "--unsound-skip-argmax", "--unsound-argmax-lax"]));
+    }
+
+    /// The name the flag had before it said what it gives up. An old driver
+    /// line must not prove the strict statement in silence.
+    #[test]
+    #[should_panic(expected = "--argmax-lax is renamed")]
+    fn the_old_lax_flag_name_is_refused() {
+        plan_of(argv(&["--head-groups", "2,1", "--nout", "64", "--residual-stream-a", "32",
+                       "--kmax", "16", "--synth-head", "--synth-vocab", "256",
+                       "--unsound-skip-argmax", "--argmax-lax"]));
     }
 
     /// Stream QQ, at the NN merge (log row 66): the guard itself, gated.

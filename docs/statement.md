@@ -33,7 +33,7 @@ side is in this statement).
 | 13 | residual stream out of this segment into the next layer's segment | bound | `--unsound-skip-layer-boundary` |
 | 14 | keys and values out of this token block into the next block | bound | `--unsound-skip-kv-boundary`, or a dump without its own block |
 | 15 | embedding row into the first segment's residual stream | bound on layer 0, absent elsewhere | `--unsound-skip-embedding` |
-| 16 | logits into the emitted token | bound on the head segment, absent elsewhere | `--unsound-skip-argmax` |
+| 16 | logits into the emitted token | bound on the head segment, absent elsewhere | `--unsound-skip-argmax`, or weakened past bound by `--unsound-argmax-lax` |
 
 A head segment has no attention and no MLP of its own, so edges 3 to 11 and 14
 are absent there. Absent says this segment states none of those seams, not that
@@ -105,14 +105,25 @@ block attending to a cache nobody wrote.
 
 **The ends (15, 16).** The embedding gadget binds a layer-0 segment's
 residual stream to the rows of the embedding matrix that its published ids
-select; the argmax binds the token a head segment emits to the maximum of the
-logits it computed. Unbound, the sequence could start from any vector, or emit
-any token, and `boundary-grid --verify --prompt` would have nothing to compare
-the published ids with.
+select; the argmax binds the token a head segment emits to the **lowest-indexed**
+maximum of the logits it computed, which is the rule the model itself decodes
+by. Unbound, the sequence could start from any vector, or emit any token, and
+`boundary-grid --verify --prompt` would have nothing to compare the published
+ids with.
+
+Edge 16 has a second, weaker form. `--unsound-argmax-lax` proves that the
+emitted token attains the maximum instead of that it is the first token to
+attain it. Where two logits are co-maximal -- 15 of 512 positions at a context
+of 4096 on the real continuations -- the weaker statement admits either of them
+and the strict one admits only the first, so a lax proof holds for a token the
+model would not have emitted. The table marks edge 16 unbound while it is on
+and says so in the row, and `provenance.unsound_skips` lists `argmax-lax`: the
+run is a control, exactly as one with a skip is.
 
 ## The unbound configuration
 
-Every skip flag names one of these edges. A run whose `provenance.unsound_skips`
+Every skip flag names one of these edges, and `--unsound-argmax-lax` weakens
+edge 16 rather than dropping it. A run whose `provenance.unsound_skips`
 is not empty is a control or a measurement of cost, never a statement about a
 forward pass, and `zk-results` refuses to tag a release that cites one. The
 digests recorded before the sound defaults reproduce with the skips set, and

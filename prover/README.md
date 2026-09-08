@@ -53,6 +53,16 @@ refused with a message naming the skip that gets past the refusal:
 | `argmax` | the head's argmax (edge 16) | a head dump without `key_head.u16`, or a synthetic head |
 | `embedding` | the layer-0 embedding gadget (edge 15) | a layer-0 dump extracted without `--embed` |
 
+One switch weakens a gadget instead of turning it off. `--unsound-argmax-lax`
+proves that the emitted token attains the maximum of the logits where the
+default proves that it is the lowest-indexed maximum, which is the rule the
+model decodes by; on a position whose two highest logits are equal -- 15 of 512
+at a context of 4096 on the real continuations -- the weaker statement admits
+either token. It is off by default, it is refused on a statement that states no
+argmax, it lists `argmax-lax` in `provenance.unsound_skips`, and the binding
+table marks edge 16 unbound with that reason while it is on, so a run that used
+it is visibly a control. The name it had before, `--argmax-lax`, is an error.
+
 The skips in effect are listed in `provenance.unsound_skips`; an unknown name
 is an error. The flags these replaced (`--bounds`, `--kv-bind`, `--embed`,
 `--head-argmax`, `--head-key`, `--norm-tails`, `--swiglu`, `--deq-ties`,

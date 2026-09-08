@@ -478,10 +478,18 @@ pub fn prov_note_proof(digest: &str, binding: Value) {
     p.bindings.push(binding);
 }
 
-/// The `--unsound-skip-<name>` flags on the command line, as their names.
+/// The unsound switches on the command line, as their names: every
+/// `--unsound-skip-<name>`, and `--unsound-argmax-lax` as `argmax-lax`.  The
+/// lax argmax turns no gadget off -- it proves a weaker statement in its place
+/// (`crate::ARGMAX_LAX`) -- so it is listed here for the same reason the skips
+/// are: a run that used it is a control, and `all_bound` is false for it.
 pub fn unsound_skips() -> Vec<String> {
     std::env::args()
-        .filter_map(|a| a.strip_prefix("--unsound-skip-").map(|s| s.to_string()))
+        .filter_map(|a| {
+            a.strip_prefix("--unsound-skip-")
+                .map(|s| s.to_string())
+                .or_else(|| (a == "--unsound-argmax-lax").then(|| "argmax-lax".to_string()))
+        })
         .collect()
 }
 

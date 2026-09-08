@@ -124,6 +124,18 @@ pub fn flag(args: &[String], key: &str) -> bool {
 pub const UNSOUND_SKIPS: [&str; 5] =
     ["residual-stream", "layer-boundary", "kv-boundary", "argmax", "embedding"];
 
+/// The one switch that weakens a gadget instead of turning it off:
+/// `--unsound-argmax-lax` proves "the emitted token attains the maximum of the
+/// logits" where the default proves "the emitted token is the lowest-indexed
+/// maximum", which is the rule the model itself decodes by.  On a row where two
+/// logits are co-maximal -- 15 of 512 rows at `C = 4096` on the real
+/// continuations, so not a theoretical case -- the lax form admits either of
+/// them and the strict form admits only the first.  It is a control and not a
+/// statement about a forward pass: the name lands in
+/// `provenance.unsound_skips` as `argmax-lax` and the binding table marks edge
+/// 16 unbound with that reason.
+pub const ARGMAX_LAX: &str = "--unsound-argmax-lax";
+
 pub fn skip(args: &[String], name: &str) -> bool {
     debug_assert!(UNSOUND_SKIPS.contains(&name), "not a skip: {name}");
     flag(args, &format!("--unsound-skip-{name}"))
@@ -148,6 +160,14 @@ pub fn check_skips(args: &[String]) {
                        and an --unsound-skip-<name> flag is the only way off it");
         }
     }
+    // The lax argmax was `--argmax-lax`, a name that said nothing about what it
+    // gives up.  Ignoring the old name would prove the *strict* statement under
+    // a command line that asked for the weaker one, which is a different
+    // measurement reported as the same run, so this is an error and not a note.
+    assert!(!flag(args, "--argmax-lax"),
+            "--argmax-lax is renamed {ARGMAX_LAX}: it proves the weaker statement \
+             (the emitted token attains the maximum, not that it is the lowest-indexed \
+             maximum), so it is a control and says so");
 }
 
 pub fn src_of(args: &[String]) -> Src {
@@ -1000,6 +1020,14 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
              be bound to the logits; pass --unsound-skip-argmax to prove the head without \
              the argmax");
     let argmax = has_head_mat && l.head_keys.is_some() && !skip("argmax");
+    // The lax form weakens the argmax; it has nothing to weaken where the
+    // argmax is not stated, and a command line that asks for a control it does
+    // not get is an error rather than a run that quietly proves something else.
+    let argmax_lax = flag(args, ARGMAX_LAX);
+    assert!(!argmax_lax || argmax,
+            "{ARGMAX_LAX}: this statement states no argmax to weaken -- it is a head chunk's \
+             edge, and this segment either carries no lm_head matmul or has the argmax \
+             skipped");
     let has_embed = family && l.embed_tab.is_some() && l.tok_in.is_some();
     assert!(l.layer != Some(0) || has_embed || skip("embedding"),
             "compose: a layer-0 chunk without embed.u16 and tok_in.i32 (extract it with \
@@ -1119,7 +1147,7 @@ pub fn params_of(l: &layer::Layer, args: &[String], vname: &str) -> compose::Par
         // -- and the head publishes it exactly when the argmax reads it.
         logits_claim: argmax,
         prove_argmax: argmax,
-        prove_argmax_lax: flag(args, "--argmax-lax"),
+        prove_argmax_lax: argmax_lax,
         variant: vname.to_string(),
         log_table: b0.log_table,
         q_bits: b0.q_bits, k_bits: b0.k_bits, nmax: b0.nmax,

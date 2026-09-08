@@ -33,9 +33,16 @@
 //! the binding itself and costs nothing extra.
 //!
 //! So the strict statement is the lax one with `s` renamed to `b`, one extra
-//! degree-2 constraint (monotonicity), and a different closing value.  `--lax`
-//! proves the weaker statement so the two can be measured against each other
-//! rather than argued about.
+//! degree-2 constraint (monotonicity), and a different closing value.
+//!
+//! The strict form is therefore the default and the composition's only sound
+//! one.  `--unsound-argmax-lax` proves the weaker statement so the two can be
+//! measured against each other rather than argued about, and it is named for
+//! what it gives up: a lax proof accepts an emitted token that is *a* maximum
+//! where the strict proof accepts only the *first* one, so on the 15 rows in
+//! 512 that carry a co-maximal pair the prover picks the token and the
+//! statement still holds.  A run that used it lists `argmax-lax` in
+//! `provenance.unsound_skips`, and its binding table marks edge 16 unbound.
 //!
 //! # What this component does *not* do
 //!
@@ -111,7 +118,9 @@ pub struct ArgmaxBinding {
 pub struct ArgmaxEval {
     pub log_rows: u32,
     pub per_row: usize,
-    /// prove only "the token attains the maximum" -- B6.5's argument unchanged
+    /// prove only "the token attains the maximum" -- B6.5's argument unchanged,
+    /// and a weaker statement than the default: see this module's header and
+    /// `crate::ARGMAX_LAX`
     pub lax: bool,
     pub rk: RangeRel,
     /// stream E: the binding to the head's dequant output, when this component is
