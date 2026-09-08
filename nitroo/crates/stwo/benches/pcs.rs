@@ -35,6 +35,11 @@ fn benched_fn<B: BackendForChannel<Blake2sMerkleChannel>>(
         twiddles,
         false,
         None,
+        // `lde_only`: drop each column's blown-up evaluations once the root is
+        // mixed. False is what the prover does unless `ZK_LDE_ONLY` is set, and
+        // it is what keeps this benchmark a measurement of the commitment
+        // itself: with it on, the timing would also carry the drop.
+        false,
     );
 }
 

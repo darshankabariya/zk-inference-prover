@@ -44,6 +44,16 @@ so the delta to upstream stays readable in `git log -- nitroo/`:
    backend was built and its digests were not run for this change, because the
    machine that made it has no GPU.
 
+4. **The polynomial commitment benchmark's missing argument** (2026-09-08):
+   `crates/stwo/benches/pcs.rs` passes `lde_only` to `CommitmentTreeProver::new`,
+   which grew that argument when a commitment tree learned to drop a column's
+   blown-up evaluations once its root is mixed. Without it the benchmark did not
+   compile, so `cargo bench -p stwo --bench pcs --features prover` measured
+   nothing at all. The value is `false`, which is what the prover does unless
+   `ZK_LDE_ONLY` is set, and which keeps the benchmark a measurement of the
+   commitment itself rather than of the commitment and the drop together.
+   Digest-neutral by construction: no proof reads a benchmark.
+
 The patch scripts themselves are retired; their docstrings survive in the two
 commit messages' file diffs and in git history.
 
