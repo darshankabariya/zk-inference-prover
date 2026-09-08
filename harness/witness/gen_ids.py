@@ -28,6 +28,7 @@ import time
 import numpy as np
 import torch
 
+from .. import provenance
 from .common import MODEL, SPECS, setup, tokens
 from .model import Cache, Model
 from .ppl import attention_scales
@@ -85,8 +86,13 @@ if __name__ == "__main__":
     ids = np.concatenate([prompt.numpy().astype(np.int64), np.array(out, dtype=np.int64)])
     os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
     np.save(a.out, ids)
+    saved = a.out if a.out.endswith(".npy") else a.out + ".npy"   # what numpy wrote
+    # The extractor names the ids file it read by digest (`ids_from`), so the
+    # decode that wrote it names the same digest: after a re-decode over the same
+    # path, which of the two a dump was extracted from is a comparison and not a
+    # reconstruction from timestamps.
     note = dict(model=MODEL, spec=a.spec, prefix=a.prefix, offset=a.offset,
-                new=a.new, total=len(ids),
+                new=a.new, total=len(ids), ids_file=provenance.digest(saved),
                 greedy=True, stop_ids=sorted(stop), stops_at=stops,
                 prompt_tail=tok.decode(prompt[-64:].tolist()),
                 continuation=tok.decode(out),

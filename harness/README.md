@@ -18,6 +18,13 @@ The witness package also holds the statement's token generator
 the shape table (`shapes`) and the plan writer (`plan`) the results drivers
 call at a pinned commit.
 
+A dump names the ids file it was extracted from by digest, in its manifest's
+`ids_from`, and the decode that wrote that file names the same digest in its own
+note. An extraction into a directory whose manifest names other ids is refused
+before the model is loaded: the directory has to be removed, or the dump written
+under another `--out`. Re-extracting over the same ids is the ordinary resume
+the drivers do, and a manifest is written only when its dump is finished.
+
 Scripts that read measured numbers take `--constants PATH` (a zk-results
 `constants.json`) and `--artifacts DIR` or `--inputs DIR` for run outputs.
 Nothing measured lives in this repository. `witness/text.txt` is the fixed

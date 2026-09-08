@@ -35,7 +35,9 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -43,6 +45,7 @@ import torch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+from .. import provenance  # noqa: E402
 from .common import MODEL, SPECS, setup, tokens  # noqa: E402
 from .model import BF16, Cache, Model, Recorder  # noqa: E402
 from .quant import pow2_ceil, round_hafz  # noqa: E402
@@ -243,7 +246,70 @@ def dump_dir(base, block, layer, *, tag_blocks, tag_layer):
     return f"{d}_L{layer}" if tag_layer else d
 
 
-def selftest():
+def ids_source(path, ids):
+    """`ids_from`: the ids file this run actually read, by path and by digest.
+
+    A path is not enough to name the ids a dump was extracted from.  The
+    one-spec re-decode wrote a second ids file over the first path at some
+    points, so a manifest that names a path names whichever file was there when
+    it was read, and a dump directory reused for the second decode kept the
+    first decode's `ids_from`.  The digest is of the file this run read, and
+    `ids_stale` compares it, so the manifest either names the ids the dump was
+    extracted from or the extraction does not happen.
+    """
+    if path is None:
+        return None
+    return {**provenance.digest(path), "path": os.path.realpath(path),
+            "tokens": int(len(ids))}
+
+
+def ids_stale(manifest_path, source):
+    """Why this dump directory's manifest names other ids than this run reads, or None.
+
+    The digest decides: the same bytes under another name are the same ids, and
+    re-extracting over them is the ordinary resume every driver does.  A
+    manifest written before this field carried a digest names a bare path, and
+    then the file name is all there is to compare -- which the reason says,
+    rather than the check assuming either way.
+    """
+    try:
+        with open(manifest_path) as f:
+            old = json.load(f)["ids_from"]
+    except (OSError, ValueError, KeyError):
+        return None                        # no dump here, or none this can read
+    if old is None and source is None:
+        return None
+    if old is None:
+        return f"was extracted from the corpus; this run reads {source['path']}"
+    if source is None:
+        return (f"was extracted from {old['file'] if isinstance(old, dict) else old}; "
+                f"this run reads the corpus")
+    if isinstance(old, str):               # an extractor before the digest
+        if os.path.basename(old) == source["file"]:
+            return None
+        return (f"names {old}, from before the manifest carried a digest, and this "
+                f"run reads {source['path']}: only the file name could be compared")
+    if old.get("sha256") != source["sha256"]:
+        return (f"was extracted from {old.get('path', old['file'])} "
+                f"(sha256 {str(old.get('sha256'))[:16]}), and this run reads "
+                f"{source['path']} (sha256 {source['sha256'][:16]})")
+    return None
+
+
+def clear_manifest(out):
+    """Drop the manifest before the dump beside it is rewritten.
+
+    A manifest is written when a dump is finished, so a manifest beside a
+    half-written dump is the one thing an interrupted run must not leave.  The
+    drivers read exactly that -- a dump directory with a manifest is done and is
+    skipped -- so removing it here is what makes their resume true.
+    """
+    path = os.path.join(out, "manifest.json")
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def selftest_dirs():
     """The directory grammar, against the two readers.  No model, no card."""
     base = "out/witness"
     cases = [
@@ -269,7 +335,77 @@ def selftest():
     bad += not ok
     print(f"{'OK  ' if ok else 'FAIL'}  {n} one-layer passes == what shapes.py and "
           f"plan.py read over <base>_B0_L")
-    return 1 if bad else 0
+    return bad
+
+
+def selftest_ids():
+    """`ids_from` and the reuse it goes stale under.  No model, no card."""
+    tmp = tempfile.mkdtemp(prefix="extract-selftest-")
+    try:
+        first, second = os.path.join(tmp, "ids_a.npy"), os.path.join(tmp, "ids_b.npy")
+        np.save(first, np.arange(8, dtype=np.int64))
+        np.save(second, np.arange(8, dtype=np.int64) + 1)
+        copy = os.path.join(tmp, "ids_a_again.npy")
+        shutil.copyfile(first, copy)
+        link = os.path.join(tmp, "ids_link.npy")
+        os.symlink(first, link)
+        ids = np.load(first)
+        src = ids_source(first, ids)
+        corpus = ids_source(None, ids)
+
+        out = os.path.join(tmp, "witness")
+        os.makedirs(out)
+        man = os.path.join(out, "manifest.json")
+
+        def manifest(ids_from):
+            with open(man, "w") as f:
+                json.dump({"ids_from": ids_from, "layer": 0}, f)
+
+        cases = []
+        cases.append(("a directory with no dump in it is not a reuse",
+                      ids_stale(man, src) is None))
+        manifest(src)
+        cases.append(("the same ids file again is the ordinary resume",
+                      ids_stale(man, src) is None))
+        cases.append(("REFUSED: the same directory over the re-decode's ids",
+                      bool(ids_stale(man, ids_source(second, np.load(second))))))
+        cases.append(("the same bytes under another name are the same ids",
+                      ids_stale(man, ids_source(copy, np.load(copy))) is None))
+        cases.append(("REFUSED: a dump from an ids file, re-extracted from the corpus",
+                      bool(ids_stale(man, corpus))))
+        manifest(None)
+        cases.append(("REFUSED: a dump from the corpus, re-extracted from an ids file",
+                      bool(ids_stale(man, src))))
+        manifest("ids_a.npy")
+        cases.append(("an older manifest naming the same file: the name is all there is",
+                      ids_stale(man, src) is None))
+        cases.append(("REFUSED: an older manifest naming another file",
+                      bool(ids_stale(man, ids_source(second, np.load(second))))))
+        with open(first, "rb") as f:
+            sha = hashlib.sha256(f.read()).hexdigest()
+        through = ids_source(link, ids)
+        cases.append(("`ids_from` is the digest of the file the run read, "
+                      "resolved through the link it was given",
+                      through["sha256"] == sha and through["path"] == os.path.realpath(first)
+                      and through["tokens"] == len(ids)))
+        manifest(src)
+        cases.append(("the link and the file behind it are one ids file",
+                      ids_stale(man, through) is None))
+        clear_manifest(out)
+        cases.append(("the manifest goes before the dump beside it is rewritten, "
+                      "so an interrupted run leaves none",
+                      not os.path.exists(man) and ids_stale(man, corpus) is None))
+        bad = 0
+        for label, ok in cases:
+            bad += not ok
+            print(f"{'OK  ' if ok else 'FAIL'}  {label}")
+        return bad
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def selftest():
+    return 1 if selftest_dirs() + selftest_ids() else 0
 
 
 if __name__ == "__main__":
@@ -343,6 +479,50 @@ if __name__ == "__main__":
 
     from .ppl import attention_scales  # noqa: E402
 
+    # Stream DD: the ids, the block axis and the reuse check all come before the
+    # model, so a refusal costs the operator nothing.
+    if a.ids:
+        ids = torch.from_numpy(np.load(a.ids).astype(np.int64))
+        assert len(ids) == a.tokens, f"--ids has {len(ids)} tokens, --tokens says {a.tokens}"
+        print(f"  ids from {a.ids}: {len(ids)} tokens, the last {a.chunk} decoded")
+    else:
+        ev, _ = tokens()
+        ids = ev[: a.tokens]
+
+    nblocks = (len(ids) + a.chunk - 1) // a.chunk
+    # Stream DD: the block axis is only well defined when every block is the
+    # same width -- a ragged last block would give it a different `S` from the
+    # one its own prefix is a whole number of, and every driver in the tree
+    # already passes a multiple.
+    assert len(ids) % a.chunk == 0, \
+        f"--tokens {len(ids)} is not a whole number of --chunk {a.chunk} blocks"
+    want = parse_blocks(a.blocks, nblocks)
+    # `last` leaves the output paths exactly where they were, which is what the
+    # byte-for-byte regression check (a re-extraction reproduces the existing
+    # dump) compares against.  Any other value tags the block into the path.
+    tag_blocks = a.blocks not in ("", "last")
+    print(f"  {nblocks} blocks of {a.chunk}; dumping {sorted(want)}"
+          f"{' (block-tagged paths)' if tag_blocks else ''}")
+
+    # A manifest and the files beside it are one dump, and a reader takes the
+    # ids the manifest names (`boundary-grid --verify --prompt`).  A directory
+    # reused for an extraction over *other* ids would hold one decode's dump
+    # under the other's manifest, which is what the one-spec re-decode left
+    # behind.  So the reuse is refused, and refused here: before the model is
+    # loaded, not after an hour of card time.
+    ids_from = ids_source(a.ids, ids)
+    stale = []
+    for bi in sorted(want):
+        for L in layers:
+            d = dump_dir(OUT_BASE, bi, L, tag_blocks=tag_blocks, tag_layer=TAG_LAYER)
+            why = ids_stale(os.path.join(d, "manifest.json"), ids_from)
+            if why:
+                stale.append(f"  {d}: the manifest there {why}")
+    if stale:
+        sys.exit("refusing to reuse a dump directory whose manifest names other ids "
+                 "than this run reads:\n" + "\n".join(stale)
+                 + "\nRemove those directories, or dump to another --out, and extract again.")
+
     m = Model(MODEL, spec, attn_scales=attention_scales(spec), track_acc=True)
     m.clamped = {}
     keep = set()
@@ -379,31 +559,9 @@ if __name__ == "__main__":
         keep |= {f"L{m.L - 1}.x", "final_norm.rsqrt/in", "final_norm.rsqrt/out",
                  "lm_head/x"}
     m.rec = LastChunk(keep)
-    if a.ids:
-        ids = torch.from_numpy(np.load(a.ids).astype(np.int64))
-        assert len(ids) == a.tokens, f"--ids has {len(ids)} tokens, --tokens says {a.tokens}"
-        print(f"  ids from {a.ids}: {len(ids)} tokens, the last {a.chunk} decoded")
-    else:
-        ev, _ = tokens()
-        ids = ev[: a.tokens]
     cache = Cache(m.L)
     t0 = time.time()
     logits = None
-
-    nblocks = (len(ids) + a.chunk - 1) // a.chunk
-    # Stream DD: the block axis is only well defined when every block is the
-    # same width -- a ragged last block would give it a different `S` from the
-    # one its own prefix is a whole number of, and every driver in the tree
-    # already passes a multiple.
-    assert len(ids) % a.chunk == 0, \
-        f"--tokens {len(ids)} is not a whole number of --chunk {a.chunk} blocks"
-    want = parse_blocks(a.blocks, nblocks)
-    # `last` leaves the output paths exactly where they were, which is what the
-    # bit-for-bit control (re-extraction reproduces the existing dump byte for
-    # byte) compares against.  Any other value tags the block into the path.
-    tag_blocks = a.blocks not in ("", "last")
-    print(f"  {nblocks} blocks of {a.chunk}; dumping {sorted(want)}"
-          f"{' (block-tagged paths)' if tag_blocks else ''}")
 
     def dump_blocks(bi, base):
         """Dump every requested layer's witness for token block `bi`.
@@ -420,6 +578,7 @@ if __name__ == "__main__":
             OUT = dump_dir(OUT_BASE, bi, L, tag_blocks=tag_blocks, tag_layer=TAG_LAYER)
             SHARE = os.path.join(a.share, f"L{L}") if a.share else None
             os.makedirs(OUT, exist_ok=True)
+            clear_manifest(OUT)
             print(f"block {bi} layer {L} -> {OUT}")
             digests = {}
 
@@ -966,7 +1125,7 @@ if __name__ == "__main__":
                 dequant_round=spec.dequant_round,
                 clamped={k: dict(over=v[0], total=v[1], frac=v[0] / v[1])
                          for k, v in (m.clamped or {}).items()},
-                ids_from=a.ids, slim=bool(SLIM),
+                ids_from=ids_from, slim=bool(SLIM),
                 residual_stream=residual_stream, head=head, embed=emb,
                 torch=torch.__version__, files=digests,
             )
