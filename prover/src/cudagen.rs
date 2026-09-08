@@ -2661,8 +2661,43 @@ pub fn emit_cmd(args: &[String]) {
         }
         // B11 stream K: the head's argmax component was never emitted -- 10,079
         // instructions on the CPU per `lm_head` chunk until now.
+        //
+        // Issue #25: and the store must hold *one* shape for it per layout. The
+        // two values a head segment's own data decides here are the key claim
+        // and the token claim the component publishes, and how many rows of the
+        // segment have two logits at the maximum is what moves them -- a block
+        // whose every emitted token is zero closes the token claim on zero, and
+        // two claims coincide when their values do. Read as ordinary constants
+        // those fold and share slots, and the store emitted from one extraction
+        // misses the shape the next extraction of the same plan asks for; read
+        // through `EvalAtRow::claim` they take a slot each by occurrence and the
+        // shape stops seeing them. That is stream RR's rule, and this is where
+        // the store is built, so this is where it is checked: the same eval with
+        // both claims driven onto the two values that used to move it must lower
+        // to the fingerprint just installed, or the emit stops instead of
+        // installing a shape no chunk will ask for.
         if let Some(am) = &b.argmax {
             go!(am, "argmax".to_string());
+            let fp = |e: &crate::argmax::ArgmaxEval| {
+                lower(e, SecureField::zero(), e.log_size(), e.max_constraint_log_degree_bound())
+                    .fingerprint()
+            };
+            let want = fp(&am.eval);
+            for (why, zero_tok) in [("both claims zero", true), ("two claims that coincide", false)]
+            {
+                let mut probe = am.eval.clone();
+                if let Some(t) = probe.binding.as_mut() {
+                    if zero_tok {
+                        t.claimed = SecureField::zero();
+                        t.claimed_tok = SecureField::zero();
+                    } else {
+                        t.claimed_tok = t.claimed;
+                    }
+                }
+                assert_eq!(fp(&probe), want,
+                           "zk_argmax_eval: {why} lowers to another shape, so the store this \
+                            emit writes would miss the head segments whose data lands there");
+            }
         }
         // B11 stream BB: the embedding gadget's two families, in *both* emit
         // walks. The argmax went only into this one, so it has a constraint
