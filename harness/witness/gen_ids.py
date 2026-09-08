@@ -15,6 +15,9 @@ benchmark condition means -- and `--prefix` is the manifest's `c`.
 
     uv run python -m harness.witness.gen_ids --prefix 16384 --new 512 --spec y-delay-vw12 \
         --out ids_c16384.npy
+
+`--help` loads the module and nothing else, so it is the check that the imports
+below resolve on a host with no weights and no card.
 """
 import argparse
 import json
@@ -27,6 +30,7 @@ import torch
 
 from .common import MODEL, SPECS, setup, tokens
 from .model import Cache, Model
+from .ppl import attention_scales
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
@@ -48,9 +52,6 @@ if __name__ == "__main__":
     assert a.prefix % a.chunk == 0, "prefix must be a whole number of prefill chunks"
     setup()
     spec = SPECS[a.spec]
-
-    from ppl import attention_scales  # noqa: E402
-
     m = Model(MODEL, spec, attn_scales=attention_scales(spec))
     ev, _ = tokens()
     need = a.offset + a.prefix
