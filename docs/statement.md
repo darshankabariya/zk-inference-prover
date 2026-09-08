@@ -84,6 +84,27 @@ the o matmul's input is the attention output's requantization. Unbound, the
 attention would be over values of the prover's choosing while the projections
 and the o matmul each prove the wrong thing correctly.
 
+The rotation holds one row per (token, head) and the quantize one per block of
+channels inside a head, so both of their row counts have the head count as a
+factor. A model whose head count has an odd factor -- Qwen2.5-14B has 40 query
+heads -- therefore gives row counts that are a power of two at no block length.
+Each component rounds its row count up to the next power of two and puts the
+difference at the front as **unconstrained padding**:
+rows whose every committed value is zero, on which the rotation is a product
+and a sum of zeros and the quantize rounds a zero to a zero, so no constraint
+of either component says anything about what they hold. What checks them is the
+comparison the real rows are already bound by. Each component folds all of its
+rows, the padded ones included, into one weighted sum, and that sum is compared
+with the producer's -- the q and k matmuls' dequantized outputs on the way in,
+the key tiles' own columns on the way out -- and the producer's runs over the
+real values alone. A padded row carries weights no real value carries, so
+anything but zero in one changes one side of that comparison and nothing else,
+and the comparison fails. Nothing else in the segment reads a padded row. On a
+model whose head count is already a power of two there is no padding and the
+proof is the one it always was; at 40 heads the rotation holds 64 rows per token
+for 40 real ones, and 37.5% of those two components' committed cells is
+padding.
+
 **The attention component (4) and the Freivalds checks (12).** These are not
 seams but the components themselves: the softmax identities and the
 accumulation are constraints of one AIR, and each matmul is a Freivalds check

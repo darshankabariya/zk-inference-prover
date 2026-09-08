@@ -223,6 +223,7 @@ fn a_repeated_flag_resolves_the_same_way_in_compose_and_in_the_loop() {
     assert_eq!(one, many,
                "the loop and the one-shot disagree on the same plan line: `zk-prover {}`",
                loop_args.join(" "));
+}
 
 /// The padded shape's own record: what the padding is, and that the statement
 /// says so (issue #77, the decision of 2026-09-08).
