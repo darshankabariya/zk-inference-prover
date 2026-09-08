@@ -21,6 +21,7 @@ mod devpre;
 mod chunks;
 mod devtab;
 mod precache;
+mod shaperoot;
 mod scalars;
 mod devacc;
 mod dev_attention_freivalds_witness_gen;
@@ -1436,6 +1437,9 @@ pub fn compose_finish(out: compose::Composed, ser: Ser, params: &compose::Params
         // milestone 3: what the constraint lowering cost, and where
         "blob": crate::cudagen::blob_report(),
         "params": serde_json::to_value(params).unwrap(),
+        // issue #18: the per-layer calibration the shape root is a function of
+        // beside the statement, and what the shape-root cache did with it
+        "shape": crate::shaperoot::shape_json(),
     });
     (j, accepts)
 }
@@ -1511,6 +1515,16 @@ fn pre_split_cmd(args: &[String]) {
 /// On a real dump the loader is still `--weights-only`'s, so the *files* are
 /// still opened; a `Layer::from_params` that opens none is the box half's, and
 /// this brief's Record names it.
+///
+/// **Issue #18: `--shape-cache DIR` is the derivation, done once.** The shape
+/// tree is a function of `Fixed.params` and of the per-layer calibration and of
+/// nothing else, so `shaperoot` keys the root on exactly those two and stores
+/// it under `DIR`. A second segment whose statement and calibration agree
+/// reports the stored root and builds no column; a segment that differs in one
+/// parameter has a different key and derives its own. What each root was keyed
+/// on is published beside it as `result.shape`, so a reader of the row can see
+/// what it is a function of. `--shape-cache-verify` derives anyway and asserts
+/// the fresh root against the stored one.
 fn expect_root_cmd(args: &[String]) {
     if flag(args, "--shape-only") {
         compose::SHAPE_ONLY.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1525,6 +1539,7 @@ fn expect_root_cmd(args: &[String]) {
 ///
 ///     zk-prover model-roots --plan PLAN [--pins "..."] [--out FILE] [--limit N]
 ///                     [--weights-only --params-dir DIR]
+///                     [--shape-cache DIR] [--shape-cache-verify]
 ///
 /// `PLAN` is an `o_plan.py` plan file: one `compose` argument line per chunk.
 /// A plan line carries only the chunk's *own* arguments, so `--pins` supplies
@@ -1553,6 +1568,12 @@ fn expect_root_cmd(args: &[String]) {
 /// The rows a grid needs are keyed by `(layer, c)`, which is what
 /// `grid_cmd` looks them up by; `block` and `model` ride along so a reader can
 /// see which dump each row came from and so the grid can compare model hashes.
+///
+/// Issue #18: `--shape-cache DIR` is passed to every child, which is the only
+/// way a cache can serve this loop -- each line is its own process. `(layer, c)`
+/// deduplicates the lines this command runs at all; the cache is what makes two
+/// *different* cells whose statement and calibration agree cost one derivation
+/// between them, and `shape_key` on each row says which cells those were.
 fn model_roots_cmd(args: &[String]) {
     let plan = arg_str(args, "--plan").expect("model-roots needs --plan FILE");
     let text = std::fs::read_to_string(&plan)
@@ -1574,6 +1595,9 @@ fn model_roots_cmd(args: &[String]) {
     assert!(!weights_only || params_dir.is_some(),
             "model-roots --weights-only needs --params-dir DIR (the serialized \
              statements: DIR/<ser-tag>.fixed.json)");
+    // Issue #18: the shape-root cache the children share.
+    let shape_cache = arg_str(args, "--shape-cache");
+    let shape_cache_verify = flag(args, "--shape-cache-verify");
     let exe = std::env::current_exe().expect("model-roots: no path to this binary");
     let mut rows: Vec<Value> = vec![];
     let mut seen: std::collections::BTreeSet<(i64, u64)> = Default::default();
@@ -1610,6 +1634,17 @@ fn model_roots_cmd(args: &[String]) {
                 continue;
             }
             a.push(w.to_string());
+        }
+        // Issue #18: each line runs in a process of its own, so an in-process
+        // cache cannot cross them and the directory the caller named is what
+        // does.  Passed through here rather than folded into `--pins`, so a
+        // plan line cannot name a different one.
+        if let Some(d) = shape_cache.as_ref() {
+            a.push("--shape-cache".into());
+            a.push(d.clone());
+        }
+        if shape_cache_verify {
+            a.push("--shape-cache-verify".into());
         }
         if weights_only {
             let d = params_dir.as_ref().unwrap();
@@ -1676,6 +1711,10 @@ fn model_roots_cmd(args: &[String]) {
             "block": r["block"],
             "c": c,
             "pre_root": r["pre_root"],
+            // issue #18: the key that row's shape root was cached under -- the
+            // digest of the statement and of the calibration below, so two rows
+            // that name one key name one shape tree
+            "shape_key": r["shape"]["key"],
             // stream PP: the per-layer calibration the shape derivation needs,
             // published beside the root rather than read off the dump
             "frac_per_head": field("frac_per_head"),
@@ -1814,6 +1853,10 @@ fn model_roots_cmd(args: &[String]) {
 fn compose_cmd(args: &[String]) {
     // Stream EE (open item 21): before anything, because `prove_gen` reads it.
     cudagen::fp_out_set(args);
+    // Issue #18: `--shape-cache DIR` and `--shape-cache-verify`, before the
+    // load, because `compose::generate` consults the cache before it builds a
+    // column.
+    shaperoot::configure(args);
     let (mut l, vname) = layer_of(args);
     // B7a milestone 4 (section 3 row 1): rung 3's sixth probe on its own, so the
     // `nopatch` control has a witness whose exp table is *not* the closed form

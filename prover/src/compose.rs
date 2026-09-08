@@ -4204,6 +4204,34 @@ pub struct Gen {
     pub residual_stream_tamper_fired: Option<usize>,
 }
 
+/// Stream PP (E11) and issue #18: the `--shape-only` report, from the plan and
+/// the root -- whether the root was derived here or came out of the cache.
+///
+/// Everything in it but the root is a function of `Fixed.params` alone
+/// (`Plan::pre_split`), so a cached run reports the same document as a derived
+/// one and `cached` is the one field that says which it was.
+fn emit_shape_root(plan: &Plan, layer: &Layer, pre_root: &str, cached: bool,
+                   trace_secs: f64, commit_shape_secs: f64) {
+    let shape_sizes = plan.shape_sizes();
+    crate::util::emit("shape_root", json!({
+        "pre_root": pre_root,
+        "layer": layer.layer,
+        "block": layer.block,
+        "c": plan.p.c,
+        "s": plan.p.s,
+        "log_table": plan.p.log_table,
+        "columns": shape_sizes.len(),
+        "cells": shape_sizes.iter().map(|s| 1usize << s).sum::<usize>(),
+        "split": plan.pre_split_report(),
+        // issue #18: what the root is a function of, and what the cache did
+        "shape": crate::shaperoot::shape_json(),
+        "cached": cached,
+        "trace_secs": trace_secs,
+        "commit_shape_secs": commit_shape_secs,
+        "peak_rss_bytes": crate::util::peak_rss_bytes(),
+    }));
+}
+
 /// B7b (README 26): the first half of `prove_layer` -- every witness generation, every
 /// table, every column born where it will be committed -- up to the
 /// transcript.
@@ -4225,6 +4253,28 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     assert!(layer.key_tile_sizes.iter().zip(&plan.shapes).all(|(n, sh)| *n == sh.insts),
             "layer key tiles disagree with params");
     assert_eq!(layer.key_tiles[0].log_table, p.log_table, "exp table rows disagree");
+
+    // Issue #18: what this segment's shape tree is a function of -- the
+    // statement and the per-layer calibration -- and its key.  Noted on every
+    // path, so the commit below stores the root it derives whether this run is
+    // `compose` or `expect-root`.
+    let shape_calibration = crate::shaperoot::Calibration::of(layer);
+    let shape_inputs = crate::shaperoot::inputs(p, &shape_calibration);
+    let shape_key = crate::shaperoot::key(&shape_inputs);
+    crate::shaperoot::note(&shape_key, &shape_inputs);
+    // Issue #18: and the derivation the cache replaces.  Only `--shape-only`
+    // may stop on a stored root: `compose` needs the tree itself and not its
+    // root, so it derives and stores.  Under `--shape-cache-verify` the tree is
+    // committed anyway and `shaperoot::fill` asserts the root against the
+    // stored one, which is the control that says the key determines the tree.
+    if SHAPE_ONLY.load(std::sync::atomic::Ordering::Relaxed)
+        && !crate::shaperoot::verifying()
+    {
+        if let Some(root) = crate::shaperoot::take(&shape_key, &shape_inputs) {
+            emit_shape_root(&plan, layer, &root, true, 0.0, 0.0);
+            std::process::exit(0);
+        }
+    }
 
     let mut tables = Tables::new(layer.key_tiles[0].table.clone(), p.log_table, p.kmax,
                                  plan.round, p.ao_q_bits, plan.widths.clone(),
@@ -5531,23 +5581,17 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     let pp_shape_secs = shape_t.elapsed().as_secs_f64();
     crate::util::m4_add("wall/commit_shape", pp_shape_secs);
+    // Issue #18: the root this run derived, under the key noted in `generate`.
+    // Storing it here and not at the stop below is what lets a full `compose`
+    // run -- which needs the tree and cannot stop -- pay for the derivations a
+    // later `expect-root --shape-only` would otherwise repeat; and under
+    // `--shape-cache-verify` this is where the fresh root is compared with the
+    // stored one.
+    crate::shaperoot::fill(&sess.tree_root(0));
     // Stream PP (E11): the verifier's own work stops here.  Everything after
     // this line reads the model; the shape root does not.
     if SHAPE_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
-        crate::util::emit("shape_root", json!({
-            "pre_root": sess.tree_root(0),
-            "layer": layer.layer,
-            "block": layer.block,
-            "c": p.c,
-            "s": p.s,
-            "log_table": p.log_table,
-            "columns": shape_sizes.len(),
-            "cells": shape_sizes.iter().map(|s| 1usize << s).sum::<usize>(),
-            "split": plan.pre_split_report(),
-            "trace_secs": trace_secs,
-            "commit_shape_secs": pp_shape_secs,
-            "peak_rss_bytes": crate::util::peak_rss_bytes(),
-        }));
+        emit_shape_root(&plan, layer, &sess.tree_root(0), false, trace_secs, pp_shape_secs);
         std::process::exit(0);
     }
     match cached {
@@ -5592,6 +5636,10 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             // (`--weights-only`), which is the property that makes it a
             // *verifier's* derivation and not a second prover's
             "weights_only": layer.source.starts_with("B6.5 model-only"),
+            // issue #18: the shape root's key and the calibration it is taken
+            // over, beside the root itself, so a reader of this row can see
+            // what the root is a function of without opening the dump
+            "shape": crate::shaperoot::shape_json(),
             "split": plan.pre_split_report(),
             "trace_secs": trace_secs,
             "commit_pre_secs": ll_pre_secs,
