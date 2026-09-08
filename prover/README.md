@@ -18,6 +18,17 @@ A fresh CUDA build evaluates constraints on the CPU until `kernels/` has
 installed the generated kernels for the shapes being proved; digests do not
 depend on it.
 
+## Repeated flags
+
+Every subcommand reads its command line left to right and **the last occurrence
+of a flag wins**: under `--table-bits 25 --table-bits 16` the width is 16,
+everywhere. So a shared prefix is written first and what one segment decides for
+itself after it, and `compose-chunks` composes a plan line the same way — the
+command line, then the line — which is what makes `compose $SHARED $line`
+reproduce the digest the loop gave that line. A flag that carries no value, such
+as `--diagonal-block`, is read as present or absent, so repeating one says
+nothing new.
+
 ## The digest gate
 
 Any change that is not meant to alter the proof reproduces every digest below

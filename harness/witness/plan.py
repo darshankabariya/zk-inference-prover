@@ -194,11 +194,13 @@ def main():
     # own `ao_q_bits` is wide refuses it: `compose.rs` asserts
     # `ao_q_bits + ao_rem_bits <= 30`, so the E11 set's `attn_out_bits 12`
     # (`ao_q_bits` 11) refuses the shared 20 that its own worst block needs,
-    # while its own 19 is legal.  A line's arguments are placed BEFORE the
-    # shared ones (`chunks.rs::specs`) and `arg_scalar` takes the first match,
+    # while its own 19 is legal.  A line's arguments are placed AFTER the
+    # shared ones (`chunks.rs::plan_of`) and `arg_scalar` takes the last match,
     # so a per-line pin simply wins and the shared one stays as the default for
-    # the lines that do not carry one.  Off by default: with it absent every
-    # plan this repo has recorded is byte-identical.
+    # the lines that do not carry one.  That is the order a one-shot
+    # `compose $SHARED $line` writes too, so a line rerun on its own resolves
+    # its flags exactly as the loop did (zk-prover #30).  Off by default: with
+    # it absent every plan this repo has recorded is byte-identical.
     ap.add_argument("--ao-rem-per-line", action="store_true",
                     help="write each layer line's own --ao-rem-bits, off the shape table's "
                          "row, instead of leaving it to the shared pin")

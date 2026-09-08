@@ -759,11 +759,12 @@ fn chain_files(a: &Chunk, b: &Chunk) -> ChainVerdict {
     chain_check(&a.fixed(), &a.proof(), &b.fixed(), &b.proof())
 }
 
-/// `args` with `--witness` pointed at `dir`.  `arg_str` takes the first match,
-/// so prepending is how an override works.
+/// `args` with `--witness` pointed at `dir`.  `arg_str` takes the last match
+/// (issue #30), so appending is how an override works.
 fn at(args: &[String], dir: &str) -> Vec<String> {
-    let mut v = vec!["--witness".to_string(), dir.to_string()];
-    v.extend(args.iter().cloned());
+    let mut v = args.to_vec();
+    v.push("--witness".to_string());
+    v.push(dir.to_string());
     v
 }
 

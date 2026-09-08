@@ -51,26 +51,39 @@ use dequant::{Spec, Tamper, Variant, Witness};
 use layout::Shape;
 use util::emit;
 
+/// The value of `key` on a command line: **the last occurrence wins** (issue #30).
+///
+/// A command line is read left to right and a later `--key value` overrides an
+/// earlier one, so a shared prefix is written first and what one segment decides
+/// for itself after it. `compose $SHARED $line` and the plan line
+/// `compose-chunks` composes out of the same two pieces therefore resolve every
+/// repeated flag to the same value, which is what makes a one-shot rerun of a
+/// plan line reproduce the loop's digest. A bare flag carries no value and
+/// `flag` only asks whether it is present, so repeating one is harmless.
+fn arg_pair<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
+    args.windows(2).rev().find(|w| w[0] == key).map(|w| w[1].as_str())
+}
+
 pub fn arg_scalar<T: std::str::FromStr>(args: &[String], key: &str, default: T) -> T {
-    args.windows(2).find(|w| w[0] == key).and_then(|w| w[1].parse().ok()).unwrap_or(default)
+    arg_pair(args, key).and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 pub fn arg_list<T: std::str::FromStr + Copy>(args: &[String], key: &str, default: &[T]) -> Vec<T> {
-    match args.windows(2).find(|w| w[0] == key) {
-        Some(w) => w[1].split(',').filter_map(|s| s.trim().parse().ok()).collect(),
+    match arg_pair(args, key) {
+        Some(v) => v.split(',').filter_map(|s| s.trim().parse().ok()).collect(),
         None => default.to_vec(),
     }
 }
 
 pub fn arg_strs(args: &[String], key: &str, default: &[&str]) -> Vec<String> {
-    match args.windows(2).find(|w| w[0] == key) {
-        Some(w) => w[1].split(',').map(|s| s.trim().to_string()).collect(),
+    match arg_pair(args, key) {
+        Some(v) => v.split(',').map(|s| s.trim().to_string()).collect(),
         None => default.iter().map(|s| s.to_string()).collect(),
     }
 }
 
 pub fn arg_str(args: &[String], key: &str) -> Option<String> {
-    args.windows(2).find(|w| w[0] == key).map(|w| w[1].clone())
+    arg_pair(args, key).map(|v| v.to_string())
 }
 
 fn spec_of(args: &[String], variant: &str, round: &str, per_row: usize) -> Spec {
@@ -1540,13 +1553,16 @@ fn model_roots_cmd(args: &[String]) {
         if rows.len() >= limit {
             break;
         }
-        // The plan line's own arguments **first**, then the shared pins, minus
+        // The shared pins **first**, then the plan line's own arguments, minus
         // the two that name the artifact rather than the chunk.  The order is
-        // load-bearing: `arg_str` and `arg_scalar` take the *first* match, so a
-        // line's own `--table-bits` or `--ao-rem-bits` has to precede the
-        // shared one or the shared one silently wins (stream SS's rider 1,
-        // `o_plan.py --ao-rem-per-line`).
-        let mut a: Vec<String> = vec![];
+        // required and not merely tidy: `arg_str` and `arg_scalar` take the
+        // *last* match, so a line's own `--table-bits` or `--ao-rem-bits` has
+        // to follow the shared one or the shared one silently wins (stream SS's
+        // rider 1, `o_plan.py --ao-rem-per-line`).  It is the order
+        // `compose $SHARED $line` writes and the order `compose-chunks`
+        // composes a plan line in (issue #30).
+        let mut a: Vec<String> = pins.clone();
+        a.push("--plan-line".into());
         let mut tag = String::new();
         let mut it = line.split_whitespace();
         while let Some(w) = it.next() {
@@ -1560,7 +1576,6 @@ fn model_roots_cmd(args: &[String]) {
             }
             a.push(w.to_string());
         }
-        a.extend(pins.iter().cloned());
         if weights_only {
             let d = params_dir.as_ref().unwrap();
             let f = format!("{d}/{tag}.fixed.json");
@@ -1616,7 +1631,7 @@ fn model_roots_cmd(args: &[String]) {
         // manifest carries the model root the verifier compares AND the
         // calibration the verifier derives with, and the dump is needed for
         // neither.
-        let calib = a.iter().position(|w| w == "--witness")
+        let calib = a.iter().rposition(|w| w == "--witness")
             .and_then(|i| a.get(i + 1))
             .and_then(|d| std::fs::read(format!("{d}/manifest.json")).ok())
             .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
@@ -3181,6 +3196,45 @@ fn fpcompare_cmd(args: &[String]) {
     }));
     if !covered {
         std::process::exit(1);
+    }
+}
+
+/// Issue #30: the rule for a repeated flag, pinned where it is implemented.
+/// The digest the rule decides is pinned in `tests/synthetic_digest.rs`.
+#[cfg(test)]
+mod repeated_flags {
+    use super::{arg_list, arg_scalar, arg_str, arg_strs, flag};
+
+    fn args(words: &str) -> Vec<String> {
+        words.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn the_last_occurrence_wins() {
+        let a = args("--table-bits 17 --variants intexp --table-bits 16 --variants intsplit6 \
+                      --head-groups 16,8 --head-groups 2,1");
+        assert_eq!(arg_scalar(&a, "--table-bits", 25u32), 16);
+        assert_eq!(arg_str(&a, "--variants").as_deref(), Some("intsplit6"));
+        assert_eq!(arg_strs(&a, "--variants", &["intexp"]), vec!["intsplit6".to_string()]);
+        assert_eq!(arg_list(&a, "--head-groups", &[16usize]), vec![2usize, 1]);
+    }
+
+    #[test]
+    fn one_occurrence_and_none_are_unchanged() {
+        let a = args("--table-bits 16 --diagonal-block");
+        assert_eq!(arg_scalar(&a, "--table-bits", 25u32), 16);
+        assert_eq!(arg_scalar(&a, "--ao-rem-bits", 19u32), 19);
+        assert_eq!(arg_str(&a, "--witness"), None);
+        // a bare flag carries no value, so repeating it says nothing new
+        assert!(flag(&a, "--diagonal-block"));
+        assert!(flag(&args("--diagonal-block --diagonal-block"), "--diagonal-block"));
+    }
+
+    /// A value that is not a number leaves the default in place, as it did when
+    /// the first occurrence won; what moved is only which occurrence is read.
+    #[test]
+    fn an_unparsable_value_falls_back_to_the_default() {
+        assert_eq!(arg_scalar(&args("--table-bits wide"), "--table-bits", 25u32), 25);
     }
 }
 

@@ -24,9 +24,12 @@
 //! that share almost nothing: each layer has its own witness and its own
 //! master table, and the head adds the argmax on top. `--plan FILE` is how the
 //! loop is given that. Each line of the plan is one chunk's own arguments,
-//! which are put in front of the ones on the command line, so a chunk's line
-//! decides what the shared pins leave open and the loop no longer needs every
-//! chunk to resolve the same parameters.
+//! which are put after the ones on the command line, so a chunk's line decides
+//! what the shared pins leave open -- and, since the last occurrence of a
+//! repeated flag wins, overrides what they do name -- and the loop no longer
+//! needs every chunk to resolve the same parameters. It is the order
+//! `compose $SHARED $line` writes, so one line rerun on its own reproduces the
+//! digest the loop gave it (issue #30).
 //!
 //! Two things follow from the shapes being different, and both of them are
 //! about what a chunk is allowed to leave behind.
@@ -161,10 +164,11 @@ fn layers_of(args: &[String]) -> (Vec<Layer>, String) {
 /// One line of a plan: one chunk, and what the loop knows about it before it
 /// has been built.
 struct ChunkSpec {
-    /// this chunk's own arguments, then the ones on the command line. The
-    /// chunk's come first because `arg_str` takes the first match it finds, so
-    /// putting them there is what lets a chunk decide its own table bits
-    /// against shared pins that say nothing about them.
+    /// the arguments on the command line, then this chunk's own. The chunk's
+    /// come last because the last occurrence of a repeated flag wins (issue
+    /// #30), so putting them there is what lets a chunk decide its own table
+    /// bits against shared pins that name another value -- and it is the order
+    /// `compose $SHARED $line` writes, so the two resolve the line alike.
     args: Vec<String>,
     /// the line as it was written, which is what says whether two chunks are
     /// the same layer at the same shape.
@@ -236,15 +240,16 @@ fn plan_of(path: &str, args: &[String]) -> Vec<ChunkSpec> {
         .iter()
         .enumerate()
         .map(|(i, tail)| {
-            let mut a: Vec<String> = tail.split_whitespace().map(str::to_string).collect();
+            let own: Vec<String> = tail.split_whitespace().map(str::to_string).collect();
             // the plan index, not `i`: two slices writing into one `--ser-dir`
             // must not both call their first untagged chunk `chunk0`
-            let tag = arg_str(&a, "--ser-tag").unwrap_or_else(|| format!("chunk{}", lo + i));
-            // `--plan-end` closes the line. Nothing reads it; it is there so
-            // that a bare flag written last on a line cannot pair with the
-            // first shared argument and be mistaken for its value.
-            a.push("--plan-end".into());
-            a.extend_from_slice(args);
+            let tag = arg_str(&own, "--ser-tag").unwrap_or_else(|| format!("chunk{}", lo + i));
+            // `--plan-line` opens the line. Nothing reads it; it is there so
+            // that a bare flag written last on the command line cannot pair
+            // with the line's first word and be mistaken for its value.
+            let mut a: Vec<String> = args.to_vec();
+            a.push("--plan-line".into());
+            a.extend(own);
             ChunkSpec {
                 args: a,
                 tail: tail.clone(),

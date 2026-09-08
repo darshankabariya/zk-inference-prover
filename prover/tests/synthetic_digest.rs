@@ -175,3 +175,42 @@ fn the_synthetic_head_chunk_proves_with_the_o_seam_absent() {
                "head: absent edges");
     assert_eq!(v["provenance"]["unsound_skips"], serde_json::json!(["argmax"]));
 }
+
+/// Issue #30: `compose` and `compose-chunks` resolve a repeated flag alike, so
+/// a plan line rerun on its own reproduces the digest the loop gave it.
+///
+/// The rule is that the last occurrence wins. The shared prefix below names
+/// `--table-bits 17` and the plan line names 16, which makes the line the
+/// `sound` case above, so both commands reproduce its recorded digest. Were the
+/// first occurrence to win, the loop would take 16 (it wrote the line first)
+/// and the one-shot 17, which is the disagreement the issue reports.
+#[test]
+fn a_repeated_flag_resolves_the_same_way_in_compose_and_in_the_loop() {
+    const SOUND: &str = "82085896a8408f36";
+    let line = "--head-groups 2,1 --nout 64 --residual-stream-a 32 --kmax 16 \
+                --synth-residual-stream --diagonal-block --table-bits 16";
+    // the shared prefix: `SYN` with the table width the line overrides
+    let mut shared: Vec<String> = SYN.iter().map(|s| s.to_string()).collect();
+    let i = shared.iter().position(|w| w == "--table-bits").expect("SYN names --table-bits");
+    shared[i + 1] = "17".to_string();
+
+    let mut one_shot = shared.clone();
+    one_shot.extend(line.split_whitespace().map(str::to_string));
+    let got = prove(&one_shot);
+    let one = got["result"]["point"]["proof_sha256"].as_str().unwrap_or("").to_string();
+    assert!(one.starts_with(SOUND),
+            "compose read the shared --table-bits over the line's: `zk-prover {}` gave {one}, \
+             the line's own width gives {SOUND}", one_shot.join(" "));
+
+    let plan = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("repeated-flag.plan.txt");
+    std::fs::write(&plan, format!("# issue #30\n{line}\n")).expect("write the plan");
+    let mut loop_args = vec!["compose-chunks".to_string()];
+    loop_args.extend(shared[1..].iter().cloned());
+    loop_args.push("--plan".to_string());
+    loop_args.push(plan.to_string_lossy().to_string());
+    let got = prove(&loop_args);
+    let many = got["result"]["summary"]["digests"][0].as_str().unwrap_or("").to_string();
+    assert_eq!(one, many,
+               "the loop and the one-shot disagree on the same plan line: `zk-prover {}`",
+               loop_args.join(" "));
+}
