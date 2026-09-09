@@ -13,6 +13,9 @@ import pathlib
 import sys
 
 from harness import inputs
+from harness.costmodel.key_tile import (  # noqa: F401  (re-exported)
+    CHAN_TARGET, GRID_TARGET, ROW_WIDTH, key_tile_cells, key_tile_family,
+    key_tile_fresh)
 
 # The micro-benchmark outputs this model reads, all under one directory: the
 # stwo benches at its root and the witness-side probes in named subdirectories.
@@ -508,88 +511,16 @@ ALPHA = (B5C["intexp"]["alpha_grid"] if B5C and "intexp" in B5C else 5.0)
 ALPHA_V1 = (B5C["bf16x"]["alpha_grid"] if B5C and "bf16x" in B5C else 5.0)
 
 # --- the attention key tile family, as a closed form in (S, C) ---------------------
-# Stream DD (2026-09-01) replaced B9's `p S^2` fit with a two-variable model of the
-# key tile family, and stream E1 re-derived its coefficients symbolically so they can
-# be evaluated at a shape that is not Llama-8B's.  Every line below is an identity
-# of the layout, read off `prover/src/attn_trace.rs:1167-1181` against
-# `prover/src/layout.rs`; nothing here is fitted.
+# `key_tile.py`, imported above.  It lives in its own module because its
+# self-test -- the form against every recorded layer segment, to the cell -- has
+# to run where this file's micro-benchmark inputs do not exist:
 #
-#   component                        base                     interaction
-#   channel: keys   `Cells::kv`   pk*rows   = nh*hd*C      2*nh*hd*C  (K range LogUp)
-#                                                          + 12*nh*hd/ct*C (Horner)
-#   channel: queries              pq*rows   = nh*hd*S      2*nh*hd*S  (query range)
-#   grid: score + numerator       2q*rows   = 2*nh*S*C     2*nh*S*C   (exp/numerator)
-#                                                          + 24*nh/gt*S*C (Horner)
-#   grid: V values  `Cells::kv`   pv*rows   = nh*hd*C      2*nh*hd*C  (V range LogUp)
-#   per-token: max, denom, 2 limbs 4*nh*S                  (8*nh + 8*nh/rw)*S
-#   out (A.V)                     the `attnout` family, NOT `key_tiles` -- charged
-#                                 separately by `cells_per_token`'s `attn_out`
+#     uv run python -m harness.costmodel.key_tile --selftest
 #
-# The layout identities the row counts come from, with `insts` summing to `nh`
-# over the key tiles (every term is linear in `insts`, so how the heads are grouped into key tiles is
-# cost-neutral -- 16/8/8 costs what 32 would):
-#   lc.g.rows = hd*insts*C/pk,  pk -> chan_target   (LayoutChan::choose)
-#   lk.g.rows =  C*insts*S/q,   q  -> grid_target   (LayoutKey::choose)
-#   rrows*rw  = nh*S                                (the per-token row component)
-#
-# Two things that are NOT derived and would move at another shape:
-#   * `grid_target` / `chan_target` / `rw` are run knobs, not constants.  The
-#     composed sequence used 64 / 128 / 16 and this model keeps them; a prover run
-#     at a frontier shape would `choose()` against the same targets, but the
-#     achieved `pk`/`q` are `div_ceil` results and only tile exactly when S, C, hd
-#     and `insts` are powers of two and the target divides.  Away from that the
-#     real cost is a few percent above this.
-#   * `Grid::new` caps `q` at `min(S, hd)` and `pk` at `min(C, S)`.  Below those
-#     caps the targets are met; above them the layout saturates and these
-#     expressions stop being exact.  `key_tile_cells` reports when it saturates.
-GRID_TARGET, CHAN_TARGET, ROW_WIDTH = 64, 128, 16
+# `key_tile_family` is what a composed segment costs and what `cells_per_token`
+# charges; `key_tile_cells` is one key tile of it, and a caller that hands it the
+# whole context gets one untiled prefix key tile and not the family.
 
-
-def key_tile_cells(nh, hd, s, c, grid_target=GRID_TARGET, chan_target=CHAN_TARGET,
-               rw=ROW_WIDTH, rows_component=True):
-    """Committed cells of the attention key tile family at (S, C) for `nh` heads of
-    width `hd`.  Returns (base, interaction, saturated).
-
-    `rows_component=False` drops the per-token max/denominator component, which is what
-    a diagonal block key tile does (`attn_trace.rs`, `with_rows = !a.diagonal_block`): the diagonal block
-    shares the prefix key tile's one max and one denominator per token.
-
-    **`hd` here is the ATTENTION head width and `nh` the number of ATTENTION
-    heads.**  The AIR commits one K and one V column set per attention head, not
-    per KV group -- `LayoutChan`/`LayoutKey` are built from `Shape::chans()` and
-    `Shape::keys()`, both of which carry `insts` = attention heads.  So grouped
-    query attention buys this prover nothing on the committed KV side today; a
-    GQA-aware layout would divide the `C` term by `nh/nkv`, and at a frontier
-    shape that ratio is 8-32.  That is a named, unbuilt optimisation, not a
-    modelling choice."""
-    q = max(1, min(grid_target, s, hd))     # scores per grid row, capped by Grid::new
-    pk = max(1, min(chan_target, c, s))     # keys per channel row, same cap
-    row_w = min(rw, max(1, nh * s))
-    # a layer with no attention grid at all (a linear-attention block, priced
-    # here at C = 0) is not a saturated layout, it is an absent one
-    saturated = bool(s and c) and ((q != grid_target) or (pk != chan_target))
-    base = (2 * nh * s * c                       # score + numerator
-            + 2 * nh * hd * c                    # K (channel component) and V (grid)
-            + nh * hd * s                        # the queries
-            + (4 * nh * s if rows_component else 0))  # max, denominator, two limbs
-    inter = ((24.0 * nh / q) * s * c             # the grid's Horner
-             + 2 * nh * s * c                    # exp / numerator LogUp
-             + 2 * nh * hd * c                   # V range LogUp
-             + (12.0 * nh * hd / pk) * c         # the channel component's Horner
-             + 2 * nh * hd * c                   # K range LogUp
-             + 2 * nh * hd * s                   # query range LogUp
-             + ((8.0 * nh + 8.0 * nh / row_w) * s if rows_component else 0))
-    return base, inter, saturated
-
-
-def key_tile_fresh(nh, hd, s, c, diagonal_block=True, **kw):
-    """The whole key tile family of one composed layer chunk: the prefix key tiles over
-    `c` keys, plus an S x S diagonal block that carries no per-token component."""
-    b, i, sat = key_tile_cells(nh, hd, s, c, **kw)
-    if diagonal_block:
-        b2, i2, s2 = key_tile_cells(nh, hd, s, s, rows_component=False, **kw)
-        b, i, sat = b + b2, i + i2, sat or s2
-    return b + i, sat
 
 # ---------------------------------------------------------------- the model --
 # Committed cells per decoded token, in the shape B1's witness actually has.
@@ -738,6 +669,10 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
         attn = alpha * L * nh * ctx
         key_tile_saturated = False
     else:
+        # the whole family of one layer chunk: the prefix tiled into key blocks of
+        # `seq` keys, the diagonal block, and stream NN's root-equality claims.  The
+        # LogUp running sums are charged, which is the prover's default; a run with
+        # `--gkr-key-tiles` moves them into a family this model does not carry.
         per_layer, key_tile_saturated = key_tile_fresh(nh, hd, seq or 1, ctx, diagonal_block=diagonal_block)
         attn = L * per_layer / (seq or 1)
     n_lookups = L * (2 * dff_active + 2 * (2 * d + 1)) + vocab

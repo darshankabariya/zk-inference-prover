@@ -1,0 +1,431 @@
+{
+ "_file": "harness/costmodel/key_tile_segments.json",
+ "_purpose": "What `key_tile.py --selftest` checks the closed form against: the measured `family_cells.key_tiles` and `family_cells.interaction_by_family.key_tiles.cells` of every recorded 8B layer segment, so the check runs with no artifacts directory and no path into another repository.",
+ "_source": "Copied from the zk-results run outputs each point names: `runs/<run>/<output>`, `result.chunks[].family_cells` for a decode run and `result.point.family_cells` for a digest run. Nothing is derived and nothing is rounded. The two decode runs prove 32 layer segments per token block and every one of them carries the same two numbers; `segments` says how many agreed, and `segment` names the first.",
+ "_shape": "`shape` is what every point shares; a point repeats only what differs from it. The fields are the prover's own `params`, and `rope` is `params.rope != null`, which is what turns the root-equality claims on.",
+ "shape": {
+  "nh": 32,
+  "hd": 128,
+  "s": 512,
+  "head_groups": [
+   16,
+   8,
+   8
+  ],
+  "variant": "intexp",
+  "grid_target": 64,
+  "chan_target": 128,
+  "rw": 16,
+  "diagonal_block": true,
+  "kv_boundary": true,
+  "rope": true,
+  "gkr_key_tiles": true
+ },
+ "points": [
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0000.json",
+   "segment": "B0L0",
+   "segments": 32,
+   "c": 0,
+   "key_tiles": 23134208,
+   "key_tiles_interaction": 4005888
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0000.json",
+   "segment": "B1L0",
+   "segments": 32,
+   "c": 512,
+   "key_tiles": 46202880,
+   "key_tiles_interaction": 7413760
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0064.json",
+   "segment": "B2L0",
+   "segments": 32,
+   "c": 1024,
+   "key_tiles": 69271552,
+   "key_tiles_interaction": 10821632
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0064.json",
+   "segment": "B3L0",
+   "segments": 32,
+   "c": 1536,
+   "key_tiles": 92340224,
+   "key_tiles_interaction": 14229504
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0128.json",
+   "segment": "B4L0",
+   "segments": 32,
+   "c": 2048,
+   "key_tiles": 115408896,
+   "key_tiles_interaction": 17637376
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0128.json",
+   "segment": "B5L0",
+   "segments": 32,
+   "c": 2560,
+   "key_tiles": 138477568,
+   "key_tiles_interaction": 21045248
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0192.json",
+   "segment": "B6L0",
+   "segments": 32,
+   "c": 3072,
+   "key_tiles": 161546240,
+   "key_tiles_interaction": 24453120
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0192.json",
+   "segment": "B7L0",
+   "segments": 32,
+   "c": 3584,
+   "key_tiles": 184614912,
+   "key_tiles_interaction": 27860992
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8L0",
+   "segments": 32,
+   "c": 4096,
+   "key_tiles": 207683584,
+   "key_tiles_interaction": 31268864
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0000.json",
+   "segment": "B0L0",
+   "segments": 32,
+   "c": 0,
+   "key_tiles": 23134208,
+   "key_tiles_interaction": 4005888
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0000.json",
+   "segment": "B1L0",
+   "segments": 32,
+   "c": 512,
+   "key_tiles": 46202880,
+   "key_tiles_interaction": 7413760
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0064.json",
+   "segment": "B2L0",
+   "segments": 32,
+   "c": 1024,
+   "key_tiles": 69271552,
+   "key_tiles_interaction": 10821632
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0096.json",
+   "segment": "B3L0",
+   "segments": 32,
+   "c": 1536,
+   "key_tiles": 92340224,
+   "key_tiles_interaction": 14229504
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0096.json",
+   "segment": "B4L0",
+   "segments": 32,
+   "c": 2048,
+   "key_tiles": 115408896,
+   "key_tiles_interaction": 17637376
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0160.json",
+   "segment": "B5L0",
+   "segments": 32,
+   "c": 2560,
+   "key_tiles": 138477568,
+   "key_tiles_interaction": 21045248
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0160.json",
+   "segment": "B6L0",
+   "segments": 32,
+   "c": 3072,
+   "key_tiles": 161546240,
+   "key_tiles_interaction": 24453120
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0224.json",
+   "segment": "B7L0",
+   "segments": 32,
+   "c": 3584,
+   "key_tiles": 184614912,
+   "key_tiles_interaction": 27860992
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0256.json",
+   "segment": "B8L0",
+   "segments": 32,
+   "c": 4096,
+   "key_tiles": 207683584,
+   "key_tiles_interaction": 31268864
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0256.json",
+   "segment": "B9L0",
+   "segments": 32,
+   "c": 4608,
+   "key_tiles": 230752256,
+   "key_tiles_interaction": 34676736
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0320.json",
+   "segment": "B10L0",
+   "segments": 32,
+   "c": 5120,
+   "key_tiles": 253820928,
+   "key_tiles_interaction": 38084608
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0320.json",
+   "segment": "B11L0",
+   "segments": 32,
+   "c": 5632,
+   "key_tiles": 276889600,
+   "key_tiles_interaction": 41492480
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0384.json",
+   "segment": "B12L0",
+   "segments": 32,
+   "c": 6144,
+   "key_tiles": 299958272,
+   "key_tiles_interaction": 44900352
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0416.json",
+   "segment": "B13L0",
+   "segments": 32,
+   "c": 6656,
+   "key_tiles": 323026944,
+   "key_tiles_interaction": 48308224
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0416.json",
+   "segment": "B14L0",
+   "segments": 32,
+   "c": 7168,
+   "key_tiles": 346095616,
+   "key_tiles_interaction": 51716096
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0480.json",
+   "segment": "B15L0",
+   "segments": 32,
+   "c": 7680,
+   "key_tiles": 369164288,
+   "key_tiles_interaction": 55123968
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0480.json",
+   "segment": "B16L0",
+   "segments": 32,
+   "c": 8192,
+   "key_tiles": 392232960,
+   "key_tiles_interaction": 58531840
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0544.json",
+   "segment": "B17L0",
+   "segments": 32,
+   "c": 8704,
+   "key_tiles": 415301632,
+   "key_tiles_interaction": 61939712
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0576.json",
+   "segment": "B18L0",
+   "segments": 32,
+   "c": 9216,
+   "key_tiles": 438370304,
+   "key_tiles_interaction": 65347584
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0576.json",
+   "segment": "B19L0",
+   "segments": 32,
+   "c": 9728,
+   "key_tiles": 461438976,
+   "key_tiles_interaction": 68755456
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0640.json",
+   "segment": "B20L0",
+   "segments": 32,
+   "c": 10240,
+   "key_tiles": 484507648,
+   "key_tiles_interaction": 72163328
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0640.json",
+   "segment": "B21L0",
+   "segments": 32,
+   "c": 10752,
+   "key_tiles": 507576320,
+   "key_tiles_interaction": 75571200
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0704.json",
+   "segment": "B22L0",
+   "segments": 32,
+   "c": 11264,
+   "key_tiles": 530644992,
+   "key_tiles_interaction": 78979072
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0736.json",
+   "segment": "B23L0",
+   "segments": 32,
+   "c": 11776,
+   "key_tiles": 553713664,
+   "key_tiles_interaction": 82386944
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0736.json",
+   "segment": "B24L0",
+   "segments": 32,
+   "c": 12288,
+   "key_tiles": 576782336,
+   "key_tiles_interaction": 85794816
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0800.json",
+   "segment": "B25L0",
+   "segments": 32,
+   "c": 12800,
+   "key_tiles": 599851008,
+   "key_tiles_interaction": 89202688
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0800.json",
+   "segment": "B26L0",
+   "segments": 32,
+   "c": 13312,
+   "key_tiles": 622919680,
+   "key_tiles_interaction": 92610560
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0864.json",
+   "segment": "B27L0",
+   "segments": 32,
+   "c": 13824,
+   "key_tiles": 645988352,
+   "key_tiles_interaction": 96018432
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0896.json",
+   "segment": "B28L0",
+   "segments": 32,
+   "c": 14336,
+   "key_tiles": 669057024,
+   "key_tiles_interaction": 99426304
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0896.json",
+   "segment": "B29L0",
+   "segments": 32,
+   "c": 14848,
+   "key_tiles": 692125696,
+   "key_tiles_interaction": 102834176
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0960.json",
+   "segment": "B30L0",
+   "segments": 32,
+   "c": 15360,
+   "key_tiles": 715194368,
+   "key_tiles_interaction": 106242048
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_0960.json",
+   "segment": "B31L0",
+   "segments": 32,
+   "c": 15872,
+   "key_tiles": 738263040,
+   "key_tiles_interaction": 109649920
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32L0",
+   "segments": 32,
+   "c": 16384,
+   "key_tiles": 761331712,
+   "key_tiles_interaction": 113057792
+  },
+  {
+   "run": "2026-09-08-reference-digest-plain-h100",
+   "output": "full-cuda.json",
+   "segments": 2,
+   "c": 16384,
+   "key_tiles": 761331712,
+   "key_tiles_interaction": 113057792
+  },
+  {
+   "run": "2026-09-08-reference-digest-plain-h100",
+   "output": "plain-simd.json",
+   "segments": 1,
+   "c": 16384,
+   "gkr_key_tiles": false,
+   "key_tiles": 761331712,
+   "key_tiles_interaction": 1082073088
+  },
+  {
+   "run": "2026-09-08-reference-digest-plain-h100",
+   "output": "short-cuda.json",
+   "segments": 2,
+   "c": 4096,
+   "s": 128,
+   "gkr_key_tiles": false,
+   "key_tiles": 86523904,
+   "key_tiles_interaction": 147146752
+  }
+ ]
+}

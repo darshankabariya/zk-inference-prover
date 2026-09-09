@@ -393,9 +393,14 @@ def _coeffs(nh, hd, base_only=False, s0=512, c0=4096):
     restated, so the drift guard compares the code that is actually used against
     the freeze.  Differenced at (s0, c0) and its doublings, well clear of
     `Grid::new`'s caps -- at S or C below them the layout saturates, `q` and `pk`
-    stop being the targets, and the form is no longer a plain trilinear."""
+    stop being the targets, and the form is no longer a plain trilinear.
+
+    On the FAMILY, which is what `cells_per_token` charges: the prefix tiled into
+    key blocks of S keys plus the diagonal block, at the prover's defaults.  One
+    untiled prefix key tile costs `nh*hd*(C - S)` base cells less and is not what any
+    recorded layer chunk built (issue #141)."""
     def f(s, c):
-        b, i, _ = cm.key_tile_cells(nh, hd, s, c)
+        b, i, _ = cm.key_tile_family(nh, hd, s, c)
         return b if base_only else b + i
     a = (f(2 * s0, 2 * c0) - f(2 * s0, c0) - f(s0, 2 * c0) + f(s0, c0)) / (s0 * c0)
     b = (f(s0, 2 * c0) - f(s0, c0)) / c0 - a * s0
@@ -416,21 +421,24 @@ def _key_tile_family_check(nh, hd):
         pr = d["params"]
         if pr["nh"] != nh or pr["hd"] != hd:
             continue
-        b, _, _ = cm.key_tile_cells(nh, hd, pr["s"], pr["c"],
-                                grid_target=pr["grid_target"], chan_target=pr["chan_target"],
-                                rw=pr["rw"])
-        if pr.get("diagonal_block"):
-            b2, _, _ = cm.key_tile_cells(nh, hd, pr["s"], pr["s"], rows_component=False,
-                                     grid_target=pr["grid_target"],
-                                     chan_target=pr["chan_target"], rw=pr["rw"])
-            b += b2
+        # the statement's own configuration: whether the prefix is tiled into key
+        # blocks, and whether the chunk binds its K/Q/V to the boundary roots
+        b, _, _ = cm.key_tile_family(nh, hd, pr["s"], pr["c"],
+                                 grid_target=pr["grid_target"], chan_target=pr["chan_target"],
+                                 rw=pr["rw"], diagonal_block=bool(pr.get("diagonal_block")),
+                                 kv_boundary=bool(pr.get("kv_boundary")),
+                                 bind=pr.get("rope") is not None)
         rows.append((f.name, pr["s"], pr["c"], d["family_cells"]["key_tiles"], b))
     for s in (512, 1024):
         f = ROOT / "b9" / "out" / f"prefill_s{s}.json"
         if not (f.exists() and f.stat().st_size):
             continue
         d = json.loads(f.read_text())["result"]["point"]
-        b, _, _ = cm.key_tile_cells(nh, hd, s, s)
+        pr = d.get("params") or {}
+        b, _, _ = cm.key_tile_family(nh, hd, s, s,
+                                 diagonal_block=bool(pr.get("diagonal_block")),
+                                 kv_boundary=bool(pr.get("kv_boundary")),
+                                 bind=pr.get("rope") is not None)
         rows.append((f.name, s, s, d["family_cells"]["key_tiles"], b))
     return rows
 

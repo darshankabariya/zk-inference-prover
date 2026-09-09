@@ -30,6 +30,7 @@ from harness import constants
 from harness import inputs
 from harness.constants import get, value
 from harness.costmodel import cost_model as cm
+from harness.costmodel import key_tile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -105,11 +106,20 @@ REF8B_SOURCE = "<--artifacts>/seq5/seq_c{4096,16384}_L16.json (result.point.cell
 # different standing:
 #
 #   key tiles   the attention key tile family.  A CLOSED FORM read off the layout
-#           (`prover/src/attn_trace.rs` x `layout.rs`), not a fit -- see
-#           `attention_grid.{base,fresh}_cell_coeffs`.  It reproduces the
-#           measured `family_cells.key_tiles` of all 32 seq5 layer chunks EXACTLY,
-#           at both contexts.  So the E4 claim on this half is exact, not
-#           bracketed.
+#           (`prover/src/attn_trace.rs` x `layout.rs` x `compose.rs`'s `Plan`),
+#           not a fit -- see `attention_grid.{base,fresh}_cell_coeffs`.  It
+#           reproduces the measured `family_cells.key_tiles` of every recorded
+#           layer chunk EXACTLY, at both contexts, base and interaction, with
+#           and without the five reductions
+#           (`harness.costmodel.key_tile --selftest`).  So the E4 claim on this
+#           half is exact, not bracketed.
+#
+#           The family is `C/S` prefix key tiles of S keys each plus the S x S
+#           diagonal block, with one per-token component across the lot, and it
+#           costs `nh*hd*(C - S)` base cells per chunk more than one untiled
+#           prefix key tile would (issue #141).  `selfcheck` prices the statement
+#           the measured chunk names; `predict` prices the prover's defaults,
+#           which is what `cells_per_token` charges for every other family.
 #
 #   rest    everything else in a layer chunk: the dequant, the Freivalds check, the
 #           requantize, the int8 range checks, the attention-output fold and
@@ -125,20 +135,26 @@ REF8B_SOURCE = "<--artifacts>/seq5/seq_c{4096,16384}_L16.json (result.point.cell
 # --------------------------------------------------------------------------
 
 
-def key_tiles_per_chunk(nh, hd, s, c, base_slope=2.0):
-    """`cm.key_tile_cells` + diagonal block, with the ONE coefficient caveat 1 disputes exposed.
+def key_tiles_per_chunk(nh, hd, s, c, base_slope=2.0, **kw):
+    """`cm.key_tile_family`, with the ONE coefficient caveat 1 disputes exposed.
+
+    The family is the prefix tiled into key blocks of `s` keys plus the diagonal
+    block, not one prefix key tile over `c` keys; `**kw` is the statement's own
+    configuration (`diagonal_block`, `kv_boundary`, `bind`, `gkr`), which
+    `selfcheck` reads off the measured chunk and `predict` leaves at the
+    prover's defaults.
 
     `base_slope` is the key tile family's committed BASE cells per (head, key, token)
     -- the `2 * nh * s * c` score-and-numerator term of `cm.key_tile_cells`, i.e. the
     64 in `attention_grid.key_tile_model_base_coeffs` divided by NH=32.  The refuted
     `key tiles = p * S^2` reading of B9's two prefill points puts it at
     72.083 / 32 = 2.2526 instead.  Everything else is untouched: this is a
-    sensitivity, not a second model.
+    sensitivity, not a second model.  The family commits that term over `c + s`
+    keys however the prefix is tiled, so the shift is unchanged.
     """
-    b, i, sat1 = cm.key_tile_cells(nh, hd, s, c)
-    cb, ci, sat2 = cm.key_tile_cells(nh, hd, s, s, rows_component=False)
+    b, i, sat = cm.key_tile_family(nh, hd, s, c, **kw)
     extra = (base_slope - 2.0) * nh * (s * c + s * s)
-    return b + cb + extra, i + ci, bool(sat1 or sat2)
+    return b + extra, i, sat
 
 
 def predict(cfg, ctx, seq=S, base_slope=2.0):
@@ -244,11 +260,16 @@ BRACKET = dict(
     also=(
         "SEPARATE and EXACT: the key tiles family. `family_cells.key tiles` (base) and "
         "`interaction_by_family.key tiles.cells` must equal the registered integers "
-        "TO THE CELL, as they do on all 32 seq5 layer chunks at both contexts. "
-        "Any nonzero deviation is a finding in its own right and must be "
-        "reported even if rho passes -- it means the layout identities in "
-        "`key_tile_cells` do not hold at a shape whose `nh` and `d` are not powers "
-        "of two, which is the one thing the closed form's own docstring flags."),
+        "TO THE CELL, as they do on every recorded layer chunk at both contexts "
+        "(`harness.costmodel.key_tile --selftest`). The registered interaction is "
+        "the statement WITHOUT the five reductions, which is the prover's default; "
+        "a run with `--gkr-key-tiles` reports a smaller one and is compared against "
+        "`key_tile_family(..., gkr=True)` at the same shape. The base is the same "
+        "integer either way. Any nonzero deviation is a finding in its own right "
+        "and must be reported even if rho passes -- it means the layout identities "
+        "in `key_tile_cells` do not hold at a shape whose `nh` and `d` are not "
+        "powers of two, which is the one thing the closed form's own docstring "
+        "flags."),
     invalidation=(
         "The comparison is void, not failed, if the run does not reproduce the "
         "registered configuration: spec `b10-final` (round even, all seven "
@@ -257,6 +278,22 @@ BRACKET = dict(
         "bounds on, and a REAL extracted witness (not `ZK_SYNTHETIC_DIMS`). "
         "A void run is re-run, never re-bracketed."),
 )
+
+
+def statement(pt):
+    """The key tile configuration the measured chunk was proved under, off its own
+    `params`: whether the prefix is tiled into key blocks, whether the chunk binds
+    its K/Q/V to the boundary roots, and whether the five reductions were on.
+
+    Read rather than assumed, because the closed form prices a different family
+    under each and the chunk is the only thing that says which it is.
+    """
+    return dict(grid_target=pt["params"]["grid_target"],
+                chan_target=pt["params"]["chan_target"], rw=pt["params"]["rw"],
+                diagonal_block=bool(pt["params"]["diagonal_block"]),
+                kv_boundary=bool(pt["params"].get("kv_boundary")),
+                bind=pt["params"].get("rope") is not None,
+                gkr=bool(pt["params"].get("gkr_key_tiles")))
 
 
 def selfcheck():
@@ -270,16 +307,17 @@ def selfcheck():
         pt = _seq5(ctx)
         nh, hd = pt["params"]["nh"], pt["params"]["hd"]
         assert (nh, hd) == (cm.LLAMA8B[2], cm.LLAMA8B[4]), (nh, hd)
-        bb, bi, sat = key_tiles_per_chunk(nh, hd, S, ctx)
+        st = statement(pt)
+        bb, bi, sat = key_tiles_per_chunk(nh, hd, S, ctx, **st)
         mb = pt["family_cells"]["key_tiles"]
         mi = pt["family_cells"]["interaction_by_family"]["key_tiles"]["cells"]
         assert int(bb) == mb, (ctx, bb, mb)
         assert int(round(bi)) == mi, (ctx, bi, mi)
         # and the local reimplementation must equal cost_model's own key_tile_fresh
-        bf, _ = cm.key_tile_fresh(nh, hd, S, ctx, diagonal_block=True)
+        bf, _ = cm.key_tile_fresh(nh, hd, S, ctx, **st)
         assert abs(bf - (bb + bi)) < 1e-6, (ctx, bf, bb + bi)
         out.append(dict(ctx=ctx, key_tiles_base=mb, key_tiles_interaction=mi, exact=True,
-                        saturated=sat))
+                        saturated=sat, statement=st))
     return out
 
 
@@ -336,6 +374,7 @@ def provenance():
     return dict(
         inputs_sha256={
             "harness/costmodel/cost_model.py": _sha(cm.__file__),
+            "harness/costmodel/key_tile.py": _sha(key_tile.__file__),
             "constants.json": _sha(constants.path()),
         },
         registered_utc_date="2026-09-01",
@@ -352,8 +391,8 @@ def provenance():
         predictor=dict(
             engine="experiments/b2/cost_model.py",
             entry_points=["cells_per_token(cfg, ctx, batch, seq, head=False)",
-                          "residual_stream_cells(cfg, 'tree')", "key_tile_cells", "key_tile_fresh",
-                          "lm_head_chunk"],
+                          "residual_stream_cells(cfg, 'tree')", "key_tile_family",
+                          "key_tile_cells", "key_tile_fresh", "lm_head_chunk"],
             not_the_engine="experiments/budget.py is an early one-shape proxy "
                            "(eval-plan.md section 3) and is not used here",
             attention_term="the KEY_TILE MODEL (alpha=None). The legacy single-slope "
