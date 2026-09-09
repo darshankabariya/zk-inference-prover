@@ -50,22 +50,22 @@ message(STATUS "Found cuh directories: ${CUH_DIRS}")
 add_library(
         stwo_cuda STATIC
         # Core CUDA utilities
-        # B7a m4c: the dequant witness generation kernel
+        # zk dequant: the dequant witness generation kernel
         zk_dequant_witness_gen.cu
-        # end B7a m4c
-        # B7a m4d: the Freivalds check, attnout and key tile witness generation kernels
+        # end zk dequant
+        # zk freivalds: the Freivalds check, attnout and key tile witness generation kernels
         zk_attention_freivalds_witness_gen.cu
         zk_residual_stream_witness_gen.cu
-        # end B7a m4d
-        # B7a m4f: the shared tables' witness-generation kernel
+        # end zk freivalds
+        # zk tables: the shared tables' witness-generation kernel
         zk_table_witness_gen.cu
-        # end B7a m4f
-        # B7a m4g: the Horner accumulators
+        # end zk tables
+        # zk accumulators: the Horner accumulators
         zk_acc.cu
-        # end B7a m4g
-        # B7a m4h: 4a's last 79 columns
+        # end zk accumulators
+        # zk preprocessed: 4a's last 79 columns
         zk_pre_witness_gen.cu
-        # end B7a m4h
+        # end zk preprocessed
         # B7a m4: generated witness-generation kernels
         gen_zk_dispatch.cu
         gen_zk_logup.cu

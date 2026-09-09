@@ -4295,7 +4295,7 @@ pub struct Gen {
     pub mult_logs: Vec<u32>,
     pub tab_pre: Vec<stwo::stwo_cuda::base_field_vec::BaseFieldVec>,
     pub tab_mult: Vec<stwo::stwo_cuda::base_field_vec::BaseFieldVec>,
-    pub m4e_tabdev: bool,
+    pub tables_on_device: bool,
     pub trace_secs: f64,
     /// what names this chunk's preprocessed tree (`chunks::key_of`); `None`
     /// is the single-proof path, which never caches
@@ -5288,11 +5288,11 @@ different rotation", inv.len(), 2 * hd * p.s);
     // fraction kernels, so 4a counts each of these columns exactly once -- the
     // same column `take_all` used to upload, moved earlier.
     let phase_t = std::time::Instant::now();
-    let m4e_tabdev = tab_mode >= 1;
+    let tables_on_device = tab_mode >= 1;
     // B7a milestone 4 (section 3 row 1): the three closed-form columns, built
     // where they are used. The other 31 are uploaded exactly as 22.4 uploaded
     // all 34, so 4a still counts every shared-table column exactly once.
-    let dev3 = m4e_tabdev.then(|| {
+    let dev3 = tables_on_device.then(|| {
         crate::devtab::table_cols_dev(&layer.key_tiles[0], p.log_table, &tables.exp,
                                       &dev_counters)
     });
@@ -5378,7 +5378,7 @@ different rotation", inv.len(), 2 * hd * p.s);
     }
     let (tab_pre, tab_mult): (Vec<stwo::stwo_cuda::base_field_vec::BaseFieldVec>,
                               Vec<stwo::stwo_cuda::base_field_vec::BaseFieldVec>) =
-        if m4e_tabdev {
+        if tables_on_device {
             let d = dev3.unwrap();
             let mut pre = vec![d.x, d.y];
             let m0 = match d.m {
@@ -5423,7 +5423,7 @@ different rotation", inv.len(), 2 * hd * p.s);
           residual_stream_components, residual_stream_tcols, residual_stream_mcols,
           residual_stream_b1, am_component, emb_component, rq_components,
           q_components, n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
-          m4e_tabdev, trace_secs, pre_key, layer_boundary_tamper: tamper.layer_boundary,
+          tables_on_device, trace_secs, pre_key, layer_boundary_tamper: tamper.layer_boundary,
           residual_stream_tamper_fired }
 }
 
@@ -5434,7 +5434,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
               residual_stream_components, residual_stream_tcols, residual_stream_mcols,
               residual_stream_b1, am_component, emb_component, rq_components,
               q_components, n_deq_base, pre_tables, base_mults, pre_logs, mult_logs, tab_pre, tab_mult,
-              m4e_tabdev, trace_secs, pre_key, layer_boundary_tamper,
+              tables_on_device, trace_secs, pre_key, layer_boundary_tamper,
               residual_stream_tamper_fired } = g;
     let p = &plan.p;
     let t0 = std::time::Instant::now();
@@ -5518,7 +5518,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             }
         }
     }
-    if m4e_tabdev {
+    if tables_on_device {
         pre_all.extend(tab_pre.iter().zip(&pre_logs).map(|(d, l)| AnyCol::Dev(d, *l)));
         base_all.extend(tab_mult.iter().zip(&mult_logs).map(|(d, l)| AnyCol::Dev(d, *l)));
     } else {
@@ -5841,8 +5841,8 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // values, so the shape a component lowers to here is the shape `genemit`
     // compiled from the same design point.
     let air_t = std::time::Instant::now();
-    let m4e_air = build_components(&plan, &rels, r, s, rv, r_diagonal_block, w_residual_stream, lam_residual_stream,
-                                   &crate::exprprobe::claims_for(&plan, 0x0b65_4b05));
+    let components = build_components(&plan, &rels, r, s, rv, r_diagonal_block, w_residual_stream, lam_residual_stream,
+                                      &crate::exprprobe::claims_for(&plan, 0x0b65_4b05));
     crate::util::add_phase("int/air", air_t.elapsed().as_secs_f64());
 
     // B11 stream V, lever 2: whether each family's looks can be linked at all,
@@ -5860,7 +5860,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // `ZK_GKR_AFFINITY=1` only. It lowers a dozen evaluators and proves nothing,
     // so it never runs under a wall number.
     // B11 stream X: the table components' names and heights in the order
-    // `m4e_air.tables` holds them -- norm, frac, mul, qnz, then one per range
+    // `components.tables` holds them -- norm, frac, mul, qnz, then one per range
     // width. The residual stream's tables are not here and cannot be: they have no
     // generated kernel and so no lowered evaluator to decide, which is a gap
     // the record names rather than one the checker hides.
@@ -5886,16 +5886,16 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                 "dequant", &format!("dequant/{}", m.name), &ir));
         }
         for (i, reg) in residual_stream_components.iter().enumerate() {
-            let ir = crate::devfrac::ir_of(&m4e_air.residual_stream[i].eval, reg.log_rows);
+            let ir = crate::devfrac::ir_of(&components.residual_stream[i].eval, reg.log_rows);
             out.push(crate::gkrlink::affinity_of(
                 "residual_stream", &format!("residual_stream/{}", reg.tag), &ir));
         }
         for (wi, reg) in freivalds_components.iter().enumerate() {
-            let ir = crate::devfrac::ir_of(&m4e_air.freivalds[wi].eval, reg.lay.g.log_rows);
+            let ir = crate::devfrac::ir_of(&components.freivalds[wi].eval, reg.lay.g.log_rows);
             out.push(crate::gkrlink::affinity_of(
                 "freivalds", &format!("freivalds/{}", reg.name), &ir));
         }
-        let ir = crate::devfrac::ir_of(&m4e_air.ao.eval, aor.lay.log_rows);
+        let ir = crate::devfrac::ir_of(&components.ao.eval, aor.lay.log_rows);
         out.push(crate::gkrlink::affinity_of("attnout", "attnout", &ir));
         // B11 stream X, lever 2 step 2: the shared tables' provide sides, which
         // are 47% of what stream V left in the interaction tree. Their fraction
@@ -5904,9 +5904,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // the question the checker answers is whether the denominator is affine
         // in committed base masks and preprocessed columns at this row and no
         // other. A look the fold cannot carry is a named stop and a result.
-        let ir = crate::devfrac::ir_of(&m4e_air.exp_t.eval, p.log_table);
+        let ir = crate::devfrac::ir_of(&components.exp_t.eval, p.log_table);
         out.push(crate::gkrlink::affinity_of("table", "table/exp", &ir));
-        for (tr, ev) in table_heights.iter().zip(&m4e_air.tables) {
+        for (tr, ev) in table_heights.iter().zip(&components.tables) {
             let ir = crate::devfrac::ir_of(&ev.eval, tr.1);
             out.push(crate::gkrlink::affinity_of("table", &tr.0, &ir));
         }
@@ -5963,9 +5963,9 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             .filter(|_| !a.diagonal_block)
             .map(|ri| crate::devfrac::KeyTileAir {
                 tag: b,
-                chan: &m4e_air.chans[b].eval,
-                key: &m4e_air.keys[b].eval,
-                row: &m4e_air.rows[ri].eval,
+                chan: &components.chans[b].eval,
+                key: &components.keys[b].eval,
+                row: &components.rows[ri].eval,
                 dev: key_tile_dev[b].as_ref(),
                 pre: key_tile_pre[b].as_ref(),
             });
@@ -6049,7 +6049,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         let g = gkr.as_mut().expect("--gkr-residual-stream needs --gkr-key-tiles");
         let phase_t = std::time::Instant::now();
         for (i, reg) in residual_stream_components.iter().enumerate() {
-            let mut ev = m4e_air.residual_stream[i].eval.clone();
+            let mut ev = components.residual_stream[i].eval.clone();
             ev.gkr = false;
             crate::gkr_key_tile::residual_stream_site(g, i, &ev, reg);
         }
@@ -6063,7 +6063,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         let g = gkr.as_mut().expect("--gkr-freivalds needs --gkr-key-tiles");
         let phase_t = std::time::Instant::now();
         for (wi, reg) in freivalds_components.iter().enumerate() {
-            let mut ev = m4e_air.freivalds[wi].eval.clone();
+            let mut ev = components.freivalds[wi].eval.clone();
             ev.gkr = false;
             crate::gkr_key_tile::freivalds_site(g, wi, &ev, reg);
         }
@@ -6072,7 +6072,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     if p.gkr_attnout {
         let g = gkr.as_mut().expect("--gkr-attnout needs --gkr-key-tiles");
         let phase_t = std::time::Instant::now();
-        let mut ev = m4e_air.ao.eval.clone();
+        let mut ev = components.ao.eval.clone();
         ev.gkr = false;
         crate::gkr_key_tile::ao_site(g, &ev, &aor);
         crate::util::add_phase("int/ao_gkr", phase_t.elapsed().as_secs_f64());
@@ -6286,7 +6286,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     }
     let phase_t = std::time::Instant::now();
     let aoi = ao_interaction(&layer.ao, &aor, r, s, rv, plan.head_weight_c(), &rels,
-                            &m4e_air.ao.eval,
+                            &components.ao.eval,
                             p.gkr_attnout);
     inter_all.extend(aoi.cols);
     inter_mark("attnout", &inter_all, &mut inter_seen, &mut inter_split);
@@ -6388,7 +6388,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     for (wi, reg) in freivalds_components.iter().enumerate() {
         let t_iw = std::time::Instant::now();
         let it = freivalds_interaction(layer, reg, rv, s, &rels, true,
-                                       &m4e_air.freivalds[wi].eval, p.gkr_freivalds);
+                                       &components.freivalds[wi].eval, p.gkr_freivalds);
         crate::util::add_phase("int/freivalds_build", t_iw.elapsed().as_secs_f64());
         inter_all.extend(it.cols);
         inter_mark(&format!("freivalds/{}", reg.name), &inter_all, &mut inter_seen,
@@ -6414,7 +6414,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         for (i, reg) in residual_stream_components.iter().enumerate() {
             let t_ig = std::time::Instant::now();
             let it = crate::residual_stream::residual_stream_interaction(
-                reg, gr, Some(&specs[i]), &m4e_air.residual_stream[i].eval,
+                reg, gr, Some(&specs[i]), &components.residual_stream[i].eval,
                 p.gkr_residual_stream);
             crate::util::add_phase("int/residual_stream_build", t_ig.elapsed().as_secs_f64());
             inter_all.extend(it.cols);
@@ -6450,7 +6450,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         // the hand-written host builder the device result is checked against.
         use crate::devtab::{htab, tab_cols as tc};
         let (c, sum) = crate::devfrac::frac_cols(
-            &m4e_air.exp_t.eval, "exp_table", p.log_table,
+            &components.exp_t.eval, "exp_table", p.log_table,
             tc(&pre_tables, &tab_pre, 0, 2), tc(&base_mults, &tab_mult, 0, 1),
             || table_col(p.log_table, &rels.exp,
                          &[htab(&pre_tables, 0), htab(&pre_tables, 1)],
@@ -6461,7 +6461,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                                   "key_cols": 2, "looks": 1}));
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
-            &m4e_air.tables[0].eval, "table norm", plan.log_norm,
+            &components.tables[0].eval, "table norm", plan.log_norm,
             tc(&pre_tables, &tab_pre, 2, 6), tc(&base_mults, &tab_mult, 1, 1),
             || {
                 let refs: Vec<&Eval> = (0..6).map(|i| htab(&pre_tables, 2 + i)).collect();
@@ -6473,7 +6473,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                                   "key_cols": 6, "looks": 1}));
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
-            &m4e_air.tables[1].eval, "table frac", plan.log_frac,
+            &components.tables[1].eval, "table frac", plan.log_frac,
             tc(&pre_tables, &tab_pre, 8, 3), tc(&base_mults, &tab_mult, 2, 1),
             || {
                 let refs: Vec<&Eval> = (0..3).map(|i| htab(&pre_tables, 8 + i)).collect();
@@ -6485,7 +6485,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                                   "key_cols": 3, "looks": 1}));
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
-            &m4e_air.tables[2].eval, "table mul", plan.log_mul,
+            &components.tables[2].eval, "table mul", plan.log_mul,
             tc(&pre_tables, &tab_pre, 11, 4), tc(&base_mults, &tab_mult, 3, 1),
             || {
                 let refs: Vec<&Eval> = (0..4).map(|i| htab(&pre_tables, 11 + i)).collect();
@@ -6497,7 +6497,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
                                   "key_cols": 4, "looks": 1}));
         claims.table_sums.push(qm(sum));
         let (c, sum) = crate::devfrac::frac_cols(
-            &m4e_air.tables[3].eval, "table qnz", p.ao_q_bits,
+            &components.tables[3].eval, "table qnz", p.ao_q_bits,
             tc(&pre_tables, &tab_pre, 15, 2), tc(&base_mults, &tab_mult, 4, 1),
             || {
                 let refs: Vec<&Eval> = (0..2).map(|i| htab(&pre_tables, 15 + i)).collect();
@@ -6510,7 +6510,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         claims.table_sums.push(qm(sum));
         for (t, w) in plan.widths.iter().enumerate() {
             let (c, sum) = crate::devfrac::frac_cols(
-                &m4e_air.tables[4 + t].eval, &format!("table range{w}"), *w,
+                &components.tables[4 + t].eval, &format!("table range{w}"), *w,
                 tc(&pre_tables, &tab_pre, 17 + t, 1),
                 tc(&base_mults, &tab_mult, 5 + t, 1),
                 || table_col(*w, &rels.ranges[t], &[htab(&pre_tables, 17 + t)],
@@ -6527,7 +6527,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             let nw = plan.widths.len();
             let lj = plan.log_epow();
             let (c, sum) = crate::devfrac::frac_cols(
-                &m4e_air.tables[4 + nw].eval, "table epow", lj,
+                &components.tables[4 + nw].eval, "table epow", lj,
                 tc(&pre_tables, &tab_pre, 17 + nw, 3),
                 tc(&base_mults, &tab_mult, 5 + nw, 1),
                 || {

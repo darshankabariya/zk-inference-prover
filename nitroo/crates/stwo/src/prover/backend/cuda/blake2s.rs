@@ -48,7 +48,7 @@ impl MerkleOps<Blake2sMerkleHasher> for CudaBackend {
 /// `reduce_hashes_to_m31` kernel, anything else (the default) the reduction
 /// fused into the commit kernel itself. All three produce the same layer, so
 /// the ablation is a run and not a rebuild.
-fn b7a_m3_merkle_mode() -> u8 {
+fn merkle_mode() -> u8 {
     static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| match std::env::var("ZK_DEVICE_MERKLE").as_deref() {
         Ok("0") => 0,
@@ -65,7 +65,7 @@ impl MerkleOps<Blake2sM31MerkleHasher> for CudaBackend {
     ) -> Blake2sHashVec {
         // B7a milestone 3, the fused path: one kernel commits the layer and
         // reduces it, because the hash words are already in registers there.
-        if b7a_m3_merkle_mode() == 1 {
+        if merkle_mode() == 1 {
             let size = 1usize << log_size;
             let result = Blake2sHashVec::new_uninitialized(size);
             unsafe {
@@ -100,7 +100,7 @@ impl MerkleOps<Blake2sM31MerkleHasher> for CudaBackend {
         // `=0` path below is the original host round trip -- 6.44 GB over the
         // proof at the B6.5 design point, down at 2.5 GB/s, a scalar loop, and
         // back up again.
-        if b7a_m3_merkle_mode() == 2 {
+        if merkle_mode() == 2 {
             unsafe {
                 bindings::reduce_hashes_to_m31(
                     result.device_ptr as *mut Blake2sHash,

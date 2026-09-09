@@ -7,7 +7,7 @@
 
 // ---------------------------------------------------------------- the permutation --
 
-// `common.rs`'s `m4_perm`, verbatim from `zk_dequant_witness_gen.cu` and `zk_attention_freivalds_witness_gen.cu`: the
+// `common.rs`'s `coset_perm`, verbatim from `zk_dequant_witness_gen.cu` and `zk_attention_freivalds_witness_gen.cu`: the
 // closed form of `bit_reverse_coset_to_circle_domain_order`. It is an
 // involution, so the thread that owns committed row `i` reads coset row `f(i)`
 // -- and the committed row holding coset row `d` is `f(d)`, which is what the

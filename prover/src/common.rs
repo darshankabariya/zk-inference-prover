@@ -73,7 +73,7 @@ pub fn pad_log(natural: u32, log_rows: u32) -> u32 {
 /// only a correct application of `f` because `f` is an involution -- so out of
 /// place it is exactly `dst[i] = src[f(i)]`, with every element independent.
 #[inline]
-fn m4_perm(i: usize, log_n: u32) -> usize {
+fn coset_perm(i: usize, log_n: u32) -> usize {
     let n = 1usize << log_n;
     let c = if i % 2 == 0 { i / 2 } else { (2 * n - i - 1) / 2 };
     c.reverse_bits() >> (usize::BITS - log_n)
@@ -82,7 +82,7 @@ fn m4_perm(i: usize, log_n: u32) -> usize {
 /// Assert the closed form against stwo's own function, once. Applying the swap
 /// loop to the identity vector yields `f` itself, so this is a direct
 /// comparison and not a spot check.
-fn m4_perm_selfcheck() {
+fn coset_perm_selfcheck() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         for log_n in 1..=14u32 {
@@ -90,8 +90,8 @@ fn m4_perm_selfcheck() {
             let mut v: Vec<u32> = (0..n as u32).collect();
             bit_reverse_coset_to_circle_domain_order(&mut v);
             for (i, got) in v.iter().enumerate() {
-                assert_eq!(*got as usize, m4_perm(i, log_n),
-                           "m4_perm disagrees with stwo at log_n={log_n}, i={i}");
+                assert_eq!(*got as usize, coset_perm(i, log_n),
+                           "coset_perm disagrees with stwo at log_n={log_n}, i={i}");
             }
         }
     });
@@ -105,7 +105,7 @@ pub fn eval_of(log_size: u32, mut vals: Vec<M31>) -> Eval {
     if crate::util::switch_on("ZK_PARALLEL_GATHER")
         && log_size >= LOG_N_LANES.max(crate::util::parallel_gather_min())
     {
-        m4_perm_selfcheck();
+        coset_perm_selfcheck();
         let t = std::time::Instant::now();
         let n_vec = 1usize << (log_size - LOG_N_LANES);
         let src = &vals[..];
@@ -114,7 +114,7 @@ pub fn eval_of(log_size: u32, mut vals: Vec<M31>) -> Eval {
             .map(|vr| {
                 let mut lanes = [M31::zero(); N_LANES];
                 for (l, x) in lanes.iter_mut().enumerate() {
-                    *x = src[m4_perm((vr << LOG_N_LANES) | l, log_size)];
+                    *x = src[coset_perm((vr << LOG_N_LANES) | l, log_size)];
                 }
                 PackedM31::from_array(lanes)
             })

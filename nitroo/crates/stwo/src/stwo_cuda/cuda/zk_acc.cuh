@@ -102,7 +102,7 @@ struct ZkAccGrid {
 // ISTART per coset row -- so they live in the header and `zk_pre_witness_gen.cu`
 // builds the columns from the same three lines the accumulators segment on.
 
-// `common.rs`'s `m4_perm`: the closed form of
+// `common.rs`'s `coset_perm`: the closed form of
 // `bit_reverse_coset_to_circle_domain_order`. An involution, so the thread that
 // owns committed row `i` reads coset row `f(i)` and the coset row `j` a scan
 // walks is held at committed index `f(j)`.

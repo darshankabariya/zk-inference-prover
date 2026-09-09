@@ -596,8 +596,8 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
     // (`dev_attention_freivalds_witness_gen.rs` mentions neither `with_rows` nor `diagonal_block`), so a key tile that
     // does not carry the component takes the host path whatever the switch says --
     // which for a diagonal block key tile is the answer `key_tile_witness_gen_mode` already gives.
-    let m4d = if with_rows { crate::dev_attention_freivalds_witness_gen::key_tile_witness_gen_mode(a) } else { 0 };
-    if m4d == 1 {
+    let witness_gen_mode = if with_rows { crate::dev_attention_freivalds_witness_gen::key_tile_witness_gen_mode(a) } else { 0 };
+    if witness_gen_mode == 1 {
         // B7a milestone 4 (section 3 row 1): with the tables' columns on the
         // device the exp counter has no host reader left, so it stays there --
         // unless a diagonal block key tile rides with this one, in which case it does have
@@ -610,7 +610,7 @@ pub fn commit_base_any(a: &Attn, l: &Layouts, cfg: &Cfg, widths: &[u32],
         let at = dev.at.clone();
         return (vec![], at, Some(dev));
     }
-    if m4d != 2 {
+    if witness_gen_mode != 2 {
         let (base, at) = commit_base(a, l, cfg, widths, mult_exp, mult_r, off_table,
                                      with_out, with_rows);
         return (base, at, None);
@@ -749,19 +749,19 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     // route exists exactly when the witness generation left them there -- and `ZK_DEVICE_ACCUMULATORS=2`
     // runs both, which is a check on the whole witness -> witness generation -> column ->
     // accumulator chain, because the host side reads the witness instead.
-    let m4g = air.and_then(|x| x.dev).filter(|_| crate::devacc::mode() >= 1);
-    let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
+    let acc_dev = air.and_then(|x| x.dev).filter(|_| crate::devacc::mode() >= 1);
+    let acc_host = acc_dev.is_none() || crate::devacc::mode() == 2;
     // B7a milestone 4 (section 3 row 1): the per-row layout flags, written once
     // at witness-generation time by `zk_flags_key_tile` and read here. Before this row each of
     // the three kernels below recomputed them; now the AIR's selector columns
     // and this segmentation are the same array.
-    let m4g_flags = air.and_then(|x| x.pre);
-    assert!(m4g.is_none() || m4g_flags.is_some(),
+    let pre_flags = air.and_then(|x| x.pre);
+    assert!(acc_dev.is_none() || pre_flags.is_some(),
             "the device accumulators need this key tile's flags: `devpre::key_tile_dev` did not run");
-    assert!(m4g.is_none() || !with_out,
+    assert!(acc_dev.is_none() || !with_out,
             "the device accumulators have no A.V output component: \
              the composed proof moves it into the attnout component");
-    let n_chan = if m4g_host { lc.g.rows } else { 0 };
+    let n_chan = if acc_host { lc.g.rows } else { 0 };
 
     // ---- channel component ----------------------------------------------------
     let (mut u, mut v, mut acc) = (vec![SecureField::zero(); n_chan],
@@ -812,11 +812,11 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             acc[j] += u[j] * v[j];
         }
     }
-    let claimed_chan = match m4g {
+    let claimed_chan = match acc_dev {
         Some(d) => {
             let got = crate::devacc::chan(&d.base, &d.at, lc, a, pow,
-                                           m4g_flags.unwrap().chan());
-            let h = m4g_host.then(|| {
+                                           pre_flags.unwrap().chan());
+            let h = acc_host.then(|| {
                 let mut e = secure_cols(lc.g.log_rows, &u);
                 e.extend(secure_cols(lc.g.log_rows, &v));
                 e.extend(secure_cols(lc.g.log_rows, &acc));
@@ -928,7 +928,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         Ok("") | Err(_) => false,
         Ok(other) => panic!("unknown ZK_MUT_GRID {other:?}"),
     };
-    let n = if m4g_host { lk.g.rows } else { 0 };
+    let n = if acc_host { lk.g.rows } else { 0 };
     let (mut zs, mut hs) = (vec![SecureField::zero(); n], vec![SecureField::zero(); n]);
     let (mut zn, mut wv) = (vec![SecureField::zero(); n], vec![SecureField::zero(); n]);
     let (mut av, mut sn) = (vec![SecureField::zero(); n], vec![SecureField::zero(); n]);
@@ -1027,12 +1027,12 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
             hs[j] += zs[j];
         }
     }
-    let m4g_aux = if a.variant == Variant::IntExp { 0 } else { lk.q };
-    let (claimed_hs, claimed_av, claimed_sn) = match m4g {
+    let n_aux = if a.variant == Variant::IntExp { 0 } else { lk.q };
+    let (claimed_hs, claimed_av, claimed_sn) = match acc_dev {
         Some(d) => {
-            let got = crate::devacc::grid(&d.base, &d.at, lk, a, m4g_aux, pow,
-                                           m4g_flags.unwrap().key());
-            let h = m4g_host.then(|| {
+            let got = crate::devacc::grid(&d.base, &d.at, lk, a, n_aux, pow,
+                                           pre_flags.unwrap().key());
+            let h = acc_host.then(|| {
                 let mut e = vec![];
                 for c in [&zs, &hs, &zn, &wv, &av, &sn] {
                     e.extend(secure_cols(lk.g.log_rows, c));
@@ -1177,7 +1177,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
     // key tile's, and it carries the row maximum both halves shift by and the total
     // denominator both halves sum to.
     let rrows = if with_rows { 1usize << l.log_row } else { 0 };
-    let n_tok = if m4g_host { rrows } else { 0 };
+    let n_tok = if acc_host { rrows } else { 0 };
     let (mut am, mut az) = (vec![SecureField::zero(); n_tok], vec![SecureField::zero(); n_tok]);
     let with_max = a.variant != Variant::Bf16x;
     let zz = a.zz_row();
@@ -1202,11 +1202,11 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         // on either side of the device link.
         (SecureField::zero(), SecureField::zero())
     } else {
-        match m4g {
+        match acc_dev {
             Some(d) => {
                 let got = crate::devacc::tok(&d.base, &d.at, l.log_row, l.rw, a, pow,
-                                          m4g_flags.unwrap().row());
-                let h = m4g_host.then(|| {
+                                          pre_flags.unwrap().row());
+                let h = acc_host.then(|| {
                     let mut e = secure_cols(l.log_row, &am);
                     e.extend(secure_cols(l.log_row, &az));
                     (e, vec![am[rrows - 1], az[rrows - 1]])

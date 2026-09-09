@@ -3401,13 +3401,13 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
     // Stream Z: the fold has no device witness generation; its component takes the host path
     // whatever the switch says (the diagonal block key tiles' pattern), and
     // `devpre::note_host_witness_gen` is told in `generate`.
-    let m4c = if spec.variant == DeqVariant::Fold {
+    let witness_gen_mode = if spec.variant == DeqVariant::Fold {
         0
     } else {
         crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_DEQUANT")
     };
-    let m4c_want = m4c == 2;
-    if m4c == 1 {
+    let cross_check = witness_gen_mode == 2;
+    if witness_gen_mode == 1 {
         // B11 stream M: `output_claim` is the component's, not `with_want`'s. The two
         // parameters sit next to each other and the o-side one was missing
         // entirely, so the head's device witness generation built 506 preprocessed columns
@@ -3417,12 +3417,12 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
         return MatComponent { lay, spec, map, pre: vec![], base: vec![], ref_bad, n,
                            dev: Some(dev) };
     }
-    let m4c_snap = |t: &Tables| -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, usize) {
+    let snap_tables = |t: &Tables| -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, usize) {
         let r8 = t.ridx(8);
         (t.m_norm.clone(), t.m_frac.clone(), t.m_mul.clone(), t.m_r[r8].clone(),
          t.off_table)
     };
-    let m4c_before = m4c_want.then(|| m4c_snap(tables));
+    let snap_before = cross_check.then(|| snap_tables(tables));
 
     let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); rows]; map.n_cols];
     // parallel over row blocks: each block fills its slice of every column and
@@ -3458,7 +3458,7 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
             let mut bq = std::collections::HashMap::new();
             let mut brw = std::collections::HashMap::new();
             let mut ref_bad = 0usize;
-            let mut want = vec![0u16; if m4c_want { len * lay.per_row } else { 0 }];
+            let mut want = vec![0u16; if cross_check { len * lay.per_row } else { 0 }];
             for jj in 0..len {
                 let j = start + jj;
                 witness_gen_mat_row(m, &spec, &lay, &map, tref, j, jj, &mut local,
@@ -3610,14 +3610,14 @@ pub fn mat_component(m: &Mat, spec: &Spec, tables: &mut Tables, output_claim: bo
     }
 
     let base: Vec<Eval> = cols.into_iter().map(|c| eval_of(lay.log_rows, c)).collect();
-    if m4c_want {
+    if cross_check {
         // `ZK_DEVICE_WITNESS_GEN_DEQUANT=2`: the check with teeth, and it runs before any column
         // has changed hands. Every committed and preprocessed cell, the four
         // multiplicity tables, `off_table`, `ref_bad` and -- because it is the
         // only non-integer arithmetic in the witness generation -- the f64 cross-check's own
         // answer per (row, slot).
-        let after = m4c_snap(tables);
-        let before = m4c_before.unwrap();
+        let after = snap_tables(tables);
+        let before = snap_before.unwrap();
         let mut want_host = vec![0u16; rows * lay.per_row];
         for (bi, start) in starts.iter().enumerate() {
             let w = &out[bi].1.want;
@@ -4014,8 +4014,8 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
     let (rv_pow, rv_step) = crate::attn_air::powers(rv, lay.per_row);
     // B7a milestone 4 (section 3 row 1): `z` and `h` where the component's own
     // accumulator columns are. `ZK_DEVICE_ACCUMULATORS=2` runs both and asserts every cell.
-    let m4g = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
-    let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
+    let acc_dev = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
+    let acc_host = acc_dev.is_none() || crate::devacc::mode() == 2;
     // B11 stream M: the component's real height, kept before `rows` is shadowed to
     // zero. `devacc` builds `z` and `h`; it does *not* build stream E's output
     // side, which is a third accumulator over the *witness* rather than over
@@ -4024,7 +4024,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
     // vector -- reachable only on an o-side matmul with `ZK_DEVICE_ACCUMULATORS` on, which
     // is `lm_head` and only `lm_head`, and `ACC` had never been on.
     let n_rows = rows;
-    let rows = if m4g_host { rows } else { 0 };
+    let rows = if acc_host { rows } else { 0 };
     // the Horner accumulators, inner sums in parallel, carries serial
     let phase_t = std::time::Instant::now();
     let inner: Vec<SecureField> = (0..rows)
@@ -4060,7 +4060,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
                 *zk = run;
             }
         });
-        let n_last = rows / lay.chunks;  // B7a m4g: `rows` is 0 on the device route
+        let n_last = rows / lay.chunks;  // `rows` is 0 on the device route
         let mut hh = vec![SecureField::zero(); n_last];
         let mut run = SecureField::zero();
         for (m, hm) in hh.iter_mut().enumerate() {
@@ -4091,10 +4091,10 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
     crate::util::add_phase("int/deq_carry", phase_t.elapsed().as_secs_f64());
     let phase_t = std::time::Instant::now();
     let mut sink = crate::device::ColSink::new();
-    let claimed_h = match m4g {
+    let claimed_h = match acc_dev {
         Some(d) => {
             let got = crate::devacc::deq(d, &lay, &r.map, r.map.f.acc, rv, s_ch);
-            let hh = m4g_host.then(|| {
+            let hh = acc_host.then(|| {
                 let mut e = crate::attn_trace::secure_cols_pub(lay.log_rows, &z);
                 e.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
                 (e, vec![h[rows - 1]])
@@ -4346,14 +4346,14 @@ fn mat_logup(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
     // Stream Z: the fold's witness generation is on the host and so is its LogUp -- the
     // hand-written builder below carries its looks, and no generated fraction
     // kernel is asked for.
-    let m4b = if r.spec.variant == DeqVariant::Fold {
+    let logup_mode = if r.spec.variant == DeqVariant::Fold {
         0
     } else {
         crate::util::path_mode("ZK_GENERATED_LOGUP")
     };
-    let from_ir = (m4b > 0).then(|| mat_logup_ir(m, r, rv, s_ch, rels, m4b >= 3));
+    let from_ir = (logup_mode > 0).then(|| mat_logup_ir(m, r, rv, s_ch, rels, logup_mode >= 3));
     // 2 checks the interpreter against the hand-written builder, 4 the kernel.
-    if m4b == 1 || m4b == 3 {
+    if logup_mode == 1 || logup_mode == 3 {
         return from_ir.unwrap();
     }
     use stwo::prover::backend::simd::m31::PackedM31;
@@ -4561,15 +4561,15 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
     // device witness generation here would write the wrong component rather than a slow one.
     // `compose::note_host_witness_gen` knows, which is what keeps the shared
     // multiplicity columns on the host with it.
-    let m4d = if corrupt_q.is_some() || corrupt_den.is_some() || corrupt_jo.is_some()
-                 || corrupt_num.is_some() || corrupt_acc.is_some()
-                 || corrupt_jo_tok.is_some() || corrupt_mag.is_some()
-                 || acc_mag || denp2 {
+    let witness_gen_mode = if corrupt_q.is_some() || corrupt_den.is_some() || corrupt_jo.is_some()
+                             || corrupt_num.is_some() || corrupt_acc.is_some()
+                             || corrupt_jo_tok.is_some() || corrupt_mag.is_some()
+                             || acc_mag || denp2 {
         0
     } else {
         crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS")
     };
-    assert!(m4d == 0 || corrupt.is_none(),
+    assert!(witness_gen_mode == 0 || corrupt.is_none(),
             "attnout: the device witness generation has no `corrupt` path");
     // Stream JJ (witness-slack section 7 item 1, and the row-`den` hole beside
     // it): the row whose denominator is bent.  `den` was read once per row and
@@ -4649,7 +4649,7 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
         assert!(ao.den[h * ao.s + t] > 1, "--corrupt-ao-den: this token's Z is 1");
         j
     });
-    if m4d == 1 {
+    if witness_gen_mode == 1 {
         let dev = crate::dev_attention_freivalds_witness_gen::ao_component_dev(ao, &lay, q_bits, rem_bits, acc_bits,
                                                  jv_min, jo_max, tables, false);
         let (ref_bad, q_out) = (dev.ref_bad, dev.q_out.clone());
@@ -4666,13 +4666,13 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
     // tuple is counted twice and the honest proof is then rejected with
     // `sums_cancel: false` -- which is what it did on the H200's reference
     // chunk, and what no desk shape shows, because the desk never runs mode 2.
-    let m4d_snap = |t: &Tables| -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, usize) {
+    let snap_tables = |t: &Tables| -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, usize) {
         (t.m_qnz.clone(), t.m_r[t.ridx(rem_bits)].clone(),
          t.m_r[t.ridx(acc_lo_bits)].clone(), t.m_r[t.ridx(acc_hi_bits)].clone(),
          t.m_epow.clone(), t.off_table)
     };
-    let m4d_before = (m4d == 2).then(|| m4d_snap(tables));
-    let mut want_host = vec![0u32; if m4d == 2 { rows * pr } else { 0 }];
+    let snap_before = (witness_gen_mode == 2).then(|| snap_tables(tables));
+    let mut want_host = vec![0u32; if witness_gen_mode == 2 { rows * pr } else { 0 }];
     let n_cols = 2 + ncs * pr;
     let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); rows]; n_cols];
     let mut q_out = vec![0i64; ao.nh * ao.s * ao.hd];
@@ -4870,9 +4870,9 @@ pub fn ao_component(ao: &AttnOut, per_row_target: usize, q_bits: u32, rem_bits: 
     pre.push(sel(&|j| j + 1 == rows));                           // end
     let _ = active;
     let base: Vec<Eval> = cols.into_iter().map(|c| eval_of(lay.log_rows, c)).collect();
-    if m4d == 2 {
-        let after = m4d_snap(tables);
-        let before = m4d_before.unwrap();
+    if witness_gen_mode == 2 {
+        let after = snap_tables(tables);
+        let before = snap_before.unwrap();
         let dev = crate::dev_attention_freivalds_witness_gen::ao_component_dev(ao, &lay, q_bits, rem_bits, acc_bits,
                                                  jv_min, jo_max, tables, true);
         crate::dev_attention_freivalds_witness_gen::check_cols("attnout base", &base, &dev.base);
@@ -4959,13 +4959,13 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoComponent, rr: SecureField, s_ch: Secu
 
     // B7a milestone 4 (section 3 row 1): the attnout's z, h and dz, on the same
     // three-value mode every witness generation in this series uses.
-    let m4g = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
-    let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
+    let acc_dev = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
+    let acc_host = acc_dev.is_none() || crate::devacc::mode() == 2;
     // stream JJ's fourth accumulator is the host's whatever the device witness generation
     // did with the other three (stream M's lesson in `mat_interaction`: keep
     // the real height before `rows` is shadowed to zero)
     let n_rows = rows;
-    let rows = if m4g_host { rows } else { 0 };
+    let rows = if acc_host { rows } else { 0 };
     let inner: Vec<SecureField> = (0..rows)
         .into_par_iter()
         .map(|j| {
@@ -5008,10 +5008,10 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoComponent, rr: SecureField, s_ch: Secu
         }
     }
     let mut cols = crate::device::ColSink::new();
-    let (claimed_out, claimed_den) = match m4g {
+    let (claimed_out, claimed_den) = match acc_dev {
         Some(d) => {
             let got = crate::devacc::ao(d, &lay, ao.nh, ao.s, rv, s_ch, mu_out, mu_den);
-            let hh = m4g_host.then(|| {
+            let hh = acc_host.then(|| {
                 let mut e = crate::attn_trace::secure_cols_pub(lay.log_rows, &z);
                 e.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
                 e.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &dz));
@@ -5203,10 +5203,10 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
     // table in its kernel, so a wide group takes the host witness generation whatever the
     // switch says -- the diagonal block key tiles' pattern, and `devpre::note_host_witness_gen`
     // is told in `generate`.
-    let m4d = if act_bits == 8 { crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS") } else { 0 };
-    assert!(m4d == 0 || corrupt_qx.is_none(),
+    let witness_gen_mode = if act_bits == 8 { crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS") } else { 0 };
+    assert!(witness_gen_mode == 0 || corrupt_qx.is_none(),
             "{name}: the device Freivalds witness generation has no `corrupt_qx` path");
-    if m4d == 1 {
+    if witness_gen_mode == 1 {
         let dev = crate::dev_attention_freivalds_witness_gen::freivalds_component_dev(layer, mat_idx, &lay, tables);
         // B7a milestone 4 (section 3 row 1): no mirror. `freivalds_interaction` reads
         // the device columns now, and nothing else reads a device component's host
@@ -5216,10 +5216,10 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
                             n_weights: mat_idx.iter().map(|i| layer.mats[*i].qw.len()).sum(),
                             dev: Some(dev) };
     }
-    let m4d_snap = |t: &Tables| -> (Vec<u32>, usize) {
+    let snap_tables = |t: &Tables| -> (Vec<u32>, usize) {
         (t.m_r[t.ridx(8)].clone(), t.off_table)
     };
-    let m4d_before = (m4d == 2).then(|| m4d_snap(tables));
+    let snap_before = (witness_gen_mode == 2).then(|| snap_tables(tables));
 
     let mut base = vec![];
     for p in 0..lay.pq {
@@ -5275,10 +5275,10 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
     pre.push(sel(&|j| j > 0));
     pre.push(sel(&|j| j + 1 == rows));
 
-    if m4d == 2 {
+    if witness_gen_mode == 2 {
         // the check with teeth, before any column has changed hands
-        let after = m4d_snap(tables);
-        let before = m4d_before.unwrap();
+        let after = snap_tables(tables);
+        let before = snap_before.unwrap();
         let dev = crate::dev_attention_freivalds_witness_gen::freivalds_component_dev(layer, mat_idx, &lay, tables);
         crate::dev_attention_freivalds_witness_gen::check_cols(&format!("freivalds {name} base"), &base, &dev.base);
         crate::dev_attention_freivalds_witness_gen::check_cols(&format!("freivalds {name} pre"), &pre, &dev.pre);
@@ -5327,9 +5327,9 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
 
     // B7a milestone 4 (section 3 row 1): the Freivalds checks' v, us and accs, on the same
     // three-value mode every witness generation in this series uses.
-    let m4g = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
-    let m4g_host = m4g.is_none() || crate::devacc::mode() == 2;
-    let rows = if m4g_host { rows } else { 0 };
+    let acc_dev = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
+    let acc_host = acc_dev.is_none() || crate::devacc::mode() == 2;
+    let rows = if acc_host { rows } else { 0 };
     // v's inner sums in parallel (the activations), u's per matmul
     let inner: Vec<(SecureField, Vec<SecureField>)> = (0..rows)
         .into_par_iter()
@@ -5381,10 +5381,10 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
         }
     }
     let mut cols = crate::device::ColSink::new();
-    let claimed: Vec<SecureField> = match m4g {
+    let claimed: Vec<SecureField> = match acc_dev {
         Some(d) => {
             let got = crate::devacc::freivalds(d, &lay, r.mats.len(), rv, s_ch);
-            let hh = m4g_host.then(|| {
+            let hh = acc_host.then(|| {
                 let mut e = crate::attn_trace::secure_cols_pub(lay.g.log_rows, &v);
                 for m in 0..r.mats.len() {
                     e.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &us[m]));

@@ -29,7 +29,7 @@ use crate::prover::vcs::prover::MerkleProver;
 
 /// B7a milestone 3: `ZK_FRI_GATHER=0` restores the per-position device reads
 /// this replaced, so the ablation is a run and not a rebuild.
-fn b7a_m3_fri_gather() -> bool {
+fn fri_gather() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("ZK_FRI_GATHER").map(|v| v != "0").unwrap_or(true))
 }
@@ -417,7 +417,7 @@ fn compute_decommitment_positions_and_witness_evals(
     }
 
     // ZK_FRI_GATHER=0 restores the per-position reads, for the ablation.
-    let evals: Vec<QM31> = if b7a_m3_fri_gather() {
+    let evals: Vec<QM31> = if fri_gather() {
         column.at_batch(&decommitment_positions)
     } else {
         decommitment_positions.iter().map(|&p| column.at(p)).collect()

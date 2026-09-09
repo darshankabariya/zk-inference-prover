@@ -8,7 +8,7 @@
 
 // ---------------------------------------------------------------- the permutation --
 
-// `common.rs`'s `m4_perm`, the same involution `zk_dequant_witness_gen.cu` uses: the thread
+// `common.rs`'s `coset_perm`, the same involution `zk_dequant_witness_gen.cu` uses: the thread
 // that owns committed output `i` computes the value of coset row `f(i)`.
 __device__ __forceinline__ unsigned g_perm(unsigned i, unsigned log_n) {
     const unsigned n = 1u << log_n;

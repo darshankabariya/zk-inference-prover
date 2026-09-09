@@ -12,11 +12,11 @@
 
 // ---------------------------------------------------------------- the permutation --
 
-// `common.rs`'s `m4_perm`: the closed form of
+// `common.rs`'s `coset_perm`: the closed form of
 // `bit_reverse_coset_to_circle_domain_order`, which is an involution, so the
 // thread that owns output `i` reads coset row `f(i)` and no swap is needed.
-// Asserted against stwo's own function on the host by `m4_perm_selfcheck`.
-__device__ __forceinline__ unsigned m4_perm(unsigned i, unsigned log_n) {
+// Asserted against stwo's own function on the host by `coset_perm_selfcheck`.
+__device__ __forceinline__ unsigned coset_perm(unsigned i, unsigned log_n) {
     const unsigned n = 1u << log_n;
     const unsigned c = (i & 1u) ? ((2u * n - i - 1u) >> 1) : (i >> 1);
     return __brev(c) >> (32u - log_n);
@@ -186,7 +186,7 @@ __global__ void zk_witness_gen_kernel(const int *__restrict__ acc,
     // the output index owns the row: `j` is where the coset order has it.
     // `noperm` is the control that says so -- without it the column is in
     // coset order and every cell but the fixed points of the involution moves.
-    const unsigned j = (cfg.mutate == ZK_MUT_NOPERM) ? i : m4_perm(i, cfg.log_rows);
+    const unsigned j = (cfg.mutate == ZK_MUT_NOPERM) ? i : coset_perm(i, cfg.log_rows);
     const unsigned t = cfg.tokens - 1u - j / cfg.chunks;
     const unsigned b = cfg.chunks - 1u - j % cfg.chunks;
 

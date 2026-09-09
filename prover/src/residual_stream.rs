@@ -1455,12 +1455,12 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
     // path rather than running a kernel that has never heard of them. That is
     // announced: a probe that silently proved the untampered witness would read
     // as a gadget that accepts.
-    let m4g = crate::dev_residual_stream_witness_gen::mode();
-    let m4g = if m4g != 0 && tamper.is_some() {
+    let witness_gen_mode = crate::dev_residual_stream_witness_gen::mode();
+    let witness_gen_mode = if witness_gen_mode != 0 && tamper.is_some() {
         eprintln!("residual_stream_witness_gen-dev: {tag}: a residual-stream tamper is set, \
                   so this component generates its witness on the host");
         0
-    } else if m4g != 0 && prog.n_pre > 0 {
+    } else if witness_gen_mode != 0 && prog.n_pre > 0 {
         // stream II: `FSlot` has no encoding for a preprocessed operand -- a
         // `Src::Pre` lowers to `(NONE, NONE)`, which the kernel reads as the
         // constant zero -- so a component with one takes the host witness generation whatever the
@@ -1471,9 +1471,9 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
                   so it generates its witness on the host");
         0
     } else {
-        m4g
+        witness_gen_mode
     };
-    if m4g == 1 {
+    if witness_gen_mode == 1 {
         let dev = crate::dev_residual_stream_witness_gen::residual_stream_component_dev(w, prog, round, tables);
         let (ref_ok, ref_n) = ref_count(w, prog, &dev.outs);
         let bad_exp = dev.bad_exp;
@@ -1489,8 +1489,8 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
             dev: Some(dev),
         };
     }
-    let m4g_snap = (m4g == 2).then(|| crate::dev_residual_stream_witness_gen::ResidualStreamSnap::of(tables));
-    let m4g_off = tables.off_table;
+    let snap_before = (witness_gen_mode == 2).then(|| crate::dev_residual_stream_witness_gen::ResidualStreamSnap::of(tables));
+    let off_before = tables.off_table;
     let n_cols = prog.n_cols(round);
     let sticky = round.needs_sticky();
     let n_slots = prog.slots.len().max(1);
@@ -1871,14 +1871,14 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
     // B11 stream M, mode 2: both witness generations built, everything asserted equal before
     // any column is used. The device's own bumps are the check's and not the
     // proof's, so the host's tables go back where the host witness generation left them.
-    if m4g == 2 {
+    if witness_gen_mode == 2 {
         let after = crate::dev_residual_stream_witness_gen::ResidualStreamSnap::of(tables);
         let after_off = tables.off_table;
         let dev = crate::dev_residual_stream_witness_gen::residual_stream_component_dev(w, prog, round, tables);
         crate::dev_residual_stream_witness_gen::check_residual_stream_dev(tag, &base, &pre, &dev,
-                                                                   after_off - m4g_off, bad_exp,
+                                                                   after_off - off_before, bad_exp,
                                                                    &in_nat, &out_nat, &outs,
-                                                                   &m4g_snap.unwrap(), &after);
+                                                                   &snap_before.unwrap(), &after);
         crate::dev_residual_stream_witness_gen::restore(tables, &after, after_off);
     }
     ResidualStreamComponent {
@@ -2016,8 +2016,8 @@ pub fn residual_stream_interaction(r: &ResidualStreamComponent, rels: &ResidualS
         // witness generation's own natural arrays, so it exists exactly when this component
         // built on the card; mode 2 builds both and asserts every cell and
         // every claim.
-        let m4t = r.dev.as_ref().filter(|_| crate::devacc::binding_mode() >= 1);
-        let host = m4t.is_none() || crate::devacc::binding_mode() == 2;
+        let bind_dev = r.dev.as_ref().filter(|_| crate::devacc::binding_mode() >= 1);
+        let host = bind_dev.is_none() || crate::devacc::binding_mode() == 2;
         let mut host_cols: Vec<crate::common::Eval> = vec![];
         let mut host_claims: Vec<SecureField> = vec![];
         if host {
@@ -2038,7 +2038,7 @@ pub fn residual_stream_interaction(r: &ResidualStreamComponent, rels: &ResidualS
                 host_cols.extend(crate::attn_trace::secure_cols_pub(r.log_rows, &h));
             }
         }
-        match m4t {
+        match bind_dev {
             Some(d) => {
                 let (specs, weights) = binding_specs(r, t);
                 let got = crate::devacc::residual_stream_bind(

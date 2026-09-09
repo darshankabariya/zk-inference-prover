@@ -13,7 +13,7 @@
 
 // ---------------------------------------------------------------- the permutation --
 
-// `common.rs`'s `m4_perm`, verbatim from `zk_dequant_witness_gen.cu`: the closed form of
+// `common.rs`'s `coset_perm`, verbatim from `zk_dequant_witness_gen.cu`: the closed form of
 // `bit_reverse_coset_to_circle_domain_order`, an involution, so the thread that
 // owns output `i` reads coset row `f(i)`.
 __device__ __forceinline__ unsigned zk_witness_perm(unsigned i, unsigned log_n) {

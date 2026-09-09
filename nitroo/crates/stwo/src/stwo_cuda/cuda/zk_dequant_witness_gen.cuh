@@ -8,7 +8,7 @@
 // Three things make it the whole of the witness generation rather than a piece of it:
 //
 //  * **the permutation is free.** The thread owns the *output* index `i` and
-//    computes the coset row `j = m4_perm(i, log_rows)`, so the column is born
+//    computes the coset row `j = coset_perm(i, log_rows)`, so the column is born
 //    in committed order and `eval_of`'s shuffle and repack (1.19 s on the
 //    host, 18.2) never happen.
 //  * **the table lookups are closed forms.** `Tables::norm_at` and `frac_at`

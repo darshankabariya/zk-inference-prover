@@ -7,7 +7,7 @@
 //! | what the host does per component | what happens here |
 //! |---|---|
 //! | `witness_gen_mat_row` over 2^17 rows x `per_row` slots | one kernel, one thread per committed row |
-//! | `eval_of` -- the coset shuffle and the SIMD repack, 37% of trace generation | nothing: the thread owns the output index and reads `m4_perm(i)` |
+//! | `eval_of` -- the coset shuffle and the SIMD repack, 37% of trace generation | nothing: the thread owns the output index and reads `coset_perm(i)` |
 //! | per-block `HashMap` multiplicities, merged serially | a warp-aggregated scatter-add, one D2H of the counters |
 //! | 1.26 GB of columns uploaded at `Session::commit` | nothing: the columns are already there |
 //!
