@@ -68,7 +68,7 @@ fn args_of(flags: &[&str]) -> Vec<String> {
 
 /// Run the suite and return its probe records. A panic is a control the suite
 /// asserted on or a shape it could not run: either way not a verdict, and the
-/// run writes no JSON at all.
+/// record the run writes then says it was cut short rather than that it passed.
 fn probes(name: &str, args: &[String]) -> Vec<serde_json::Value> {
     let out = Command::new(env!("CARGO_BIN_EXE_zk-prover"))
         .args(args)

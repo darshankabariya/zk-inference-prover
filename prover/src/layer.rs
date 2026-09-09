@@ -1794,8 +1794,12 @@ impl Layer {
     /// key tiles around it: the attention it proves is then honest, the matmuls are
     /// untouched, and the only thing in the chunk that can see it is the key tile's
     /// own claim against the quantize component's output.  `(which of q/k/v, cell)`.
-    pub fn rope_from_mats(&mut self, round: bf16::Round, bend: Option<(usize, usize)>)
-                          -> Option<RopeCols> {
+    ///
+    /// `pinned` is `rebuild_key_tiles`'s: the master exp table keeps the width
+    /// the statement carries, rather than being sized again from the rebuilt
+    /// data.
+    pub fn rope_from_mats(&mut self, round: bf16::Round, bend: Option<(usize, usize)>,
+                          pinned: bool) -> Option<RopeCols> {
         use crate::residual_stream::{Prog, UnKind, reference};
         let (nh, hd, tokens) = (self.ao.nh, self.ao.hd, self.ao.s);
         // stream NN-3: a tiled prefix (`--kv-boundary`) is rebuilt like any other
@@ -1975,7 +1979,7 @@ exponent(s) small, so B1's clamp fires");
                           ["Q", "K", "V"][which % 3]);
             }
         }
-        self.rebuild_key_tiles(&qq, &kk, &vv, pre_q_bend);
+        self.rebuild_key_tiles(&qq, &kk, &vv, pre_q_bend, pinned);
         Some(RopeCols { nkv, pos0, theta, rope_type: kind, rope_scale: vec![],
                         inv_ref: Some(inv_freq), jq, jk, jv })
     }
@@ -2004,8 +2008,15 @@ exponent(s) small, so B1's clamp fires");
     /// built, so the diagonal block keeps the honest queries and the chunk is still an
     /// honest attention over the cache -- and the only thing that can see it is
     /// `nn_q_ok`, the equality between the two halves' Q folds.
+    ///
+    /// `pinned` says the statement this segment is proved against is already
+    /// written, which is what every control's rebuild is: the master exp table
+    /// keeps the width that statement carries, and a key past that width stays
+    /// off the table where the lookup refuses it (issue #134).  An honest
+    /// construction runs before there is a statement and sizes the table from
+    /// its own data.
     pub fn rebuild_key_tiles(&mut self, qq: &[i32], kk: &[i32], vv: &[i32],
-                         pre_q_bend: Option<usize>) {
+                         pre_q_bend: Option<usize>, pinned: bool) {
         let (nh, hd, s) = (self.ao.nh, self.ao.hd, self.ao.s);
         let nsub = self.nsub.max(1);
         let n_pre = self.key_tiles.iter().filter(|b| !b.diagonal_block).count();
@@ -2087,8 +2098,16 @@ unmoved (a rejection is the pass)");
         // dominates a single-key-tile benchmark.  At the 8B model's attention width
         // the data needs 24 bits of key, and clamping to 2^22 here left them off
         // the table, where only a rejected proof reported them.
-        let ceiling = self.key_tiles.iter().map(|b| b.log_table).max().unwrap_or(0).max(22);
-        let mut log_table = d_bits.clamp(4, ceiling);
+        //
+        // Issue #134: under `pinned` the table is not this rebuild's to size.  A
+        // control rebuilds a segment whose statement is already written -- and that
+        // statement says how many rows the master table has -- so the width stays
+        // where the statement put it, whatever the rebuilt data would rather have.
+        // Widening it would prove another statement; narrowing it would prove a
+        // smaller one.
+        let stated = self.key_tiles.iter().map(|b| b.log_table).max().unwrap_or(0);
+        let ceiling = if pinned { stated } else { stated.max(22) };
+        let mut log_table = if pinned { stated } else { d_bits.clamp(4, ceiling) };
         // pass 2: the joint row maximum per group -- over every sub-key-tile and the
         // diagonal block -- then all of them under it.  Issue #72: `d_bits` is the
         // shift before that joint maximum widens it, so it can fall short of the
@@ -2133,9 +2152,26 @@ unmoved (a rejection is the pass)");
             if need <= log_table {
                 break;
             }
-            assert!(need <= ceiling,
-                    "the rotated key tiles look up an exp table key of {need} bits and \
+            if need > ceiling {
+                // Issue #72: an honest construction sizes its own table, so a
+                // rebuild that outgrows the width the line gave is the line's
+                // mistake, and it is said here rather than left to a rejected
+                // proof to report.
+                assert!(pinned,
+                        "the rotated key tiles look up an exp table key of {need} bits and \
 --table-bits gives at most {ceiling}: pass --table-bits {need}");
+                // Issue #134: a control's table is the statement's, so a key past
+                // it is a refusal and not a mistake.  The keys that do not fit stay
+                // off the table, where no lookup argument can absorb them, and the
+                // proof is rejected -- which is what a control that moves the data
+                // is for.  The count is the witness's own, recounted by the rebuild
+                // above.
+                let off: usize = self.key_tiles.iter().map(|b| b.off_table).sum();
+                eprintln!("layer: this witness is refused -- the rebuilt key tiles look up an \
+exp table key of {need} bits, the statement's table takes at most {log_table}, and {off} keys are \
+off it");
+                break;
+            }
             log_table = need;
         }
         // the attention output follows the key tiles: its accumulator and
@@ -2623,6 +2659,13 @@ impl Layer {
                     model_swap: Option<u64>) {
         use crate::residual_stream::{Kind, Prog, Tiling, UnKind, canon, reference};
         let head = head_vocab > 0;
+        // Issue #134: which of the two rebuilds this is.  An honest construction
+        // -- `synth_residual_stream`, `synth_head` -- runs before the statement is
+        // derived and sizes the master exp table from its own data.  A rebuild that
+        // carries a bend or a swap is a *control*, made to be proved against the
+        // honest statement, so its table is that statement's and a key past it is a
+        // refusal rather than a wider table.
+        let pinned = o_bend.is_some() || rope_bend.is_some() || model_swap.is_some();
         let tokens = self.ao.s;
         let d = self.mats.iter().find(|m| m.name == "q")
             .expect("--synth-residual-stream needs a q matmul").n_in;
@@ -2755,7 +2798,7 @@ impl Layer {
         // leaves the family off and the run reports it, rather than proving
         // something narrower quietly.
         if !head {
-            self.rope = self.rope_from_mats(round, rope_bend);
+            self.rope = self.rope_from_mats(round, rope_bend, pinned);
         }
         // the `o` matmul's committed input is the attention output requantized,
         // and the attention output has just moved -- so this runs after the

@@ -2343,8 +2343,46 @@ fn bend_freivalds_qx(l: &mut layer::Layer, specs: &[dequant::Spec], mats: &[usiz
 /// the test in `prover/tests/model_tree_control.rs` all read it by this name.
 pub const MODEL_SWAP: &str = "model tree: this segment under another layer's weights";
 
+/// Issue #134: the control suite's record, written as it is made rather than
+/// when the suite finishes.
+///
+/// `compose-probes` emitted its record at the end, so a control that aborted the
+/// process took every refusal before it with it and the run had nothing to keep
+/// -- on the 8B segment, 41 designed rejections lost to the 42nd.  Each
+/// control's result lands here as it happens, and a panic emits what is there
+/// before the process leaves, so a crash costs one control and not the suite.
+static PROBE_RECORD: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
+fn record_probe(v: Value) {
+    PROBE_RECORD.lock().unwrap_or_else(|e| e.into_inner()).push(v);
+}
+
+/// Everything the suite has established, and nothing twice: the record is taken
+/// out, so the panic hook and the ordinary end of the run cannot both write it.
+fn recorded_probes() -> Vec<Value> {
+    std::mem::take(&mut *PROBE_RECORD.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
 fn compose_probes_cmd(args: &[String]) {
     let (l, vname) = layer_of(args);
+    // Issue #134: what the suite established, when it cannot finish.  The
+    // default hook still prints the panic and the exit code is still the
+    // panic's; what is new is that the controls already refused reach the
+    // record, which says it was cut short and by what.
+    {
+        let source = l.source.clone();
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            previous(info);
+            static EMITTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if EMITTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            emit("compose_probes", json!({"source": source, "probes": recorded_probes(),
+                                          "crashed": info.to_string()}));
+        }));
+    }
     let params = params_of(&l, args, &vname);
     let (hj, ok) = compose_once(&l, &params, &Default::default(), None);
     assert!(ok, "honest composed proof rejected");
@@ -2357,7 +2395,7 @@ fn compose_probes_cmd(args: &[String]) {
     // nothing and is accepted.
     let honest_model_root = hj["model_root"].as_str().unwrap().to_string();
     let honest_v = hj["verdict"].clone();
-    let mut out = vec![json!({"probe": "honest", "result": hj.clone()})];
+    record_probe(json!({"probe": "honest", "result": hj.clone()}));
     // Stream NN: which verdict fields a control actually turned off.  "The
     // control rejects" is not the whole claim a record should make -- "and by
     // exactly this one field" is, because a probe that trips three checks at
@@ -2438,15 +2476,15 @@ fn compose_probes_cmd(args: &[String]) {
     }
     let unstatable = unstatable;
     let statable = |name: &str| !unstatable.iter().any(|(w, _)| name.contains(*w));
-    let mut probe = |name: &str, l2: &layer::Layer, t: &compose::ProverTamper,
-                     expect: &str| -> bool {
+    let probe = |name: &str, l2: &layer::Layer, t: &compose::ProverTamper,
+                 expect: &str| -> bool {
         if !selected(name) {
-            out.push(json!({"probe": name, "skipped": "not selected by --probe"}));
+            record_probe(json!({"probe": name, "skipped": "not selected by --probe"}));
             return false;
         }
         if let Some((_, why)) = unstatable.iter().find(|(w, _)| name.contains(*w)) {
             eprintln!("compose probe SKIP {name}: {why}");
-            out.push(json!({"probe": name, "skipped": why}));
+            record_probe(json!({"probe": name, "skipped": why}));
             return false;
         }
         eprintln!("compose probe {name}");
@@ -2480,7 +2518,7 @@ fn compose_probes_cmd(args: &[String]) {
         let flipped = verdict.as_ref()
             .map(|v| falsified(&serde_json::to_value(v).unwrap()))
             .unwrap_or_default();
-        out.push(json!({
+        record_probe(json!({
             "probe": name, "expect_reject_by": expect,
             "accepted": accepted,
             "falsified": flipped,
@@ -2490,6 +2528,12 @@ fn compose_probes_cmd(args: &[String]) {
             // holds it through `pre_root`.  The probe record carries the
             // build's own reading, which is how a control on it is visible.
             "sv_binding": out2.family_cells.get("sv_binding"),
+            // Issue #134: how many committed values no table of this statement can
+            // absorb.  A control that moves a key past the master exp table --
+            // which `--tight-table` leaves no slack against -- is refused by that
+            // lookup, and this is where the record says so; the verdict alone
+            // would only show the sum failing to cancel.
+            "off_table": out2.off_table,
             "prove_error": out2.prove_error,
             "root_differs_from_honest": root_differs,
             "model_root_differs_from_honest": model_root_differs,
@@ -3184,12 +3228,95 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
         let proof_b = serde_json::to_vec(out2.proof.as_ref().unwrap()).unwrap();
         let v = compose::verify_composed(&fixed_b, &claims_b, &proof_b);
         assert!(!v.accepts(), "tampered claim accepted");
-        out.push(json!({"probe": "tampered claim in the statement",
-                        "expect_reject_by": "transcript divergence (stwo verify)",
-                        "accepted": v.accepts(),
-                        "verdict": serde_json::to_value(&v).unwrap()}));
+        record_probe(json!({"probe": "tampered claim in the statement",
+                            "expect_reject_by": "transcript divergence (stwo verify)",
+                            "accepted": v.accepts(),
+                            "verdict": serde_json::to_value(&v).unwrap()}));
     }
-    emit("compose_probes", json!({"source": l.source, "probes": out}));
+    emit("compose_probes", json!({"source": l.source, "probes": recorded_probes(),
+                                  "crashed": Value::Null}));
+}
+
+/// Issue #134: a control's rebuild keeps the exp table the statement carries.
+///
+/// Every control in the suite rebuilds the segment around its own bend and is
+/// verified against the honest statement, so the master exp table it looks up is
+/// that statement's.  Where the rebuilt key tiles want a wider key than the
+/// statement takes -- which is what `--tight-table` makes of a real segment,
+/// where the table is the honest witness's own with no slack -- the keys that do
+/// not fit stay off the table, no lookup argument can absorb them, and the proof
+/// is refused.  Before this the rebuild aborted the process, and the suite lost
+/// every control it had already refused along with it.
+///
+/// The shape is the smallest one that reaches the case: its q, k and v matmuls
+/// line up with the key tiles, so a control rebuilds the key tiles through the
+/// rotation, and its keys are wide enough that the 2^22 rows a rebuild may
+/// always grow to are not what stops it.
+#[cfg(test)]
+mod pinned_exp_table {
+    use super::{Round, layer, layer_of};
+
+    /// How many bits this shape's keys need, which is what `--table-bits` gives
+    /// it: an honest construction sizes its own table and refuses a line that
+    /// gives it a narrower one.
+    const TABLE_BITS: u32 = 24;
+
+    fn args(table_bits: u32) -> Vec<String> {
+        format!("compose-probes --round away --variants intsplit6 --table-bits {table_bits} \
+--s 32 --ctx 32 --hd 64 --head-groups 1,1 --nin 128 --nout 128 --qbits 15 --kbits 14 \
+--residual-stream-a 32 --kmax 16 --synth-residual-stream --diagonal-block")
+            .split_whitespace().map(str::to_string).collect()
+    }
+
+    /// The honest segment, and how wide its keys are.
+    fn honest() -> (layer::Layer, u32) {
+        let l = layer_of(&args(TABLE_BITS)).0;
+        assert!(l.rope.is_some(),
+                "this shape wires no rotation, so no control rebuilds the key tiles and \
+                 the test measures nothing");
+        let need = l.key_bits();
+        assert_eq!(need, TABLE_BITS, "this shape's keys are {need} bits wide");
+        assert!(need > 22,
+                "the keys must be wider than the 2^22 rows a rebuild may always grow to, \
+                 or the statement's own width is not what stops it");
+        (l, need)
+    }
+
+    /// The `o` seam's control on a segment whose table is one bit under what the
+    /// rebuilt key tiles look up -- a real segment's tight table, as the control's
+    /// own rebuild finds it.  The rebuild leaves the table where the statement put
+    /// it and the keys that do not fit off it, so the proof is refused; it used to
+    /// abort the process instead.
+    #[test]
+    fn a_control_leaves_a_key_past_the_statements_table_off_it() {
+        let (mut l, need) = honest();
+        l.set_master_table(need - 1);
+        assert_eq!(l.key_tiles[0].log_table, need - 1);
+        let _bent = l.synth_residual_stream_bent(7, 32, Round::Away, 41)
+            .expect("the o seam's control is statable on this shape");
+        assert_eq!(l.key_tiles[0].log_table, need - 1,
+                   "the control moved the exp table, so it proves another statement");
+        assert_eq!(l.key_bits(), need,
+                   "the rebuilt key tiles no longer look up a key past the table");
+        assert!(l.key_tiles.iter().map(|b| b.off_table).sum::<usize>() > 0,
+                "every rebuilt key fits the table, so nothing refuses this witness");
+    }
+
+    /// The other half of the same choice (issue #72): an honest construction sizes
+    /// its own table, so a line that gives it a narrower one than its data needs is
+    /// stopped before anything is proved, and told what to pass.
+    #[test]
+    fn an_honest_construction_still_refuses_a_line_whose_table_is_too_narrow() {
+        let narrow = std::panic::catch_unwind(|| {
+            layer_of(&args(TABLE_BITS - 1));
+        });
+        let Err(why) = narrow else {
+            panic!("a table narrower than the honest data was accepted");
+        };
+        let msg = *why.downcast::<String>()
+            .expect("the refusal says which --table-bits to pass");
+        assert!(msg.contains(&format!("pass --table-bits {TABLE_BITS}")), "{msg}");
+    }
 }
 
 /// The Layer is plain data; clone by rebuilding the pieces (Attn is not Clone).
@@ -3735,3 +3862,4 @@ mod tests {
         packed(&[], 8);
     }
 }
+
