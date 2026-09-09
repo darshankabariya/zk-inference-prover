@@ -34,6 +34,25 @@ before the model is loaded: the directory has to be removed, or the dump written
 under another `--out`. Re-extracting over the same ids is the ordinary resume
 the drivers do, and a manifest is written only when its dump is finished.
 
+A dump also names itself and the calibration it was quantized under, which is
+what a record needs to say that a moved proof digest is a moved dump and not a
+moved prover (issue #130). `dump_sha256` is the roll-up over the per-array
+digests the manifest already lists under `files`: over the arrays alone, so a
+`--slim` or a `--share` dump has the identity of the full copy of it, and over
+what the manifest claims about them rather than a re-reading of 4.2 GB. The
+prover computes the same number over every dump it opens and writes it into its
+run JSON, so the two ends of a recorded row name one dump.
+
+`attn_ranges` is the digest of `out/attn_ranges.json`, the K, V and Q ranges of
+a forward pass over the calibration slice. Its K half becomes `jk.i32`, the
+per-head power-of-two K scale exponents, so it decides the integer scores, the
+shape table's `z_max` and the model tree's root -- and it is computed where it
+is absent and reused where it is present, which makes it a per-host input that
+no commit pins. `--attn-ranges FILE` extracts under a calibration a record
+names instead of under whichever one this host has; it is read and never
+written, so a file that is not there is a refusal rather than a fresh
+calibration under that name.
+
 Scripts that read measured numbers take `--constants PATH` (a zk-results
 `constants.json`) and `--artifacts DIR` or `--inputs DIR` for run outputs.
 Nothing measured lives in this repository. `witness/text.txt` is the fixed

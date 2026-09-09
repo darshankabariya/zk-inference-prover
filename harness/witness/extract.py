@@ -250,6 +250,60 @@ def dump_dir(base, block, layer, *, tag_blocks, tag_layer):
     return f"{d}_L{layer}" if tag_layer else d
 
 
+def dump_digest(files):
+    """The dump's identity: the per-array digests its manifest lists, in one number.
+
+    A manifest already carries one entry per array under `files` -- the name,
+    the element count, the dtype, the shape and the array's sha256 -- and
+    nothing rolled them into a number a record can quote.  So a recorded proof
+    digest named the commit that made it and not the dump it was made from, and
+    when the 8B reference digest moved with no prover commit behind it, nothing
+    in either record could say that the dump had moved (issue #130).
+
+    The roll-up is over the arrays alone: the entries sorted by name, one line
+    each, `name values dtype shape sha256`.  Not over the manifest's own bytes,
+    which carry the ids path this host read and the torch version it ran, so two
+    hosts that wrote the same arrays would get two numbers out of them.  Not
+    over `written` or `link` either: `--slim` and `--share` decide what is on
+    disk and not what the extraction computed, and a shared dump already hashes
+    like a copied one.
+
+    It is a claim about the arrays and not a re-reading of them -- each entry's
+    sha256 is taken from the array in memory as it is written -- so a reader
+    that wants the bytes checked has to hash the files itself.
+
+    `prover/src/util.rs` rolls the same lines up the same way, over the `files`
+    map of any dump it reads, and writes the result into the run JSON's
+    provenance block.  The two are pinned against one number: the case below
+    and `prover/tests/dump_identity.rs` name the same map and the same digest.
+    """
+    h = hashlib.sha256()
+    h.update(b"zk-dump-v1\n")
+    for name in sorted(files):
+        f = files[name]
+        shape = ",".join(str(int(x)) for x in f["shape"])
+        h.update(f"{name} {int(f['values'])} {f['dtype']} {shape} {f['sha256']}\n".encode())
+    return h.hexdigest()
+
+
+def attn_ranges_source(path, given):
+    """`attn_ranges`: the attention calibration this run quantized with.
+
+    `out/attn_ranges.json` holds max|k| per (layer, head), max|v| per (layer,
+    head, channel) and max|q| per (layer, head), from a forward pass over the
+    calibration slice.  The K half of it becomes `jk.i32`, the per-head
+    power-of-two K scale exponents, and those move the integer scores, the shape
+    table's `z_max` and the model tree's root.  It is computed on the host when
+    it is absent and reused when it is present, so it is a per-host input that
+    no commit pins and, until this, no dump recorded (issue #130).
+
+    `given` is whether `--attn-ranges FILE` named it, which is the difference
+    between a dump quantized under a calibration a reader can get back and one
+    quantized under whatever the host had.
+    """
+    return {**provenance.digest(path), "path": os.path.realpath(path), "given": bool(given)}
+
+
 def ids_source(path, ids):
     """`ids_from`: the ids file this run actually read, by path and by digest.
 
@@ -408,8 +462,76 @@ def selftest_ids():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# Issue #130: the one number the prover and the extractor have to agree on.
+# `prover/tests/dump_identity.rs` names this map and this digest too; the prover
+# rolls the map up in Rust and writes the result into its run JSON, and if the
+# two implementations ever part company, one of the two tests says so.
+GOLDEN_FILES = {
+    "tok_head.i32": dict(values=8, dtype="int32", shape=[8],
+                         sha256="e5e9f2e7cf0c271d"),
+    "key_head.u16": dict(values=4096, dtype="uint16", shape=[8, 512],
+                         sha256="132ce9b6a2a54e71"),
+}
+GOLDEN_DUMP = "badad7e68e76e9c83289dc3f18abcab667fb3a4039677edaf9ff371607a71f26"
+
+
+def selftest_dump():
+    """The dump digest and the calibration it is pinned beside.  No model, no card."""
+    from .ppl import attention_ranges     # noqa: E402  (no model: it reads a file)
+
+    tmp = tempfile.mkdtemp(prefix="extract-selftest-")
+    try:
+        base = dump_digest(GOLDEN_FILES)
+        moved = dict(GOLDEN_FILES)
+        moved["key_head.u16"] = dict(GOLDEN_FILES["key_head.u16"],
+                                     sha256="0000000000000000")
+        added = dict(GOLDEN_FILES, **{"jk.i32": dict(values=32, dtype="int32", shape=[32],
+                                                     sha256="1111111111111111")})
+        # the same two arrays in the other order, one of them held by `--slim`
+        # and one of them a `--share` symlink
+        other = {k: dict(GOLDEN_FILES[k]) for k in reversed(list(GOLDEN_FILES))}
+        other["tok_head.i32"]["written"] = False
+        other["key_head.u16"]["link"] = "../shared/L0/key_head.u16"
+
+        acal = os.path.join(tmp, "attn_ranges.json")
+        with open(acal, "w") as f:
+            json.dump({"L0.k": [1.0, 2.0], "L0.q": [3.0], "L0.v": [[4.0]]}, f)
+        with open(acal, "rb") as f:
+            asha = hashlib.sha256(f.read()).hexdigest()
+        link = os.path.join(tmp, "given.json")
+        os.symlink(acal, link)
+
+        cases = [
+            ("the dump digest is the roll-up `prover/tests/dump_identity.rs` names",
+             base == GOLDEN_DUMP),
+            ("the same arrays in the other order, one of them held by `--slim` and "
+             "one of them a `--share` link, are the same dump",
+             dump_digest(other) == base),
+            ("one array's digest moves it", dump_digest(moved) != base),
+            ("an array the extraction did not write before moves it",
+             dump_digest(added) != base),
+            ("a dump that lists no array at all is neither of them",
+             dump_digest({}) not in (base, dump_digest(moved))),
+            ("the calibration is named by the digest of the file that was read, "
+             "resolved through the link it was given",
+             attn_ranges_source(link, True)["sha256"] == asha
+             and attn_ranges_source(link, True)["path"] == os.path.realpath(acal)),
+            ("a calibration this host computed is recorded too, and says it was not given",
+             attn_ranges_source(acal, False)["given"] is False),
+            ("`--attn-ranges FILE` is what the quantization then reads",
+             attention_ranges(acal)["L0.k"] == [1.0, 2.0]),
+        ]
+        bad = 0
+        for label, ok in cases:
+            bad += not ok
+            print(f"{'OK  ' if ok else 'FAIL'}  {label}")
+        return bad
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def selftest():
-    return 1 if selftest_dirs() + selftest_ids() + no_wrap_selftest() else 0
+    return 1 if selftest_dirs() + selftest_ids() + selftest_dump() + no_wrap_selftest() else 0
 
 
 def no_wrap_selftest():
@@ -511,6 +633,13 @@ if __name__ == "__main__":
     # prefill, so the extractor still prefills the concatenation).
     p.add_argument("--ids", default=None,
                    help="token ids (.npy) to run instead of the corpus's first --tokens")
+    # Issue #130: the attention calibration is an input, so it can be given like
+    # one.  Without this the file is whatever the host computed the first time
+    # anything asked for it, and two hosts quantize the same weights differently.
+    p.add_argument("--attn-ranges", default=None,
+                   help="the attention calibration (out/attn_ranges.json) to quantize "
+                        "K, V and Q with, instead of the one this host has or would "
+                        "compute; the dump's manifest records its digest either way")
     p.add_argument("--slim", action="store_true",
                    help="hash the derived attention columns into the manifest, do not write them")
     # ---- stream DD (E11): the block axis and the two disk levers -------------
@@ -561,7 +690,17 @@ if __name__ == "__main__":
         f"{a.spec} does not use the provable int8 attention-output fold"
     mats = a.mats.split(",")
 
-    from .ppl import attention_scales  # noqa: E402
+    from .ppl import ACALIB, attention_scales  # noqa: E402
+
+    # Issue #130: which calibration this extraction quantizes with, resolved
+    # before the model like the ids are.  `--attn-ranges` is read and never
+    # written, so a file that is not there is a refusal and not a fresh
+    # calibration under that name; without the flag it is the host's own, which
+    # `attention_ranges` computes if the host has none yet.
+    ATTN_RANGES = a.attn_ranges
+    if ATTN_RANGES is not None and not os.path.exists(ATTN_RANGES):
+        sys.exit(f"--attn-ranges {ATTN_RANGES}: no such file.  Name a calibration that "
+                 f"exists, or leave the flag off to use this host's own.")
 
     # Stream DD: the ids, the block axis and the reuse check all come before the
     # model, so a refusal costs the operator nothing.
@@ -607,7 +746,12 @@ if __name__ == "__main__":
                  "than this run reads:\n" + "\n".join(stale)
                  + "\nRemove those directories, or dump to another --out, and extract again.")
 
-    m = Model(MODEL, spec, attn_scales=attention_scales(spec), track_acc=True)
+    m = Model(MODEL, spec, attn_scales=attention_scales(spec, ATTN_RANGES), track_acc=True)
+    # after the model, because a host with no calibration yet writes it on the
+    # way in and the digest has to be of the file this extraction quantized with
+    attn_ranges = attn_ranges_source(ATTN_RANGES or ACALIB, ATTN_RANGES is not None)
+    print(f"  attn_ranges {attn_ranges['path']}: sha256 {str(attn_ranges['sha256'])[:16]}"
+          f" ({'given' if attn_ranges['given'] else 'calibrated on this host'})")
     m.clamped = {}
     keep = set()
     for L in layers:
@@ -750,7 +894,7 @@ if __name__ == "__main__":
             # in the project, B9's job), so its accumulators and denominators are the
             # recomputed `out`/`zz` above.  The V scales are the forward pass's,
             # power-of-two per (head, channel).
-            s_v = attention_scales(spec)[f"L{L}.v"]                  # (nh, 1, hd)
+            s_v = attention_scales(spec, ATTN_RANGES)[f"L{L}.v"]    # (nh, 1, hd)
             jv = pow2_exponent(s_v.reshape(nh, hd))
             assert (jv != -1000).all(), "V scales are not powers of two -- wrong spec?"
             write("jv.i32", jv.reshape(-1), digests)
@@ -769,7 +913,7 @@ if __name__ == "__main__":
             # `inv_freq.f64` the model has per-layer-type frequencies and the
             # statement would have to name which. The prover proves no rotation
             # in either case and says so, rather than guessing one.
-            ascl = attention_scales(spec)
+            ascl = attention_scales(spec, ATTN_RANGES)
             s_k = ascl[f"L{L}.k"]
             jk = pow2_exponent(s_k.reshape(nh, -1).expand(nh, hd).contiguous())
             assert (jk != -1000).all(), "K scales are not powers of two -- wrong spec?"
@@ -1241,9 +1385,19 @@ if __name__ == "__main__":
                 dequant_round=spec.dequant_round,
                 clamped={k: dict(over=v[0], total=v[1], frac=v[0] / v[1])
                          for k, v in (m.clamped or {}).items()},
-                ids_from=ids_from, slim=bool(SLIM),
+                ids_from=ids_from,
+                # Issue #130: the attention calibration this dump was quantized
+                # under, by digest.  `jk.i32` below is its K half and the model
+                # tree's root moves with it, so a dump that does not name it is
+                # a dump whose statement nothing can reproduce.
+                attn_ranges=attn_ranges,
+                slim=bool(SLIM),
                 residual_stream=residual_stream, head=head, embed=emb,
                 torch=torch.__version__, files=digests,
+                # Issue #130: the whole `files` map above, in one number a
+                # record can quote.  Last, because it is a function of every
+                # array this dump wrote and of nothing else in the manifest.
+                dump_sha256=dump_digest(digests),
             )
             json.dump(stats, open(os.path.join(OUT, "manifest.json"), "w"), indent=1)
             print(json.dumps({k: v for k, v in stats.items() if k != "files"}, indent=1))

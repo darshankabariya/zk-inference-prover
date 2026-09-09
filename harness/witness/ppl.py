@@ -45,7 +45,7 @@ def calibration_scales():
     return {k: bf16_ceil(torch.tensor(v) / INT8_MAX).view(1, 1) for k, v in ranges.items()}
 
 
-def attention_ranges():
+def attention_ranges(path=None):
     """max|k| per (layer, head) and max|v| per (layer, head, channel).
 
     B5: the integer softmax needs the K and V scales to be constant along the
@@ -53,7 +53,18 @@ def attention_ranges():
     only then), and a scale that is recomputed as the cache grows would
     re-quantize columns that are already committed.  So they are calibrated once,
     on the same disjoint slice B1's static W8A8 baseline uses.
+
+    Calibrated once *per host*, which is the part that had no record: the file
+    is computed where it is absent and reused where it is present, and its
+    contents decide the integer scores and the model tree's root (issue #130).
+    `path` is a calibration a caller already holds -- `extract.py
+    --attn-ranges FILE` -- so a dump can be re-extracted under the calibration a
+    record names instead of under a fresh one.  It is read, never written: a
+    caller that names a file it does not have gets an error, not a new
+    calibration under that name.
     """
+    if path is not None:
+        return json.load(open(path))
     if not os.path.exists(ACALIB):
         _, cal = tokens()
         m = Model(MODEL, SPECS["bf16-only"])
@@ -66,11 +77,11 @@ def attention_ranges():
     return json.load(open(ACALIB))
 
 
-def attention_scales(spec):
+def attention_scales(spec, path=None):
     """Calibrated ranges -> the two scale tensors `Model.kv_scales` expects."""
     qmax_k = (1 << (spec.qk_bits[1] - 1)) - 1
     out = {}
-    for k, v in attention_ranges().items():
+    for k, v in attention_ranges(path).items():
         t = torch.tensor(v)
         p2 = spec.pow2_scales in ("all", "attn")
         if k.endswith(".k"):                       # (nh,) -> (nh, 1, 1)
