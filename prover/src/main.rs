@@ -2343,6 +2343,10 @@ fn bend_freivalds_qx(l: &mut layer::Layer, specs: &[dequant::Spec], mats: &[usiz
 /// the test in `prover/tests/model_tree_control.rs` all read it by this name.
 pub const MODEL_SWAP: &str = "model tree: this segment under another layer's weights";
 
+/// Issue #24: the `o` seam's control, named once for the same reason -- the
+/// probe and the skip read it by this name.
+pub const O_SEAM: &str = "o seam: one activation the attention output did not produce";
+
 /// Issue #134: the control suite's record, written as it is made rather than
 /// when the suite finishes.
 ///
@@ -2426,11 +2430,9 @@ fn compose_probes_cmd(args: &[String]) {
 
     // Stream NN-3: `--probe <substring>[,<substring>...]` runs only the controls
     // whose name contains one of them (`arg_strs` splits on commas and reads
-    // one flag), so a control can have a process of its own.  Two reasons, both paid for on the H200's real 8B chunk: the suite
-    // is 46 probes and about two hours there, and one probe that cannot fire on
-    // a dump (`o seam`, whose rebuilt layer needs a bigger exp table than the
-    // honest statement declares) panics and takes every probe after it with it.
-    // With no `--probe` the list is what it always was.
+    // one flag), so a control can have a process of its own.  The reason is paid
+    // for on the H200's real 8B chunk, where the suite is 46 probes and about two
+    // hours.  With no `--probe` the list is what it always was.
     let only = arg_strs(args, "--probe", &[]);
     let selected = |name: &str| only.is_empty() || only.iter().any(|w| name.contains(w.as_str()));
     // Stream JJ (E11): the two `jo` controls move `jo` by one and have to stay
@@ -2473,6 +2475,30 @@ fn compose_probes_cmd(args: &[String]) {
         unstatable.push((MODEL_SWAP,
             "this shape carries no residual-stream family, so there is nothing to rebuild \
              the segment around the swapped weights with".into()));
+    }
+    // Issue #24: the `o` seam's control rebuilds this segment around a second
+    // draw of the residual stream -- the same generator the three key-tile
+    // controls use, and those are skipped on a dump for the reason that decides
+    // this one too.  A dump's activations are B1's; a second draw is another
+    // layer's, and on a real segment it lands outside the windows this statement
+    // pins from the honest witness: the master exp table's width and the
+    // attention output's accumulator, on the 8B chunk both at once.  A witness
+    // refused for the draw says nothing about the seam, so this is a skip by name
+    // and not a rejection the control did not earn.
+    if arg_str(args, "--witness").is_some() {
+        unstatable.push((O_SEAM,
+            "the seam's control rebuilds this segment around a second draw of the residual \
+             stream, which is the synthetic construction's; a dump's activations are the \
+             dump's, and a second draw lands outside the windows this statement pins from \
+             the honest witness -- the master exp table's width and the attention output's \
+             accumulator -- so what refuses such a witness is the draw and not the seam".into()));
+    } else if !l.residual_stream.as_ref().is_some_and(|g| !g.head)
+        || !l.mats.iter().any(|m| m.name == "o" && m.n_in == l.ao.nh * l.ao.hd)
+    {
+        unstatable.push((O_SEAM,
+            "this shape has no residual-stream family of a layer segment, or its family is \
+             the head's final norm, or its o Freivalds check is not nh*hd wide, so the two \
+             folds are over different sequences and ao_q_ok is not statable here".into()));
     }
     let unstatable = unstatable;
     let statable = |name: &str| !unstatable.iter().any(|(w, _)| name.contains(*w));
@@ -2836,26 +2862,35 @@ fn compose_probes_cmd(args: &[String]) {
         // own accumulator moved to match, so the matmul is honestly proved and
         // only `claims.ao_q` against the Freivalds check's `qX` can see it.
         if let Some(wi) = rplan.freivalds.iter().position(|w| w.name == "o") {
-            let mut lb = layer_of(args).0;
-            let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
-            // On a layer chunk only: the head chunk's family builds no `o` seam,
-            // so there is nothing there for this bend to be seen by (issue #58).
-            let layer_family = lb.residual_stream.as_ref().is_some_and(|g| !g.head);
-            let bent = layer_family.then(|| {
-                lb.synth_residual_stream_bent(src_of(args).seed, arg_scalar(args, "--residual-stream-a", 32usize),
-                                              round, 41)
-            }).flatten();
-            match bent {
-                Some(at) => {
-                    eprintln!("  o seam: activation {at} bent, the whole layer rebuilt around it");
-                    assert!(!probe("o seam: one activation the attention output did not produce",
-                                   &lb, &Default::default(),
-                                   &format!("the binding ao_q == freivalds_qx[{wi}]")),
-                            "an o activation the attnout component did not requantize accepted");
+            let expect = format!("the binding ao_q == freivalds_qx[{wi}]");
+            // Issue #24: the rebuild draws the whole segment again, which on the
+            // 8B chunk is another load of the dump and most of an hour -- and
+            // where the suite is not going to run the control, a witness nobody
+            // proves.  So it is built only where the control is the suite's to
+            // run, and `probe` writes the skip and its reason into the record for
+            // every other shape.
+            if !(selected(O_SEAM) && statable(O_SEAM)) {
+                probe(O_SEAM, &l, &Default::default(), &expect);
+            } else {
+                let mut lb = layer_of(args).0;
+                let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
+                match lb.synth_residual_stream_bent(
+                    src_of(args).seed, arg_scalar(args, "--residual-stream-a", 32usize), round, 41)
+                {
+                    Some(at) => {
+                        eprintln!("  o seam: activation {at} bent, the whole layer rebuilt \
+around it");
+                        assert!(!probe(O_SEAM, &lb, &Default::default(), &expect),
+                                "an o activation the attnout component did not requantize \
+accepted");
+                    }
+                    // the skip above reads the same two conditions off the honest
+                    // segment, so this arm is the generator disagreeing with it --
+                    // a record either way, never a control that quietly did not run
+                    None => record_probe(json!({"probe": O_SEAM, "skipped":
+                        "the generator built no bend for this shape, though the segment's own \
+                         widths said it could"})),
                 }
-                None => eprintln!("  o seam: SKIP -- this shape has no wiring family, or its \
-family is the head's final norm, or its o Freivalds check is not nh*hd wide, so the two folds are \
-over different sequences and `ao_q_ok` is not statable here"),
             }
         }
 

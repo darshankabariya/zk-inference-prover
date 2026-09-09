@@ -10,10 +10,12 @@
 //! has no move to make: two of the three sound synthetic shapes are that shape,
 //! and the control there used to assert and take the whole suite with it.
 //!
-//! So this pins two things: that the suite runs every control it can state and
-//! reaches its own JSON on all three shapes, and that a control the shape
-//! cannot state is skipped by name with its reason in the record rather than
-//! crashing. A crash is never a pass.
+//! So this pins three things: that the suite runs every control it can state and
+//! reaches its own JSON on all three shapes, that a control the shape cannot
+//! state is skipped by name with its reason in the record rather than crashing,
+//! and (issue #24) that the `o` seam's control reaches the record on every shape
+//! either way -- it used to reach it as neither, saying so on stderr alone.
+//! A crash is never a pass.
 //!
 //! These run on the SIMD build alone. A binary built with `--features cuda`
 //! takes the device path, where `devfrac` demands a generated kernel for the
@@ -39,6 +41,10 @@ const GKR5: &[&str] =
 
 const JO_ROW: &str = "attnout: one row's jo moved by one";
 const JO_TOK: &str = "attnout: a whole token's jo moved by one";
+/// Issue #24: the `o` seam's control, by the name the suite gives it.  Three
+/// heads of 32 over 64-wide matmuls cannot state the seam and the first two
+/// shapes are that shape; four heads over 128-wide ones can.
+const O_SEAM: &str = "o seam: one activation the attention output did not produce";
 
 /// The three sound shapes `prover/README.md` records digests for, and whether
 /// each states the two `jo` controls. The first two draw every `jv` of the
@@ -137,6 +143,22 @@ fn the_control_suite_reaches_its_own_json_on_every_sound_shape() {
                 assert!(p["accepted"].is_null(),
                         "{name}: a skipped control must carry no verdict");
             }
+        }
+        // Issue #24: the seam's control is in the record on every shape -- a
+        // rejection where the shape can state it, and a skip that says why where
+        // it cannot.  On a dump it is the second, because the rebuild draws the
+        // residual stream a second time and no window of the honest statement
+        // admits that draw; here it is the shape's widths that decide.
+        let seam = probe_named(&ps, O_SEAM);
+        match seam["skipped"].as_str() {
+            Some(why) => {
+                assert!(why.contains("ao_q_ok is not statable here"),
+                        "{name}: the seam control was skipped without saying why: {why:?}");
+                assert!(seam["accepted"].is_null(),
+                        "{name}: a skipped control must carry no verdict");
+            }
+            None => assert_eq!(seam["accepted"], serde_json::Value::Bool(false),
+                               "{name}: the seam control produced no rejection"),
         }
         // the per-row control is the one the `joff` pin exists for: where it can
         // be stated it is a rejection and nothing else
