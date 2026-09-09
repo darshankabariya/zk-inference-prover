@@ -73,8 +73,7 @@ what `--ao-rem-per-line` writes), the bound is evaluated at it, and a plan with 
 layer over the cap is refused with the layer and the numbers instead of being
 written and refused four hours later at the loop's first chunk.  What every plan
 prints is the tightest window and what is left of it; the recorded C=4,096 plan
-sits at `11 + 20 = 31` of 31 and is unchanged, line for line.  The head line is
-not checked: its pin is `--head-flags`' and the shape table has no row for it.
+sits at `11 + 20 = 31` of 31 and is unchanged, line for line.
 
     python -m harness.witness.plan --selftest     the check itself, no witness set
 
@@ -87,6 +86,26 @@ chunk.  A row read off a dump extracted before the extractor recorded the
 accumulator width states none, and the window half is then not checked: the plan
 says so rather than checking it against a guess, and the recorded 4,096-token
 plan is unchanged line for line.
+
+**Issue #125: the head line, at the pin it resolves.**  A head chunk proves the
+attention output's rounding exactly as a layer chunk does.  Its dump is the
+layer dump of the layer it was extracted at with a `head` block added, so
+`Layer::load` builds the segment's `AttnOut` out of that layer's attention
+columns and `prover/src/compose.rs` builds the attention-output component and
+its interaction unconditionally (lines 4535 and 6288).  Both halves of the bound
+therefore apply to the head line, and the manifest this writer already opens for
+`master_table_bits` states every number they need: `attn_out_bits`, and the
+`attn_out` block's `ao_acc_bits`, `jv_max` and `jo_min`.  So a head row is built
+here and evaluated at the pin the head line resolves -- `--head-flags`', or the
+shared one when the line carries none -- and a head line over either cap is
+refused with the numbers, beside the layers'.  The shape table has no row for it
+and should not: it walks one block's layer dumps, and the pin it writes is the
+loop's shared one, which the head line overrides.  A head manifest that states
+neither the fold width nor the `attn_out` block is not a dump manifest and is
+refused rather than skipped; one that predates `ao_acc_bits` leaves the window
+half not checked, as a layer row of the same age does.  The recorded head
+configuration is a `b10-final` dump at `--ao-rem-bits 23`, whose fold target
+width is 8: `7 + 23 = 30` is the plain form's cap exactly.
 
 **Stream MM (E11): what the model manifest needs of a plan.**  `zk-prover
 model-roots` requires `master_table_bits` to be **one value per layer across
@@ -114,7 +133,8 @@ import os
 import sys
 import tempfile
 
-from .shapes import ao_pin, ao_pin_refusals, ao_pin_row, ao_where, ao_window_report
+from .shapes import (ao_head_refusal, ao_head_report, ao_head_row, ao_pin, ao_pin_refusals,
+                     ao_pin_row, ao_where, ao_window_report)
 
 
 def read_rows(path):
@@ -342,6 +362,10 @@ def main():
     pin = (ao_pin(pin_rows) if pin_rows and all(r.get("ao_rem_bits") for r in pin_rows)
            else None)
     checked, refused = [], []
+    # issue #125: one line per head chunk, printed beside the layers' report --
+    # a head line's numbers are wanted whether or not it is the tightest of the
+    # plan, because it is the one line the shape table has no row for
+    head_notes = []
 
     lines, emit = [], {}
     n_rows, n_layer_rows = 0, 0
@@ -409,6 +433,36 @@ def main():
             # reached the emit list, and the second head chunk proved against a
             # feed kernel that was never generated.
             emit.setdefault((hman["c"], htb, True, hf), hl)
+            # issue #125: the head line's own bound, both halves, at the pin
+            # this line resolves.  The head chunk proves the attention output's
+            # rounding like any layer chunk -- its dump is that layer's dump
+            # with a `head` block added, and `compose.rs` builds the component
+            # and its interaction unconditionally -- so the manifest opened
+            # above for the table width states the fold's target width and the
+            # three window-half numbers, and the head line is checked here
+            # exactly as a layer line is.  It is the only line whose bound
+            # nothing else evaluates: the shape table walks layer dumps.
+            hflag = ao_rem_of(hf, None)
+            hpin = ao_rem_of(hf, pin)
+            hrow = ao_head_row(hman, hpin, block=b, flag_pin=hflag)
+            bad = ao_head_refusal(hman, ao_where(hrow))
+            if bad:
+                refused.append(bad)
+            elif hpin is None:
+                # neither the shape tables nor `--head-flags` name a pin, so the
+                # loop leaves the chunk at the head dump's own divisor range and
+                # no plan can say what that is -- the manifest records none
+                head_notes.append(
+                    f"attention output, {ao_where(hrow)}: it resolves no --ao-rem-bits "
+                    f"(the shape tables carry none and --head-flags names none), so it is "
+                    f"proved at the head dump's own divisor range, which the manifest does "
+                    f"not state, and its bound is not checked here")
+            else:
+                hq, hmsg = ao_pin_row(hrow, hpin)
+                checked.append((hrow, hq))
+                head_notes.append(ao_head_report(hrow, hq))
+                if hmsg:
+                    refused.append(hmsg)
     # issue #118: refused here, with the layer and the numbers, and before the
     # plan file is written -- a plan that would be refused by `Plan::new` at the
     # first chunk of the loop is not written at all
@@ -434,6 +488,9 @@ def main():
     elif pin is None:
         print("attention output: the shape tables carry no ao_rem_bits, so the pin the "
               "loop is launched with is not checked here")
+    # issue #125: the head lines' own margins, beside the layers' above
+    for note in head_notes:
+        print(note)
 
     if a.emit_out:
         el = [f"# stream DD: {len(emit)} distinct emit shapes for the {n_rows} chunks of "
@@ -469,15 +526,27 @@ def _shape_table(d, b, rems, bits=12, acc=None):
         json.dump(dict(rows=rows, block=b), f)
 
 
-def _head_dump(d, b, c, tb=25):
+def _head_dump(d, b, c, tb=25, bits=8, acc=19, jv=-6, jo=-10, attn_out=True):
     """One head dump's manifest, with only the fields a plan reads.
 
     A head dump carries its own prefix, and the dumps of two blocks carry two.
+
+    Issue #125: and it carries the fold's target width and the `attn_out` block,
+    because a head dump is the layer dump of the layer it was extracted at with
+    a `head` block added and `extract.py` writes one manifest per dump.  `bits`
+    8 and a 23-bit pin are the recorded head configuration's numbers.  `acc`
+    `None` is a dump extracted before the accumulator's width was recorded, and
+    `attn_out` false is a manifest that is not a dump's at all.
     """
     hd = os.path.join(d, f"head_B{b}")
     os.makedirs(hd, exist_ok=True)
+    man = dict(layer=16, block=b, c=c, master_table_bits=tb)
+    if attn_out:
+        man["attn_out_bits"] = bits
+        man["attn_out"] = dict(jv_max=jv, jo_min=jo,
+                               **({"ao_acc_bits": acc} if acc is not None else {}))
     with open(os.path.join(hd, "manifest.json"), "w") as f:
-        json.dump(dict(layer=16, block=b, c=c, master_table_bits=tb), f)
+        json.dump(man, f)
 
 
 def _plan(argv):
@@ -511,6 +580,11 @@ def selftest():
         nonlocal bad
         bad += not ok
         print(f"{'OK  ' if ok else 'FAIL'}  {label:<52s} -> {note}")
+
+    def _head_note(printed):
+        """Issue #125: the head line's own report line, out of what was printed."""
+        return next((l for l in (printed or "").splitlines()
+                     if l.startswith("attention output, ")), "")
 
     def last(printed, refusal):
         return (printed.strip().splitlines()[-1] if printed
@@ -652,6 +726,71 @@ def selftest():
               and "1 + 16 + 11 + 4 = 32 > 31 (over by 1, magnitude form)" in refusal
               and "--ao-rem-per-line" not in refusal and not os.path.exists(out))
         case("a window half past the field is refused", ok, last(printed, refusal))
+
+        # ---- issue #125: the head line, evaluated like a layer line -------
+        # The head chunk proves the attention output's rounding as any layer
+        # chunk does, and it is the one line no shape table has a row for, so
+        # this is where both halves of its bound are evaluated.  The numbers
+        # are the recorded head configuration's: a `b10-final` dump, whose fold
+        # target width is 8, at the 23 bits its own divisor range needs.
+        _shape_table(d, 0, [14, 15, 19])
+        _shape_table(d, 1, [15, 16, 20])
+        head = ["--head", os.path.join(d, "head"), "--head-per-block",
+                "--head-blocks", "1"]
+        pin23 = ["--head-flags=--ao-rem-bits 23"]
+
+        # 12. the recorded head configuration: `7 + 23 = 30` is the plain form's
+        #     cap exactly, the window half fits with six bits to spare, and the
+        #     plan is written
+        _head_dump(d, 1, 512)
+        printed, refusal = _plan(args + head + pin23)
+        ok = (refusal is None and os.path.exists(out)
+              and "attention output, block 1's head line: at --ao-rem-bits 23 the "
+                  "quotient window is 7 + 23 = 30/30 bits, margin 0 (plain form)" in printed
+              and "the no-wrap window is 1 + 16 + 4 + 4 = 25/31 bits, margin 6 "
+                  "(offset form)" in printed)
+        case("the head line's two margins, beside the layers'", ok,
+             _head_note(printed) or last(printed, refusal))
+
+        # 13. one bit past the quotient cap: refused, and the refusal names the
+        #     head line rather than a layer, and names the flag that pinned it
+        os.remove(out)
+        printed, refusal = _plan(args + head + ["--head-flags=--ao-rem-bits 25"])
+        ok = (refusal is not None and refusal.startswith("block 1's head line: ")
+              and "7 + 25 = 32 > 31 (over by 1, denp2 form)" in refusal
+              and "`--head-flags` names" in refusal
+              and "--ao-rem-per-line" not in refusal and not os.path.exists(out))
+        case("a head line past the quotient cap is refused", ok, last(printed, refusal))
+
+        # 14. and the half no pin moves: an accumulator one bit past the window
+        #     is refused too, naming neither pin, since neither could recover it
+        _head_dump(d, 1, 512, acc=27)
+        printed, refusal = _plan(args + head + pin23)
+        ok = (refusal is not None and refusal.startswith("block 1's head line: ")
+              and "no-wrap window does not fit" in refusal
+              and "1 + 16 + 11 + 4 = 32 > 31 (over by 1, magnitude form)" in refusal
+              and "--head-flags" not in refusal and not os.path.exists(out))
+        case("a head line past the window half is refused", ok, last(printed, refusal))
+
+        # 15. a manifest that states neither the fold width nor the `attn_out`
+        #     block is not a dump manifest: refused, not silently skipped
+        _head_dump(d, 1, 512, attn_out=False)
+        printed, refusal = _plan(args + head + pin23)
+        ok = (refusal is not None and refusal.startswith("block 1's head line: ")
+              and "states no attn_out_bits, attn_out" in refusal
+              and "extract the head dump again" in refusal and not os.path.exists(out))
+        case("an incomplete head manifest is refused", ok, last(printed, refusal))
+
+        # 16. and a head dump that predates the accumulator's width: the
+        #     quotient half is checked, the window half is not, and the plan
+        #     says which it was rather than guessing an accumulator
+        _head_dump(d, 1, 512, acc=None)
+        printed, refusal = _plan(args + head + pin23)
+        ok = (refusal is None and os.path.exists(out)
+              and "7 + 23 = 30/30 bits, margin 0 (plain form)" in printed
+              and "the no-wrap window half is NOT CHECKED" in printed)
+        case("a head dump with no accumulator width says so", ok,
+             _head_note(printed) or last(printed, refusal))
 
     return 1 if bad else 0
 

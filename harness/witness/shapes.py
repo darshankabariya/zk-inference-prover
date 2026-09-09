@@ -55,6 +55,17 @@ row extracted before the extractor recorded the accumulator width states no
 against a guess: the tables print how many rows that was.  The recorded
 4,096-token set's 288 rows are all of that kind, so its plan is unchanged.
 
+**Issue #125: the head line, which this table has no row for.**  A head chunk
+proves the attention output's rounding like any layer chunk -- its dump is the
+layer dump of the layer it was extracted at with a `head` block added -- so both
+halves apply to it.  This table cannot hold it: `shape_of` measures a divisor
+range off a layer dump's own columns, the sweep walks one block's layers, and
+the head dump is written by its own pass into a directory of its own.  Folding
+it in would also widen the loop's shared pin to a value no layer needs.  So the
+head line's bound is evaluated where its pin is decided, in the plan writer, off
+the manifest that plan already opens; the arithmetic and the way a head row is
+named live here, beside the layers' (`ao_head_row`, `ao_head_report`).
+
     ... shapes --selftest                     the bound and its refusal, no dump
 """
 import argparse
@@ -229,7 +240,15 @@ def ao_row_window(r, rem_bits):
 
 
 def ao_where(r):
-    """A row, named as a refusal names it."""
+    """A row, named as a refusal names it.
+
+    Issue #125: a head row names the line it is, because the head chunk is not
+    a layer of the model and no layer coordinate of the dump it was extracted at
+    identifies it.
+    """
+    if r.get("head"):
+        return ("the head line" if r.get("block") is None
+                else f"block {r['block']}'s head line")
     return (f"layer {r['layer']}" if r.get("block") is None
             else f"block {r['block']} layer {r['layer']}")
 
@@ -266,6 +285,24 @@ def ao_pin_row(r, rem_bits):
     msg = ao_quotient_refusal(q, where)
     if msg is None:
         return q, None
+    # Issue #125: a head row's `ao_rem_bits` IS the pin the line resolves -- the
+    # head manifest states no divisor range of its own -- so there is no "its
+    # own value fits" case to name here, and `--ao-rem-per-line` is a layer
+    # line's flag and could not move a head line at all.
+    if r.get("head"):
+        if r.get("head_flag_pin") is None:
+            msg += (" The head line carries no `--ao-rem-bits` of its own, so it is proved "
+                    "at the loop's shared pin, which is the layers' worst case. "
+                    "`plan.py --head-flags='--ao-rem-bits N'` writes the head dump's own "
+                    "divisor range on the head line instead, and a line's arguments are "
+                    "read after the shared ones; `params_of` refuses any N below the head "
+                    "dump's own.")
+        else:
+            msg += (f" {r['ao_rem_bits']} is the pin `--head-flags` names, and `params_of` "
+                    f"refuses a pin below the head dump's own divisor range, so no pin "
+                    f"recovers this: what is left is a head spec whose fold target width "
+                    f"is narrower, or a quantization whose divisor range is.")
+        return q, msg
     own = ao_quotient(r.get("attn_out_bits", 8), r["ao_rem_bits"])
     if own["margin"] >= 0:
         msg += (f" This layer's own divisor range is {own['rem_bits']} bits and does fit "
@@ -333,6 +370,96 @@ def ao_window_report(rows):
                  f"ao_acc_bits and their window half was NOT CHECKED")
     return (f"attention output: the tightest no-wrap window is {w['bits']}/{w['limit']} "
             f"bits, margin {w['margin']} ({w['form']} form), at {ao_where(r)}{tail}")
+
+
+# ---- issue #125: the head line, a chunk of the same kind --------------------
+# A head dump is the layer dump of the layer it was extracted at with a `head`
+# block added: `extract.py --head` writes into the same directory and the same
+# `manifest.json` as that layer's own, so the dump carries that layer's
+# attention columns and the manifest carries `attn_out_bits` and the whole
+# `attn_out` block beside the vocabulary and the norm parameters.  The prover
+# reads them like any other dump's -- `Layer::load` builds the segment's
+# `AttnOut` out of those columns, and `prover/src/compose.rs` builds the
+# attention-output component and its interaction unconditionally (lines 4535
+# and 6288).  So a head chunk proves the same rounding identity a layer chunk
+# does, both halves of the no-wrap bound apply to it, and its line is evaluated
+# exactly as a layer line's is.
+#
+# It has no row in this table, and it should not have one.  `shape_of` measures
+# a layer dump's divisor range off its `zz.i32`, `jo.i32` and `jv.i32`, and the
+# sweep that calls it walks one block's layers; the head dump lives in a
+# directory of its own, written by its own extraction pass, and is never in that
+# sweep.  Folding it in would also be wrong twice over: what this table writes
+# is the pin the whole loop is launched with, and the head line resolves its own
+# through `--head-flags`, so a head dump's wider divisor range would push every
+# layer of the set past the quotient cap without any layer needing it.  The head
+# line's pin is decided where the head line is written, so `plan.py` is where it
+# is checked, off the manifest it already opens for `master_table_bits`.
+
+
+def ao_head_refusal(man, where):
+    """What an incomplete head manifest is refused with, or `None`.
+
+    `attn_out_bits` and the `attn_out` block's two exponent extremes have been
+    written for every dump `extract.py` has ever written, head dumps included,
+    so a manifest without them is not a dump manifest.  It is refused rather
+    than skipped: skipping it would leave the one line of a plan whose bound
+    nothing else evaluates unevaluated and silent.  `ao_acc_bits` is the one
+    field that may be absent -- a dump extracted before it was recorded states
+    none -- and the window half is then not checked, as a layer row's is not.
+    """
+    missing = []
+    if man.get("attn_out_bits") is None:
+        missing.append("attn_out_bits")
+    ao = man.get("attn_out")
+    if not isinstance(ao, dict):
+        missing.append("attn_out")
+    else:
+        missing += [f"attn_out.{k}" for k in ("jv_max", "jo_min") if ao.get(k) is None]
+    if not missing:
+        return None
+    return (f"{where}: the head dump's manifest states no {', '.join(missing)}, so the "
+            f"attention output's no-wrap bound cannot be evaluated for it -- and the head "
+            f"chunk proves that rounding like any layer chunk does. A head dump is the "
+            f"layer dump of the layer it was extracted at with a `head` block added, and "
+            f"`extract.py` writes these fields into every manifest it writes, so a "
+            f"manifest without them is not one it wrote: extract the head dump again.")
+
+
+def ao_head_row(man, rem_bits, block=None, flag_pin=None):
+    """Issue #125: the shape row of a head line, off the head dump's manifest.
+
+    The fold's target width and the three window-half numbers are the head
+    dump's own, exactly as a layer row's are.  `ao_rem_bits` is not: the
+    manifest records no divisor range -- `shape_of` measures that off the dump's
+    columns and no plan reads those -- and the head line is proved at the pin it
+    resolves, which `params_of` refuses to place below the dump's own.  So the
+    resolved pin is the row's value, and `flag_pin` is the one `--head-flags`
+    named, or `None` when the line carries none and takes the shared pin.
+    """
+    return dict(ao_row_of(man), head=True, layer=None, block=block,
+                attn_out_bits=man.get("attn_out_bits", 8),
+                ao_rem_bits=rem_bits, head_flag_pin=flag_pin)
+
+
+def ao_head_report(r, q):
+    """Issue #125: the head line's two margins, printed beside the layer lines'.
+
+    One line per head chunk, because there is one head line per head block and a
+    plan's reader wants its numbers whether or not it is the tightest of the
+    plan.  The recorded head configuration is a `b10-final` dump, whose fold
+    target width is 8, pinned at the 23 bits its own divisor range needs:
+    `7 + 23 = 30` is the plain form's cap exactly.
+    """
+    w = q["window"]
+    half = (f"the no-wrap window is 1 + {w['acc_lo_bits']} + {w['acc_hi_bits']} + "
+            f"{w['e_hi']} = {w['bits']}/{w['limit']} bits, margin {w['margin']} "
+            f"({w['form']} form)" if w else
+            "the no-wrap window half is NOT CHECKED -- this head dump states no "
+            "ao_acc_bits (zk-prover #121)")
+    return (f"attention output, {ao_where(r)}: at --ao-rem-bits {q['rem_bits']} the "
+            f"quotient window is {q['q_bits']} + {q['rem_bits']} = {q['bits']}/{q['limit']} "
+            f"bits, margin {q['margin']} ({q['form']} form); {half}")
 
 
 def shape_of(d):

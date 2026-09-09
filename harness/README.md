@@ -82,8 +82,28 @@ and a plan say how many rows that was rather than checking them against a
 guessed accumulator, which would refuse a set that composes or admit one that
 does not. The recorded 4,096-token table's 288 rows are all of that kind; a
 re-extracted set carries the width and gets both windows.
+
+The head line is checked the same way, and only in the plan writer. A head
+chunk proves the attention output's rounding exactly as a layer chunk does: its
+dump is the layer dump of the layer it was extracted at with a head block added,
+so the segment carries that layer's attention columns and the prover builds the
+attention-output component and its interaction for it unconditionally. Both
+bounds therefore apply to the head line, and the manifest the plan writer
+already opens for the head's master table width states every number they need --
+the fold's target width, the accumulator's bit length and the two exponent
+extremes. So the head line is evaluated at the pin it will resolve, which is its
+own `--head-flags` value or the shared one when it carries none, and a head line
+over either cap is refused with the numbers beside the layers'. The shape table
+has no row for it and should not have one: it goes through a block's layer dumps, and
+the pin it writes is the shared one that the head line overrides. A head
+manifest that states neither the fold width nor the exponents is not a dump's
+and is refused rather than skipped; one written before the accumulator's width
+was recorded leaves that window **not checked**, as a layer row of the same age
+does. The recorded head configuration sits at `7 + 23 = 30` of 30, which
+composes and admits nothing wider.
+
 `witness/shapes.py --selftest` and `witness/plan.py --selftest` check the
-arithmetic and both refusals, with no model and no card.
+arithmetic and every refusal, with no model and no card.
 
 ## The unproved baseline
 
