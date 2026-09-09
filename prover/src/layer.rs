@@ -4095,7 +4095,8 @@ pub struct OutputClaimW {
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
-                       rels: &crate::compose::Rels, out: Option<&OutputClaimW>, gkr: bool,
+                       rels: &crate::compose::Rels, out: Option<&OutputClaimW>,
+                       air: &crate::dequant::DequantEval, gkr: bool,
                        sc: Option<(SecureField, SecureField)>)
                        -> MatInteraction {
     let lay = r.lay;
@@ -4293,7 +4294,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
         // in different places
         SecureField::zero()
     } else {
-        let (lcols, use_sum) = mat_logup(m, r, rv, s_ch, rels);
+        let (lcols, use_sum) = mat_logup(m, r, rels, air);
         crate::util::add_phase("int/deq_logup", phase_t.elapsed().as_secs_f64());
         cols.extend(lcols);
         use_sum
@@ -4301,9 +4302,9 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
     MatInteraction { cols, claimed_h, use_sum, claimed_out, claimed_sc }
 }
 
-/// The interaction-mask columns come first (z, h), then the LogUp columns; this
-/// builds the latter with the parallel builder.
-/// The same fractions, from the AIR itself (B7a milestone 4, 18.7).
+/// The evaluator whose fraction IR *is* this component's lookups: the
+/// component's own, with the parts that carry no lookup left off. The same
+/// fractions the AIR states (B7a milestone 4, 18.7).
 ///
 /// `DequantEval` is the component the verifier checks; lowering it with
 /// `cudagen::lower_logup` gives every lookup's numerator and denominator as a
@@ -4312,54 +4313,41 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
 /// therefore the order `paired` needs. Nothing below is dequant-specific:
 /// swap the eval and it builds another family's LogUp columns.
 ///
-/// The eval is rebuilt here rather than borrowed from `build_components`,
-/// which does not exist yet at generation time. Only `yside.claimed_h` is
-/// unavailable, and it enters constraints alone -- never a lookup -- so a
-/// placeholder is correct. `ZK_GENERATED_LOGUP=2` is what says the two agree.
-/// The evaluator whose fraction IR *is* this component's lookups.
+/// Issue #43: the argument is the component `build_components` built, so the
+/// prover, the GKR collector, the affinity report and `genemit` all lower one
+/// evaluator derived one way. It used to be rebuilt from the plan here, which
+/// left the emitter lowering the component and the prover lowering this, and
+/// only the fingerprint said the two agreed. What the derivation drops:
 ///
-/// B11 stream U, lever 3: the GKR backend needs the same evaluator, so it is built
-/// here once and both callers take it. `gkr` is false in both -- the fractions
-/// the backend proves are the ones the committed backend would have built, so the
-/// lowering is of the *un-ablated* evaluator and asks for the flag-off shape,
-/// which is stream T's precedent for the key tiles and is why the kernel store
-/// already carries this fingerprint.
-pub fn deq_logup_eval(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
-                      rels: &crate::compose::Rels) -> crate::dequant::DequantEval {
-    let sub: Vec<crate::attn_air::RangeRel> = crate::dequant::range_widths(&r.spec)
-        .iter()
-        .map(|w| rels.range(*w).clone())
-        .collect();
-    let (rv_pow, rv_step) = crate::attn_air::powers(rv, r.lay.per_row);
-    crate::dequant::DequantEval {
-        log_rows: r.lay.log_rows,
-        sp: r.spec.clone(),
-        tag: m.name.clone(),
-        norm: rels.norm.clone(),
-        frac: rels.frac.clone(),
-        mul: rels.mul.clone(),
-        qnz: rels.qnz.clone(),
-        rels: sub,
-        yside: Some(crate::dequant::YSide {
-            rv_pow,
-            rv_step,
-            s: s_ch,
-            claimed_h: SecureField::zero(),
-        }),
-        // the output side carries no lookups, so it cannot change this eval's
-        // LogUp IR -- leaving it off here keeps the lowering identical whether
-        // the binding is on or not, which is what `ZK_GENERATED_LOGUP=2` compares
-        output_claim: None,
-        sside: None,
-        gkr: false,
+///  * **the output side and the scale side.** Both are Horner accumulators
+///    closed on a claim; neither adds a lookup, so neither can change this
+///    eval's LogUp IR. Leaving them off keeps the lowering identical whether
+///    the bindings are on or not, which is what `ZK_GENERATED_LOGUP=2`
+///    compares.
+///  * **the claimed side's claim.** `yside.claimed_h` enters constraints
+///    alone -- never a lookup -- and at generation time there is no claimed
+///    sum yet, so zero is correct and says so.
+///
+/// B11 stream U, lever 3: the GKR backend needs the same evaluator. `gkr` is
+/// cleared -- the fractions the backend proves are the ones the committed
+/// backend would have built, so the lowering is of the *un-ablated* evaluator
+/// and asks for the flag-off shape, which is stream T's precedent for the key
+/// tiles and is why the kernel store already carries this fingerprint.
+pub fn deq_logup_eval(air: &crate::dequant::DequantEval) -> crate::dequant::DequantEval {
+    let mut eval = air.clone();
+    eval.output_claim = None;
+    eval.sside = None;
+    if let Some(y) = eval.yside.as_mut() {
+        y.claimed_h = SecureField::zero();
     }
+    eval.gkr = false;
+    eval
 }
 
-fn mat_logup_ir(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
-                rels: &crate::compose::Rels, on_device: bool)
+fn mat_logup_ir(r: &MatComponent, air: &crate::dequant::DequantEval, on_device: bool)
                 -> (Vec<crate::device::AnyCol<'static>>, SecureField) {
     use stwo::prover::backend::simd::m31::PackedM31;
-    let eval = deq_logup_eval(m, r, rv, s_ch, rels);
+    let eval = deq_logup_eval(air);
     // `ZK_MUT_LOGUP` picks one of 2b's deliberate defects, so mode 2 has a
     // negative control. B7a milestone 4 (section 3 row 1): one place reads it
     // for every family, and it takes a `:family` suffix -- unaimed, a defect
@@ -4423,14 +4411,14 @@ fn mat_logup_ir(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
     (crate::device::host_cols(cols), sum)
 }
 
-fn mat_logup(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
-             rels: &crate::compose::Rels)
+fn mat_logup(m: &Mat, r: &MatComponent, rels: &crate::compose::Rels,
+             air: &crate::dequant::DequantEval)
              -> (Vec<crate::device::AnyCol<'static>>, SecureField) {
     // B7a milestone 4 (19.6): with the generate its witness on the device there is no host
     // column to build the fractions from, so the device path is the only one
     // -- and it is also the one that leaves 4a's bytes at zero.
     if r.dev.is_some() {
-        return mat_logup_ir(m, r, rv, s_ch, rels, true);
+        return mat_logup_ir(r, air, true);
     }
     // Stream Z: the fold's witness generation is on the host and so is its LogUp -- the
     // hand-written builder below carries its looks, and no generated fraction
@@ -4440,7 +4428,7 @@ fn mat_logup(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
     } else {
         crate::util::path_mode("ZK_GENERATED_LOGUP")
     };
-    let from_ir = (logup_mode > 0).then(|| mat_logup_ir(m, r, rv, s_ch, rels, logup_mode >= 3));
+    let from_ir = (logup_mode > 0).then(|| mat_logup_ir(r, air, logup_mode >= 3));
     // 2 checks the interpreter against the hand-written builder, 4 the kernel.
     if logup_mode == 1 || logup_mode == 3 {
         return from_ir.unwrap();

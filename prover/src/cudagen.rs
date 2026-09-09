@@ -3551,6 +3551,21 @@ pub fn gen_emit_cmd(args: &[String]) {
                 "columns": {"preprocessed": ir.cols[0], "base": ir.cols[1]},
             }));
         };
+        // Issue #43: what a group installs is the lowering of the evaluator the
+        // *prover* lowers for that group's lookups, and of nothing else.
+        //
+        // For every group but one that evaluator is the component's own: it is
+        // what `compose` hands `devfrac::frac_cols`, and the GKR sites clone it
+        // with the ablation undone, which the design-point fixup above has
+        // already done here. The dequant family is the one exception -- the
+        // prover derives a slimmer evaluator, `layer::deq_logup_eval` -- and
+        // this loop used to install the component instead. The two share every
+        // load by tree and by column, so they shared a fingerprint and the
+        // divergence never stopped a proof; what they did not share is their
+        // column totals, which `Ir::fingerprint` does not hash and which the
+        // generated kernel checks as a lower bound (`emit_frac_family`). So the
+        // dequant arm below lowers the prover's evaluator, and asserts that the
+        // component it was derived from still states the same lookups.
         macro_rules! go {
             ($c:expr, $name:expr) => {{
                 let ir = lower_logup(&$c.eval, $c.eval.log_size());
@@ -3571,7 +3586,17 @@ pub fn gen_emit_cmd(args: &[String]) {
         }
         go!(b.ao, "attnout".to_string());
         for i in 0..b.mats.len() {
-            go!(b.mats[i], format!("dequant{i}"));
+            let ev = crate::layer::deq_logup_eval(&b.mats[i].eval);
+            let want = lower_logup(&ev, ev.log_size());
+            let full = lower_logup(&b.mats[i].eval, b.mats[i].eval.log_size());
+            assert_eq!(
+                (full.fingerprint(), full.ops.len(), full.scalars.len(), &full.fracs),
+                (want.fingerprint(), want.ops.len(), want.scalars.len(), &want.fracs),
+                "dequant{i} ({}): the component's own evaluator states lookups the \
+                 evaluator the prover lowers does not",
+                b.mats[i].eval.tag
+            );
+            add(ev.cuda_eval_name(), format!("dequant{i}"), want);
         }
         for i in 0..b.residual_stream.len() {
             go!(b.residual_stream[i], format!("residual_stream{i}"));
@@ -3918,6 +3943,67 @@ mod tests {
             assert_eq!(shapes(&zeroed), want,
                        "{what}: a key tile whose numerator column is identically zero lowers \
                         to a shape of its own");
+        }
+    }
+
+    /// #43, on the real components and through the whole construction path.
+    ///
+    /// `genemit` installs the lowering of `layer::deq_logup_eval` -- the
+    /// evaluator the prover lowers for this family's lookups -- and the
+    /// component the verifier checks carries two accumulator sides more, the
+    /// output side and the scale side. Neither side is a lookup, so the two
+    /// state the same fractions; what they do not share is their column
+    /// totals, which `Ir::fingerprint` does not hash. That is the divergence
+    /// #43 names: nothing but the fingerprint said the emitter's evaluator and
+    /// the prover's agreed. The emitter now lowers the prover's, derived from
+    /// the component, and this is what says the derivation drops no lookup and
+    /// that the sides it drops are the ones that carried the difference.
+    #[test]
+    fn the_dequant_lookups_are_the_components_own() {
+        let with_prefix = {
+            let mut p = crate::exprprobe::tests::params_no_prefix();
+            p.c = 128;
+            p
+        };
+        for (what, params) in
+            [("no prefix", crate::exprprobe::tests::params_no_prefix()), ("a prefix", with_prefix)]
+        {
+            let plan = crate::compose::Plan::new(&params);
+            let mut ch = stwo::core::channel::Blake2sM31Channel::default();
+            stwo::core::channel::Channel::mix_u64(&mut ch, 0x0b65_4b05);
+            let rels = crate::compose::Rels::draw(
+                &mut ch, &plan.widths,
+                plan.residual_stream.as_ref().map(|g| g.uns.as_slice()),
+                plan.emb.map(|l| l.arity()), plan.needs_rq_rels(), plan.q_tabs.len());
+            let f = stwo::core::channel::Channel::draw_secure_felts(&mut ch, 6);
+            let mut claims = crate::exprprobe::claims_for(&plan, 0x0b65_4b05);
+            // the emitter's own placeholders, so this lowers what `genemit` lowers
+            fill_binding_claims(&plan, &mut claims, 0x7135_4b05);
+            let b = crate::compose::build_components(
+                &plan, &rels, f[0], f[1], f[2], f[3], f[4], f[5], &claims);
+            assert!(!b.mats.is_empty(), "{what}: the fixture carries dequant components");
+            let mut with_sides = 0usize;
+            for c in &b.mats {
+                let tag = &c.eval.tag;
+                let slim = crate::layer::deq_logup_eval(&c.eval);
+                let full = lower_logup(&c.eval, c.eval.log_size());
+                let want = lower_logup(&slim, slim.log_size());
+                assert_eq!(full.fingerprint(), want.fingerprint(),
+                           "{what}/{tag}: the two evaluators lower to different shapes");
+                assert_eq!(full.fracs, want.fracs, "{what}/{tag}: lookups");
+                assert_eq!((full.ops.len(), full.scalars.len()),
+                           (want.ops.len(), want.scalars.len()),
+                           "{what}/{tag}: instruction or slot count");
+                if c.eval.output_claim.is_some() || c.eval.sside.is_some() {
+                    with_sides += 1;
+                    assert!(full.cols[0] > want.cols[0] || full.cols[2] > want.cols[2],
+                            "{what}/{tag}: the sides the derivation drops declare no column \
+                             of their own, so this component does not carry #43's difference");
+                }
+            }
+            assert!(with_sides > 0,
+                    "{what}: no dequant component carries an output side or a scale side, so \
+                     the fixture does not reach the divergence");
         }
     }
 }

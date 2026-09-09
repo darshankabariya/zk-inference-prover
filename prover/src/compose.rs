@@ -5872,7 +5872,10 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
     // what makes that correct: a claimed sum enters constraints and never a
     // lookup. `Ir::fingerprint` records the number of scalars and not their
     // values, so the shape a component lowers to here is the shape `genemit`
-    // compiled from the same design point.
+    // compiled from the same design point. Issue #43: the dequant family's
+    // lookups are lowered from `layer::deq_logup_eval` of the component built
+    // here, on both routes, so "the same design point" is now "the same
+    // evaluator".
     let air_t = std::time::Instant::now();
     let components = build_components(&plan, &rels, r, s, rv, r_diagonal_block, w_residual_stream, lam_residual_stream,
                                       &crate::exprprobe::claims_for(&plan, 0x0b65_4b05));
@@ -5912,8 +5915,8 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
     } else {
         let affine_t = std::time::Instant::now();
         let mut out = vec![];
-        for (m, reg) in layer.mats.iter().zip(&mat_components) {
-            let ev = crate::layer::deq_logup_eval(m, reg, rv, s, &rels);
+        for (mi, (m, reg)) in layer.mats.iter().zip(&mat_components).enumerate() {
+            let ev = crate::layer::deq_logup_eval(&components.mats[mi].eval);
             let ir = crate::devfrac::ir_of(&ev, reg.lay.log_rows);
             out.push(crate::gkrlink::affinity_of(
                 "dequant", &format!("dequant/{}", m.name), &ir));
@@ -6060,8 +6063,8 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
     if p.gkr_dequant {
         let g = gkr.as_mut().expect("--gkr-dequant needs --gkr-key-tiles");
         let phase_t = std::time::Instant::now();
-        for (mi, (m, reg)) in layer.mats.iter().zip(&mat_components).enumerate() {
-            let eval = crate::layer::deq_logup_eval(m, reg, rv, s, &rels);
+        for (mi, reg) in mat_components.iter().enumerate() {
+            let eval = crate::layer::deq_logup_eval(&components.mats[mi].eval);
             crate::gkr_key_tile::deq_site(g, mi, &eval, reg);
         }
         crate::util::add_phase("int/deq_gkr", phase_t.elapsed().as_secs_f64());
@@ -6074,10 +6077,11 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
     // plan's component order, which is `sites_of`'s and the order the interaction
     // loop below reaches them in.
     //
-    // The evaluator is the component's own with the ablation undone. Stream U
-    // rebuilt dequant's from the plan; cloning the built one and clearing `gkr`
-    // is the same lowering by construction rather than by inspection, which is
-    // the property `ZK_GENERATED_LOGUP=2` exists to check for the committed half.
+    // The evaluator is the component's own with the ablation undone -- the same
+    // lowering by construction rather than by inspection, which is the property
+    // `ZK_GENERATED_LOGUP=2` exists to check for the committed half. Issue #43:
+    // dequant's is derived the same way now (`layer::deq_logup_eval`), so no
+    // family builds a second evaluator from the plan.
     if p.gkr_residual_stream {
         let g = gkr.as_mut().expect("--gkr-residual-stream needs --gkr-key-tiles");
         let phase_t = std::time::Instant::now();
@@ -6354,7 +6358,8 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
         let sc = (plan.rqs.iter().any(|rp| plan.freivalds[rp.freivalds].mats.contains(&mi))
                   && plan.specs[mi].variant != DeqVariant::Fold)
             .then_some((w_residual_stream, lam_residual_stream));
-        let it = mat_interaction(m, reg, rv, s, &rels, ow.as_ref(), p.gkr_dequant, sc);
+        let it = mat_interaction(m, reg, rv, s, &rels, ow.as_ref(),
+                                 &components.mats[mi].eval, p.gkr_dequant, sc);
         inter_all.extend(it.cols);
         inter_mark(&format!("dequant/{}", m.name), &inter_all, &mut inter_seen,
                    &mut inter_split);
