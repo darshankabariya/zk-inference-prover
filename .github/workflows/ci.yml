@@ -80,6 +80,16 @@ jobs:
       - name: banned words in durable prose
         run: python3 tools/words.py README.md GLOSSARY.md docs/ prover/README.md prover/kernels/README.md harness/README.md nitroo/README.md
 
+  kernels:
+    # The install scripts' block markers are a contract with the vendored fork's
+    # CMakeLists.txt.  The self-test installs twice and undoes once against a
+    # scratch copy of it: standard library only, no store and no card.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: the witness-generation install script's self-test
+        run: python3 prover/kernels/install_witness_gen_kernels.py --selftest
+
   harness:
     # The harness's own self-tests.  Every one of them runs on the CPU: no card,
     # no weights and nothing downloaded, which is what lets CI run them at all.
