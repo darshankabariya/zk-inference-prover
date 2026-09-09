@@ -248,6 +248,21 @@ pub fn read_json(path: &str) -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
+/// A dump's own `manifest.json`, read, parsed, and noted in the run's
+/// provenance block.
+///
+/// Every reader of a dump opens this file -- the layer, its key tiles, the
+/// requantize seam, the residual stream, the head's argmax, the manifest writer's
+/// republished calibration -- so noting the dump here is what makes the run
+/// JSON's record of the dumps it read complete, and complete without a reader
+/// having to remember to say so (issue #130). The digest is over the `files`
+/// map; `util::dump_digest` says what of it.
+pub fn read_manifest(dir: &str) -> Result<Value, String> {
+    let man = read_json(&format!("{dir}/manifest.json"))?;
+    crate::util::prov_note_dump(dir, &man);
+    Ok(man)
+}
+
 /// The counters as they stand. A caller times a component by taking one of these
 /// before it and calling `since` after it.
 #[derive(Clone)]

@@ -533,9 +533,7 @@ impl RWitness {
             raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]]) & 0x7fff).collect();
         let qraw = std::fs::read(format!("{dir}/qx_{name}.i8"))
             .map_err(|e| format!("qx_{name}.i8: {e}"))?;
-        let man: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(format!("{dir}/manifest.json"))
-                .map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        let man: serde_json::Value = crate::witread::read_manifest(dir)?;
         let am = &man["accumulators"][name];
         let n = am["n_in"].as_u64().ok_or("manifest: n_in")? as usize;
         let mut tokens = am["tokens"].as_u64().ok_or("manifest: tokens")? as usize;

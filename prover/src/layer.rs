@@ -926,7 +926,7 @@ pub const FREIVALDS_GROUPS: [(&str, &[&str]); 5] =
 impl Layer {
     pub fn load(dir: &str, cfg: &Src, key_tile_sizes: &[usize], variant: Variant,
                 round: bf16::Round) -> Result<Self, String> {
-        let man: serde_json::Value = witread::read_json(&format!("{dir}/manifest.json"))?;
+        let man: serde_json::Value = witread::read_manifest(dir)?;
         // Issue #53: before the dump is read at all, let alone committed -- the
         // rounding the line names has to be the one this dump was written under.
         if let Some(why) = round_refusal(&man, round) {
@@ -1329,7 +1329,7 @@ impl Layer {
     ///   own shifts and there is no witness here.
     pub fn load_weights(dir: &str, cfg: &Src, key_tile_sizes: &[usize], variant: Variant)
                         -> Result<Self, String> {
-        let man: serde_json::Value = witread::read_json(&format!("{dir}/manifest.json"))?;
+        let man: serde_json::Value = witread::read_manifest(dir)?;
         let g = |k: &str| man[k].as_u64().ok_or(format!("manifest: missing {k}"));
         let (nh, s, c, hd) = (g("heads")? as usize, g("s")? as usize,
                               g("c")? as usize, g("hd")? as usize);

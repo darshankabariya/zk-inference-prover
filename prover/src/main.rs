@@ -564,9 +564,8 @@ fn argmax_cmd(args: &[String]) {
     // from that dump's manifest rather than from the flags.
     let w = match arg_str(args, "--witness") {
         Some(dir) => {
-            let man: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(format!("{dir}/manifest.json")).expect("manifest.json"))
-                .expect("manifest.json parses");
+            let man: serde_json::Value =
+                witread::read_manifest(&dir).expect("manifest.json");
             let tk = man["head"]["tokens"].as_u64().expect("manifest: head.tokens") as usize;
             let vc = man["head"]["vocab"].as_u64().expect("manifest: head.vocab") as usize;
             eprintln!("argmax on the dump's own keys: {tk} rows of {vc}");
@@ -1971,8 +1970,7 @@ fn model_roots_cmd(args: &[String]) {
         // neither.
         let calib = a.iter().rposition(|w| w == "--witness")
             .and_then(|i| a.get(i + 1))
-            .and_then(|d| std::fs::read(format!("{d}/manifest.json")).ok())
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+            .and_then(|d| witread::read_manifest(d).ok());
         let field = |k: &str| calib.as_ref().map(|m| m[k].clone()).unwrap_or(Value::Null);
         rows.push(json!({
             "layer": layer,
@@ -3522,9 +3520,7 @@ fn residual_stream_cmd(args: &[String]) {
     let mut drift = vec![];
     let mut b1 = vec![];
     if let Some(d) = &dir {
-        let man: Value = serde_json::from_str(
-            &std::fs::read_to_string(format!("{d}/manifest.json")).expect("manifest"))
-            .expect("manifest json");
+        let man: Value = witread::read_manifest(d).expect("manifest");
         let dm = man["residual_stream"]["d"].as_u64()
             .expect("manifest: residual_stream.d -- extract with --residual-stream") as usize;
         let rd = |n: &str| -> Vec<u16> {

@@ -415,7 +415,7 @@ impl Attn {
     #[allow(clippy::too_many_arguments)]
     pub fn load(dir: &str, head: usize, sh: Shape, variant: Variant, nmax: u32,
                 log_table: u32, master: Option<f64>, diagonal_block: bool) -> Result<Self, String> {
-        let man: serde_json::Value = witread::read_json(&format!("{dir}/manifest.json"))?;
+        let man: serde_json::Value = witread::read_manifest(dir)?;
         let raw = LayerRaw::read(dir, &man, !diagonal_block, diagonal_block)?;
         Self::load_from(&raw, &man, head, sh, variant, nmax, log_table, master, diagonal_block, 0)
     }

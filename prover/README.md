@@ -200,9 +200,24 @@ RAYON_NUM_THREADS=16 zk-prover compose --round even --numbits 9 --z-hi-bits 7 \
     --witness <dir>
 ```
 
-| proof | digest (first 16 hex) | recorded |
-|---|---|---|
-| Llama-3.1-8B layer 16, `S = 512`, `C = 16384` | `25741d12f315aae7` | both backends, 2026-09-07; no skip in effect, every edge bound, no kernel fallback; `zk-results` run `2026-09-07-reference-digest-h100` |
+| proof | digest (first 16 hex) | dump (first 16 hex) | recorded |
+|---|---|---|---|
+| Llama-3.1-8B layer 16, `S = 512`, `C = 16384` | `25741d12f315aae7` | not recorded | both backends, 2026-09-07; no skip in effect, every edge bound, no kernel fallback; `zk-results` run `2026-09-07-reference-digest-h100` |
+
+**The row is a function of the dump as well as of the commit.** This digest does
+not reproduce today, and no prover commit is behind that: the same command at
+the commit the row names proves the same number as current main, and what moved
+between the two measurements is the dump the proof was made from (issue #130).
+The most likely part of it is the attention calibration, which is computed once
+per host and which nothing pinned. So the dump column says `not recorded`: the
+run behind this row named the commit, the command and the proof, and about the
+dump it named nothing, which is why "the same command at this commit" is not yet
+a check a reader can make. Every run now names the dump it proved on --
+`provenance.dump_sha256`, the roll-up over the per-array digests the dump's
+manifest lists, beside the digest of the calibration that dump was quantized
+under -- and re-recording the row from a run that carries both is the card job
+issue #130 keeps open. The predecessor row below is in the same position and
+cannot leave it: no host holds that dump.
 
 The dump carries its own diagonal block and the residual-stream columns, so
 every binding gadget the defaults switch on is stated on it and the proof
@@ -251,6 +266,16 @@ the tree was `dirty` (both from `build.rs`; `unknown` when the build had no
 git and no `.source-commit` file), the `binary` name and its `args`, the
 `backend`, the `gpu`, the `driver_version` and the `cuda_version` the driver
 reports, the `proof_sha256` (one proof) or `proof_sha256s` (a chunk loop),
-the `unsound_skips` in effect, and the `binding` table folded over every proof
+the `dump_sha256` (one dump) and `dumps` (every dump the run read), the
+`unsound_skips` in effect, and the `binding` table folded over every proof
 the run made. None of it enters a statement or a proof, so the digest does not
 depend on it.
+
+A dump's digest is the roll-up over the per-array digests its own
+`manifest.json` lists, which is a claim about the arrays and not a re-reading of
+them (`util::dump_digest` says what it is over and what it leaves out; the
+extractor computes the same number as it writes the dump). Each entry of `dumps`
+carries it beside the directory, the layer and the block, the ids file the dump
+was extracted from and the attention calibration it was quantized under -- the
+two inputs a dump has that its arrays do not state. A run on a synthetic segment
+reads no dump and its `dumps` is empty.

@@ -2840,9 +2840,7 @@ pub fn norm_drift(dir: &str, d: usize, tokens_cap: usize, round: Round, which: &
                   roots: Option<&[u16]>) -> Result<Value, String> {
     let x = read_u16(dir, if which == "n2" { "xmid" } else { "xin" })?;
     let want = read_u16(dir, if which == "n2" { "n2_in" } else { "n1_in" })?;
-    let man: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(format!("{dir}/manifest.json"))
-            .map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let man: serde_json::Value = crate::witread::read_manifest(dir)?;
     let eps = man["residual_stream"]["eps"].as_u64().ok_or("manifest: residual_stream.eps")? as u16;
     let inv_d = man["residual_stream"]["inv_d"].as_u64().ok_or("manifest: residual_stream.inv_d")? as u16;
     let tokens = (x.len() / d).min(tokens_cap.max(1)).max(1);

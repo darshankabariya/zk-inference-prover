@@ -460,6 +460,7 @@ pub fn env_json() -> Value {
 struct Prov {
     digests: Vec<String>,
     bindings: Vec<Value>,
+    dumps: Vec<Value>,
 }
 
 fn prov() -> &'static std::sync::Mutex<Prov> {
@@ -473,6 +474,81 @@ pub fn prov_note_proof(digest: &str, binding: Value) {
     let mut p = prov().lock().unwrap();
     p.digests.push(digest.to_string());
     p.bindings.push(binding);
+}
+
+/// The identity of one dump: the per-array digests its manifest lists, rolled
+/// into one number.
+///
+/// A dump's `manifest.json` already carries an entry per array under `files` --
+/// the name, the element count, the dtype, the shape and the array's sha256 --
+/// and nothing rolled them into a number a record could quote. So a recorded
+/// proof digest named the commit that made it and not the dump it was made
+/// from, and when the 8B reference digest moved with no prover commit behind it
+/// (issue #130), neither record could say that what had moved was the dump.
+///
+/// The roll-up is over the arrays alone: the entries sorted by name, one line
+/// each, `name values dtype shape sha256`, after a version tag. Not over the
+/// manifest's own bytes, which carry the ids path that host read and the torch
+/// version it ran, so two hosts that wrote the same arrays would get two
+/// numbers out of them; and not over `written` or `link`, which say what is on
+/// disk (`--slim`, `--share`) and not what the extraction computed.
+///
+/// It is what the manifest **claims** about its arrays, not a re-reading of
+/// them: the extractor hashes each array as it writes it, and a 4.2 GB dump is
+/// not re-hashed here. A reader who wants the bytes checked hashes the files.
+///
+/// `harness/witness/extract.py` rolls the same lines up the same way and writes
+/// the result into the manifest as `dump_sha256`. This reads the `files` map
+/// instead of that field, so a dump written before the field existed still has
+/// an identity, and a manifest whose two disagree is reported rather than
+/// believed. `None` for a manifest with no `files` map at all.
+pub fn dump_digest(man: &Value) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let files = man.get("files")?.as_object()?;
+    let mut names: Vec<&String> = files.keys().collect();
+    names.sort();
+    let mut h = Sha256::new();
+    h.update(b"zk-dump-v1\n");
+    for n in names {
+        let f = &files[n];
+        let shape: Vec<String> = f["shape"].as_array()
+            .map(|a| a.iter().map(|v| v.to_string()).collect())
+            .unwrap_or_default();
+        h.update(format!("{n} {} {} {} {}\n", f["values"], f["dtype"].as_str().unwrap_or(""),
+                         shape.join(","), f["sha256"].as_str().unwrap_or("")).as_bytes());
+    }
+    Some(format!("{:x}", h.finalize()))
+}
+
+/// This run read a dump: name it in the provenance block, by directory and by
+/// digest, with what its manifest says about where it came from.
+///
+/// Called once per dump directory from `witread::read_manifest`, which is how
+/// every reader of a dump opens one. A directory read twice -- the layer and
+/// its key tiles both open the manifest -- is one dump and is noted once.
+pub fn prov_note_dump(dir: &str, man: &Value) {
+    let sha = dump_digest(man);
+    let mut p = prov().lock().unwrap();
+    if p.dumps.iter().any(|d| d["dir"] == json!(dir)) {
+        return;
+    }
+    let mut e = json!({
+        "dir": dir,
+        "sha256": sha,
+        "layer": man["layer"],
+        "block": man["block"],
+        // the ids the dump was extracted from and the attention calibration it
+        // was quantized under, as the manifest names them: both null on a dump
+        // written before the extractor recorded them
+        "ids_from": man["ids_from"],
+        "attn_ranges": man["attn_ranges"],
+    });
+    // a manifest that states its own roll-up and does not agree with the arrays
+    // it lists has been edited since it was written, which is worth saying
+    if man["dump_sha256"].is_string() && man["dump_sha256"].as_str().map(String::from) != sha {
+        e["dump_sha256_stated"] = man["dump_sha256"].clone();
+    }
+    p.dumps.push(e);
 }
 
 /// The unsound switches on the command line, as their names: every
@@ -547,6 +623,12 @@ pub fn provenance_json() -> Value {
         "cuda_version": cuda,
         "proof_sha256": if p.digests.len() == 1 { json!(p.digests[0]) } else { Value::Null },
         "proof_sha256s": if p.digests.len() > 1 { json!(p.digests) } else { Value::Null },
+        // issue #130: which dump this run was made from. `dump_sha256` is the
+        // one a record quotes when there is one dump to quote, the way
+        // `proof_sha256` is; `dumps` names every one a chunk loop read, and is
+        // empty for a run on a synthetic segment, which reads none.
+        "dump_sha256": if p.dumps.len() == 1 { p.dumps[0]["sha256"].clone() } else { Value::Null },
+        "dumps": json!(p.dumps),
         "unsound_skips": unsound_skips(),
         "binding": fold_bindings(&p.bindings),
     })
