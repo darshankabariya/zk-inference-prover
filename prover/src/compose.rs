@@ -455,6 +455,11 @@ pub struct Fixed {
     /// the pinned root of tree 0, the shape tree: tables, selectors, masks,
     /// cos/sin and `dinv` -- everything a verifier rebuilds from this statement
     /// and the model manifest's per-layer calibration, with no weights.
+    ///
+    /// Issue #95: and rebuilding it is what `verify_composed` does with it.
+    /// Given a calibration (`--verify-calibration FILE`) the verifier derives
+    /// this root rather than reading it, so a statement that names the root of
+    /// a shape tree its own parameters do not give is refused.
     pub pre_root: String,
     /// Stream PP (E11): the pinned root of tree 1, the model tree -- the
     /// weights and their scales.  One constant per (model, layer); the verifier
@@ -5427,9 +5432,30 @@ different rotation", inv.len(), 2 * hd * p.s);
           residual_stream_tamper_fired }
 }
 
+/// Issue #95: what `prove_gen_to` was asked for -- the whole proof, or the
+/// shape tree's root and nothing after it.
+///
+/// The verifier's derivation stops where `--shape-only` stops, and it stops by
+/// *returning*: `verify_composed` runs inside a process that has a verdict to
+/// report, so the exit the command line takes there is not open to it.
+pub enum Proved {
+    Composed(Box<Composed>),
+    ShapeRoot(String),
+}
+
 /// B7b (README 26): the second half -- the session, the three commits, the
 /// interaction, the components and the proof.
 pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
+    match prove_gen_to(layer, params, g, false) {
+        Proved::Composed(c) => *c,
+        Proved::ShapeRoot(_) => unreachable!("prove_gen: asked for the proof, given a root"),
+    }
+}
+
+/// `prove_gen`, and -- with `shape_root_only` -- the derivation that stops at
+/// tree 0's root.  One builder for both, so there is no second implementation
+/// of the shape tree for the verifier's root to be derived by.
+pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: bool) -> Proved {
     let Gen { plan, tables, key_tile_committed, key_tile_dev, key_tile_pre, aor, mat_components, freivalds_components,
               residual_stream_components, residual_stream_tcols, residual_stream_mcols,
               residual_stream_b1, am_component, emb_component, rq_components,
@@ -5709,6 +5735,13 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
     // `--shape-cache-verify` this is where the fresh root is compared with the
     // stored one.
     crate::shaperoot::fill(&sess.tree_root(0));
+    // Issue #95: and this is where the verifier's derivation ends -- the same
+    // line the command line stops at below, with the root returned instead of
+    // printed.  Before the exit, so that a derivation inside a process that
+    // happens to carry `--shape-only` still returns to its caller.
+    if shape_root_only {
+        return Proved::ShapeRoot(sess.tree_root(0));
+    }
     // Stream PP (E11): the verifier's own work stops here.  Everything after
     // this line reads the model; the shape root does not.
     if SHAPE_ONLY.load(std::sync::atomic::Ordering::Relaxed) {
@@ -7097,7 +7130,7 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
             .map(|r| r.token_ids(p.mats[plan.argmax_mat().expect("the head matmul")].tokens))
             .unwrap_or_default(),
     };
-    Composed {
+    Proved::Composed(Box::new(Composed {
         proof,
         prove_error,
         stats,
@@ -7125,10 +7158,91 @@ pub fn prove_gen(layer: &Layer, params: &Params, g: Gen) -> Composed {
         layer_boundary: layer_boundary_report,
         kv_boundary: kv_report,
         residual_stream_tamper_fired,
-    }
+    }))
 }
 
 // ---------------------------------------------------------------- verifying ----
+
+/// Issue #95: the shape tree's root, from the statement's own parameters and
+/// the per-layer calibration the model manifest publishes -- the two things
+/// the tree is a function of, and the two things a verifier holds.
+///
+/// It is `zk-prover expect-root --shape-only --calibration` as a function.
+/// `Layer::from_params` (#112) builds the segment those two determine, with no
+/// dump and no weight anywhere in reach, and the **prover's own builder**
+/// commits tree 0 and stops: there is no second implementation of the shape
+/// tree for this root to be derived by, which is what makes comparing it with
+/// the statement's `pre_root` a check and not a second declaration.
+///
+/// The cost is the preprocessed build the issue names, and it is paid once per
+/// key in a process -- a grid's segments at one `(layer, shape)` share one
+/// derivation between them.  Returns the root, whether this call paid for it,
+/// and what it paid.
+pub fn shape_root_from_params(params: &Params, calib: &crate::shaperoot::Calibration)
+                              -> (String, bool, f64) {
+    let t0 = std::time::Instant::now();
+    let (root, paid) = crate::shaperoot::derived_root(params, calib, || {
+        // the run's own noted key and its cache are left as the run wrote them
+        let _deriving = crate::shaperoot::deriving();
+        let layer = crate::layer::Layer::from_params(params, calib);
+        let g = generate(&layer, params, &ProverTamper::default(), None);
+        match prove_gen_to(&layer, params, g, true) {
+            Proved::ShapeRoot(r) => r,
+            Proved::Composed(_) => unreachable!("the derivation ran past the shape tree"),
+        }
+    });
+    (root, paid, if paid { t0.elapsed().as_secs_f64() } else { 0.0 })
+}
+
+/// Issue #95: the shape root this statement should have, and the comparison.
+///
+/// The calibration is the verifier's own input -- the document
+/// `--verify-calibration FILE` names, which is the manifest `zk-prover
+/// model-roots` writes -- and the statement is the prover's, so a statement
+/// whose parameters and the manifest's calibration do not describe one segment
+/// is a **rejection** and not a crash: `Layer::from_params` refuses such a pair
+/// by name, and the name is what the verdict then carries.
+///
+/// Returns the derived root, whether it is the statement's, what the derivation
+/// cost, and the message a mismatch is refused with.
+fn shape_root_check(fixed: &Fixed)
+                    -> (Option<String>, Option<bool>, f64, Option<String>) {
+    let Some((f, doc)) = crate::shaperoot::verify_calibration() else {
+        return (None, None, 0.0, None);
+    };
+    let calib = match crate::shaperoot::calibration_for(f, doc, &fixed.params, fixed.layer) {
+        Ok(c) => c,
+        Err(e) => return (None, Some(false), 0.0,
+                          Some(format!("the shape root was not derived: {e}"))),
+    };
+    let derived = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        shape_root_from_params(&fixed.params, &calib)
+    }));
+    let (root, _paid, secs) = match derived {
+        Ok(v) => v,
+        // `from_params` and the builder refuse by panicking, which is right
+        // where they are called from a command line and wrong here: a verifier
+        // that cannot derive this statement's shape tree has not accepted it.
+        Err(e) => {
+            let why = e.downcast_ref::<String>().cloned()
+                .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "the derivation failed".to_string());
+            return (None, Some(false), 0.0,
+                    Some(format!("the shape root was not derived from the statement and \
+                                  {f}: {why}")));
+        }
+    };
+    if root == fixed.pre_root {
+        return (Some(root), Some(true), secs, None);
+    }
+    // both roots, so a reader of the verdict sees what the parameters give and
+    // what the statement asked to be believed
+    let why = format!(
+        "the shape tree the statement's parameters and the calibration give has root {root}, \
+         and the statement declares pre_root {} -- this proof is about some other shape",
+        fixed.pre_root);
+    (Some(root), Some(false), secs, Some(why))
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Verdict {
@@ -7137,6 +7251,18 @@ pub struct Verdict {
     /// Stream PP (E11): the proof's second root is the one the statement
     /// declares as its model commitment.
     pub model_root_ok: bool,
+    /// Issue #95: the shape tree's root, **derived** from `Fixed.params` and
+    /// the calibration the manifest publishes, is the root the statement
+    /// declares.  `None` on a run given no calibration
+    /// (`--verify-calibration FILE`): there the shape root is asserted by the
+    /// prover and checked by nothing, exactly as it was before this existed,
+    /// and the report says so rather than the verdict pretending.
+    pub shape_root_ok: Option<bool>,
+    /// the root that derivation gave, when it ran
+    pub shape_root: Option<String>,
+    /// what the derivation cost this proof, in seconds -- zero on a proof whose
+    /// shape another proof of this process had already derived
+    pub shape_secs: f64,
     pub sums_cancel: bool,
     pub qk_ok: Vec<bool>,
     pub den_ok: Vec<bool>,
@@ -7259,7 +7385,11 @@ impl Verdict {
             .map(|s| s.root.as_str())
     }
     pub fn accepts(&self) -> bool {
-        self.stark_ok && self.root_ok && self.model_root_ok
+        // issue #95: a derived root that is not the statement's is a rejection;
+        // a run that derived none accepts what it accepted before, and
+        // `shape_root_ok` is `None` there rather than true
+        self.shape_root_ok != Some(false)
+            && self.stark_ok && self.root_ok && self.model_root_ok
             && self.sums_cancel && self.av_ok && self.den_link_ok
             && self.sizes_ok && self.qk_ok.iter().all(|x| *x) && self.den_ok.iter().all(|x| *x)
 
@@ -7273,6 +7403,7 @@ impl Verdict {
     }
     fn rejected(msg: &str) -> Self {
         Self { stark_ok: false, root_ok: false, model_root_ok: false,
+               shape_root_ok: None, shape_root: None, shape_secs: 0.0,
                sums_cancel: false, qk_ok: vec![],
                den_ok: vec![], av_ok: false, den_link_ok: false, freivalds_ok: vec![],
                sizes_ok: false, residual_stream_ok: vec![false], deq_out_ok: vec![false],
@@ -7354,10 +7485,15 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
     let mut ch = Blake2sM31Channel::default();
     config.mix_into(&mut ch);
     let mut vcs = CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+    // the proof committed the shape root its own statement declares; that the
+    // root is the one this statement's parameters give is issue #95's question
+    // and is asked at the end of this function
     let root_ok = format!("{:?}", proof.commitments[0]) == fixed.pre_root;
-    // stream PP: the model tree's root is the second unchecked one -- a
-    // *declaration* here, like `pre_root`; what pins it to a model is
-    // `boundary-grid --expect-model-roots` against the published manifest.
+    // stream PP: the model tree's root is the unchecked one -- a *declaration*
+    // here; what pins it to a model is `boundary-grid --expect-model-roots`
+    // against the published manifest.  It is the publisher's commitment to
+    // weights the verifier does not hold, so unlike the shape root it is not
+    // derivable from anything a verifier has.
     let model_root_ok = format!("{:?}", proof.commitments[1]) == fixed.model_root;
     vcs.commit(proof.commitments[0], &fixed.sizes[0], &mut ch);
     vcs.commit(proof.commitments[1], &fixed.sizes[1], &mut ch);
@@ -7809,7 +7945,30 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         }
     }).collect();
 
-    Verdict { stark_ok, root_ok, model_root_ok,
+    // ---- issue #95: the shape tree, rebuilt ------------------------------------
+    //
+    // Every line above reads the proof, the claims and the statement.  This one
+    // reads the statement's *parameters* and the calibration the manifest
+    // publishes, rebuilds tree 0 from them and compares the root with the one
+    // the statement declares -- so the columns the AIR reads as facts (every
+    // selector, the causal mask, the marker for the rows a key grid holds, the
+    // range tables' indices) are the shape the parameters give and not a shape
+    // the prover chose and then named.  `root_ok` above says the proof
+    // committed the root its own statement declares, which is a different
+    // question and was the only one asked before this.
+    //
+    // The model root stays a comparison and not a derivation: it is the
+    // publisher's commitment to weights this verifier does not hold, and what
+    // pins it is `boundary-grid --expect-model-roots` against the same
+    // manifest.
+    let (shape_root, shape_root_ok, shape_secs, shape_why) = shape_root_check(&fixed);
+    let error = match (shape_why, error) {
+        (Some(w), Some(e)) => Some(format!("{w}; and stwo's verify: {e}")),
+        (Some(w), None) => Some(w),
+        (None, e) => e,
+    };
+
+    Verdict { stark_ok, root_ok, model_root_ok, shape_root_ok, shape_root, shape_secs,
               sums_cancel, qk_ok, den_ok, av_ok, den_link_ok, freivalds_ok, deq_out_ok,
               deq_out_open, head_binding_ok, embed_ok, embed_tok_ok, head_tok_ok,
               rq_in_ok, rq_out_ok, rq_scale_ok, rq_scale_open, ao_q_open, ao_q_ok,

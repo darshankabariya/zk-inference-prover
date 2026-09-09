@@ -29,6 +29,35 @@ reproduce the digest the loop gave that line. A flag that carries no value, such
 as `--diagonal-block`, is read as present or absent, so repeating one says
 nothing new.
 
+## What the verifier derives
+
+`verify_composed` -- the only accept path, and what `boundary-grid --verify`
+runs on every chunk -- rebuilds the shape tree from the statement it verifies
+and compares the root it gets with the `pre_root` that statement declares
+(issue #95). Its two inputs are the statement's own `params` and the per-layer
+calibration the model manifest publishes, and the second is a command line of
+the verifier's own:
+
+```sh
+zk-prover boundary-grid --dir SER --verify --prompt IDS --verify-calibration MANIFEST
+zk-prover compose <flags> --verify-calibration FILE
+```
+
+`FILE` is the manifest `zk-prover model-roots --out` writes, whose row for the
+chunk's `(layer, c)` carries `frac_per_head` beside the model root; for one
+segment it is also the `result.shape.calibration` block every run publishes, or
+a dump's `manifest.json`. `boundary-grid --verify` demands it, as it demands
+`--prompt`. Without it a run derives nothing, `verdict.shape_root_ok` is null,
+and the shape root is asserted by the prover and checked by nothing, which is
+what every verifier had before this.
+
+The derivation costs the preprocessed build of one shape tree, paid once per
+`(layer, shape)` in a process: a grid pays one derivation per cell of the
+`(layer, context)` table and not one per proof. The model root is not
+derivable -- it is the publisher's commitment to weights the verifier does not
+hold -- and stays a comparison against the same manifest
+(`boundary-grid --expect-model-roots`).
+
 ## The digest gate
 
 Any change that is not meant to alter the proof reproduces every digest below

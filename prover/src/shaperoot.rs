@@ -61,12 +61,21 @@
 //!
 //! What the cache does **not** do is make the comparison: a stored root is only
 //! as good as the derivation that wrote it, so it amortises the honest cost and
-//! is not itself a check. Whether the verifier derives at all is #95's
-//! question and this file does not answer it.
+//! is not itself a check.
+//!
+//! **Issue #95 makes the comparison.** `verify_composed` derives the shape root
+//! from `Fixed.params` and the calibration the model manifest publishes and
+//! compares it with the statement's `pre_root`, and the second half of this
+//! file is what it derives with: the calibration read off a published document
+//! (`--verify-calibration FILE`) and the memo that makes one shape's derivation
+//! cost one derivation in a process. That memo is **not** the cache above: a
+//! `--shape-cache` record is a prover-side artifact, and a verifier that read a
+//! root out of a directory would have taken the root off something other than
+//! its own derivation, which is the whole of what #95 refuses.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Mutex, OnceLock};
 
 use serde_json::{json, Value};
@@ -189,6 +198,15 @@ pub fn configure(args: &[String]) {
     }
     let _ = DIR.set(dir);
     let _ = VERIFY.set(args.iter().any(|a| a == "--shape-cache-verify"));
+    // Issue #95: and the verifier's own input, read here because it is read
+    // once per process and because every command that verifies takes it.
+    let _ = VERIFY_CALIB.set(crate::arg_str(args, "--verify-calibration").map(|f| {
+        let bytes = std::fs::read(&f)
+            .unwrap_or_else(|e| panic!("--verify-calibration {f}: {e}"));
+        let v: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("--verify-calibration {f}: not JSON: {e}"));
+        (f, v)
+    }));
 }
 
 /// Whether the cache is on at all: `--shape-cache DIR` is the switch.
@@ -283,7 +301,11 @@ fn stored(k: &str, inputs: &Value) -> Option<String> {
 /// alone would have nothing to compare against and would quietly rewrite the
 /// record instead.
 pub fn fill(pre_root: &str) {
-    if !enabled() {
+    // Issue #95: a verifier's derivation runs the same builder, and the root it
+    // gets is a root of stand-ins for everything but the shape. It has its own
+    // memo below; the run's cache and the run's noted key are left as the run
+    // itself wrote them.
+    if !enabled() || DERIVING.load(Relaxed) {
         return;
     }
     let Some((k, inputs)) = lock(noted()).clone() else { return };
@@ -328,6 +350,190 @@ pub fn shape_json() -> Value {
             }),
         }),
     }
+}
+
+// ------------------------------------------------ issue #95: the verifier ----
+
+/// `--verify-calibration FILE`, read once: the published document a verifier
+/// derives shape roots with.
+static VERIFY_CALIB: OnceLock<Option<(String, Value)>> = OnceLock::new();
+/// The roots this process derived, by key, with the inputs each was derived
+/// from beside it. Filled by `derived_root` and by nothing else.
+static DERIVED: OnceLock<Mutex<HashMap<String, Entry>>> = OnceLock::new();
+/// set while a verifier's derivation is running, so the derivation cannot
+/// write to the run's own cache or rewrite the key the run published
+static DERIVING: AtomicBool = AtomicBool::new(false);
+static DERIVATIONS: AtomicU64 = AtomicU64::new(0);
+static REUSES: AtomicU64 = AtomicU64::new(0);
+
+fn derived() -> &'static Mutex<HashMap<String, Entry>> {
+    DERIVED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The document `--verify-calibration` named, when the run was given one.
+/// Without it a verifier has no calibration and derives nothing.
+pub fn verify_calibration() -> Option<&'static (String, Value)> {
+    VERIFY_CALIB.get().and_then(|d| d.as_ref())
+}
+
+/// The calibration a published document names for this statement.
+///
+/// Four forms, and each of them is a document this repository already writes:
+///
+/// * a model manifest -- `{"rows": [...]}` or the bare list of rows `zk-prover
+///   model-roots --out` writes -- whose row for this statement's `(layer, c)`
+///   carries the calibration. This is the verifier's own case: the manifest is
+///   what publishes the model root it compares, and it publishes the
+///   calibration beside it;
+/// * a run's `result.shape` block, `{"calibration": [...]}`;
+/// * that block's per-key-tile list on its own, which is the exact form and the
+///   only one a segment whose key tiles do not share one exponent per head has;
+/// * `{"frac_per_head": [...]}` -- a dump's manifest, or one manifest row --
+///   which `Layer::calibration_of` cycles into the key tiles.
+///
+/// `layer` is the statement's own coordinate, which is how a manifest row is
+/// found; a document that is not a manifest names one segment and is read as
+/// it stands.
+pub fn calibration_for(f: &str, doc: &Value, p: &Params, layer: Option<usize>)
+                       -> Result<Calibration, String> {
+    let Some(rows) = manifest_rows(doc) else {
+        return calibration_of_doc(f, doc, p);
+    };
+    let row = rows.iter().find(|r| {
+        r["layer"].as_i64() == layer.map(|l| l as i64)
+            && r["c"].as_u64() == Some(p.c as u64)
+    });
+    // A manifest that has no row for a cell is a manifest that says nothing
+    // about it, and saying nothing is not a calibration to derive with.
+    let row = row.ok_or_else(|| format!(
+        "{f}: the manifest has no row for (layer {}, c {}), so it publishes no calibration \
+         for this statement",
+        layer.map(|l| l.to_string()).unwrap_or_else(|| "unstated".into()), p.c))?;
+    calibration_of_doc(f, row, p)
+}
+
+/// Whether this document is a model manifest, and its rows. A manifest row
+/// names a cell of a grid (`layer`, `c`, `pre_root`, `model_root`); a key
+/// tile's calibration names an exponent and a scale, and neither is the other.
+fn manifest_rows(doc: &Value) -> Option<&Vec<Value>> {
+    let rows = if doc.is_array() { doc.as_array()? } else { doc.get("rows")?.as_array()? };
+    let first = rows.first()?;
+    ["layer", "c", "pre_root", "model_root"].iter().any(|k| !first[k].is_null())
+        .then_some(rows)
+}
+
+/// One segment's calibration, off a document that names exactly one: the
+/// per-key-tile block a run publishes, or the per-head list a manifest row
+/// carries.
+///
+/// The bit patterns are what the key is taken over, so they are what is read;
+/// the decimal fields beside them are a reader's copy and are used only where a
+/// document carries no bit pattern at all.
+pub fn calibration_of_doc(f: &str, v: &Value, p: &Params) -> Result<Calibration, String> {
+    // the per-key-tile block first: it is the exact form, and a document that
+    // carries both is a run's own report, where the block is what the root was
+    // taken over
+    let per_key_tile = if v.is_array() { v.clone() } else { v["calibration"].clone() };
+    if let Some(rows) = per_key_tile.as_array() {
+        if rows.is_empty() {
+            return Err(format!("{f}: the calibration names no key tile"));
+        }
+        let mut out = vec![];
+        for k in rows {
+            let bits = |x: &Value, name: &str| -> Result<u64, String> {
+                x.as_u64().ok_or_else(|| format!("{f}: {name} is not a bit pattern"))
+            };
+            let frac = match (&k["frac_bits"], &k["frac"]) {
+                (Value::Null, x) => x.as_f64()
+                    .ok_or_else(|| format!("{f}: a key tile names no frac"))?
+                    .to_bits(),
+                (x, _) => bits(x, "frac_bits")?,
+            };
+            let frac_per_inst: Vec<u64> = match (&k["frac_per_inst_bits"], &k["frac_per_inst"]) {
+                (Value::Null, x) => x.as_array()
+                    .ok_or_else(|| format!("{f}: a key tile names no frac_per_inst"))?
+                    .iter().map(|v| v.as_f64().unwrap_or(0.0).to_bits()).collect(),
+                (x, _) => {
+                    let a = x.as_array()
+                        .ok_or_else(|| format!("{f}: frac_per_inst_bits is not a list"))?;
+                    a.iter().map(|v| bits(v, "frac_per_inst_bits"))
+                        .collect::<Result<Vec<u64>, String>>()?
+                }
+            };
+            let delta: Vec<i64> = k["delta"].as_array()
+                .ok_or_else(|| format!("{f}: a key tile names no delta"))?
+                .iter().map(|v| v.as_i64().unwrap_or(0)).collect();
+            out.push(KeyTileCalibration { frac, frac_per_inst, delta });
+        }
+        return Ok(Calibration(out));
+    }
+    let v = v["frac_per_head"].as_array()
+        .ok_or_else(|| format!("{f}: carries neither a `calibration` block nor \
+                                `frac_per_head`"))?;
+    let mut fracs: Vec<f64> = vec![];
+    for x in v {
+        fracs.push(x.as_f64()
+                   .ok_or_else(|| format!("{f}: frac_per_head is not a list of numbers"))?);
+    }
+    if fracs.len() < p.nh {
+        return Err(format!("{f}: the calibration names {} heads and this statement has {}",
+                           fracs.len(), p.nh));
+    }
+    Ok(crate::layer::Layer::calibration_of(p, &fracs))
+}
+
+/// Issue #95: the shape root this statement and this calibration give, derived
+/// once per key in a process.
+///
+/// The key is the one the whole file is about -- the digest of the serialized
+/// parameters and of the calibration -- so two segments of a grid at one
+/// `(layer, shape)` pay one derivation between them, which is what makes the
+/// comparison affordable at all. A record whose key matches and whose inputs do
+/// not is refused by name here as it is in the store: the key is what the tree
+/// is a function of, and a memo that answered on the digest alone would be a
+/// second place a shape root could come from.
+///
+/// Returns the root and whether this call paid for it.
+pub fn derived_root(p: &Params, calib: &Calibration,
+                    derive: impl FnOnce() -> String) -> (String, bool) {
+    let inputs = inputs(p, calib);
+    let k = key(&inputs);
+    let held = lock(derived()).get(&k).map(|e| (e.inputs.clone(), e.pre_root.clone()));
+    if let Some((was, root)) = held {
+        assert_eq!(&was, &inputs,
+                   "the verifier's derivation under {k} was made from different parameters -- \
+                    the key does not determine the shape tree");
+        REUSES.fetch_add(1, Relaxed);
+        return (root, false);
+    }
+    let root = derive();
+    DERIVATIONS.fetch_add(1, Relaxed);
+    lock(derived()).insert(k, Entry { inputs, pre_root: root.clone() });
+    (root, true)
+}
+
+/// Held while a verifier's derivation runs: the run's own noted key is put back
+/// when it ends, so a verification never rewrites what the run it verifies
+/// published as `result.shape`.
+pub struct Deriving(Option<(String, Value)>);
+
+impl Drop for Deriving {
+    fn drop(&mut self) {
+        *lock(noted()) = self.0.take();
+        DERIVING.store(false, Relaxed);
+    }
+}
+
+/// Take that guard.
+pub fn deriving() -> Deriving {
+    DERIVING.store(true, Relaxed);
+    Deriving(lock(noted()).clone())
+}
+
+/// What the verifier's derivations cost this process: how many were paid and
+/// how many proofs took a root one of them had already given.
+pub fn derivations_json() -> Value {
+    json!({"derived": DERIVATIONS.load(Relaxed), "reused": REUSES.load(Relaxed)})
 }
 
 #[cfg(test)]

@@ -1111,6 +1111,7 @@ struct GridChunk {
 ///   --expect-layer-links N      pin the implied count from outside
 ///   --expect-token-links N
 ///   --verify                    also run `verify_composed` on every chunk proof
+///   --verify-calibration FILE   the calibration the verifier derives shape roots with
 ///   --prompt FILE               the prompt's ids (a JSON list, or an `ids` field)
 ///   --expect-pre-roots FILE     the shape root each (layer, prefix) must declare
 ///   --expect-model-roots FILE   the model commitment each layer must declare
@@ -1130,6 +1131,19 @@ struct GridChunk {
 /// `--ser-dir` writes, `<tag>.claims.json`; a directory serialized before
 /// stream KK does not have it, and the run says so per chunk rather than
 /// passing.
+///
+/// **Issue #95.**  `--verify` also demands `--verify-calibration FILE`, as it
+/// demands `--prompt`: the verifier derives every chunk's shape root from that
+/// chunk's own `Fixed.params` and the per-layer calibration the file publishes,
+/// and compares it with the `pre_root` the statement declares.  The file is the
+/// manifest `zk-prover model-roots --out` writes -- the same document
+/// `--expect-model-roots` reads, whose rows carry `frac_per_head` beside the
+/// model root -- and a chunk's row is the one at its `(layer, c)`.  With the
+/// derivation inside `verify_composed` the shape root stops being a table's to
+/// pin: `--expect-pre-roots` compares the same statements against a table
+/// derived outside the run, which is now a second opinion and not the only one.
+/// The derivation is paid once per `(layer, shape)` in the process, so a grid
+/// of 290 segments over 32 layers pays about 32 derivations and not 290.
 ///
 /// The token axis of the *sequence* -- as distinct from the K/V axis of the
 /// grid -- is checked here too, and unconditionally: every position of every
@@ -1192,6 +1206,16 @@ pub fn grid_cmd(args: &[String]) {
         eprintln!("grid: --verify needs --prompt <file>: without the prompt no \
                    position's id can be checked against anything, and a run that skipped \
                    the check would read as one that made it");
+        std::process::exit(1);
+    }
+    // Issue #95: and the same for the calibration.  Without it every chunk's
+    // shape root is the prover's declaration, taken on trust, and a run that
+    // took it would read as one that derived it.
+    if verify && crate::shaperoot::verify_calibration().is_none() {
+        eprintln!("grid: --verify needs --verify-calibration <file>: the verifier derives \
+                   each chunk's shape root from its own parameters and the per-layer \
+                   calibration the model manifest publishes, and without that calibration \
+                   the root is asserted by the prover and checked by nothing");
         std::process::exit(1);
     }
 
@@ -1458,6 +1482,10 @@ pub fn grid_cmd(args: &[String]) {
     // makes a chain a proof: does this chunk verify?
     let mut verified: Vec<Value> = vec![];
     let mut n_accept = 0usize;
+    // issue #95: how many chunks had their shape root derived and matched, and
+    // what the derivations cost the run
+    let mut n_shape = 0usize;
+    let mut shape_secs = 0.0f64;
     if verify {
         for ch in &chunks {
             let t0 = std::time::Instant::now();
@@ -1471,10 +1499,17 @@ pub fn grid_cmd(args: &[String]) {
                     let why = (!v.accepts()).then(|| {
                         serde_json::to_string(&json!({
                             "stark": v.stark_ok, "root": v.root_ok, "sums": v.sums_cancel,
+                            // issue #95: the derived shape root against the
+                            // declared one, and the derived root itself
+                            "shape_root": v.shape_root_ok, "derived": v.shape_root,
                             "embed": v.embed_ok, "embed_tok": v.embed_tok_ok,
                             "head_binding": v.head_binding_ok, "head_tok": v.head_tok_ok,
                             "error": v.error})).unwrap()
                     });
+                    shape_secs += v.shape_secs;
+                    if v.shape_root_ok == Some(true) {
+                        n_shape += 1;
+                    }
                     (v.accepts(), v.verify_secs, why)
                 }
                 (_, Err(e), _) => (false, 0.0,
@@ -1591,12 +1626,18 @@ pub fn grid_cmd(args: &[String]) {
     // root derived from the model and the chunk's own coordinates, so the roots
     // stop being an input the verifier takes on trust and become a check --
     // which is the whole of `notes/witness-slack.md` section 5 item 1.
-    if expect_pre.is_none() {
+    //
+    // Issue #95 closes it from the other side: under `--verify` the verifier
+    // derives every chunk's shape root from that chunk's own parameters and the
+    // published calibration, so the root is checked whether or not a table was
+    // handed in, and the entry below is only for a run that verified nothing.
+    if expect_pre.is_none() && !verify {
         unchecked.push(json!({"what": "one tree-0 root per chunk", "chunks": chunks.len(),
-                              "why": "root_ok compares the proof's commitment 0 against its \
-                                      own statement's pre_root; that the root is the model's, \
-                                      for this layer and this shape, is the verifier's \
-                                      declaration"}));
+                              "why": "this run verified no chunk, so nothing compared a \
+                                      statement's pre_root with anything: `--verify` derives \
+                                      each chunk's shape root from its parameters and the \
+                                      calibration, and `--expect-pre-roots` compares it \
+                                      against a table derived outside the run"}));
     }
     let ids_ok = bad_ids.is_empty() && (prompt.is_none() || unbacked.is_empty());
 
@@ -1816,6 +1857,17 @@ pub fn grid_cmd(args: &[String]) {
                        "mismatches": bad_ids, "unbacked": unbacked, "all": ids_ok},
             "pre_roots": {"table": crate::arg_str(args, "--expect-pre-roots"),
                           "chunks": pre_rows},
+            // Issue #95: the shape root the verifier derived per chunk, and
+            // what the derivations cost.  `matched` counts chunks whose
+            // declared root is the one their own parameters and the published
+            // calibration give; a chunk that failed the comparison is in
+            // `verified` with both roots beside it.  `derivations` is how many
+            // shape trees this run built -- one per `(layer, shape)`, not one
+            // per chunk, which is what makes the check affordable.
+            "shape_roots": {"calibration": crate::arg_str(args, "--verify-calibration"),
+                            "matched": n_shape, "of": verified.len(),
+                            "secs": shape_secs,
+                            "derivations": crate::shaperoot::derivations_json()},
             // stream PP: the published model commitment, per chunk
             "model_roots": {"manifest": crate::arg_str(args, "--expect-model-roots"),
                             "chunks": model_rows},

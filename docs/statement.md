@@ -117,6 +117,20 @@ unconstrained padding. The code that builds the two columns asserts that, over
 exactly those rows and with the predicate that writes them, on the one path that
 builds them for either backend.
 
+**The shape tree.** Those two columns are not the prover's, and neither is any
+other column the AIR reads as a fact: every selector, the marker for the rows a
+key grid really holds, the range tables' row indices, the rotation's angles.
+They are committed as a tree of their own, and what says they are the columns
+the public parameters give is that the verifier **builds that tree itself** and
+compares its root with the root the statement declares. It needs two things to
+do it and holds both: the statement's own parameters, and the per-layer
+calibration the model manifest publishes beside the model commitment. No weight
+enters the shape tree, so no dump is needed. A verifier given no calibration
+derives nothing, and then the shape root is asserted by the prover and checked
+by nothing -- a run says which of the two it was. The other preprocessed tree is
+the model's, and its root is not derivable by anyone but the publisher: it
+commits the weights, and the verifier compares it with the published manifest.
+
 **The boundaries (13, 14).** The residual stream leaving a segment and the
 keys and values a block writes are committed as their own trees, and
 `boundary-grid` compares each such root with the root the consuming segment

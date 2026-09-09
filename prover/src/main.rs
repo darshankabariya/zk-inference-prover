@@ -867,49 +867,10 @@ fn calibration_of_args(args: &[String], p: &compose::Params)
         return Some(layer::Layer::calibration_of(p, &v));
     }
     let (f, v) = doc?;
-    // the per-key-tile block first: it is the exact form, and a document that
-    // carries both is a run's own report, where the block is what the root was
-    // taken over
-    let per_key_tile = if v.is_array() { v.clone() } else { v["calibration"].clone() };
-    if let Some(rows) = per_key_tile.as_array() {
-        assert!(!rows.is_empty(), "--calibration {f}: the calibration names no key tile");
-        return Some(shaperoot::Calibration(rows.iter().map(|k| {
-            let bits = |x: &Value, name: &str| -> u64 {
-                x.as_u64().unwrap_or_else(|| panic!("--calibration {f}: {name} is not a bit \
-                                                     pattern"))
-            };
-            // the bit patterns are what the key is taken over, so they are what
-            // is read; the decimal fields beside them are a reader's copy
-            let frac = match (&k["frac_bits"], &k["frac"]) {
-                (Value::Null, x) => x.as_f64()
-                    .unwrap_or_else(|| panic!("--calibration {f}: a key tile names no frac"))
-                    .to_bits(),
-                (x, _) => bits(x, "frac_bits"),
-            };
-            let frac_per_inst: Vec<u64> = match (&k["frac_per_inst_bits"], &k["frac_per_inst"]) {
-                (Value::Null, x) => x.as_array()
-                    .unwrap_or_else(|| panic!("--calibration {f}: a key tile names no \
-                                              frac_per_inst"))
-                    .iter().map(|v| v.as_f64().unwrap_or(0.0).to_bits()).collect(),
-                (x, _) => x.as_array()
-                    .unwrap_or_else(|| panic!("--calibration {f}: frac_per_inst_bits is not a \
-                                              list"))
-                    .iter().map(|v| bits(v, "frac_per_inst_bits")).collect(),
-            };
-            let delta: Vec<i64> = k["delta"].as_array()
-                .unwrap_or_else(|| panic!("--calibration {f}: a key tile names no delta"))
-                .iter().map(|v| v.as_i64().unwrap_or(0)).collect();
-            shaperoot::KeyTileCalibration { frac, frac_per_inst, delta }
-        }).collect()));
-    }
-    let v = v["frac_per_head"].as_array()
-        .unwrap_or_else(|| panic!("--calibration {f}: carries neither a `calibration` block \
-                                   nor `frac_per_head`"));
-    let fracs: Vec<f64> = v.iter()
-        .map(|x| x.as_f64().unwrap_or_else(|| panic!("--calibration {f}: frac_per_head is not \
-                                                      a list of numbers")))
-        .collect();
-    Some(layer::Layer::calibration_of(p, &fracs))
+    // the document forms are `shaperoot`'s to read: the verifier reads the same
+    // ones off `--verify-calibration` (issue #95), and two readers of one
+    // document would be two calibrations to drift apart
+    Some(shaperoot::calibration_of_doc(&f, &v, p).unwrap_or_else(|e| panic!("--calibration {e}")))
 }
 
 pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
@@ -2165,10 +2126,9 @@ fn model_roots_cmd(args: &[String]) {
 fn compose_cmd(args: &[String]) {
     // Stream EE (open item 21): before anything, because `prove_gen` reads it.
     cudagen::fp_out_set(args);
-    // Issue #18: `--shape-cache DIR` and `--shape-cache-verify`, before the
-    // load, because `compose::generate` consults the cache before it builds a
-    // column.
-    shaperoot::configure(args);
+    // Issue #18: `--shape-cache DIR` and `--shape-cache-verify` are read in
+    // `main` before any subcommand, which is before the load here and before
+    // `compose::generate` consults the cache.
     let (mut l, vname) = layer_of(args);
     // B7a milestone 4 (section 3 row 1): rung 3's sixth probe on its own, so the
     // `nopatch` control has a witness whose exp table is *not* the closed form
@@ -3677,6 +3637,11 @@ fn main() {
     // B12 stream GG: the fork's three marks inside `prove_ex` (a no-op on
     // the SIMD backend).
     device::install_mem_hook();
+    // Issue #18's cache and issue #95's calibration, before any subcommand:
+    // every command that proves consults the first and every command that
+    // verifies reads the second, and a flag read in one command and ignored in
+    // another is a switch that silently does nothing.
+    shaperoot::configure(&args);
     match cmd.as_str() {
         "tables" => tables_cmd(&args),
         "dequant" => dequant_cmd(&args),
