@@ -44,7 +44,12 @@ constraint-kernel shape rather than one per chunk.  `emitset` runs one
 257 lines it launches 257 processes to install ~40 shapes.  Within one model
 and one set of shared pins the only shape-bearing things that vary down a plan
 are the prefix length and the master table size, so `(c, table_bits)` -- plus
-the head's two extra arguments -- is the whole distinct set.
+the head's two extra arguments -- is the whole distinct set.  A head line is
+keyed by its prefix the way a layer line is, and its prefix is the one its own
+dump declares (issue #131): with `--head-per-block` the head chunks of two
+blocks read two dumps of two prefixes and are two kernel shapes, and a key that
+gave a head line no prefix at all listed the first of them and left the second
+block's chunk to prove against kernels nobody generated.
 
 **Stream EE (E11): the flags a line carries.**  `--layer-flags` goes on every
 layer line, `--l0-flags` on the layer-0 lines after it, `--head-flags` on the
@@ -368,7 +373,8 @@ def main():
             emit.setdefault((rows[k]["c"], tb, False, extra), line)
         if a.head and (b in head_blocks if head_blocks is not None else b == blocks[-1]):
             hdir = f"{a.head}_B{b}" if a.head_per_block else a.head
-            htb = json.load(open(f"{hdir}/manifest.json"))["master_table_bits"]
+            hman = json.load(open(f"{hdir}/manifest.json"))
+            htb = hman["master_table_bits"]
             if a.table_bits_map:
                 hm = json.load(open(a.table_bits_map)).get("head")
                 if hm is not None:
@@ -385,7 +391,14 @@ def main():
                            layer=n_layers, block=b)
             lines.append(hl)
             n_rows += 1
-            emit.setdefault((None, htb, True, hf), hl)
+            # issue #131: a head chunk's prefix is the one its own dump
+            # declares (`params_of` takes `c` off the witness manifest), and
+            # with `--head-per-block` the dumps of two blocks are two prefixes
+            # -- 3,584 and 4,096 tokens for the C=4,096 pair.  Keyed with no
+            # prefix at all they were one entry, only the first block's line
+            # reached the emit list, and the second head chunk proved against a
+            # feed kernel that was never generated.
+            emit.setdefault((hman["c"], htb, True, hf), hl)
     # issue #118: refused here, with the layer and the numbers, and before the
     # plan file is written -- a plan that would be refused by `Plan::new` at the
     # first chunk of the loop is not written at all
@@ -413,7 +426,7 @@ def main():
     if a.emit_out:
         el = [f"# stream DD: {len(emit)} distinct emit shapes for the {n_rows} chunks of "
               f"{a.out}; the key is (prefix c, master table bits, head, the line's flags)"]
-        for key in sorted(emit, key=lambda k: (k[2], k[0] or 0, k[1], k[3])):
+        for key in sorted(emit, key=lambda k: (k[2], k[0], k[1], k[3])):
             el.append(emit[key])
         os.makedirs(os.path.dirname(a.emit_out) or ".", exist_ok=True)
         with open(a.emit_out, "w") as f:
@@ -435,6 +448,17 @@ def _shape_table(d, b, rems, bits=12):
                  attn_out_bits=w) for k, (rem, w) in enumerate(zip(rems, bits))]
     with open(os.path.join(d, f"shapes_B{b}.json"), "w") as f:
         json.dump(dict(rows=rows, block=b), f)
+
+
+def _head_dump(d, b, c, tb=25):
+    """One head dump's manifest, with only the fields a plan reads.
+
+    A head dump carries its own prefix, and the dumps of two blocks carry two.
+    """
+    hd = os.path.join(d, f"head_B{b}")
+    os.makedirs(hd, exist_ok=True)
+    with open(os.path.join(hd, "manifest.json"), "w") as f:
+        json.dump(dict(layer=16, block=b, c=c, master_table_bits=tb), f)
 
 
 def _plan(argv):
@@ -540,6 +564,44 @@ def selftest():
         printed, refusal = _plan(args)
         ok = refusal is None and "31/31 bits, margin 0 (denp2 form)" in printed
         case("and the denp2 form's one bit past it", ok, last(printed, refusal))
+
+        # 7. issue #131: every head block's shape is in the emit list.  Two head
+        #    dumps of one master table width are one entry only when their
+        #    prefixes agree, and the two `--head-blocks` a `--verify --prompt`
+        #    grid needs do not agree -- the recorded C=4,096 pair is 3,584
+        #    tokens of prefix for block 7 and 4,096 for block 8.  Keyed with no
+        #    prefix they were one entry, only the first block's line was
+        #    emitted, and the second head chunk was proved against a feed kernel
+        #    nobody had been given the shape of.
+        em = os.path.join(d, "emit.txt")
+        heads = ["--head", os.path.join(d, "head"), "--head-per-block",
+                 "--head-blocks", "0,1", "--emit-out", em]
+
+        def head_shapes():
+            """(the plan's head lines, the emit list's lines)."""
+            return ([l for l in open(out).read().splitlines() if l.endswith("head")],
+                    [l for l in open(em).read().splitlines() if not l.startswith("#")])
+
+        _shape_table(d, 0, [14, 15, 19])
+        _shape_table(d, 1, [14, 15, 19])
+        _head_dump(d, 0, 512)
+        _head_dump(d, 1, 1024)
+        printed, refusal = _plan(args + heads)
+        hl, el = head_shapes()
+        ok = (refusal is None and len(hl) == 2 and len(el) == 3
+              and all(l in el for l in hl))
+        case("every head block's shape is in the emit list", ok,
+             f"{len(hl)} head chunks, {len(el)} emit shapes")
+
+        # 8. and the other way round: two head chunks that read one dump's
+        #    prefix at one width are one shape, and the list holds one of them
+        _head_dump(d, 1, 512)
+        printed, refusal = _plan(args + heads)
+        hl, el = head_shapes()
+        ok = (refusal is None and len(hl) == 2 and len(el) == 2
+              and sum(l in el for l in hl) == 1)
+        case("two head dumps of one prefix are one shape", ok,
+             f"{len(hl)} head chunks, {len(el)} emit shapes")
 
     return 1 if bad else 0
 
