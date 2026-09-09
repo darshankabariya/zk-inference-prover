@@ -2836,13 +2836,59 @@ impl Layer {
         let gi = self.mats.iter().position(|m| m.name == "gate").unwrap();
         let ui = self.mats.iter().position(|m| m.name == "up").unwrap();
         let (gs, us) = (sp(&self.mats[gi]), sp(&self.mats[ui]));
-        let mut gate_out = vec![0u16; tokens * dff];
-        let mut up_out = vec![0u16; tokens * dff];
-        for t in 0..tokens {
-            for c in 0..dff {
-                gate_out[t * dff + c] = deq_ref(&self.mats[gi], &gs, t, c);
-                up_out[t * dff + c] = deq_ref(&self.mats[ui], &us, t, c);
+        let out_of = |m: &Mat, spec: &Spec| -> Vec<u16> {
+            let mut v = vec![0u16; tokens * dff];
+            v.par_chunks_mut(dff).enumerate().for_each(|(t, row)| {
+                for (c, x) in row.iter_mut().enumerate() {
+                    *x = deq_ref(m, spec, t, c);
+                }
+            });
+            v
+        };
+        let up_out = out_of(&self.mats[ui], &us);
+        // Issue #136: the gate matmul's weight scale, sized off the data this
+        // layer drew.
+        //
+        // `silu(x)` is about `x exp(x)` well below zero, so a gate value near
+        // -85 has an image a few binades above bf16's smallest normal, and its
+        // product with a small `up` is *below* that -- a value the multiply has
+        // no exponent for, which the component counts as
+        // `exponent_out_of_range` and no `VAL` row answers.  It is the
+        // incompleteness edge `ResidualStreamWitness::synthetic` avoids by
+        // halving a multiply's spread, and the model's real values never reach
+        // it: there the two scales invert the quantization and the dequantized
+        // activation is order one whatever the matmul's inner dimension.  Here
+        // the accumulator grows with that dimension and the weight scale is an
+        // arbitrary draw, so at the 8B width the gate reached -88 and 31 of a
+        // 64-token block's products fell out of the range.
+        //
+        // So the draw is shifted down by the fewest binades that leave every
+        // product inside it, the way the fold's divisor and the master
+        // exponential table are sized off their own data.  A shape whose
+        // products are already inside takes no shift at all and does not move.
+        let mut gate_out = out_of(&self.mats[gi], &gs);
+        let outside = |g: &[u16]| -> usize {
+            g.par_iter().zip(up_out.par_iter())
+                .filter(|(a, b)| {
+                    crate::residual_stream::mul_exponent(
+                        crate::residual_stream::un_image(UnKind::Silu, **a), **b, round).is_none()
+                })
+                .count()
+        };
+        let mut shift = 0u32;
+        while outside(&gate_out) > 0 {
+            shift += 1;
+            assert!(shift <= 24, "gate: no weight scale of this layer keeps the SwiGLU inside \
+bf16's normal range");
+            for (_, es) in self.mats[gi].sw.iter_mut() {
+                assert!(*es > 1, "gate: the weight scale ran out of exponent below the SwiGLU");
+                *es -= 1;
             }
+            gate_out = out_of(&self.mats[gi], &gs);
+        }
+        if shift > 0 {
+            eprintln!("synthetic layer: the gate weight scale is {shift} binades down, \
+so the SwiGLU stays inside bf16's normal range");
         }
         let sw = reference(&[tff.lay(&gate_out), tff.lay(&up_out)], &[], tff.rows1(),
                            &Prog::pairs(tff.nreal, Kind::Mul, UnKind::Silu, UnKind::None),
@@ -5501,6 +5547,47 @@ mod tests {
         assert!(l.key_bits() <= bits,
                 "keys of {} bits against a table of 2^{bits} rows", l.key_bits());
         assert_eq!(l.key_tiles.iter().map(|b| b.off_table).sum::<usize>(), 0);
+    }
+
+    /// Issue #136: the SwiGLU of an honest synthetic layer at the 8B model's
+    /// attention width stays inside bf16's normal range.
+    ///
+    /// The gate matmul's dequantized output reached -88 there, `silu` of which
+    /// is a few binades above the smallest normal, and its product with a small
+    /// `up` was below it: 31 of a 64-token block's products with no exponent the
+    /// multiply can write, 29 of them disagreeing with the reference, and an
+    /// honest proof rejected with `ConstraintsNotSatisfied`.  The counts here are
+    /// the run's own.
+    #[test]
+    fn the_synthetic_swiglu_stays_in_bf16_range_at_the_8b_width() {
+        use crate::residual_stream::{UnKind, mul_exponent, un_image};
+        let argv: Vec<String> =
+            ["compose", "--round", "even", "--numbits", "9", "--z-hi-bits", "7",
+             "--variants", "intexp", "--table-bits", "24", "--hd", "128",
+             "--head-groups", "16,8,8", "--nin", "4096", "--nout", "4096",
+             "--residual-stream-a", "32", "--kmax", "19", "--ao-rem-bits", "22",
+             "--synth-residual-stream", "--diagonal-block", "--s", "64", "--ctx", "64"]
+            .iter().map(|x| x.to_string()).collect();
+        let (l, _) = crate::layer_of(&argv);
+        let round = bf16::Round::Even;
+        let tokens = l.ao.s;
+        let dff = l.mats.iter().find(|m| m.name == "gate").unwrap().n_out;
+        let spec = |m: &Mat| Spec {
+            variant: m.variant, round, kmax: 0, per_row: 1, limb_bits: (16, 14),
+            q_bits: 0, rem_bits: 0, fold_alpha: 0,
+        };
+        let out = |name: &str| -> Vec<u16> {
+            let m = l.mats.iter().find(|m| m.name == name).unwrap();
+            let sp = spec(m);
+            (0..tokens * dff).map(|i| deq_ref(m, &sp, i / dff, i % dff)).collect()
+        };
+        let (gate_out, up_out) = (out("gate"), out("up"));
+        let outside = gate_out.iter().zip(up_out.iter())
+            .filter(|(a, b)| mul_exponent(un_image(UnKind::Silu, **a), **b, round).is_none())
+            .count();
+        assert_eq!(outside, 0,
+                   "{outside} of {} SwiGLU products leave bf16's normal range",
+                   tokens * dff);
     }
 
     /// Issue #53: a dump whose rounding disagrees with `--round` is refused at

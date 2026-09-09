@@ -255,30 +255,50 @@ pub fn smul_vals() -> Vec<i64> {
         .collect()
 }
 
+/// One row of `smul_table`: the rounded signed significand and the binade shift.
+pub fn smul(a: i64, b: i64, round: Round) -> (i64, u32) {
+    if a == 0 || b == 0 {
+        return (0, 0);
+    }
+    let p = (a.unsigned_abs() * b.unsigned_abs()) as u32; // [2^14, 2^16)
+    let carry = (p >> 15) & 1;
+    let shift = 7 + carry;
+    let m = p >> shift;
+    let rb = (p >> (shift - 1)) & 1;
+    let st = u32::from(p & ((1 << (shift - 1)) - 1) != 0);
+    let up = round.carry(m, rb, st);
+    let (msig, extra) = if m + up == 256 { (128, 1) } else { (m + up, 0) };
+    let sgn = if (a < 0) != (b < 0) { -1 } else { 1 };
+    (sgn * msig as i64, carry + extra)
+}
+
 pub fn smul_table(round: Round) -> Vec<[M31; 5]> {
     let vals = smul_vals();
     let mut rows = Vec::with_capacity(vals.len() * vals.len());
     for a in &vals {
         for b in &vals {
-            let (sm, cy) = if *a == 0 || *b == 0 {
-                (0i64, 0u32)
-            } else {
-                let p = (a.unsigned_abs() * b.unsigned_abs()) as u32; // [2^14, 2^16)
-                let carry = (p >> 15) & 1;
-                let shift = 7 + carry;
-                let m = p >> shift;
-                let rb = (p >> (shift - 1)) & 1;
-                let st = u32::from(p & ((1 << (shift - 1)) - 1) != 0);
-                let up = round.carry(m, rb, st);
-                let (msig, extra) = if m + up == 256 { (128, 1) } else { (m + up, 0) };
-                let sgn = if (*a < 0) != (*b < 0) { -1 } else { 1 };
-                (sgn * msig as i64, carry + extra)
-            };
+            let (sm, cy) = smul(*a, *b, round);
             rows.push([m31_of(*a), m31_of(*b), m31_of(sm), m31_u32(cy),
                        m31_u32(u32::from(sm != 0))]);
         }
     }
     rows
+}
+
+/// The exponent field `Kind::Mul` gives `a * b`, and `None` where the product
+/// leaves bf16's normal range -- what a component counts as
+/// `exponent_out_of_range` and what no `VAL` row answers, so a witness carrying
+/// one cannot be proved.  A synthetic generator asks before it hands a multiply
+/// its inputs (issue #136).
+pub fn mul_exponent(a: u16, b: u16, round: Round) -> Option<u32> {
+    let (asm, aef) = split(a);
+    let (bsm, bef) = split(b);
+    let (sm, cy) = smul(asm, bsm, round);
+    if sm == 0 {
+        return Some(0);
+    }
+    let ef = aef as i64 + bef as i64 + cy as i64 - 127;
+    (1..0xff).contains(&ef).then_some(ef as u32)
 }
 
 /// Which unary bf16 op a component's leaves apply.  `None` commits the leaf value
