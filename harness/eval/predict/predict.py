@@ -4,6 +4,9 @@
         --artifacts DIR --inputs DIR          # print the registration
     uv run python -m harness.eval.predict.predict ... --json   # and rewrite
                                               # out/registration.json
+    uv run python -m harness.eval.predict.predict ... \
+        --shape Llama-3.1-70B --json          # another registration, into
+                                              # out/registration-<shape>.json
 
 What this is.  `experiments/b2/cost_model.py` was built from gadget marginals
 measured at exactly two model scales: Qwen2.5-0.5B (B1-B6.5) and Llama-3.1-8B
@@ -29,6 +32,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 
 from harness import constants
@@ -71,6 +75,64 @@ SHAPES = {
         why="the strongest test if the window is generous, and the shape closest "
             "to the paper's 27B frontier row; C=4096 only -- a 16K layer chunk "
             "extrapolates past the card"),
+    # zk-results #93.  Not an E4 candidate and not registered by an E4 run: it is
+    # the shape of the 70B campaign, whose measurement is a SYNTHETIC layer
+    # segment at this width and not the model, so `hf` names where the seven
+    # numbers were read and not a checkpoint anything here loads.
+    "Llama-3.1-70B": dict(
+        cfg=(80, 8192, 64, 8, 128, 28672, 128256), tied=False,
+        role="campaign", hf="meta-llama/Llama-3.1-70B",
+        why="the shape zk-results #93 measures and projects: 64 attention heads "
+            "of 128 with 8 key/value heads, twice the 8B's hidden size and twice "
+            "its FFN. 64 heads is a power of two, so it clears the rotation "
+            "gadget's requirement that the 14B's 40 do not, and the width is the "
+            "one `SHAPES` in `harness/costmodel/frontier.py` now carries a row "
+            "for"),
+}
+
+# The shapes a run registers when it is given no `--shape`: E4's three, in the
+# order E4 registered them.  A run of this document is a registration, so which
+# shapes it prices is named rather than defaulted to whatever `SHAPES` holds --
+# adding a row above must not move the document E4 registered.
+E4_SHAPES = ("Qwen2.5-14B-Instruct", "Qwen2.5-3B-Instruct", "Qwen2.5-32B-Instruct")
+
+# What the provenance block says about each selection this document knows how to
+# register: the date the prediction was written, who wrote it, and the claim a
+# registration exists to make -- that nothing is measured at the shapes it
+# prices.  A selection that is in no row here is refused rather than registered
+# under E4's dated sentence, and E4's own row is left exactly as it was written.
+REGISTERED = {
+    E4_SHAPES: dict(
+        utc_date="2026-09-01", by="stream E4 (desk lane)",
+        driver="tools/drivers/predict-14b.sh (zk-results), which proves every "
+               "layer of the target shape with these flags",
+        no_measurement_exists=(
+            "At registration there is NO witness, NO proof and NO cell count for "
+            "Qwen2.5-3B / 14B / 32B anywhere in this repo or on either box. The "
+            "only scales ever extracted are Qwen2.5-0.5B (experiments/b65/out/) "
+            "and Llama-3.1-8B (experiments/b8, b9, b10). The H200 queue at "
+            "registration time is bring-up -> E8 seq6 -> E2 measurement -> E4 "
+            "extraction, and E8 is the item in progress; the H100 is on E11's "
+            "third fit point. Neither box has been asked for any number in this "
+            "file.")),
+    ("Llama-3.1-70B",): dict(
+        utc_date="2026-09-10", by="zk-results #93, the 70B campaign (desk lane)",
+        driver="tools/drivers/predict-70b.sh (zk-results), which proves a "
+               "SYNTHETIC layer segment at this shape's width, one per context, "
+               "with these flags -- not the model's layers, and not a weight of "
+               "it",
+        no_measurement_exists=(
+            "At registration there is NO witness, NO proof and NO cell count at "
+            "the Llama-3.1-70B width anywhere in either repository or on any "
+            "box, and no box is booked. Every measured number either repository "
+            "holds was taken at the Llama-3.1-8B width or below. What the "
+            "campaign will measure against this is a SYNTHETIC layer segment at "
+            "this width -- the shape and not the model -- so the run it is "
+            "registered against proves no 70B weight and the bracket's "
+            "invalidation clause, which asks for a real extracted witness, is "
+            "not met by it: what the comparison tests here is the closed form "
+            "and the cell counts at a width nothing was fitted at, and the "
+            "document says so rather than being read as the E4 bracket.")),
 }
 
 CONTEXTS = (4096, 16384)
@@ -605,18 +667,21 @@ BRACKET = dict(
 )
 
 
-def registered_statement():
+def registered_statement(names=E4_SHAPES):
     """What the registered key tile integers price, said in the document itself.
 
     Four settings and the driver flags they correspond to, so that a reader of
     `registration.json` can see which statement the integers assume without
     reading this file.  It is part of the hashed content: a registration that
     priced another statement is another registration.
+
+    The flags are the same set for every selection -- the five reductions and the
+    diagonal block -- and the driver that proves them is not, so the driver is
+    read from the selection's own record rather than named once here.
     """
     return dict(
         STATEMENT,
-        driver="tools/drivers/predict-14b.sh (zk-results), which proves every "
-               "layer of the target shape with these flags",
+        driver=REGISTERED[tuple(names)]["driver"],
         driver_flags="--diagonal-block --gkr-key-tiles --gkr-dequant "
                      "--gkr-residual-stream --gkr-freivalds --gkr-attnout",
         flags=dict(STATEMENT_FLAGS),
@@ -671,10 +736,16 @@ def canonical(block):
     return json.dumps(block, sort_keys=True, separators=(",", ":")).encode()
 
 
-def build():
+def build(names=E4_SHAPES):
+    """The registration's `shapes` block, one entry per shape in `names`.
+
+    The selection is an argument and not `SHAPES` itself: this document is a
+    registration, and a row added to the registry for another campaign must not
+    change the one E4 registered."""
     reg = {}
     ref8b_cells = ref8b()
-    for name, meta in SHAPES.items():
+    for name in names:
+        meta = SHAPES[name]
         cfg = meta["cfg"]
         L, d, nh, nkv, hd, dff, vocab = cfg
         n = cm.n_params(cfg) + (0 if meta["tied"] else vocab * d)
@@ -716,22 +787,16 @@ def _sha(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def provenance():
+def provenance(names=E4_SHAPES):
+    rec = REGISTERED[tuple(names)]
     return dict(
         # the same digests the frozen inputs carry, so the two cannot drift
-        inputs_sha256=dict(frozen_inputs()["code_sha256"],
+        inputs_sha256=dict(frozen_inputs(names)["code_sha256"],
                            **{"constants.json": _sha(constants.path())}),
-        registered_utc_date="2026-09-01",
-        registered_by="stream E4 (desk lane)",
-        no_measurement_exists=(
-            "At registration there is NO witness, NO proof and NO cell count for "
-            "Qwen2.5-3B / 14B / 32B anywhere in this repo or on either box. The "
-            "only scales ever extracted are Qwen2.5-0.5B (experiments/b65/out/) "
-            "and Llama-3.1-8B (experiments/b8, b9, b10). The H200 queue at "
-            "registration time is bring-up -> E8 seq6 -> E2 measurement -> E4 "
-            "extraction, and E8 is the item in progress; the H100 is on E11's "
-            "third fit point. Neither box has been asked for any number in this "
-            "file."),
+        registers=list(names),
+        registered_utc_date=rec["utc_date"],
+        registered_by=rec["by"],
+        no_measurement_exists=rec["no_measurement_exists"],
         predictor=dict(
             engine="experiments/b2/cost_model.py",
             entry_points=["cells_per_token(cfg, ctx, batch, seq, head=False, gkr=...)",
@@ -749,7 +814,7 @@ def provenance():
     )
 
 
-def frozen_inputs():
+def frozen_inputs(names=E4_SHAPES):
     """What this prediction actually read, frozen with it.
 
     It used to be a list of constants keys, and most of them were in no
@@ -790,7 +855,7 @@ def frozen_inputs():
         constants_file_sha256=_sha(constants.path()),
         n_from_constants=len(from_constants), n_inputs=len(cells),
         not_priced=unpriced,
-        statement=registered_statement(),
+        statement=registered_statement(names),
         reference_chunks={str(c): _seq5_source(c) for c in CONTEXTS},
         code_sha256={
             "harness/costmodel/cost_model.py": _sha(cm.__file__),
@@ -885,28 +950,62 @@ def integrator_notes(reg):
     )
 
 
+def out_name(names):
+    """The file `--json` writes the document to.
+
+    E4's three shapes keep `registration.json`, which is the name
+    `harness/eval/predict/compare.py` reads and the one
+    `tools/drivers/register-14b.sh` in zk-results copies a recorded registration
+    back to.  Any other selection writes BESIDE it and never over it: a
+    registration is the document that must not move once it is made, and two of
+    them in one checkout must not be able to overwrite each other."""
+    if tuple(names) == E4_SHAPES:
+        return "registration.json"
+    slug = "-".join(re.sub(r"[^a-z0-9]+", "-", n.lower()).strip("-") for n in names)
+    return f"registration-{slug}.json"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true", help="rewrite the registration file")
+    ap.add_argument("--shape", action="append", metavar="NAME",
+                    help="the shape to register, repeatable; default: the three "
+                         f"E4 registered ({', '.join(E4_SHAPES)}). Known: "
+                         f"{', '.join(SHAPES)}")
     constants.add_argument(ap)
     ap.add_argument("--inputs", metavar="DIR", help="cost-model inputs (read at import; or set ZK_COSTMODEL_INPUTS)")
     inputs.add_arguments(ap)
     a = ap.parse_args()
     constants.load(a.constants)
 
+    names = tuple(a.shape) if a.shape else E4_SHAPES
+    unknown = [n for n in names if n not in SHAPES]
+    if unknown:
+        raise SystemExit(f"--shape {', '.join(unknown)}: this document holds no such "
+                         f"shape. Known: {', '.join(SHAPES)}")
+    if names not in REGISTERED:
+        raise SystemExit(
+            f"--shape {', '.join(names)}: this document carries no registration record "
+            "for that selection, and a prediction registered under another selection's "
+            "date and standing is not this one's.\n"
+            "  the selections it holds: "
+            + "; ".join(", ".join(k) for k in REGISTERED)
+            + "\n  add a row to REGISTERED naming the date, who registers it and what is "
+              "measured at those shapes, and register that.")
+
     chk = selfcheck()
-    reg = build()
+    reg = build(names)
     anc = anchors()
     # The falsifiable content, hashed ALONE.  This must not move when an
     # unrelated constant is edited, or the hash cannot answer the only question
     # a later reader asks of it: is this the prediction that was registered?
-    content = dict(schema="e4-registration/1", statement=registered_statement(),
+    content = dict(schema="e4-registration/1", statement=registered_statement(names),
                    shapes=reg, bracket=BRACKET,
                    anchors=anc, key_tiles_selfcheck_8b=chk,
                    chunk_identity=chunk_identity(), layer_spread=layer_spread(),
-                   frozen_inputs=frozen_inputs())
+                   frozen_inputs=frozen_inputs(names))
     content_digest = hashlib.sha256(canonical(content)).hexdigest()
-    block = dict(content, provenance=provenance())
+    block = dict(content, provenance=provenance(names))
     digest = hashlib.sha256(canonical(block)).hexdigest()
     doc = dict(block, prediction_sha256=content_digest,
                prediction_block_sha256=digest,
@@ -918,7 +1017,7 @@ def main():
     print("E4 -- unfitted-scale prediction, registered before measurement")
     print("=" * 78)
     print()
-    st = registered_statement()
+    st = registered_statement(names)
     print("the statement priced:", " ".join(f"{k}={STATEMENT[k]}" for k in sorted(STATEMENT)))
     print(f"  the run it is registered against: {st['driver_flags']}")
     print(f"  not priced: {STATEMENT_NOT_PRICED['flags']} -- {STATEMENT_NOT_PRICED['effect']}")
@@ -993,7 +1092,7 @@ def main():
     print(f"prediction block sha256 (incl. provenance): {digest}")
     if a.json:
         os.makedirs(os.path.join(HERE, "out"), exist_ok=True)
-        p = os.path.join(HERE, "out", "registration.json")
+        p = os.path.join(HERE, "out", out_name(names))
         with open(p, "w") as f:
             json.dump(doc, f, indent=1, sort_keys=True)
             f.write("\n")

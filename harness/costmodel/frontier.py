@@ -367,6 +367,14 @@ SHAPES = [
          check_total=8.03e9, check_active=8.03e9,
          source="config.json (meta-llama/Meta-Llama-3.1-8B); the shape every "
                 "measured number in this repo was taken on"),
+    dict(name="Llama-3.1-70B", tag="dense", d=8192, nh=64, nkv=8, hd=128,
+         vocab=128256, groups=[group(80, 28672)],
+         check_total=70.55e9, check_active=70.55e9,
+         source="[web] config.json, nvidia/Llama-3.1-70B-Instruct-FP8 and "
+                "unsloth/Meta-Llama-3.1-70B, which agree, fetched 2026-09-10: "
+                "L=80 d=8192 nh=64 nkv=8 dff=28672 vocab=128256, untied "
+                "embeddings; the head dimension is d/nh = 128, which the config "
+                "does not name. The published count is 70,553,706,496"),
     dict(name="Llama-3.1-405B", tag="dense", d=16384, nh=128, nkv=8, hd=128,
          vocab=128256, groups=[group(126, 53248)],
          check_total=405.85e9, check_active=405.85e9,
