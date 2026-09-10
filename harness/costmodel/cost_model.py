@@ -219,11 +219,14 @@ B3C = b3_constants()
 WEIGHT_FREIVALDS_CELLS_PER_WEIGHT = cell(
     "weight_freivalds_cells_per_weight", "model_constants.weight_freivalds_cells_per_weight",
     B3C["cells_per_weight"] if B3C else None, "b3/width.json") or 0.0
-# The preprocessed side of the same layout choice.  No key names it yet, so this
-# one term still forces the inputs directory even when every other cell cost is
-# backed by a constant.
+# The preprocessed side of the same layout choice, under the key beside the fresh
+# one.  The `freivalds` subcommand the microbench-cells driver runs reports it in
+# the same points, as a marginal over the weights two output widths differ by, so
+# the recorded figure is the unpadded slope; the archive's is one padded
+# component divided by its weights and is the higher of the two.
 PREPROCESSED_PER_WEIGHT = cell(
-    "preprocessed_cells_per_weight", None,
+    "preprocessed_cells_per_weight",
+    "model_constants.weight_freivalds_preprocessed_cells_per_weight",
     B3C["preprocessed_per_weight"] if B3C else None, "b3/width.json") or 0.0
 
 
@@ -266,8 +269,11 @@ B4C = b4_constants()
 LIMB_CELLS_PER_ACC = cell("limb_cells_per_acc", None,
                           B4C["cells_per_acc"] if B4C else None, "b4/limbs.json",
                           charged=False) or 0.0
-# the packed pair table's range check on every committed int8 activation
-RANGE_CELLS_PER_ACTIVATION = cell("int8_range_cells_per_activation", None,
+# the packed pair table's range check on every committed int8 activation: one
+# arity-2 lookup covers two activations, so the key is half the LogUp marginal at
+# the batch every use side finalises with and the entry that backs it is derived
+RANGE_CELLS_PER_ACTIVATION = cell("int8_range_cells_per_activation",
+                                  "model_constants.int8_range_cells_per_activation",
                                   B4C["range_marginal"] if B4C else None, "b4/range.json")
 
 
@@ -487,8 +493,12 @@ MAXARG_CELLS_B65 = ((B65C["requant_max"] - B65C["requant_only"])
 # `model_constants.argmax_cells_per_comparison` does NOT back this: that key is
 # the whole gadget over its comparisons, the fixed table half included, and the
 # marginal below subtracts that half using the run's own row count, which the
-# key does not carry.  Recording the marginal beside it would back this input.
-MAXARG_CELLS_BUILT = cell("argmax_marginal_cells_per_comparison", None,
+# key does not carry.  The key named here is the marginal itself, and separating
+# it from the fixed side takes a second vocabulary at the same token count: one
+# point cannot, because the assumed fixed side is what the difference of two
+# points measures.
+MAXARG_CELLS_BUILT = cell("argmax_marginal_cells_per_comparison",
+                          "model_constants.argmax_marginal_cells_per_comparison",
                           B10A["marginal"] if B10A else None, "b10/argmax_v8k.json",
                           "the whole-gadget key is not this quantity") or 0.0
 MAXARG_CELLS = MAXARG_CELLS_BUILT or MAXARG_CELLS_B65
@@ -511,21 +521,23 @@ for _n, _v in (("route_selection_cells", ROUTE_SEL_CELLS),
                                "was measured stands in for it")
 # `dequant` is the per-accumulator cost of reading the integer *and* rounding it;
 # it subsumes B4's limb term, so `cells_per_token` charges this instead of that.
-# The two keys are measured with the round half to even; the model charges the
-# rounding away from zero on every layer matmul, and no key names that one, so
-# where the inputs directory is missing the even figure stands in and the model
-# is one cell an accumulator high.
+# The two even keys are the ones the recorded run measured; the model charges the
+# rounding away from zero on every layer matmul and reads it under its own key.
+# Until a run at that rounding records one, the even figure stands in where the
+# inputs directory is missing and the model is one cell an accumulator high.
 DEQUANT_CELLS_PER_ACC = cell("dequant_chain_cells_per_acc",
                              "model_constants.dequant_chain_cells_per_acc",
                              (B6C or {}).get("chain"), "b6/dequant.json",
                              charged=False) or 0.0
-DEQUANT_AWAY_PER_ACC = cell("dequant_chain_away_cells_per_acc", None,
+DEQUANT_AWAY_PER_ACC = cell("dequant_chain_away_cells_per_acc",
+                            "model_constants.dequant_chain_away_cells_per_acc",
                             (B6C or {}).get("chain_away"), "b6/dequant.json") or 0.0
 DEQUANT_POW2_PER_ACC = cell("dequant_pow2_cells_per_acc",
                             "model_constants.dequant_pow2_cells_per_acc",
                             (B6C or {}).get("pow2"), "b6/dequant.json",
                             charged=False) or 0.0
-DEQUANT_POW2_AWAY_PER_ACC = cell("dequant_pow2_away_cells_per_acc", None,
+DEQUANT_POW2_AWAY_PER_ACC = cell("dequant_pow2_away_cells_per_acc",
+                                 "model_constants.dequant_pow2_away_cells_per_acc",
                                  (B6C or {}).get("pow2_away"), "b6/dequant.json") or 0.0
 
 
@@ -553,13 +565,16 @@ ATTNOUT_CELLS_PER_ACC = cell("attnout_int8_cells_per_acc",
 # run with `--gkr-dequant` builds: the batched reduction proves those sums and
 # the gadget commits its base columns alone.  Read off the same points'
 # `columns.base` over the layout's accumulators per row, so it is the rung's own
-# split and not a second measurement.  No key names either one.
+# split and not a second measurement.  Both come out of the same run at the
+# rounding the model charges, and each has its own key.
 _B6BASE = (B6C or {}).get("base") or {}
-DEQUANT_AWAY_BASE_PER_ACC = cell("dequant_chain_away_base_cells_per_acc", None,
+DEQUANT_AWAY_BASE_PER_ACC = cell("dequant_chain_away_base_cells_per_acc",
+                                 "model_constants.dequant_chain_away_base_cells_per_acc",
                                  _B6BASE.get(("chain", "away")), "b6/dequant.json",
                                  "the chain rung's committed columns, no LogUp "
                                  "running sums: what `--gkr-dequant` builds") or 0.0
-DEQUANT_POW2_AWAY_BASE_PER_ACC = cell("dequant_pow2_away_base_cells_per_acc", None,
+DEQUANT_POW2_AWAY_BASE_PER_ACC = cell("dequant_pow2_away_base_cells_per_acc",
+                                      "model_constants.dequant_pow2_away_base_cells_per_acc",
                                       _B6BASE.get(("pow2", "away")), "b6/dequant.json",
                                       "the power-of-two rung's committed columns, no "
                                       "LogUp running sums") or 0.0
@@ -622,7 +637,13 @@ MUL_CELLS = cell("residual_stream_mul_cells_per_op",
                  "model_constants.residual_stream_mul_cells_per_op",
                  (B10G or {}).get("mul") or _mul_ladder or None,
                  "b65/residual_stream.json") or 0.0
-UNARY_CELLS = cell("unary_cells_per_application", None,
+# the bf16 unary op, under the key beside the add and the multiply.  It is the
+# residual stream's third primitive and an exact count rather than a measurement:
+# the output is one committed bf16 value and the op pays one lookup's share of an
+# interaction column, so the entry that backs it is derived from the LogUp
+# marginal at the batch every use side finalises with.
+UNARY_CELLS = cell("unary_cells_per_application",
+                   "model_constants.residual_stream_unary_cells_per_op",
                    (B10G or {}).get("unary") or (B4C or {}).get("lookup_cells") or None,
                    "b4/unary.json") or 0.0
 # the add, from its construction: B6's `round` variant (the normalisation, one
