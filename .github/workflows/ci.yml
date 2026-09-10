@@ -118,3 +118,4 @@ jobs:
           uv run python -m harness.witness.plan --selftest
           uv run python -m harness.eval.baseline.decode_bench --selftest
           uv run python -m harness.costmodel.key_tile --selftest
+          uv run python -m harness.costmodel.cost_model --selftest

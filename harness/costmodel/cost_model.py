@@ -16,11 +16,13 @@ from it. Closing that gap is B7's job.
 """
 import json
 import pathlib
+import sys
 
 from harness import constants, inputs
 from harness.costmodel.key_tile import (  # noqa: F401  (re-exported)
-    CHAN_TARGET, GRID_TARGET, ROW_WIDTH, key_tile_cells, key_tile_family,
-    key_tile_fresh)
+    CELLS_PER_TABLE_ROW, CHAN_TARGET, FIXED_TABLE_ROWS, GRID_TARGET, LOG_TABLE,
+    ROW_WIDTH, boundary_cells, key_tile_cells, key_tile_family, key_tile_fresh,
+    lookup_table_cells)
 
 # The micro-benchmark outputs this model reads, all under one directory: the
 # stwo benches at its root and the witness-side probes in named subdirectories.
@@ -59,9 +61,11 @@ def cell(name, key, measured=None, file=None, note="", charged=True):
     under `key`, the micro-benchmark outputs' `measured` where the file has no
     such key, and None where neither has it.
 
-    `charged=False` marks an input the model reads for a comparison it prints and
-    does not multiply by a count, so a caller that refuses to price a term it
-    cannot price knows not to count this one."""
+    `charged=False` marks an input the model does not multiply by a count -- one
+    it reads for a comparison it prints, or a whole family it does not price at
+    all and records so that a reader of a projection sees what is missing from
+    it.  A caller that refuses to print a table with an unpriced term reads this
+    flag to know which absent inputs are that kind and which are not."""
     e = constants.find(key) if key else None
     if e is not None:
         PROVENANCE[name] = dict(value=e["value"], source="constants", key=key,
@@ -142,10 +146,46 @@ if logup:
                for p in logup["result"]["points"] if p["logup_batch_size"] == b)
         for b in LOGUP_MARGINAL
     }
-_logup_marginal = cell("logup_marginal_cells_per_lookup",
-                       "model_constants.logup_marginal_cells_per_lookup",
-                       LOGUP_MARGINAL.get(LOGUP_BATCH), "logup.json")
-if _logup_marginal is not None:
+LOGUP_MARGINAL_KEY = "model_constants.logup_marginal_cells_per_lookup"
+LOGUP_MARGINAL_SHAPE = ('an object keyed by the LogUp batch size as a string, '
+                        '{"1": 4.0, "2": 2.0} -- the marginal is one number per '
+                        'batch size and the model indexes it by the batch it charges')
+
+
+def logup_marginal_by_batch(value, where=LOGUP_MARGINAL_KEY):
+    """The recorded LogUp marginal, as the mapping `cells_per_token` indexes.
+
+    `b2/out/logup.json` measures one marginal per lookup batch size and the model
+    charges whichever batch it is asked for, so the recorded value is a mapping
+    and not a number.  A scalar is refused here rather than charged at whatever
+    batch the caller happens to ask for: it would be silently wrong at every
+    batch but one, and indexing it would raise deep inside `cells_per_token`."""
+    if not isinstance(value, dict):
+        raise SystemExit(f"{where}: the LogUp marginal is recorded as "
+                         f"{LOGUP_MARGINAL_SHAPE}; this file has the scalar {value!r}")
+    out = {}
+    for k, v in value.items():
+        try:
+            b = int(k)
+        except (TypeError, ValueError):
+            raise SystemExit(f"{where}: {k!r} is not a LogUp batch size; the value is "
+                             f"{LOGUP_MARGINAL_SHAPE}")
+        out[b] = v
+    if not out:
+        raise SystemExit(f"{where}: no batch size is recorded; the value is "
+                         f"{LOGUP_MARGINAL_SHAPE}")
+    return out
+
+
+_logup_marginal = cell("logup_marginal_cells_per_lookup", LOGUP_MARGINAL_KEY,
+                       LOGUP_MARGINAL.get(LOGUP_BATCH), "logup.json",
+                       note=f"recorded as {LOGUP_MARGINAL_SHAPE}")
+if PROVENANCE["logup_marginal_cells_per_lookup"]["source"] == "constants":
+    # the constants file carries every batch size it measured, so it replaces the
+    # whole mapping rather than one entry of it
+    LOGUP_MARGINAL.update(logup_marginal_by_batch(_logup_marginal))
+elif _logup_marginal is not None:
+    # the bench file's own point at the batch the model charges: one entry
     LOGUP_MARGINAL[LOGUP_BATCH] = _logup_marginal
 
 # --- B3's two missing terms, measured ----------------------------------------
@@ -291,8 +331,14 @@ def b6_constants():
     except (ValueError, KeyError):
         return None
     by = {}
+    base = {}
+    per_row = json.loads(fd.read_text())["result"]["per_row"]
     for p in pts:
-        by[(p["spec"]["variant"], p["spec"]["round"])] = p["cells_per_acc_marginal"]
+        k = (p["spec"]["variant"], p["spec"]["round"])
+        by[k] = p["cells_per_acc_marginal"]
+        # the same rung with its LogUp running sums NOT committed: the gadget's
+        # base columns alone, which is what a `--gkr-*` run builds
+        base[k] = p["columns"]["base"] / per_row
     # Prefer the host sweep at the *design point* (`intexp`, the alpha = 4.00 variant
     # the model charges) over the containerised `intsplit6` one, which exists only
     # because one master exp table at 2^23 rows does not fit 7.7 GiB.
@@ -321,6 +367,7 @@ def b6_constants():
         )
         break
     return dict(
+        base=base,
         limbs=by.get(("limbs", "even")),
         # the design point for a matmul whose consumer is a bf16 table or the
         # residual stream: general bf16 scales, three roundings, no quality cost
@@ -502,6 +549,20 @@ if not DEQUANT_POW2_AWAY_PER_ACC:
 ATTNOUT_CELLS_PER_ACC = cell("attnout_int8_cells_per_acc",
                              "model_constants.attnout_int8_cells_per_acc",
                              (B6C or {}).get("int8"), "b6/dequant.json") or 0.0
+# The same two rungs with the LogUp running sums NOT committed, which is what a
+# run with `--gkr-dequant` builds: the batched reduction proves those sums and
+# the gadget commits its base columns alone.  Read off the same points'
+# `columns.base` over the layout's accumulators per row, so it is the rung's own
+# split and not a second measurement.  No key names either one.
+_B6BASE = (B6C or {}).get("base") or {}
+DEQUANT_AWAY_BASE_PER_ACC = cell("dequant_chain_away_base_cells_per_acc", None,
+                                 _B6BASE.get(("chain", "away")), "b6/dequant.json",
+                                 "the chain rung's committed columns, no LogUp "
+                                 "running sums: what `--gkr-dequant` builds") or 0.0
+DEQUANT_POW2_AWAY_BASE_PER_ACC = cell("dequant_pow2_away_base_cells_per_acc", None,
+                                      _B6BASE.get(("pow2", "away")), "b6/dequant.json",
+                                      "the power-of-two rung's committed columns, no "
+                                      "LogUp running sums") or 0.0
 
 # --- B10 step 2: the residual stream between the components ---------------------------------
 # B6.5 open gap 1: the composition bindings every matmul's accumulators to its own
@@ -692,7 +753,7 @@ def sum_order(n, order):
     raise SystemExit(f"unknown sum order {order}")
 
 
-def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True):
+def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True, batch=None):
     """B6.5 open gap 1, per decoded token: what the wiring between the components
     costs, per gadget.  `d`-wide terms are the residual stream's width, `dff`-wide
     the SwiGLU's.
@@ -701,7 +762,13 @@ def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True):
     the SwiGLU is `topk` times as wide.  The norms and the residual adds are on the
     residual stream and do not move.  `final_norm=False` drops the model-level norm
     so that a two-group model (dense layers + MoE layers) can be summed without
-    counting it twice."""
+    counting it twice.
+
+    `batch` is the LogUp lookup-batch size the STUB's lookups are charged at, and
+    it has to be the one `cells_per_token` charges them at: the stub is what that
+    function already counted and this one takes back, so reading it at another
+    batch takes back cells nobody charged.  It defaults to `BATCH`, which is what
+    `cells_per_token` uses when its caller does not say otherwise."""
     L, d, nh, nkv, hd, dff, vocab = cfg
     dff = topk * dff
     so = sum_order(d, order)
@@ -728,9 +795,14 @@ def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True):
     requant_place = 0.0
     total = sq + red + scale + scalars + swiglu + resid + requant_place
     # what the stub this replaces charged: B1's witness columns for the two norms
-    # and the SiLU, plus their lookups' LogUp share
+    # and the SiLU, plus their lookups' LogUp share -- at the batch
+    # `cells_per_token` charged them at, which is the whole point of taking them
+    # back.  Reading the smallest measured batch here instead took back twice the
+    # marginal at the batch the model charges, and so under-charged the residual
+    # stream by one marginal per lookup.
     stub = (L * (2 * dff + 4 * d)
-            + (L * (2 * dff + 2 * (2 * d + 1))) * LOGUP_MARGINAL[min(LOGUP_MARGINAL)])
+            + (L * (2 * dff + 2 * (2 * d + 1)))
+            * LOGUP_MARGINAL[BATCH if batch is None else batch])
     return dict(order=order, adds=so["adds"], components=so["components"],
                 err_ulps=so["err_ulps"],
                 norm_square=sq, norm_reduce=red, norm_scale=scale,
@@ -739,10 +811,37 @@ def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True):
                 total=total, stub=stub, net=total - stub)
 
 
+# The five batched GKR reductions the prover can be asked for.  Each one proves
+# the LogUp running sums of the family it names instead of committing them, and
+# moves what it does commit into the `gkrlink` family (`main.rs`'s `--gkr-*`
+# flags).  `cells_per_token(gkr=...)` names the ones a statement has on, exactly
+# as `key_tile_cells(gkr=...)` does for its own family, so that a caller prices
+# the statement it means rather than the prover's defaults.
+REDUCTIONS = ("key_tiles", "dequant", "residual_stream", "freivalds", "attnout")
+# What this model can re-price at the reduced statement, and what it cannot.
+# The dequant's rung splits into committed columns and LogUp running sums on the
+# points that measured it, so `--gkr-dequant` is an identity here.  Nothing in
+# the inputs splits the other three the same way, so a statement that names them
+# is priced at the un-reduced rung and the returned `gkr_not_priced` says so.
+REDUCTIONS_PRICED = ("key_tiles", "dequant")
+# The reductions' own link, one interaction family per chunk.  On both recorded
+# 8B layer chunks it is 16 cells per row summed over the reduced components'
+# heights (`family_cells.link_heights`), 12,529,664 cells, and the same at both
+# contexts -- but the heights are the composed plan's, not the shape's, and one
+# shape cannot say what they are at another.  So the model does not price it and
+# says so rather than carrying an 8B number.
+PROVENANCE["gkrlink_cells_per_chunk"] = dict(
+    value=None, source="absent", key=None, file=None, charged=False,
+    note="the batched reductions' link. 16 cells per row over the reduced "
+         "components' heights on both recorded 8B layer chunks; no form in the "
+         "shape, so a statement with the reductions on is under-priced by it")
+
+
 def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
                     head_dequant=None, experts=1, topk=1, seq_batch=1,
                     head=True, attn_accs_per_layer=None,
-                    attn_params_per_layer=None, diagonal_block=True):
+                    attn_params_per_layer=None, diagonal_block=True,
+                    gkr=(), log_table=LOG_TABLE):
     """Committed (fresh) cells per decoded token.
 
     `batch` is the **LogUp lookup-batch size** -- how many lookups share one
@@ -772,8 +871,17 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     `head=False` drops the model-level terms (the `lm_head`'s accumulators, its
     lookups and the token binding) so that a model whose layers are not all alike can
     be summed group by group without counting the head more than once.
+
+    `gkr` names the batched reductions the statement has on, out of `REDUCTIONS`;
+    the default is none of them, which is the prover's own default.  `log_table`
+    is the master exponent table's height, which the `tables` term charges and
+    which a run reports per chunk (`params.log_table`).
     """
     L, d, nh, nkv, hd, dff, vocab = cfg
+    bad = [r for r in gkr if r not in REDUCTIONS]
+    if bad:
+        raise SystemExit(f"unknown reduction {bad}: gkr names a subset of {REDUCTIONS}")
+    not_priced = tuple(r for r in gkr if r not in REDUCTIONS_PRICED)
     if not head:
         vocab = 0
     # the FFN, per token: `topk` experts of width `dff` are actually evaluated
@@ -807,7 +915,9 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
         # `seq` keys, the diagonal block, and stream NN's root-equality claims.  The
         # LogUp running sums are charged, which is the prover's default; a run with
         # `--gkr-key-tiles` moves them into a family this model does not carry.
-        per_layer, key_tile_saturated = key_tile_fresh(nh, hd, seq or 1, ctx, diagonal_block=diagonal_block)
+        per_layer, key_tile_saturated = key_tile_fresh(
+            nh, hd, seq or 1, ctx, diagonal_block=diagonal_block,
+            gkr="key_tiles" in gkr)
         attn = L * per_layer / (seq or 1)
     n_lookups = L * (2 * dff_active + 2 * (2 * d + 1)) + vocab
     logup = n_lookups * LOGUP_MARGINAL[batch]
@@ -829,10 +939,16 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     # (+2.29% perplexity, 15 cells).
     # B8's layout (B9 step 0): the chain on every layer matmul, the power-of-two
     # dequant on `lm_head` alone.  `dequant`/`head_dequant` override either rung.
+    # With `--gkr-dequant` the rung's LogUp running sums are not committed at all,
+    # so the statement's own rung is the gadget's base columns.
+    _reduced = "dequant" in gkr
     per_acc = dequant if dequant is not None else (
-        LAYER_DEQUANT_PER_ACC or LIMB_CELLS_PER_ACC)
+        (DEQUANT_AWAY_BASE_PER_ACC if _reduced else LAYER_DEQUANT_PER_ACC)
+        or LIMB_CELLS_PER_ACC)
     head_acc = head_dequant if head_dequant is not None else (
-        per_acc if dequant is not None else (HEAD_DEQUANT_PER_ACC or per_acc))
+        per_acc if dequant is not None else
+        ((DEQUANT_POW2_AWAY_BASE_PER_ACC if _reduced else HEAD_DEQUANT_PER_ACC)
+         or per_acc))
     limbs = (acc_layer * per_acc + vocab * head_acc) if seq else 0.0
     # B6: the attention output's own dequant, folded straight to int8 because
     # `o_proj` requantises it anyway -- one rounding per output element
@@ -870,12 +986,36 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     # router's `experts` logits (`ROUTE_MAX_CELLS`, B6.5's max argument).
     route = (L * (topk * ROUTE_SEL_CELLS + experts * ROUTE_MAX_CELLS)
              if experts > 1 else 0.0)
+    # RoPE, which the prover reports inside the `residual_stream` family and this
+    # model charged nothing for.  Per rotated q and k value the rotation is two
+    # bf16 multiplies and one bf16 add -- the op counts the recorded chunks'
+    # `residual_stream_components` carry for `rpqm`/`rpqa`/`rpkm`/`rpka` -- so it
+    # is those two primitives and no new number.
+    rope_vals = L * (nh + nkv) * hd
+    rope = rope_vals * (2.0 * MUL_CELLS + ADD_CELLS)
+    # The q and k the attention grid reads are quantized integers, and the
+    # quantize is B6.5's gadget again: the same rung `requant` charges on every
+    # distinct matmul input, on `(nh + nkv) hd` more values per token.  `act` and
+    # `range` do not count these -- they are attention inputs and not matmul
+    # inputs -- so both are charged here beside the rung.
+    quant = rope_vals * (1.0 + rng_cells + REQUANT_CELLS) if seq else 0.0
+    # The lookup tables themselves: five cells a row, once per chunk, over the
+    # spec's table set.  Not per token and not per layer -- a chunk is one layer,
+    # so per token it is `L / seq` chunks' worth.
+    tables = L * lookup_table_cells(log_table) / seq if seq else 0.0
+    # The boundary trees, which no `family_cells` entry names and this model
+    # charged nothing for: one layer chunk's own two residual-stream sides and
+    # its K/V sides, plus the output head's one input side.
+    boundary = (L * boundary_cells(nh, hd, d, seq, ctx) / seq
+                + (d if head else 0.0)) if seq else 0.0
     total = (acc + act + nl + attn + logup + freivalds + rng + limbs + kv + softmax_rows
-             + attn_out + requant + argmax + route)
+             + attn_out + requant + argmax + route + rope + quant + tables + boundary)
     return dict(acc=acc, act=act, nl=nl, attn=attn, logup=logup, n_lookups=n_lookups,
                 freivalds=freivalds, range=rng, limbs=limbs, kv=kv, softmax_rows=softmax_rows,
                 attn_out=attn_out, requant=requant, argmax=argmax, route=route,
+                rope=rope, quant=quant, tables=tables, boundary=boundary,
                 key_tiles=attn, key_tile_saturated=key_tile_saturated, legacy_alpha=legacy_alpha,
+                gkr=tuple(gkr), gkr_not_priced=not_priced, log_table=log_table,
                 dequant_per_acc=per_acc,
                 head_per_acc=head_acc, n_acc=acc, n_acc_layer=acc_layer,
                 flat=acc + act + nl, total=total, freivalds_params=params,
@@ -1430,5 +1570,86 @@ def report():
 
 
 
+# --------------------------------------------------------------- self-test --
+def selftest():
+    """The readers and the switches, with no constants file and no inputs.
+
+    Three things this checks, all of which a caller would otherwise only find out
+    about from a wrong number: that the LogUp marginal is read as the mapping it
+    is, that the residual stream takes back exactly the stub `cells_per_token`
+    charged, and that the reductions switch is a closed set and moves the rung it
+    says it moves.
+    """
+    bad = 0
+    # (1) the LogUp marginal is recorded per lookup batch size
+    got = logup_marginal_by_batch({"1": 4.0, "2": 2.0}, "self-test")
+    if got != {1: 4.0, 2: 2.0}:
+        print(f"  logup marginal: {got} from an object keyed by batch")
+        bad += 1
+    for wrong in (2.0, {"every": 2.0}, {}):
+        try:
+            logup_marginal_by_batch(wrong, "self-test")
+        except SystemExit:
+            continue
+        print(f"  logup marginal: {wrong!r} was accepted; a scalar or an unkeyed "
+              "object has to be refused, not charged at one batch")
+        bad += 1
+    # (2) and (3) need a marginal per batch; without inputs and without a
+    # constants file there is none, so the self-test supplies its own and says so
+    marginal = dict(LOGUP_MARGINAL) or {1: 4.0, 2: 2.0}
+    saved = dict(LOGUP_MARGINAL)
+    LOGUP_MARGINAL.update(marginal)
+    try:
+        for cfg in (QWEN, LLAMA8B, GEMMA):
+            for b in sorted(marginal):
+                c = cells_per_token(cfg, 4096, b, seq=SEQ, head=False)
+                gl = residual_stream_cells(cfg, "tree", batch=b)
+                if abs((c["nl"] + c["logup"]) - gl["stub"]) > 1e-6:
+                    print(f"  stub: {cfg[1]}d batch {b} charges {c['nl'] + c['logup']:,.0f} "
+                          f"and the residual stream takes back {gl['stub']:,.0f}")
+                    bad += 1
+        base = cells_per_token(LLAMA8B, 4096, BATCH, seq=SEQ, head=False)
+        red = cells_per_token(LLAMA8B, 4096, BATCH, seq=SEQ, head=False, gkr=REDUCTIONS)
+        if DEQUANT_AWAY_BASE_PER_ACC and not red["dequant_per_acc"] < base["dequant_per_acc"]:
+            print("  reductions: --gkr-dequant did not lower the dequant rung")
+            bad += 1
+        if red["key_tiles"] >= base["key_tiles"]:
+            print("  reductions: --gkr-key-tiles did not lower the key tile family")
+            bad += 1
+        # the two identities are charged whatever the inputs directory holds; the
+        # other two are a count times a rung, and an absent rung is not a zero
+        for row in ("boundary", "tables"):
+            if not base[row] > 0:
+                print(f"  {row}: charged nothing")
+                bad += 1
+        for row, rung in (("rope", MUL_CELLS + ADD_CELLS), ("quant", REQUANT_CELLS)):
+            if rung and not base[row] > 0:
+                print(f"  {row}: charged nothing at a rung of {rung}")
+                bad += 1
+        try:
+            cells_per_token(LLAMA8B, 4096, BATCH, seq=SEQ, gkr=("gkr-everything",))
+        except SystemExit:
+            pass
+        else:
+            print("  reductions: an unknown reduction name was accepted")
+            bad += 1
+    finally:
+        LOGUP_MARGINAL.clear()
+        LOGUP_MARGINAL.update(saved)
+    if bad:
+        print(f"cost model: {bad} self-test failures")
+        return 1
+    print("cost model: the LogUp marginal reads per batch and refuses a scalar; the "
+          "residual stream takes back exactly the stub charged, at every measured "
+          "batch and three shapes; the reductions switch is closed and moves the "
+          "key tile family and the dequant rung")
+    if not LOGUP_MARGINAL:
+        print("  (no constants file and no inputs here, so the batch marginals above "
+              "are the self-test's own)")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(selftest())
     report()

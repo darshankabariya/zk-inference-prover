@@ -1,15 +1,19 @@
-"""The attention key tile family, as a closed form in (S, C), and its self-test.
+"""The closed forms a chunk's cell count is exact in -- the attention key tile
+family, the boundary trees and the lookup tables -- and their self-test.
 
     uv run python -m harness.costmodel.key_tile --selftest
 
 Kept out of `cost_model.py` so that the self-test runs with nothing: the cost
-model reads its micro-benchmark inputs at import time, and this form reads no
+model reads its micro-benchmark inputs at import time, and these forms read no
 measured artifact at all.  `cost_model` re-exports every name below, so
-`cm.key_tile_cells` and `cm.key_tile_fresh` are unchanged for their callers.
+`cm.key_tile_cells`, `cm.key_tile_fresh`, `cm.boundary_cells` and
+`cm.lookup_table_cells` are the same objects for their callers.
 
-The self-test evaluates the form against `key_tile_segments.json`, the measured
-`family_cells.key_tiles` of every recorded layer segment, and compares to the
-cell: a one-cell difference is a failure and there is no tolerance to widen.
+The self-test evaluates the key tile form against `key_tile_segments.json`, the
+measured `family_cells.key_tiles` of every recorded layer segment, and the
+boundary form and the whole-chunk identity against `layer_chunks.json`, every
+chunk of one token block of each headline run.  Both compare to the cell: a
+one-cell difference is a failure and there is no tolerance to widen.
 """
 import argparse
 import json
@@ -18,6 +22,7 @@ import sys
 
 HERE = pathlib.Path(__file__).parent
 SEGMENTS = HERE / "key_tile_segments.json"
+CHUNKS = HERE / "layer_chunks.json"
 
 # Stream DD (2026-09-01) replaced B9's `p S^2` fit with a two-variable model of the
 # key tile family, and stream E1 re-derived its coefficients symbolically so they can
@@ -202,6 +207,64 @@ def key_tile_family(nh, hd, s, c, diagonal_block=True, kv_boundary=None, **kw):
     return base, inter, saturated
 
 
+# ------------------------------------------------------- the boundary trees --
+# A chunk's `cells.fresh` is its base tree plus its interaction tree plus its
+# BOUNDARY trees, and no `family_cells` entry names the last of the three: they
+# are what `fresh` has above `base + interaction` (`prover/src/common.rs`,
+# `Cells::fresh`; `prover/src/boundary.rs`, `sides`/`kv_sides`).  A boundary
+# tree commits one side of what a chunk hands to the chunk that reads it, so
+# the layout fixes the count exactly:
+#
+#   * the residual stream, `d` wide over `s` tokens, on the way in and on the
+#     way out                                                        2*d*s
+#   * the keys and the values a layer chunk publishes, `nh*hd` wide per key
+#     block: the OUT side covers this chunk's own `c/s + 1` key blocks (the
+#     tiled prefix and the diagonal block) and the IN side the `c/s` blocks it
+#     read, which is `2*nh*hd*(2*c + s)` over both K and V
+#
+# An output head chunk publishes no keys and no values and reads the residual
+# stream without handing one on, so it commits the one input side alone.
+def boundary_cells(nh, hd, d, s, c, head=False):
+    """The boundary trees of ONE composed chunk, in cells.  An identity of the
+    layout, exact on every recorded chunk (`--selftest`), and the only term
+    besides the key tile family that grows with the context."""
+    if head:
+        return d * s
+    return 2 * d * s + 2 * nh * hd * (2 * c + s)
+
+
+# --------------------------------------------------------- the lookup tables --
+# Every lookup table a chunk uses costs the same two columns whatever it holds:
+# one multiplicity column in the base trace, one QM31 column in the interaction
+# trace, both one entry per table ROW.  A QM31 cell is four M31 cells, so a
+# table of `2^r` rows costs `5 * 2^r` and nothing else -- an identity of LogUp,
+# not a measurement, and the `interaction_by_family.table` of every recorded
+# chunk is exactly four times its `family_cells.tables` multiplicities.
+#
+# The set below is the `b10-final` spec's own, read off the recorded chunks'
+# `family_cells.tables`: nineteen tables whose rows the spec fixes, plus the
+# master exponent table, whose rows are the chunk's `params.log_table` (22 to
+# 25 over the recorded layers, 23 the modal one and 25 on layer 0) and which is
+# most of the total on its own.  A twentieth, small range table (`range4`,
+# `range5` or `range6`, 16 to 64 rows) appears on some layers and not others,
+# which is why this form is exact to 320 cells and not to the cell.
+LOG_TABLE = 23
+FIXED_TABLE_ROWS = ((14, "norm"), (20, "frac"), (14, "mul"), (11, "qnz"),
+                    (7, "range7"), (8, "range8"), (11, "range11"), (12, "range12"),
+                    (13, "range13"), (15, "range15"), (16, "range16"), (20, "range20"),
+                    (4, "epow"), (9, "residual_stream0"), (17, "residual_stream1"),
+                    (16, "residual_stream2"), (16, "residual_stream3"),
+                    (16, "residual_stream4"), (16, "residual_stream5"))
+CELLS_PER_TABLE_ROW = 5
+
+
+def lookup_table_cells(log_table=LOG_TABLE, tables=FIXED_TABLE_ROWS):
+    """What one chunk's lookup tables cost, in cells: five per table row over the
+    master exponent table at `2^log_table` rows and the spec's fixed tables."""
+    rows = (1 << log_table) + sum(1 << r for r, _ in tables)
+    return CELLS_PER_TABLE_ROW * rows
+
+
 def key_tile_fresh(nh, hd, s, c, diagonal_block=True, **kw):
     """The key tile family's fresh cells (base + interaction) of one composed segment."""
     b, i, sat = key_tile_family(nh, hd, s, c, diagonal_block=diagonal_block, **kw)
@@ -229,6 +292,96 @@ def reproduces(p):
     """Does the form give this recorded point's two cell counts exactly?  Equality,
     with no tolerance: one cell apart is not reproduced."""
     return evaluate(p) == (p["key_tiles"], p["key_tiles_interaction"])
+
+
+def chunks():
+    """The recorded chunks the boundary form and the identity are checked against."""
+    d = json.loads(CHUNKS.read_text())
+    return [dict(d["shape"], **p) for p in d["points"]]
+
+
+def chunk_identity(pts=None):
+    """The whole-chunk identity, solved on the recorded chunks.
+
+    A composed layer chunk's fresh cells are its key tile family, its boundary
+    trees, its lookup tables and a REST that the shape fixes and the context
+    does not touch:
+
+        cells.fresh == key_tile_family(nh, hd, S, C) + boundary_cells(...)
+                       + 5 * table_rows + rest
+
+    `rest` comes out at one integer on every recorded layer chunk of both
+    headline runs at both contexts, and at one other integer on the two layer-0
+    chunks, which carry the embedding lookup and one more cell per
+    attention-output accumulator.  Both are returned rather than asserted:
+    solving them here is what lets a caller quote them without transcribing a
+    number.
+    """
+    out = {}
+    for p in (chunks() if pts is None else pts):
+        if p["head"]:
+            continue
+        b, i, _ = key_tile_family(
+            p["nh"], p["hd"], p["s"], p["c"],
+            grid_target=p["grid_target"], chan_target=p["chan_target"], rw=p["rw"],
+            diagonal_block=p["diagonal_block"], kv_boundary=p["kv_boundary"],
+            bind=p["rope"], gkr=p["gkr_key_tiles"])
+        rest = (p["fresh"] - (int(b) + int(round(i)))
+                - boundary_cells(p["nh"], p["hd"], p["d"], p["s"], p["c"])
+                - CELLS_PER_TABLE_ROW * p["table_rows"])
+        out.setdefault("embedding" if p["embedding"] else "layer", set()).add(rest)
+    return dict(layer=sorted(out.get("layer", ())),
+                embedding=sorted(out.get("embedding", ())))
+
+
+def boundary_selftest():
+    """The boundary form, the lookup-table form and the identity, to the cell."""
+    pts = chunks()
+    bad = [p for p in pts
+           if (p["fresh"] - p["base"] - p["interaction"])
+           != boundary_cells(p["nh"], p["hd"], p["d"], p["s"], p["c"], head=p["head"])]
+    for p in bad:
+        print(f"  {p['run']} {p['segment']} C={p['c']} head={p['head']}: boundary "
+              f"{p['fresh'] - p['base'] - p['interaction']:,} vs "
+              f"{boundary_cells(p['nh'], p['hd'], p['d'], p['s'], p['c'], head=p['head']):,}")
+    if bad:
+        print(f"boundary form: {len(bad)} of {len(pts)} recorded chunks do not reproduce")
+        return 1
+    # the negative control: a one-cell difference has to be rejected
+    for p in pts:
+        q = dict(p, fresh=p["fresh"] + 1)
+        if (q["fresh"] - q["base"] - q["interaction"]) == boundary_cells(
+                q["nh"], q["hd"], q["d"], q["s"], q["c"], head=q["head"]):
+            print(f"boundary form: the comparison accepts a one-cell difference "
+                  f"at {p['segment']}")
+            return 1
+    heads = sum(1 for p in pts if p["head"])
+    ctxs = sorted({p["c"] for p in pts if not p["head"]})
+    print(f"boundary form: {len(pts)} recorded chunks ({len(pts) - heads} layer, "
+          f"{heads} output head), exact to the cell")
+    print(f"  contexts C = {ctxs[0]:,} and {ctxs[-1]:,}, d = {pts[0]['d']:,}, "
+          f"S = {pts[0]['s']}")
+    # the lookup tables, against the same chunks' own table rows
+    off = sorted({CELLS_PER_TABLE_ROW * p["table_rows"] - lookup_table_cells(p["log_table"])
+                  for p in pts if not p["head"]})
+    if off[-1] > 320 or off[0] < 0:
+        print(f"lookup-table form: off by {off[0]:,} to {off[-1]:,} cells, not 0 to 320")
+        return 1
+    print(f"lookup-table form: the spec's fixed tables plus 2^log_table are "
+          f"{off[0]} to {off[-1]} cells under every chunk's own table rows "
+          f"(the small per-layer range table)")
+    # the whole-chunk identity
+    ident = chunk_identity(pts)
+    if len(ident["layer"]) != 1 or len(ident["embedding"]) != 1:
+        print(f"whole-chunk identity: rest is not single-valued: {ident}")
+        return 1
+    lay, emb = ident["layer"][0], ident["embedding"][0]
+    n_lay = sum(1 for p in pts if not p["head"] and not p["embedding"])
+    print(f"whole-chunk identity: fresh == key tiles + boundary + 5 * table rows + "
+          f"{lay:,} on {n_lay} layer chunks, exact to the cell")
+    print(f"  the two layer-0 chunks come out at {emb:,}, {emb - lay:,} more: the "
+          f"embedding lookup and one more cell per attention-output accumulator")
+    return 0
 
 
 def selftest():
@@ -264,9 +417,9 @@ def selftest():
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--selftest", action="store_true",
-                    help="check the form against the recorded segments (the default)")
+                    help="check the forms against the recorded segments (the default)")
     ap.parse_args(argv)
-    return selftest()
+    return selftest() or boundary_selftest()
 
 
 if __name__ == "__main__":
