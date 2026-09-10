@@ -4,7 +4,13 @@ Reads the prover's per-layer JSONs (one `compose` run per layer, reference backe
 and the committed registration, writes the per-chunk record the run-book asks
 for and the comparison, in the run-book's order:
 
-  (a) the key tiles integers, exact -- reported whatever rho does;
+  (a) the key tiles integers, exact -- reported whatever rho does.  Against the
+      registered integers if the chunk was proved under the statement the
+      registration prices, and against the closed form at the chunk's own
+      statement if it was not: the registration prices `--diagonal-block
+      --gkr-key-tiles ...`, and a chunk proved without `--gkr-key-tiles`
+      commits the LogUp running sums and reports a larger interaction for the
+      same layout.  The base is the same integer either way;
   (b) rho = measured / predicted on layers-only fresh cells per decoded token,
       with section 3's protocol widening and no other adjustment;
   (c) the tier, and the consequence the bracket table fixed in advance.
@@ -20,6 +26,8 @@ import json
 import os
 import re
 import sys
+
+from harness.costmodel.key_tile import key_tile_family
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REG = os.path.join(HERE, "out", "registration.json")
@@ -50,6 +58,8 @@ def load_run(path):
         params=dict(log_table=pa["log_table"], ao_rem_bits=pa["ao_rem_bits"],
                     ao_q_bits=pa["ao_q_bits"], key_tiles=pa["key_tiles"], nh=pa["nh"], hd=pa["hd"],
                     s=pa["s"], c=pa["c"], diagonal_block=pa.get("diagonal_block", False), layer_boundary=pa.get("layer_boundary", False),
+                    kv_boundary=pa.get("kv_boundary"), rope=pa.get("rope"),
+                    gkr_key_tiles=pa.get("gkr_key_tiles"),
                     grid_target=pa["grid_target"], chan_target=pa["chan_target"], rw=pa["rw"],
                     k_bits=pa["k_bits"], q_bits=pa["q_bits"], nmax=pa["nmax"],
                     kmax=pa["kmax"], round=pa["round"], variant=pa["variant"],
@@ -67,6 +77,33 @@ def load_run(path):
                   stwo_wall=(p.get("phases") or {}).get("wall_secs"), fri=(p.get("phases") or {}).get("fri_secs")),
         env=r.get("env"),
     )
+
+
+STATEMENT_KEYS = ("diagonal_block", "kv_boundary", "bind", "gkr")
+
+
+def statement_of(p):
+    """The key tile configuration this chunk was proved under, off its own `params`.
+
+    The four settings the closed form prices different columns under: whether
+    the prefix is tiled into key blocks, whether the chunk binds its K/Q/V to
+    the boundary roots, and whether the key tiles' batched reduction proves the
+    LogUp sums instead of committing them.  Read rather than assumed, for the
+    same reason `predict.statement` reads it: the chunk is the only thing that
+    says which statement it is.
+    """
+    return dict(diagonal_block=bool(p["diagonal_block"]),
+                kv_boundary=bool(p["kv_boundary"]),
+                bind=p["rope"] is not None,
+                gkr=bool(p["gkr_key_tiles"]))
+
+
+def key_tiles_at(p, st):
+    """The closed form's (base, interaction) at this chunk's own shape and `st`."""
+    b, i, _ = key_tile_family(p["nh"], p["hd"], p["s"], p["c"],
+                              grid_target=p["grid_target"], chan_target=p["chan_target"],
+                              rw=p["rw"], **st)
+    return int(b), int(round(i))
 
 
 def tier_of(rho, br):
@@ -150,14 +187,37 @@ def main():
             problems.append(f"L{k}: residual_stream_ties_ok false")
 
     # ---- (a) the key tiles integers, exact ------------------------------------
+    # The registered integers price one statement (`reg["statement"]`).  A chunk
+    # proved under another one is compared against the closed form at ITS
+    # statement, at the chunk's own shape, and the row says so; comparing it
+    # against the registered interaction would report a difference the layout
+    # never had.  A registration with no statement block predates this and is
+    # taken at its word.
+    reg_st = reg.get("statement")
+    registered_st = {k: reg_st[k] for k in STATEMENT_KEYS} if reg_st else None
     key_tiles_rows = []
     for r in runs:
         b, i = r["family_cells"]["key_tiles"], r["interaction_by_family"]["key_tiles"]
+        st = statement_of(r["params"])
+        as_registered = registered_st is None or st == registered_st
+        if as_registered:
+            eb, ei, against = pred_key_tiles_base, pred_key_tiles_inter, "the registered integers"
+            if registered_st is not None and key_tiles_at(r["params"], st) != (eb, ei):
+                problems.append(f"L{r['layer']}: the closed form at this chunk's own shape and "
+                                f"the registered statement is not the registered pair "
+                                f"{eb:,} / {ei:,}: the shape is not the registered one")
+        else:
+            eb, ei = key_tiles_at(r["params"], st)
+            against = ("`key_tile_family` at this chunk's statement "
+                       + " ".join(f"{k}={st[k]}" for k in STATEMENT_KEYS))
         key_tiles_rows.append(dict(layer=r["layer"], key_tiles_base=b, key_tiles_interaction=i,
-                               base_delta=b - pred_key_tiles_base,
-                               interaction_delta=i - pred_key_tiles_inter,
-                               exact=(b == pred_key_tiles_base and i == pred_key_tiles_inter)))
+                               base_delta=b - eb, interaction_delta=i - ei,
+                               expected_base=eb, expected_interaction=ei,
+                               statement=st, statement_as_registered=as_registered,
+                               compared_against=against,
+                               exact=(b == eb and i == ei)))
     key_tiles_exact = all(x["exact"] for x in key_tiles_rows)
+    off_statement = sorted({x["layer"] for x in key_tiles_rows if not x["statement_as_registered"]})
 
     # ---- (b) rho, with the protocol widening ------------------------------
     n = len(runs)
@@ -243,7 +303,10 @@ def main():
                        key_tiles_family_interaction_per_chunk=pred_key_tiles_inter,
                        cells_per_token_layers_key_tiles=pc["cells_per_token_layers_key_tiles"],
                        cells_per_token_layers_rest=pc["cells_per_token_layers_rest"]),
-        a_key_tiles_exact=dict(exact_on_every_chunk=key_tiles_exact, rows=key_tiles_rows),
+        a_key_tiles_exact=dict(exact_on_every_chunk=key_tiles_exact,
+                               registered_statement=registered_st,
+                               layers_not_at_the_registered_statement=off_statement,
+                               rows=key_tiles_rows),
         b_rho=dict(protocol=protocol, layers_proved=n, widen_pct_lower=widen_lo,
                    widen_pct_upper=widen_hi, measured_cells_per_token_layers=measured_cpt,
                    predicted_cells_per_token_layers=pred_cpt, rho=rho,
@@ -277,11 +340,24 @@ def main():
     print()
     print(f"(a) key tiles exact on every chunk: {key_tiles_exact}  "
           f"(registered {pred_key_tiles_base:,} / {pred_key_tiles_inter:,})")
+    if registered_st is None:
+        print("    the registration names no statement: the registered integers are "
+              "taken as they stand")
+    elif off_statement:
+        other = next(x for x in key_tiles_rows if not x["statement_as_registered"])
+        print(f"    proved under another statement than the registration prices, so "
+              f"compared against the closed form at their own: L{off_statement} "
+              f"({other['compared_against']})")
+    else:
+        print("    every chunk was proved under the statement the registration prices: "
+              + " ".join(f"{k}={registered_st[k]}" for k in STATEMENT_KEYS))
     if not key_tiles_exact:
         for x in key_tiles_rows:
             if not x["exact"]:
                 print(f"    L{x['layer']}: base {x['key_tiles_base']:,} ({x['base_delta']:+,}), "
-                      f"interaction {x['key_tiles_interaction']:,} ({x['interaction_delta']:+,})")
+                      f"interaction {x['key_tiles_interaction']:,} ({x['interaction_delta']:+,}) "
+                      f"against {x['expected_base']:,} / {x['expected_interaction']:,}, "
+                      f"{x['compared_against']}")
     print(f"(b) protocol {protocol}: {n}/{L} layers; measured {measured_cpt:,.1f} cells/token "
           f"(layers), predicted {pred_cpt:,.1f}; rho = {rho:.5f} ({(rho - 1) * 100:+.3f}%)")
     print(f"    per-chunk ratio range {comparison['b_rho']['chunk_ratio_min']:.4f} .. "

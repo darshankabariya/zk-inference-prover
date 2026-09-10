@@ -118,13 +118,28 @@ REF8B_SOURCE = "<--artifacts>/seq5/seq_c{4096,16384}_L16.json (result.point.cell
 #           diagonal block, with one per-token component across the lot, and it
 #           costs `nh*hd*(C - S)` base cells per chunk more than one untiled
 #           prefix key tile would (issue #141).  `selfcheck` prices the statement
-#           the measured chunk names; `predict` prices the prover's defaults,
-#           which is what `cells_per_token` charges for every other family.
+#           the measured chunk names; `predict` prices `STATEMENT` below, the
+#           statement the run this is registered against proves.
 #
 #   rest    everything else in a layer chunk: the dequant, the Freivalds check, the
 #           requantize, the int8 range checks, the attention-output fold and
 #           the residual stream.  Pure arithmetic in the 7-tuple, from the B2-B10 gadget
 #           marginals.  This is the half that can be wrong at a new scale.
+#
+#           Every one of them is priced with its committed LogUp
+#           running-sum columns BUILT, which is the prover's default and the
+#           only thing `cost_model.py` carries a term for: the four reductions
+#           beside `--gkr-key-tiles` -- `--gkr-dequant`,
+#           `--gkr-residual-stream`, `--gkr-freivalds`, `--gkr-attnout` -- move
+#           those cells into `gkrlink`, which this model does not carry
+#           (`cost_model.py`, the `attn` term).  The run this is
+#           registered against passes all four, so this half charges columns
+#           that run does not build.  Which way the total then lands is a
+#           separate question and measurable today: against the one 8B layer
+#           chunk per context that IS proved at the registered statement, this
+#           half comes out 13.4% LOW at C=4096 and 26.2% low at C=16384.  It is
+#           registered as it stands rather than adjusted by a term nobody has
+#           fitted.
 #
 # `rest` is the cost model's layers-only per-token total minus its `attn` term,
 # plus the residual stream's NET cost (`residual_stream_cells(...)['net']` --
@@ -135,14 +150,51 @@ REF8B_SOURCE = "<--artifacts>/seq5/seq_c{4096,16384}_L16.json (result.point.cell
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# THE STATEMENT THE REGISTRATION PRICES.  `tools/drivers/predict-14b.sh` in
+# zk-results proves every layer of the target shape with `--diagonal-block
+# --gkr-key-tiles --gkr-dequant --gkr-residual-stream --gkr-freivalds
+# --gkr-attnout`, the same configuration as both headline runs, so that is the
+# statement the key tile half is priced at.  The closed form's own defaults are
+# a different statement -- the five reductions off -- and would register a
+# larger interaction at the same shape, so it is asked for this one explicitly
+# and never left to default.
+#
+# `kv_boundary` and `bind` are not flags: the prover derives `kv_boundary =
+# diagonal_block && !head` (`main.rs`) and publishes the root-equality claims
+# whenever the segment has `Params::rope`, which every layer segment does.
+# --------------------------------------------------------------------------
+STATEMENT = dict(diagonal_block=True, kv_boundary=True, bind=True, gkr=True)
+
+STATEMENT_FLAGS = dict(
+    diagonal_block="--diagonal-block",
+    kv_boundary="not a flag: `kv_boundary = diagonal_block && !head` (`main.rs`), "
+                "so every layer segment of the run has it",
+    bind="not a flag: `Params::rope`, which every layer segment has and no "
+         "output head does",
+    gkr="--gkr-key-tiles",
+)
+
+# What the driver passes beside `--gkr-key-tiles`, and what this model does with
+# it: nothing.  Named here so a reader of the registration is not left to infer
+# it from the integers.
+STATEMENT_NOT_PRICED = dict(
+    flags="--gkr-dequant --gkr-residual-stream --gkr-freivalds --gkr-attnout",
+    effect="each moves the committed LogUp running sums it owns into "
+           "`gkrlink`; `cost_model.py` carries no term for any of the four, so "
+           "the `rest` half prices all four OFF while the run proves them on",
+)
+
+
 def key_tiles_per_chunk(nh, hd, s, c, base_slope=2.0, **kw):
     """`cm.key_tile_family`, with the ONE coefficient caveat 1 disputes exposed.
 
     The family is the prefix tiled into key blocks of `s` keys plus the diagonal
     block, not one prefix key tile over `c` keys; `**kw` is the statement's own
     configuration (`diagonal_block`, `kv_boundary`, `bind`, `gkr`), which
-    `selfcheck` reads off the measured chunk and `predict` leaves at the
-    prover's defaults.
+    `selfcheck` reads off the measured chunk and `predict` takes from
+    `STATEMENT`.  There is no default here worth having: the caller says which
+    statement it is pricing or the integers mean nothing.
 
     `base_slope` is the key tile family's committed BASE cells per (head, key, token)
     -- the `2 * nh * s * c` score-and-numerator term of `cm.key_tile_cells`, i.e. the
@@ -157,18 +209,26 @@ def key_tiles_per_chunk(nh, hd, s, c, base_slope=2.0, **kw):
     return b + extra, i, sat
 
 
-def predict(cfg, ctx, seq=S, base_slope=2.0):
-    """Layers-only fresh cells per decoded token, split key tiles / rest."""
+def predict(cfg, ctx, seq=S, base_slope=2.0, statement=None):
+    """Layers-only fresh cells per decoded token, split key tiles / rest.
+
+    `statement` is the key tile configuration being priced, `STATEMENT` by
+    default.  The cost model's own `attn` term is subtracted whole and replaced
+    by `key_tiles_per_chunk`, so it is that argument and nothing else that says
+    which statement the key tile half of the prediction is for.
+    """
+    st = STATEMENT if statement is None else statement
     L, d, nh, nkv, hd, dff, vocab = cfg
     r = cm.cells_per_token(cfg, ctx, B, seq=seq, head=False)
     gl = cm.residual_stream_cells(cfg, "tree")
-    bb, bi, sat = key_tiles_per_chunk(nh, hd, seq, ctx, base_slope=base_slope)
+    bb, bi, sat = key_tiles_per_chunk(nh, hd, seq, ctx, base_slope=base_slope, **st)
     key_tiles = L * (bb + bi) / seq
     rest = r["total"] - r["attn"] + gl["net"]
     return dict(key_tiles=key_tiles, rest=rest, total=key_tiles + rest,
                 key_tiles_base_per_chunk=bb, key_tiles_interaction_per_chunk=bi,
                 per_layer_chunk=(key_tiles + rest) * seq / L,
-                saturated=sat, residual_stream_net=gl["net"], bare=r["total"])
+                saturated=sat, residual_stream_net=gl["net"], bare=r["total"],
+                statement=dict(st))
 
 
 def head_chunk(cfg, seq=S):
@@ -189,9 +249,39 @@ def anchors():
         out[f"llama8b_c{ctx}"] = dict(
             scale="Llama-3.1-8B", ctx=ctx, predicted=p["total"], measured=m,
             ratio=p["total"] / m, source=get(key)["source"], grade=get(key)["grade"],
-            card=get(key)["card"])
+            card=get(key)["card"], statement=dict(STATEMENT),
+            note="the predicted side prices the registered statement; the measured "
+                 "side is the earlier seq5 sequence, proved before the tiled prefix, "
+                 "the root-equality claims and the five reductions existed, so its "
+                 "key tile family is a different statement's and this residual "
+                 "carries that difference as well as the model's own")
+        # The same predictor against a chunk that IS proved at the registered
+        # statement: the artifact `ref8b()` already reads, scaled from one layer
+        # chunk to the model's 32.  Not a frozen constant and not a substitute
+        # for one -- it is here because the residual above cannot be read as the
+        # model's own and this one can.
+        pt = _seq5(ctx)
+        mref = pt["cells"]["fresh"] * cm.LLAMA8B[0] / S
+        mkt = (pt["family_cells"]["key_tiles"]
+               + pt["family_cells"]["interaction_by_family"]["key_tiles"]["cells"])
+        pkt = cm.LLAMA8B[0] * (p["key_tiles_base_per_chunk"]
+                               + p["key_tiles_interaction_per_chunk"]) / S
+        mrest = mref - mkt * cm.LLAMA8B[0] / S
+        out[f"llama8b_c{ctx}_registered_statement"] = dict(
+            scale="Llama-3.1-8B", ctx=ctx, predicted=p["total"], measured=mref,
+            ratio=p["total"] / mref, source=REF8B_SOURCE, grade="measured",
+            card="n/a (a cell count is the same on either card)",
+            statement=dict(STATEMENT),
+            key_tiles_exact=int(round(pkt)) == int(round(mkt * cm.LLAMA8B[0] / S)),
+            rest_ratio=p["rest"] / mrest,
+            note="one layer chunk per context, scaled to 32 layers. The key tile "
+                 "half of this ratio is exact to the cell; every cell of the "
+                 "difference is in `rest`, which prices the four reductions "
+                 "beside `--gkr-key-tiles` off while this chunk was proved with "
+                 "them on")
     # Qwen2.5-0.5B: B6.5's composed layer, a DIFFERENT statement -- no
-    # residual-stream family, no diagonal block key tile, and q/k/v/o on the pow2 dequant
+    # residual-stream family, no diagonal block key tile, none of the five reductions,
+    # and q/k/v/o on the pow2 dequant
     # rung while gate/up/down are on the chain.  Evaluated the same way, as a weak anchor.
     L, d, nh, nkv, hd, dff, vocab = cm.QWEN
     r = cm.cells_per_token(cm.QWEN, 1024, B, seq=S, head=False, diagonal_block=False)
@@ -203,6 +293,10 @@ def anchors():
         scale="Qwen2.5-0.5B", ctx=1024, predicted=tot, measured=meas,
         ratio=tot / meas, source="experiments/b65/out/compose_host.json "
         "(result.point.cells.fresh)", grade="measured", card="none (host, macOS)",
+        statement=dict(diagonal_block=False, kv_boundary=False, bind=True, gkr=False),
+        statement_note="what `cells_per_token` prices here, not what B6.5 proved: "
+                       "that prover generation published no root-equality claim, "
+                       "so `bind` is charged against a chunk that has none",
         note="weak anchor: no residual-stream family, no diagonal block key tile, mixed dequant rungs, "
              "and a prover generation older than the seq5 statement")
     return out
@@ -221,9 +315,15 @@ BRACKET = dict(
         "PRIZE  rho in [0.97, 1.03] -- the model predicts a never-fitted scale to "
         "3%. The extrapolation licence is claimed without qualification and the "
         "section 6.3 frontier table keeps its [projected] grade.\n"
-        "PASS   rho in [0.90, 1.10] -- roughly twice the worst residual the same "
-        "predictor shows at the two scales it WAS built from (-5.0% at 0.5B, "
-        "+4.2% at 8B). The licence is claimed with the measured residual quoted "
+        "PASS   rho in [0.90, 1.10] -- the range as registered, unchanged. What "
+        "the same predictor now shows at the two scales it WAS built from is "
+        "-5.0% at 0.5B, -17.6% at 8B C=4096 and -30.8% at 8B C=16384, against "
+        "measurements proved before the tiled prefix, the root-equality claims "
+        "and the five reductions existed. Against the one 8B layer chunk per "
+        "context that IS proved at the registered statement the same predictor "
+        "is -11.1% and -15.9%, every cell of it in the `rest` half: the key "
+        "tile half is exact to the cell at both. The range is NOT rebased on "
+        "any of those. The licence is claimed with the measured residual quoted "
         "beside it.\n"
         "MARGINAL rho in [0.80, 0.90) or (1.10, 1.25] -- the licence is claimed "
         "only with an explicit +/-25% key tile printed on every frontier row.\n"
@@ -258,14 +358,17 @@ BRACKET = dict(
                   "`interaction_by_family.table.cells` for the layer it proved."),
     ),
     also=(
-        "SEPARATE and EXACT: the key tiles family. `family_cells.key tiles` (base) and "
-        "`interaction_by_family.key tiles.cells` must equal the registered integers "
-        "TO THE CELL, as they do on every recorded layer chunk at both contexts "
+        "SEPARATE and EXACT: the key tiles family. `family_cells.key_tiles` (base) and "
+        "`family_cells.interaction_by_family.key_tiles.cells` must equal the registered "
+        "integers TO THE CELL, as they do on every recorded layer chunk at both contexts "
         "(`harness.costmodel.key_tile --selftest`). The registered interaction is "
-        "the statement WITHOUT the five reductions, which is the prover's default; "
-        "a run with `--gkr-key-tiles` reports a smaller one and is compared against "
-        "`key_tile_family(..., gkr=True)` at the same shape. The base is the same "
-        "integer either way. Any nonzero deviation is a finding in its own right "
+        "the statement WITH the five reductions -- `--diagonal-block --gkr-key-tiles "
+        "--gkr-dequant --gkr-residual-stream --gkr-freivalds --gkr-attnout`, the "
+        "configuration `tools/drivers/predict-14b.sh` proves every layer under and "
+        "the one both headline runs used. A run WITHOUT `--gkr-key-tiles` commits the "
+        "LogUp running sums instead, reports a LARGER interaction, and is compared "
+        "against `key_tile_family(..., gkr=False)` at the same shape. The base is the "
+        "same integer either way. Any nonzero deviation is a finding in its own right "
         "and must be reported even if rho passes -- it means the layout identities "
         "in `key_tile_cells` do not hold at a shape whose `nh` and `d` are not "
         "powers of two, which is the one thing the closed form's own docstring "
@@ -278,6 +381,27 @@ BRACKET = dict(
         "bounds on, and a REAL extracted witness (not `ZK_SYNTHETIC_DIMS`). "
         "A void run is re-run, never re-bracketed."),
 )
+
+
+def registered_statement():
+    """What the registered key tile integers price, said in the document itself.
+
+    Four settings and the driver flags they correspond to, so that a reader of
+    `registration.json` can see which statement the integers assume without
+    reading this file.  It is part of the hashed content: a registration that
+    priced another statement is another registration.
+    """
+    return dict(
+        STATEMENT,
+        driver="tools/drivers/predict-14b.sh (zk-results), which proves every "
+               "layer of the target shape with these flags",
+        driver_flags="--diagonal-block --gkr-key-tiles --gkr-dequant "
+                     "--gkr-residual-stream --gkr-freivalds --gkr-attnout",
+        flags=dict(STATEMENT_FLAGS),
+        key_tiles_half="priced at exactly this statement: "
+                       "`key_tile_family(nh, hd, S, C, **STATEMENT)`",
+        rest_half=dict(STATEMENT_NOT_PRICED),
+    )
 
 
 def statement(pt):
@@ -512,7 +636,8 @@ def main():
     # The falsifiable content, hashed ALONE.  This must not move when an
     # unrelated constant is edited, or the hash cannot answer the only question
     # a later reader asks of it: is this the prediction that was registered?
-    content = dict(schema="e4-registration/1", shapes=reg, bracket=BRACKET,
+    content = dict(schema="e4-registration/1", statement=registered_statement(),
+                   shapes=reg, bracket=BRACKET,
                    anchors=anc, key_tiles_selfcheck_8b=chk,
                    frozen_inputs=frozen_inputs())
     content_digest = hashlib.sha256(canonical(content)).hexdigest()
@@ -528,6 +653,11 @@ def main():
     print("E4 -- unfitted-scale prediction, registered before measurement")
     print("=" * 78)
     print()
+    st = registered_statement()
+    print("the statement priced:", " ".join(f"{k}={STATEMENT[k]}" for k in sorted(STATEMENT)))
+    print(f"  the run it is registered against: {st['driver_flags']}")
+    print(f"  not priced: {STATEMENT_NOT_PRICED['flags']} -- {STATEMENT_NOT_PRICED['effect']}")
+    print()
     print("key tiles self-check against the 8B artifacts (must be exact to the cell):")
     for c in chk:
         print(f"  C={c['ctx']:<6} base {c['key_tiles_base']:>13,}  interaction "
@@ -535,8 +665,8 @@ def main():
     print()
     print("the predictor's residual at the two scales it WAS built from:")
     for k, v in anc.items():
-        print(f"  {v['scale']:<16} C={v['ctx']:<6} predicted {v['predicted']:>15,.0f}  "
-              f"measured {v['measured']:>15,}  ratio {v['ratio']:.4f}  "
+        print(f"  {k:<34} predicted {v['predicted']:>15,.0f}  "
+              f"measured {v['measured']:>15,.0f}  ratio {v['ratio']:.4f}  "
               f"({100*(v['ratio']-1):+.2f}%)")
     print()
     for name, e in reg.items():
