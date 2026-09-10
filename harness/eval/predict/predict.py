@@ -17,12 +17,13 @@ committed no witness, no proof and no cell count existed at any of the three
 target scales, on either box -- see the `provenance` block in the emitted JSON.
 
 Nothing here re-derives a frozen constant, and nothing here falls back to a
-number.  The anchor that carries the weight is a measured 8B layer chunk per
-context, read from `--artifacts` and proved at exactly the statement this
-registration prices; a constants key that this constants file does not name is
-recorded as absent and nothing stands in for it.  The cost model's own inputs
-come through `cost_model.PROVENANCE`, constants first and the micro-benchmark
-outputs second, and the whole record is frozen with the prediction.
+number.  The anchor that carries the weight is the 8B layer block zk-results
+records per proved position, one row per context, with a measured 8B layer
+chunk read from `--artifacts` beside it; a constants key that this constants
+file does not name is recorded as absent and nothing stands in for it.  The
+cost model's own inputs come through `cost_model.PROVENANCE`, constants first
+and the micro-benchmark outputs second, and the whole record is frozen with the
+prediction.
 """
 import argparse
 import hashlib
@@ -270,29 +271,75 @@ def head_chunk(cfg, seq=S):
 # This is the only honest basis for a bracket, so it is computed here rather
 # than asserted.
 #
-# The anchor that carries the weight is the DERIVED REFERENCE CHUNK: one 8B
-# layer chunk per context out of a headline run, proved at exactly the
-# statement this registration prices.  It is read from `--artifacts` and its
-# own `derived_from` block says which run, block and segment it came from.
+# The anchor that carries the weight is the RECORDED LAYER BLOCK, one
+# constants row per context: the fresh cells of the model's 32 layer segments
+# of one token block over the 512 positions that block proves.  The block is
+# the one whose prefix is the whole context, so both sides of the comparison
+# are 32 layers at C over a block of S, and neither side carries an output head
+# segment: it is the quantity `predict` states, position for position.  The
+# other `cells_per_position.headline.*` rows of the same run are NOT that
+# quantity -- they divide every segment of the run, output heads and shorter
+# prefixes included, by every position the run proves -- and are not read here.
 #
-# There is a second, weaker anchor per context against a frozen 32-layer
-# per-token figure, and it is OPTIONAL: the keys it wants
-# (`cells_per_token.8b.c{4096,16384}.fresh_layers`) are not in zk-results'
-# `constants.json`, which names its 8B figures `cells_per_position.headline.*`
-# instead.  Those are NOT the same quantity -- per proved position over a whole
-# decode sequence whose context grows block by block, the output head chunks
-# included, against layers-only cells per decoded token at ONE context -- so
-# nothing substitutes for the absent key and the block records it as absent.
+# One difference between the two sides is named rather than adjusted away: the
+# measured block's layer segment 0 carries the embedding lookup and one more
+# cell per attention-output accumulator, which the model prices as no layer's
+# cost.  `layer_chunks.json` holds the same 32 segments, so both the size of
+# that difference and the recorded figure itself are recomputed here, to the
+# cell, instead of transcribed.
+#
+# The second anchor per context is the DERIVED REFERENCE CHUNK: one 8B layer
+# chunk out of that same block, read from `--artifacts`, scaled to 32 layers.
+# It is what a constants file older than the row above leaves, and it splits
+# the residual into the key tile half and the rest, which the row cannot.
 # --------------------------------------------------------------------------
-FROZEN_8B_KEYS = {4096: "cells_per_token.8b.c4096.fresh_layers",
-                  16384: "cells_per_token.8b.c16384.fresh_layers"}
+FROZEN_8B_KEYS = {4096: "cells_per_position.headline.c4096.fresh_layers_block",
+                  16384: "cells_per_position.headline.c16384.fresh_layers_block"}
 FROZEN_8B_ABSENT = (
-    "this constants file does not name it. zk-results names its 8B figures "
-    "`cells_per_position.headline.c{4096,16384}.*`, which are a different "
-    "quantity: per proved position over a whole decode sequence, the output "
-    "head chunks included and the context growing one block at a time, against "
-    "layers-only cells per decoded token at one context. The registration is "
-    "anchored on the derived reference chunk beside this instead.")
+    "this constants file does not name it. A constants file older than the "
+    "record of this row has only the `cells_per_position.headline.*` rows over "
+    "the whole decode sequence, which are a different quantity -- every segment "
+    "of the run, output heads and shorter prefixes included, over every "
+    "position it proves -- and none of them stands in for it. The registration "
+    "is anchored on the derived reference chunk beside this instead.")
+
+
+def entry_provenance(e):
+    """Where a constants entry came from, in the fields zk-results names.
+
+    That file's entries carry `run` and `artifact`; none of them has a `source`
+    field and its own check refuses one that does. An entry that names neither
+    -- an assumption, or a figure read from a public source -- says so here
+    rather than being given a path it does not have."""
+    run, artifact = e.get("run"), e.get("artifact")
+    if run and artifact:
+        return f"runs/{run}/{artifact}"
+    return run or artifact or "the constants file, which names no run for this entry"
+
+
+def recorded_layer_block(ctx):
+    """The measured 8B layer block, out of this repository's copy of its segments.
+
+    `layer_chunks.json` holds every segment of the token block each recorded
+    row divides, so the row can be recomputed here to the cell instead of
+    trusted, and the embedding lookup that separates the two sides of the
+    comparison can be sized without transcribing a number."""
+    ch = [q for q in key_tile.chunks() if not q["head"] and q["c"] == ctx]
+    if not ch:
+        return None
+    ident = key_tile.chunk_identity(ch)
+    exact = len(ident["layer"]) == 1 and len(ident["embedding"]) == 1
+    fresh, s = sum(q["fresh"] for q in ch), ch[0]["s"]
+    return dict(layers=len(ch), positions=s, fresh=fresh, per_position=fresh / s,
+                embedding_lookup_per_position=(ident["embedding"][0] - ident["layer"][0]) / s
+                if exact else None,
+                run=ch[0]["run"], artifact=ch[0]["output"],
+                block=ch[0]["segment"].split("L")[0],
+                note="the same 32 segments the recorded row divides, copied into "
+                     "this repository; `embedding_lookup_per_position` is what "
+                     "layer segment 0 builds above the other 31, which is the "
+                     "embedding lookup and one more cell per attention-output "
+                     "accumulator")
 
 
 def anchors():
@@ -307,17 +354,33 @@ def anchors():
                 ratio=None, key=key, source="absent", grade="absent",
                 statement=dict(STATEMENT), note=FROZEN_8B_ABSENT)
         else:
+            m = e["value"]
+            rec = recorded_layer_block(ctx)
+            emb = rec and rec["embedding_lookup_per_position"]
             out[f"llama8b_c{ctx}"] = dict(
-                scale="Llama-3.1-8B", ctx=ctx, predicted=p["total"], measured=e["value"],
-                ratio=p["total"] / e["value"], key=key, source=e["source"],
+                scale="Llama-3.1-8B", ctx=ctx, predicted=p["total"], measured=m,
+                ratio=p["total"] / m, key=key, source=entry_provenance(e),
+                run=e.get("run"), artifact=e.get("artifact"),
                 grade=e["grade"], card=e["card"], statement=dict(STATEMENT),
-                note="the predicted side prices the registered statement; the measured "
-                     "side is the earlier seq5 sequence, proved before the tiled prefix, "
-                     "the root-equality claims and the five reductions existed, so its "
-                     "key tile family is a different statement's and this residual "
-                     "carries that difference as well as the model's own")
-        # The anchor that carries the weight: a chunk that IS proved at the
-        # registered statement, scaled from one layer chunk to the model's 32.
+                recorded_chunks=rec,
+                measured_matches_recorded_chunks=(rec is not None
+                                                  and rec["fresh"] == m * rec["positions"]),
+                embedding_lookup_per_position=emb,
+                ratio_without_the_embedding_layer=None if not emb else p["total"] / (m - emb),
+                note="both sides are the fresh cells of the model's 32 layer segments "
+                     "over the 512 positions one token block proves, at this context "
+                     "and at the statement this registration prices, with no output "
+                     "head segment on either. The measured block is the one whose "
+                     "prefix is the whole context: the earlier blocks of that sequence "
+                     "read a shorter prefix and cost less, which is the comparison the "
+                     "prediction does not make. Its layer segment 0 carries the "
+                     "embedding lookup and one more cell per attention-output "
+                     "accumulator, which the model prices as no layer's cost -- that "
+                     "is `embedding_lookup_per_position`, and the ratio beside it is "
+                     "the same comparison without it")
+        # The second anchor: one layer chunk out of the same block, scaled to
+        # the model's 32.  It splits the residual into the key tile half, which
+        # is exact to the cell, and the rest, which the recorded row cannot.
         pt = _seq5(ctx)
         mref = pt["cells"]["fresh"] * cm.LLAMA8B[0] / S
         mkt = (pt["family_cells"]["key_tiles"]
@@ -874,6 +937,13 @@ def main():
         print(f"  {k:<34} predicted {v['predicted']:>15,.0f}  "
               f"measured {v['measured']:>15,.0f}  ratio {v['ratio']:.4f}  "
               f"({100*(v['ratio']-1):+.2f}%)")
+        print(f"  {'':<34} measured side, {v['grade']}: {v['source']}")
+        if v.get("embedding_lookup_per_position"):
+            print(f"  {'':<34} the embedding lookup in it, which the model prices as "
+                  f"no layer's cost: {v['embedding_lookup_per_position']:,.0f} a position, "
+                  f"ratio without it {v['ratio_without_the_embedding_layer']:.4f}"
+                  f"   recomputed from this repository's copy of the 32 segments: "
+                  f"{v['measured_matches_recorded_chunks']}")
     print()
     ci = chunk_identity()
     print(f"one layer chunk, to the cell on {ci['chunks']} recorded chunks at both contexts:")

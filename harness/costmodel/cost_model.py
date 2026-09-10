@@ -842,9 +842,13 @@ def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True, batch=None
 #
 # This is a RE-FIT AGAINST ONE SHAPE and is labelled as one everywhere it is
 # read: 8B, S = 512, `b10-final`.  It is not a form in the shape and it is not a
-# second measurement of the standalone gadget -- the keys named in the file are
-# keys zk-results does not have, and where a key of a similar name does exist it
-# names the standalone rung and must not be read for this.
+# second measurement of the standalone gadget -- where a key of a similar name
+# exists it names the standalone rung and must not be read for this.
+#
+# The `key` each entry names is the key zk-results records that figure under, and
+# is read before this file.  The two are the same number where both exist, because
+# the recorded values are these quotients; one that disagrees with them is refused
+# rather than charged, and `PROVENANCE` says which one was read.
 COMPOSED_RUNGS = pathlib.Path(__file__).parent / "composed_rungs.json"
 
 
@@ -869,6 +873,12 @@ COMPOSED, _COMPOSED_DOC = composed_rungs()
 for _n, _v in sorted(COMPOSED.items()):
     _e = _COMPOSED_DOC["rungs"][_n]
     _k = constants.find(_e["key"]) if _e.get("key") else None
+    if _k and _v != _e["cells"] / _e["count"]:
+        raise SystemExit(
+            f"{_e['key']}: the constants file holds {_v!r} and this file "
+            f"{_e['cells']:,} cells over {_e['count']:,} {_e['unit']}s. Both claim the "
+            "same 62 recorded 8B layer chunks, so one of them is wrong about what "
+            "those chunks built and this model will not pick between them.")
     PROVENANCE[f"composed_{_n}"] = dict(
         value=_v, source="constants" if _k else "composed", key=_e["key"], charged=True,
         grade=_k.get("grade") if _k else None, run=_k.get("run") if _k else None,
