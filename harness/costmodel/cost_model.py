@@ -849,17 +849,29 @@ COMPOSED_RUNGS = pathlib.Path(__file__).parent / "composed_rungs.json"
 
 
 def composed_rungs():
-    """`{name: cells per unit}` from the composed chunks, and the file's own
-    record of what each one is."""
+    """`{name: cells per unit}` for the composed rungs, and the file's own record of
+    what each one is.
+
+    Constants first, exactly as `cell` reads every other cell cost: the value the
+    constants file holds under the key this file names, and the file's own division
+    of cells by count where no such key exists yet.  The file states the two
+    integers rather than the quotient, so the fallback divides and nothing is
+    rounded on the way in."""
     doc = json.loads(COMPOSED_RUNGS.read_text())
-    return {n: e["cells"] / e["count"] for n, e in doc["rungs"].items()}, doc
+    out = {}
+    for n, e in doc["rungs"].items():
+        got = constants.find(e["key"]) if e.get("key") else None
+        out[n] = e["cells"] / e["count"] if got is None else got["value"]
+    return out, doc
 
 
 COMPOSED, _COMPOSED_DOC = composed_rungs()
 for _n, _v in sorted(COMPOSED.items()):
     _e = _COMPOSED_DOC["rungs"][_n]
+    _k = constants.find(_e["key"]) if _e.get("key") else None
     PROVENANCE[f"composed_{_n}"] = dict(
-        value=_v, source="composed", key=_e["key"], charged=True,
+        value=_v, source="constants" if _k else "composed", key=_e["key"], charged=True,
+        grade=_k.get("grade") if _k else None, run=_k.get("run") if _k else None,
         file="harness/costmodel/composed_rungs.json",
         note=f"{_e['cells']:,} cells over {_e['count']:,} {_e['unit']}s on all 62 "
              f"recorded 8B layer chunks at both contexts, at the registered "

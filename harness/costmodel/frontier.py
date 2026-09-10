@@ -3,28 +3,38 @@
 The paper's thesis is that the cost of verified inference is a *computable
 function* of a model's architecture and a card's measured hash rate.  This module
 is that computation: it takes the B2 cost model (`cost_model.py`, extended by this
-stream with experts / top-k / sequence-batch terms), calibrates it against the one
-sequence this project has actually measured end to end, and prices seven frontier
-shapes at both contexts, at all three boundaries, on both cards.
+stream with experts / top-k / sequence-batch terms), calibrates it against the two
+sequences zk-results has measured end to end, and prices eight frontier shapes at
+both contexts, at all four boundaries, on both cards.
+
+What the table prices is the SOUND STATEMENT: a prompt and the output the model
+writes from it, proved as one statement in token blocks, per proved position.
+That is what zk-results' two headline runs prove and what the paper quotes
+(`docs/decisions/2026-09-08-cost-per-proved-position-not-an-overhead-multiple.md`),
+and it is not the decode-only statement the private archive's sequence proved.
+The two differ by more than a third at the long context, so a rate measured on
+one of them and a cell count taken on the other do not divide.
 
 Three rules it keeps, and they are the point:
 
  1. **No measured constant is written down here.**  Every number the table stands
-    on is read out of a checked-in artifact, or -- for the dollar rates, which are
-    market facts and not measurements -- taken from
-    `experiments/paper/constants.json` (stream W0) if it exists and named as a
-    required input if it does not.  A missing rate prints `n/a`; it never
-    defaults, and it never falls back to zero.
+    on is read out of zk-results' `constants.json` (`--constants PATH`) where a key
+    names it, and out of a checked-in artifact under `--artifacts DIR` where none
+    does yet; which of the two each one came from is printed and written into the
+    output.  A missing rate prints `n/a`; it never defaults, and it never falls
+    back to zero.
  2. **Every architectural number has a source**, and every shape carries a
     self-check: the model's own parameter count against the published total and
     active counts.  A shape that fails its check is marked `[check]` and the
     failure is printed, not smoothed.
  3. **The 8B row the model was calibrated on is checked, not tuned.**  The
-    calibration has exactly one free parameter and two measured points, so it has
-    one residual degree of freedom, and that residual is printed.
+    calibration has no free parameter at all and two measured points, so it has
+    two residual degrees of freedom, and that residual is printed and recorded
+    (`frontier.calibration.residual_pct`).
 
-    uv run experiments/b2/frontier.py
-    uv run experiments/b2/frontier.py --seq-batch 32
+    uv run python -m harness.costmodel.frontier --constants PATH
+    uv run python -m harness.costmodel.frontier --constants PATH --artifacts DIR \
+        --inputs DIR --seq-batch 32
 """
 import argparse
 import json
@@ -33,7 +43,7 @@ import pathlib
 import re
 import sys
 
-from harness import constants, inputs
+from harness import constants, inputs, provenance
 from . import cost_model as cm
 from . import key_tile
 
@@ -127,26 +137,112 @@ def load_constants():
     return out
 
 
+# ----------------------------------------------------------- the statement --
+# The sound statement, and the unit every priced row is in.
+#
+# zk-results' two headline runs prove a prompt and the output the model writes
+# from it as ONE statement: `positions.headline.c{ctx}` positions in token blocks
+# of S, each block's layer segments attending over the blocks before it, and two
+# output head segments beside them, `segments.headline.c{ctx}` proofs in all.  A
+# position is the unit the paper quotes.  So the statement's own numbers -- how
+# many positions, in how many blocks, with how many head segments -- are read out
+# of the constants file here and transported to the other shapes, and nothing
+# about it is typed in.
+#
+# The five batched GKR reductions are on, which is the paper's configuration
+# (zk-results' decision of 2026-09-03), so the model prices each family at what
+# the composed prover builds it at and not at its standalone rung.
+STATEMENT_GKR = cm.REDUCTIONS
+CONTEXTS = (4096, 16384)
+# The four timing scopes: the name the constants file's keys use, and the name
+# this module has printed since W0's freeze.  All four are kept apart on purpose
+# and a recorded row names the one it was taken at.
+SCOPES = (("commit", "commit"), ("stwo_total", "stwo total"),
+          ("whole_wall", "whole wall"), ("loop", "loop"))
+
+
+def headline_card():
+    """The measured side, out of zk-results' `constants.json`: the card the two
+    headline runs were proved on, at four scopes and two contexts.
+
+    Every number is a key -- the cells the sequence committed, the positions it
+    proved, the segments it took, the rate at each scope, the proof bytes a
+    position cost and the peak the card held -- so a run made from this side alone
+    reads nothing outside a repository and is recordable.  Returns None when the
+    constants file names none of it, so that the archive layout below can still
+    answer and say that it did."""
+    per_ctx, keys = {}, []
+    for ctx in CONTEXTS:
+        cells = constants.find(f"cells.headline.c{ctx}.fresh")
+        pos = constants.find(f"positions.headline.c{ctx}")
+        segs = constants.find(f"segments.headline.c{ctx}")
+        if cells is None or pos is None or segs is None:
+            continue
+        read = [f"cells.headline.c{ctx}.fresh", f"positions.headline.c{ctx}",
+                f"segments.headline.c{ctx}"]
+        boundaries = {}
+        for scope, name in SCOPES:
+            e = constants.find(f"rate.headline.c{ctx}.{scope}")
+            if e is None:
+                continue
+            # the file records a rate in Mcell/s; this module divides cells
+            boundaries[name] = dict(cells_s=e["value"] * 1e6, scope=scope,
+                                    key=f"rate.headline.c{ctx}.{scope}",
+                                    secs=cells["value"] / (e["value"] * 1e6))
+            read.append(f"rate.headline.c{ctx}.{scope}")
+        if not boundaries:
+            continue
+        proof = constants.find(f"proof.headline.c{ctx}.bytes_per_position")
+        seg_bytes = constants.find(f"proof.headline.c{ctx}.bytes_per_segment_median")
+        peak = constants.find(f"mem.headline.c{ctx}.peak_mib")
+        for e, k in ((proof, f"proof.headline.c{ctx}.bytes_per_position"),
+                     (seg_bytes, f"proof.headline.c{ctx}.bytes_per_segment_median"),
+                     (peak, f"mem.headline.c{ctx}.peak_mib")):
+            if e is not None:
+                read.append(k)
+        per_ctx[ctx] = dict(
+            fresh=cells["value"], positions=pos["value"], segments=segs["value"],
+            cells_per_position=cells["value"] / pos["value"],
+            mib_per_position=None if proof is None else proof["value"] / 2 ** 20,
+            mib_per_segment=None if seg_bytes is None else seg_bytes["value"] / 2 ** 20,
+            peak_mib=None if peak is None else peak["value"],
+            boundaries=boundaries, source=constants.path(), keys=read,
+            run=cells.get("run"), card=cells["card"])
+        keys += read
+    if not per_ctx:
+        return None
+    # the card is the entry's own, not a name this module carries
+    cards = {v["card"] for v in per_ctx.values()}
+    if len(cards) != 1:
+        sys.exit(f"the recorded sequences are on more than one card, {sorted(cards)}; "
+                 "this table prices one card at a time")
+    return dict(card=cards.pop(), source="constants", per_ctx=per_ctx, keys=keys,
+                statement="sound", tokens=None,
+                note="the prompt and the output proved as one statement, per proved "
+                     "position, the five reductions on; read from the constants file "
+                     "and from nothing else, so a row priced on it is recordable")
+
+
 # ------------------------------------------------------- measured artifacts --
-# The card constants.  Not typed in: parsed out of the two sequence runs this
-# project has recorded at all three boundaries.  Each carries its card, its
-# context, its chunk count and its boundary, per the house rule.
+# The archive's two sequences, and they are the FALLBACK.  Each is parsed out of a
+# run output in `--artifacts DIR` -- a directory that is in no repository -- and
+# each proves the decode-only statement: `TOKENS` decoded tokens, every one of
+# them against a full C-key prefix, at a prover that predates the tiled prefix,
+# the root-equality claims and the five reductions.  A row priced on one of them
+# is a row about a different statement and this module marks it as one.
 H200_SUMMARY = art("b10", "out", "seq5", "n_summary_c{ctx}.json")
 H100_LOOP = art("b10", "out", "w", "fin_pipe_c4096.json")
 
-# What a reader is told when the two sequence runs are not there.  No constants
-# key holds either of them: zk-results records the H100 headline sequence, which
-# is the sound prompt+output statement on a different card, and this module's
-# calibration is against the decode-only statement these two runs prove.
 NO_SEQUENCE = (
-    "the measured sequence runs are not in the artifacts directory and no "
-    "constants key holds them:\n"
+    "no measured card rate: the constants file names none of\n"
+    "  cells.headline.c{4096,16384}.fresh, positions.headline.c{4096,16384},\n"
+    "  segments.headline.c{4096,16384}, rate.headline.c{4096,16384}.{commit,"
+    "stwo_total,whole_wall,loop}\n"
+    "and the artifacts directory holds neither archive sequence:\n"
     "  b10/out/seq5/n_summary_c{4096,16384}.json -- H200, 33 chunks, decode-only\n"
     "  b10/out/w/fin_pipe_c4096.json             -- H100, 32 layer chunks, pipelined\n"
-    "zk-results' `cells.headline.*` / `rate.headline.*` are a DIFFERENT run: the\n"
-    "H100, the prompt+output statement, priced per proved position.  Reading them\n"
-    "here would change what the calibration checks, which is the campaign's own\n"
-    "decision.  Pass --artifacts DIR until it is taken.")
+    "Pass --constants PATH at a zk-results checkout that records the headline runs, "
+    "or --artifacts DIR.")
 
 SUMMED = re.compile(
     r"=== \(3\) the sequence summed, C=(?P<ctx>\d+) ===(?P<body>.*?)(?====|\Z)", re.S)
@@ -160,14 +256,17 @@ CHUNK = re.compile(r"^\s*(?P<chunk>\S+)\s+(?P<tbl>\d+)\s+(?P<acc>yes|no)\s+"
 
 def h200_card():
     """H200, seq5, 33 chunks (32 layers + head), S=512, defaults regime, empty
-    family env.  `briefs/n-alldev.md` Record (5); artifacts in b10/out/seq5/."""
+    family env.  `briefs/n-alldev.md` Record (5); artifacts in b10/out/seq5/.
+
+    None when the artifacts directory does not hold it: it is the fallback, and a
+    reader that has the constants file's own card does not need it."""
     if H200_SUMMARY is None:
-        sys.exit(NO_SEQUENCE)
+        return None
     cards = {}
     for ctx in (4096, 16384):
         p = pathlib.Path(str(H200_SUMMARY).format(ctx=ctx))
         if not p.exists():
-            sys.exit(f"missing {p}\n{NO_SEQUENCE}")
+            return None
         text = p.read_text()
         m = SUMMED.search(text)
         body = m.group("body")
@@ -185,16 +284,23 @@ def h200_card():
                           mib_per_token=proof / 2 ** 20 / TOKENS,
                           chunks=int(vals["chunks accepted"]), boundaries=rates,
                           peak_mib=peak, peak_chunk_cells=big, source=rel(p))
-    return dict(card="H200", tokens=TOKENS, per_ctx=cards,
+    return dict(card="H200", tokens=TOKENS, per_ctx=cards, source="archive",
+                statement="decode-only", keys=[],
                 note="33 chunks (32 layers + the head), one process per chunk, "
-                     "not pipelined; stream N's seq5")
+                     "not pipelined; stream N's seq5.  The DECODE-ONLY statement: "
+                     "512 tokens each against a full C-key prefix, proved before "
+                     "the tiled prefix, the root-equality claims and the five "
+                     "reductions existed.  Read from the archive, so nothing "
+                     "priced on it is recordable")
 
 
 def h100_card():
     """H100, stream W's final pipelined loop, 32 layer chunks (no head), C=4096.
-    `briefs/w-genbuild.md` Record (5); artifact b10/out/w/fin_pipe_c4096.json."""
+    `briefs/w-genbuild.md` Record (5); artifact b10/out/w/fin_pipe_c4096.json.
+
+    None when the artifacts directory does not hold it, like `h200_card`."""
     if H100_LOOP is None or not H100_LOOP.exists():
-        sys.exit(NO_SEQUENCE)
+        return None
     res = json.loads(H100_LOOP.read_text())["result"]
     ch, s = res["chunks"], res["summary"]
     fresh = sum(c["cells"]["fresh"] for c in ch)
@@ -217,6 +323,7 @@ def h100_card():
         peak_mib=max(c.get("mem_after_prove", 0) for c in ch) / 2 ** 20,
         peak_chunk_cells=max(c["cells"]["fresh"] for c in ch),
         source=rel(H100_LOOP))},
+        source="archive", statement="decode-only", keys=[],
         note="32 layer chunks, no head, pipelined (`ZK_PIPELINE=1`).  `loop_secs` "
              "is W0's FOURTH boundary and is not `whole wall`: it counts the "
              "witness read and the layer build, which `whole wall` has never "
@@ -365,18 +472,133 @@ def params_of(shape, freivalds=False, embedding=False):
 
 
 # ------------------------------------------------------------ calibration ----
-def measured_8b(h200):
-    return {c: h200["per_ctx"][c]["cells_per_token"] for c in h200["per_ctx"]}
+def measured_8b(card):
+    """What one unit of the card's own statement measured: a proved position where
+    the card is the constants file's headline card, a decoded token where it is one
+    of the archive's decode-only sequences.  The two are not the same quantity and
+    the caller says which it is comparing against."""
+    per = card["per_ctx"]
+    if all("cells_per_position" in v for v in per.values()):
+        return {c: per[c]["cells_per_position"] for c in per}
+    return {c: per[c]["cells_per_token"] for c in per}
+
+
+def statement_shape(card, shape, s_chunk=TOKENS):
+    """How the sound statement is laid out, read off the run that recorded it: the
+    block length, how many positions the output is, and how many output head
+    segments the plan carries beside the layer segments.
+
+    Nothing here is typed in.  The head count is `segments - blocks * layers` on the
+    run that recorded both, at the shape that run was made on, and it is checked at
+    the second context rather than assumed to hold there.  These three numbers are
+    what a shape with no measured run of its own inherits."""
+    layers = sum(grp["layers"] for grp in shape["groups"])
+    got = None
+    for ctx in sorted(card.get("per_ctx", {})):
+        ref = card["per_ctx"][ctx]
+        if not ref.get("positions") or not ref.get("segments"):
+            continue
+        positions, segments = int(ref["positions"]), int(ref["segments"])
+        blocks, rem = divmod(positions, s_chunk)
+        if rem:
+            sys.exit(f"positions.headline.c{ctx} is {positions}, which is not a whole "
+                     f"number of {s_chunk}-position blocks: the statement's block length "
+                     f"and the recorded sequence's disagree.  Pass --seq S.")
+        heads = segments - blocks * layers
+        this = dict(s_chunk=s_chunk, n_output=positions - ctx, heads=heads,
+                    source="constants", read_at=ctx,
+                    keys=[f"positions.headline.c{ctx}", f"segments.headline.c{ctx}"])
+        if got is None:
+            got = this
+            continue
+        if (heads, this["n_output"]) != (got["heads"], got["n_output"]):
+            sys.exit(f"the two recorded sequences do not prove the same statement: "
+                     f"C={got['read_at']} is {got['n_output']} output positions and "
+                     f"{got['heads']} head segments, C={ctx} is {this['n_output']} and "
+                     f"{heads}.  One of them is not the statement this table prices.")
+        got["keys"] += this["keys"]
+    if got is None:
+        # no run recorded it: the archive's sequences prove the decode-only
+        # statement and say nothing about a prompt, so this is the plan the two
+        # headline runs are known to have proved, named as an assumption.
+        return dict(s_chunk=s_chunk, n_output=s_chunk, heads=2, source="assumed",
+                    read_at=None, keys=[])
+    return got
+
+
+def statement_of(shape, ctx, shp):
+    """The sound statement at one context and one shape: how many positions are
+    proved, in how many blocks, over how many layer segments and head segments.
+
+    The layout comes from `statement_shape` -- the run that recorded it -- and only
+    the layer count is the shape's own.  That transport is the extrapolation every
+    other row in this table makes and it is named here rather than hidden."""
+    layers = sum(grp["layers"] for grp in shape["groups"])
+    positions = ctx + shp["n_output"]
+    blocks, rem = divmod(positions, shp["s_chunk"])
+    if rem:
+        sys.exit(f"a prompt of {ctx} and an output of {shp['n_output']} is not a whole "
+                 f"number of {shp['s_chunk']}-position blocks")
+    return dict(positions=positions, blocks=blocks, s_chunk=shp["s_chunk"],
+                heads=shp["heads"], layers=layers,
+                segments=blocks * layers + shp["heads"], ctx=ctx,
+                n_output=shp["n_output"], source=shp["source"], keys=list(shp["keys"]),
+                gkr=tuple(STATEMENT_GKR))
+
+
+def head_chunk(shape, seq, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GKR):
+    """One output head segment, at any shape: the model-level terms -- the head's
+    accumulators, its lookups, its Freivalds check, the token binding and the final
+    norm -- over the `seq` positions the segment covers.
+
+    Taken as the difference between the budget with the head charged and the budget
+    without it, so the head is priced by the function that prices the layers and no
+    second form of it is written down here.  It does not depend on the context: the
+    head chunk performs no attention."""
+    kw = dict(seq=seq, seq_batch=seq_batch, batch=batch, alpha=alpha, gkr=gkr)
+    return seq * (model_cells(shape, seq, with_head=True, **kw)["total"]
+                  - model_cells(shape, seq, with_head=False, **kw)["total"])
+
+
+def sound_cells(shape, st, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GKR):
+    """What one proved position costs under the sound statement, modelled.
+
+    Block `b` of the statement attends over the `b * S` positions before it, so the
+    layer segments are priced at that prefix and not at the full context, and the
+    head segments are added whole.  This is NOT `model_cells` divided by anything:
+    `model_cells` prices one decoded token against a full C-key prefix, which is the
+    decode-only statement, and the two differ by more than a third at C=16,384."""
+    per_block, total = [], 0.0
+    saturated = False
+    parts = {}
+    for b in range(st["blocks"]):
+        c = model_cells(shape, b * st["s_chunk"], seq=st["s_chunk"], seq_batch=seq_batch,
+                        batch=batch, alpha=alpha, with_head=False, gkr=gkr)
+        per_block.append(c["total"])
+        total += st["s_chunk"] * c["total"]
+        saturated = saturated or bool(c.get("saturated"))
+        for k, v in c["parts"].items():
+            parts[k] = parts.get(k, 0.0) + st["s_chunk"] * v
+    layers = total
+    head = head_chunk(shape, st["s_chunk"], seq_batch=seq_batch, batch=batch,
+                      alpha=alpha, gkr=gkr)
+    total += st["heads"] * head
+    return dict(cells=total, per_position=total / st["positions"],
+                layers_cells=layers, layers_per_position=layers / st["positions"],
+                head_chunk=head, heads=st["heads"], per_block=per_block,
+                parts={k: v / st["positions"] for k, v in parts.items()},
+                saturated=saturated, statement=st)
 
 
 def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
-                with_head=True, diagonal_block=True):
+                with_head=True, diagonal_block=True, gkr=()):
     """The whole per-token budget for a shape, summed group by group: the cost
     model's `cells_per_token` plus B10 step 2's residual stream, with the model-level terms
     (the head's accumulators, its lookups, the token binding, the final norm) charged
     to exactly one group."""
     batch = cm.BATCH if batch is None else batch
-    out = dict(total=0.0, preprocessed=0.0, residual_stream=0.0, parts={})
+    out = dict(total=0.0, preprocessed=0.0, residual_stream=0.0, parts={},
+               gkr=tuple(gkr))
     for i, grp in enumerate(shape["groups"]):
         cfg = cfg_of(shape, grp)
         head = with_head and (i == 0)
@@ -384,9 +606,11 @@ def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
             cfg, 0 if grp["linear"] else ctx, batch, seq, alpha=alpha,
             experts=grp["experts"], topk=grp["topk"], seq_batch=seq_batch, head=head,
             attn_accs_per_layer=grp.get("attn_accs_per_layer"),
-            attn_params_per_layer=grp.get("attn_params_per_layer"), diagonal_block=diagonal_block)
+            attn_params_per_layer=grp.get("attn_params_per_layer"),
+            diagonal_block=diagonal_block, gkr=gkr)
         out["saturated"] = out.get("saturated", False) or bool(c["key_tile_saturated"])
-        gl = cm.residual_stream_cells(cfg, "tree", topk=grp["topk"], final_norm=head)
+        gl = cm.residual_stream_cells(cfg, "tree", topk=grp["topk"], final_norm=head,
+                                      batch=batch, gkr=gkr)
         out["total"] += c["total"] + gl["net"]
         out["preprocessed"] += c["preprocessed"]
         out["residual_stream"] += gl["net"]
@@ -397,7 +621,7 @@ def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
     return out
 
 
-def check_8b(h200, shape, consts, batch=None):
+def check_8b(card, shape, consts, batch=None, shp=None):
     """The check, and it now has **no free parameter at all**.
 
     Before 2026-09-01 the attention term was one slope, `alpha`, solved from the
@@ -407,23 +631,42 @@ def check_8b(h200, shape, consts, batch=None):
     so the model now predicts both measured levels with nothing solved: two points,
     zero fitted parameters, two residual degrees of freedom.
 
+    **What the two levels are.**  Where the card is the constants file's headline
+    card the comparison is per PROVED POSITION over the sound statement: the model
+    prices the same blocks, the same prefixes and the same output head segments the
+    run proved, at the same five reductions.  Where it is one of the archive's
+    sequences the comparison is per DECODED TOKEN against a full C-key prefix, which
+    is a different statement, and `statement` says which one each residual is on.
+
     Also re-checks the base coefficients themselves against the measured triple,
     and the whole family against every recorded layer segment's own key tiles."""
-    meas = measured_8b(h200)
+    meas = measured_8b(card)
+    sound = card.get("statement") == "sound"
     nh, hd = shape["nh"], shape["hd"]
     got_fresh = _coeffs(nh, hd)
     got_base = _base_coeffs(nh, hd)
     want_base = consts["key_tile_base_coeffs"]["value"]
+    st = {c: statement_of(shape, c, shp) for c in meas} if sound else {}
+
+    def predict(ctx, alpha=None):
+        if sound:
+            return sound_cells(shape, st[ctx], batch=batch, alpha=alpha)["per_position"]
+        return model_cells(shape, ctx, alpha=alpha, batch=batch)["total"]
 
     def legacy(alias):
         a = consts[alias]["value"]
-        return (None if a is None else
-                {c: model_cells(shape, c, alpha=a, batch=batch)["total"] / meas[c] - 1
-                 for c in meas})
+        return None if a is None else {c: predict(c, a) / meas[c] - 1 for c in meas}
 
+    pred = {c: predict(c) for c in meas}
+    resid = {c: pred[c] / meas[c] - 1 for c in meas}
     out = dict(
-        measured=meas,
-        key_tile={c: model_cells(shape, c, batch=batch)["total"] / meas[c] - 1 for c in meas},
+        measured=meas, predicted=pred,
+        key_tile=resid,
+        residual_pct={c: 100.0 * r for c, r in resid.items()},
+        statement={c: st[c] for c in meas} if sound else None,
+        unit="cells per proved position" if sound else "cells per decoded token",
+        card=card["card"], source=card.get("source"),
+        keys={c: card["per_ctx"][c].get("keys", []) for c in meas},
         legacy_slope=legacy("alpha_e1"), legacy_b5=legacy("alpha_b5"),
         coeffs_fresh=got_fresh, coeffs_base=got_base,
         frozen_base=want_base,
@@ -1038,11 +1281,33 @@ def usd_per_mtok(tok_s, usd_per_hour):
     return 1e6 / tok_s / 3600.0 * usd_per_hour
 
 
+# A model's name as one segment of a constants key: lower case, and everything
+# that is not a letter or a digit becomes a dash.  `Llama-3.1-8B` carries dots and
+# a dotted key would split it into two levels of a namespace that has no such
+# levels, so the dots go the same way the spaces do.
+def slug(name):
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+# The target every `cards_for_20` row is stated against, in PROVED POSITIONS per
+# second (the paper's unit), and the key that would replace it.  The number is in
+# the key's name, so a constants file that names another target renames the row.
+TARGET_KEY = "design.frontier_target_positions_per_s"
+
+
 def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
-          usd=None, target_tok_s=20.0, mib_per_chunk=None, batch=None):
-    """The reusable per-shape row.  Everything the table prints comes from here."""
+          usd=None, target_tok_s=20.0, mib_per_chunk=None, batch=None,
+          shp=None):
+    """The reusable per-shape row.  Everything the table prints comes from here.
+
+    Two quantities per context, and they are not interchangeable.  `cells_per_token`
+    is the decode-only statement -- one decoded token against a full C-key prefix --
+    and every section that compares this table against an older one reads it.
+    `cells_per_position` is the sound statement, per proved position, and it is what
+    the cards-at-target and the dollars columns are computed from, because that is
+    what the measured rates were measured on and what the paper quotes."""
     usd = usd or {}
-    row = dict(name=shape["name"], tag=shape["tag"],
+    row = dict(name=shape["name"], slug=slug(shape["name"]), tag=shape["tag"],
                params_total=params_of(shape, freivalds=True, embedding=True),
                params_active=params_of(shape, embedding=True),
                params_freivalds=params_of(shape, freivalds=True),
@@ -1052,8 +1317,13 @@ def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
     for ctx in contexts:
         c = model_cells(shape, ctx, seq=seq, seq_batch=seq_batch, alpha=alpha,
                         batch=batch)
+        st = statement_of(shape, ctx, shp)
+        sc = sound_cells(shape, st, seq_batch=seq_batch, batch=batch, alpha=alpha)
         entry = dict(cells_per_token=c["total"], preprocessed_per_token=c["preprocessed"],
                      residual_stream_per_token=c["residual_stream"], parts=c["parts"], chunks=n_chunks,
+                     cells_per_position=sc["per_position"],
+                     layers_per_position=sc["layers_per_position"],
+                     head_chunk_cells=sc["head_chunk"], statement=st,
                      cards={})
         # proof bytes, two ways, because they disagree and neither is measured at
         # frontier scale (see the record)
@@ -1066,8 +1336,14 @@ def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
             out = {}
             for b, m in ref["boundaries"].items():
                 tok_s = m["cells_s"] / c["total"]
-                out[b] = dict(cells_s=m["cells_s"], tok_s=tok_s,
-                              cards_for_target=math.ceil(target_tok_s / tok_s),
+                pos_s = m["cells_s"] / sc["per_position"]
+                out[b] = dict(cells_s=m["cells_s"], tok_s=tok_s, pos_s=pos_s,
+                              scope=m.get("scope"), rate_key=m.get("key"),
+                              rate_source=card.get("source"),
+                              rate_statement=card.get("statement"),
+                              cards_for_target=math.ceil(target_tok_s / pos_s),
+                              cards_for_target_tok_s=math.ceil(target_tok_s / tok_s),
+                              usd_per_mposition=usd_per_mtok(pos_s, usd.get(name)),
                               usd_per_mtok=usd_per_mtok(tok_s, usd.get(name)))
             entry["cards"][name] = out
         row["contexts"][ctx] = entry
@@ -1084,7 +1360,8 @@ def dense_twin(shape):
     return twin
 
 
-def moe_ratio(shape, ctx, alpha, seq=TOKENS, seq_batch=1, ref_batch=1, batch=None):
+def moe_ratio(shape, ctx, alpha, seq=TOKENS, seq_batch=1, ref_batch=1, batch=None,
+              gkr=STATEMENT_GKR):
     """MoE at batch B against its dense twin at batch `ref_batch`.
 
     With `ref_batch=1` the reference is fixed, which is what section 6.4's counter
@@ -1092,12 +1369,131 @@ def moe_ratio(shape, ctx, alpha, seq=TOKENS, seq_batch=1, ref_batch=1, batch=Non
     costs, because each expert is again amortising its Freivalds check over S
     tokens."""
     dense = dense_twin(shape)
-    a = model_cells(shape, ctx, seq=seq, seq_batch=seq_batch, alpha=alpha, batch=batch)
-    b = model_cells(dense, ctx, seq=seq, seq_batch=ref_batch, alpha=alpha, batch=batch)
+    a = model_cells(shape, ctx, seq=seq, seq_batch=seq_batch, alpha=alpha, batch=batch,
+                    gkr=gkr)
+    b = model_cells(dense, ctx, seq=seq, seq_batch=ref_batch, alpha=alpha, batch=batch,
+                    gkr=gkr)
     return dict(moe=a["total"], dense_active=b["total"], ratio=a["total"] / b["total"],
                 moe_pre=a["preprocessed"], dense_pre=b["preprocessed"],
                 ratio_with_pre=(a["total"] + a["preprocessed"])
                 / (b["total"] + b["preprocessed"]))
+
+
+
+
+# ------------------------------------------------- what a driver can record --
+# The rows above, as constants entries: the key, the value, the unit, the card,
+# the context and the timing scope, the grade -- always `projected`, because
+# nothing here is measured -- and the `inputs` naming every constants key the
+# model read to produce it.  A driver in zk-results turns this list into entries
+# and records nothing else; which of them it MAY record is `recordable`, and a row
+# that read anything outside the constants file is not one of them.
+
+
+def read_from_constants():
+    """Every cell cost the model charges that a key in the constants file backs."""
+    return sorted({e["key"] for e in cm.PROVENANCE.values()
+                   if e["source"] == "constants" and e["key"]})
+
+
+def read_elsewhere():
+    """Every input the model charges that the constants file did not give it, by
+    where it came from: `inputs` is the micro-benchmark directory, `composed` this
+    repository's own re-fit of the composed rungs, `analogy` a number nothing
+    measures anywhere, `absent` one nothing prices at all."""
+    out = {}
+    for name, e in sorted(cm.PROVENANCE.items()):
+        if e["source"] == "constants" or not e.get("charged", True):
+            continue
+        out.setdefault(e["source"], []).append(
+            dict(input=name, key=e["key"], file=e["file"], value=e["value"]))
+    return out
+
+
+def entry(key, value, unit, card, context, scope, inputs, note, from_constants=True):
+    """One row, ready to be an entry of zk-results' `constants.json`.
+
+    `entry` is the entry verbatim -- the seven fields every entry carries plus the
+    `inputs` a projected one must name -- and `from_constants` says whether every
+    number behind it came from that same file.  A driver records `entry` and reads
+    the two fields beside it to decide whether it may."""
+    return dict(key=key, recordable=None, from_constants=from_constants, entry=dict(
+        value=value, unit=unit, card=card, context=context, timing_scope=scope,
+        grade="projected", inputs=sorted(set(inputs)), note=note))
+
+
+def projected_rows(priced, moe_rows, cal, cards, usd, target, seq, seq_batch):
+    """#88's rows, ready to be recorded, each naming what it was computed from."""
+    cells_keys = read_from_constants()
+    rows = []
+    for r in priced:
+        for ctx, e in sorted(r["contexts"].items()):
+            st = e["statement"]
+            for cname, per_b in sorted(e["cards"].items()):
+                card = cards[cname]
+                usd_key = f"cost.{cname.lower()}_reference_usd_per_hour"
+                for bname, m in per_b.items():
+                    scope = m.get("scope") or bname.replace(" ", "_")
+                    base = f"frontier.{r['slug']}.{cname.lower()}.c{ctx}.{scope}"
+                    inputs = cells_keys + list(st["keys"])
+                    if m.get("rate_key"):
+                        inputs = inputs + [m["rate_key"]]
+                    where = ("the rate is a key of this file"
+                             if m.get("rate_source") == "constants" else
+                             f"the rate is NOT from this file: it is the archive's "
+                             f"{m.get('rate_statement')} sequence on this card")
+                    common = (f"{r['name']} at {ctx:,} context, {st['positions']:,} proved "
+                              f"positions in {st['blocks']} blocks of {st['s_chunk']} and "
+                              f"{st['heads']} output head segments, the five reductions on. "
+                              f"{e['cells_per_position']:,.0f} modelled cells a proved "
+                              f"position at {m['cells_s'] / 1e6:,.1f} Mcell/s, "
+                              f"{m['pos_s']:.4f} proved positions a second on one card. "
+                              f"{where}.")
+                    ours = m.get("rate_source") == "constants"
+                    rows.append(entry(
+                        f"{base}.cards_for_20", m["cards_for_target"], "cards",
+                        card["card"], ctx, bname,
+                        inputs, f"Cards to reach {target:g} proved positions a second. "
+                                + common, from_constants=ours))
+                    rows.append(entry(
+                        f"{base}.usd_per_mposition", m["usd_per_mposition"],
+                        "USD/1000000 positions", card["card"], ctx, bname,
+                        inputs + [usd_key],
+                        f"Dollars a million proved positions at "
+                        f"{usd.get(cname)} USD/GPU-h. " + common, from_constants=ours))
+    for name, v in sorted(moe_rows.items()):
+        s = slug(name)
+        r = v["sweep"][1]
+        for suffix, val, what in (
+                ("fresh_over_dense", r["ratio"],
+                 "committed cells against the dense model with the same active "
+                 "parameters, at one sequence a proof"),
+                ("preprocessed_over_fresh", r["ratio_with_pre"],
+                 "the same comparison counting the preprocessed weight trace, which "
+                 "the measured rates do not count")):
+            rows.append(entry(
+                f"moe.{s}.{suffix}", val, "fraction", "none", 4096, "n/a", cells_keys,
+                f"{name}, {v['ek']:.1f} experts a token's top-k: {what}. Modelled at "
+                f"S={seq} and B={seq_batch}, the five reductions on; no measured rate "
+                f"enters it and no card."))
+    for ctx, pct in sorted(cal.get("residual_pct", {}).items()):
+        rows.append(entry(
+            f"frontier.calibration.c{ctx}.residual_pct", pct, "per cent",
+            cal["card"], ctx, "n/a",
+            cells_keys + cal["keys"].get(ctx, []),
+            f"The model's prediction for the sound statement against what the run "
+            f"measured, per proved position: {cal['predicted'][ctx]:,.0f} modelled "
+            f"against {cal['measured'][ctx]:,.0f}. No fitted parameter: two measured "
+            f"levels, two residual degrees of freedom."))
+    if cal.get("residual_pct"):
+        worst = max(cal["residual_pct"], key=lambda c: abs(cal["residual_pct"][c]))
+        rows.append(entry(
+            "frontier.calibration.residual_pct", cal["residual_pct"][worst], "per cent",
+            cal["card"], worst, "n/a",
+            cells_keys + [k for ks in cal["keys"].values() for k in ks],
+            f"The calibration residual the whole table stands on: the worst of the two "
+            f"contexts, which is C={worst:,}. The per-context rows beside it carry both."))
+    return rows
 
 
 def _e11_section(priced, h100, usd, mult, net, fixed):
@@ -1127,13 +1523,14 @@ def _e11_section(priced, h100, usd, mult, net, fixed):
     print("  (+13.7% / +11.6%) and called it the overhead.")
     fac = mult[1]
     print(f"\n  the table at x{fac:.2f} (prompt+output, C=4096, S=1024 chunking):")
-    print(f"  {'model':<18} {'cells/token':>12} {'H100 tok/s':>11} {'$/Mtok':>10}"
-          f"   (H100 loop_secs, ${usd['H100']}/GPU-h)")
+    print(f"  {'model':<18} {'cells/token':>12} {'tok/s':>11} {'$/Mtok':>10}"
+          f"   ({h100['card']} chunk loop, ${usd.get(h100['card'])}/GPU-h)")
     for r in priced:
         e = r["contexts"][4096]
         c = e["cells_per_token"] * fac
-        h = h100["per_ctx"][4096]["boundaries"]["loop_secs"]["cells_s"] / c
-        d = usd_per_mtok(h, usd["H100"])
+        bnd = h100["per_ctx"][4096]["boundaries"]
+        h = bnd[next(b for b in ("loop", "loop_secs", "whole wall") if b in bnd)]["cells_s"] / c
+        d = usd_per_mtok(h, usd.get(h100["card"]))
         r["e11"] = dict(cells_per_token=c, tok_s_h100=h, usd_per_mtok=d)
         print(f"  {r['name']:<18} {g(c):>12} {h:>11.4f} "
               + (f"{d:>10,.0f}" if d else f"{'n/a':>10}"))
@@ -1155,7 +1552,11 @@ def main(argv=None):
     ap.add_argument("--logup-batch", type=int, default=None,
                     help="LogUp lookups sharing one interaction column (b2/out/"
                          "logup.json); nothing to do with --seq-batch")
-    ap.add_argument("--target", type=float, default=20.0)
+    ap.add_argument("--target", type=float, default=None,
+                    help="the throughput a `cards_for_20` row is stated against, in "
+                         "PROVED POSITIONS per second (the paper's unit).  Default: "
+                         f"the constants file's `{TARGET_KEY}`, or 20 where it names "
+                         "none")
     ap.add_argument("--json", default="frontier.json")
     constants.add_argument(ap)
     inputs.add_arguments(ap, artifacts=True, inputs=True)
@@ -1167,6 +1568,9 @@ def main(argv=None):
     constants.load(args.constants)
 
     consts = load_constants()
+    target_key = constants.find(TARGET_KEY)
+    target = (args.target if args.target is not None else
+              target_key["value"] if target_key else 20.0)
     # Rule 1 of this module: a number this table stands on never defaults and
     # never falls back to zero.  A cell cost with no key and no file is a term
     # `cells_per_token` would multiply by a count and charge nothing for, so the
@@ -1174,12 +1578,28 @@ def main(argv=None):
     unpriced = [n for n, e in cm.PROVENANCE.items()
                 if e["source"] == "absent" and e.get("charged", True)]
     if unpriced:
-        sys.exit("these cell costs have no source, and the model charges no term it "
-                 "cannot price:\n"
-                 + "\n".join(f"  {n:<40} {cm.PROVENANCE[n]['key'] or 'no key names it yet'}"
-                             f"  ({cm.PROVENANCE[n]['file'] or 'no file'})"
-                             for n in unpriced)
-                 + "\nRecord a key for it in zk-results, or pass --inputs DIR.")
+        # Two different states, and they need two different things done about them:
+        # an input a key already names is waiting for a run in zk-results to record
+        # it, and an input no key names is waiting for a name first.
+        named = [n for n in unpriced if cm.PROVENANCE[n]["key"]]
+        unnamed = [n for n in unpriced if not cm.PROVENANCE[n]["key"]]
+        msg = ["these cell costs have no source, and the model charges no term it "
+               "cannot price:"]
+        if named:
+            msg.append("  a key names it and this constants file does not hold it -- "
+                       "record it in zk-results:")
+            msg += [f"    {n:<40} {cm.PROVENANCE[n]['key']}" for n in named]
+        if unnamed:
+            msg.append("  no key names it at all -- it needs a name before it can be "
+                       "recorded:")
+            msg += [f"    {n:<40} today: {cm.PROVENANCE[n]['file'] or 'no file'} "
+                    f"under --inputs DIR" for n in unnamed]
+        msg.append("Record a key for each in zk-results, or pass --inputs DIR to price "
+                   "them from the")
+        msg.append("micro-benchmark outputs -- which is a directory in no repository, so "
+                   "a table priced")
+        msg.append("that way is printed and is not recordable.")
+        sys.exit("\n".join(msg))
     batch = args.logup_batch if args.logup_batch is not None else cm.BATCH
     if batch not in cm.LOGUP_MARGINAL:
         sys.exit(f"the LogUp marginal at batch {batch} is not there, so no cell count can "
@@ -1190,10 +1610,35 @@ def main(argv=None):
                  f"  the file that holds it today: logup.json under --inputs DIR")
     usd = {"H100": consts["h100_usd_per_hour"]["value"],
            "H200": consts["h200_usd_per_hour"]["value"]}
-    h200, h100 = h200_card(), h100_card()
-    cards = {"H200": h200, "H100": h100}
+    # The measured side, constants first.  The headline card is the sound
+    # statement's, per proved position, and every number in it is a key; the two
+    # archive sequences are the fallback, they prove the decode-only statement, and
+    # a row priced on one of them is marked as one and is not recordable.
+    headline = headline_card()
+    arch200, arch100 = h200_card(), h100_card()
+    cards = {}
+    if headline:
+        cards[headline["card"]] = headline
+    for c in (arch200, arch100):
+        if c and c["card"] not in cards:
+            cards[c["card"]] = c
+    if not cards:
+        sys.exit(NO_SEQUENCE)
+    priced_card = headline or cards[sorted(cards)[0]]
     llama8b = next(s for s in SHAPES if s["name"] == "Llama-3.1-8B")
-    cal = check_8b(h200, llama8b, consts, batch=batch)
+    shp = statement_shape(priced_card, llama8b, s_chunk=args.seq)
+    cal = check_8b(priced_card, llama8b, consts, batch=batch, shp=shp)
+    # The statement the model prices has to be the statement the run proved: the
+    # positions and the segments it comes back with are the run's own.
+    if cal.get("statement"):
+        for ctx, st in cal["statement"].items():
+            ref = priced_card["per_ctx"][ctx]
+            if (st["positions"], st["segments"]) != (ref["positions"], ref["segments"]):
+                sys.exit(
+                    f"the statement this table prices is not the one the run at "
+                    f"C={ctx} proved: {st['positions']} positions in {st['segments']} "
+                    f"segments against the recorded {ref['positions']} and "
+                    f"{ref['segments']}.")
     # The drift guard, now on the coefficients rather than on a composite slope.
     # This module derives them symbolically and `prefill-sweep-8b` measured them;
     # they must agree exactly at the 8B geometry, because both claim to be
@@ -1211,8 +1656,13 @@ def main(argv=None):
                  + ", ".join(r[0] for r in bad))
     alpha = None                       # the key tile model IS the attention term now
     fit = prefill_fit()
-    mib_per_chunk = (h200["per_ctx"][4096]["proof_bytes"] / 2 ** 20
-                     / h200["per_ctx"][4096]["chunks"] / TOKENS)
+    # the measured proof size of one segment, per position in the block it covers.
+    # From the constants file where a key names it, from the archive sequence where
+    # none does; None where neither has it and section (2b) says so.
+    seg_mib = priced_card["per_ctx"].get(4096, {}).get("mib_per_segment")
+    mib_per_chunk = (seg_mib / args.seq if seg_mib else
+                     (arch200["per_ctx"][4096]["proof_bytes"] / 2 ** 20
+                      / arch200["per_ctx"][4096]["chunks"] / TOKENS) if arch200 else None)
 
     print("=" * 100)
     print("E1 -- the frontier price table")
@@ -1231,14 +1681,22 @@ def main(argv=None):
                  else f"{e['source']}: {e['file'] or 'no file and no key'}")
         print(f"    {name:<40} {str(e['value']):>14}  {where}")
     backed = [n for n, e in cm.PROVENANCE.items() if e["source"] == "constants"]
-    analogy = [n for n, e in cm.PROVENANCE.items() if e["source"] == "analogy"]
-    rest = [n for n, e in cm.PROVENANCE.items()
-            if e["source"] not in ("constants", "analogy")]
+    elsewhere = read_elsewhere()
     print(f"    {len(backed)} of {len(cm.PROVENANCE)} are backed by a key in the constants "
-          f"file.  {len(analogy)} are priced by analogy and")
-    print("    nothing measures them anywhere.  These still come out of the inputs "
-          "directory:")
-    print("      " + ", ".join(rest))
+          f"file.  Every other one the model")
+    print("    charges is named here with where it came from, because a row that reads "
+          "any of them")
+    print("    is a row this repository cannot record:")
+    WHERE = dict(inputs="the micro-benchmark directory under --inputs DIR",
+                 composed="this repository's own re-fit, harness/costmodel/composed_rungs.json",
+                 analogy="nothing measures it anywhere",
+                 absent="nothing prices it at all")
+    for where, items in sorted(elsewhere.items()):
+        print(f"      {where} ({WHERE.get(where, where)}), {len(items)}:")
+        for it in items:
+            print(f"        {it['input']:<40} {it['key'] or 'no key names it yet'}")
+    if not elsewhere:
+        print("      none: every input the model charges is a key of the constants file.")
     for alias in ("h100_usd_per_hour", "h200_usd_per_hour"):
         e = consts[alias]
         print(f"    {e['card']} ${e['value']}/GPU-h  [{e['grade']}]  "
@@ -1254,25 +1712,43 @@ def main(argv=None):
     print("  than cherry-picked.  The H200's `*_actual_*` key is 0.00 (sponsored access) and")
     print("  this module never reads an `*_actual_*` key.  Grade both $ columns [web].")
 
+    print("\n  the measured side, and the statement it was measured on")
+    for name, card in cards.items():
+        where = ("the constants file" if card.get("source") == "constants"
+                 else "the private archive, which is in no repository")
+        print(f"    {name:<6} {card.get('statement', 'unknown'):<12} from {where}")
+        for ctx in sorted(card["per_ctx"]):
+            ks = card["per_ctx"][ctx].get("keys") or []
+            print(f"      C={ctx:<6} " + (", ".join(ks) if ks else card["per_ctx"][ctx]["source"]))
+    print(f"    the statement's own layout ({shp['s_chunk']}-position blocks, "
+          f"{shp['n_output']} output positions,")
+    print(f"    {shp['heads']} output head segments) is "
+          + (f"read from {', '.join(shp['keys'])}"
+             if shp["source"] == "constants" else
+             "assumed: no key records it"))
+
     print("\nthe four boundaries, kept apart (W0's freeze names all four)")
     print("  commit      interpolate + LDE + Merkle over the committed trees")
     print("  stwo total  commit + prove_ex (constraint eval, quotients, OODS, FRI)")
     print("  whole wall  trace gen + interaction gen + stwo + serialize, summed per")
     print("              chunk.  Has NEVER counted the witness read or the layer build.")
-    print("  loop_secs   the one-process chunk loop's own wall, which DOES count them,")
-    print("              pipelined one chunk ahead so the prove hides behind the next")
-    print("              chunk's generation.  A FOURTH boundary, not a superset and not")
-    print("              a subset of `whole wall` -- on the H100 below it counts more")
-    print("              work and still finishes sooner.  W/X/Z/O all report here.")
+    print("  loop        the chunk loop's own wall, which DOES count them.  A FOURTH")
+    print("              boundary, not a superset and not a subset of `whole wall`: it")
+    print("              counts more work and, where the loop is pipelined, still")
+    print("              finishes sooner.  `rate.headline.*.loop` is this one, and the")
+    print("              archive's sequence calls it `loop_secs`.")
     for name, card in cards.items():
         for ctx, ref in sorted(card["per_ctx"].items()):
             bs = "  ".join(f"{b} {m['cells_s']/1e9:.3f} G/s" for b, m in ref["boundaries"].items())
-            print(f"    {name} C={ctx:<6} {ref['chunks']:>2} chunks  "
-                  f"{ref['cells_per_token']/1e6:7.2f} M cells/token   {bs}")
+            if "cells_per_position" in ref:
+                what = (f"{ref['segments']:>4} segments  "
+                        f"{ref['cells_per_position']/1e6:7.2f} M cells/position")
+            else:
+                what = (f"{ref['chunks']:>4} chunks    "
+                        f"{ref['cells_per_token']/1e6:7.2f} M cells/token  ")
+            print(f"    {name} C={ctx:<6} {what}   {bs}")
             print(f"    {'':<14} {ref['source']}")
         print(f"    {'':<14} {card['note']}")
-    print("    the H200 sequence ran one process per chunk, so it has no `loop_secs`;")
-    print("    the H100 loop has no lm_head chunk.  Neither gap is fillable by arithmetic.")
 
     # --- the check: no free parameter at all ---------------------------------
     print("\nthe check: the attention term now has ZERO fitted parameters")
@@ -1282,20 +1758,44 @@ def main(argv=None):
     print("  a closed form in (S, C) whose every coefficient is an identity of the layout,")
     print("  so both measured levels are now predicted with nothing solved: two points,")
     print("  zero fitted parameters, TWO residual degrees of freedom.")
+    if cal.get("statement"):
+        st0 = cal["statement"][min(cal["statement"])]
+        print(f"\n  What is compared, and it is the whole of the campaign's ruling: the "
+              f"model's own")
+        print(f"  price for the SOUND STATEMENT -- the prompt and the output proved as one "
+              f"statement,")
+        print(f"  in blocks of {st0['s_chunk']}, each block's layer segments attending over "
+              f"the blocks before")
+        print(f"  it, {st0['heads']} output head segments beside them, the five reductions "
+              f"on -- against what")
+        print(f"  the two headline runs measured, per proved position.  The statement's own "
+              f"numbers")
+        print(f"  are read from {', '.join(st0['keys']) or 'no key'} and the layer count is "
+              f"the shape's.")
+        print("  The archive's sequences prove a DIFFERENT statement (512 decoded tokens, "
+              "each")
+        print("  against a full C-key prefix, before the tiled prefix and the reductions "
+              "existed), and")
+        print("  a rate measured on one statement over cells modelled on another does not "
+              "divide.")
 
     def legacy_col(which, ctx, width):
         v = cal[which]
         return f"{v[ctx]:>+{width}.2%}" if v else f"{'not recorded':>{width + 1}}"
 
-    print(f"\n  {'context':>8} {'measured M/token':>18} {'key tile model':>12} {'residual':>10}"
-          f"   {'single slope':>12} {'B5 alpha':>12}")
+    unit = "M/position" if cal.get("statement") else "M/token"
+    print(f"\n  {'context':>8} {'positions':>10} {'measured ' + unit:>20} "
+          f"{'key tile model':>14} {'residual':>10}   {'single slope':>12} {'B5 alpha':>12}")
     for ctx in sorted(cal["measured"]):
-        m = cal["measured"][ctx]
-        print(f"  {ctx:>8} {m/1e6:>18.2f} {m*(1+cal['key_tile'][ctx])/1e6:>12.2f} "
+        m, q = cal["measured"][ctx], cal["predicted"][ctx]
+        n = cal["statement"][ctx]["positions"] if cal.get("statement") else TOKENS
+        print(f"  {ctx:>8} {n:>10,} {m/1e6:>20.2f} {q/1e6:>14.2f} "
               f"{cal['key_tile'][ctx]:>+9.2%}   {legacy_col('legacy_slope', ctx, 11)} "
               f"{legacy_col('legacy_b5', ctx, 11)}")
     print(f"  key tile model residual {min(cal['key_tile'].values()):+.2%} to "
           f"{max(cal['key_tile'].values()):+.2%}, on no fitted attention parameter at all.")
+    print(f"  recorded as `frontier.calibration.residual_pct` (worst of the two) and "
+          f"per context beside it.")
     print("  The two superseded columns are the same model with the key tile term replaced")
     print("  by a single slope, each read from the key named beside it; where the constants")
     print("  file does not name one the column says so.")
@@ -1404,22 +1904,35 @@ def main(argv=None):
 
     # --- cells and throughput ------------------------------------------------
     priced = [price(s, cards, alpha, seq=args.seq, seq_batch=args.seq_batch, usd=usd,
-                    target_tok_s=args.target, mib_per_chunk=mib_per_chunk, batch=batch)
+                    target_tok_s=target, mib_per_chunk=mib_per_chunk, batch=batch,
+                    shp=shp)
               for s in SHAPES]
 
-    print(f"\n(2) committed cells per token, S={args.seq} tokens/chunk, B={args.seq_batch} "
-          "sequence(s)/proof")
-    print(f"  {'model':<18} {'C=4K fresh':>12} {'C=16K fresh':>12} {'C=4K pre':>10} "
-          f"{'C=16K pre':>10} {'freivalds %':>11} {'grid %':>7} {'chunks':>7}")
+    print(f"\n(2) committed cells, S={args.seq} positions/block, B={args.seq_batch} "
+          "sequence(s)/proof, at both statements")
+    print("  per PROVED POSITION is the sound statement and is what every priced row "
+          "below divides;")
+    print("  per DECODED TOKEN is one token against a full C-key prefix, which is what "
+          "the archive's")
+    print("  sequences prove and what sections (2a) and (6) compare against.")
+    print(f"  {'model':<18} {'C=4K /pos':>11} {'C=16K /pos':>11} {'C=4K /token':>12} "
+          f"{'C=16K /token':>12} {'C=4K pre':>10} {'freivalds %':>11} {'grid %':>7} "
+          f"{'segments':>9}")
     for r in priced:
         a, b = r["contexts"][4096], r["contexts"][16384]
-        print(f"  {r['name']:<18} {g(a['cells_per_token']):>12} {g(b['cells_per_token']):>12} "
-              f"{g(a['preprocessed_per_token']):>10} {g(b['preprocessed_per_token']):>10} "
+        print(f"  {r['name']:<18} {g(a['cells_per_position']):>11} "
+              f"{g(b['cells_per_position']):>11} {g(a['cells_per_token']):>12} "
+              f"{g(b['cells_per_token']):>12} {g(a['preprocessed_per_token']):>10} "
               f"{a['parts']['freivalds']/a['cells_per_token']*100:>10.1f}% "
-              f"{a['parts']['attn']/a['cells_per_token']*100:>6.1f}% {a['chunks']:>7}")
+              f"{a['parts']['attn']/a['cells_per_token']*100:>6.1f}% "
+              f"{a['statement']['segments']:>9,}")
     print("  `pre` is the preprocessed weight trace, committed offline but read once per")
     print("  proof.  It is NOT in the fresh count the measured rates divide, and it is")
     print("  where MoE's x E lands hardest -- see (4).")
+    print("  A proved position costs LESS than a decoded token at the same context "
+          "because most")
+    print("  of the sequence's positions are in earlier blocks, which attend over a "
+          "shorter prefix.")
 
     print("\n(2a) what the superseded attention terms cost.  Section 6.3's dense table")
     print("     was produced at B5's standalone block AIR; the version this work item")
@@ -1496,13 +2009,19 @@ def main(argv=None):
     print("     69 linear-attention layers have no grid to correct.")
 
     print("\n(2b) proof bytes: two estimates that disagree, and neither is measured above 8B")
+    if not mib_per_chunk:
+        print("  not answered: neither `proof.headline.c4096.bytes_per_segment_median` nor "
+              "the archive")
+        print("  sequence gives one segment's proof size, so the left column has nothing "
+              "to scale.")
     print(f"  {'model':<18} {'by chunk count':>15} {'by 0.15 MiB/B-active':>22} {'ratio':>8}")
-    for r in priced:
+    for r in (priced if mib_per_chunk else []):
         e = r["contexts"][4096]
         a, b = e["mib_per_token_chunks"], e["mib_per_token_params"]
         print(f"  {r['name']:<18} {a:>15.2f} {b:>22.2f} {b / a:>7.1f}x")
-    print("  Left: (L+1) chunks x the measured 8B per-chunk proof size "
-          f"({mib_per_chunk * TOKENS:.2f} MiB a chunk).")
+    print("  Left: (L+1) segments x the measured 8B per-segment proof size "
+          + (f"({mib_per_chunk * args.seq:.2f} MiB a segment)."
+             if mib_per_chunk else "(not recorded)."))
     print("  Right: section 6.3's rule of thumb, 0.15 MiB per token per B active params,")
     print("  which is the same 8B measurement divided by 8.03 B and then scaled linearly.")
     print("  They cannot both be right.  Proof size is queries x columns x log(rows), and")
@@ -1513,21 +2032,31 @@ def main(argv=None):
     print("  frontier scale; the left column also holds the per-chunk size fixed, so it is")
     print("  a floor.  **Open: this needs one measured point at a wider shape.**")
 
-    for cardname in ("H200", "H100"):
+    for n_card, cardname in enumerate(sorted(cards, key=lambda c: c != priced_card["card"])):
         card = cards[cardname]
-        rate = usd[cardname]
-        print(f"\n(3{'a' if cardname == 'H200' else 'b'}) {cardname}: per-card tok/s at "
-              f"every boundary, cards for {args.target:.0f} tok/s, $/Mtok at "
+        rate = usd.get(cardname)
+        print(f"\n(3{'ab'[n_card] if n_card < 2 else n_card}) {cardname}: per-card PROVED "
+              f"POSITIONS/s at every boundary, cards for {target:g} positions/s, "
+              f"$/M positions at "
               f"{('$%.2f/GPU-h' % rate) if rate else 'n/a (no reference rate)'}")
+        print(f"  the statement is the sound one and the unit is a proved position, not a "
+              f"decoded token.")
+        if card.get("source") != "constants":
+            print(f"  This card's rates come from the archive's {card.get('statement')} "
+                  "sequence, not from a key of")
+            print("  the constants file, so every row below is a rate measured on one "
+                  "statement over a cell")
+            print("  count modelled on another, and none of them is recordable.")
         for ctx in sorted(card["per_ctx"]):
             print(f"  C={ctx}")
             bnames = list(card["per_ctx"][ctx]["boundaries"])
-            # the widest boundary this card actually has: `loop_secs` where it was
-            # measured, `whole wall` where it was not.  They are DIFFERENT
-            # boundaries and the header says which one the dollars are priced at.
-            money = "loop_secs" if "loop_secs" in bnames else "whole wall"
+            # the widest boundary this card actually has: the chunk loop's own wall
+            # where it was measured, `whole wall` where it was not.  They are
+            # DIFFERENT boundaries and the header says which the dollars are at.
+            money = next((b for b in ("loop", "loop_secs", "whole wall") if b in bnames),
+                         bnames[-1])
             hdr = "".join(f"{b:>17}" for b in bnames)
-            print(f"  {'model':<18}{hdr}   {'MiB/token':>10} {'$/Mtok @ ' + money:>19}")
+            print(f"  {'model':<18}{hdr}   {'MiB/pos':>10} {'$/Mpos @ ' + money:>19}")
             for r in priced:
                 e = r["contexts"][ctx]
                 cells = e["cards"].get(cardname)
@@ -1536,11 +2065,14 @@ def main(argv=None):
                 cs = ""
                 for b in bnames:
                     m = cells[b]
-                    cs += f"{m['tok_s']:>9.3f}/{m['cards_for_target']:<7}"
-                dollars = cells[money]["usd_per_mtok"]
-                print(f"  {r['name']:<18}{cs}   {e['mib_per_token_chunks']:>10.2f} "
+                    cs += f"{m['pos_s']:>9.3f}/{m['cards_for_target']:<7}"
+                dollars = cells[money]["usd_per_mposition"]
+                mib = e["mib_per_token_chunks"]
+                print(f"  {r['name']:<18}{cs}   "
+                      + (f"{mib:>10.2f} " if mib else f"{'n/a':>10} ")
                       + (f"{dollars:>19,.0f}" if dollars else f"{'n/a':>19}"))
-            print("   (each cell is tok/s on one card / cards needed for the target)")
+            print("   (each cell is proved positions/s on one card / cards needed for "
+                  "the target)")
 
     # --- MoE and the batch knob ----------------------------------------------
     print("\n(4) MoE against a dense model with the same *active* parameters, C=4K")
@@ -1588,19 +2120,21 @@ def main(argv=None):
         print(f"  {s['name']:<18} {r['ek']:>6.1f} "
               + "".join(f"{r['same_b'][B]['ratio']:>9.3f}x" for B in BS))
 
-    print("\n(5) what B buys in absolute terms, C=4K, whole-wall boundary on the H200")
+    print(f"\n(5) what B buys in absolute terms, C=4K, whole-wall boundary on the "
+          f"{priced_card['card']}")
     print(f"  {'model':<18} " + "".join(f"{'B=%d' % b:>14}" for b in (1, 4, 16, 64, 256)))
     batch_rows = {}
+    cells_s = priced_card["per_ctx"][4096]["boundaries"]["whole wall"]["cells_s"]
     for s in SHAPES:
         vals = []
         for B in (1, 4, 16, 64, 256):
-            c = model_cells(s, 4096, seq=args.seq, seq_batch=B, alpha=alpha,
-                            batch=batch)["total"]
-            vals.append(h200["per_ctx"][4096]["boundaries"]["whole wall"]["cells_s"] / c)
+            c = sound_cells(s, statement_of(s, 4096, shp), seq_batch=B, batch=batch,
+                            alpha=alpha)["per_position"]
+            vals.append(cells_s / c)
         batch_rows[s["name"]] = vals
         print(f"  {s['name']:<18} " + "".join(f"{v:>13.3f}" for v in vals))
-    print("  tok/s per card; B sequences are proven at once, so this is throughput, not")
-    print("  latency, and the wall per proof grows with B.")
+    print("  proved positions/s per card; B sequences are proven at once, so this is")
+    print("  throughput, not latency, and the wall per proof grows with B.")
 
     # --- E11 -----------------------------------------------------------------
     print("\n(6) the full prompt+output statement (E11, decided 2026-08-31)")
@@ -1624,7 +2158,7 @@ def main(argv=None):
         print("  No priced row depends on them: section (3)'s rows carry no E11 block and")
         print("  their cards-at-target and dollars-per-token columns are unchanged.")
     else:
-        _e11_section(priced, h100, usd, mult, net, fixed)
+        _e11_section(priced, priced_card, usd, mult, net, fixed)
         e11 = dict(multiple_prompt=mult[0], multiple_prompt_output=mult[1],
                    chunking_net_4k=net[0], chunking_net_16k=net[1],
                    chunking_fixed=fixed)
@@ -1643,16 +2177,28 @@ def main(argv=None):
               f"(`{OPTIONAL['chunk_floor']}`).")
 
     # --- the memory wall -----------------------------------------------------
-    ref = h200["per_ctx"][4096]
-    gib_per_gcell = ref["peak_mib"] / 1024.0 / (ref["peak_chunk_cells"] / 1e9)
-    print(f"\n(7) does a layer chunk still fit?  measured: the biggest seq5 chunk is "
-          f"{ref['peak_chunk_cells']/1e9:.2f} G cells")
-    print(f"  at {ref['peak_mib']:,} MiB of card, i.e. ~{gib_per_gcell:.1f} GiB per G cell "
-          "(one point, C=4K, 8B -- approximate)")
-    print(f"  {'model':<18} {'G cells/layer chunk':>20} {'GiB implied':>12} "
-          f"{'80 GB':>7} {'141 GB':>7}   at S=512")
+    # One slope over one chunk, and it needs a chunk's own peak beside its own cell
+    # count.  No constants key carries a single segment's fresh cells, so this
+    # section is the archive's or it is not printed; (7b) below supersedes it and
+    # no priced row depends on either.
+    ref = arch200["per_ctx"][4096] if arch200 else None
     fits = {}
-    for s in SHAPES:
+    if ref is None:
+        print("\n(7) does a layer chunk still fit?  not answered here: it needs one "
+              "chunk's own peak")
+        print("  beside that same chunk's own fresh cells, and the constants file "
+              "carries a sequence's")
+        print("  cells and a run's peak but not one segment's of each.  Pass "
+              "--artifacts DIR, or read (7b).")
+    else:
+        gib_per_gcell = ref["peak_mib"] / 1024.0 / (ref["peak_chunk_cells"] / 1e9)
+        print(f"\n(7) does a layer chunk still fit?  measured: the biggest seq5 chunk is "
+              f"{ref['peak_chunk_cells']/1e9:.2f} G cells")
+        print(f"  at {ref['peak_mib']:,} MiB of card, i.e. ~{gib_per_gcell:.1f} GiB per G cell "
+              "(one point, C=4K, 8B -- approximate)")
+        print(f"  {'model':<18} {'G cells/layer chunk':>20} {'GiB implied':>12} "
+              f"{'80 GB':>7} {'141 GB':>7}   at S=512")
+    for s in (SHAPES if ref else []):
         per_layer = 0.0
         for grp in s["groups"]:
             c = model_cells(dict(s, groups=[grp]), 4096, seq=args.seq,
@@ -1663,9 +2209,10 @@ def main(argv=None):
         fits[s["name"]] = dict(cells=per_layer, gib=gib)
         print(f"  {s['name']:<18} {per_layer/1e9:>20.2f} {gib:>12.1f} "
               f"{'yes' if gib < 80 else 'NO':>7} {'yes' if gib < 141 else 'NO':>7}")
-    print("  A chunk that does not fit forces a smaller S, which raises the Freivalds term")
-    print("  (~1/S) and multiplies the proof bytes -- the frontier rows above assume the")
-    print("  measured S=512 and are optimistic wherever this column says NO.")
+    if ref:
+        print("  A chunk that does not fit forces a smaller S, which raises the Freivalds term")
+        print("  (~1/S) and multiplies the proof bytes -- the frontier rows above assume the")
+        print("  measured S=512 and are optimistic wherever this column says NO.")
 
     # --- the memory wall, re-priced on stream GG's coefficients --------------
     mc = memory_coeffs()
@@ -1734,7 +2281,7 @@ def main(argv=None):
         print("  fresh-cell residual showing through; the coefficients themselves "
               "decompose both")
         print("  measured peaks to a few kB (stream GG, `## Record`).")
-        head = head_cross_check(mc, ref)
+        head = head_cross_check(mc, ref) if ref else None
         if head:
             print(f"  held out, and in no part of the solve: the `lm_head` chunk the "
                   f"retired slope was")
@@ -2081,11 +2628,16 @@ def main(argv=None):
 
     # --- what moved against a previous run -----------------------------------
     if args.compare:
-        prev = json.loads(pathlib.Path(args.compare).read_text())
+        prev = provenance.rows(json.loads(pathlib.Path(args.compare).read_text()))
         po = {r["name"]: r for r in prev["rows"]}
         print(f"\n(8) what moved against {rel(args.compare)}")
-        print(f"  {'model':<18} {'C=4K cells/token':>24} {'C=16K':>16} "
-              f"{'H200 commit tok/s':>22} {'cards@%g' % args.target:>12}")
+        # A file written before this module priced positions carries only the
+        # per-token side, so the comparison falls back to it and says so.
+        first = next(iter(po.values()), {}).get("contexts", {}).get("4096", {})
+        unit = "cells_per_position" if "cells_per_position" in first else "cells_per_token"
+        rate = "pos_s" if unit == "cells_per_position" else "tok_s"
+        print(f"  {'model':<18} {'C=4K ' + unit:>26} {'C=16K':>14} "
+              f"{'commit ' + rate:>22} {'cards@%g' % target:>12}")
         moved = []
         for r in priced:
             o = po.get(r["name"])
@@ -2093,27 +2645,75 @@ def main(argv=None):
                 continue
             a4, b4 = o["contexts"]["4096"], r["contexts"][4096]
             a16, b16 = o["contexts"]["16384"], r["contexts"][16384]
-            ca = a4["cards"]["H200"]["commit"]
-            cb = b4["cards"]["H200"]["commit"]
+            cardname = next((c for c in b4["cards"] if c in a4["cards"]), None)
+            if cardname is None:
+                continue
+            ca = a4["cards"][cardname]["commit"]
+            cb = b4["cards"][cardname]["commit"]
             moved.append((r["name"], ca["cards_for_target"], cb["cards_for_target"]))
-            print(f"  {r['name']:<18} {a4['cells_per_token']/1e6:8.1f} ->"
-                  f"{b4['cells_per_token']/1e6:8.1f} {b4['cells_per_token']/a4['cells_per_token']-1:>+6.1%}"
-                  f" {b16['cells_per_token']/a16['cells_per_token']-1:>15.1%}"
-                  f" {ca['tok_s']:>10.3f} ->{cb['tok_s']:>8.3f}"
+            print(f"  {r['name']:<18} {a4[unit]/1e6:10.1f} ->"
+                  f"{b4[unit]/1e6:8.1f} {b4[unit]/a4[unit]-1:>+6.1%}"
+                  f" {b16[unit]/a16[unit]-1:>13.1%}"
+                  f" {ca[rate]:>10.3f} ->{cb[rate]:>8.3f}"
                   f" {ca['cards_for_target']:>7d} ->{cb['cards_for_target']:<4d}")
         def order(rows, key):
             return [n for n, _ in sorted(rows, key=key, reverse=True)]
+        cardname = next(iter(priced[0]["contexts"][4096]["cards"]))
         oa = order([(r["name"], po[r["name"]]) for r in priced if r["name"] in po],
-                   lambda kv: kv[1]["contexts"]["4096"]["cards"]["H200"]["commit"]["tok_s"])
+                   lambda kv: kv[1]["contexts"]["4096"]["cards"][cardname]["commit"][rate])
         ob = order([(r["name"], r) for r in priced],
-                   lambda kv: kv[1]["contexts"][4096]["cards"]["H200"]["commit"]["tok_s"])
+                   lambda kv: kv[1]["contexts"][4096]["cards"][cardname]["commit"][rate])
         changed = [f"{n} {a}->{b}" for n, a, b in moved if a != b]
-        print(f"  ordering by H200 commit tok/s at C=4K: "
+        print(f"  ordering by {cardname} commit {rate} at C=4K: "
               f"{'UNCHANGED' if oa == ob else 'CHANGED'}")
         print("  cards-at-target changes: " + (", ".join(changed) if changed else "none"))
 
+    # --- what a driver may record --------------------------------------------
+    to_record = projected_rows(priced, moe_rows, cal, cards, usd, target, args.seq,
+                               args.seq_batch)
+    elsewhere = read_elsewhere()
+    # A row may be recorded when every input behind it is a key of this constants
+    # file: the cell costs the model charged, the statement's own layout, and the
+    # rate it divided by.  One input from anywhere else and the whole run is a
+    # projection over a number that is in no repository, so none of it is recorded.
+    file_only = not elsewhere and shp["source"] == "constants"
+    for r in to_record:
+        r["recordable"] = bool(file_only and r["entry"]["inputs"]
+                               and r["from_constants"])
+    ok = [r for r in to_record if r["recordable"]]
+    rows = to_record
+    print(f"\n(9) what this run may record: {len(ok)} of {len(rows)} rows")
+    print(f"  {'key':<58} {'value':>14}  unit")
+    for r in rows:
+        v = r["entry"]["value"]
+        print(f"  {r['key']:<58} "
+              + (f"{v:>14,.4f}" if isinstance(v, float) else f"{str(v):>14}")
+              + f"  {r['entry']['unit']}"
+              + ("" if r["recordable"] else "   [not recordable]"))
+    recordable = bool(ok) and len(ok) == len(rows)
+    if not recordable:
+        print("\n  NOT RECORDABLE, and exactly why:")
+        for where, items in sorted(elsewhere.items()):
+            print(f"    {len(items)} input(s) from {where}: "
+                  + ", ".join(i["input"] for i in items))
+            for it in items:
+                if it["key"]:
+                    print(f"      {it['key']} would back {it['input']} and this file "
+                          "does not name it")
+        if shp["source"] != "constants":
+            print("    the statement's own layout is assumed and no key records it")
+        print("  The gate counts every cell cost this model can charge, including the "
+              "standalone")
+        print("  rungs the five reductions replace: it is deliberately over-strict, "
+              "because the")
+        print("  model does not record which inputs one statement read.  Record those "
+              "keys in")
+        print("  zk-results and run this again; nothing here is recorded from a "
+              "directory that is")
+        print("  in no repository.")
+
     OUT.mkdir(exist_ok=True)
-    doc = dict(
+    result = dict(
         constants=consts,
         # Where every input came from, so a reader of this file can tell a
         # number that a run in zk-results backs from one that only a directory
@@ -2123,10 +2723,12 @@ def main(argv=None):
             cost_model={k: dict(v) for k, v in cm.PROVENANCE.items()},
             required_keys=dict(KEYS), optional_keys=dict(OPTIONAL),
             not_recorded=[v["key"] for v in consts.values() if not v.get("recorded", True)],
-            sequence={f"{name}.c{ctx}": dict(card=card["card"], source=ref["source"],
-                                             context=ctx, key=None)
+            sequence={f"{name}.c{ctx}": dict(card=card["card"], source=r["source"],
+                                             context=ctx, read_from=card.get("source"),
+                                             statement=card.get("statement"),
+                                             keys=r.get("keys", []))
                       for name, card in cards.items()
-                      for ctx, ref in sorted(card["per_ctx"].items())}),
+                      for ctx, r in sorted(card["per_ctx"].items())}),
         cards={k: v for k, v in cards.items()},
         calibration=cal, alpha=alpha, seq=args.seq, seq_batch=args.seq_batch,
         prefill_fit=fit,
@@ -2178,6 +2780,24 @@ def main(argv=None):
             cards={c: gib for c, gib in CARDS},
             host_cgroup_bytes=H100_HOST_CGROUP, pcie_bytes_per_s=PCIE_PINNED_BPS,
             rows={n: {str(h): v for h, v in r.items()} for n, r in ldeo.items()})))
+    result.update(
+        statement=shp, target_positions_per_s=target, projected=rows,
+        recordable=recordable, priced_card=priced_card["card"])
+    doc = dict(
+        # The block every run JSON in this project carries, so that a driver in
+        # zk-results can write a manifest from this file the way it writes one from
+        # a prover output.  This run makes no proof and touches no card: it reads a
+        # constants file and prints arithmetic, so it says `harness`, it names no
+        # GPU even where the machine has one, and it binds nothing.
+        provenance=provenance.block(
+            model=None, device="none", threads=None, module=__spec__.name,
+            gpu=None, driver_version=None, cuda_version=None,
+            constants_file=constants.path(),
+            artifacts_dir=None if ROOT is None else str(ROOT),
+            inputs_dir=None if cm.OUT is None else str(cm.OUT),
+            statement="sound" if shp["source"] == "constants" else "assumed",
+            recordable=recordable),
+        result=result)
     pathlib.Path(args.json).write_text(json.dumps(doc, indent=1, default=str))
     print(f"\nwrote {rel(args.json)}")
     return doc
