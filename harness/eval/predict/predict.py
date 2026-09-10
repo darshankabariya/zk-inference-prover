@@ -16,9 +16,13 @@ The rule the plan attaches to E4 (eval-plan.md section 4, row 9) is in bold:
 committed no witness, no proof and no cell count existed at any of the three
 target scales, on either box -- see the `provenance` block in the emitted JSON.
 
-Nothing here re-derives a frozen constant.  Measured anchors are read through
-`harness.constants.value()`; the cost model's own constants come from the
-checked-in B2-B10 JSON exactly as every other caller sees them.
+Nothing here re-derives a frozen constant, and nothing here falls back to a
+number.  The anchor that carries the weight is a measured 8B layer chunk per
+context, read from `--artifacts` and proved at exactly the statement this
+registration prices; a constants key that this constants file does not name is
+recorded as absent and nothing stands in for it.  The cost model's own inputs
+come through `cost_model.PROVENANCE`, constants first and the micro-benchmark
+outputs second, and the whole record is frozen with the prediction.
 """
 import argparse
 import hashlib
@@ -28,7 +32,7 @@ import sys
 
 from harness import constants
 from harness import inputs
-from harness.constants import get, value
+from harness.constants import get
 from harness.costmodel import cost_model as cm
 from harness.costmodel import key_tile
 
@@ -90,8 +94,20 @@ def _seq5(ctx, layer=16):
         if not f.exists():
             raise SystemExit(f"missing {f}: the measured 8B layer chunk at C={ctx}, "
                              "layer 16, which the shape ratios are stated against")
-        _SEQ5[(ctx, layer)] = json.loads(f.read_text())["result"]["point"]
-    return _SEQ5[(ctx, layer)]
+        _SEQ5[(ctx, layer)] = json.loads(f.read_text())
+    return _SEQ5[(ctx, layer)]["result"]["point"]
+
+
+def _seq5_source(ctx, layer=16):
+    """Which run, block and segment the reference chunk was derived from.
+
+    The chunk carries its own `derived_from` block -- the run id, the slice
+    output, the segment tag and the proof digest -- so the registration records
+    where the number came from instead of naming a file path."""
+    _seq5(ctx, layer)
+    d = dict(_SEQ5[(ctx, layer)].get("derived_from") or {})
+    d.pop("file", None)
+    return d
 
 
 def ref8b():
@@ -122,31 +138,26 @@ REF8B_SOURCE = "<--artifacts>/seq5/seq_c{4096,16384}_L16.json (result.point.cell
 #           statement the run this is registered against proves.
 #
 #   rest    everything else in a layer chunk: the dequant, the Freivalds check, the
-#           requantize, the int8 range checks, the attention-output fold and
-#           the residual stream.  Pure arithmetic in the 7-tuple, from the B2-B10 gadget
-#           marginals.  This is the half that can be wrong at a new scale.
+#           requantize, the q/k quantize, the int8 range checks, the
+#           attention-output fold, RoPE, the lookup tables, the boundary trees
+#           and the residual stream.  Two of those are closed forms of the
+#           layout like the key tile family (the boundary trees and the lookup
+#           tables); the rest is arithmetic in the 7-tuple times a gadget rung.
+#           This is the half that can be wrong at a new scale.
 #
-#           Every one of them is priced with its committed LogUp
-#           running-sum columns BUILT, which is the prover's default and the
-#           only thing `cost_model.py` carries a term for: the four reductions
-#           beside `--gkr-key-tiles` -- `--gkr-dequant`,
-#           `--gkr-residual-stream`, `--gkr-freivalds`, `--gkr-attnout` -- move
-#           those cells into `gkrlink`, which this model does not carry
-#           (`cost_model.py`, the `attn` term).  The run this is
-#           registered against passes all four, so this half charges columns
-#           that run does not build.  Which way the total then lands is a
-#           separate question and measurable today: against the one 8B layer
-#           chunk per context that IS proved at the registered statement, this
-#           half comes out 13.4% LOW at C=4096 and 26.2% low at C=16384.  It is
-#           registered as it stands rather than adjusted by a term nobody has
-#           fitted.
+#           Both halves are priced at the SAME statement, and `cells_per_token`
+#           is told which one: `--gkr-dequant`, `--gkr-residual-stream`,
+#           `--gkr-freivalds` and `--gkr-attnout` each prove a family's LogUp
+#           running sums instead of committing them, and the driver passes all
+#           four beside `--gkr-key-tiles`.  What the model does NOT carry is
+#           `gkrlink`, the reductions' own link -- 12,529,664 cells on both
+#           recorded 8B layer chunks, with no form in the shape -- so this half
+#           is short by about that much per chunk and `cost_model.PROVENANCE`
+#           records it as unpriced.
 #
 # `rest` is the cost model's layers-only per-token total minus its `attn` term,
 # plus the residual stream's NET cost (`residual_stream_cells(...)['net']` --
-# total minus the stub the composed statement replaces).  Charging the residual
-# stream's gross total instead over-predicts the 8B chunk by 11.6%; charging no
-# residual stream at all under-predicts it by 14.3%.  The net is the one that
-# matches what the prover builds.
+# total minus the stub the composed statement replaces).
 # --------------------------------------------------------------------------
 
 
@@ -166,6 +177,12 @@ REF8B_SOURCE = "<--artifacts>/seq5/seq_c{4096,16384}_L16.json (result.point.cell
 # --------------------------------------------------------------------------
 STATEMENT = dict(diagonal_block=True, kv_boundary=True, bind=True, gkr=True)
 
+# The same statement for the other half: every one of the prover's five batched
+# reductions, which is what the driver passes.  `STATEMENT` is the key tile
+# family's own configuration and `gkr=True` in it is `--gkr-key-tiles` alone;
+# this is the set `cells_per_token` and `residual_stream_cells` are told about.
+STATEMENT_REDUCTIONS = cm.REDUCTIONS
+
 STATEMENT_FLAGS = dict(
     diagonal_block="--diagonal-block",
     kv_boundary="not a flag: `kv_boundary = diagonal_block && !head` (`main.rs`), "
@@ -175,14 +192,16 @@ STATEMENT_FLAGS = dict(
     gkr="--gkr-key-tiles",
 )
 
-# What the driver passes beside `--gkr-key-tiles`, and what this model does with
-# it: nothing.  Named here so a reader of the registration is not left to infer
-# it from the integers.
+# What the driver passes beside `--gkr-key-tiles`, and what the model does with
+# it.  Named here so a reader of the registration is not left to infer it from
+# the integers.
 STATEMENT_NOT_PRICED = dict(
     flags="--gkr-dequant --gkr-residual-stream --gkr-freivalds --gkr-attnout",
-    effect="each moves the committed LogUp running sums it owns into "
-           "`gkrlink`; `cost_model.py` carries no term for any of the four, so "
-           "the `rest` half prices all four OFF while the run proves them on",
+    effect="each proves the LogUp running sums of the family it names instead "
+           "of committing them, and moves what it does commit into `gkrlink`. "
+           "`cells_per_token(gkr=...)` prices all four; `gkrlink` itself is the "
+           "one family the model does not price, and "
+           "`cost_model.PROVENANCE['gkrlink_cells_per_chunk']` says so",
 )
 
 
@@ -209,18 +228,25 @@ def key_tiles_per_chunk(nh, hd, s, c, base_slope=2.0, **kw):
     return b + extra, i, sat
 
 
-def predict(cfg, ctx, seq=S, base_slope=2.0, statement=None):
+def predict(cfg, ctx, seq=S, base_slope=2.0, statement=None, reductions=None):
     """Layers-only fresh cells per decoded token, split key tiles / rest.
 
     `statement` is the key tile configuration being priced, `STATEMENT` by
     default.  The cost model's own `attn` term is subtracted whole and replaced
     by `key_tiles_per_chunk`, so it is that argument and nothing else that says
     which statement the key tile half of the prediction is for.
+
+    `reductions` is the same statement for the other half -- which of the
+    prover's five batched reductions the run proves -- and it defaults to
+    `STATEMENT_REDUCTIONS`, all five, which is what the driver passes.  The two
+    arguments have to agree: pricing the key tile family at a reduced statement
+    and everything else at an un-reduced one is not a statement any run proves.
     """
     st = STATEMENT if statement is None else statement
+    red = STATEMENT_REDUCTIONS if reductions is None else reductions
     L, d, nh, nkv, hd, dff, vocab = cfg
-    r = cm.cells_per_token(cfg, ctx, B, seq=seq, head=False)
-    gl = cm.residual_stream_cells(cfg, "tree")
+    r = cm.cells_per_token(cfg, ctx, B, seq=seq, head=False, gkr=red)
+    gl = cm.residual_stream_cells(cfg, "tree", gkr=red)
     bb, bi, sat = key_tiles_per_chunk(nh, hd, seq, ctx, base_slope=base_slope, **st)
     key_tiles = L * (bb + bi) / seq
     rest = r["total"] - r["attn"] + gl["net"]
@@ -228,7 +254,11 @@ def predict(cfg, ctx, seq=S, base_slope=2.0, statement=None):
                 key_tiles_base_per_chunk=bb, key_tiles_interaction_per_chunk=bi,
                 per_layer_chunk=(key_tiles + rest) * seq / L,
                 saturated=sat, residual_stream_net=gl["net"], bare=r["total"],
-                statement=dict(st))
+                statement=dict(st), reductions=tuple(red),
+                reductions_not_priced=r["gkr_not_priced"],
+                rest_rows={k: r[k] for k in ("acc", "act", "nl", "logup", "freivalds",
+                                             "range", "limbs", "attn_out", "requant",
+                                             "rope", "quant", "tables", "boundary")})
 
 
 def head_chunk(cfg, seq=S):
@@ -239,27 +269,55 @@ def head_chunk(cfg, seq=S):
 # Anchors: what the same predictor says about the two scales it WAS built from.
 # This is the only honest basis for a bracket, so it is computed here rather
 # than asserted.
+#
+# The anchor that carries the weight is the DERIVED REFERENCE CHUNK: one 8B
+# layer chunk per context out of a headline run, proved at exactly the
+# statement this registration prices.  It is read from `--artifacts` and its
+# own `derived_from` block says which run, block and segment it came from.
+#
+# There is a second, weaker anchor per context against a frozen 32-layer
+# per-token figure, and it is OPTIONAL: the keys it wants
+# (`cells_per_token.8b.c{4096,16384}.fresh_layers`) are not in zk-results'
+# `constants.json`, which names its 8B figures `cells_per_position.headline.*`
+# instead.  Those are NOT the same quantity -- per proved position over a whole
+# decode sequence whose context grows block by block, the output head chunks
+# included, against layers-only cells per decoded token at ONE context -- so
+# nothing substitutes for the absent key and the block records it as absent.
 # --------------------------------------------------------------------------
+FROZEN_8B_KEYS = {4096: "cells_per_token.8b.c4096.fresh_layers",
+                  16384: "cells_per_token.8b.c16384.fresh_layers"}
+FROZEN_8B_ABSENT = (
+    "this constants file does not name it. zk-results names its 8B figures "
+    "`cells_per_position.headline.c{4096,16384}.*`, which are a different "
+    "quantity: per proved position over a whole decode sequence, the output "
+    "head chunks included and the context growing one block at a time, against "
+    "layers-only cells per decoded token at one context. The registration is "
+    "anchored on the derived reference chunk beside this instead.")
+
+
 def anchors():
     out = {}
-    for ctx, key in ((4096, "cells_per_token.8b.c4096.fresh_layers"),
-                     (16384, "cells_per_token.8b.c16384.fresh_layers")):
+    for ctx in CONTEXTS:
+        key = FROZEN_8B_KEYS[ctx]
         p = predict(cm.LLAMA8B, ctx)
-        m = value(key)
-        out[f"llama8b_c{ctx}"] = dict(
-            scale="Llama-3.1-8B", ctx=ctx, predicted=p["total"], measured=m,
-            ratio=p["total"] / m, source=get(key)["source"], grade=get(key)["grade"],
-            card=get(key)["card"], statement=dict(STATEMENT),
-            note="the predicted side prices the registered statement; the measured "
-                 "side is the earlier seq5 sequence, proved before the tiled prefix, "
-                 "the root-equality claims and the five reductions existed, so its "
-                 "key tile family is a different statement's and this residual "
-                 "carries that difference as well as the model's own")
-        # The same predictor against a chunk that IS proved at the registered
-        # statement: the artifact `ref8b()` already reads, scaled from one layer
-        # chunk to the model's 32.  Not a frozen constant and not a substitute
-        # for one -- it is here because the residual above cannot be read as the
-        # model's own and this one can.
+        e = constants.find(key)
+        if e is None:
+            out[f"llama8b_c{ctx}"] = dict(
+                scale="Llama-3.1-8B", ctx=ctx, predicted=p["total"], measured=None,
+                ratio=None, key=key, source="absent", grade="absent",
+                statement=dict(STATEMENT), note=FROZEN_8B_ABSENT)
+        else:
+            out[f"llama8b_c{ctx}"] = dict(
+                scale="Llama-3.1-8B", ctx=ctx, predicted=p["total"], measured=e["value"],
+                ratio=p["total"] / e["value"], key=key, source=e["source"],
+                grade=e["grade"], card=e["card"], statement=dict(STATEMENT),
+                note="the predicted side prices the registered statement; the measured "
+                     "side is the earlier seq5 sequence, proved before the tiled prefix, "
+                     "the root-equality claims and the five reductions existed, so its "
+                     "key tile family is a different statement's and this residual "
+                     "carries that difference as well as the model's own")
+        # The anchor that carries the weight: a chunk that IS proved at the
+        # registered statement, scaled from one layer chunk to the model's 32.
         pt = _seq5(ctx)
         mref = pt["cells"]["fresh"] * cm.LLAMA8B[0] / S
         mkt = (pt["family_cells"]["key_tiles"]
@@ -274,21 +332,37 @@ def anchors():
             statement=dict(STATEMENT),
             key_tiles_exact=int(round(pkt)) == int(round(mkt * cm.LLAMA8B[0] / S)),
             rest_ratio=p["rest"] / mrest,
-            note="one layer chunk per context, scaled to 32 layers. The key tile "
-                 "half of this ratio is exact to the cell; every cell of the "
-                 "difference is in `rest`, which prices the four reductions "
-                 "beside `--gkr-key-tiles` off while this chunk was proved with "
-                 "them on")
+            rest_residual_per_chunk=(p["rest"] - mrest) * S / cm.LLAMA8B[0],
+            chunk=_seq5_source(ctx),
+            note="one layer chunk per context, scaled to 32 layers, at exactly the "
+                 "statement this registration prices. The key tile half of this "
+                 "ratio is exact to the cell; every cell of the difference is in "
+                 "`rest`, and the largest single term the model does not price is "
+                 "`gkrlink`, the reductions' own link")
     # Qwen2.5-0.5B: B6.5's composed layer, a DIFFERENT statement -- no
     # residual-stream family, no diagonal block key tile, none of the five reductions,
     # and q/k/v/o on the pow2 dequant
     # rung while gate/up/down are on the chain.  Evaluated the same way, as a weak anchor.
+    #
+    # Four families that prover generation did not build are taken back off the
+    # predicted side, because charging a chunk for a family it has no entry for
+    # is not a residual of the model: its `cells.fresh` is exactly its base plus
+    # its interaction, so it commits no boundary tree at all, and its
+    # `family_cells` names no lookup-table, quantize or residual-stream family.
     L, d, nh, nkv, hd, dff, vocab = cm.QWEN
     r = cm.cells_per_token(cm.QWEN, 1024, B, seq=S, head=False, diagonal_block=False)
     mixed = L * (((nh + 2 * nkv) * hd + d) * cm.HEAD_DEQUANT_PER_ACC
                  + (2 * dff + d) * cm.LAYER_DEQUANT_PER_ACC)
-    tot = (r["total"] - r["limbs"] + mixed) * S / L
-    meas = cm.B65C["compose"]["fresh"]
+    not_built = r["boundary"] + r["tables"] + r["quant"] + r["rope"]
+    tot = (r["total"] - r["limbs"] + mixed - not_built) * S / L
+    meas = (cm.B65C or {}).get("compose", {}).get("fresh")
+    if meas is None:
+        out["qwen0p5b_c1024"] = dict(
+            scale="Qwen2.5-0.5B", ctx=1024, predicted=tot, measured=None, ratio=None,
+            source="b65/compose_host.json under --inputs DIR", grade="absent",
+            note="the composed 0.5B layer is in no constants file and no key names "
+                 "it; without the inputs directory this anchor is not evaluated")
+        return out
     out["qwen0p5b_c1024"] = dict(
         scale="Qwen2.5-0.5B", ctx=1024, predicted=tot, measured=meas,
         ratio=tot / meas, source="experiments/b65/out/compose_host.json "
@@ -297,8 +371,86 @@ def anchors():
         statement_note="what `cells_per_token` prices here, not what B6.5 proved: "
                        "that prover generation published no root-equality claim, "
                        "so `bind` is charged against a chunk that has none",
+        families_not_built=dict(
+            boundary=r["boundary"] * S / L, tables=r["tables"] * S / L,
+            quant=r["quant"] * S / L, rope=r["rope"] * S / L,
+            why="this chunk's `cells.fresh` is exactly its base plus its "
+                "interaction, so it commits no boundary tree, and its "
+                "`family_cells` names no lookup-table, quantize or "
+                "residual-stream family. Charged, they are most of the chunk."),
         note="weak anchor: no residual-stream family, no diagonal block key tile, mixed dequant rungs, "
              "and a prover generation older than the seq5 statement")
+    return out
+
+
+# --------------------------------------------------------------------------
+# What one layer chunk is, and how far one layer is from the mean of them.
+# Both are computed off `harness/costmodel/layer_chunks.json` -- every chunk of
+# one token block of each headline run, copied into the repository -- so they
+# move with the runs and never with a sentence somebody forgot to edit.
+# --------------------------------------------------------------------------
+def chunk_identity():
+    """The whole-chunk identity, solved on the recorded chunks.
+
+    A composed layer chunk's fresh cells are its key tile family, its boundary
+    trees, its lookup tables and a rest the shape fixes:
+
+        cells.fresh == key_tile_family(nh, hd, S, C) + boundary_cells(...)
+                       + 5 * (sum of 2^log_rows over the chunk's tables) + rest
+
+    and `rest` is one integer on every recorded non-embedding layer chunk at
+    both contexts.  A single-layer run can check it on its own chunk, which is
+    what protocol C leans on.
+    """
+    ident = key_tile.chunk_identity()
+    return dict(
+        form="cells.fresh == key_tile_family(nh, hd, S, C) + boundary_cells(nh, hd, d, S, C)"
+             " + 5 * sum_t 2^log_rows(t) + rest",
+        rest=ident["layer"][0] if len(ident["layer"]) == 1 else ident["layer"],
+        rest_embedding_layer=(ident["embedding"][0] if len(ident["embedding"]) == 1
+                              else ident["embedding"]),
+        exact_to_the_cell=len(ident["layer"]) == 1,
+        chunks=sum(1 for q in key_tile.chunks() if not q["head"] and not q["embedding"]),
+        note="8B, S=512, spec b10-final, both contexts. The embedding layer's rest is "
+             "higher by its embedding lookup and one more cell per attention-output "
+             "accumulator. `boundary_cells` is the term no `family_cells` entry names: "
+             "what `cells.fresh` has above `base + interaction`.",
+        checked_by="harness.costmodel.key_tile --selftest")
+
+
+def layer_spread():
+    """How far one layer chunk is from the mean of a context's 32, measured.
+
+    This is the basis the protocol widening was set from and it is recomputed
+    here rather than quoted, at both contexts, for one layer and for the worst
+    evenly-spaced subsample of eight over every phase offset.  The registered
+    widening percentages are NOT derived from it: they are what they were.
+    """
+    out = {}
+    for ctx in CONTEXTS:
+        ch = sorted((q for q in key_tile.chunks()
+                     if not q["head"] and q["c"] == ctx),
+                    key=lambda q: int(q["segment"].split("L")[1]))
+        if not ch:
+            continue
+        fresh = [q["fresh"] for q in ch]
+        n = len(fresh)
+        mean = sum(fresh) / n
+        worst8 = max(abs(sum(fresh[o::4]) / len(fresh[o::4]) / mean - 1) for o in range(4))
+        no0 = fresh[1:]
+        out[str(ctx)] = dict(
+            layers=n, mean_fresh_per_chunk=mean,
+            single_layer_pct=[100 * (min(fresh) / mean - 1), 100 * (max(fresh) / mean - 1)],
+            single_layer_pct_without_the_embedding_layer=[
+                100 * (min(no0) / mean - 1), 100 * (max(no0) / mean - 1)],
+            worst_even_8_subsample_pct=100 * worst8,
+            widest_layer=ch[fresh.index(max(fresh))]["segment"],
+            narrowest_layer=ch[fresh.index(min(fresh))]["segment"],
+            run=ch[0]["run"],
+            note="the widest layer is the embedding one: it carries the embedding "
+                 "lookup, the largest master exponent table of the 32 and one more "
+                 "cell per attention-output accumulator. Without it the spread is "
+                 "the row above.")
     return out
 
 
@@ -316,15 +468,13 @@ BRACKET = dict(
         "3%. The extrapolation licence is claimed without qualification and the "
         "section 6.3 frontier table keeps its [projected] grade.\n"
         "PASS   rho in [0.90, 1.10] -- the range as registered, unchanged. What "
-        "the same predictor now shows at the two scales it WAS built from is "
-        "-5.0% at 0.5B, -17.6% at 8B C=4096 and -30.8% at 8B C=16384, against "
-        "measurements proved before the tiled prefix, the root-equality claims "
-        "and the five reductions existed. Against the one 8B layer chunk per "
-        "context that IS proved at the registered statement the same predictor "
-        "is -11.1% and -15.9%, every cell of it in the `rest` half: the key "
-        "tile half is exact to the cell at both. The range is NOT rebased on "
-        "any of those. The licence is claimed with the measured residual quoted "
-        "beside it.\n"
+        "the same predictor shows at the two scales it WAS built from is not "
+        "quoted here: it moves whenever the model does, and a number in this "
+        "sentence went stale once already. It is computed into the `anchors` "
+        "block of this document, per scale and per context, with the statement "
+        "each measured side was proved at beside it. The range is NOT rebased "
+        "on any of them. The licence is claimed with the measured residual "
+        "quoted beside it.\n"
         "MARGINAL rho in [0.80, 0.90) or (1.10, 1.25] -- the licence is claimed "
         "only with an explicit +/-25% key tile printed on every frontier row.\n"
         "FAIL   rho < 0.80 or rho > 1.25 -- the cost model is REFUTED as an "
@@ -341,21 +491,20 @@ BRACKET = dict(
             what=">= 8 EVENLY SPACED layers (L0, L*1/8, ... by a rule fixed "
                  "before the run), compare the mean scaled to L layers",
             widen_pct=1.0,
-            basis="on the 8B's own 32 chunks, the worst 8-layer evenly-spaced "
-                  "subsample mean is 0.92% off the full mean at C=4096 and 0.41% "
-                  "at C=16384, over every phase offset"),
+            basis="the percentages here are the ones registered and are NOT "
+                  "re-derived; `layer_spread` in this document is what the two "
+                  "headline runs' own 32 chunks per context say today, computed "
+                  "rather than quoted"),
         C_single_layer=dict(
             what="one layer only -- the minimum that still tests anything",
             widen_pct_upper=9.0, widen_pct_lower=1.5,
-            basis="a single 8B chunk runs -1.18% to +8.59% around the 32-layer "
-                  "mean at C=4096, ENTIRELY from the per-layer master exp table. "
-                  "Every other family is identical to the cell across all 32 "
-                  "layers, and the whole chunk is the exact identity "
-                  "`cells.fresh == key tiles(S, C) + 1,006,949,376 + 5 * 2^log_table`, "
-                  "verified on all 32 chunks at BOTH contexts (`log_table` 22..25, "
-                  "`interaction_by_family.table` 56.0-173.4 Mcells). The run MUST "
-                  "report `params.log_table` and "
-                  "`interaction_by_family.table.cells` for the layer it proved."),
+            basis="the percentages here are the ones registered and are NOT "
+                  "re-derived; `layer_spread` in this document is what the two "
+                  "headline runs say today, and the run MUST report "
+                  "`params.log_table` and `interaction_by_family.table.cells` "
+                  "for the layer it proved. The whole chunk is the exact "
+                  "identity `chunk_identity` states, which a single-layer run "
+                  "can check on its own chunk."),
     ),
     also=(
         "SEPARATE and EXACT: the key tiles family. `family_cells.key_tiles` (base) and "
@@ -372,7 +521,17 @@ BRACKET = dict(
         "and must be reported even if rho passes -- it means the layout identities "
         "in `key_tile_cells` do not hold at a shape whose `nh` and `d` are not "
         "powers of two, which is the one thing the closed form's own docstring "
-        "flags."),
+        "flags.\n"
+        "SEPARATE and EXACT, the second one: the BOUNDARY TREES. "
+        "`cells.fresh - cells.base - cells.interaction` must equal "
+        "`2*d*S + 2*nh*hd*(2*C + S)` on every layer chunk and `d*S` on every "
+        "output head chunk, as it does on all 68 recorded 8B chunks of the two "
+        "headline runs (`harness.costmodel.key_tile --selftest`). No "
+        "`family_cells` entry names this family, so a run that does not report "
+        "`cells.base` and `cells.interaction` beside `cells.fresh` cannot be "
+        "checked against it. Like the key tiles, a deviation is a finding in "
+        "its own right and is reported whatever rho does; unlike a "
+        "configuration miss, it does not void the run."),
     invalidation=(
         "The comparison is void, not failed, if the run does not reproduce the "
         "registered configuration: spec `b10-final` (round even, all seven "
@@ -496,11 +655,9 @@ def _sha(path):
 
 def provenance():
     return dict(
-        inputs_sha256={
-            "harness/costmodel/cost_model.py": _sha(cm.__file__),
-            "harness/costmodel/key_tile.py": _sha(key_tile.__file__),
-            "constants.json": _sha(constants.path()),
-        },
+        # the same digests the frozen inputs carry, so the two cannot drift
+        inputs_sha256=dict(frozen_inputs()["code_sha256"],
+                           **{"constants.json": _sha(constants.path())}),
         registered_utc_date="2026-09-01",
         registered_by="stream E4 (desk lane)",
         no_measurement_exists=(
@@ -514,9 +671,11 @@ def provenance():
             "file."),
         predictor=dict(
             engine="experiments/b2/cost_model.py",
-            entry_points=["cells_per_token(cfg, ctx, batch, seq, head=False)",
-                          "residual_stream_cells(cfg, 'tree')", "key_tile_family",
-                          "key_tile_cells", "key_tile_fresh", "lm_head_chunk"],
+            entry_points=["cells_per_token(cfg, ctx, batch, seq, head=False, gkr=...)",
+                          "residual_stream_cells(cfg, 'tree', gkr=...)",
+                          "key_tile_family", "key_tile_cells", "key_tile_fresh",
+                          "boundary_cells", "lookup_table_cells", "lm_head_chunk"],
+            reductions_priced=list(STATEMENT_REDUCTIONS),
             not_the_engine="experiments/budget.py is an early one-shape proxy "
                            "(eval-plan.md section 3) and is not used here",
             attention_term="the KEY_TILE MODEL (alpha=None). The legacy single-slope "
@@ -528,35 +687,65 @@ def provenance():
 
 
 def frozen_inputs():
-    keys = [
-        "cells_per_token.8b.c4096.fresh_layers",
-        "cells_per_token.8b.c16384.fresh_layers",
-        "cells.c4096.fresh_layers32",
-        "cells.c16384.fresh_layers32",
-        "attention_grid.key_tile_model_base_coeffs",
-        "attention_grid.key_tile_model_fresh_coeffs",
-        "attention_grid.key_tile_model_alpha_fresh",
-        "attention_grid.composed_chunk_fresh_slope",
-        "attention_grid.composed_chunk_fresh_slope_32layers",
-        "attention_grid.b5_standalone_alpha",
-        "model_constants.attention_cells_per_head_key_token",
-        "model_constants.dequant_chain_cells_per_acc",
-        "model_constants.dequant_pow2_cells_per_acc",
-        "model_constants.attnout_int8_cells_per_acc",
-        "model_constants.weight_freivalds_cells_per_weight",
-        "model_constants.logup_marginal_cells_per_lookup",
-        "model_constants.nonlinear_cells_per_application",
-        "model_constants.default_logup_lookup_batch",
-        "rate.h200.c4096.commit_layers32",
-        "rate.h200.c16384.commit_layers32",
-        "spec.name", "spec.decoded_tokens", "spec.round_mode",
-    ]
-    out = {}
-    for k in keys:
+    """What this prediction actually read, frozen with it.
+
+    It used to be a list of constants keys, and most of them were in no
+    constants file: three of them named the key tile model's fitted
+    coefficients, which this predictor does not read at all -- the key tile
+    half is a closed form, so its coefficients are an output of the layout and
+    not an input to the prediction.  What the prediction does read is three
+    things, and all three are here:
+
+      * every cell cost the model charged, with the source each came from --
+        `cost_model.PROVENANCE`, which #153 made the model's own record of
+        constants-first reading with an archive fallback.  A cost the model
+        could not price is in it too, marked absent;
+      * the statement priced, which is what makes the integers mean anything;
+      * the code that computed it, by digest, and the two measured chunks it
+        was anchored on, by run and segment.
+
+    A key that IS in the constants file and was read still appears, under
+    `constants_entries`, with its grade -- that is the graded provenance the
+    freeze was for -- and one that is not is not silently dropped: the
+    `cell_costs` entry for it says `absent` and names the key.
+    """
+    cells = {n: dict(e) for n, e in sorted(cm.PROVENANCE.items())}
+    # `boundary` is what an older constants file called the timing scope; a
+    # cell count has neither, so both are optional here and neither defaults.
+    def entry(k):
         e = get(k)
-        out[k] = dict(value=e["value"], grade=e["grade"], card=e["card"],
-                      context=e["context"], boundary=e["boundary"])
-    return out
+        return {f: e[f] for f in ("value", "grade", "card", "context", "unit",
+                                  "timing_scope", "boundary", "run", "artifact")
+                if f in e}
+
+    from_constants = {e["key"]: entry(e["key"])
+                      for e in cells.values() if e["source"] == "constants" and e["key"]}
+    unpriced = sorted(n for n, e in cells.items() if e["source"] == "absent")
+    return dict(
+        cell_costs=cells,
+        constants_entries=from_constants,
+        constants_file_sha256=_sha(constants.path()),
+        n_from_constants=len(from_constants), n_inputs=len(cells),
+        not_priced=unpriced,
+        statement=registered_statement(),
+        reference_chunks={str(c): _seq5_source(c) for c in CONTEXTS},
+        code_sha256={
+            "harness/costmodel/cost_model.py": _sha(cm.__file__),
+            "harness/costmodel/key_tile.py": _sha(key_tile.__file__),
+            "harness/costmodel/layer_chunks.json": _sha(str(key_tile.CHUNKS)),
+            "harness/costmodel/composed_rungs.json": _sha(str(cm.COMPOSED_RUNGS)),
+            "harness/eval/predict/predict.py": _sha(os.path.join(HERE, "predict.py")),
+        })
+
+
+# The card rate the secondary tok/s column would need, and the key that would
+# hold it.  Neither is part of the prediction: a cell count is the same on
+# either card, and the rate is a card measurement the registration is not
+# making.  zk-results holds `rate.headline.*` for the H100 and no H200 rate at
+# all, so on that constants file this column is not printed rather than
+# computed from something else.
+RATE_KEYS = {"4096": "rate.h200.c4096.commit_layers32",
+             "16384": "rate.h200.c16384.commit_layers32"}
 
 
 def implied_tok_s(reg):
@@ -564,14 +753,19 @@ def implied_tok_s(reg):
     out = {}
     for name, e in reg.items():
         row = {}
-        for ctx, key in (("4096", "rate.h200.c4096.commit_layers32"),
-                         ("16384", "rate.h200.c16384.commit_layers32")):
+        for ctx, key in RATE_KEYS.items():
             if ctx not in e["contexts"]:
                 continue
-            rate = value(key) * 1e9
+            r = constants.find(key)
+            if r is None:
+                row[ctx] = dict(tok_s_commit_boundary=None, rate_key=key, rate=None,
+                                note="this constants file does not name the H200 "
+                                     "commit rate, so no tok/s is implied here")
+                continue
+            rate = r["value"] * 1e9
             row[ctx] = dict(tok_s_commit_boundary=rate / e["contexts"][ctx]["cells_per_token_layers"],
-                            rate_key=key, rate=value(key), card=get(key)["card"],
-                            boundary=get(key)["boundary"])
+                            rate_key=key, rate=r["value"], card=r["card"],
+                            boundary=r["boundary"])
         out[name] = row
     return out
 
@@ -587,11 +781,19 @@ def integrator_notes(reg):
     for ctx, key in ((4096, "cells_per_token.27b.c4096.model"),
                      (16384, "cells_per_token.27b.c16384.model")):
         alpha4 = cm.cells_per_token(g, ctx, B, seq=S, alpha=4.0)["total"]
-        key_tile = cm.cells_per_token(g, ctx, B, seq=S)["total"]
-        rows[str(ctx)] = dict(frozen=value(key), rerun_alpha_4p00=alpha4,
-                              rerun_key_tile_model=key_tile,
-                              key_tile_over_frozen=key_tile / value(key),
-                              understated_pct=100.0 * (key_tile / value(key) - 1.0))
+        kt = cm.cells_per_token(g, ctx, B, seq=S, gkr=STATEMENT_REDUCTIONS)["total"]
+        e = constants.find(key)
+        if e is None:
+            rows[str(ctx)] = dict(frozen=None, key=key, rerun_alpha_4p00=alpha4,
+                                  rerun_key_tile_model=kt,
+                                  note="this constants file does not name the frozen "
+                                       "27B row, so there is nothing to compare the "
+                                       "re-run against")
+            continue
+        rows[str(ctx)] = dict(frozen=e["value"], rerun_alpha_4p00=alpha4,
+                              rerun_key_tile_model=kt,
+                              key_tile_over_frozen=kt / e["value"],
+                              understated_pct=100.0 * (kt / e["value"] - 1.0))
     mem = {}
     for name, e in reg.items():
         mem[name] = {ctx: dict(chunk_over_8b_l16=c["chunk_over_8b_l16_chunk"])
@@ -606,10 +808,9 @@ def integrator_notes(reg):
                     "-- raises them as below. E4 reports this and does not patch "
                     "it: `paper/constants.json` is owned elsewhere this session.",
             grades_still_wrong=[
-                dict(key="attention_grid.b5_standalone_alpha",
-                     grade=get("attention_grid.b5_standalone_alpha")["grade"]),
-                dict(key="model_constants.attention_cells_per_head_key_token",
-                     grade=get("model_constants.attention_cells_per_head_key_token")["grade"]),
+                dict(key=k, grade=(constants.find(k) or {}).get("grade", "absent"))
+                for k in ("attention_grid.b5_standalone_alpha",
+                          "model_constants.attention_cells_per_head_key_token")
             ],
             rows=rows),
         card_footprint=dict(
@@ -639,6 +840,7 @@ def main():
     content = dict(schema="e4-registration/1", statement=registered_statement(),
                    shapes=reg, bracket=BRACKET,
                    anchors=anc, key_tiles_selfcheck_8b=chk,
+                   chunk_identity=chunk_identity(), layer_spread=layer_spread(),
                    frozen_inputs=frozen_inputs())
     content_digest = hashlib.sha256(canonical(content)).hexdigest()
     block = dict(content, provenance=provenance())
@@ -665,9 +867,30 @@ def main():
     print()
     print("the predictor's residual at the two scales it WAS built from:")
     for k, v in anc.items():
+        if v["measured"] is None:
+            print(f"  {k:<34} predicted {v['predicted']:>15,.0f}  "
+                  f"measured    not in this constants file ({v.get('key') or v['source']})")
+            continue
         print(f"  {k:<34} predicted {v['predicted']:>15,.0f}  "
               f"measured {v['measured']:>15,.0f}  ratio {v['ratio']:.4f}  "
               f"({100*(v['ratio']-1):+.2f}%)")
+    print()
+    ci = chunk_identity()
+    print(f"one layer chunk, to the cell on {ci['chunks']} recorded chunks at both contexts:")
+    print(f"  {ci['form']}")
+    print(f"  rest = {ci['rest']:,}   (the embedding layer: {ci['rest_embedding_layer']:,})")
+    ls = layer_spread()
+    print("how far one layer chunk is from the mean of its 32, measured:")
+    for ctx, v in ls.items():
+        lo, hi = v["single_layer_pct"]
+        nlo, nhi = v["single_layer_pct_without_the_embedding_layer"]
+        print(f"  C={ctx:<6} one layer {lo:+.2f}% .. {hi:+.2f}% "
+              f"(without the embedding layer {nlo:+.2f}% .. {nhi:+.2f}%), "
+              f"worst even 8 of 32 {v['worst_even_8_subsample_pct']:.2f}%")
+    w = BRACKET["protocol_widening"]
+    print(f"  registered widening, unchanged: protocol B {w['B_even_subset']['widen_pct']}%, "
+          f"protocol C -{w['C_single_layer']['widen_pct_lower']}% / "
+          f"+{w['C_single_layer']['widen_pct_upper']}%")
     print()
     for name, e in reg.items():
         print(f"{name}  [{e['role']}]  L={e['cfg'][0]} d={e['cfg'][1]} nh={e['cfg'][2]} "
@@ -687,6 +910,11 @@ def main():
     _n = integrator_notes(reg)["frontier_rows_still_on_4p00"]["rows"]
     print("section 7.5(e) check -- the frozen 27B frontier rows:")
     for ctx, r in _n.items():
+        if r["frozen"] is None:
+            print(f"  C={ctx:<6} not in this constants file ({r['key']}); the re-runs are "
+                  f"alpha 4.00 {r['rerun_alpha_4p00']:,.0f} and key tile model "
+                  f"{r['rerun_key_tile_model']:,.0f}")
+            continue
         print(f"  C={ctx:<6} frozen {r['frozen']:>13,}  = alpha 4.00 rerun "
               f"{r['rerun_alpha_4p00']:>13,.0f}   key tile model {r['rerun_key_tile_model']:>13,.0f}"
               f"  ({r['understated_pct']:+.2f}% understated)")

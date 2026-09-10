@@ -11,6 +11,11 @@ for and the comparison, in the run-book's order:
       --gkr-key-tiles ...`, and a chunk proved without `--gkr-key-tiles`
       commits the LogUp running sums and reports a larger interaction for the
       same layout.  The base is the same integer either way;
+  (a2) the boundary trees, exact -- the other closed form of the layout and the
+      other term that grows with the context, `cells.fresh - cells.base -
+      cells.interaction` against `2*d*S + 2*nh*hd*(2*C + S)`.  No `family_cells`
+      entry names it.  Reported whatever rho does, and a deviation does not
+      void the run;
   (b) rho = measured / predicted on layers-only fresh cells per decoded token,
       with section 3's protocol widening and no other adjustment;
   (c) the tier, and the consequence the bracket table fixed in advance.
@@ -27,7 +32,7 @@ import os
 import re
 import sys
 
-from harness.costmodel.key_tile import key_tile_family
+from harness.costmodel.key_tile import boundary_cells, key_tile_family
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REG = os.path.join(HERE, "out", "registration.json")
@@ -55,6 +60,9 @@ def load_run(path):
                           residual_stream=fc["residual_stream"],
                           attnout=fc["attnout"], interaction=fc["interaction"]),
         interaction_by_family={f: ibf[f]["cells"] for f in ibf},
+        # every lookup table's rows, which is what the whole-chunk identity is
+        # exact in; `log_table` alone is only the master exponent table of them
+        table_rows=sum(1 << t["log_rows"] for t in fc["tables"]),
         params=dict(log_table=pa["log_table"], ao_rem_bits=pa["ao_rem_bits"],
                     ao_q_bits=pa["ao_q_bits"], key_tiles=pa["key_tiles"], nh=pa["nh"], hd=pa["hd"],
                     s=pa["s"], c=pa["c"], diagonal_block=pa.get("diagonal_block", False), layer_boundary=pa.get("layer_boundary", False),
@@ -219,6 +227,23 @@ def main():
     key_tiles_exact = all(x["exact"] for x in key_tiles_rows)
     off_statement = sorted({x["layer"] for x in key_tiles_rows if not x["statement_as_registered"]})
 
+    # ---- (a2) the boundary trees, exact ---------------------------------------
+    # The other closed form of the layout, and the other term that grows with
+    # the context.  Like the key tiles integers this is reported whatever rho
+    # does and a deviation is a finding in its own right -- it means the layout
+    # identity does not hold at a shape whose `nh` and `d` are not powers of two
+    # -- but it does not VOID the run: a void is a run that did not reproduce
+    # the registered configuration, and this is a run that did and disagreed.
+    boundary_rows = []
+    for r in runs:
+        want = boundary_cells(r["params"]["nh"], r["params"]["hd"],
+                              r["params"]["residual_stream"]["d"], r["params"]["s"],
+                              r["params"]["c"])
+        got = r["cells"]["fresh"] - r["cells"]["base"] - r["cells"]["interaction"]
+        boundary_rows.append(dict(layer=r["layer"], boundary=got, expected=want,
+                                  delta=got - want, exact=(got == want)))
+    boundary_exact = all(x["exact"] for x in boundary_rows)
+
     # ---- (b) rho, with the protocol widening ------------------------------
     n = len(runs)
     layers = [r["layer"] for r in runs]
@@ -247,10 +272,22 @@ def main():
     rss = [r["peak_rss_bytes"] for r in runs if r["peak_rss_bytes"]]
     table_cells = [r["interaction_by_family"]["table"] for r in runs]
     logt = sorted(set(r["params"]["log_table"] for r in runs))
-    # the 8B identity's analogue: fresh - key_tiles_fresh - 5 * 2^log_table, per layer
+    # The whole-chunk identity, at this shape.  On the 8B chunks
+    # `cells.fresh - key tiles - boundary trees - 5 * table rows` is one integer
+    # on every non-embedding layer at both contexts (`predict.chunk_identity`),
+    # and this is the same subtraction here.  The boundary trees are the term no
+    # `family_cells` entry names -- what `fresh` has above `base + interaction`
+    # -- and leaving them out of it, as this line used to, misses a term that
+    # grows with the context: 105.2 M cells a chunk at C=4,096 on the 8B and
+    # 306.6 M at C=16,384.
     rest = [r["cells"]["fresh"] - r["family_cells"]["key_tiles"]
-            - r["interaction_by_family"]["key_tiles"] - 5 * (1 << r["params"]["log_table"])
+            - r["interaction_by_family"]["key_tiles"]
+            - boundary_cells(r["params"]["nh"], r["params"]["hd"],
+                             r["params"]["residual_stream"]["d"], r["params"]["s"],
+                             r["params"]["c"])
+            - 5 * r["table_rows"]
             for r in runs]
+
     measured = dict(
         schema="e4-measured/1", shape=SHAPES[a.shape], hf=shape["hf"], cfg=shape["cfg"],
         ctx=a.ctx, s=512, spec="b10-final", card=a.card, backend=a.backend,
@@ -268,7 +305,9 @@ def main():
             table_cells_min=min(table_cells), table_cells_max=max(table_cells),
             ao_rem_bits_values=sorted(set(r["params"]["ao_rem_bits"] for r in runs)),
             kmax_values=sorted(set(r["params"]["kmax"] for r in runs)),
-            rest_after_key_tiles_and_table=dict(values=sorted(set(rest)), constant=len(set(rest)) == 1),
+            rest_after_key_tiles_boundary_and_tables=dict(
+                values=sorted(set(rest)), constant=len(set(rest)) == 1,
+                form="cells.fresh - key tiles - boundary trees - 5 * table rows"),
             # which families move across layers (at 8B every family but the table is
             # identical to the cell on all 32 chunks)
             family_spread={f: dict(min=min(r["family_cells"][f] for r in runs),
@@ -303,6 +342,10 @@ def main():
                        key_tiles_family_interaction_per_chunk=pred_key_tiles_inter,
                        cells_per_token_layers_key_tiles=pc["cells_per_token_layers_key_tiles"],
                        cells_per_token_layers_rest=pc["cells_per_token_layers_rest"]),
+        a2_boundary_exact=dict(
+            exact_on_every_chunk=boundary_exact,
+            form="cells.fresh - cells.base - cells.interaction == 2*d*S + 2*nh*hd*(2*C + S)",
+            rows=boundary_rows),
         a_key_tiles_exact=dict(exact_on_every_chunk=key_tiles_exact,
                                registered_statement=registered_st,
                                layers_not_at_the_registered_statement=off_statement,
@@ -358,11 +401,21 @@ def main():
                       f"interaction {x['key_tiles_interaction']:,} ({x['interaction_delta']:+,}) "
                       f"against {x['expected_base']:,} / {x['expected_interaction']:,}, "
                       f"{x['compared_against']}")
+    print(f"(a2) boundary trees exact on every chunk: {boundary_exact}  "
+          f"(the form 2*d*S + 2*nh*hd*(2*C + S) = "
+          f"{boundary_rows[0]['expected']:,} at this shape)")
+    if not boundary_exact:
+        for x in boundary_rows:
+            if not x["exact"]:
+                print(f"    L{x['layer']}: {x['boundary']:,} ({x['delta']:+,}) against "
+                      f"{x['expected']:,} -- a finding in its own right, reported "
+                      f"whatever rho does, and not a void")
     print(f"(b) protocol {protocol}: {n}/{L} layers; measured {measured_cpt:,.1f} cells/token "
           f"(layers), predicted {pred_cpt:,.1f}; rho = {rho:.5f} ({(rho - 1) * 100:+.3f}%)")
     print(f"    per-chunk ratio range {comparison['b_rho']['chunk_ratio_min']:.4f} .. "
           f"{comparison['b_rho']['chunk_ratio_max']:.4f}; log_table {logt}; "
-          f"rest-after-key-tiles-and-table constant: {len(set(rest)) == 1} {sorted(set(rest))[:4]}")
+          f"rest after key tiles, boundary trees and tables constant: "
+          f"{len(set(rest)) == 1} {sorted(set(rest))[:4]}")
     print(f"(c) tier: {tier.upper()} -- {CONSEQUENCE[tier]}")
     sp = measured["summary"]
     moving = {f: v for f, v in {**{"family." + k: v for k, v in sp["family_spread"].items()},
