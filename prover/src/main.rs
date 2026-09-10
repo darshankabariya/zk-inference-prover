@@ -40,6 +40,7 @@ mod plogup;
 mod requant;
 mod rope;
 mod freivalds;
+mod freivalds_run;
 mod witread;
 mod spans;
 mod util;
@@ -316,6 +317,55 @@ fn kmax_cmd(args: &[String]) {
         points.push(j);
     }
     emit("dequant_kmax", json!({"points": points, "n": n, "per_row": per_row}));
+}
+
+// --------------------------------------------------------------- freivalds ----
+/// What the weight Freivalds check costs per weight, at a sweep of weights per row.
+///
+/// Cells per weight is a layout quantity, and the sweep is what says so rather than
+/// asserting it. The check's three QM31 accumulator columns are 12 M31 cells a
+/// trace row, a row carries `p` weights of each matmul in the group, and nothing
+/// else in the component grows with the weights -- the committed activations are
+/// the same `tokens x n_in` at every `p`, and so is their range check. So each
+/// point proves one weight block at two output widths and reports the difference
+/// over the weights the two differ by, which leaves the activations, their range
+/// check and the shared range table out of the figure the cost model multiplies by
+/// a parameter count.
+fn freivalds_cmd(args: &[String]) {
+    assert!(arg_str(args, "--witness").is_none(),
+            "the marginal needs one weight block at two output widths, which a dump \
+             has not got: drop --witness and sweep a synthetic block");
+    let group = arg_strs(args, "--group", &["o"])[0].clone();
+    let n_out: usize = arg_scalar(args, "--nout", 64usize);
+    let names = layer::FREIVALDS_GROUPS.iter().find(|(g, _)| *g == group)
+        .unwrap_or_else(|| panic!("no Freivalds group {group}")).1;
+    let build = |n: usize| -> layer::Layer {
+        // the last occurrence of a flag wins, so this overrides whatever the line said
+        let mut a = args.to_vec();
+        a.push("--nout".into());
+        a.push(n.to_string());
+        layer_of(&a).0
+    };
+    let (l1, l2) = (build(n_out), build(2 * n_out));
+    let mats: Vec<usize> = l1.mats.iter().enumerate()
+        .filter(|(_, m)| names.contains(&m.name.as_str())).map(|(i, _)| i).collect();
+    assert!(!mats.is_empty(), "the layer has no matmul of the {group} group");
+    let mut points = vec![];
+    for p in arg_list(args, "--widths", &[8usize, 16, 32, 64]) {
+        eprintln!("freivalds {group} weights_per_row={p}");
+        let small = freivalds_run::run(&l1, &group, &mats, p);
+        let large = freivalds_run::run(&l2, &group, &mats, p);
+        for (o, n) in [(&small, n_out), (&large, 2 * n_out)] {
+            assert!(o.accepts(),
+                    "honest Freivalds proof rejected at p={p}, n_out={n}: stark={} sums={} \
+                     off_table={} reference_mismatch={} err={:?}",
+                    o.proven.stark_ok, o.sums.cancels(), o.off_table, o.ref_n - o.ref_ok,
+                    o.proven.prove_error);
+        }
+        points.push(freivalds_run::marginal(&small, &large));
+    }
+    emit("freivalds", json!({"points": points, "group": group,
+                             "n_out": [n_out, 2 * n_out], "source": l2.source}));
 }
 
 // ------------------------------------------------------------------ probes ----
@@ -3805,6 +3855,7 @@ fn main() {
         "dequant" => dequant_cmd(&args),
         "width" => width_cmd(&args),
         "kmax" => kmax_cmd(&args),
+        "freivalds" => freivalds_cmd(&args),
         "probes" => probes_cmd(&args),
         "pack" => pack_cmd(&args),
         "attn-probes" => attn_probes_cmd(&args),
