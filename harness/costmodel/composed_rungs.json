@@ -1,0 +1,99 @@
+{
+ "_file": "harness/costmodel/composed_rungs.json",
+ "_purpose": "What each gadget costs in the COMPOSED prover at the registered statement, per accumulator, per value, per weight or per bf16 operation. The rungs the rest of the cost model charges were measured on standalone gadget chains, one gadget per proof; these are the same gadgets inside one AIR, where a value one gadget commits is the next gadget's input and the batched reductions prove the LogUp running sums. Every number here is a re-fit against one shape and is labelled as one: it is what the 8B layer chunk builds, not a form in the shape.",
+ "_source": "Every layer chunk of one token block of each headline run except layer 0, which carries the embedding lookup: 62 chunks, and each `cells` and `count` below is the same integer on all 62, at both contexts. `cells` adds `family_cells.<family>` to `family_cells.interaction_by_family.<family>.cells`; the counts are the chunk's own `family_cells.mats[].n`, `requant[].checked`, `quant[].checked`, `freivalds_weights[].weights`, `nh*hd*s`, and the `ops` of the RoPE and SwiGLU components of `family_cells.residual_stream_components`. Nothing is derived here and nothing is rounded: the reader divides.",
+ "_keys": "`key` names the constants entry in zk-results that would back a rung and does not exist yet; where a key of a similar name does exist it names the STANDALONE rung, which is a different quantity and must not be read here.",
+ "statement": {
+  "flags": "--diagonal-block --gkr-key-tiles --gkr-dequant --gkr-residual-stream --gkr-freivalds --gkr-attnout",
+  "spec": "b10-final",
+  "s": 512,
+  "round": "even",
+  "nh": 32,
+  "hd": 128,
+  "d": 4096,
+  "dff": 14336,
+  "note": "the statement `tools/drivers/predict-14b.sh` proves every layer under and the one both headline runs used"
+ },
+ "chunks": [
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "block": "B8",
+   "c": 4096,
+   "layers": 31
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "block": "B32",
+   "c": 16384,
+   "layers": 31
+  }
+ ],
+ "rungs": {
+  "dequant": {
+   "cells": 353632256,
+   "count": 22020096,
+   "unit": "matmul accumulator",
+   "key": "model_constants.dequant_chain_composed_cells_per_acc",
+   "note": "the whole dequant family: the committed accumulator, the chain rounding and what the reduction leaves in the interaction trace. The standalone chain rung is 25.125 or 26.125 depending on the rounding and commits its own LogUp running sums.",
+   "reduction": "dequant",
+   "charged_elsewhere": "the committed accumulator, which `acc` charges"
+  },
+  "requant": {
+   "cells": 212664832,
+   "count": 11534336,
+   "unit": "distinct matmul input value",
+   "key": "model_constants.requant_composed_cells_per_value",
+   "note": "the whole requantize family, the multiplicity column of its own tables included. `model_constants.requant_cells_per_value` is the standalone gadget and is not this.",
+   "charged_elsewhere": "the committed int8 value (`act`) and its range check (`range`)"
+  },
+  "quant": {
+   "cells": 45875200,
+   "count": 2621440,
+   "unit": "attention q or k value",
+   "key": "model_constants.quant_composed_cells_per_value",
+   "note": "the q and k quantize, which no reduction owns and no key names at all."
+  },
+  "freivalds": {
+   "cells": 44040192,
+   "count": 218103808,
+   "unit": "weight",
+   "key": "model_constants.weight_freivalds_composed_cells_per_weight",
+   "note": "B3's width sweep put the standalone check at 0.0902 cells a weight at its own design point; the composed check at this statement is more than twice that, and most of the difference is interaction the reduction does not remove.",
+   "reduction": "freivalds"
+  },
+  "attnout": {
+   "cells": 21757952,
+   "count": 2097152,
+   "unit": "attention-output accumulator",
+   "key": "model_constants.attnout_composed_cells_per_acc",
+   "note": "the attention-output fold. Layer 0 builds one cell an accumulator more than every other layer and is not in the 62.",
+   "reduction": "attnout"
+  },
+  "residual_stream_mul": {
+   "cells": 26214400,
+   "count": 5242880,
+   "unit": "bf16 multiply",
+   "key": "model_constants.residual_stream_composed_mul_cells_per_op",
+   "note": "read off RoPE's own two multiplies per rotated value (`rpqm`, `rpkm`), which are the only bf16 multiplies in the chunk whose op count the run reports on their own.",
+   "reduction": "residual_stream"
+  },
+  "residual_stream_add": {
+   "cells": 47185920,
+   "count": 2621440,
+   "unit": "bf16 add",
+   "key": "model_constants.residual_stream_composed_add_cells_per_op",
+   "note": "read off RoPE's own add per rotated value (`rpqa`, `rpka`).",
+   "reduction": "residual_stream"
+  },
+  "residual_stream_unary_plus_mul": {
+   "cells": 73400320,
+   "count": 7340032,
+   "unit": "SwiGLU channel",
+   "key": "model_constants.residual_stream_composed_swiglu_cells_per_op",
+   "note": "one `silu` table application and one bf16 product per channel (`gsw`); the unary on its own is this less the multiply above.",
+   "reduction": "residual_stream"
+  }
+ }
+}

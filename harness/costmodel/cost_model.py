@@ -753,7 +753,21 @@ def sum_order(n, order):
     raise SystemExit(f"unknown sum order {order}")
 
 
-def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True, batch=None):
+def residual_stream_primitives(gkr=()):
+    """The three bf16 primitives, at the statement's own prices.
+
+    With `--gkr-residual-stream` the composed prover builds this family at the
+    rungs `composed_rungs.json` carries -- a bf16 multiply at 5 cells and an add
+    at 18 against the standalone gadgets' 8.75 and 24.32 -- so a caller pricing
+    that statement charges those and not the standalone ones."""
+    if "residual_stream" not in gkr:
+        return MUL_CELLS, ADD_CELLS, UNARY_CELLS
+    mul = COMPOSED["residual_stream_mul"]
+    return mul, COMPOSED["residual_stream_add"], COMPOSED["residual_stream_unary_plus_mul"] - mul
+
+
+def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True, batch=None,
+                          gkr=()):
     """B6.5 open gap 1, per decoded token: what the wiring between the components
     costs, per gadget.  `d`-wide terms are the residual stream's width, `dff`-wide
     the SwiGLU's.
@@ -764,6 +778,10 @@ def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True, batch=None
     so that a two-group model (dense layers + MoE layers) can be summed without
     counting it twice.
 
+    `gkr` names the batched reductions the statement has on, as in
+    `cells_per_token`; only `residual_stream` changes anything here, and it
+    prices the three bf16 primitives at what the composed prover builds them at.
+
     `batch` is the LogUp lookup-batch size the STUB's lookups are charged at, and
     it has to be the one `cells_per_token` charges them at: the stub is what that
     function already counted and this one takes back, so reading it at another
@@ -772,6 +790,7 @@ def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True, batch=None
     L, d, nh, nkv, hd, dff, vocab = cfg
     dff = topk * dff
     so = sum_order(d, order)
+    mul_cells, add_cells, unary_cells = residual_stream_primitives(gkr)
     # (a) RMSNorm, twice per layer plus the final one.  Per channel: the square
     # (one unary table), its share of the reduction, and the two multiplies
     # (`x * r`, then `* w`).  Per token: `* 1/d`, `+ eps`, `rsqrt`.
@@ -780,14 +799,14 @@ def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True, batch=None
     # and read by both -- which is a saving on the *leaves*, not on the ops, and
     # the table below counts ops.
     norms = 2 * L + (1 if final_norm else 0)
-    sq = norms * d * UNARY_CELLS
-    red = norms * so["adds"] * ADD_CELLS
-    scale = norms * 2 * d * MUL_CELLS
-    scalars = norms * (MUL_CELLS + ADD_CELLS + UNARY_CELLS)
+    sq = norms * d * unary_cells
+    red = norms * so["adds"] * add_cells
+    scale = norms * 2 * d * mul_cells
+    scalars = norms * (mul_cells + add_cells + unary_cells)
     # (b) SwiGLU: one `silu` table and one bf16 product per dff channel
-    swiglu = L * dff * (UNARY_CELLS + MUL_CELLS)
+    swiglu = L * dff * (unary_cells + mul_cells)
     # (c) the two residual adds
-    resid = L * 2 * d * ADD_CELLS
+    resid = L * 2 * d * add_cells
     # (d) the requantize's placement.  B6.5 priced the gadget and `cells_per_token`
     # already charges it on every distinct matmul input; wiring it between a
     # dequant's output and a Freivalds check's input is AIR work at zero marginal
@@ -811,6 +830,41 @@ def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True, batch=None
                 total=total, stub=stub, net=total - stub)
 
 
+# ------------------------------- the composed prover's own rungs, re-fitted --
+# Every rung above was measured on a STANDALONE gadget chain: one gadget, one
+# proof, its own tables and its own LogUp running sums.  The prover composes
+# seven matmuls, the attention grid and the residual stream into one AIR, where
+# a value one gadget commits is the next gadget's input and the batched
+# reductions prove the running sums, and the same gadget does not cost the same
+# there.  `composed_rungs.json` carries what each family costs in the composed
+# prover at the registered statement, off the 62 non-embedding layer chunks of
+# the two headline runs, where every one of them is the same integer.
+#
+# This is a RE-FIT AGAINST ONE SHAPE and is labelled as one everywhere it is
+# read: 8B, S = 512, `b10-final`.  It is not a form in the shape and it is not a
+# second measurement of the standalone gadget -- the keys named in the file are
+# keys zk-results does not have, and where a key of a similar name does exist it
+# names the standalone rung and must not be read for this.
+COMPOSED_RUNGS = pathlib.Path(__file__).parent / "composed_rungs.json"
+
+
+def composed_rungs():
+    """`{name: cells per unit}` from the composed chunks, and the file's own
+    record of what each one is."""
+    doc = json.loads(COMPOSED_RUNGS.read_text())
+    return {n: e["cells"] / e["count"] for n, e in doc["rungs"].items()}, doc
+
+
+COMPOSED, _COMPOSED_DOC = composed_rungs()
+for _n, _v in sorted(COMPOSED.items()):
+    _e = _COMPOSED_DOC["rungs"][_n]
+    PROVENANCE[f"composed_{_n}"] = dict(
+        value=_v, source="composed", key=_e["key"], charged=True,
+        file="harness/costmodel/composed_rungs.json",
+        note=f"{_e['cells']:,} cells over {_e['count']:,} {_e['unit']}s on all 62 "
+             f"recorded 8B layer chunks at both contexts, at the registered "
+             f"statement; a re-fit against one shape. {_e['note']}")
+
 # The five batched GKR reductions the prover can be asked for.  Each one proves
 # the LogUp running sums of the family it names instead of committing them, and
 # moves what it does commit into the `gkrlink` family (`main.rs`'s `--gkr-*`
@@ -818,12 +872,13 @@ def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True, batch=None
 # as `key_tile_cells(gkr=...)` does for its own family, so that a caller prices
 # the statement it means rather than the prover's defaults.
 REDUCTIONS = ("key_tiles", "dequant", "residual_stream", "freivalds", "attnout")
-# What this model can re-price at the reduced statement, and what it cannot.
-# The dequant's rung splits into committed columns and LogUp running sums on the
-# points that measured it, so `--gkr-dequant` is an identity here.  Nothing in
-# the inputs splits the other three the same way, so a statement that names them
-# is priced at the un-reduced rung and the returned `gkr_not_priced` says so.
-REDUCTIONS_PRICED = ("key_tiles", "dequant")
+# What this model can re-price at the reduced statement.  All five: the dequant
+# rung splits into committed columns and LogUp running sums on the points that
+# measured it, and the composed rungs above were read at a statement with all
+# five on, so each family a reduction owns has a price at that statement.  A
+# statement this model cannot price a reduction for would come back in the
+# returned `gkr_not_priced`.
+REDUCTIONS_PRICED = REDUCTIONS
 # The reductions' own link, one interaction family per chunk.  On both recorded
 # 8B layer chunks it is 16 cells per row summed over the reduced components'
 # heights (`family_cells.link_heights`), 12,529,664 cells, and the same at both
@@ -891,7 +946,11 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
                  else (nh + 2 * nkv) * hd + d)
     acc_layer = L * (attn_accs + 2 * dff_active + topk * d)
     acc = acc_layer + vocab
-    act = L * (2 * d + nh * hd + dff_active) + d
+    # B6's attention-output fold commits the int8 value and range-checks it as
+    # part of its own rung, so `act` and `range` must not count those `nh*hd`
+    # values a second time: they are the fold's output, not a matmul input this
+    # chunk requantises.
+    act = L * (2 * d + dff_active) + d
     nl = L * (2 * dff_active + 4 * d)
     # The attention key tile family.  Two regimes, and the default is the key tile model.
     #
@@ -927,7 +986,9 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     # -- `seq * seq_batch`, not `seq`.
     params = n_params(cfg, experts=experts, freivalds=True, head=head,
                       attn_params_per_layer=attn_params_per_layer)
-    freivalds = WEIGHT_FREIVALDS_CELLS_PER_WEIGHT * params / tokens if seq else 0.0
+    per_weight = (COMPOSED["freivalds"] if "freivalds" in gkr
+                  else WEIGHT_FREIVALDS_CELLS_PER_WEIGHT)
+    freivalds = per_weight * params / tokens if seq else 0.0
     # B4: the packed pair table halves B3's per-activation range check
     rng_cells = (RANGE_CELLS_PER_ACTIVATION if RANGE_CELLS_PER_ACTIVATION is not None
                  else LOGUP_MARGINAL[batch])
@@ -941,9 +1002,11 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     # dequant on `lm_head` alone.  `dequant`/`head_dequant` override either rung.
     # With `--gkr-dequant` the rung's LogUp running sums are not committed at all,
     # so the statement's own rung is the gadget's base columns.
+    # With `--gkr-dequant` the composed prover's own rung is what it builds, and
+    # the accumulator column `acc` already charges is inside it.
     _reduced = "dequant" in gkr
     per_acc = dequant if dequant is not None else (
-        (DEQUANT_AWAY_BASE_PER_ACC if _reduced else LAYER_DEQUANT_PER_ACC)
+        (COMPOSED["dequant"] - 1.0 if _reduced else LAYER_DEQUANT_PER_ACC)
         or LIMB_CELLS_PER_ACC)
     head_acc = head_dequant if head_dequant is not None else (
         per_acc if dequant is not None else
@@ -952,10 +1015,17 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     limbs = (acc_layer * per_acc + vocab * head_acc) if seq else 0.0
     # B6: the attention output's own dequant, folded straight to int8 because
     # `o_proj` requantises it anyway -- one rounding per output element
-    attn_out = L * nh * hd * (ATTNOUT_CELLS_PER_ACC or 0.0) if seq else 0.0
+    attn_out = L * nh * hd * (COMPOSED["attnout"] if "attnout" in gkr
+                              else (ATTNOUT_CELLS_PER_ACC or 0.0)) if seq else 0.0
     # B6.5: the requantize + max argument, once per *distinct* matmul input
     # (q/k/v share one, gate/up share one; o's input is already int8 via the fold)
-    requant = (L * (2 * d + dff_active) + d) * REQUANT_CELLS if seq else 0.0
+    # The composed prover builds the whole family -- the committed value, its
+    # range check and the gadget -- at one price a value, and `act` and `range`
+    # charge the first two of the three, so this term is the rest of it.  No
+    # reduction owns this family: its LogUp running sums are committed either
+    # way, which is most of what it costs.
+    requant_values = L * (2 * d + dff_active) + d
+    requant = requant_values * (COMPOSED["requant"] - 1.0 - rng_cells) if seq else 0.0
     # B10 step 4: the token binding.  Proving that the emitted token *is* the argmax
     # means showing no other logit is larger, which is one comparison per
     # vocabulary entry per token -- the max argument's own per-value price.  The
@@ -992,13 +1062,13 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     # `residual_stream_components` carry for `rpqm`/`rpqa`/`rpkm`/`rpka` -- so it
     # is those two primitives and no new number.
     rope_vals = L * (nh + nkv) * hd
-    rope = rope_vals * (2.0 * MUL_CELLS + ADD_CELLS)
+    _mul, _add, _ = residual_stream_primitives(gkr)
+    rope = rope_vals * (2.0 * _mul + _add)
     # The q and k the attention grid reads are quantized integers, and the
-    # quantize is B6.5's gadget again: the same rung `requant` charges on every
-    # distinct matmul input, on `(nh + nkv) hd` more values per token.  `act` and
-    # `range` do not count these -- they are attention inputs and not matmul
-    # inputs -- so both are charged here beside the rung.
-    quant = rope_vals * (1.0 + rng_cells + REQUANT_CELLS) if seq else 0.0
+    # quantize is B6.5's gadget again, on `(nh + nkv) hd` more values per token.
+    # `act` and `range` do not count these -- they are attention inputs and not
+    # matmul inputs -- so this is the whole family and not a rung on top of them.
+    quant = rope_vals * COMPOSED["quant"] if seq else 0.0
     # The lookup tables themselves: five cells a row, once per chunk, over the
     # spec's table set.  Not per token and not per layer -- a chunk is one layer,
     # so per token it is `L / seq` chunks' worth.
