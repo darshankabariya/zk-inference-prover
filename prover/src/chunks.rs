@@ -332,9 +332,11 @@ impl Source {
         }
     }
 
-    /// Which of the loop's layers this chunk proves. Under a plan every chunk
-    /// is its own, so the index is the chunk's.
-    fn li(&self, k: usize) -> usize {
+    /// Issue #142: this chunk's index in the composed output. Under a plan
+    /// every chunk builds its own layer, so the index is the chunk's; the
+    /// cycling loop repeats one set of layers and the index is the one it
+    /// takes from that set. Neither is the model's layer -- `model_layer` is.
+    fn chunk_index(&self, k: usize) -> usize {
         match self {
             Source::Cycle { layers, .. } => k % layers.len(),
             Source::Plan(_) => k,
@@ -430,7 +432,12 @@ unsafe impl Send for SendGen<'_> {}
 
 struct Row {
     k: usize,
-    li: usize,
+    /// issue #142: the index in the composed output, reported as `chunk_index`
+    chunk_index: usize,
+    /// Issue #142: which layer of the model this chunk proves, off the
+    /// statement's own coordinate. `None` on a head chunk, which is not a layer
+    /// of the model.
+    model_layer: Option<usize>,
     /// Stream DD: the plan-file line and the `--ser-tag` it carries. The tag is
     /// what names this chunk's bytes on disk and, on a sequence, the only place
     /// its token block is written down (`B<b>L<k>`); reporting it is what lets
@@ -459,6 +466,18 @@ struct Row {
     /// The first is what a second chunk in flight would have to fit beside.
     mem_after_gen: u64,
     mem_after_prove: u64,
+}
+
+/// Issue #142: which layer of the model this chunk proves, as a number.
+///
+/// The statement's own coordinate (`Fixed::layer`), which is the witness
+/// manifest's `layer` or the `--layer` a plan line overrides it with. `None` on
+/// a head chunk: the `lm_head` chunk is not a layer of the model, and the
+/// coordinate a plan gives it places it after the last layer of its block so
+/// that the grid has a cell for it. `boundary::grid_cmd` marks a head row off
+/// the same field (`params.prove_argmax`).
+fn model_layer_of(out: &compose::Composed, p: &Params) -> Option<usize> {
+    if p.prove_argmax { None } else { out.fixed.layer }
 }
 
 /// Write this chunk's statement and proof, and time the write.
@@ -561,7 +580,8 @@ pub fn chunks_cmd(args: &[String]) {
             );
             let row = Row {
                 k,
-                li: src.li(k),
+                chunk_index: src.chunk_index(k),
+                model_layer: model_layer_of(&out, built.params()),
                 plan_index: src.plan_index(k),
                 tag: src.tag(k),
                 source: built.layer().source.clone(),
@@ -633,7 +653,8 @@ pub fn chunks_cmd(args: &[String]) {
                           built.layer().source);
                 let row = Row {
                     k,
-                    li: src.li(k),
+                    chunk_index: src.chunk_index(k),
+                    model_layer: model_layer_of(&out, built.params()),
                     plan_index: src.plan_index(k),
                     tag: src.tag(k),
                     source: built.layer().source.clone(),
@@ -702,10 +723,23 @@ pub fn chunks_cmd(args: &[String]) {
         // publishing a number that looks per-chunk and is not.
         j["upload_scope"] = json!(if pipe { "loop-cumulative" } else { "chunk" });
         j["chunk"] = json!(r.k);
-        j["layer"] = json!(r.li);
-        // Stream DD: under a plan `layer` is the chunk's index and says nothing
-        // about the model once a plan has more than one token block in it. The
-        // tag does, and the plan index puts a slice back in the file's order.
+        // Issue #142: the chunk's index in this output, which is what the field
+        // has always held; it was called `layer` and it is not the model's.
+        // Once a plan carries more than one token block a head chunk sits
+        // between two blocks and shifts every index after it by one, so a
+        // reader picking a segment by this number gets the one before the one
+        // it asked for and nothing says so.
+        j["chunk_index"] = json!(r.chunk_index);
+        // Issue #142: the model's own layer, from the statement this chunk
+        // proves -- the witness manifest's `layer`, or the `--layer` a plan
+        // line carries for a chunk whose manifest cannot know where the grid
+        // puts it. Null on a head chunk: the head is not a layer of the model,
+        // and the coordinate the grid places it at is one past the last layer.
+        // `ser_tag` says the same thing as a name (`B<block>L<layer>`, or
+        // `B<block>head`) and `layer_source` names the witness directory the
+        // chunk was built from; this is the number.
+        j["model_layer"] = json!(r.model_layer);
+        // Stream DD: the plan index puts a slice back in the file's order.
         j["plan_index"] = json!(r.plan_index);
         j["ser_tag"] = json!(r.tag);
         j["layer_source"] = json!(r.source);
