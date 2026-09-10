@@ -2446,19 +2446,22 @@ impl Outcome {
     /// Cells the gadget adds per op, witness *and* LogUp columns, the way B6 and
     /// B6.5 count.  The tables amortise over a whole layer, so they are reported
     /// apart; so are the leaves, which in a chained component are the previous
-    /// component's outputs and are committed there (`leaf_width` columns plus the
-    /// 2 cells the validity or unary lookup costs at pairwise batching).
+    /// component's outputs and are committed there (`leaf_width` columns plus what
+    /// the validity or unary lookup costs at the pairwise batching this component
+    /// finalizes in, which is `plogup::marginal_cells` and `zk-prover logup`
+    /// measures).
     pub fn cells_per_op_marginal(&self) -> f64 {
-        let leaf: usize = self
+        let look = crate::plogup::marginal_cells(crate::plogup::PAIRED);
+        let leaf: f64 = self
             .prog
             .groups
             .iter()
             .enumerate()
-            .map(|(g, gr)| gr.n * (self.prog.leaf_width(g) + 2))
+            .map(|(g, gr)| gr.n as f64 * (self.prog.leaf_width(g) as f64 + look))
             .sum();
         let rows = self.n_ops / self.prog.slots.len().max(1);
         (self.component_cells + self.inter_cells) as f64 / self.n_ops as f64
-            - (leaf * rows) as f64 / self.n_ops as f64
+            - leaf * rows as f64 / self.n_ops as f64
     }
     pub fn cells_per_op_total(&self) -> f64 {
         (self.component_cells + self.inter_cells) as f64 / self.n_ops as f64

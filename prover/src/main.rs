@@ -36,6 +36,7 @@ mod embed;
 mod residual_stream;
 mod layer;
 mod layout;
+mod logup_run;
 mod plogup;
 mod requant;
 mod rope;
@@ -366,6 +367,51 @@ fn freivalds_cmd(args: &[String]) {
     }
     emit("freivalds", json!({"points": points, "group": group,
                              "n_out": [n_out, 2 * n_out], "source": l2.source}));
+}
+
+// ------------------------------------------------------------------- logup ----
+/// What one lookup costs in committed cells, at each batch size the crate uses.
+///
+/// The cost model charges a lookup by a marginal figure -- the cells it adds
+/// beyond the values a witness commits anyway -- and until now nothing in the tree
+/// measured one: the other cell-cost subcommands each report a whole gadget with
+/// its own lookups inside. Every point here proves the crate's own use and table
+/// sides at two lookup counts and reports the difference, for the range check
+/// every committed integer takes and for a general two-column table lookup, at
+/// batch 1 (`finalize_logup`, what a table side finalizes with) and batch 2
+/// (`finalize_logup_in_pairs`, what every use side finalizes with).
+fn logup_cmd(args: &[String]) {
+    let bits: u32 = arg_scalar(args, "--table-bits", 12u32);
+    let log_rows: u32 = arg_scalar(args, "--log-rows", 10u32);
+    let n: usize = arg_scalar(args, "--lookups-per-row", 4usize);
+    let seed: u64 = arg_scalar(args, "--seed", 7u64);
+    let batches = arg_list(args, "--batches", &[1usize, 2]);
+    let mut points = vec![];
+    // the range check first and the general lookup last, so a reader that keeps
+    // one figure per batch size keeps the one whose gadget commits a key and a
+    // value -- which is the shape `cost_model.py` takes two cells off
+    for kind in [logup_run::Kind::Range, logup_run::Kind::Pair] {
+        for batch in &batches {
+            eprintln!("logup {} batch={batch}", kind.name());
+            let small = logup_run::run(kind, bits, n, log_rows, *batch, seed);
+            let large = logup_run::run(kind, bits, 2 * n, log_rows, *batch, seed);
+            for o in [&small, &large] {
+                assert!(o.accepts(),
+                        "honest lookup proof rejected ({} batch {batch}, {} a row): stark={} \
+                         sums={} off_table={} reference_mismatch={} err={:?}",
+                        kind.name(), o.per_row, o.proven.stark_ok, o.sums.cancels(),
+                        o.off_table, o.ref_n - o.ref_ok, o.proven.prove_error);
+            }
+            points.push(logup_run::marginal(&small, &large));
+        }
+    }
+    emit("logup", json!({"points": points, "table_bits": bits, "log_rows": log_rows,
+                         "lookups_per_row": [n, 2 * n],
+                         "closed_form": {
+                             "column_cells": plogup::COLUMN_CELLS,
+                             "marginal_cells_per_lookup":
+                                 batches.iter().map(|b| plogup::marginal_cells(*b))
+                                     .collect::<Vec<_>>()}}));
 }
 
 // ------------------------------------------------------------------ probes ----
@@ -3625,8 +3671,15 @@ fn residual_stream_cmd(args: &[String]) {
             .and_then(|p| p["cells_per_op_marginal"].as_f64()).unwrap_or(0.0)
     };
     let prim = json!({
-        "add": pick("add"), "mul": pick("mul"), "unary": 4.0, "value": 2.0,
-        "note": "add and mul measured on a power-of-two tiled component, each output range-checked against VAL; unary is its two output columns plus the lookup's 2 cells; a committed bf16 value is 2 cells",
+        "add": pick("add"), "mul": pick("mul"),
+        // a committed bf16 value is one column per part of the `(sm, ef)` pair,
+        // and a unary op commits its output as one and pays its lookup's share of
+        // an interaction column: `plogup::marginal_cells`, which `zk-prover logup`
+        // measures rather than assuming (issue #140)
+        "unary": residual_stream::VAL_COLS.len() as f64
+            + plogup::marginal_cells(plogup::PAIRED),
+        "value": residual_stream::VAL_COLS.len() as f64,
+        "note": "add and mul measured on a power-of-two tiled component, each output range-checked against VAL; unary is its two output columns plus what one lookup costs at pairwise batching, which `logup` measures; a committed bf16 value is 2 cells",
     });
     emit("residual_stream", json!({"points": points, "primitives": prim,
                                    "tables": residual_stream::check_tables(round, 20000),
@@ -3856,6 +3909,7 @@ fn main() {
         "width" => width_cmd(&args),
         "kmax" => kmax_cmd(&args),
         "freivalds" => freivalds_cmd(&args),
+        "logup" => logup_cmd(&args),
         "probes" => probes_cmd(&args),
         "pack" => pack_cmd(&args),
         "attn-probes" => attn_probes_cmd(&args),

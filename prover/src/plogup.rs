@@ -186,6 +186,27 @@ fn finish(log_rows: u32, fracs: Vec<Vec<PackedQM31>>) -> (Vec<Eval>, SecureField
     (out, claimed_sum)
 }
 
+/// The batch size `finalize_logup_in_pairs` applies: two consecutive lookups share
+/// one interaction column.  Every use side in this crate finalizes in pairs and
+/// every table side finalizes singly, so 1 and 2 are the two batch sizes there are.
+pub const PAIRED: usize = 2;
+
+/// A LogUp interaction column is one QM31, and a QM31 is four M31 cells a row --
+/// whatever the relation's arity, which enters the denominator and not the column
+/// count.
+pub const COLUMN_CELLS: usize = 4;
+
+/// The committed cells one lookup adds beyond whatever the gadget commits for the
+/// lookup itself: its share of the interaction column `batch` lookups sit in.
+///
+/// This is the one place in the crate that names the figure, so a cost report that
+/// quotes it and the run that measures it cannot drift apart.  `zk-prover logup`
+/// measures it on the crate's own use and table sides rather than reading it off
+/// here (issue #140).
+pub fn marginal_cells(batch: usize) -> f64 {
+    COLUMN_CELLS as f64 / batch as f64
+}
+
 /// The pairwise batching the constraint framework's `finalize_logup_in_pairs`
 /// applies, as a column count and a per-column fraction: `n` lookups become
 /// `ceil(n/2)` columns, the odd tail unpaired.

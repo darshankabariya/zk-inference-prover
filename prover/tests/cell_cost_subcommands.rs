@@ -1,8 +1,8 @@
-//! The eight cell-cost subcommands, run through the binary.
+//! The nine cell-cost subcommands, run through the binary.
 //!
-//! `dequant`, `width`, `kmax`, `pack`, `requant`, `residual-stream`, `argmax`
-//! and `freivalds` each build one component on a synthetic shape and report what
-//! it costs in committed cells; the cost model reads its cells-per-operation
+//! `dequant`, `width`, `kmax`, `pack`, `requant`, `residual-stream`, `argmax`,
+//! `freivalds` and `logup` each build one component on a synthetic shape and
+//! report what it costs in committed cells; the cost model reads its cells-per-operation
 //! constants off their JSON. None of them makes a proof whose digest is pinned,
 //! so before this test nothing in the repository ran any of them, and seven of
 //! them panicked in the vendored library on their own defaults (issue #70).
@@ -20,7 +20,7 @@
 //! is a separate defect from the tree layout this test pins, it is older than
 //! the split, and it is not fixed here; the case below runs 1 and 2.
 //!
-//! These run on the SIMD build alone. The eight subcommands are host-only by
+//! These run on the SIMD build alone. The nine subcommands are host-only by
 //! design -- the micro-benchmark campaign runs them untimed on the host -- and
 //! their synthetic shapes are in no kernel store, so a binary built with
 //! `--features cuda` takes the device path and ends every one of them in
@@ -37,7 +37,7 @@ struct Case {
     bench: &'static str,
 }
 
-/// The eight, in the order the driver runs them. The flags that differ from the
+/// The nine, in the order the driver runs them. The flags that differ from the
 /// driver's are the ones that only set the size of the witness or the number of
 /// points measured: `--kmax` (the dequant tables are `2^(kmax+1)` rows), `--n`,
 /// `--rows`, `--tokens`, `--vocab`, `--widths`, `--kmax-sweep`, `--insts` and
@@ -64,6 +64,11 @@ const CASES: &[Case] = &[
     Case { bench: "freivalds",
            args: &["freivalds", "--s", "16", "--ctx", "32", "--hd", "16", "--nin", "32",
                    "--nout", "32", "--widths", "8,16"] },
+    // `logup` proves each kind at each batch size twice, at `--lookups-per-row`
+    // and at twice it; the flags below only make the table and the trace small.
+    Case { bench: "logup",
+           args: &["logup", "--table-bits", "8", "--log-rows", "6",
+                   "--lookups-per-row", "2"] },
 ];
 
 fn run(args: &[&str]) -> serde_json::Value {
