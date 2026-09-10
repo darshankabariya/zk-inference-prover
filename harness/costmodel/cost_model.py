@@ -1,50 +1,86 @@
 """B2 cost model: measured stwo constants -> per-token prover budget, checked
 against a published 53 tok/s target for a Gemma-3-27B-class model.
 
-Every constant is read out of the micro-benchmark run outputs in `--inputs DIR`
-(or `ZK_COSTMODEL_INPUTS`), i.e. out of an actual run. The CPU->H100 speedup is never assumed: the model reports the trace
+Nothing measured lives in this repository.  Every constant below is read from a
+zk-results `constants.json` (`--constants PATH`) where a key names it, and from
+the micro-benchmark run outputs in `--inputs DIR` (or `ZK_COSTMODEL_INPUTS`)
+where no key does yet; `PROVENANCE` records which source each one came from and
+says `absent` for the ones neither has.  Both directories are optional: without
+`--inputs` the model keeps every cell cost a key backs and charges nothing for
+the rest, and the rates the four bench files carry print `not measured here`.
+The CPU->H100 speedup is never assumed: the model reports the trace
 commitment throughput a prover would need for 53 tok/s and how far one CPU is
 from it. Closing that gap is B7's job.
 
-    uv run python -m harness.costmodel.cost_model --inputs DIR
+    uv run python -m harness.costmodel.cost_model --constants PATH --inputs DIR
 """
 import json
 import pathlib
-import sys
 
-from harness import inputs
+from harness import constants, inputs
 from harness.costmodel.key_tile import (  # noqa: F401  (re-exported)
     CHAN_TARGET, GRID_TARGET, ROW_WIDTH, key_tile_cells, key_tile_family,
     key_tile_fresh)
 
 # The micro-benchmark outputs this model reads, all under one directory: the
 # stwo benches at its root and the witness-side probes in named subdirectories.
-OUT = inputs.costmodel_inputs()
-B1 = OUT / "b1"
-B3 = OUT / "b3"
-B4 = OUT / "b4"
-B5 = OUT / "b5"
-B6 = OUT / "b6"
-B65 = OUT / "b65"
-B10 = OUT / "b10"
+# The directory is optional, so every reader below tests its own file first and
+# every quantity it would have produced can be `None`.
+OUT = inputs.costmodel_inputs(optional=True)
 
 
-def load(name, required=True):
-    p = OUT / f"{name}.json"
-    if not p.exists():
-        if required:
-            sys.exit(f"missing {p} in the cost-model inputs directory")
+def _sub(name):
+    return None if OUT is None else OUT / name
+
+
+B1, B3, B4, B5, B6, B65, B10 = (_sub(n) for n in
+                                ("b1", "b3", "b4", "b5", "b6", "b65", "b10"))
+
+
+def load(name):
+    if OUT is None:
         return None
-    return json.loads(p.read_text())
+    p = OUT / f"{name}.json"
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+# ------------------------------------------- where each input came from -----
+# `PROVENANCE[name]` is one input's `value`, the `source` it was read from
+# (`constants`, `inputs`, `stand-in`, `analogy` or `absent`), the constants
+# `key` that backs it or `None` where no key does yet, and the `file` under
+# `--inputs DIR` that the fallback read.  A caller writes the whole record into
+# its own output, so a reader of a projection can see which numbers came from a
+# run in zk-results and which from a directory that is not in any repository.
+PROVENANCE = {}
+
+
+def cell(name, key, measured=None, file=None, note="", charged=True):
+    """One cell-cost input, constants first: the value the constants file holds
+    under `key`, the micro-benchmark outputs' `measured` where the file has no
+    such key, and None where neither has it.
+
+    `charged=False` marks an input the model reads for a comparison it prints and
+    does not multiply by a count, so a caller that refuses to price a term it
+    cannot price knows not to count this one."""
+    e = constants.find(key) if key else None
+    if e is not None:
+        PROVENANCE[name] = dict(value=e["value"], source="constants", key=key,
+                                grade=e.get("grade"), run=e.get("run"), file=file,
+                                note=note or e.get("note", ""), charged=charged)
+        return e["value"]
+    PROVENANCE[name] = dict(value=measured, key=key, file=file, note=note, charged=charged,
+                            source="inputs" if measured is not None else "absent")
+    return measured
 
 
 commit = load("commit")
-commit_host = load("commit_host", required=False)
+commit_host = load("commit_host")
 field = load("field")
 logup = load("logup")
 fri = load("fri")
 
-ENV, SEC = commit["env"], commit["security"]
+ENV = commit["env"] if commit else None
+SEC = commit["security"] if commit else None
 
 
 def wide(run):
@@ -61,37 +97,56 @@ def largest(pts):
 
 
 def rate(kernel, where="all_threads"):
+    if not field:
+        return None
     for k in field["result"][where]:
         if k["kernel"] == kernel:
             return k["ops_per_sec"]
     raise KeyError(kernel)
 
 
+# The four rates below are the only quantities the bench files at the root of
+# `--inputs DIR` carry, and nothing but this module's own report reads them: no
+# constants key backs any of them, and without the directory each is None and
+# the report says `not measured here`.
+#
 # Headline constants come from the containerised run only, so the whole model
 # sits in one environment. The host run (bigger traces than the 8 GiB VM can
 # hold) is reported separately below.
-CP = peak(wide(commit))
-COMMIT_CELLS_S = CP["base_cells_per_sec"]["total"]
+CP = peak(wide(commit)) if commit else None
+COMMIT_CELLS_S = CP["base_cells_per_sec"]["total"] if CP else None
 
 # End-to-end prover throughput: a whole proof, not just the commit path. Still
 # climbing at the largest shape measured, so this is a floor, not a plateau.
-fri_cols = load("fri_cols", required=False)
-E2E = max((p for r in (fri, fri_cols) if r for p in r["result"]["points"]),
-          key=lambda p: p["trace_cells_per_sec"])
-E2E_CELLS_S = E2E["trace_cells_per_sec"]
+fri_cols = load("fri_cols")
+_e2e = [p for r in (fri, fri_cols) if r for p in r["result"]["points"]]
+E2E = max(_e2e, key=lambda p: p["trace_cells_per_sec"]) if _e2e else None
+E2E_CELLS_S = E2E["trace_cells_per_sec"] if E2E else None
 M31_MUL_S = rate("m31_mul_simd")
 QM31_MUL_S = rate("qm31_mul_simd")
+
+# The LogUp lookup-batch size the model charges: 2, the largest a blowup of 2
+# allows, since a batch of b needs degree-(b+1) constraints. That is a design
+# point of the proof system and not a measurement.
+LOGUP_BATCH = 2
 
 # LogUp marginal cost: total cells per lookup minus the 2 (in, out) trace cells,
 # which a witness has to commit anyway. Measured, per batch size.
 LOGUP_MARGINAL = {}
-for p in logup["result"]["points"]:
-    LOGUP_MARGINAL[p["logup_batch_size"]] = p["cells"]["per_lookup"] - 2
-LOGUP_NS = {
-    b: min(p["prove_secs"] / p["n_lookups"] * 1e9
-           for p in logup["result"]["points"] if p["logup_batch_size"] == b)
-    for b in LOGUP_MARGINAL
-}
+LOGUP_NS = {}
+if logup:
+    for p in logup["result"]["points"]:
+        LOGUP_MARGINAL[p["logup_batch_size"]] = p["cells"]["per_lookup"] - 2
+    LOGUP_NS = {
+        b: min(p["prove_secs"] / p["n_lookups"] * 1e9
+               for p in logup["result"]["points"] if p["logup_batch_size"] == b)
+        for b in LOGUP_MARGINAL
+    }
+_logup_marginal = cell("logup_marginal_cells_per_lookup",
+                       "model_constants.logup_marginal_cells_per_lookup",
+                       LOGUP_MARGINAL.get(LOGUP_BATCH), "logup.json")
+if _logup_marginal is not None:
+    LOGUP_MARGINAL[LOGUP_BATCH] = _logup_marginal
 
 # --- B3's two missing terms, measured ----------------------------------------
 # (1) the r^T W Freivalds check. Its three QM31 accumulator columns cost 12 M31
@@ -103,8 +158,8 @@ LOGUP_NS = {
 # (2) the byte-range check on every committed int8 activation, which B2's model
 #     charged nothing for: one LogUp lookup per activation cell.
 def b3_constants():
-    f = B3 / "width.json"
-    if not f.exists():
+    f = B3 and B3 / "width.json"
+    if not (f and f.exists()):
         return None
     pts = json.loads(f.read_text())["result"]["points"]
     best = min(pts, key=lambda p: (p["proof_bytes"], p["cells"]["fresh_per_token"]))
@@ -121,8 +176,15 @@ def b3_constants():
 
 
 B3C = b3_constants()
-WEIGHT_FREIVALDS_CELLS_PER_WEIGHT = B3C["cells_per_weight"] if B3C else 0.0
-PREPROCESSED_PER_WEIGHT = B3C["preprocessed_per_weight"] if B3C else 0.0
+WEIGHT_FREIVALDS_CELLS_PER_WEIGHT = cell(
+    "weight_freivalds_cells_per_weight", "model_constants.weight_freivalds_cells_per_weight",
+    B3C["cells_per_weight"] if B3C else None, "b3/width.json") or 0.0
+# The preprocessed side of the same layout choice.  No key names it yet, so this
+# one term still forces the inputs directory even when every other cell cost is
+# backed by a constant.
+PREPROCESSED_PER_WEIGHT = cell(
+    "preprocessed_cells_per_weight", None,
+    B3C["preprocessed_per_weight"] if B3C else None, "b3/width.json") or 0.0
 
 
 # --- B4's terms, measured -----------------------------------------------------
@@ -133,6 +195,8 @@ PREPROCESSED_PER_WEIGHT = B3C["preprocessed_per_weight"] if B3C else 0.0
 # (2) the int8 range check, again: B3 spent one lookup per activation, B4 checks
 #     two activations with one arity-2 lookup into a 2^16 pair table.
 def b4_constants():
+    if B4 is None:
+        return None
     fl, fr = B4 / "limbs.json", B4 / "range.json"
     if not (fl.exists() and fr.exists()):
         return None
@@ -159,7 +223,12 @@ def b4_constants():
 
 
 B4C = b4_constants()
-LIMB_CELLS_PER_ACC = B4C["cells_per_acc"] if B4C else 0.0
+LIMB_CELLS_PER_ACC = cell("limb_cells_per_acc", None,
+                          B4C["cells_per_acc"] if B4C else None, "b4/limbs.json",
+                          charged=False) or 0.0
+# the packed pair table's range check on every committed int8 activation
+RANGE_CELLS_PER_ACTIVATION = cell("int8_range_cells_per_activation", None,
+                                  B4C["range_marginal"] if B4C else None, "b4/range.json")
 
 
 # --- B5's terms, measured ------------------------------------------------------
@@ -174,8 +243,8 @@ LIMB_CELLS_PER_ACC = B4C["cells_per_acc"] if B4C else 0.0
 # (3) the per-token softmax scalars: the row maximum, the denominator, and the
 #     two-limb range check that makes the A.V window explicit.
 def b5_constants():
-    f = B5 / "block.json"
-    if not f.exists():
+    f = B5 and B5 / "block.json"
+    if not (f and f.exists()):
         return None
     try:
         pts = json.loads(f.read_text())["result"]["points"]
@@ -212,6 +281,8 @@ B5C = b5_constants()
 #     instances share one column set, so the whole-model proof is key tiles x one
 #     key tile's columns, with popcount(L*nh) key tiles.
 def b6_constants():
+    if B6 is None:
+        return None
     fd, fp = B6 / "dequant.json", B6 / "pack.json"
     if not fd.exists():
         return None
@@ -280,6 +351,8 @@ B6C = b6_constants()
 # scale.  The marginal below includes the committed q cell, which `act` already
 # charges, so the model charges (marginal - 1) per distinct matmul input.
 def b65_constants():
+    if B65 is None:
+        return None
     pts = []
     for f in ("requant_q", "requant_gate", "requant_down"):
         p = B65 / f"{f}.json"
@@ -312,7 +385,11 @@ def b65_constants():
 
 
 B65C = b65_constants()
-REQUANT_CELLS = (B65C["requant_max"] - 1.0) if B65C and B65C.get("requant_max") else 0.0
+# the requantize with its scale argument, less the committed quantized value
+# `cells_per_token` already counts on every distinct matmul input
+_requant = cell("requant_cells_per_value", "model_constants.requant_cells_per_value",
+                B65C.get("requant_max") if B65C else None, "b65/requant_*.json")
+REQUANT_CELLS = (_requant - 1.0) if _requant else 0.0
 # B10 step 4: greedy decoding's argmax is B6.5's **max argument** run over the
 # vocabulary instead of over a matmul input's row -- the same gadget, the same
 # per-value price.  `requant_max - requant_only` is what the argument costs on
@@ -332,8 +409,8 @@ REQUANT_CELLS = (B65C["requant_max"] - 1.0) if B65C and B65C.get("requant_max") 
 # an inference from a neighbouring gadget is not a measurement of this one.
 def b10_argmax_constants():
     """The built argmax gadget, per comparison, from `b10/out/argmax_v8k.json`."""
-    f = B10 / "argmax_v8k.json"
-    if not f.exists():
+    f = B10 and B10 / "argmax_v8k.json"
+    if not (f and f.exists()):
         return None
     try:
         res = json.loads(f.read_text())["result"]
@@ -360,7 +437,13 @@ def b10_argmax_constants():
 B10A = b10_argmax_constants()
 MAXARG_CELLS_B65 = ((B65C["requant_max"] - B65C["requant_only"])
                     if B65C and B65C.get("requant_max") else 0.0)
-MAXARG_CELLS_BUILT = B10A["marginal"] if B10A else 0.0
+# `model_constants.argmax_cells_per_comparison` does NOT back this: that key is
+# the whole gadget over its comparisons, the fixed table half included, and the
+# marginal below subtracts that half using the run's own row count, which the
+# key does not carry.  Recording the marginal beside it would back this input.
+MAXARG_CELLS_BUILT = cell("argmax_marginal_cells_per_comparison", None,
+                          B10A["marginal"] if B10A else None, "b10/argmax_v8k.json",
+                          "the whole-gadget key is not this quantity") or 0.0
 MAXARG_CELLS = MAXARG_CELLS_BUILT or MAXARG_CELLS_B65
 # E1 / B9 probe 2 (`b9/moe.py`, and `b9/out/moe.json`'s `routing`): the MoE
 # routing-selection argument, priced **by analogy** because nobody has built it.
@@ -374,13 +457,51 @@ MAXARG_CELLS = MAXARG_CELLS_BUILT or MAXARG_CELLS_B65
 #       argument, `requant_max - requant_only`.
 ROUTE_SEL_CELLS = 3.0
 ROUTE_MAX_CELLS = MAXARG_CELLS_B65 or 3.36
+for _n, _v in (("route_selection_cells", ROUTE_SEL_CELLS),
+               ("route_topk_cells", ROUTE_MAX_CELLS)):
+    PROVENANCE[_n] = dict(value=_v, source="analogy", key=None, file=None, charged=True,
+                          note="nobody has built this gadget; the nearest gadget that "
+                               "was measured stands in for it")
 # `dequant` is the per-accumulator cost of reading the integer *and* rounding it;
 # it subsumes B4's limb term, so `cells_per_token` charges this instead of that.
-DEQUANT_CELLS_PER_ACC = (B6C or {}).get("chain") or 0.0
-DEQUANT_AWAY_PER_ACC = (B6C or {}).get("chain_away") or DEQUANT_CELLS_PER_ACC
-DEQUANT_POW2_PER_ACC = (B6C or {}).get("pow2") or 0.0
-DEQUANT_POW2_AWAY_PER_ACC = (B6C or {}).get("pow2_away") or DEQUANT_POW2_PER_ACC
-ATTNOUT_CELLS_PER_ACC = (B6C or {}).get("int8") or 0.0
+# The two keys are measured with the round half to even; the model charges the
+# rounding away from zero on every layer matmul, and no key names that one, so
+# where the inputs directory is missing the even figure stands in and the model
+# is one cell an accumulator high.
+DEQUANT_CELLS_PER_ACC = cell("dequant_chain_cells_per_acc",
+                             "model_constants.dequant_chain_cells_per_acc",
+                             (B6C or {}).get("chain"), "b6/dequant.json",
+                             charged=False) or 0.0
+DEQUANT_AWAY_PER_ACC = cell("dequant_chain_away_cells_per_acc", None,
+                            (B6C or {}).get("chain_away"), "b6/dequant.json") or 0.0
+DEQUANT_POW2_PER_ACC = cell("dequant_pow2_cells_per_acc",
+                            "model_constants.dequant_pow2_cells_per_acc",
+                            (B6C or {}).get("pow2"), "b6/dequant.json",
+                            charged=False) or 0.0
+DEQUANT_POW2_AWAY_PER_ACC = cell("dequant_pow2_away_cells_per_acc", None,
+                                 (B6C or {}).get("pow2_away"), "b6/dequant.json") or 0.0
+
+
+def _stands_in(name, value, said):
+    """Nothing names this input, so a neighbouring one is charged instead; the
+    record says which, because the difference is a real cost and not a rounding.
+    A stand-in that is itself absent is absent, not a zero."""
+    PROVENANCE[name].update(value=value or None, note=said,
+                            source="stand-in" if value else "absent")
+    return value
+
+
+if not DEQUANT_AWAY_PER_ACC:
+    DEQUANT_AWAY_PER_ACC = _stands_in(
+        "dequant_chain_away_cells_per_acc", DEQUANT_CELLS_PER_ACC,
+        "the round-half-to-even chain stands in, one cell an accumulator high")
+if not DEQUANT_POW2_AWAY_PER_ACC:
+    DEQUANT_POW2_AWAY_PER_ACC = _stands_in(
+        "dequant_pow2_away_cells_per_acc", DEQUANT_POW2_PER_ACC,
+        "the round-half-to-even power-of-two figure stands in, one cell high")
+ATTNOUT_CELLS_PER_ACC = cell("attnout_int8_cells_per_acc",
+                             "model_constants.attnout_int8_cells_per_acc",
+                             (B6C or {}).get("int8"), "b6/dequant.json") or 0.0
 
 # --- B10 step 2: the residual stream between the components ---------------------------------
 # B6.5 open gap 1: the composition bindings every matmul's accumulators to its own
@@ -415,8 +536,8 @@ ATTNOUT_CELLS_PER_ACC = (B6C or {}).get("int8") or 0.0
 #     named gap: without it the gadget can prove a value bf16 cannot represent),
 #     which is +2 cells on each and is in the measured numbers below.
 def b10_residual_stream_constants():
-    f = B65 / "residual_stream.json"
-    if not f.exists():
+    f = B65 and B65 / "residual_stream.json"
+    if not (f and f.exists()):
         return None
     try:
         pts = json.loads(f.read_text())["result"]["points"]
@@ -434,9 +555,15 @@ def b10_residual_stream_constants():
 
 B10G = b10_residual_stream_constants()
 # the bf16 multiply, read off B6's ladder: `chain` is `pow2` plus two of them
-MUL_CELLS = ((DEQUANT_AWAY_PER_ACC - DEQUANT_POW2_AWAY_PER_ACC) / 2.0
-             if DEQUANT_AWAY_PER_ACC and DEQUANT_POW2_AWAY_PER_ACC else 0.0)
-UNARY_CELLS = (B4C or {}).get("lookup_cells") or 0.0
+_mul_ladder = ((DEQUANT_AWAY_PER_ACC - DEQUANT_POW2_AWAY_PER_ACC) / 2.0
+               if DEQUANT_AWAY_PER_ACC and DEQUANT_POW2_AWAY_PER_ACC else 0.0)
+MUL_CELLS = cell("residual_stream_mul_cells_per_op",
+                 "model_constants.residual_stream_mul_cells_per_op",
+                 (B10G or {}).get("mul") or _mul_ladder or None,
+                 "b65/residual_stream.json") or 0.0
+UNARY_CELLS = cell("unary_cells_per_application", None,
+                   (B10G or {}).get("unary") or (B4C or {}).get("lookup_cells") or None,
+                   "b4/unary.json") or 0.0
 # the add, from its construction: B6's `round` variant (the normalisation, one
 # `NORM` and one `FRAC` lookup, 11.06 cells/away) minus the committed integer it
 # no longer needs (the aligned sum is an expression, not a column), plus the
@@ -455,12 +582,16 @@ LOGUP_IN_GADGET = (ROUND_CELLS - ROUND_COLS) / 2.0 if ROUND_CELLS else 0.0
 # committed integer), +3 columns (the order selector, the committed 2^Delta, the
 # far-branch selector) and +3 lookups (the 15-bit magnitude compare that orders
 # the operands, the (Delta, 2^Delta) pair table, and the far-branch range check)
-ADD_CELLS_MODEL = (ROUND_CELLS - 1.0) + 3.0 + 3.0 * LOGUP_IN_GADGET
-ADD_CELLS = (B10G or {}).get("add") or ADD_CELLS_MODEL
-if B10G and B10G.get("mul"):
-    MUL_CELLS = B10G["mul"]
-if B10G and B10G.get("unary"):
-    UNARY_CELLS = B10G["unary"]
+ADD_CELLS_MODEL = ((ROUND_CELLS - 1.0) + 3.0 + 3.0 * LOGUP_IN_GADGET
+                   if ROUND_CELLS else None)
+ADD_CELLS = cell("residual_stream_add_cells_per_op",
+                 "model_constants.residual_stream_add_cells_per_op",
+                 (B10G or {}).get("add"), "b65/residual_stream.json")
+if ADD_CELLS is None and ADD_CELLS_MODEL is not None:
+    ADD_CELLS = _stands_in("residual_stream_add_cells_per_op", ADD_CELLS_MODEL,
+                           "nothing measures the add; the construction's own column "
+                           "and lookup count stands in")
+ADD_CELLS = ADD_CELLS or 0.0
 
 # --- B8's layout, the default since B9 step 0 ---------------------------------
 # B6.5's mixed layout rested on a 0.5B attribution that **inverts** at 8B
@@ -507,7 +638,10 @@ def attn_window(num_bits, ctx, z_lo_bits=Z_LO_BITS):
                 fits_sign_2p30=av <= 1 << 30,   # the sign-bit reading, floor(p/2)
                 blind_sum=nmax * ctx)
 # the integer softmax is the design point; v1 is what B2's model already assumed
-ALPHA = (B5C["intexp"]["alpha_grid"] if B5C and "intexp" in B5C else 5.0)
+ALPHA = cell("attention_cells_per_head_key_token",
+             "model_constants.attention_cells_per_head_key_token",
+             B5C["intexp"]["alpha_grid"] if B5C and "intexp" in B5C else None,
+             "b5/block.json") or 5.0
 ALPHA_V1 = (B5C["bf16x"]["alpha_grid"] if B5C and "bf16x" in B5C else 5.0)
 
 # --- the attention key tile family, as a closed form in (S, C) ---------------------
@@ -685,7 +819,8 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
                       attn_params_per_layer=attn_params_per_layer)
     freivalds = WEIGHT_FREIVALDS_CELLS_PER_WEIGHT * params / tokens if seq else 0.0
     # B4: the packed pair table halves B3's per-activation range check
-    rng_cells = B4C["range_marginal"] if B4C else LOGUP_MARGINAL[batch]
+    rng_cells = (RANGE_CELLS_PER_ACTIVATION if RANGE_CELLS_PER_ACTIVATION is not None
+                 else LOGUP_MARGINAL[batch])
     rng = act * rng_cells if seq else 0.0
     # B4 read the accumulator as an integer and stopped there; B6 rounds it too, and
     # its normalisation *is* the integer reading, so this replaces B4's limb term
@@ -818,10 +953,13 @@ def ops_per_token(cfg, ctx, seq, experts=1, topk=1, seq_batch=1):
                 params=params, naive_cells=params + L * 2 * nh * hd * ctx)
 
 
-# the LogUp lookup-batch size the model charges: the cheapest measured batching.
-# This is the `batch` argument of `cells_per_token`, and it has nothing to do with
-# batching *sequences* into one proof, which is `seq_batch` (E1/E6a).
-BATCH = min(LOGUP_MARGINAL, key=LOGUP_MARGINAL.get)
+# the LogUp lookup-batch size the model charges: the design point above where it
+# is priced, and the cheapest measured batching otherwise.  This is the `batch`
+# argument of `cells_per_token`, and it has nothing to do with batching
+# *sequences* into one proof, which is `seq_batch` (E1/E6a).
+BATCH = (LOGUP_BATCH if LOGUP_BATCH in LOGUP_MARGINAL
+         else min(LOGUP_MARGINAL, key=LOGUP_MARGINAL.get) if LOGUP_MARGINAL
+         else LOGUP_BATCH)
 
 QWEN = (24, 896, 14, 2, 64, 4864, 151936)      # B1's model
 LLAMA8B = (32, 4096, 32, 8, 128, 14336, 128256)  # B8/B9/B10's rung
@@ -830,10 +968,20 @@ TARGET_TOKS, TARGET_CTX, SEQ = 53.0, 16384, 512
 
 
 def g(x, unit=""):
+    if x is None:
+        return "not measured here "
     for s, d in (("G", 1e9), ("M", 1e6), ("k", 1e3)):
         if abs(x) >= d:
             return f"{x / d:.2f} {s}{unit}"
     return f"{x:.2f} {unit}"
+
+
+def _source_line(name):
+    """`value (where it came from)` for one recorded input, for the report."""
+    e = PROVENANCE[name]
+    where = (e["key"] if e["source"] == "constants"
+             else f"{e['source']}, {e['file']}" if e["file"] else e["source"])
+    return f"{'not priced' if e['value'] is None else e['value']} ({where})"
 
 
 def report():
@@ -843,29 +991,51 @@ def report():
     print("=" * 78)
     print("B2 cost model - measured stwo constants -> per-token prover budget")
     print("=" * 78)
-    print(f"platform: {ENV['arch']}/{ENV['os']}, {ENV['threads']} threads, "
-          f"{ENV['simd_n_lanes']} SIMD lanes")
-    print(f"security: blowup {SEC['blowup_factor']}, {SEC['n_queries']} FRI queries, "
-          f"{SEC['pow_bits']} PoW bits -> {SEC['security_bits_conjectured']} bits conjectured, "
-          f"{SEC['hash']}")
+    if ENV:
+        print(f"platform: {ENV['arch']}/{ENV['os']}, {ENV['threads']} threads, "
+              f"{ENV['simd_n_lanes']} SIMD lanes")
+        print(f"security: blowup {SEC['blowup_factor']}, {SEC['n_queries']} FRI queries, "
+              f"{SEC['pow_bits']} PoW bits -> {SEC['security_bits_conjectured']} bits "
+              f"conjectured, {SEC['hash']}")
+    else:
+        print("platform and security: not measured here -- pass --inputs DIR for the four "
+              "bench files")
     print()
     print("measured constants")
-    print(f"  trace commit  2^{CP['log_size']} rows x {CP['n_cols']} cols   "
-          f"{g(COMMIT_CELLS_S)}cells/s   (commit path only, peak over the wide traces)")
-    print(f"  whole proof   2^{E2E['log_size']} rows x {E2E['n_cols']} cols   "
-          f"{g(E2E_CELLS_S)}cells/s   (prove() end to end, still rising with size)")
-    print(f"  M31 mul       SIMD, {ENV['threads']} threads              {g(M31_MUL_S)}op/s")
-    print(f"  QM31 mul      SIMD, {ENV['threads']} threads              {g(QM31_MUL_S)}op/s")
+    if CP:
+        print(f"  trace commit  2^{CP['log_size']} rows x {CP['n_cols']} cols   "
+              f"{g(COMMIT_CELLS_S)}cells/s   (commit path only, peak over the wide traces)")
+    else:
+        print("  trace commit  not measured here (commit.json); no constants key backs it")
+    if E2E:
+        print(f"  whole proof   2^{E2E['log_size']} rows x {E2E['n_cols']} cols   "
+              f"{g(E2E_CELLS_S)}cells/s   (prove() end to end, still rising with size)")
+    else:
+        print("  whole proof   not measured here (fri.json); no constants key backs it")
+    if M31_MUL_S:
+        print(f"  M31 mul       SIMD, {ENV['threads']} threads              {g(M31_MUL_S)}op/s")
+        print(f"  QM31 mul      SIMD, {ENV['threads']} threads              {g(QM31_MUL_S)}op/s")
+    else:
+        print("  field rates   not measured here (field.json); no constants key backs them")
     for b in sorted(LOGUP_MARGINAL):
-        print(f"  LogUp batch {b} into 2^{logup['result']['log_table']} table      "
-              f"{LOGUP_MARGINAL[b]:.0f} extra cells/lookup, {LOGUP_NS[b]:.0f} ns/lookup")
+        ns = (f", {LOGUP_NS[b]:.0f} ns/lookup" if b in LOGUP_NS
+              else ", time not measured here")
+        table = (f" into 2^{logup['result']['log_table']} table" if logup else "")
+        print(f"  LogUp batch {b}{table}      "
+              f"{LOGUP_MARGINAL[b]:.0f} extra cells/lookup{ns}")
+    if not LOGUP_MARGINAL:
+        print("  LogUp         NOT MEASURED -- no logup.json and no "
+              "`model_constants.logup_marginal_cells_per_lookup`; nothing below can be "
+              "charged for a lookup")
     if B3C:
         print(f"  Freivalds     B3, {B3C['weights_per_row']} weights/row     "
               f"{WEIGHT_FREIVALDS_CELLS_PER_WEIGHT:.3f} fresh cells/weight "
               f"(12/p; {PREPROCESSED_PER_WEIGHT:.2f} preprocessed cells/weight read per proof)")
     else:
-        print("  Freivalds     NOT MEASURED -- run experiments/b3/run_all.sh; "
-              "the Freivalds check is charged 0 cells below")
+        print(f"  Freivalds     {_source_line('weight_freivalds_cells_per_weight')} "
+              "fresh cells/weight")
+        print(f"                {_source_line('preprocessed_cells_per_weight')} "
+              "preprocessed cells/weight read per proof")
     if B4C:
         print(f"  limb decomp   B4, variant {B4C['limb_variant']:<9}      "
               f"{B4C['cells_per_acc']:.2f} cells/accumulator "
@@ -877,16 +1047,18 @@ def report():
             print(f"  bf16 lookup   B4, 2^16 table          "
                   f"{B4C['lookup_cells']:.2f} cells/application, witness included")
     else:
-        print("  limb decomp   NOT MEASURED -- run experiments/b4/run_all.sh; "
-              "the dequant is charged 0 cells below")
+        print(f"  int8 range    {_source_line('int8_range_cells_per_activation')} "
+              "cells/activation")
+        print(f"  bf16 lookup   {_source_line('unary_cells_per_application')} "
+              "cells/application")
     if B5C:
         for v, c in sorted(B5C.items()):
             print(f"  attention     B5, {v:<8}            "
                   f"{c['alpha_grid']:.2f} cells/(head,key,token) on the grid, "
                   f"{c['alpha_marginal']:.2f} marginal (one head, S={c['s']}, hd={c['hd']})")
     else:
-        print("  attention     NOT MEASURED -- run experiments/b5/run_all.sh; the model "
-              "charges B2's assumed 5 cells/key below")
+        print(f"  attention     {_source_line('attention_cells_per_head_key_token')} "
+              "cells/(head,key,token) on the grid -- the superseded single-slope form")
     if B6C:
         print(f"  dequant       B6, general bf16 scales  "
               f"{B6C['chain']:.2f} cells/accumulator "
@@ -906,13 +1078,15 @@ def report():
                   f"{pk['alpha_block'][0]:.2f} -> {pk['alpha_block'][-1]:.2f} as the shared "
                   f"tables amortise")
     else:
-        print("  dequant       NOT MEASURED -- run experiments/b6/run_all.sh; the model "
-              "falls back to B4's limb term")
+        for _label, _n in (("dequant chain", "dequant_chain_cells_per_acc"),
+                           ("dequant pow2 ", "dequant_pow2_cells_per_acc"),
+                           ("attn output  ", "attnout_int8_cells_per_acc")):
+            print(f"  {_label} {_source_line(_n)} cells/accumulator")
     print()
 
     # --- validate the cells model against B1's actual witness ---------------------
-    man = B1 / "manifest.json"
-    if man.exists():
+    man = B1 and B1 / "manifest.json"
+    if man and man.exists():
         w = json.loads(man.read_text())["witness"]
         steps = json.loads(man.read_text())["sequence"]["steps"]
         kinds = w["values_by_kind"]
@@ -928,9 +1102,6 @@ def report():
     for ctx in (4096, TARGET_CTX):
         c = cells_per_token(GEMMA, ctx, BATCH, SEQ)
         o = ops_per_token(GEMMA, ctx, SEQ)
-        t_commit = c["total"] / COMMIT_CELLS_S
-        t_e2e = c["total"] / E2E_CELLS_S
-        t_field = o["total"] / M31_MUL_S
         print()
         print(f"  ctx={ctx}")
         print(f"    committed cells/token  {g(c['total'])}  "
@@ -946,8 +1117,15 @@ def report():
               f"committed offline but read once per proof (B3)")
         print(f"    in-circuit M31 mul/tok {g(o['total'])}  "
               f"(weight pass {o['weight_pass'] / o['total'] * 100:.0f}%)")
-        print(f"    on this box            commit-limited {1 / (t_commit + t_field):5.2f} tok/s"
-              f"   |  measured end-to-end rate {1 / (t_e2e + t_field):5.2f} tok/s")
+        if COMMIT_CELLS_S and E2E_CELLS_S and M31_MUL_S:
+            t_field = o["total"] / M31_MUL_S
+            t_commit = c["total"] / COMMIT_CELLS_S + t_field
+            t_e2e = c["total"] / E2E_CELLS_S + t_field
+            print(f"    on this host           commit-limited {1 / t_commit:5.2f} tok/s"
+                  f"   |  measured end-to-end rate {1 / t_e2e:5.2f} tok/s")
+        else:
+            print("    on this host           not measured here: the four bench files at "
+                  "the root of --inputs DIR carry the only rates")
 
     c = cells_per_token(GEMMA, TARGET_CTX, BATCH, SEQ)
     o = ops_per_token(GEMMA, TARGET_CTX, SEQ)
@@ -956,14 +1134,15 @@ def report():
     print()
     print(f"what {TARGET_TOKS:.0f} tok/s at ctx={TARGET_CTX} requires:")
     print(f"  trace commitment   {g(need_cells)}cells/s")
-    print(f"    vs commit path only   {g(COMMIT_CELLS_S)}cells/s  ->  "
-          f"x{need_cells / COMMIT_CELLS_S:,.0f} short")
-    print(f"    vs whole-proof rate   {g(E2E_CELLS_S)}cells/s  ->  "
-          f"x{need_cells / E2E_CELLS_S:,.0f} short")
+    print(f"    vs commit path only   {g(COMMIT_CELLS_S)}cells/s"
+          + (f"  ->  x{need_cells / COMMIT_CELLS_S:,.0f} short" if COMMIT_CELLS_S else ""))
+    print(f"    vs whole-proof rate   {g(E2E_CELLS_S)}cells/s"
+          + (f"  ->  x{need_cells / E2E_CELLS_S:,.0f} short" if E2E_CELLS_S else ""))
     print(f"  in-circuit field   {g(need_ops)}M31 mul/s  "
-          f"measured {g(M31_MUL_S)}op/s  ->  "
-          + (f"x{need_ops / M31_MUL_S:,.1f} short" if need_ops > M31_MUL_S
-             else f"already {M31_MUL_S / need_ops:,.1f}x headroom"))
+          f"measured {g(M31_MUL_S)}op/s"
+          + ("" if not M31_MUL_S else
+             f"  ->  x{need_ops / M31_MUL_S:,.1f} short" if need_ops > M31_MUL_S
+             else f"  ->  already {M31_MUL_S / need_ops:,.1f}x headroom"))
     print(f"  commit-every-MAC   {g(o['naive_cells'] * TARGET_TOKS)}cells/s "
           f"= {o['naive_cells'] * TARGET_TOKS * 4 / 1e12:,.1f} TB/s of trace  ->  impossible")
     if B3C:
@@ -1072,7 +1251,9 @@ def report():
     # --- B10 step 2: the residual stream's price table ------------------------
     print()
     print("B10 step 2 -- the residual stream between the components (B6.5 open gap 1), priced")
-    SRC = ("b65/out/residual_stream.json, measured" if B10G and B10G.get("add")
+    _add_src = PROVENANCE["residual_stream_add_cells_per_op"]
+    SRC = (f"{_add_src['key']}, measured" if _add_src["source"] == "constants"
+           else "b65/out/residual_stream.json, measured" if _add_src["source"] == "inputs"
            else "from the construction")
     print(f"  bf16 unary (2^16 table)  {UNARY_CELLS:.2f} cells/application  ({SRC}; B4's "
           f"packed {(B4C or {}).get('lookup_cells', 0):.2f} in a pattern layout)")
@@ -1080,8 +1261,10 @@ def report():
           f"ladder implies (chain {DEQUANT_AWAY_PER_ACC:.2f} - pow2 "
           f"{DEQUANT_POW2_AWAY_PER_ACC:.2f}) / 2 = "
           f"{(DEQUANT_AWAY_PER_ACC - DEQUANT_POW2_AWAY_PER_ACC) / 2:.2f})")
-    print(f"  bf16 add                 {ADD_CELLS:.2f} cells/add           ({SRC}; the "
-          f"construction says {ADD_CELLS_MODEL:.2f}, B4 section 9 guessed 12-15 and built none)")
+    _says = (f"the construction says {ADD_CELLS_MODEL:.2f}, " if ADD_CELLS_MODEL
+             else "the construction is not priced here, ")
+    print(f"  bf16 add                 {ADD_CELLS:.2f} cells/add           ({SRC}; "
+          f"{_says}B4 section 9 guessed 12-15 and built none)")
     if B10G and B10G.get("value"):
         print(f"  one committed bf16 value {B10G['value']:.2f} cells                (`sm`, `ef`: "
               "two columns, which is what keeps every constraint degree 2)")
@@ -1107,7 +1290,7 @@ def report():
               f"{dr['two_level_matches_tree_sum']} of {dr['two_level_checked']}")
     print()
     CHUNKS = {}
-    if (B10 / "prove8b.json").exists():
+    if B10 and (B10 / "prove8b.json").exists():
         try:
             pt = json.loads((B10 / "prove8b.json").read_text())["result"]["point"]
             CHUNKS["Llama-3.1-8B"] = (pt["cells"]["fresh"], pt["params"]["s"], pt["params"]["c"])
@@ -1198,13 +1381,17 @@ def report():
         print(f"  per-token softmax scalars (max, denominator, its limbs): "
               f"{g(c['softmax_rows'])}cells/token")
     print()
-    print("proof size / verification, measured at blowup 2 and "
-          f"{SEC['n_queries']} queries:")
-    for p in fri["result"]["points"]:
-        print(f"  2^{p['log_size']} rows x {p['n_cols']} cols   "
-              f"{p['proof_bytes'] / 1024:6.1f} KiB   verify {p['verify_secs'] * 1e3:5.2f} ms   "
-              f"{p['n_fri_query_positions']} query positions, "
-              f"{p['n_fri_inner_layers']} FRI layers")
+    if fri:
+        print("proof size / verification, measured at blowup 2 and "
+              f"{SEC['n_queries']} queries:")
+        for p in fri["result"]["points"]:
+            print(f"  2^{p['log_size']} rows x {p['n_cols']} cols   "
+                  f"{p['proof_bytes'] / 1024:6.1f} KiB   verify "
+                  f"{p['verify_secs'] * 1e3:5.2f} ms   "
+                  f"{p['n_fri_query_positions']} query positions, "
+                  f"{p['n_fri_inner_layers']} FRI layers")
+    else:
+        print("proof size / verification: not measured here (fri.json)")
 
 
     if commit_host:

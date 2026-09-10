@@ -12,7 +12,7 @@ import pathlib
 import sys
 
 
-def _flag(name, env, what):
+def _flag(name, env, what, optional=False):
     argv = sys.argv[1:]
     if name in argv and argv.index(name) + 1 < len(argv):
         return pathlib.Path(argv[argv.index(name) + 1])
@@ -21,17 +21,21 @@ def _flag(name, env, what):
             return pathlib.Path(a.split("=", 1)[1])
     if os.environ.get(env):
         return pathlib.Path(os.environ[env])
+    if optional:
+        return None
     raise SystemExit(f"{what}: pass {name} DIR or set {env}")
 
 
-def artifacts_dir():
-    return _flag("--artifacts", "ZK_ARTIFACTS", "measured artifacts")
+def artifacts_dir(optional=False):
+    """`optional=True` returns None instead of exiting, for a script that has a
+    second source for what the directory holds and says which one it read."""
+    return _flag("--artifacts", "ZK_ARTIFACTS", "measured artifacts", optional)
 
 
-def costmodel_inputs():
+def costmodel_inputs(optional=False):
     return _flag("--inputs", "ZK_COSTMODEL_INPUTS",
                  "cost-model inputs (commit.json, field.json, logup.json, fri.json and "
-                 "the b1..b10 subdirectories the readers name)")
+                 "the b1..b10 subdirectories the readers name)", optional)
 
 
 def add_arguments(parser, artifacts=True, inputs=False):

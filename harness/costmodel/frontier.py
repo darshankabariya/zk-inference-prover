@@ -35,20 +35,30 @@ import sys
 
 from harness import constants, inputs
 from . import cost_model as cm
+from . import key_tile
 
 HERE = pathlib.Path(__file__).parent
 # The measured run outputs this module reads, laid out as the readers below name
-# them (`b10/out/seq5/...`, `b9/out/...`, `b12/.../out/...`).
-ROOT = inputs.artifacts_dir()
+# them (`b10/out/seq5/...`, `b9/out/...`, `b12/.../out/...`).  Optional: every
+# reader tests its own file, and the two sequence runs -- the only inputs no
+# constants key can replace today -- say so by name when the directory is absent.
+ROOT = inputs.artifacts_dir(optional=True)
 OUT = pathlib.Path(".")
 
 TOKENS = 512            # the measured sequence's decoded tokens (S per chunk)
 REPO = ROOT
 
 
+def art(*parts):
+    """A path under `--artifacts DIR`, or None when no directory was given."""
+    return None if ROOT is None else ROOT.joinpath(*parts)
+
+
 def rel(p):
     """Paths in the printed table are repo-relative: the table is a committed
     artifact and a worktree path in it is noise."""
+    if REPO is None:
+        return str(p)
     try:
         return str(pathlib.Path(p).relative_to(REPO))
     except ValueError:
@@ -57,46 +67,63 @@ def rel(p):
 
 # ---------------------------------------------------------------- constants --
 # Read from a zk-results `constants.json` (`--constants PATH`).  Nothing measured,
-# cited or agreed is written down here: this module names the keys it needs and
-# fails loudly on a `null`.
+# cited or agreed is written down here: this module names the keys it needs, fails
+# loudly on a `null` in one a priced row depends on, and says `not recorded` where
+# a key only a diagnostic reads is not in the file yet.
 
-# The keys this module consumes, and nothing else.
-#   dollars -- the `*_reference_*` pair only; an `*_actual_*` key must never be read.
-#   the grid -- E1's own composed-chunk solve, plus the other values in
-#   circulation, which section (2) reconciles rather than averages.
+# The keys a priced row depends on, and nothing else: every `usd_per_mtok` in
+# the table is a rate times a time, so a missing rate is a missing row and this
+# module fails on it.  The `*_reference_*` pair only; an `*_actual_*` key must
+# never be read.
 KEYS = dict(
     h100_usd_per_hour="cost.h100_reference_usd_per_hour",
     h200_usd_per_hour="cost.h200_reference_usd_per_hour",
-    # the attention term.  The drift guard checks these COEFFICIENTS, not a
-    # composite slope: a single cells-per-(head, key, token) number is a per-entry
-    # cost and a per-key cost collapsed together by the accident that the
-    # calibration point has S=512, and it is valid only at that S.
-    key_tile_fresh_coeffs="attention_grid.fresh_cell_coeffs",
+)
+
+# The keys a diagnostic reads and no priced row depends on.  Each one that the
+# constants file does not name yet prints `not recorded` where it would have been
+# read, and the table around it is printed without it.  Nothing here defaults and
+# nothing here falls back to zero.
+OPTIONAL = dict(
+    # the attention term's base coefficients, measured by `prefill-sweep-8b`.  The
+    # drift guard checks these COEFFICIENTS, not a composite slope: a single
+    # cells-per-(head, key, token) number is a per-entry cost and a per-key cost
+    # collapsed together by the accident that the calibration point has S=512, and
+    # it is valid only at that S.  There is no `fresh_cell_coeffs` beside them:
+    # with the five reductions on, most of the key tiles' interaction sits in the
+    # reduction rather than in their own columns, so solving for it over the
+    # measured points returns a negative per-token cost, and a negative number
+    # cannot be a cost.  The interaction side is checked instead by the family
+    # reproducing every recorded segment's committed cells exactly.
     key_tile_base_coeffs="attention_grid.base_cell_coeffs",
-    key_tile_alpha_fresh="attention_grid.alpha_fresh",
-    key_tile_alpha_base="attention_grid.alpha_base",
-    # the superseded single slopes, kept only so the table can show what they cost
+    # the superseded single slopes, read only so section (2a) can show what they cost
     alpha_e1="attention_grid.e1_composed_solve",
-    alpha_w0_32layers="attention_grid.composed_chunk_fresh_slope_32layers",
     alpha_b5="attention_grid.b5_standalone_alpha",
     # E11, re-priced by stream E7 on the key tile model
     e11_multiple="design.e11_cells_multiple_c4096",
     e11_chunking_net="design.e11_chunking_net_pct",
     e11_chunking_fixed="design.e11_chunking_overhead_pct",
     chunk_floor="attention_grid.chunk_model_fixed_composed",
-    prefill_remainder="design.prefill_chunk_remainder",
 )
 
 
 def load_constants():
     """`{alias: entry}`, each entry carrying the constants file's own value / unit /
-    grade / card, plus the key it came from and where it was read."""
+    grade / card, plus the key it came from and where it was read.
+
+    A required key that is not in the file is an error.  An optional one that is
+    not gets a `null` value and `recorded=False`, so the diagnostic that would
+    have read it prints `not recorded` instead of exiting."""
     out = {}
     for alias, key in KEYS.items():
         e = dict(constants.get(key))
-        e["origin"] = constants.path()
-        e["key"] = key
+        e.update(origin=constants.path(), key=key, recorded=True)
         out[alias] = e
+    for alias, key in OPTIONAL.items():
+        e = constants.find(key)
+        out[alias] = (dict(e, origin=constants.path(), key=key, recorded=True) if e
+                      else dict(value=None, grade="not recorded", origin=constants.path(),
+                                key=key, recorded=False))
     return out
 
 
@@ -104,8 +131,22 @@ def load_constants():
 # The card constants.  Not typed in: parsed out of the two sequence runs this
 # project has recorded at all three boundaries.  Each carries its card, its
 # context, its chunk count and its boundary, per the house rule.
-H200_SUMMARY = ROOT / "b10" / "out" / "seq5" / "n_summary_c{ctx}.json"
-H100_LOOP = ROOT / "b10" / "out" / "w" / "fin_pipe_c4096.json"
+H200_SUMMARY = art("b10", "out", "seq5", "n_summary_c{ctx}.json")
+H100_LOOP = art("b10", "out", "w", "fin_pipe_c4096.json")
+
+# What a reader is told when the two sequence runs are not there.  No constants
+# key holds either of them: zk-results records the H100 headline sequence, which
+# is the sound prompt+output statement on a different card, and this module's
+# calibration is against the decode-only statement these two runs prove.
+NO_SEQUENCE = (
+    "the measured sequence runs are not in the artifacts directory and no "
+    "constants key holds them:\n"
+    "  b10/out/seq5/n_summary_c{4096,16384}.json -- H200, 33 chunks, decode-only\n"
+    "  b10/out/w/fin_pipe_c4096.json             -- H100, 32 layer chunks, pipelined\n"
+    "zk-results' `cells.headline.*` / `rate.headline.*` are a DIFFERENT run: the\n"
+    "H100, the prompt+output statement, priced per proved position.  Reading them\n"
+    "here would change what the calibration checks, which is the campaign's own\n"
+    "decision.  Pass --artifacts DIR until it is taken.")
 
 SUMMED = re.compile(
     r"=== \(3\) the sequence summed, C=(?P<ctx>\d+) ===(?P<body>.*?)(?====|\Z)", re.S)
@@ -120,11 +161,13 @@ CHUNK = re.compile(r"^\s*(?P<chunk>\S+)\s+(?P<tbl>\d+)\s+(?P<acc>yes|no)\s+"
 def h200_card():
     """H200, seq5, 33 chunks (32 layers + head), S=512, defaults regime, empty
     family env.  `briefs/n-alldev.md` Record (5); artifacts in b10/out/seq5/."""
+    if H200_SUMMARY is None:
+        sys.exit(NO_SEQUENCE)
     cards = {}
     for ctx in (4096, 16384):
         p = pathlib.Path(str(H200_SUMMARY).format(ctx=ctx))
         if not p.exists():
-            sys.exit(f"missing {p}")
+            sys.exit(f"missing {p}\n{NO_SEQUENCE}")
         text = p.read_text()
         m = SUMMED.search(text)
         body = m.group("body")
@@ -150,8 +193,8 @@ def h200_card():
 def h100_card():
     """H100, stream W's final pipelined loop, 32 layer chunks (no head), C=4096.
     `briefs/w-genbuild.md` Record (5); artifact b10/out/w/fin_pipe_c4096.json."""
-    if not H100_LOOP.exists():
-        sys.exit(f"missing {H100_LOOP}")
+    if H100_LOOP is None or not H100_LOOP.exists():
+        sys.exit(NO_SEQUENCE)
     res = json.loads(H100_LOOP.read_text())["result"]
     ch, s = res["chunks"], res["summary"]
     fresh = sum(c["cells"]["fresh"] for c in ch)
@@ -364,24 +407,27 @@ def check_8b(h200, shape, consts, batch=None):
     so the model now predicts both measured levels with nothing solved: two points,
     zero fitted parameters, two residual degrees of freedom.
 
-    Also re-checks the coefficients themselves against the freeze, and against the
-    key tile family measured directly in the seq5 artifacts."""
+    Also re-checks the base coefficients themselves against the measured triple,
+    and the whole family against every recorded layer segment's own key tiles."""
     meas = measured_8b(h200)
     nh, hd = shape["nh"], shape["hd"]
     got_fresh = _coeffs(nh, hd)
-    got_base = _coeffs(nh, hd, base_only=True)
-    want_fresh = consts["key_tile_fresh_coeffs"]["value"]
+    got_base = _base_coeffs(nh, hd)
     want_base = consts["key_tile_base_coeffs"]["value"]
+
+    def legacy(alias):
+        a = consts[alias]["value"]
+        return (None if a is None else
+                {c: model_cells(shape, c, alpha=a, batch=batch)["total"] / meas[c] - 1
+                 for c in meas})
+
     out = dict(
         measured=meas,
         key_tile={c: model_cells(shape, c, batch=batch)["total"] / meas[c] - 1 for c in meas},
-        legacy_slope={c: model_cells(shape, c, alpha=consts["alpha_e1"]["value"],
-                                     batch=batch)["total"] / meas[c] - 1 for c in meas},
-        legacy_b5={c: model_cells(shape, c, alpha=consts["alpha_b5"]["value"],
-                                  batch=batch)["total"] / meas[c] - 1 for c in meas},
+        legacy_slope=legacy("alpha_e1"), legacy_b5=legacy("alpha_b5"),
         coeffs_fresh=got_fresh, coeffs_base=got_base,
-        frozen_fresh=want_fresh, frozen_base=want_base,
-        coeffs_agree=(got_fresh == tuple(want_fresh) and got_base == tuple(want_base)),
+        frozen_base=want_base,
+        coeffs_agree=(want_base is None or got_base == tuple(want_base)),
         family=_key_tile_family_check(nh, hd))
     return out
 
@@ -408,16 +454,57 @@ def _coeffs(nh, hd, base_only=False, s0=512, c0=4096):
     return tuple(round(x, 6) for x in (a, b, d))
 
 
+def _base_coeffs(nh, hd, s0=512, c0=4096):
+    """The base triple in the parametrisation `attention_grid.base_cell_coeffs`
+    names, so that the drift guard compares like with like.
+
+    The measured entry states the family's base cells as `a S (C + S) + b (C + S)
+    + d S`: the diagonal block is the same key tile at (S, S) with the per-token
+    component dropped, so it costs what a prefix of S more keys costs, and the
+    two S-shaped terms group into `C + S` rather than standing apart.  `_coeffs`
+    above differences the same function as a plain trilinear in (S, C) instead,
+    which folds `a S^2 + b S` into its S coefficient and so reports a different
+    third number at the point it differences.  Both describe the same family;
+    only this one is the triple the constant carries."""
+    def f(s, c):
+        b, i, _ = cm.key_tile_family(nh, hd, s, c)
+        return b
+    a = (f(2 * s0, 2 * c0) - f(2 * s0, c0) - f(s0, 2 * c0) + f(s0, c0)) / (s0 * c0)
+    b = (f(s0, 2 * c0) - f(s0, c0)) / c0 - a * s0
+    d = (f(s0, c0) - a * s0 * (c0 + s0) - b * (c0 + s0)) / s0
+    return tuple(round(x, 6) for x in (a, b, d))
+
+
 def _key_tile_family_check(nh, hd):
-    """`family_cells.key_tiles` is base-only; predict it on every seq5 layer chunk and
-    on B9's two prefill points, and report exact-or-not.  Nothing is fitted, so a
-    miss here is a real disagreement, not a residual."""
+    """`family_cells.key_tiles` is base-only; predict it on every recorded layer
+    segment and on B9's two prefill points, and report exact-or-not.  Nothing is
+    fitted, so a miss here is a real disagreement, not a residual.
+
+    The recorded segments are `key_tile_segments.json`, the file
+    `key_tile --selftest` checks and the one this repository carries so the check
+    runs with no artifacts directory: every 8B layer segment of the two recorded
+    sequences, at both contexts and with the five reductions on and off.  An
+    artifacts directory adds the seq5 layer chunks and B9's prefill points on top,
+    and a run output that does not carry the family count under this name -- an
+    older vocabulary -- is skipped rather than read as a zero."""
     rows = []
-    for f in sorted((ROOT / "b10" / "out" / "seq5").glob("seq_c*_L*.json")):
+    for pt in key_tile.segments():
+        if pt["nh"] != nh or pt["hd"] != hd:
+            continue
+        b, _ = key_tile.evaluate(pt)
+        name = f"{pt['run']}/{pt['output']}"
+        if pt.get("segment"):
+            name += f":{pt['segment']}"
+        rows.append((name, pt["s"], pt["c"], pt["key_tiles"], b))
+    seq5 = art("b10", "out", "seq5")
+    chunks = sorted(seq5.glob("seq_c*_L*.json")) if seq5 and seq5.is_dir() else []
+    for f in chunks:
         try:
             d = json.loads(f.read_text())["result"]["point"]
         except (ValueError, KeyError):
             continue
+        if "key_tiles" not in d.get("family_cells", {}):
+            continue      # an older vocabulary; not this quantity under this name
         pr = d["params"]
         if pr["nh"] != nh or pr["hd"] != hd:
             continue
@@ -430,10 +517,12 @@ def _key_tile_family_check(nh, hd):
                                  bind=pr.get("rope") is not None)
         rows.append((f.name, pr["s"], pr["c"], d["family_cells"]["key_tiles"], b))
     for s in (512, 1024):
-        f = ROOT / "b9" / "out" / f"prefill_s{s}.json"
-        if not (f.exists() and f.stat().st_size):
+        f = art("b9", "out", f"prefill_s{s}.json")
+        if not (f and f.exists() and f.stat().st_size):
             continue
         d = json.loads(f.read_text())["result"]["point"]
+        if "key_tiles" not in d.get("family_cells", {}):
+            continue
         pr = d.get("params") or {}
         b, _, _ = cm.key_tile_family(nh, hd, s, s,
                                  diagonal_block=bool(pr.get("diagonal_block")),
@@ -454,10 +543,13 @@ def prefill_fit():
     that rides on it carries this caveat."""
     pts = []
     for s in (512, 1024, 2048):
-        p = ROOT / "b9" / "out" / f"prefill_s{s}.json"
-        if p.exists() and p.stat().st_size:
+        p = art("b9", "out", f"prefill_s{s}.json")
+        if p and p.exists() and p.stat().st_size:
             d = json.loads(p.read_text())["result"]["point"]
-            pts.append(dict(s=s, fresh=d["cells"]["fresh"], key_tiles=d["family_cells"]["key_tiles"]))
+            if "key_tiles" not in d.get("family_cells", {}):
+                continue      # an older vocabulary; not this quantity under this name
+            pts.append(dict(s=s, fresh=d["cells"]["fresh"],
+                            key_tiles=d["family_cells"]["key_tiles"]))
     if len(pts) < 2:
         return None
     a, b = pts[-2], pts[-1]
@@ -467,7 +559,7 @@ def prefill_fit():
     return dict(fixed=f, per_token=q, per_pair=p, points=[x["s"] for x in pts],
                 missing=[s for s in (512, 1024, 2048)
                          if s not in [x["s"] for x in pts]],
-                source=rel(ROOT / "b9" / "out" / "prefill_s*.json"))
+                source=rel(art("b9", "out", "prefill_s*.json")))
 
 
 def e11_factor(fit, n_positions, n_output, s_chunk, layers=32):
@@ -506,7 +598,7 @@ def e11_factor(fit, n_positions, n_output, s_chunk, layers=32):
 # 25), so a two-point solve separates every term that scales with the tallest
 # column from every term that does not, and the coefficients fall out of the two
 # committed artifacts.
-GG_DIR = ROOT / "b12" / "livemem" / "out" / "h100"
+GG_DIR = art("b12", "livemem", "out", "h100")
 GG_RUNS = ("r1_L16_defaults.json", "r3_L0_defaults.json")
 
 
@@ -544,7 +636,7 @@ def memory_coeffs():
     columns of the tallest height it carries and the remainder is its fixed part.
     That is the whole solve; the only judgement in it is which fixed parts are
     held constant when the shape changes, and section (7b) prints that."""
-    if not all((GG_DIR / f).exists() for f in GG_RUNS):
+    if not (GG_DIR and all((GG_DIR / f).exists() for f in GG_RUNS)):
         return None
     a, b = (gg_point(GG_DIR / f) for f in GG_RUNS)
     if a["h"] == b["h"]:
@@ -692,7 +784,7 @@ def freivalds_height(mc, shape, grp):
 # A1/A3 reproduce GG's R1/R3 peaks to the byte, so the same two-point solve that
 # gives (7b) its coefficients gives this one its residency model.  Nothing below
 # is typed in either.
-HH_DIR = ROOT / "b12" / "ldeonly" / "out" / "h100"
+HH_DIR = art("b12", "ldeonly", "out", "h100")
 HH_ON = ("a2_L16_on.json", "a4_L0_on.json")
 HH_OFF = ("a1_L16_off.json", "a3_L0_off.json")
 HH_LOOP = ("p1_pipe_off_c4096.json", "p2_pipe_on_c4096.json")
@@ -787,7 +879,7 @@ def ldeonly_coeffs(mc):
     checks it is `held_out`: the coefficients of the h=23 run's mark deltas,
     replayed against the h=25 run's own cells, must reproduce all six of ITS
     level marks and its peak, and no level mark is in the solve."""
-    if not all((HH_DIR / f).exists() for f in HH_ON + HH_OFF + HH_LOOP):
+    if not (HH_DIR and all((HH_DIR / f).exists() for f in HH_ON + HH_OFF + HH_LOOP)):
         return None
     a, b = (hh_point(HH_DIR / f) for f in HH_ON)
     off = [hh_point(HH_DIR / f) for f in HH_OFF]
@@ -1008,6 +1100,51 @@ def moe_ratio(shape, ctx, alpha, seq=TOKENS, seq_batch=1, ref_batch=1, batch=Non
                 / (b["total"] + b["preprocessed"]))
 
 
+def _e11_section(priced, h100, usd, mult, net, fixed):
+    """Section (6)'s tables, printed only where all three constants are recorded.
+    Nothing a priced row's cards-at-target or dollars-per-token depends on is
+    computed here: what this adds to a row is the row's own `e11` block."""
+    print("\n  the cells multiple at C=4096, against seq5's measured decode sequence:")
+    print(f"    prompt alone         x{mult[0]:.2f}")
+    print(f"    prompt + output      x{mult[1]:.2f}       (`{OPTIONAL['e11_multiple']}`)")
+    print("    at C=16384 the same model gives x17.55 / x18.55")
+    print("  The superseded ~x4.5-5.5 priced each prompt chunk as its own S=C=1024 SQUARE.")
+    print("  That is not a proof of the sequence: the fourth chunk must attend over all")
+    print("  4,096 keys, not its own 1,024.  Under the key tile model the square reading is")
+    print("  x4.56 / x5.56, so the correction is +14% on the prompt multiple -- and a head")
+    print("  chunk per 512 prompt positions is counted in NEITHER (at 4K it would add")
+    print("  ~8 x the measured lm_head chunk).")
+    print("\n  the chunking cost, which is now three terms and not one:")
+    print(f"    {'the shared-table floor paid n times':<44} {fixed[1]:>+6.1f}% (4K) "
+          f"{fixed[0]:>+6.1f}% (16K)")
+    print(f"    {'the prefix K/V re-committed by every later chunk':<44} {1.9:>+6.1f}%      "
+          f"{5.2:>+6.1f}%")
+    print(f"    {'the unconstrained half of the block a one-shot pays':<44} "
+          f"{-11.2:>+6.1f}%      {-30.0:>+6.1f}%")
+    print(f"    {'NET':<44} {net[0]:>+6.1f}%      {net[1]:>+6.1f}%")
+    print("  At C=16384 chunking is CHEAPER outright -- the causal saving beats the floor")
+    print("  and the re-commitment together.  The old section reported only the first row")
+    print("  (+13.7% / +11.6%) and called it the overhead.")
+    fac = mult[1]
+    print(f"\n  the table at x{fac:.2f} (prompt+output, C=4096, S=1024 chunking):")
+    print(f"  {'model':<18} {'cells/token':>12} {'H100 tok/s':>11} {'$/Mtok':>10}"
+          f"   (H100 loop_secs, ${usd['H100']}/GPU-h)")
+    for r in priced:
+        e = r["contexts"][4096]
+        c = e["cells_per_token"] * fac
+        h = h100["per_ctx"][4096]["boundaries"]["loop_secs"]["cells_s"] / c
+        d = usd_per_mtok(h, usd["H100"])
+        r["e11"] = dict(cells_per_token=c, tok_s_h100=h, usd_per_mtok=d)
+        print(f"  {r['name']:<18} {g(c):>12} {h:>11.4f} "
+              + (f"{d:>10,.0f}" if d else f"{'n/a':>10}"))
+    print("  The multiple is transported from the 8B shape, not recomputed per row: E7's")
+    print("  chunk model carries a remainder fitted on B9's two SYNTHETIC S=C points,")
+    print("  which is the only fitted part left and the only place its uncertainty lives.")
+    print("  Per shape the multiple would move with nh/L and with hd (the re-commitment")
+    print("  term is the key tile family's C term, and that one this module can now")
+    print("  evaluate at any shape -- but the remainder cannot).")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--seq", type=int, default=TOKENS,
@@ -1030,9 +1167,27 @@ def main(argv=None):
     constants.load(args.constants)
 
     consts = load_constants()
+    # Rule 1 of this module: a number this table stands on never defaults and
+    # never falls back to zero.  A cell cost with no key and no file is a term
+    # `cells_per_token` would multiply by a count and charge nothing for, so the
+    # table is not printed at all.
+    unpriced = [n for n, e in cm.PROVENANCE.items()
+                if e["source"] == "absent" and e.get("charged", True)]
+    if unpriced:
+        sys.exit("these cell costs have no source, and the model charges no term it "
+                 "cannot price:\n"
+                 + "\n".join(f"  {n:<40} {cm.PROVENANCE[n]['key'] or 'no key names it yet'}"
+                             f"  ({cm.PROVENANCE[n]['file'] or 'no file'})"
+                             for n in unpriced)
+                 + "\nRecord a key for it in zk-results, or pass --inputs DIR.")
     batch = args.logup_batch if args.logup_batch is not None else cm.BATCH
     if batch not in cm.LOGUP_MARGINAL:
-        sys.exit(f"--logup-batch {batch} not measured; have {sorted(cm.LOGUP_MARGINAL)}")
+        sys.exit(f"the LogUp marginal at batch {batch} is not there, so no cell count can "
+                 f"be charged for a lookup.\n"
+                 f"  measured batches: {sorted(cm.LOGUP_MARGINAL) or 'none'}\n"
+                 f"  the key that would back it: "
+                 f"model_constants.logup_marginal_cells_per_lookup (zk-prover #140)\n"
+                 f"  the file that holds it today: logup.json under --inputs DIR")
     usd = {"H100": consts["h100_usd_per_hour"]["value"],
            "H200": consts["h200_usd_per_hour"]["value"]}
     h200, h100 = h200_card(), h100_card()
@@ -1040,13 +1195,14 @@ def main(argv=None):
     llama8b = next(s for s in SHAPES if s["name"] == "Llama-3.1-8B")
     cal = check_8b(h200, llama8b, consts, batch=batch)
     # The drift guard, now on the coefficients rather than on a composite slope.
-    # This module derives them symbolically and the freeze carries stream DD's;
+    # This module derives them symbolically and `prefill-sweep-8b` measured them;
     # they must agree exactly at the 8B geometry, because both claim to be
     # identities of the same layout rather than fits.
-    if consts["key_tile_fresh_coeffs"]["value"] and not cal["coeffs_agree"]:
-        sys.exit(f"key tile coefficients disagree with the freeze:\n"
-                 f"  fresh  derived {cal['coeffs_fresh']}  frozen {cal['frozen_fresh']}\n"
-                 f"  base   derived {cal['coeffs_base']}  frozen {cal['frozen_base']}\n"
+    if not cal["coeffs_agree"]:
+        sys.exit(f"the key tile base coefficients disagree with the measurement:\n"
+                 f"  derived  {cal['coeffs_base']}\n"
+                 f"  measured {tuple(cal['frozen_base'])}  "
+                 f"({OPTIONAL['key_tile_base_coeffs']})\n"
                  "Both claim to be layout identities, so one of them is wrong; "
                  "resolve it, do not average.")
     bad = [r for r in cal["family"] if r[3] != r[4]]
@@ -1066,11 +1222,27 @@ def main(argv=None):
     print("\nthe constants this table stands on (nothing below is typed in twice)")
     src = constants.path()
     print(f"  W0's freeze: {src}")
-    for k, v in consts.items():
+    for v in consts.values():
         print(f"    {v['key']:<52} {str(v['value']):>8}  [{v['grade']}]")
+    print("\n  the cell costs the model charges, and where each one came from")
+    print(f"    {'input':<40} {'value':>14}  source")
+    for name, e in cm.PROVENANCE.items():
+        where = (e["key"] if e["source"] == "constants"
+                 else f"{e['source']}: {e['file'] or 'no file and no key'}")
+        print(f"    {name:<40} {str(e['value']):>14}  {where}")
+    backed = [n for n, e in cm.PROVENANCE.items() if e["source"] == "constants"]
+    analogy = [n for n, e in cm.PROVENANCE.items() if e["source"] == "analogy"]
+    rest = [n for n, e in cm.PROVENANCE.items()
+            if e["source"] not in ("constants", "analogy")]
+    print(f"    {len(backed)} of {len(cm.PROVENANCE)} are backed by a key in the constants "
+          f"file.  {len(analogy)} are priced by analogy and")
+    print("    nothing measures them anywhere.  These still come out of the inputs "
+          "directory:")
+    print("      " + ", ".join(rest))
     for alias in ("h100_usd_per_hour", "h200_usd_per_hour"):
         e = consts[alias]
-        print(f"    {e['card']} ${e['value']}/GPU-h  [{e['grade']}]  {e['source']}")
+        print(f"    {e['card']} ${e['value']}/GPU-h  [{e['grade']}]  "
+              f"{e.get('source') or e.get('note', '')}")
     print("  Both rates are published list prices from ONE provider, ONE tier and ONE page")
     print("  date, so the H100/H200 ratio is not a cross-provider artifact.  Secure Cloud")
     print("  is deliberate: Community Cloud is cheaper ($2.69 / $3.59) and using the higher")
@@ -1110,37 +1282,48 @@ def main(argv=None):
     print("  a closed form in (S, C) whose every coefficient is an identity of the layout,")
     print("  so both measured levels are now predicted with nothing solved: two points,")
     print("  zero fitted parameters, TWO residual degrees of freedom.")
+
+    def legacy_col(which, ctx, width):
+        v = cal[which]
+        return f"{v[ctx]:>+{width}.2%}" if v else f"{'not recorded':>{width + 1}}"
+
     print(f"\n  {'context':>8} {'measured M/token':>18} {'key tile model':>12} {'residual':>10}"
-          f"   {'slope 5.855':>12} {'B5 4.00':>10}")
+          f"   {'single slope':>12} {'B5 alpha':>12}")
     for ctx in sorted(cal["measured"]):
         m = cal["measured"][ctx]
         print(f"  {ctx:>8} {m/1e6:>18.2f} {m*(1+cal['key_tile'][ctx])/1e6:>12.2f} "
-              f"{cal['key_tile'][ctx]:>+9.2%}   {cal['legacy_slope'][ctx]:>+11.2%} "
-              f"{cal['legacy_b5'][ctx]:>+9.2%}")
+              f"{cal['key_tile'][ctx]:>+9.2%}   {legacy_col('legacy_slope', ctx, 11)} "
+              f"{legacy_col('legacy_b5', ctx, 11)}")
     print(f"  key tile model residual {min(cal['key_tile'].values()):+.2%} to "
           f"{max(cal['key_tile'].values()):+.2%}, on no fitted attention parameter at all.")
-    print("  The two superseded columns are the same model with the key tile term replaced by")
-    print("  a single slope: 5.855 was solved to hit these two points, and 4.00 is B5's")
-    print("  standalone block AIR, which is what everything before 2026-09-01 charged.")
+    print("  The two superseded columns are the same model with the key tile term replaced")
+    print("  by a single slope, each read from the key named beside it; where the constants")
+    print("  file does not name one the column says so.")
 
-    print("\n  the coefficients, derived here and frozen by stream DD -- they must agree")
-    print("  exactly, because both claim to be identities of the same layout:")
+    print("\n  the coefficients, derived here and measured by `prefill-sweep-8b` -- they")
+    print("  must agree exactly, because both claim to be identities of the same layout:")
     print(f"  {'':<10} {'S*C':>10} {'C':>12} {'S':>12}")
-    print(f"  {'fresh':<10} {cal['coeffs_fresh'][0]:>10} {cal['coeffs_fresh'][1]:>12} "
-          f"{cal['coeffs_fresh'][2]:>12}   derived symbolically here")
-    print(f"  {'':<10} {cal['frozen_fresh'][0]:>10} {cal['frozen_fresh'][1]:>12} "
-          f"{cal['frozen_fresh'][2]:>12}   attention_grid.fresh_cell_coeffs")
     print(f"  {'base':<10} {cal['coeffs_base'][0]:>10} {cal['coeffs_base'][1]:>12} "
           f"{cal['coeffs_base'][2]:>12}   derived symbolically here")
-    print(f"  {'':<10} {cal['frozen_base'][0]:>10} {cal['frozen_base'][1]:>12} "
-          f"{cal['frozen_base'][2]:>12}   attention_grid.base_cell_coeffs")
+    if cal["frozen_base"]:
+        print(f"  {'':<10} {cal['frozen_base'][0]:>10} {cal['frozen_base'][1]:>12} "
+              f"{cal['frozen_base'][2]:>12}   {OPTIONAL['key_tile_base_coeffs']}")
+    else:
+        print(f"  {'':<10} {'not recorded':>36}   {OPTIONAL['key_tile_base_coeffs']}")
+    print(f"  {'fresh':<10} {cal['coeffs_fresh'][0]:>10} {cal['coeffs_fresh'][1]:>12} "
+          f"{cal['coeffs_fresh'][2]:>12}   derived symbolically here, as a plain trilinear")
+    print("  There is no measured fresh triple to check it against, and there will not be")
+    print("  one at this configuration: with the five reductions on, most of the key tiles'")
+    print("  interaction sits in the reduction rather than in their own columns, so solving")
+    print("  for it over the measured points returns a negative per-token cost.  What checks")
+    print("  the interaction side instead is the family below, to the cell.")
     n_exact = sum(1 for r in cal["family"] if r[3] == r[4])
     print(f"  and `family_cells.key_tiles` reproduced EXACTLY, to the cell, on "
-          f"{n_exact}/{len(cal['family'])} artifacts")
-    print("  (every seq5 layer chunk at C=4096 and C=16384 on the real extracted")
-    print("  witness, plus B9's two S=C prefill points).  Nothing is fitted, so a miss")
-    print("  would be a")
-    print("  disagreement, not a residual, and `frontier.py` exits on one.")
+          f"{n_exact}/{len(cal['family'])} recorded points")
+    print("  (`key_tile_segments.json`: every 8B layer segment of the two recorded")
+    print("  sequences, at both contexts and with the five reductions on and off, plus")
+    print("  whatever the artifacts directory adds).  Nothing is fitted, so a miss would")
+    print("  be a disagreement, not a residual, and this module exits on one.")
 
     # --- the general form ----------------------------------------------------
     print("\n  the closed form, general in (nh, hd, S, C).  DD froze the coefficients at")
@@ -1150,8 +1333,8 @@ def main(argv=None):
     print("      inter = (2 + 24/gt)*nh*S*C  +  (4*nh*hd + 12*nh*hd/ct)*C")
     print("              +  2*nh*hd*S  +  (8*nh + 8*nh/rw)*S")
     print("  with gt = grid_target (64), ct = chan_target (128), rw = row width (16).")
-    print(f"  At nh=32, hd=128 that is exactly {cal['frozen_fresh']} fresh and "
-          f"{cal['frozen_base']} base.")
+    print(f"  At nh=32, hd=128 the derived triples are {cal['coeffs_fresh']} fresh and "
+          f"{cal['coeffs_base']} base.")
     print("  Read off `prover/src/attn_trace.rs:1167-1181` with `prover/src/layout.rs`:")
     print("    lc.g.rows = hd*insts*C/pk (pk -> ct), lk.g.rows = C*insts*S/q (q -> gt),")
     print("    rrows*rw = nh*S, and `insts` sums to nh over the key tiles -- every term is")
@@ -1239,14 +1422,26 @@ def main(argv=None):
     print("  where MoE's x E lands hardest -- see (4).")
 
     print("\n(2a) what the superseded attention terms cost.  Section 6.3's dense table")
-    print("     was produced at B5's 4.00; the version this stream committed at 3ec240c")
-    print("     used the single composed slope 5.855.  Both are here against the key tile model.")
+    print("     was produced at B5's standalone block AIR; the version this work item")
+    print("     committed at 3ec240c used a single composed slope solved to hit the two")
+    print("     measured points.  Both are here against the key tile model.")
     b5 = consts["alpha_b5"]["value"]
     slope = consts["alpha_e1"]["value"]
-    print(f"  {'model':<18} {'@4.00':>10} {'@5.855':>10} {'key_tile':>10} {'key tile vs 4.00':>13}"
-          f" {'key tile vs 5.855':>14}   {'C=16K: vs 4.00':>15} {'vs 5.855':>10}")
     grid_delta = {}
-    for shape in SHAPES:
+    superseded = b5 is not None and slope is not None
+    if superseded:
+        print(f"  {'model':<18} {'@B5':>10} {'@slope':>10} {'key_tile':>10} "
+              f"{'key tile vs B5':>13} {'key tile vs slope':>14}   "
+              f"{'C=16K: vs B5':>15} {'vs slope':>10}")
+    else:
+        for alias in ("alpha_b5", "alpha_e1"):
+            e = consts[alias]
+            print(f"  {e['key']:<52} "
+                  + ("not recorded" if not e["recorded"] else str(e["value"])))
+        print("  What a superseded slope cost is exactly those two numbers and there is")
+        print("  nothing to substitute for one, so the table is not printed.  No priced")
+        print("  row depends on them.")
+    for shape in (SHAPES if superseded else []):
         row = {}
         for ctx in (4096, 16384):
             kw = dict(seq=args.seq, seq_batch=args.seq_batch, batch=batch)
@@ -1261,20 +1456,23 @@ def main(argv=None):
         print(f"  {shape['name']:<18} {g(a['b5']):>10} {g(a['slope']):>10} {g(a['key_tile']):>10}"
               f" {a['d_b5']:>+12.1%} {a['d_slope']:>+13.1%}   {b['d_b5']:>+14.1%}"
               f" {b['d_slope']:>+9.1%}")
-    d5 = [v["4096"]["d_b5"] for v in grid_delta.values()]
-    d5c = [v["16384"]["d_b5"] for v in grid_delta.values()]
-    ds = [v["4096"]["d_slope"] for v in grid_delta.values()]
-    dsc = [v["16384"]["d_slope"] for v in grid_delta.values()]
-    print(f"  Against B5's 4.00 the key tile model is {min(d5):+.1%} to {max(d5):+.1%} at C=4K")
-    print(f"  and {min(d5c):+.1%} to {max(d5c):+.1%} at C=16K -- that is the error in")
-    print("  section 6.3's table, and it grows with the context because the term that was")
-    print("  wrong is the one on the context.")
-    print(f"  Against the single slope 5.855 it is {min(ds):+.1%} to {max(ds):+.1%} (4K) and")
-    print(f"  {min(dsc):+.1%} to {max(dsc):+.1%} (16K) -- a spread of {max(ds)-min(ds):.1%} "
-          f"(4K) / {max(dsc)-min(dsc):.1%} (16K)")
-    print("  across the eight shapes.  So the aliasing is BENIGN at this table's settings,")
-    print("  and it is worth being precise about why, because the reason is not that a")
-    print("  composite slope is safe.  Write the composite out:")
+    if grid_delta:
+        d5 = [v["4096"]["d_b5"] for v in grid_delta.values()]
+        d5c = [v["16384"]["d_b5"] for v in grid_delta.values()]
+        ds = [v["4096"]["d_slope"] for v in grid_delta.values()]
+        dsc = [v["16384"]["d_slope"] for v in grid_delta.values()]
+        print(f"  Against B5's {b5} the key tile model is {min(d5):+.1%} to {max(d5):+.1%} "
+              "at C=4K")
+        print(f"  and {min(d5c):+.1%} to {max(d5c):+.1%} at C=16K -- that is the error in")
+        print("  section 6.3's table, and it grows with the context because the term that")
+        print("  was wrong is the one on the context.")
+        print(f"  Against the single slope {slope} it is {min(ds):+.1%} to {max(ds):+.1%} "
+              f"(4K) and")
+        print(f"  {min(dsc):+.1%} to {max(dsc):+.1%} (16K) -- a spread of "
+              f"{max(ds)-min(ds):.1%} (4K) / {max(dsc)-min(dsc):.1%} (16K)")
+        print("  across the eight shapes.  So the aliasing is BENIGN at this table's")
+        print("  settings, and it is worth being precise about why, because the reason is")
+        print("  not that a composite slope is safe.  Write the composite out:")
     print("")
     gt, ct = cm.GRID_TARGET, cm.CHAN_TARGET
     print("      alpha_composite(hd, S) = (4 + 24/gt)  +  hd*(6 + 12/ct)/S")
@@ -1412,62 +1610,37 @@ def main(argv=None):
     print("  key tile family's linear term into its quadratic one.  A model in S alone also")
     print("  cannot express the term that turns out to matter most: a chunked prompt")
     print("  re-commits the growing K/V prefix, which is a function of C, not S.")
-    e11 = {}
+    e11 = None
     mult = consts["e11_multiple"]["value"]
     net = consts["e11_chunking_net"]["value"]
     fixed = consts["e11_chunking_fixed"]["value"]
-    print("\n  the cells multiple at C=4096, against seq5's measured decode sequence:")
-    print(f"    prompt alone         x{mult[0]:.2f}")
-    print(f"    prompt + output      x{mult[1]:.2f}       (`design.e11_cells_multiple_c4096`)")
-    print("    at C=16384 the same model gives x17.55 / x18.55")
-    print("  The superseded ~x4.5-5.5 priced each prompt chunk as its own S=C=1024 SQUARE.")
-    print("  That is not a proof of the sequence: the fourth chunk must attend over all")
-    print("  4,096 keys, not its own 1,024.  Under the key tile model the square reading is")
-    print("  x4.56 / x5.56, so the correction is +14% on the prompt multiple -- and a head")
-    print("  chunk per 512 prompt positions is counted in NEITHER (at 4K it would add")
-    print("  ~8 x the measured lm_head chunk).")
-    print("\n  the chunking cost, which is now three terms and not one:")
-    print(f"    {'the shared-table floor paid n times':<44} {fixed[1]:>+6.1f}% (4K) "
-          f"{fixed[0]:>+6.1f}% (16K)")
-    print(f"    {'the prefix K/V re-committed by every later chunk':<44} {1.9:>+6.1f}%      "
-          f"{5.2:>+6.1f}%")
-    print(f"    {'the inert half of the rectangle a one-shot pays':<44} {-11.2:>+6.1f}%      "
-          f"{-30.0:>+6.1f}%")
-    print(f"    {'NET':<44} {net[0]:>+6.1f}%      {net[1]:>+6.1f}%")
-    print("  At C=16384 chunking is CHEAPER outright -- the causal saving beats the floor")
-    print("  and the re-commitment together.  The old section reported only the first row")
-    print("  (+13.7% / +11.6%) and called it the overhead.")
-    e11 = dict(multiple_prompt=mult[0], multiple_prompt_output=mult[1],
-               chunking_net_4k=net[0], chunking_net_16k=net[1],
-               chunking_fixed=fixed)
-    fac = mult[1]
-    print(f"\n  the table at x{fac:.2f} (prompt+output, C=4096, S=1024 chunking):")
-    print(f"  {'model':<18} {'cells/token':>12} {'H100 tok/s':>11} {'$/Mtok':>10}"
-          f"   (H100 loop_secs, ${usd['H100']}/GPU-h)")
-    for r in priced:
-        e = r["contexts"][4096]
-        c = e["cells_per_token"] * fac
-        h = h100["per_ctx"][4096]["boundaries"]["loop_secs"]["cells_s"] / c
-        d = usd_per_mtok(h, usd["H100"])
-        r["e11"] = dict(cells_per_token=c, tok_s_h100=h, usd_per_mtok=d)
-        print(f"  {r['name']:<18} {g(c):>12} {h:>11.4f} "
-              + (f"{d:>10,.0f}" if d else f"{'n/a':>10}"))
-    print("  The multiple is transported from the 8B shape, not recomputed per row: E7's")
-    print("  chunk model carries a `design.prefill_chunk_remainder` fitted on B9's two")
-    print("  SYNTHETIC S=C points, which is the only fitted part left and the only place")
-    print("  its uncertainty lives.  Per shape the multiple would move with nh/L and with")
-    print("  hd (the re-commitment term is the key tile family's C term, and that one this")
-    print("  module can now evaluate at any shape -- but the remainder cannot).")
+    if mult is None or net is None or fixed is None:
+        print("\n  not recorded.  This section is three numbers and the table that rides on")
+        print("  them, and the constants file names none of the three:")
+        for alias in ("e11_multiple", "e11_chunking_net", "e11_chunking_fixed"):
+            e = consts[alias]
+            print(f"    {e['key']:<44} "
+                  + ("not recorded" if not e["recorded"] else str(e["value"])))
+        print("  No priced row depends on them: section (3)'s rows carry no E11 block and")
+        print("  their cards-at-target and dollars-per-token columns are unchanged.")
+    else:
+        _e11_section(priced, h100, usd, mult, net, fixed)
+        e11 = dict(multiple_prompt=mult[0], multiple_prompt_output=mult[1],
+                   chunking_net_4k=net[0], chunking_net_16k=net[1],
+                   chunking_fixed=fixed)
     floor = consts["chunk_floor"]["value"]
     if floor:
         print(f"\n  the shared-table floor of our own composed layer chunk: "
               f"{g(floor)}fresh cells/layer,")
         print("  solved at C=4096 and held out at C=16384 to -0.63% "
-              "(`attention_grid.chunk_model_fixed_composed`).")
+              f"(`{OPTIONAL['chunk_floor']}`).")
         print("  It is +14.1% over B9's synthetic-probe floor, which under-predicts our own")
         print("  chunk by 7.15% -- so a one-position eval item costs "
               f"{g(floor * 32)}cells at 8B before")
         print("  it proves anything, which is what makes short multiple-choice proofs dear.")
+    else:
+        print(f"\n  the composed layer chunk's shared-table floor: not recorded "
+              f"(`{OPTIONAL['chunk_floor']}`).")
 
     # --- the memory wall -----------------------------------------------------
     ref = h200["per_ctx"][4096]
@@ -1941,11 +2114,24 @@ def main(argv=None):
 
     OUT.mkdir(exist_ok=True)
     doc = dict(
-        constants=consts, cards={k: v for k, v in cards.items()},
+        constants=consts,
+        # Where every input came from, so a reader of this file can tell a
+        # number that a run in zk-results backs from one that only a directory
+        # outside any repository has.
+        provenance=dict(
+            constants_file=constants.path(),
+            cost_model={k: dict(v) for k, v in cm.PROVENANCE.items()},
+            required_keys=dict(KEYS), optional_keys=dict(OPTIONAL),
+            not_recorded=[v["key"] for v in consts.values() if not v.get("recorded", True)],
+            sequence={f"{name}.c{ctx}": dict(card=card["card"], source=ref["source"],
+                                             context=ctx, key=None)
+                      for name, card in cards.items()
+                      for ctx, ref in sorted(card["per_ctx"].items())}),
+        cards={k: v for k, v in cards.items()},
         calibration=cal, alpha=alpha, seq=args.seq, seq_batch=args.seq_batch,
         prefill_fit=fit,
         key_tile_coeffs=dict(fresh=cal["coeffs_fresh"], base=cal["coeffs_base"],
-                         frozen_fresh=cal["frozen_fresh"], frozen_base=cal["frozen_base"]),
+                             measured_base=cal["frozen_base"]),
         shapes=[dict(name=s["name"], tag=s["tag"], source=s["source"],
                      groups=s["groups"], d=s["d"], nh=s["nh"], nkv=s["nkv"],
                      hd=s["hd"], vocab=s["vocab"],

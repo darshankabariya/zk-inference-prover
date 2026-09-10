@@ -55,7 +55,10 @@ calibration under that name.
 
 Scripts that read measured numbers take `--constants PATH` (a zk-results
 `constants.json`) and `--artifacts DIR` or `--inputs DIR` for run outputs.
-Nothing measured lives in this repository. `witness/text.txt` is the fixed
+Nothing measured lives in this repository. The cost model reads each of its
+cell costs from the constants file where a key names it and from `--inputs DIR`
+where none does yet, records which of the two under `provenance` in what it
+writes, and prices no term that neither has rather than charging it zero. `witness/text.txt` is the fixed
 evaluation corpus (Pride and Prejudice, Project Gutenberg #1342).
 
 ## What the extractor refuses

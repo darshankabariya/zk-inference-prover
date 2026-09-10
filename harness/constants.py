@@ -15,6 +15,7 @@ _DOC = None
 
 
 def _resolve(path):
+    """The path an argument or the environment names, or None if neither does."""
     if path:
         return path
     argv = sys.argv[1:]
@@ -23,18 +24,19 @@ def _resolve(path):
     for a in argv:
         if a.startswith("--constants="):
             return a.split("=", 1)[1]
-    if os.environ.get(ENV):
-        return os.environ[ENV]
-    raise SystemExit("constants.json needed: pass --constants PATH (a zk-results checkout's "
-                     f"constants.json) or set {ENV}")
+    return os.environ.get(ENV) or None
 
 
 def load(path=None):
     """Read the file once; later calls to `get`/`value` use it."""
     global _PATH, _DOC
-    _PATH = _resolve(path)
-    with open(_PATH) as f:
+    p = _resolve(path)
+    if p is None:
+        raise SystemExit("constants.json needed: pass --constants PATH (a zk-results "
+                         f"checkout's constants.json) or set {ENV}")
+    with open(p) as f:
         _DOC = json.load(f)
+    _PATH = p
     return _DOC
 
 
@@ -62,6 +64,17 @@ def value(key):
     if e["value"] is None:
         raise ValueError(f"{key!r} has no value: {e.get('note', '')}")
     return e["value"]
+
+
+def find(key):
+    """The entry for `key`, or None when nothing names a constants file, the file
+    does not hold the key, or the key's value is null.  For a reader that has a
+    second source for the quantity and records which one it read; a reader with
+    no second source calls `get` and fails loudly."""
+    if _DOC is None and _resolve(None) is None:
+        return None
+    e = doc()["constants"].get(key)
+    return e if e is not None and e.get("value") is not None else None
 
 
 def keys(prefix=""):
