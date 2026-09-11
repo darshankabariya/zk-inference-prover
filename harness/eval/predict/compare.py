@@ -46,7 +46,10 @@ SHAPES = {"qwen2p5_14b": "Qwen2.5-14B-Instruct",
           # zk-results #93's shape, registered on its own and not by an E4 run.
           # What it is measured against is a synthetic layer segment at this
           # width, which is the shape and not the model.
-          "llama3p1_70b": "Llama-3.1-70B"}
+          "llama3p1_70b": "Llama-3.1-70B",
+          # E4's third scale as it is actually measured: Qwen2.5-14B cannot be
+          # proved (#172, #174) and this is the bias-free model of that class.
+          "codellama_13b": "CodeLlama-13b-hf"}
 
 # The document a shape is read out of.  E4's three are registered together in
 # `REG`; a shape registered on its own is written beside it, under the name
@@ -55,7 +58,9 @@ SHAPES = {"qwen2p5_14b": "Qwen2.5-14B-Instruct",
 # rather than imported: importing `predict` reads the cost model's inputs
 # directory at import, and this script prices nothing and needs none of it.
 REGISTRATION = {"llama3p1_70b": os.path.join(HERE, "out",
-                                             "registration-llama-3-1-70b.json")}
+                                             "registration-llama-3-1-70b.json"),
+                "codellama_13b": os.path.join(HERE, "out",
+                                              "registration-codellama-13b-hf.json")}
 
 # The shapes E4 registered, whatever document they are registered in: the
 # counted registration of the 14B is its own file and its own selection, and it

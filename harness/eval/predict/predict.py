@@ -100,6 +100,26 @@ SHAPES = {
         why="the strongest test if the window is generous, and the shape closest "
             "to the paper's 27B frontier row; C=4096 only -- a 16K layer chunk "
             "extrapolates past the card"),
+    # The shape E4's third scale actually measures.  Qwen2.5 puts a bias on q, k
+    # and v, the statement has no site for a projection bias and an honest
+    # segment is rejected on the one equality that compares the derived integer
+    # with the key tile's (#172; #174 is the component that would be needed),
+    # so no Qwen layer can be proved and the extractor now refuses one by name.
+    # This is the nearest bias-free model of the same class: the same forty
+    # heads of 128, the same hidden size, the same inner width, eight layers
+    # fewer, and one key/value head per attention head where the 14B shares one
+    # per five.  Whether it becomes E4's third-scale row rather than the 14B is
+    # the owner's call (PR 173, decision 3); the row is here because the shape
+    # is what a registration prices.
+    "CodeLlama-13b-hf": dict(
+        cfg=(40, 5120, 40, 40, 128, 13824, 32016), tied=False,
+        role="stand-in", hf="codellama/CodeLlama-13b-hf",
+        why="above both fitted scales and provable, which the 14B is not: no "
+            "bias on any matmul, a head dimension that is a power of two, and a "
+            "16,384-token trained window, so the 4,608-token sequence the "
+            "measurement proves is inside it.  Llama-2-13B is the same seven "
+            "numbers and was not taken: its window is 4,096 and its published "
+            "weights are fp16, which the harness would round on the way in"),
     # zk-results #93.  Not an E4 candidate and not registered by an E4 run: it is
     # the shape of the 70B campaign, whose measurement is a SYNTHETIC layer
     # segment at this width and not the model, so `hf` names where the seven
@@ -151,6 +171,25 @@ COUNTED = {
             "a fit: nothing here is fitted to them, and the same code reproduces "
             "all 84 recorded 8B segments to the cell without ever having seen this "
             "shape.")),
+    "CodeLlama-13b-hf": dict(
+        utc_date="2026-09-11", by="stream E4 (desk lane), the counted registration",
+        driver="tools/drivers/register-13b.sh (zk-results), which passes `--cells "
+               "exact` and the fields file, and tools/drivers/predict-13b.sh, which "
+               "proves every layer of the target shape with these flags",
+        disclosure=(
+            "One of the 40 layers is NOT blind, and this document says so rather "
+            "than letting a reader assume otherwise: before this registration was "
+            "made, layer 16 of this model was extracted and proved once as a probe "
+            "of whether a bias-free model of this class proves at all, after the "
+            "14B's rejection left E4's third scale with no measurement. That proof "
+            "accepted and reported `cells.fresh` 2,290,115,312, at C=4,096, S=512, "
+            "spec b10-final, head groups 16,16,8 and the same statement. It made no "
+            "run record and the dump it proved is not one of the dumps this "
+            "registration is counted from. Layers 0 to 15 and 17 to 39 are blind. "
+            "The counted total for layer 16 landing on that integer is the expected "
+            "result of counting a layout, not evidence of a fit: nothing here is "
+            "fitted to it, and the same code reproduces all 84 recorded 8B segments "
+            "to the cell without ever having seen this shape.")),
 }
 
 
