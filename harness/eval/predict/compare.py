@@ -24,6 +24,10 @@ The predicted figures are READ OUT OF `out/registration.json` (step 0c); nothing
 here recomputes them.
 
     uv run python e4/compare.py --runs e4/out/h200 --shape qwen2p5_14b --ctx 4096
+    uv run python e4/compare.py --runs e4/out/h100 --shape llama3p1_70b --ctx 4096
+
+A shape E4 did not register is read out of the registration written for it
+instead (step 0c is the same, the document is another one).
 """
 import argparse
 import glob
@@ -38,7 +42,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REG = os.path.join(HERE, "out", "registration.json")
 SHAPES = {"qwen2p5_14b": "Qwen2.5-14B-Instruct",
           "qwen2p5_3b": "Qwen2.5-3B-Instruct",
-          "qwen2p5_32b": "Qwen2.5-32B-Instruct"}
+          "qwen2p5_32b": "Qwen2.5-32B-Instruct",
+          # zk-results #93's shape, registered on its own and not by an E4 run.
+          # What it is measured against is a synthetic layer segment at this
+          # width, which is the shape and not the model.
+          "llama3p1_70b": "Llama-3.1-70B"}
+
+# The document a shape is read out of.  E4's three are registered together in
+# `REG`; a shape registered on its own is written beside it, under the name
+# `predict.out_name` gives it -- the shape name lower-cased, with every run of
+# characters that is not a letter or a digit turned into one dash.  Named here
+# rather than imported: importing `predict` reads the cost model's inputs
+# directory at import, and this script prices nothing and needs none of it.
+REGISTRATION = {"llama3p1_70b": os.path.join(HERE, "out",
+                                             "registration-llama-3-1-70b.json")}
 
 
 def load_run(path):
@@ -147,7 +164,8 @@ def main():
     ap.add_argument("--out", default=os.path.join(HERE, "out"))
     a = ap.parse_args()
 
-    reg = json.load(open(REG))
+    reg_file = REGISTRATION.get(a.shape, REG)
+    reg = json.load(open(reg_file))
     shape = reg["shapes"][SHAPES[a.shape]]
     L = shape["cfg"][0]
     pc = shape["contexts"][str(a.ctx)]
@@ -335,7 +353,7 @@ def main():
     comparison = dict(
         schema="e4-comparison/1", shape=SHAPES[a.shape], ctx=a.ctx, s=512, spec="b10-final",
         card=a.card, backend=a.backend,
-        registration=dict(file=os.path.relpath(REG, HERE), prediction_sha256=reg["prediction_sha256"],
+        registration=dict(file=os.path.relpath(reg_file, HERE), prediction_sha256=reg["prediction_sha256"],
                           prediction_block_sha256=reg["prediction_block_sha256"]),
         predicted=dict(cells_per_token_layers=pred_cpt, per_layer_chunk_fresh=pred_chunk,
                        key_tiles_family_base_per_chunk=pred_key_tiles_base,
@@ -417,6 +435,11 @@ def main():
           f"rest after key tiles, boundary trees and tables constant: "
           f"{len(set(rest)) == 1} {sorted(set(rest))[:4]}")
     print(f"(c) tier: {tier.upper()} -- {CONSEQUENCE[tier]}")
+    if reg_file != REG:
+        print("    the tier and the consequence above are E4's acceptance range, applied "
+              "to a shape E4 did not register: what is measured against this "
+              "registration is in its own document, and whether that run is graded this "
+              "way is not settled here")
     sp = measured["summary"]
     moving = {f: v for f, v in {**{"family." + k: v for k, v in sp["family_spread"].items()},
                                 **{"interaction." + k: v for k, v in sp["interaction_spread"].items()}}.items()
