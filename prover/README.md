@@ -102,9 +102,31 @@ for a component and change the proof, not the statement.
 ## Recorded digests
 
 Every digest below was taken after the binding work of 2026-09-03 to 2026-09-06
-and the sound defaults of 2026-09-07. The preprocessed trace is two committed
-trees (a shape tree whose root the verifier derives from the public parameters,
-and a model tree whose root is compared with the published model commitment).
+and the sound defaults of 2026-09-07; the shapes whose requantize seam scales by
+a bf16 value were read again on 2026-09-11, when the scale table stopped
+wrapping. The preprocessed trace is two committed trees (a shape tree whose root
+the verifier derives from the public parameters, and a model tree whose root is
+compared with the published model commitment).
+
+**The scale table stopped wrapping (issue #143).** `bf16::from_f64` wrote
+`e + 127` into the 8-bit exponent field whatever `e` was, so a value below
+bf16's smallest normal came back as a large value of the other sign. The scale
+table is `pm -> bf16_ceil(pm / 127)` at every nonzero magnitude pattern, and
+1,147 of its 32,767 rows held a wrapped answer: the patterns `0x0001` to
+`0x03fb`, where that quotient is below the smallest normal, and `0x7f80` to
+`0x7fff`, the infinity and NaN patterns, whose quotient the field read as a
+value beside 1.0. The low rows now hold what `from_f32` holds at that end of the
+range -- a subnormal below the smallest normal, zero below the last subnormal --
+and the 128 rows above hold an infinity.
+
+The table is preprocessed under the shape root, so the root moved and with it
+every digest of a shape that carries a bf16-scaled requantize seam. Two kinds of
+shape did not move: the ones proved with `--unsound-skip-residual-stream`, which
+build no requantize component at all, and the head shape, whose one seam scales
+by a power of two and reads the other table, a `log2` that never asked
+`from_f64` anything. No honest witness reads a moved row -- a token whose whole
+activation row is below 1e-36 does not occur -- and every shape below proves
+with no lookup off its table and no reference mismatch, as it did before.
 
 The synthetic shapes share one base command and differ in the flags after it.
 `RESIDUAL_STREAM` builds the residual-stream components on the synthetic
@@ -125,14 +147,15 @@ no power of two.
 
 | shape | flags after `$SYN` | digest (first 16 hex) | unbound edges | recorded |
 |---|---|---|---|---|
-| `sound` | `--head-groups 2,1 $RESIDUAL_STREAM --diagonal-block` | `82085896a8408f36` | 3, 5 | both backends, 2026-09-07; pinned in `tests/` |
-| `sound_gkrfive` | `--head-groups 2,1 $RESIDUAL_STREAM --diagonal-block GKR5` | `6bee5972d6f616aa` | 3, 5 | same |
-| `sound_aligned` | `--head-groups 2,2 --nin 128 --nout 128 --residual-stream-a 32 --kmax 16 --synth-residual-stream --diagonal-block` | `9c3cdebd97a7d57b` | none | same |
-| `sound_padded` | `--head-groups 4,1 --nin 160 --nout 160 --residual-stream-a 32 --kmax 16 --synth-residual-stream --diagonal-block` | `284e5f3d24ad2c52` | none | SIMD backend, 2026-09-08; pinned in `tests/`; **new**, not moved |
+| `sound` | `--head-groups 2,1 $RESIDUAL_STREAM --diagonal-block` | `01e053521df2cf67` | 3, 5 | SIMD backend, 2026-09-11; pinned in `tests/`; the CUDA backend reads it on the next card gate |
+| `sound_gkrfive` | `--head-groups 2,1 $RESIDUAL_STREAM --diagonal-block GKR5` | `d4d90d4fbdedec94` | 3, 5 | same |
+| `sound_aligned` | `--head-groups 2,2 --nin 128 --nout 128 --residual-stream-a 32 --kmax 16 --synth-residual-stream --diagonal-block` | `db6d17a700c25457` | none | same |
+| `sound_padded` | `--head-groups 4,1 --nin 160 --nout 160 --residual-stream-a 32 --kmax 16 --synth-residual-stream --diagonal-block` | `4f20e8f7656038c6` | none | SIMD backend, 2026-09-11; pinned in `tests/` |
 
-**The padded head count.** `sound_padded` is the last row's shape and is new
-here, not a moved digest: five heads of 32 over 160-wide matmuls. Thirty-two
-tokens times five heads is 160, and no block length makes that a power of two,
+**The padded head count.** `sound_padded` is the last row's shape, and on
+2026-09-08 it entered the record as a new digest rather than a moved one: five
+heads of 32 over 160-wide matmuls. Thirty-two tokens times five heads is 160,
+and no block length makes that a power of two,
 so before the decision of 2026-09-08 the rotation refused the layer outright
 (issue #73, and Qwen2.5-14B's 40 query heads are the same arithmetic). The
 rotation now holds 256 rows for its 160 real ones and each quantize component
@@ -142,7 +165,8 @@ the two Horner comparisons binding the real rows check are zero. Every layer
 edge is bound on this shape and the binding table's edge 3 says what the padding
 is; the padded rows are 37.5% of the rotation's and the quantize's own committed
 cells, which is 230,400 cells of the segment's 7,066,144. The three rows above
-tile exactly, take the same path they always did, and their digests do not move.
+tile exactly and take the same path they always did; the padding moved no digest
+of theirs.
 
 Reading the first three on the CUDA backend took one fix in the kernel emitter. A
 generated LogUp kernel used to ask for exactly as many preprocessed columns as
@@ -168,8 +192,10 @@ page pinned before, so it is a new digest and not a moved one.
 | `head` | `--head-groups 2,1 --nout 64 --residual-stream-a 32 --kmax 16 --synth-head --synth-vocab 256 --unsound-skip-argmax` | `e3f31c1d4aeae77e` | 16 | SIMD backend, 2026-09-07; pinned in `tests/` |
 
 **The unbound configuration.** The same shapes with the skips set reproduce the
-digests recorded on 2026-09-06, before the sound defaults; `RS`, `LB` and `KV`
-stand for `--unsound-skip-residual-stream`, `--unsound-skip-layer-boundary` and
+digests recorded on 2026-09-06, before the sound defaults -- all but the four
+that keep the residual-stream components, and with them a bf16-scaled requantize
+seam, which moved with the scale table on 2026-09-11. `RS`, `LB` and `KV` stand
+for `--unsound-skip-residual-stream`, `--unsound-skip-layer-boundary` and
 `--unsound-skip-kv-boundary`.
 
 | shape | flags after `$SYN` | digest (first 16 hex) | recorded |
@@ -181,10 +207,10 @@ stand for `--unsound-skip-residual-stream`, `--unsound-skip-layer-boundary` and
 | `gkrfive` | `--head-groups 2,1 --diagonal-block RS KV GKR5` | `5d7aa189c702c2a5` | same |
 | `kv_gkr_key_tiles` | `--head-groups 2,1 --diagonal-block RS --gkr-key-tiles` | `b857c0b7a978642f` | same |
 | `kv_gkrfive` | `--head-groups 2,1 --diagonal-block RS GKR5` | `a379fa16dc2b0e98` | same |
-| `residual_stream_diagonal_block` | `--head-groups 2,1 $RESIDUAL_STREAM --diagonal-block LB KV` | `5a4a05ea6274e7c6` | same |
-| `residual_stream_kv` | `--head-groups 2,1 $RESIDUAL_STREAM --diagonal-block LB` | `94c32161ecbbef84` | same |
-| `residual_stream_bounds` | `--head-groups 2,1 $RESIDUAL_STREAM --diagonal-block KV` | `775b1972badf31e4` | same |
-| `residual_stream_gkrfive` | `--head-groups 2,1 $RESIDUAL_STREAM --diagonal-block LB KV GKR5` | `d1aff3e6580569a4` | same |
+| `residual_stream_diagonal_block` | `--head-groups 2,1 $RESIDUAL_STREAM --diagonal-block LB KV` | `9fd4455a88323bb5` | SIMD backend, 2026-09-11 |
+| `residual_stream_kv` | `--head-groups 2,1 $RESIDUAL_STREAM --diagonal-block LB` | `046f6b4c9bc66826` | SIMD backend, 2026-09-11 |
+| `residual_stream_bounds` | `--head-groups 2,1 $RESIDUAL_STREAM --diagonal-block KV` | `43ac6a98e61e6226` | SIMD backend, 2026-09-11 |
+| `residual_stream_gkrfive` | `--head-groups 2,1 $RESIDUAL_STREAM --diagonal-block LB KV GKR5` | `89758b9a578822d9` | SIMD backend, 2026-09-11 |
 
 **The full-size reference.** One Llama-3.1-8B layer-16 segment, `S = 512`
 output positions against a `C = 16384` key prefix, from a dump

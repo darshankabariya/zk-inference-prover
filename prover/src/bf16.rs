@@ -169,41 +169,42 @@ pub fn pattern(sg: u32, expfield: u32, m7: u32) -> u16 {
 /// does differ from a direct rounding on some inputs.  f64 holds every integer
 /// below 2^53 exactly, so rounding its 52-bit mantissa straight to 7 bits is an
 /// independent single-rounding path -- IEEE bit surgery against the table's
-/// integer normalisation.  Normal numbers only, which is all the dequant produces.
+/// integer normalisation.
 pub fn from_f64(x: f64) -> u16 {
-    if x == 0.0 {
-        return if x.is_sign_negative() { 0x8000 } else { 0 };
-    }
-    let u = x.to_bits();
-    let sign = (u >> 63) as u32;
-    let mut e = (((u >> 52) & 0x7ff) as i32) - 1023;
-    let man = u & ((1u64 << 52) - 1);
-    const SH: u32 = 52 - 7;
-    let keep = man >> SH;
-    let rb = (man >> (SH - 1)) & 1;
-    let st = (man & ((1u64 << (SH - 1)) - 1)) != 0;
-    let up = rb == 1 && (st || (keep & 1) == 1);
-    let mut m7 = keep + u64::from(up);
-    if m7 == 128 {
-        m7 = 0;
-        e += 1;
-    }
-    pattern(sign, (e + 127) as u32, m7 as u32)
+    from_f64_round(x, Round::Even)
 }
 
 /// `from_f64` in a chosen rounding mode -- the reference every residual-stream gadget is
 /// checked against, since B10 step 2's adds and multiplies have to round the way
 /// the mode the shared `NORM` table was built in rounds.
+///
+/// **The ends of the range.**  The exponent field is 8 bits, so a result outside
+/// bf16's normal binades has nowhere to go, and this answers there what
+/// `from_f32` answers: an infinity past the largest normal, a subnormal below
+/// the smallest normal, zero below the last subnormal, and a quiet NaN for a
+/// NaN.  Without that check the shift wrote `e + 127` into the field whatever it
+/// was, and a magnitude under `2^-127` came back as a large value of the other
+/// sign -- which is what `requant::scl_table`'s low rows held (issue #143).
+/// Inside the range every value rounds to the pattern it always did.
+///
+/// Two answers here are choices rather than `from_f32`'s.  Past the largest
+/// normal every mode answers an infinity, the truncating mode included, where
+/// IEEE truncation would answer the largest normal; and a NaN answers an
+/// infinity too, where `from_f32` keeps the payload, since the check is on the
+/// exponent's range and not on what the mantissa means.  Nothing the prover
+/// builds reaches either end -- the only place the second shows is the scale
+/// table's rows for a maximum that is not a number.
 pub fn from_f64_round(x: f64, round: Round) -> u16 {
-    if round == Round::Even {
-        return from_f64(x);
-    }
-    if x == 0.0 {
-        return if x.is_sign_negative() { 0x8000 } else { 0 };
-    }
     let u = x.to_bits();
     let sign = (u >> 63) as u32;
+    if x == 0.0 {
+        return pattern(sign, 0, 0);
+    }
     let mut e = (((u >> 52) & 0x7ff) as i32) - 1023;
+    if e < -126 {
+        // below the smallest normal, which is where every f64 subnormal lands too
+        return below_smallest_normal(x, sign, round);
+    }
     let man = u & ((1u64 << 52) - 1);
     const SH: u32 = 52 - 7;
     let keep = (man >> SH) as u32;
@@ -214,7 +215,30 @@ pub fn from_f64_round(x: f64, round: Round) -> u16 {
         m7 = 0;
         e += 1;
     }
+    if e > 127 {
+        // past the largest normal; every infinity and every NaN arrive here too,
+        // with e = 1024
+        return pattern(sign, 0xff, 0);
+    }
     pattern(sign, (e + 127) as u32, m7)
+}
+
+/// The pattern for a magnitude below bf16's smallest normal: a subnormal, or
+/// zero below the last of them.
+///
+/// The subnormals are the multiples of `2^-133` up to `2^-126`, so `|x| * 2^133`
+/// is the integer to round -- and that product is exact, since scaling by a power
+/// of two is exact wherever it neither overflows nor underflows, which at these
+/// magnitudes it does not.  A value that rounds up past the last subnormal gives
+/// 128, which is already the smallest normal's pattern.
+fn below_smallest_normal(x: f64, sign: u32, round: Round) -> u16 {
+    let q = x.abs() * 2f64.powi(133);
+    let n = match round {
+        Round::Even => q.round_ties_even(),
+        Round::Away => q.round(),
+        Round::Zero => q.trunc(),
+    } as u32;
+    pattern(sign, n >> 7, n & 0x7f)
 }
 
 /// Independent check of `norm_table`: what a single f64 rounding says.
@@ -356,4 +380,111 @@ pub fn exp_int_table(rows: usize, nmax: u32, frac: f64) -> Vec<u32> {
             v.clamp(0.0, nmax as f64) as u32
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Inside bf16's range `from_f64` and `from_f32` are the same single
+    /// rounding: f32 -> f64 is exact, so the two agree on every f32 there is --
+    /// which is also what pins that issue #143's range check left the values
+    /// inside the range where they were, bit for bit.
+    #[test]
+    fn it_rounds_every_f32_the_way_from_f32_does() {
+        // every bf16 pattern's own value, its two neighbours, and the midpoints
+        // between it and the next pattern, which is where the rounding decides
+        for p in 0..=u16::MAX as u32 {
+            for k in [0u32, 1, 0x7fff, 0x8000, 0x8001, 0xffff] {
+                let x = f32::from_bits((p << 16) | k);
+                if x.is_nan() {
+                    continue;
+                }
+                assert_eq!(from_f64(x as f64), from_f32(x), "{x:e} ({:#010x})", x.to_bits());
+            }
+        }
+        // and a stride over the whole f32 range
+        for u in (0..=u32::MAX).step_by(1 << 13) {
+            let x = f32::from_bits(u);
+            if x.is_nan() {
+                continue;
+            }
+            assert_eq!(from_f64(x as f64), from_f32(x), "{x:e} ({u:#010x})");
+        }
+    }
+
+    /// Past the largest normal the answer is an infinity (issue #143: the
+    /// exponent field used to take `e + 127` whatever it was).
+    #[test]
+    fn past_the_largest_normal_it_answers_an_infinity() {
+        let largest = to_f32(0x7f7f) as f64; // (2 - 2^-7) 2^127
+        for round in [Round::Even, Round::Away, Round::Zero] {
+            assert_eq!(from_f64_round(largest, round), 0x7f7f, "{round:?}");
+            assert_eq!(from_f64_round(2f64.powi(128), round), 0x7f80, "{round:?}");
+            assert_eq!(from_f64_round(-1e300, round), 0xff80, "{round:?}");
+            assert_eq!(from_f64_round(f64::INFINITY, round), 0x7f80, "{round:?}");
+            assert_eq!(from_f64_round(f64::NEG_INFINITY, round), 0xff80, "{round:?}");
+        }
+        // half an ulp past the largest normal, where rounding to nearest carries
+        // into the exponent and truncation does not
+        let half_ulp = 2f64.powi(119);
+        assert_eq!(from_f64(largest + half_ulp), 0x7f80);
+        assert_eq!(from_f64_round(largest + half_ulp, Round::Away), 0x7f80);
+        assert_eq!(from_f64_round(largest + half_ulp, Round::Zero), 0x7f7f);
+        assert_eq!(from_f64(largest + 0.5 * half_ulp), 0x7f7f);
+    }
+
+    /// Below the smallest normal the answer is a subnormal: the multiples of
+    /// `2^-133`, and the smallest normal itself where one rounds up past the
+    /// last of them.
+    #[test]
+    fn below_the_smallest_normal_it_answers_a_subnormal() {
+        let step = 2f64.powi(-133);
+        let smallest_normal = 128.0 * step; // 2^-126
+        assert_eq!(from_f64(smallest_normal), 0x0080);
+        for n in 1..128u16 {
+            assert_eq!(from_f64(n as f64 * step), n, "{n}");
+            assert_eq!(from_f64(-(n as f64) * step), 0x8000 | n, "{n}");
+        }
+        assert_eq!(from_f64(smallest_normal - 0.25 * step), 0x0080);
+        // half a step is the only place down here the three modes differ
+        assert_eq!(from_f64(1.5 * step), 2);
+        assert_eq!(from_f64(0.5 * step), 0);
+        assert_eq!(from_f64_round(0.5 * step, Round::Away), 1);
+        assert_eq!(from_f64_round(1.9 * step, Round::Zero), 1);
+        // the first quotient `requant::scl_table` asks for, which used to wrap
+        assert_eq!(from_f64(to_f32(1) as f64 / 127.0), 0);
+        assert_eq!(crate::requant::bf16_ceil_f64(to_f32(1) as f64 / 127.0), 1);
+    }
+
+    /// Below the last subnormal the answer is zero, with the sign kept -- issue
+    /// #143's SwiGLU product came back as a large value of the other sign.
+    #[test]
+    fn below_the_last_subnormal_it_answers_zero() {
+        let step = 2f64.powi(-133);
+        for round in [Round::Even, Round::Away, Round::Zero] {
+            assert_eq!(from_f64_round(0.4 * step, round), 0, "{round:?}");
+            assert_eq!(from_f64_round(-0.4 * step, round), 0x8000, "{round:?}");
+            assert_eq!(from_f64_round(f64::MIN_POSITIVE, round), 0, "{round:?}");
+            assert_eq!(from_f64_round(-f64::MIN_POSITIVE, round), 0x8000, "{round:?}");
+            assert_eq!(from_f64_round(f64::from_bits(1), round), 0, "{round:?}");
+            assert_eq!(from_f64_round(0.0, round), 0, "{round:?}");
+            assert_eq!(from_f64_round(-0.0, round), 0x8000, "{round:?}");
+        }
+        assert_eq!(from_f64(3.855602659666518e-41), 0);
+    }
+
+    /// A NaN answers an infinity, which is the one answer here that is not
+    /// `from_f32`'s: the check is on the exponent's range, not on the payload.
+    /// The wrap used to read a NaN as a value beside 1.0.
+    #[test]
+    fn a_nan_answers_an_infinity() {
+        let negative = f64::from_bits(f64::NAN.to_bits() | 1 << 63);
+        let payload = f64::from_bits(f64::NAN.to_bits() | 0x000f_0000_0000_0000);
+        for round in [Round::Even, Round::Away, Round::Zero] {
+            assert_eq!(from_f64_round(f64::NAN, round), 0x7f80, "{round:?}");
+            assert_eq!(from_f64_round(negative, round), 0xff80, "{round:?}");
+            assert_eq!(from_f64_round(payload, round), 0x7f80, "{round:?}");
+        }
+    }
 }

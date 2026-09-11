@@ -37,12 +37,12 @@ struct Case {
 const CASES: &[Case] = &[
     // the residual-stream family with both boundaries on; the 64-wide matmuls
     // under three heads of 32 leave the rotation (3) and the o seam (5) open
-    Case { name: "sound", digest: "82085896a8408f36",
+    Case { name: "sound", digest: "01e053521df2cf67",
            flags: &["--head-groups", "2,1", "RESIDUAL_STREAM", "--diagonal-block"], unbound: &[3, 5] },
-    Case { name: "sound_gkrfive", digest: "6bee5972d6f616aa",
+    Case { name: "sound_gkrfive", digest: "d4d90d4fbdedec94",
            flags: &["--head-groups", "2,1", "RESIDUAL_STREAM", "--diagonal-block", "GKR5"], unbound: &[3, 5] },
     // four heads of 32 over 128-wide matmuls: every layer edge bound
-    Case { name: "sound_aligned", digest: "9c3cdebd97a7d57b",
+    Case { name: "sound_aligned", digest: "db6d17a700c25457",
            flags: &["--head-groups", "2,2", "--nin", "128", "--nout", "128", "--residual-stream-a", "32",
                     "--kmax", "16", "--synth-residual-stream", "--diagonal-block"],
            unbound: &[] },
@@ -51,7 +51,7 @@ const CASES: &[Case] = &[
     // the rotation and the quantize round their row counts up to 256 and 512
     // and carry the difference as padded rows that hold zero.  Every layer edge
     // is bound all the same, and the binding table names the padding.
-    Case { name: "sound_padded", digest: "284e5f3d24ad2c52",
+    Case { name: "sound_padded", digest: "4f20e8f7656038c6",
            flags: &["--head-groups", "4,1", "--nin", "160", "--nout", "160",
                     "--residual-stream-a", "32", "--kmax", "16", "--synth-residual-stream",
                     "--diagonal-block"],
@@ -79,14 +79,14 @@ const CASES: &[Case] = &[
     Case { name: "kv_gkrfive", digest: "a379fa16dc2b0e98",
            flags: &["--head-groups", "2,1", "--diagonal-block", SKIP_RS, "GKR5"],
            unbound: &[1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 13] },
-    Case { name: "residual_stream_diagonal_block", digest: "5a4a05ea6274e7c6",
+    Case { name: "residual_stream_diagonal_block", digest: "9fd4455a88323bb5",
            flags: &["--head-groups", "2,1", "RESIDUAL_STREAM", "--diagonal-block", SKIP_LB, SKIP_KV],
            unbound: &[3, 5, 13, 14] },
-    Case { name: "residual_stream_kv", digest: "94c32161ecbbef84",
+    Case { name: "residual_stream_kv", digest: "046f6b4c9bc66826",
            flags: &["--head-groups", "2,1", "RESIDUAL_STREAM", "--diagonal-block", SKIP_LB], unbound: &[3, 5, 13] },
-    Case { name: "residual_stream_bounds", digest: "775b1972badf31e4",
+    Case { name: "residual_stream_bounds", digest: "43ac6a98e61e6226",
            flags: &["--head-groups", "2,1", "RESIDUAL_STREAM", "--diagonal-block", SKIP_KV], unbound: &[3, 5, 14] },
-    Case { name: "residual_stream_gkrfive", digest: "d1aff3e6580569a4",
+    Case { name: "residual_stream_gkrfive", digest: "89758b9a578822d9",
            flags: &["--head-groups", "2,1", "RESIDUAL_STREAM", "--diagonal-block", SKIP_LB, SKIP_KV, "GKR5"],
            unbound: &[3, 5, 13, 14] },
 ];
@@ -196,7 +196,7 @@ fn the_synthetic_head_chunk_proves_with_the_o_seam_absent() {
 /// and the one-shot 17, which is the disagreement the issue reports.
 #[test]
 fn a_repeated_flag_resolves_the_same_way_in_compose_and_in_the_loop() {
-    const SOUND: &str = "82085896a8408f36";
+    const SOUND: &str = "01e053521df2cf67";
     let line = "--head-groups 2,1 --nout 64 --residual-stream-a 32 --kmax 16 \
                 --synth-residual-stream --diagonal-block --table-bits 16";
     // the shared prefix: `SYN` with the table width the line overrides
