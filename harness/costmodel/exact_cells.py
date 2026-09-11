@@ -609,8 +609,14 @@ def exact_cells(p):
         # the selector sum last
         n_scale = 1 if _seam_variant(p, name) == "pow2" else 2
         rq_b += (2 + n_scale + 7 * pr) << lr
-        # five lookups per slot, batched in pairs, and four Horner claims
-        rq_i += (M31_PER_QM31 * (-(-5 * pr // 2) + 4)) << lr
+        # `rq_interaction`: five lookups per slot and the per-token scale's own,
+        # `5 * pr + 1` in all, batched in pairs (`plogup::paired`, `div_ceil`),
+        # and three Horner claims -- the two bindings and the scale.  The odd
+        # lookup has to be inside the `div_ceil` and not beside it: at an even
+        # `pr` the two readings agree, and every recorded seam has one, so what
+        # separates them is a feed-forward width whose layout puts an odd number
+        # of slots in a row (13,824 at 27 a row, Qwen2.5-14B).
+        rq_i += (M31_PER_QM31 * (-(-(5 * pr + 1) // 2) + 3)) << lr
     comp["requant"] = (rq_b, rq_i)
 
     # ---- the output head's argmax, which `family_cells` does not name (#159)
@@ -1056,7 +1062,13 @@ def segment_params(kind, d, nh, nkv, hd, dff, vocab, s, c, witness,
     p.update(mats=mats, kv_boundary=True,
              residual_stream=dict(a=RS_A, d=d, dff=active), rope=dict(nkv=nkv))
     if kind == "first":
-        p.update(embed_vocab=vocab, embed_per_row=EMBED_PER_ROW, ao_acc_mag=True)
+        # The magnitude form is what the recorded first segments take, and it is
+        # not a property of being first: `params_of` takes it exactly when the
+        # offset window does not fit, which is a question about that segment's
+        # own accumulator and exponents.  So a witness block that states it wins,
+        # and the recorded runs' answer is what a block that does not gets.
+        p.update(embed_vocab=vocab, embed_per_row=EMBED_PER_ROW,
+                 ao_acc_mag=witness.get("ao_acc_mag", True))
     return p
 
 
@@ -1217,7 +1229,8 @@ def selftest(argv_points=None):
           f"{', '.join(sorted({p['params']['round'] for p in pts}))}")
     print(f"  {len(red)} reduction configurations, from none of the five to all five")
     print("  a one-cell difference is a failure: checked")
-    return bound_selftest(pts) or builder_selftest() or moe_selftest()
+    return (bound_selftest(pts) or seam_selftest() or builder_selftest()
+            or moe_selftest())
 
 
 def bound_selftest(pts):
@@ -1282,6 +1295,55 @@ def moe_selftest():
           f"the same matmuls")
     print(f"  written out one by one count, and conserve the {slots:,} token "
           f"slots: checked")
+    return 0
+
+
+def seam_selftest():
+    """The requantize seam's interaction columns, where the recorded chunks cannot
+    separate two readings of them.
+
+    `requant.rs`'s `rq_interaction` looks up `5 * per_row + 1` fractions -- five a
+    slot and the per-token scale's own -- batches them in pairs (`plogup::paired`,
+    a `div_ceil`) and adds three Horner claims: the two bindings and the scale.
+    Pairing the per-slot lookups alone and calling the scale a fourth claim gives
+    the same number at every EVEN `per_row`, and every seam of every recorded
+    segment is laid out at an even one, so the fixture is blind to the
+    difference.  At an odd width the two part by one QM31 column, which is
+    1,048,576 cells at Qwen2.5-14B's feed-forward width (13,824 at 27 slots a
+    row) -- so this checks the arithmetic where no recorded chunk can.
+    """
+    def paired(n):
+        return -(-n // 2)
+
+    bad = []
+    for pr in (1, 2, 3, 13, 14, 16, 20, 27, 28):
+        counted = paired(5 * pr + 1) + 3
+        other = paired(5 * pr) + 4
+        if pr % 2 == 0 and counted != other:
+            bad.append(f"the two readings part at an even per_row {pr}: "
+                       f"{counted} against {other}")
+        if pr % 2 and counted != other - 1:
+            bad.append(f"at an odd per_row {pr} the readings differ by "
+                       f"{other - counted} and not by one")
+    odd = []
+    for p in chunks():
+        q = p["params"]
+        for name in _seam_names(q):
+            pr, _, _ = mat_layout(_seam_width(q, name), q["s"], q["deq_target"])
+            if pr % 2:
+                odd.append((p["segment"], name, pr))
+    if odd:
+        bad.append(f"a recorded segment lays a seam out at an odd width after all "
+                   f"({odd[:3]}), so the fixture does separate the two readings and "
+                   f"this check is not the one to make")
+    for b in bad:
+        print("exact cells:", b)
+    if bad:
+        return 1
+    print("  the requantize seam batches `5 * per_row + 1` lookups in pairs and "
+          "carries three claims,")
+    print("  which no recorded segment separates from the other reading: every one "
+          "of their seams is even")
     return 0
 
 
