@@ -177,7 +177,14 @@ COUNTED = {
                "exact` and the fields file, and tools/drivers/predict-13b.sh, which "
                "proves every layer of the target shape with these flags",
         disclosure=(
-            "One of the 40 layers is NOT blind, and this document says so rather "
+            "Layer 0 of this model cannot be proved and is not in this "
+            "registration: the harness refuses to write its dump, because the "
+            "attention output's quotient term is 7 + 26 = 33 bits against the "
+            "field's 31 in the widest form there is, and the divisor range is the "
+            "layer's own, which a driver may only widen. So what is registered and "
+            "what will be measured is layers 1 to 39, with the embedding segment "
+            "in neither. "
+            "One of those 39 layers is NOT blind, and this document says so rather "
             "than letting a reader assume otherwise: before this registration was "
             "made, layer 16 of this model was extracted and proved once as a probe "
             "of whether a bias-free model of this class proves at all, after the "
@@ -185,7 +192,7 @@ COUNTED = {
             "accepted and reported `cells.fresh` 2,290,115,312, at C=4,096, S=512, "
             "spec b10-final, head groups 16,16,8 and the same statement. It made no "
             "run record and the dump it proved is not one of the dumps this "
-            "registration is counted from. Layers 0 to 15 and 17 to 39 are blind. "
+            "registration is counted from. Layers 1 to 15 and 17 to 39 are blind. "
             "The counted total for layer 16 landing on that integer is the expected "
             "result of counting a layout, not evidence of a fit: nothing here is "
             "fitted to it, and the same code reproduces all 84 recorded 8B segments "
@@ -224,8 +231,19 @@ def counted_standing(name, fields):
     model = sorted({r.get("model") for r in rows if r.get("model")}) or ["unnamed"]
     spec = sorted({r.get("spec") for r in rows if r.get("spec")}) or ["unnamed"]
     ctx = fields_context(fields)
+    absent = sorted(fields.get("absent") or ())
+    gap = ("" if not absent else
+           f"The stack has {len(rows) + len(absent)} layers and this counts "
+           f"{len(rows)}: layer{'s' if len(absent) > 1 else ''} "
+           f"{', '.join(str(k) for k in absent)} "
+           f"{'are' if len(absent) > 1 else 'is'} NOT in it, because the harness "
+           f"refused to write that dump, so no witness of it exists and no proof "
+           f"of it will. Every per-token figure here is over the segments this "
+           f"file names and not over the stack. ")
     return dict(
         utc_date=rec["utc_date"], by=rec["by"], driver=rec["driver"],
+        layers_counted=sorted(int(k) for k in fields["layers"]),
+        layers_absent=absent,
         no_measurement_exists=(
             f"NO accepted proof and NO measured cell count of {model[0]} exists in "
             f"either repository or on any host. What does exist, and what this "
@@ -234,7 +252,7 @@ def counted_standing(name, fields):
             f"{spec[0]}, whose per-layer digests are in "
             f"`frozen_inputs.witness_fields`. A dump is not a measurement: every "
             f"field read off it is a property of the forward pass and is fixed "
-            f"before any proof is built. "
+            f"before any proof is built. " + gap
             + rec.get("disclosure", "No total at this shape was visible when this "
                                     "registration was made.")))
 
@@ -479,13 +497,23 @@ def exact_segments(cfg, ctx, fields, seq=S, reductions=None, head_groups=None):
             f"`insts must be a power of two`). The run's own grouping belongs in "
             f"the fields file's `knobs.head_groups`.")
     rows = []
+    absent = set(fields.get("absent") or ())
     for k in range(L):
         row = (fields.get("layers") or {}).get(str(k))
+        if row is None and k in absent:
+            # A layer the extractor refused to write.  It is not counted at
+            # another layer's fields and it is not counted at a guess: the
+            # registration carries fewer segments than the model has layers, and
+            # `counted_standing` says which ones and that the per-token figure
+            # is over those.
+            continue
         if row is None:
             raise SystemExit(
                 f"the fields file names no layer {k}, and this shape has {L}. Every "
                 f"segment is counted at its own witness fields, and a layer that is "
-                f"not in the file is not counted at another layer's.")
+                f"not in the file is not counted at another layer's. A layer the "
+                f"extractor refused belongs in the file's `absent` list, which "
+                f"`witness_fields --absent` writes.")
         w = dict(wf.witness_block(row), ao_acc_mag=row["ao_acc_mag"])
         p = ec.segment_params("first" if k == 0 else "layer", d=d, nh=nh, nkv=nkv,
                               hd=hd, dff=dff, vocab=vocab, s=seq, c=ctx,

@@ -374,13 +374,18 @@ def summary(doc):
 
 
 def build(base, layers, numbits=9, tight=True, table_bits=0, check_derived=False,
-          dump=None, head_groups=None):
+          dump=None, head_groups=None, absent=()):
     rows = {}
+    absent = sorted(set(int(k) for k in absent))
     if dump:
         r = fields_of(dump, numbits, tight, table_bits, check_derived)
         rows[str(r["layer"])] = r
     else:
         for k in range(layers):
+            if k in absent:
+                print(f"  L{k:<3} absent: the extractor refused this layer, and the "
+                      f"file says so rather than counting it", flush=True)
+                continue
             d = f"{base}_L{k}"
             if not os.path.exists(os.path.join(d, "manifest.json")):
                 raise SystemExit(f"{d}: no dump there")
@@ -391,6 +396,13 @@ def build(base, layers, numbits=9, tight=True, table_bits=0, check_derived=False
                   f"{rows[str(k)]['ao_rem_bits']:>3}  ao_q_bits "
                   f"{rows[str(k)]['ao_q_bits']:>3}", flush=True)
     doc = dict(schema=SCHEMA, layers=rows,
+               # The layers this file does NOT carry, named rather than left to
+               # be noticed as a gap.  A dump that is not there is still a
+               # refusal; this is the other case, a layer the extractor itself
+               # refused to write, which a reader of the registration has to be
+               # told about because the per-token figure is then over fewer
+               # segments than the model has.
+               absent=absent,
                read_by="harness/eval/predict/witness_fields.py",
                # the run's own command line, beside the dump's fields: `nmax`,
                # the master table's size and how the heads are grouped into key
@@ -572,6 +584,12 @@ def main(argv=None):
                          "rule a projection assumes is not what a driver passes "
                          "(16,16,8 at 40 heads, where the rule would say 20,10,10 "
                          "and the prover refuses a group that is not a power of two)")
+    ap.add_argument("--absent", metavar="A,B",
+                    help="layers the extractor refused to dump, named here so the "
+                         "file states which segments it does not carry. A layer "
+                         "that is merely missing is still a refusal; this is for "
+                         "one the harness itself would not write, and the "
+                         "registration counted from the file says so")
     ap.add_argument("--out", metavar="FILE", help="write the fields file here")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args(argv)
@@ -582,9 +600,10 @@ def main(argv=None):
     if a.dir and not a.layers:
         raise SystemExit("--dir needs --layers N")
     hg = [int(x) for x in a.head_groups.split(",")] if a.head_groups else None
+    ab = [int(x) for x in a.absent.split(",") if x != ""] if a.absent else ()
     doc = build(a.dir, a.layers, numbits=a.numbits, tight=a.tight,
                 table_bits=a.table_bits, check_derived=a.check_derived, dump=a.dump,
-                head_groups=hg)
+                head_groups=hg, absent=ab)
     print()
     for f, v in doc["summary"].items():
         if v["min"] != v["max"]:
