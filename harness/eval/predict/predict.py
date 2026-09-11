@@ -523,8 +523,8 @@ def predict_exact(cfg, ctx, fields, seq=S, statement=None, reductions=None,
                   head_groups="knobs"):
     """The same quantity as `predict`, counted instead of priced.
 
-    `total` is the layers-only fresh cells per decoded token: the 48 segments'
-    own counts over the `seq` positions one token block proves.  The key tile
+    `total` is the layers-only fresh cells per decoded token: the shape's own
+    segments' counts over the `seq` positions one token block proves.  The key tile
     half is the layout's own `key_tiles` component rather than the closed form,
     which is the same integer wherever the three grids tile exactly and is not
     where they pad.
@@ -1618,7 +1618,7 @@ def main():
                       f"({cf['base']:,} / {cf['interaction']:,} closed form)")
                 lo = min(c["layers"], key=lambda r: r["fresh"])
                 hi_ = max(c["layers"], key=lambda r: r["fresh"])
-                print(f"    {'':<8} the 48 segments: {lo['fresh']:,} (L{lo['layer']}) "
+                print(f"    {'':<8} the {len(c['layers'])} segments: {lo['fresh']:,} (L{lo['layer']}) "
                       f"to {hi_['fresh']:,} (L{hi_['layer']}), "
                       f"{100 * (hi_['fresh'] / lo['fresh'] - 1):.1f}% apart")
                 continue
