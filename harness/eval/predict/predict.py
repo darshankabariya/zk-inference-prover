@@ -1363,6 +1363,10 @@ def witness_fields_record(fields, path):
         file=os.path.basename(path) if path else None,
         file_sha256=wf.sha256(path) if path else None,
         schema=fields.get("schema"), knobs=fields.get("knobs"),
+        # The layers the file does not carry, carried here too: a reader of the
+        # registration must not have to open the fields file to learn that the
+        # count is over fewer segments than the model has layers.
+        absent=sorted(fields.get("absent") or ()),
         read_by=fields.get("read_by"),
         summary=fields.get("summary"),
         layers={k: dict(wf.witness_block(r), ao_acc_mag=r["ao_acc_mag"],
