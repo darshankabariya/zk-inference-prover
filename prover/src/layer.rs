@@ -1860,6 +1860,47 @@ impl Layer {
             });
             v
         };
+        // Issue #172: a q/k/v projection bias, as a witness-construction switch.
+        // B1 adds the model's bias to the *dequantized* matmul output, before the
+        // rotation and before the quantize, so the key tiles hold integers the
+        // dequant component -- which states `acc s_x s_w` and nothing else --
+        // cannot derive, and `nn_out` is the one equality that compares them.
+        // Qwen2.5 gives q, k and v a bias; Llama gives none, which is why every
+        // witness this repo had proved carried none.  At 0 -- the default, and
+        // every recorded digest -- nothing here moves.
+        let bias_frac = std::env::var("ZK_SYNTHETIC_QKV_BIAS").ok()
+            .and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+        let val = |p: u16| -> f64 {
+            let (sm, ef) = crate::residual_stream::split(crate::residual_stream::canon(p));
+            crate::residual_stream::to_f64(sm, ef)
+        };
+        let add_bias = |x: Vec<u16>, n: usize| -> Vec<u16> {
+            if bias_frac == 0.0 {
+                return x;
+            }
+            // one constant per output channel, at `bias_frac` of that channel's own
+            // largest magnitude, signs alternating -- the size a real bias has
+            // against the values beside it, which is what decides how many
+            // derived integers it moves
+            let b: Vec<f64> = (0..n)
+                .map(|c| {
+                    let m = (0..tokens).map(|t| val(x[t * n + c]).abs()).fold(0.0f64, f64::max);
+                    if c % 2 == 0 { bias_frac * m } else { -bias_frac * m }
+                })
+                .collect();
+            let mut out = x;
+            out.par_chunks_mut(n).for_each(|row| {
+                for (c, slot) in row.iter_mut().enumerate() {
+                    *slot = crate::residual_stream::canon(bf16::from_f64(val(*slot) + b[c]));
+                }
+            });
+            out
+        };
+        if bias_frac != 0.0 {
+            eprintln!("layer: ZK_SYNTHETIC_QKV_BIAS={bias_frac} -- the key tiles carry a q/k/v \
+projection bias the statement has no site for (a rejection is the pass)");
+        }
+
         // the rotation, through the components' own programs: one row per
         // (token, head), `hd` leaves, `cos`/`sgnsin` preprocessed
         let rotate = |x: &[u16], heads: usize| -> Vec<u16> {
@@ -1872,8 +1913,8 @@ impl Layer {
             let out = reference(&[prod[0].clone()], &[], rows, &Prog::rope_add(hd), round);
             out[0].clone()
         };
-        let qrot = rotate(&deq(self, "q", nq), nh);
-        let krot = rotate(&deq(self, "k", nk), nkv);
+        let qrot = rotate(&add_bias(deq(self, "q", nq), nq), nh);
+        let krot = rotate(&add_bias(deq(self, "k", nk), nk), nkv);
         // Stream SS: a folded `v` has no bf16 stream to quantize -- the fold's
         // one rounding *is* the quantize -- so the component below is not built for
         // it and `vv` comes off `fold_out` directly.  `deq` would panic here
@@ -1881,7 +1922,7 @@ impl Layer {
         // `--layout zfold` shape could not carry the wiring family at all.
         let vmi = self.mats.iter().position(|m| m.name == "v").unwrap();
         let v_fold = self.mats[vmi].variant == DeqVariant::Fold;
-        let vdeq = if v_fold { vec![] } else { deq(self, "v", nv) };
+        let vdeq = if v_fold { vec![] } else { add_bias(deq(self, "v", nv), nv) };
         // the scales.  B1 calibrates them offline; a synthetic layer picks the
         // smallest power of two that leaves every value inside the domain, so
         // the desk's witness is complete (`quantize`'s clamp has no honest

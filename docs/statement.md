@@ -79,10 +79,14 @@ prover could add any vector to the residual stream, or gate any product.
 component reads are the projections' outputs, rotated and rounded exactly as
 the model does it: the rotation is its own component built from the
 statement's rotation parameters, the per-head power-of-two quantize is
-another, and the key tiles' columns are bound to their outputs. Edge 5 says
-the o matmul's input is the attention output's requantization. Unbound, the
-attention would be over values of the prover's choosing while the projections
-and the o matmul each prove the wrong thing correctly.
+another, and the key tiles' columns are bound to their outputs. A site for a
+projection's bias is **not built**: the dequant states `acc s_x s_w` and
+nothing else, so a model that gives q, k or v a bias -- Qwen2.5 does, Llama
+does not -- puts values in the key tiles that no component here derives, and
+edge 3 refuses every layer of it. Edge 5 says the o matmul's input is the
+attention output's requantization. Unbound, the attention would be over values
+of the prover's choosing while the projections and the o matmul each prove the
+wrong thing correctly.
 
 The rotation holds one row per (token, head) and the quantize one per block of
 channels inside a head, so both of their row counts have the head count as a

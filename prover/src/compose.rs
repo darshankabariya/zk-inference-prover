@@ -5127,6 +5127,22 @@ different rotation", inv.len(), 2 * hd * p.s);
             tamper.quant.filter(|(i, _)| *i == k).map(|(_, t)| t));
         q_components.push(r);
     }
+    // Issue #172: what the quantize *derived* against what the key tiles committed.
+    // `nn_out` compares the two and nothing else, so this count is the whole
+    // reason a segment whose every constraint holds is then rejected -- and it
+    // belongs on stderr in the first seconds rather than in a field of the
+    // verdict a rejected run dumps at the end.
+    for (r, qp) in q_components.iter().zip(&plan.quants) {
+        if r.ref_n == r.ref_ok {
+            continue;
+        }
+        eprintln!("compose: quant {}: {} of {} derived integers are not the key tile's own, \
+so the binding nn_out rejects this segment. One cell is a bent witness; a systematic count \
+is a layer the statement cannot state -- a q/k/v projection bias, which B1 adds to the \
+matmul output before the rotation and the quantize and which the dequant component, stating \
+`acc s_x s_w` and nothing else, does not carry.",
+                  qp.name, r.ref_n - r.ref_ok, r.ref_n);
+    }
     crate::util::add_phase("gen/quant", phase_t.elapsed().as_secs_f64());
 
     let phase_t = std::time::Instant::now();

@@ -1018,6 +1018,18 @@ if __name__ == "__main__":
                     continue
                 acc = m.rec.cols[key]
                 lin = m.layers[L][name]
+                # zk-prover #172: the dequant gadget states `acc s_x s_w` and
+                # nothing else.  A projection bias sits between that product and
+                # whatever reads it -- the rotation for q and k, the quantize for
+                # v -- so every integer the prover derives from this matmul is off
+                # by the bias and the segment is rejected after it is proved.
+                # Qwen2.5 gives q, k and v one; Llama gives none, which is why
+                # every witness extracted before this carried none.  Refuse here,
+                # where the model is still in hand, rather than dumping tens of
+                # gigabytes nothing can prove.
+                assert lin.bias is None, (
+                    f"{name} carries a bias -- the statement has no site for it, so no "
+                    f"proof of this layer can be accepted (zk-prover #172)")
                 s_x = m.rec.cols[f"L{L}.{name}/s_x"]
                 write(f"acc_{name}.i32", acc.numpy().astype(np.int32), digests)
                 # stream Z: the widened attention output makes o's quantized input

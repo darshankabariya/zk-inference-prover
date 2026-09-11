@@ -2298,13 +2298,34 @@ acc={}+{}",
     if let Some(m) = device::mem_marks_json() {
         j["mem_marks"] = m;
     }
-    assert!(accepts, "honest composed proof rejected: {j}");
+    // Issue #172: the point below carries every field, and the two numbers that
+    // say *why* a rejected segment was rejected sit deep inside it.  Name them in
+    // the panic as well, so the failure reads as a diagnosis and not as a dump.
+    assert!(accepts, "honest composed proof rejected{}: {j}", quant_vs_key_tile(&j));
     if tamper.norm_row.is_none() {
         assert_eq!(j["ref_mismatch"], 0,
                    "composed witness disagrees with the f64 reference");
     }
     assert_eq!(j["off_table"], 0, "honest composed witness has off-table values");
     emit("compose", json!({"source": l.source, "point": j}));
+}
+
+/// Issue #172: the quantize components' integers against the key tiles', as one
+/// clause for the rejection message.  Empty where the two agree, which is every
+/// segment whose rejection is something else.
+fn quant_vs_key_tile(j: &Value) -> String {
+    let Some(qs) = j["family_cells"]["quant"].as_array() else { return String::new() };
+    let bad: Vec<String> = qs.iter()
+        .filter(|q| q["mismatch"].as_u64().unwrap_or(0) > 0)
+        .map(|q| format!("{} {}/{}", q["component"].as_str().unwrap_or("?"),
+                         q["mismatch"], q["checked"]))
+        .collect();
+    if bad.is_empty() {
+        return String::new();
+    }
+    format!(" -- the quantize components derived integers the key tiles do not hold \
+({}), which is the layer the witness carries and not the layer the statement can state",
+            bad.join(", "))
 }
 
 /// Stream J: the master exp table at three sizes on one witness.
