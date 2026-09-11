@@ -297,7 +297,8 @@ def main():
     #
     #   * the count against the chunk's own `cells.fresh`, per layer.  There is
     #     no averaging in this and no protocol widening: the registration named
-    #     48 integers before the run and the run reports 48;
+    #     one integer per counted segment before the run and the run reports one
+    #     for each;
     #   * the FIELDS against the chunk's own `params`.  They were read off the
     #     dumps before anything was proved, so the proof has to agree with them
     #     -- and if it does not, the registration counted a statement this run
@@ -334,7 +335,18 @@ def main():
     # ---- (b) rho, with the protocol widening ------------------------------
     n = len(runs)
     layers = [r["layer"] for r in runs]
-    if n == L:
+    # What the prediction is stated over, which is not always the stack.  A
+    # counted registration of a model whose every layer can be dumped counts
+    # `L` segments; one that names a layer absent counts the ones it has and
+    # says nothing about the one it does not, so its `cells_per_token_layers`
+    # is over those.  Scaling the measured side to `L` against that would put
+    # `L` layers on one side and the counted set on the other -- at 39 of 40
+    # a difference of 2.6%, none of it the model's.  So the basis is the
+    # registration's own.
+    absent = sorted((reg.get("frozen_inputs", {}).get("witness_fields")
+                     or {}).get("absent") or ())
+    basis = L - len(absent)
+    if n == basis:
         protocol, widen_lo, widen_hi = "A", 0.0, 0.0
     elif n >= 8:
         gaps = sorted(set(b - a_ for a_, b in zip(layers, layers[1:])))
@@ -346,7 +358,7 @@ def main():
         widen_hi = br["protocol_widening"]["C_single_layer"]["widen_pct_upper"]
     fresh_sum = sum(r["cells"]["fresh"] for r in runs)
     fresh_mean = fresh_sum / n
-    measured_cpt = fresh_mean * L / 512          # layers only, S = 512 decoded tokens
+    measured_cpt = fresh_mean * basis / 512      # layers only, S = 512 decoded tokens
     rho = measured_cpt / pred_cpt
     widened = {t: [lo * (1 - widen_lo / 100), hi * (1 + widen_hi / 100)]
                for t, (lo, hi) in (("prize", br["prize"]), ("pass_", br["pass_"]),
@@ -446,11 +458,13 @@ def main():
             sum_measured=sum(x["measured"] for x in layer_rows),
             fields_agree_on_every_layer=all(x["agrees"] for x in field_rows),
             rows=layer_rows, fields=field_rows,
-            note="the registration counted every segment from the prover's trace "
-                 "layout at the witness fields its own dump carries, so these are "
-                 "48 integers named before the run and 48 reported by it, compared "
-                 "one for one and with no widening")),
-        b_rho=dict(protocol=protocol, layers_proved=n, widen_pct_lower=widen_lo,
+            note=(f"the registration counted every segment from the prover's trace "
+                  f"layout at the witness fields its own dump carries, so these are "
+                  f"{len(counted or ())} integers named before the run and "
+                  f"{len(layer_rows)} reported by it, compared one for one and with "
+                  f"no widening"))),
+        b_rho=dict(protocol=protocol, layers_proved=n, layers_counted=basis,
+                   layers_in_stack=L, layers_absent=absent, widen_pct_lower=widen_lo,
                    widen_pct_upper=widen_hi, measured_cells_per_token_layers=measured_cpt,
                    predicted_cells_per_token_layers=pred_cpt, rho=rho,
                    residual_pct=(rho - 1) * 100,
@@ -527,7 +541,13 @@ def main():
                     print(f"     L{x['layer']}: "
                           + ", ".join(f"{f} registered {v[0]}, proved {v[1]}"
                                       for f, v in x["disagrees"].items()))
-    print(f"(b) protocol {protocol}: {n}/{L} layers; measured {measured_cpt:,.1f} cells/token "
+    gap = ("" if not absent else
+           f" (the model has {L}; layer{'s' if len(absent) > 1 else ''} "
+           f"{', '.join(str(k) for k in absent)} "
+           f"{'are' if len(absent) > 1 else 'is'} in no dump, so neither side counts "
+           f"{'them' if len(absent) > 1 else 'it'})")
+    print(f"(b) protocol {protocol}: {n}/{basis} of the segments the registration "
+          f"counts{gap}; measured {measured_cpt:,.1f} cells/token "
           f"(layers), predicted {pred_cpt:,.1f}; rho = {rho:.5f} ({(rho - 1) * 100:+.3f}%)")
     print(f"    per-chunk ratio range {comparison['b_rho']['chunk_ratio_min']:.4f} .. "
           f"{comparison['b_rho']['chunk_ratio_max']:.4f}; log_table {logt}; "
