@@ -463,6 +463,14 @@ def _mat(p, name):
 
 
 def _seam_names(p):
+    """The requantize seams a segment builds, read off the groups it carries.
+
+    A block may name them instead (`seams`), which is what a mixture layer whose
+    feed-forward matmuls are all routed has to do: it requantizes the residual
+    once before its experts and once before their down projections, and neither
+    of those seams is a group of this segment's own name."""
+    if p.get("seams") is not None:
+        return list(p["seams"])
     g = p.get("residual_stream") or {}
     names = ["head"] if g.get("head_norm") else ["qkv", "gateup", "down"]
     return [n for n in names if any(g2 == n for g2, _ in _freivalds_groups(p))]
@@ -483,13 +491,33 @@ def _seam_width(p, name):
 
 
 def _freivalds_groups(p):
-    """The groups this segment builds: those whose matmuls it carries."""
+    """The groups this segment builds: those whose matmuls it carries.
+
+    A matmul that names its own `group` is checked on its own and is not in the
+    group its name would put it in.  That is what a routed expert of a mixture
+    is: its matmul covers only the tokens routed to it, so it does not share a
+    committed input with the rest and the check over it is its own."""
     out = []
     for name, members in FREIVALDS_GROUPS:
-        idx = [m for m in p["mats"] if m["name"] in members]
+        idx = [m for m in p["mats"] if m["name"] in members and not m.get("group")]
         if idx:
             out.append((name, idx))
+    own = {}
+    for m in p["mats"]:
+        if m.get("group"):
+            own.setdefault(m["group"], []).append(m)
+    for name in sorted(own):
+        out.append((name, own[name]))
     return out
+
+
+def _repeat(mats):
+    """`repeat` on a matmul means that many matmuls of exactly this shape, each
+    its own component: the routed experts of one mixture layer, which the
+    uniform-routing assumption makes identical."""
+    reps = {m.get("repeat", 1) for m in mats}
+    assert len(reps) == 1, f"a group's matmuls repeat unequally: {sorted(reps)}"
+    return reps.pop()
 
 
 # ------------------------------------------------------------------ the count --
@@ -512,17 +540,18 @@ def exact_cells(p):
     # ---- the dequantize components, one per matmul
     deq_b = deq_i = 0
     mat_lays = {}
-    for m in p["mats"]:
+    for j, m in enumerate(p["mats"]):
+        rep_m = m.get("repeat", 1)
         pr, _, lr = mat_layout(m["n_out"], m["tokens"], p["deq_target"])
-        mat_lays[m["name"]] = (pr, lr)
-        deq_b += deq_columns(m["variant"], sticky, pr) << lr
+        mat_lays[j] = (pr, lr)
+        deq_b += rep_m * (deq_columns(m["variant"], sticky, pr) << lr)
         # `mat_interaction`: the two Horner accumulators `z` and `h`, the output
         # claim the wiring family reads, and -- on a matmul a requantize seam
         # feeds, and only if it is not folded -- the x-side scale's fold
         qm = 2 + int(_has_output_claim(p, m["name"])) + int(_has_scale_claim(p, m))
         if not p.get("gkr_dequant"):
             qm += -(-deq_looks(m["variant"], pr) // 2)
-        deq_i += (M31_PER_QM31 * qm) << lr
+        deq_i += rep_m * ((M31_PER_QM31 * qm) << lr)
     comp["dequant"] = (deq_b, deq_i)
 
     # ---- the attention output
@@ -538,16 +567,17 @@ def exact_cells(p):
     fv_lays = []
     for name, mats in _freivalds_groups(p):
         n_in = mats[0]["n_in"]
+        rep_g = _repeat(mats)
         pk, pq, lr = freivalds_layout(n_in, max(m["n_out"] for m in mats),
                                       mats[0]["tokens"], p["freivalds_p"])
         fv_lays.append((name, pk, pq, lr, len(mats)))
-        fv_b += pq << lr
+        fv_b += rep_g * (pq << lr)
         # one accumulator pair per matmul, plus the group's own `z` and its
         # claim over the committed activations
         qm = 2 * len(mats) + 2
         if not p.get("gkr_freivalds"):
             qm += -(-pq // 2)
-        fv_i += (M31_PER_QM31 * qm) << lr
+        fv_i += rep_g * ((M31_PER_QM31 * qm) << lr)
     comp["freivalds"] = (fv_b, fv_i)
 
     # ---- the residual stream
@@ -889,6 +919,37 @@ def head_groups_for(nh, rule="half-quarter-quarter"):
     return [nh // 2, nh // 4, nh // 4]
 
 
+def expected_distinct_experts(experts, topk, s):
+    """`E * (1 - (1 - k/E)^S)`: how many of a mixture's experts a block of `s`
+    tokens touches, when each token's top-k is uniform over the experts.  It is
+    what the segment's preprocessed trace has to hold, and how many routed
+    matmuls the segment builds."""
+    if experts <= 1 or topk <= 0:
+        return 0.0
+    return experts * (1.0 - (1.0 - topk / experts) ** s)
+
+
+def routed_blocks(s, topk, touched):
+    """How one segment's routed matmuls are laid out, under uniform routing.
+
+    `s * topk` token slots spread over `touched` experts.  A matmul's rows are
+    `tokens * chunks` and `chunks` divides the output width, so a token count
+    with an odd factor the width cannot cancel does not tile at any width
+    (`MatLayout::choose_padded` refuses a lead of more than a quarter of the
+    rows, and `5 * 2^j` is always three eighths short of the next power of two).
+    So the block a routed matmul covers is the largest power of two at or below
+    the uniform share, and the segment builds as many blocks as that takes --
+    the token count is conserved, and every block tiles.  Returns (tokens per
+    block, blocks)."""
+    slots = s * topk
+    share = int(slots / max(1.0, touched))
+    te = 1 << max(0, share.bit_length() - 1)
+    if slots % te:
+        raise Refused(f"{slots} routed token slots do not divide into blocks of "
+                      f"{te}, so the routed matmuls do not tile")
+    return te, slots // te
+
+
 def layer_mats(d, nh, nkv, hd, dff, tokens):
     """`compose.rs`, the layer plan's seven matmuls: the three projections, the
     attention output, the two gates and the down projection.  `v` is folded --
@@ -916,14 +977,25 @@ def head_deq_target(vocab):
 
 
 def segment_params(kind, d, nh, nkv, hd, dff, vocab, s, c, witness,
-                   knobs=None, head_groups=None, gkr=REDUCTIONS_ON):
+                   knobs=None, head_groups=None, gkr=REDUCTIONS_ON, moe=None):
     """One composed segment of a model, as the `params` block `exact_cells` counts.
 
     `kind` is `layer`, `first` (the segment of the stack that carries the
-    embedding lookup) or `head` (the output head).  `witness` is the block of
-    witness-calibrated fields the caller assumes; `knobs` the run knobs, the
-    recorded statement's by default.  Raises `Refused` where the shape is not a
-    `params` block at all."""
+    embedding lookup) or `head` (the output head).  `dff` is the feed-forward
+    width every token goes through.  `witness` is the block of witness-calibrated
+    fields the caller assumes; `knobs` the run knobs, the recorded statement's by
+    default.  Raises `Refused` where the shape is not a `params` block at all.
+
+    `moe` makes it a mixture layer, and then the feed-forward side is THREE
+    things rather than one: the shared experts, which are a dense matmul over
+    every token and are in `dff`; the routed experts, each a matmul over the
+    tokens routed to it alone; and the router's own matmul of `experts` logits.
+    `{"experts", "topk", "moe_dff", "touched", "n_in", "router"}` -- `touched` is
+    how many routed matmuls the segment builds (`expected_distinct_experts`) and
+    `n_in` the width a routed expert reads, which is not always the model's
+    (Kimi K3 projects to `routed_expert_hidden_size` first).  `distribution`
+    overrides the uniform split with `[(tokens, matmuls), ...]` measured on a real
+    run of the model, which is the one way to remove the routing assumption."""
     if kind not in ("layer", "first", "head"):
         raise Refused(f"no such segment kind: {kind!r}")
     if int(nkv) != nkv or nkv < 1:
@@ -932,7 +1004,9 @@ def segment_params(kind, d, nh, nkv, hd, dff, vocab, s, c, witness,
                       f"`params` block.  Multi-head latent attention is the case "
                       f"this refuses, and the prover has no layout for it")
     nkv = int(nkv)
-    for name, n in (("d", d), ("dff", dff)):
+    moe = dict(moe or {})
+    active = dff + (moe.get("topk", 0) * moe.get("moe_dff", 0))
+    for name, n in (("d", d), ("the active feed-forward width", active)):
         if kind != "head" and n % RS_A:
             raise Refused(f"{name} = {n} is not a multiple of {RS_A}, the wiring "
                           f"family's committed leaves per row")
@@ -944,17 +1018,45 @@ def segment_params(kind, d, nh, nkv, hd, dff, vocab, s, c, witness,
     for r in gkr:
         p[f"gkr_{r}"] = True
     mats = layer_mats(d, nh, nkv, hd, dff, s)
+    if not dff:
+        # a layer whose feed-forward side is entirely routed builds no matmul
+        # over all `s` tokens there
+        mats = [m for m in mats if m["name"] not in ("gate", "up", "down")]
     if kind == "head":
         mats.append(dict(name="lm_head", n_in=d, n_out=vocab, tokens=s,
                          variant="pow2"))
         p.update(mats=mats, prove_argmax=True, logits_claim=True,
                  deq_target=head_deq_target(vocab),
                  residual_stream=dict(a=RS_A, d=d, dff=0, head_norm=True))
-    else:
-        p.update(mats=mats, kv_boundary=True,
-                 residual_stream=dict(a=RS_A, d=d, dff=dff), rope=dict(nkv=nkv))
-        if kind == "first":
-            p.update(embed_vocab=vocab, embed_per_row=EMBED_PER_ROW, ao_acc_mag=True)
+        return p
+    if moe.get("experts", 0) > 1:
+        w, n_in = moe["moe_dff"], moe.get("n_in") or d
+        dist = moe.get("distribution")
+        if not dist:
+            te, blocks = routed_blocks(s, moe["topk"], moe["touched"])
+            dist = [(te, blocks)]
+        moe["distribution"] = dist = [(int(t), int(n)) for t, n in dist if t and n]
+        for j, (te, blocks) in enumerate(dist):
+            for name in ("gate", "up"):
+                mats.append(dict(name=name, n_in=n_in, n_out=w, tokens=te,
+                                 variant="chain", group=f"expert_gateup{j}",
+                                 repeat=blocks))
+            mats.append(dict(name="down", n_in=w, n_out=n_in, tokens=te,
+                             variant="chain", group=f"expert_down{j}", repeat=blocks))
+        if moe.get("router", True):
+            # the gate logits: one matmul of `experts` outputs over every token.
+            # The selection on top of them has no layout and is not here; the
+            # caller prices it as a stated bound and says so.
+            mats.append(dict(name="gate", n_in=d, n_out=moe["experts"], tokens=s,
+                             variant="chain", group="router"))
+        # both seams are built whatever the groups are called: the residual is
+        # requantized once before the experts and once before their outputs
+        p["seams"] = ["qkv", "gateup", "down"]
+        p["moe"] = moe
+    p.update(mats=mats, kv_boundary=True,
+             residual_stream=dict(a=RS_A, d=d, dff=active), rope=dict(nkv=nkv))
+    if kind == "first":
+        p.update(embed_vocab=vocab, embed_per_row=EMBED_PER_ROW, ao_acc_mag=True)
     return p
 
 
@@ -1115,7 +1217,7 @@ def selftest(argv_points=None):
           f"{', '.join(sorted({p['params']['round'] for p in pts}))}")
     print(f"  {len(red)} reduction configurations, from none of the five to all five")
     print("  a one-cell difference is a failure: checked")
-    return bound_selftest(pts) or builder_selftest()
+    return bound_selftest(pts) or builder_selftest() or moe_selftest()
 
 
 def bound_selftest(pts):
@@ -1136,6 +1238,50 @@ def bound_selftest(pts):
     print(f"  the witness bound ({', '.join(f'{f} {v}' for f, v in sorted(bounds.items()))})")
     print(f"  is at or above all {len(pts)} recorded counts and is reached by a "
           f"recorded segment: checked")
+    return 0
+
+
+def moe_selftest():
+    """A mixture layer's routed matmuls: `repeat` is exactly writing them out.
+
+    `repeat` says a matmul stands for that many of exactly its own shape, each
+    its own component and its own check.  The only thing that makes it sound is
+    that it counts what the same block with every matmul written out counts, so
+    that is what this compares -- and it checks that the routed blocks conserve
+    the token count, which is the one thing the uniform-routing assumption must
+    not lose."""
+    bad = 0
+    wit = modal_assumption()
+    shape = dict(d=4096, nh=32, nkv=8, hd=128, vocab=128256, s=512, c=4096)
+    moe = dict(experts=128, topk=8, moe_dff=1536, touched=128.0)
+    p = segment_params("layer", dff=0, witness=wit, moe=moe, **shape)
+    dist = p["moe"]["distribution"]
+    slots = sum(t * n for t, n in dist)
+    if slots != shape["s"] * moe["topk"]:
+        print(f"exact cells: the routed blocks {dist} are {slots} token slots, not "
+              f"the {shape['s'] * moe['topk']} the segment routes")
+        bad += 1
+    te, blocks = dist[0]
+    written = dict(p, mats=[])
+    for m in p["mats"]:
+        n = m.get("repeat", 1)
+        one = {k: v for k, v in m.items() if k != "repeat"}
+        for i in range(n):
+            written["mats"].append(dict(one, group=f"{one['group']}_{i}")
+                                   if one.get("group") and n > 1 else dict(one))
+    a, b = exact_cells(p), exact_cells(written)
+    for field in ("base", "interaction", "fresh"):
+        if a[field] != b[field]:
+            print(f"exact cells: a routed matmul at repeat {blocks} counts "
+                  f"{a[field]:,} of `{field}` and the same matmuls written out "
+                  f"count {b[field]:,} ({a[field] - b[field]:+,})")
+            bad += 1
+    if bad:
+        return 1
+    print(f"  a mixture layer's {blocks} routed matmuls of {te} tokens count what "
+          f"the same matmuls")
+    print(f"  written out one by one count, and conserve the {slots:,} token "
+          f"slots: checked")
     return 0
 
 

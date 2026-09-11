@@ -979,6 +979,13 @@ def exact_cells_per_token(cfg, ctx, seq=None, experts=1, topk=1, seq_batch=1,
                          "latent-attention shapes -- is not a `params` block: the "
                          "layer's matmuls are five and not four and the key grids "
                          "read a width the prover has no layout for")
+    if experts > 1 or topk > 1:
+        raise ec.Refused("a mixture layer is three feed-forward sides -- the shared "
+                         "experts over every token, the routed experts over the "
+                         "tokens routed to each, and the router's own matmul -- and "
+                         "one width with a folded expert count cannot say which is "
+                         "which.  `frontier.py` builds it from the model's "
+                         "published config; this entry point takes one width")
     out = dict(total=0.0, preprocessed=0.0, components={}, segments={},
                cells="exact", gkr=tuple(gkr), key_tile_saturated=False,
                legacy_alpha=False, tokens_per_proof=seq)
@@ -1815,6 +1822,7 @@ def _exact_selftest():
             bad += 1
     for kw, what in ((dict(seq_batch=4), "a batched proof"),
                      (dict(attn_accs_per_layer=1024), "latent attention"),
+                     (dict(experts=128, topk=8), "a mixture layer"),
                      (dict(seq=None), "a segment with no block length")):
         try:
             cells_per_token(LLAMA8B, 4096, BATCH, cells="exact",
@@ -1903,7 +1911,8 @@ def selftest():
           "+0.09% / -0.53%, which")
     print("  is what the witness assumption costs and nothing else, and refuses a "
           "batched proof,")
-    print("  a latent attention and a segment with no block length")
+    print("  a latent attention, a mixture layer and a segment with no block "
+          "length")
     if not LOGUP_MARGINAL:
         print("  (no constants file and no inputs here, so the batch marginals above "
               "are the self-test's own)")

@@ -341,9 +341,12 @@ def h100_card():
 
 
 # ------------------------------------------------------------- the shapes ----
-# Every field below is read out of the model's own `config.json`, fetched
-# 2026-08-31.  `check_total` / `check_active` are the vendor's published counts and
-# the table prints the model's own arithmetic against them.
+# Every field below is read out of the model's own published `config.json`.  The
+# owner's ruling of 2026-09-11 on what a projection may assume applies here too:
+# the fewer assumptions the better, and a model's own architecture is the way to
+# have fewer.  So no dimension in this table is solved or approximated except
+# where the row says so, and each row names the repository its config was read
+# from and the date.
 def mla(d, nh, q_lora, kv_lora, qk_nope=128, qk_rope=64, v_head=128):
     """DeepSeek-V3-family multi-head latent attention, as parameters and as
     committed accumulators per layer.  The cost model's GQA formulas do not
@@ -360,94 +363,161 @@ def mla(d, nh, q_lora, kv_lora, qk_nope=128, qk_rope=64, v_head=128):
                 nkv_eff=kv_a_out / (2.0 * v_head))
 
 
-def group(layers, dff, experts=1, topk=1, linear=False, **kw):
-    return dict(layers=layers, dff=dff, experts=experts, topk=topk, linear=linear, **kw)
+def group(layers, dff=0, routed=0, per_token=0, shared=0, moe_dff=0,
+          routed_n_in=None, linear=False, **kw):
+    """One run of layers that are all alike, from the model's published config.
+
+    Every field is a key of that config and nothing is solved: `dff` is
+    `intermediate_size` on a dense layer and zero on a mixture layer, `routed` is
+    `n_routed_experts` / `num_experts` / `num_local_experts`, `per_token` is
+    `num_experts_per_tok`, `shared` is `n_shared_experts` and `moe_dff` is
+    `moe_intermediate_size`.  `routed_n_in` is the width a routed expert reads
+    where the config says it is not the model's (`routed_expert_hidden_size`).
+
+    `experts` and `topk` beside them are the folded pair the older per-unit path
+    reads -- the shared experts counted as routed ones that every token uses --
+    and they are derived here rather than written down twice."""
+    width = moe_dff if routed else dff
+    experts = (routed + shared) if routed else 1
+    topk = (per_token + shared) if routed else 1
+    return dict(layers=layers, dff=width, experts=experts, topk=topk, linear=linear,
+                dense_dff=dff, routed=routed, per_token=per_token, shared=shared,
+                moe_dff=moe_dff, routed_n_in=routed_n_in, **kw)
 
 
+# Multi-head latent attention, from the three configs' own `q_lora_rank`,
+# `kv_lora_rank`, `qk_nope_head_dim`, `qk_rope_head_dim` and `v_head_dim`.
 DS3 = mla(7168, 128, 1536, 512)
 K2 = mla(7168, 64, 1536, 512)
 K3 = mla(7168, 96, 1536, 512)
 
+# Every field below is read out of the model's own published `config.json`,
+# fetched 2026-09-11 (2026-09-10 for the 70B, which has not moved).  Values only:
+# `source` names the repository the file was read from and the date, and a shape
+# the vendor's published totals do not reproduce is marked `[check]` and printed
+# rather than adjusted.  `check_total` / `check_active` are the vendor's counts.
 SHAPES = [
     dict(name="Llama-3.1-8B", tag="calibration", d=4096, nh=32, nkv=8, hd=128,
-         vocab=128256, groups=[group(32, 14336)],
+         vocab=128256, groups=[group(32, dff=14336)],
          check_total=8.03e9, check_active=8.03e9,
-         source="config.json (meta-llama/Meta-Llama-3.1-8B); the shape every "
-                "measured number in this repo was taken on"),
+         source="config.json, meta-llama/Meta-Llama-3.1-8B, fetched 2026-09-11 "
+                "from the ungated mirror unsloth/Meta-Llama-3.1-8B, which "
+                "agrees: L=32 d=4096 nh=32 nkv=8 head_dim=128 dff=14336 "
+                "vocab=128256, untied embeddings; the shape every measured "
+                "number in this repository was taken on"),
     dict(name="Llama-3.1-70B", tag="dense", d=8192, nh=64, nkv=8, hd=128,
-         vocab=128256, groups=[group(80, 28672)],
+         vocab=128256, groups=[group(80, dff=28672)],
          check_total=70.55e9, check_active=70.55e9,
          source="[web] config.json, nvidia/Llama-3.1-70B-Instruct-FP8 and "
                 "unsloth/Meta-Llama-3.1-70B, which agree, fetched 2026-09-10: "
                 "L=80 d=8192 nh=64 nkv=8 dff=28672 vocab=128256, untied "
-                "embeddings; the head dimension is d/nh = 128, which the config "
-                "does not name. The published count is 70,553,706,496"),
+                "embeddings; head_dim=128. The published count is 70,553,706,496"),
     dict(name="Llama-3.1-405B", tag="dense", d=16384, nh=128, nkv=8, hd=128,
-         vocab=128256, groups=[group(126, 53248)],
+         vocab=128256, groups=[group(126, dff=53248)],
          check_total=405.85e9, check_active=405.85e9,
-         source="[web] config.json, nvidia/Llama-3.1-405B-Instruct-FP8, fetched "
-                "2026-08-31: L=126 d=16384 nh=128 nkv=8 dff=53248 vocab=128256"),
+         source="[web] config.json, NousResearch/Hermes-3-Llama-3.1-405B, which "
+                "is the 405B architecture and is not gated, fetched 2026-09-11: "
+                "L=126 d=16384 nh=128 nkv=8 dff=53248 vocab=128256, untied "
+                "embeddings. A 4-bit repack of the same model "
+                "(hugging-quants/Meta-Llama-3.1-405B-Instruct-AWQ-INT4) states "
+                "num_key_value_heads 16; the base config and the model card both "
+                "say 8 and that is what is used"),
     dict(name="1T dense", tag="dense, hypothetical", d=20480, nh=160, nkv=16, hd=128,
-         vocab=128256, groups=[group(160, None)], solve_dff_for=1.0e12,
-         check_total=1.0e12, check_active=1.0e12,
-         source="[hypothetical] defined here, not a real model: Llama-405B's "
-                "aspect ratio scaled to 1.0 T parameters (dff solved)"),
+         vocab=128256, groups=[group(160, dff=None)], solve_dff_for=1.0e12,
+         check_total=1.0e12, check_active=1.0e12, solved="dff",
+         source="[hypothetical] defined here, not a real model, and the ONE row "
+                "in this table with no published config: Llama-405B's aspect "
+                "ratio scaled to 1.0 T parameters with the feed-forward width "
+                "solved for that target"),
     dict(name="DeepSeek-V3", tag="MoE 256/8", d=7168, nh=128, nkv=DS3["nkv_eff"], hd=128,
          vocab=129280,
-         groups=[group(3, 18432, **{k: DS3[k] for k in ("attn_params_per_layer",
-                                                        "attn_accs_per_layer")}),
-                 group(58, 2048, experts=257, topk=9,
+         groups=[group(3, dff=18432, **{k: DS3[k] for k in ("attn_params_per_layer",
+                                                            "attn_accs_per_layer")}),
+                 group(58, routed=256, per_token=8, shared=1, moe_dff=2048,
                        **{k: DS3[k] for k in ("attn_params_per_layer",
                                               "attn_accs_per_layer")})],
          check_total=671e9, check_active=37e9,
-         source="[web] config.json, deepseek-ai/DeepSeek-V3, fetched 2026-08-31: "
-                "L=61 d=7168 nh=128 MLA(kv_lora 512, q_lora 1536) "
-                "moe_intermediate 2048, 256 routed + 1 shared, top-8, "
-                "first_k_dense_replace 3 (intermediate 18432), vocab 129280"),
+         source="[web] config.json, deepseek-ai/DeepSeek-V3, fetched 2026-09-11: "
+                "num_hidden_layers 61, hidden_size 7168, num_attention_heads 128, "
+                "vocab_size 129280, MLA q_lora_rank 1536 kv_lora_rank 512 "
+                "qk_nope_head_dim 128 qk_rope_head_dim 64 v_head_dim 128, "
+                "first_k_dense_replace 3 at intermediate_size 18432, "
+                "moe_intermediate_size 2048, n_routed_experts 256, "
+                "n_shared_experts 1, num_experts_per_tok 8, moe_layer_freq 1, "
+                "untied embeddings"),
     dict(name="Kimi K2", tag="MoE 384/8", d=7168, nh=64, nkv=K2["nkv_eff"], hd=128,
          vocab=163840,
-         groups=[group(1, 18432, **{k: K2[k] for k in ("attn_params_per_layer",
-                                                       "attn_accs_per_layer")}),
-                 group(60, 2048, experts=385, topk=9,
+         groups=[group(1, dff=18432, **{k: K2[k] for k in ("attn_params_per_layer",
+                                                           "attn_accs_per_layer")}),
+                 group(60, routed=384, per_token=8, shared=1, moe_dff=2048,
                        **{k: K2[k] for k in ("attn_params_per_layer",
                                              "attn_accs_per_layer")})],
          check_total=1.04e12, check_active=32e9,
          source="[web] config.json, moonshotai/Kimi-K2-Instruct, fetched "
-                "2026-08-31: L=61 d=7168 nh=64 MLA(kv_lora 512, q_lora 1536) "
-                "moe_intermediate 2048, 384 routed + 1 shared, top-8, "
-                "first_k_dense_replace 1, vocab 163840"),
-    dict(name="Kimi K3", tag="MoE 896/16 [check]", d=7168, nh=96, nkv=K3["nkv_eff"], hd=128,
+                "2026-09-11: num_hidden_layers 61, hidden_size 7168, "
+                "num_attention_heads 64, vocab_size 163840, MLA q_lora_rank 1536 "
+                "kv_lora_rank 512 qk_nope_head_dim 128 qk_rope_head_dim 64 "
+                "v_head_dim 128, first_k_dense_replace 1 at intermediate_size "
+                "18432, moe_intermediate_size 2048, n_routed_experts 384, "
+                "n_shared_experts 1, num_experts_per_tok 8, untied embeddings"),
+    dict(name="Kimi K3", tag="MoE 896/16", d=7168, nh=96, nkv=K3["nkv_eff"], hd=128,
          vocab=163840,
-         groups=[group(24, 3072, experts=898, topk=18,
+         groups=[group(1, dff=33792, linear=True,
                        **{k: K3[k] for k in ("attn_params_per_layer",
                                              "attn_accs_per_layer")}),
-                 group(69, 3072, experts=898, topk=18, linear=True,
+                 group(24, routed=896, per_token=16, shared=2, moe_dff=3072,
+                       routed_n_in=3584,
+                       **{k: K3[k] for k in ("attn_params_per_layer",
+                                             "attn_accs_per_layer")}),
+                 group(68, routed=896, per_token=16, shared=2, moe_dff=3072,
+                       routed_n_in=3584, linear=True,
                        **{k: K3[k] for k in ("attn_params_per_layer",
                                              "attn_accs_per_layer")})],
          check_total=2.8e12, check_active=104e9,
-         source="[web, CHECK] config.json, moonshotai/Kimi-K3, fetched 2026-08-31: "
-                "L=93 (24 full-attention + 69 KDA linear-attention) d=7168 nh=96 "
-                "moe_intermediate 3072, 896 routed + 2 shared, top-16, "
-                "vocab 163840.  Two things this row cannot confirm: the expert "
-                "geometry does not reproduce the published 2.8 T (see the check "
-                "column), and the 69 KDA layers' proving cost is priced at a zero "
-                "attention grid, which is a floor and not a model."),
+         source="[web] config.json, moonshotai/Kimi-K3 (text_config), fetched "
+                "2026-09-11: num_hidden_layers 93, hidden_size 7168, "
+                "num_attention_heads 96, vocab_size 163840, MLA q_lora_rank 1536 "
+                "kv_lora_rank 512 qk_nope_head_dim 128 qk_rope_head_dim 64 "
+                "v_head_dim 128, first_k_dense_replace 1 at intermediate_size "
+                "33792, moe_intermediate_size 3072, num_experts 896, "
+                "num_shared_experts 2, num_experts_per_token 16, "
+                "routed_expert_hidden_size 3584 -- the routed experts read a "
+                "projection of the residual and not the model's own width, which "
+                "is what makes the published 2.8 T come out. "
+                "linear_attn_config names 24 full-attention layers and the rest "
+                "Kimi Delta Attention, whose proving cost is priced at a zero "
+                "attention grid here: a floor and not a model.  The active count "
+                "below is short because those layers' own projections are not in "
+                "the config in a form this table reads, and the latent-attention "
+                "form is charged for them instead"),
     dict(name="Qwen3-235B-A22B", tag="MoE 128/8", d=4096, nh=64, nkv=4, hd=128,
-         vocab=151936, groups=[group(94, 1536, experts=128, topk=8)],
+         vocab=151936,
+         groups=[group(94, routed=128, per_token=8, shared=0, moe_dff=1536)],
          check_total=235e9, check_active=22e9,
-         source="[web] config.json, Qwen/Qwen3-235B-A22B, fetched 2026-08-31: "
-                "L=94 d=4096 nh=64 nkv=4 hd=128 moe_intermediate 1536, "
-                "128 experts top-8, no shared expert, vocab 151936"),
+         source="[web] config.json, Qwen/Qwen3-235B-A22B, fetched 2026-09-11: "
+                "num_hidden_layers 94, hidden_size 4096, num_attention_heads 64, "
+                "num_key_value_heads 4, head_dim 128, vocab_size 151936, "
+                "moe_intermediate_size 1536, num_experts 128, "
+                "num_experts_per_tok 8, decoder_sparse_step 1 and "
+                "mlp_only_layers empty (so every layer is a mixture), no "
+                "shared-expert key at all, untied embeddings"),
     dict(name="Llama-4 Maverick", tag="MoE 128/1", d=5120, nh=40, nkv=8, hd=128,
          vocab=202048,
-         groups=[group(24, 16384), group(24, 8192, experts=129, topk=2)],
+         groups=[group(24, dff=16384),
+                 group(24, routed=128, per_token=1, shared=1, moe_dff=8192)],
          check_total=400e9, check_active=17e9,
-         source="[web] config.json (text_config), Llama-4-Maverick-17B-128E-"
-                "Instruct, fetched 2026-08-31: L=48 d=5120 nh=40 nkv=8 hd=128, "
-                "interleave_moe_layer_step 2 -> 24 dense layers at "
-                "intermediate_size_mlp 16384 and 24 MoE layers at "
-                "intermediate_size 8192, 128 routed + 1 shared, top-1, "
-                "vocab 202048"),
+         source="[web] config.json (text_config), "
+                "unsloth/Llama-4-Maverick-17B-128E-Instruct, an ungated mirror of "
+                "meta-llama/Llama-4-Maverick-17B-128E-Instruct, fetched "
+                "2026-09-11: num_hidden_layers 48, hidden_size 5120, "
+                "num_attention_heads 40, num_key_value_heads 8, head_dim 128, "
+                "vocab_size 202048, moe_layers the 24 odd indices at "
+                "intermediate_size 8192 and the 24 even ones at "
+                "intermediate_size_mlp 16384, num_local_experts 128, "
+                "num_experts_per_tok 1, untied embeddings. The config names no "
+                "shared-expert key; `Llama4TextMoe` carries one at "
+                "intermediate_size, and that is where the shared expert here "
+                "comes from"),
 ]
 
 
@@ -462,7 +532,29 @@ def solve_dff(shape, target):
 
 for _s in SHAPES:
     if _s.get("solve_dff_for"):
-        _s["groups"][0]["dff"] = solve_dff(_s, _s["solve_dff_for"])
+        _w = solve_dff(_s, _s["solve_dff_for"])
+        _s["groups"][0].update(dff=_w, dense_dff=_w)
+# The weights each run of layers holds, from the published fields and not from
+# one folded width: `all` is every expert, which is what a proof covers, and
+# `token` is the shared experts plus the top-k a token uses.  Kimi K3's routed
+# experts read `routed_expert_hidden_size` and its shared ones read the model's
+# own width, which one folded width cannot say.
+for _s in SHAPES:
+    for _g in _s["groups"]:
+        _d, _w = _s["d"], _g["moe_dff"]
+        _rn = _g["routed_n_in"] or _d
+        _base = 3 * _d * (_g["dense_dff"] or 0) + 3 * _d * _w * _g["shared"]
+        _g["ffn_all"] = _base + 3 * _rn * _w * _g["routed"]
+        _g["ffn_token"] = _base + 3 * _rn * _w * _g["per_token"]
+
+
+def attn_params(shape, grp):
+    """One layer's attention weights: the shape's own where a group overrides
+    them (the latent-attention rows), the GQA form otherwise."""
+    if grp.get("attn_params_per_layer") is not None:
+        return grp["attn_params_per_layer"]
+    d, nh, nkv, hd = shape["d"], shape["nh"], shape["nkv"], shape["hd"]
+    return d * nh * hd + 2 * d * nkv * hd + nh * hd * d
 
 
 def cfg_of(shape, grp):
@@ -480,9 +572,8 @@ def params_of(shape, freivalds=False, embedding=False):
     back to compare like with like."""
     tot = shape["vocab"] * shape["d"] * (2 if embedding else 1)
     for grp in shape["groups"]:
-        tot += cm.n_params(cfg_of(shape, grp), experts=grp["experts"],
-                           topk=grp["topk"], freivalds=freivalds, head=False,
-                           attn_params_per_layer=grp.get("attn_params_per_layer"))
+        tot += grp["layers"] * (attn_params(shape, grp)
+                                + (grp["ffn_all"] if freivalds else grp["ffn_token"]))
     return tot
 
 
@@ -706,7 +797,84 @@ def assumption_rows(shape, seq=TOKENS, ctx=4096):
             cells=None, share_of_segment=None,
             note="every composed segment of the two headline runs carries this "
                  "value; a shape proved at another one is a different statement"))
-    return dict(segment_fresh=fresh, context=ctx, seq=seq, rows=rows)
+    # and the two a mixture row adds, measured on the one row that is all mixture
+    moe_ref = next((s for s in SHAPES if not refusal(s)
+                    and any(g["routed"] for g in s["groups"])), None)
+    moe_rows = [] if moe_ref is None else moe_assumption_rows(moe_ref, seq=seq, ctx=ctx)
+    rows += moe_rows
+    return dict(segment_fresh=fresh, context=ctx, seq=seq, rows=rows,
+                moe_reference=None if moe_ref is None else moe_ref["name"])
+
+
+def moe_assumption_rows(shape, seq=TOKENS, ctx=4096, gkr=STATEMENT_GKR):
+    """The two assumptions a counted mixture row makes, and what each is worth.
+
+    Everything else about a mixture layer is the published config and the
+    prover's layout.  These two are not: how the tokens are spread over the
+    experts, and the selection argument on top of the router's logits, which no
+    AIR in this project builds."""
+    grp = next((g for g in shape["groups"] if g["routed"]), None)
+    if grp is None:
+        return []
+    geom = group_geom(shape, grp, seq, ctx)
+    moe = moe_of(shape, grp, seq)
+    wit = witness_fields()
+
+    def at(**kw):
+        return segment_cells("layer", geom, wit, gkr, True, False,
+                             moe=dict(moe, **kw))["fresh"]
+    whole = at()
+    # the other end of the routing assumption: the same token slots on as few
+    # experts as they fit on, `topk` experts of `seq` tokens each
+    concentrated = at(distribution=[(seq, grp["per_token"])])
+    no_router = at(router=False)
+    topk = grp["per_token"] * grp["routed"] * (cm.MAXARG_CELLS or 0.0) * seq
+    row = f"{shape['name']}, one mixture layer segment at C={ctx:,}, S={seq}"
+    return [dict(
+        field="moe_routing", value="uniform", grade="asserted", bound=None,
+        recorded_values=["no run of any of these models has been proved"],
+        source_run="none", source_segment=row,
+        sizes="how many tokens each routed matmul covers, and so its rows",
+        cells=abs(whole - concentrated), share_of_segment=abs(whole - concentrated) / whole,
+        note=f"every token's top-k is taken uniform over the {grp['routed']} "
+             f"experts, so a segment of {seq} tokens touches "
+             f"{moe['touched_expected']:.1f} of them and each routed matmul covers "
+             f"{ec.routed_blocks(seq, grp['per_token'], moe['touched'])[0]} tokens. "
+             f"`cells` is what the assumption is worth: the same token slots "
+             f"concentrated on {grp['per_token']} experts of {seq} tokens each cost "
+             f"{concentrated:,} against {whole:,}.  Routing statistics from an "
+             f"actual run of the model remove the assumption: pass them as "
+             f"--routing FILE and the row is counted at them"),
+        dict(
+        field="moe_router", value="gate matmul counted, top-k bounded",
+        grade="bound", bound=None,
+        recorded_values=["no AIR in this project builds a selection argument"],
+        source_run="none", source_segment=row,
+        sizes="the router's own matmul and the selection on its logits",
+        cells=(whole - no_router) + topk,
+        share_of_segment=((whole - no_router) + topk) / (whole + topk),
+        note=f"the gate logits are a matmul of {grp['routed']} outputs over every "
+             f"token and are COUNTED like any other ({whole - no_router:,} cells "
+             f"a segment).  The top-k selection on them is not: no AIR here builds "
+             f"one, so it is an upper bound, {grp['per_token']} argmax passes over "
+             f"{grp['routed']} logits a token at the built gadget's measured "
+             f"marginal ({cm.MAXARG_CELLS} cells a comparison, "
+             f"`model_constants.argmax_marginal_cells_per_comparison`), "
+             f"{topk:,.0f} cells a segment")]
+
+
+def _wrap(text, width):
+    """A note, broken at spaces, for a printed block that is read and not parsed."""
+    out, line = [], ""
+    for word in text.split():
+        if line and len(line) + 1 + len(word) > width:
+            out.append(line)
+            line = word
+        else:
+            line = f"{line} {word}".strip()
+    if line:
+        out.append(line)
+    return out
 
 
 def _head_group_share(shape, geom):
@@ -747,15 +915,47 @@ def refusal(shape):
 
 
 _SEGMENTS = {}
+# Per-expert token counts measured on a real run of a model, keyed by the row's
+# slug: `{slug: [[tokens, matmuls], ...]}`.  `--routing FILE` fills it, and a row
+# it names is counted at that distribution instead of at the uniform one, which
+# is how the routing assumption is removed rather than restated.
+ROUTING = {}
 
 
-def segment_cells(kind, geom, witness, gkr, diagonal_block, bound):
+def moe_of(shape, grp, seq):
+    """The mixture block of one group's `params`, or None where the group is dense.
+
+    `touched` is how many of the routed experts a block of `seq` tokens reaches
+    under uniform routing, which is how many routed matmuls the segment builds
+    and whose weights its preprocessed trace holds."""
+    if not grp["routed"]:
+        return None
+    touched = ec.expected_distinct_experts(grp["routed"], grp["per_token"], seq)
+    return dict(experts=grp["routed"], topk=grp["per_token"], moe_dff=grp["moe_dff"],
+                n_in=grp["routed_n_in"], touched=max(1, int(round(touched))),
+                touched_expected=touched, router=True,
+                distribution=ROUTING.get(slug(shape["name"])))
+
+
+def group_geom(shape, grp, seq, ctx):
+    """The `segment_params` arguments of one group's layer segment.
+
+    The feed-forward side is split the way the config splits it: `dff` is what
+    every token goes through -- a dense layer's own width, or the shared experts'
+    -- and the routed experts are the `moe` block beside it."""
+    return dict(d=shape["d"], nh=shape["nh"], nkv=shape["nkv"], hd=shape["hd"],
+                dff=(grp["dense_dff"] or 0) + grp["shared"] * grp["moe_dff"],
+                vocab=shape["vocab"], s=seq, c=0 if grp["linear"] else ctx)
+
+
+def segment_cells(kind, geom, witness, gkr, diagonal_block, bound, moe=None):
     """One segment's committed cells, counted from its `params` block.  Memoised:
     a statement prices the same segment once per (kind, shape, prefix)."""
     key = (kind, tuple(sorted(geom.items())), tuple(sorted(witness.items())),
-           tuple(gkr), diagonal_block, bound)
+           tuple(gkr), diagonal_block, bound,
+           json.dumps(moe, sort_keys=True, default=str))
     if key not in _SEGMENTS:
-        p = ec.segment_params(kind, witness=witness, gkr=gkr,
+        p = ec.segment_params(kind, witness=witness, gkr=gkr, moe=moe,
                               head_groups=ec.head_groups_for(
                                   geom["nh"], WITNESS_ASSUMPTIONS["head_groups"]),
                               **geom)
@@ -764,13 +964,32 @@ def segment_cells(kind, geom, witness, gkr, diagonal_block, bound):
     return _SEGMENTS[key]
 
 
+def moe_weights(shape, grp, moe):
+    """The weights one layer of this group holds that a proof over it covers: the
+    attention, the dense or shared feed-forward side, and the routed experts the
+    segment TOUCHES -- not every expert the model has, because a segment that
+    never reads an expert's weights does not commit them."""
+    d, w = shape["d"], grp["moe_dff"]
+    base = attn_params(shape, grp) + 3 * d * ((grp["dense_dff"] or 0) + grp["shared"] * w)
+    if not moe:
+        return base
+    return base + 3 * (grp["routed_n_in"] or d) * w * moe["touched"]
+
+
 def exact_model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
                       with_head=True, diagonal_block=True, gkr=(), bound=False):
     """`model_cells`, counted from the layout: one `params` block per segment.
 
     The unit is the same -- committed cells per decoded token, the layer segments
     of the whole stack plus the output head, each amortised over the `seq`
-    positions its segment covers."""
+    positions its segment covers.
+
+    A mixture layer is counted and not twinned.  Its shared experts are a matmul
+    over every token; each routed expert is a matmul over the tokens routed to it
+    alone, laid out as `MatLayout::choose` lays out that many tokens, so the row
+    padding a small token count pays is in the number; the router's own matmul of
+    `experts` logits is counted beside them.  What is NOT counted from a layout is
+    the top-k selection, which no AIR here builds: it is a stated bound, below."""
     if alpha is not None:
         raise Refused("a single attention slope is not a layout; `--cells fitted` "
                       "is what prices it")
@@ -780,12 +999,11 @@ def exact_model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=Non
                       f"describes one segment of one sequence")
     out = dict(total=0.0, preprocessed=0.0, residual_stream=0.0, parts={},
                gkr=tuple(gkr), saturated=False, cells="exact", bound=bound,
-               segments={})
+               segments={}, moe={})
     first = True
-    for i, grp in enumerate(shape["groups"]):
-        geom = dict(d=shape["d"], nh=shape["nh"], nkv=shape["nkv"], hd=shape["hd"],
-                    dff=grp["dff"] * grp["topk"], vocab=shape["vocab"], s=seq,
-                    c=0 if grp["linear"] else ctx)
+    for grp in shape["groups"]:
+        geom = group_geom(shape, grp, seq, ctx)
+        moe = moe_of(shape, grp, seq)
         counts = []
         layers = grp["layers"]
         if first and layers:
@@ -797,7 +1015,7 @@ def exact_model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=Non
             if not n:
                 continue
             got = segment_cells(kind, geom, witness_fields(kind), gkr,
-                                diagonal_block, bound)
+                                diagonal_block, bound, moe=moe)
             out["segments"][f"{kind} x{n}"] = got["fresh"]
             out["total"] += n * got["fresh"] / seq
             out["residual_stream"] += n * sum(got["components"]["residual_stream"]) / seq
@@ -806,28 +1024,37 @@ def exact_model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=Non
             out["parts"]["boundary"] = (out["parts"].get("boundary", 0.0)
                                         + n * got["boundary"] / seq)
         # the weight trace the Freivalds check reads, committed offline.  It is
-        # not a committed cell of this segment, so the exact count says nothing
+        # not a committed cell of any segment, so the exact count says nothing
         # about it and this is `cost_model.py`'s per-weight figure as before.
-        params = cm.n_params(cfg_of(shape, grp), experts=grp["experts"],
-                             freivalds=True, head=(with_head and i == 0))
-        out["preprocessed"] += (cm.PREPROCESSED_PER_WEIGHT or 0.0) * params / seq
-        # the routing inputs, which the prover does not build: an analogy, and
-        # the only per-unit constant left on this side of the table
-        if grp["experts"] > 1:
-            out["parts"]["route"] = out["parts"].get("route", 0.0) + grp["layers"] * (
-                grp["topk"] * cm.ROUTE_SEL_CELLS + grp["experts"] * cm.ROUTE_MAX_CELLS)
+        w = grp["layers"] * moe_weights(shape, grp, moe)
+        if with_head and grp is shape["groups"][0]:
+            w += shape["vocab"] * shape["d"]
+        out["preprocessed"] += (cm.PREPROCESSED_PER_WEIGHT or 0.0) * w / seq
+        if moe:
+            # the top-k selection over the router's `experts` logits, which no AIR
+            # in this project builds.  Priced as `topk` argmax passes over the
+            # logits at the built gadget's measured marginal, which is an upper
+            # bound on a selection argument and is labelled one.
+            out["parts"]["router_topk"] = out["parts"].get("router_topk", 0.0) + (
+                grp["layers"] * grp["per_token"] * grp["routed"]
+                * (cm.MAXARG_CELLS or 0.0))
+            out["moe"][f"{grp['layers']}x{grp['routed']}/{grp['per_token']}"] = dict(
+                touched=moe["touched"], touched_expected=moe["touched_expected"],
+                experts=grp["routed"], topk=grp["per_token"], shared=grp["shared"],
+                moe_dff=grp["moe_dff"], routed_n_in=grp["routed_n_in"] or shape["d"],
+                distribution=moe.get("distribution") or "uniform",
+                weights_per_layer=moe_weights(shape, grp, moe))
     if with_head:
         grp = shape["groups"][0]
-        geom = dict(d=shape["d"], nh=shape["nh"], nkv=shape["nkv"], hd=shape["hd"],
-                    dff=grp["dff"] * grp["topk"], vocab=shape["vocab"], s=seq, c=ctx)
+        geom = dict(group_geom(shape, grp, seq, ctx), c=ctx)
         got = segment_cells("head", geom, witness_fields("head"), gkr,
-                            diagonal_block, bound)
+                            diagonal_block, bound, moe=moe_of(shape, grp, seq))
         out["segments"]["head"] = got["fresh"]
         out["total"] += got["fresh"] / seq
         for name, (b, inter) in got["components"].items():
             out["parts"][name] = out["parts"].get(name, 0.0) + (b + inter) / seq
         out["parts"]["boundary"] = out["parts"].get("boundary", 0.0) + got["boundary"] / seq
-    out["total"] += out["parts"].get("route", 0.0)
+    out["total"] += out["parts"].get("router_topk", 0.0)
     # the two names the table's own columns read
     out["parts"]["attn"] = out["parts"].get("key_tiles", 0.0)
     out["parts"].setdefault("freivalds", 0.0)
@@ -1719,12 +1946,23 @@ def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
 
 
 def dense_twin(shape):
-    """The same shape with every expert count collapsed to its top-k: a dense model
-    with *identical active parameters*.  This is the comparison B9's `x2.35 pure
+    """The same shape with every mixture layer collapsed to one dense feed-forward
+    block of the width a token actually goes through: a dense model with
+    *identical active parameters*.  This is the comparison B9's `x2.35 pure
     overhead` is stated against, and the only fair one -- against a dense model of
-    the same *total* size an MoE is of course cheaper."""
+    the same *total* size a mixture is of course cheaper."""
     twin = dict(shape)
-    twin["groups"] = [dict(grp, experts=grp["topk"]) for grp in shape["groups"]]
+    groups = []
+    for grp in shape["groups"]:
+        if not grp["routed"]:
+            groups.append(dict(grp))
+            continue
+        w = (grp["dense_dff"] or 0) + (grp["shared"] + grp["per_token"]) * grp["moe_dff"]
+        t = dict(grp, dense_dff=w, dff=w, routed=0, per_token=0, shared=0,
+                 moe_dff=0, routed_n_in=None, experts=1, topk=1,
+                 ffn_all=3 * shape["d"] * w, ffn_token=3 * shape["d"] * w)
+        groups.append(t)
+    twin["groups"] = groups
     return twin
 
 
@@ -1770,9 +2008,23 @@ def read_from_constants():
 ASSUMPTION_KEY = "assumption.cost_model.{field}"
 
 
-def assumption_keys():
+# The two a counted mixture row adds: how the tokens are spread over the experts,
+# and the selection argument on the router's logits, which is a stated bound.
+MOE_ASSUMPTIONS = ("moe_routing", "moe_router")
+
+
+def assumption_keys(moe=True):
+    fields = list(ec.WITNESS_FIELDS) + ["head_groups", "variant", "round"]
     return [ASSUMPTION_KEY.format(field=f)
-            for f in list(ec.WITNESS_FIELDS) + ["head_groups", "variant", "round"]]
+            for f in fields + (list(MOE_ASSUMPTIONS) if moe else [])]
+
+
+def missing_assumption_keys():
+    """The assumption block's keys that this constants file does not hold.
+
+    A projected row names them in its `inputs`, so until zk-results records them
+    the run is not recordable and this says exactly which are wanted."""
+    return [k for k in assumption_keys() if constants.find(k) is None]
 
 
 def cells_inputs():
@@ -1789,6 +2041,13 @@ def cells_inputs():
     return sorted(set(pre + assumption_keys()))
 
 
+# What the COUNTED path does not charge, although the fitted one does: the two
+# routing inputs priced by analogy.  A counted mixture layer builds the router's
+# matmul like any other matmul and states the selection on top of it as a bound,
+# so neither analogy is read.
+NOT_CHARGED_EXACT = ("route_selection_cells", "route_topk_cells")
+
+
 def read_elsewhere():
     """Every input the model charges that the constants file did not give it, by
     where it came from: `inputs` is the micro-benchmark directory, `composed` this
@@ -1797,6 +2056,8 @@ def read_elsewhere():
     out = {}
     for name, e in sorted(cm.PROVENANCE.items()):
         if e["source"] == "constants" or not e.get("charged", True):
+            continue
+        if CELLS == "exact" and name in NOT_CHARGED_EXACT:
             continue
         out.setdefault(e["source"], []).append(
             dict(input=name, key=e["key"], file=e["file"], value=e["value"]))
@@ -1958,6 +2219,12 @@ def main(argv=None):
                          "PROVED POSITIONS per second (the paper's unit).  Default: "
                          f"the constants file's `{TARGET_KEY}`, or 20 where it names "
                          "none")
+    ap.add_argument("--routing", metavar="FILE", default=None,
+                    help="per-expert token counts measured on a real run, "
+                         "`{slug: [[tokens, matmuls], ...]}`; a mixture row the "
+                         "file names is counted at that distribution instead of "
+                         "at the uniform one, which is what removes the routing "
+                         "assumption")
     ap.add_argument("--cells", choices=CELLS_MODES, default=CELLS,
                     help="how the cell side of every row is counted: `exact` "
                          "builds a `params` block per segment and calls "
@@ -1974,6 +2241,12 @@ def main(argv=None):
     args = ap.parse_args(argv)
     constants.load(args.constants)
     CELLS = args.cells
+    if args.routing:
+        ROUTING.update(json.loads(pathlib.Path(args.routing).read_text()))
+        bad = sorted(set(ROUTING) - {slug(s["name"]) for s in SHAPES})
+        if bad:
+            sys.exit(f"--routing {args.routing} names rows this table has no shape "
+                     f"for: {', '.join(bad)}")
     if CELLS == "exact" and args.seq_batch != 1:
         sys.exit(f"--cells exact --seq-batch {args.seq_batch}: a batched proof "
                  f"commits B key caches and B wiring families, and one `params` "
@@ -2152,7 +2425,7 @@ def main(argv=None):
               "columns price.")
         print(f"    {'field':<16} {'assumed':>20} {'bound':>7} {'recorded':>18} "
               f"{'sizes, cells':>14} {'of a segment':>13}  read off")
-        for r in arows["rows"]:
+        for r in [q for q in arows["rows"] if q["field"] not in MOE_ASSUMPTIONS]:
             sh = r["share_of_segment"]
             vals = ", ".join(str(v) for v in r["recorded_values"][:4])
             print(f"    {r['field']:<16} {str(r['value']):>20} "
@@ -2161,6 +2434,15 @@ def main(argv=None):
                   + (f"{r['cells']:>14,}" if r["cells"] else f"{'-':>14}")
                   + (f" {sh:>12.4%}" if sh is not None else f" {'-':>12}")
                   + f"  {r['source_run'][:10]} {r['source_segment']}")
+        moe_rows = [q for q in arows["rows"] if q["field"] in MOE_ASSUMPTIONS]
+        if moe_rows:
+            print(f"\n    and the two a counted MIXTURE row adds, on "
+                  f"{arows['moe_reference']}, one layer segment:")
+            for r in moe_rows:
+                print(f"      {r['field']:<12} {r['value']:<38} [{r['grade']}]  "
+                      f"{r['cells']:>14,.0f} cells  {r['share_of_segment']:>8.2%}")
+                for line in _wrap(r["note"], 88):
+                    print(f"        {line}")
         print(f"    the five `ao_*` range fields size ONE group of tables together, "
               f"so their cells")
         print(f"    column is that group's and is not added up.  A driver in "
@@ -2371,28 +2653,36 @@ def main(argv=None):
     print("  the check: the model's own arithmetic over the fetched config, plus the input")
     print("  embedding (which the proof never covers), against the vendor's published counts.")
     print(f"  {'model':<18} {'L':>4} {'d':>6} {'nh':>4} {'dff':>7} {'E':>5} {'k':>3} "
-          f"{'total (model)':>14} {'published':>10} {'d':>7} "
+          f"{'sh':>3} {'total (model)':>14} {'published':>10} {'d':>7} "
           f"{'active (model)':>15} {'published':>10} {'d':>7}")
     rows = []
     for shape in SHAPES:
         L = sum(grp["layers"] for grp in shape["groups"])
-        moe = [grp for grp in shape["groups"] if grp["experts"] > 1]
-        E = moe[0]["experts"] if moe else 1
-        k = moe[0]["topk"] if moe else 1
-        dff = moe[0]["dff"] if moe else shape["groups"][0]["dff"]
+        moe = [grp for grp in shape["groups"] if grp["routed"]]
+        E = moe[0]["routed"] if moe else 0
+        k = moe[0]["per_token"] if moe else 0
+        sh = moe[0]["shared"] if moe else 0
+        dff = moe[0]["moe_dff"] if moe else shape["groups"][0]["dense_dff"]
         tot = params_of(shape, freivalds=True, embedding=True)
         act = params_of(shape, embedding=True)
         dt = tot / shape["check_total"] - 1 if shape.get("check_total") else None
         da = act / shape["check_active"] - 1 if shape.get("check_active") else None
         bad = (dt is not None and abs(dt) > 0.05) or (da is not None and abs(da) > 0.05)
         print(f"  {shape['name']:<18} {L:>4} {shape['d']:>6} {shape['nh']:>4} {dff:>7} "
-              f"{E:>5} {k:>3} {g(tot):>14} {g(shape['check_total']):>10} {dt:>+6.1%} "
+              f"{E:>5} {k:>3} {sh:>3} {g(tot):>14} {g(shape['check_total']):>10} {dt:>+6.1%} "
               f"{g(act):>15} {g(shape['check_active']):>10} {da:>+6.1%}"
               + ("  [check]" if bad else ""))
         rows.append(dict(shape=shape, total=tot, active=act, d_total=dt, d_active=da,
                          flagged=bad))
-    print("  E and k include the shared expert where the architecture has one "
-          "(always covered, always active).")
+    print("  E is the ROUTED expert count, k the experts a token routes to and sh "
+          "the shared experts,")
+    print("  each as its own published field; `dff` is the expert width on a "
+          "mixture row and the")
+    print("  feed-forward width on a dense one.  Every one of them is a key of the "
+          "model's own")
+    print("  config.json, named in the source line below, and none is solved -- "
+          "except the")
+    print("  hypothetical row, which says so.")
     for r in rows:
         if r["flagged"]:
             print(f"  [check] {r['shape']['name']}: total {r['d_total']:+.0%}, "
@@ -2608,12 +2898,27 @@ def main(argv=None):
 
     # --- MoE and the batch knob ----------------------------------------------
     print("\n(4) MoE against a dense model with the same *active* parameters, C=4K")
-    print("  the mechanism (B9 probe 2): a proof covers every expert in full, and the")
-    print("  Freivalds check is per weight -- exactly invariant to how many tokens used")
-    print("  it.  So the weight side is x E while the accumulators are only x k.  B")
-    print("  batches sequences into one proof; at B ~ E/k every expert sees S tokens")
-    print("  again and the Freivalds check amortises exactly as a dense matmul's does")
-    print("  at B = 1.")
+    if CELLS != "exact":
+        print("  the mechanism (B9 probe 2): a proof covers every expert in full, and "
+              "the")
+        print("  Freivalds check is per weight -- exactly invariant to how many tokens "
+              "used")
+        print("  it.  So the weight side is x E while the accumulators are only x k.  B")
+        print("  batches sequences into one proof; at B ~ E/k every expert sees S "
+              "tokens")
+        print("  again and the Freivalds check amortises exactly as a dense matmul's "
+              "does")
+        print("  at B = 1.")
+    else:
+        print("  the mechanism, counted rather than asserted: a proof covers every "
+              "expert the")
+        print("  segment touches, and what it COMMITS for each is that expert's own "
+              "matmul over")
+        print("  the few tokens routed to it -- which pads -- and the activations its "
+              "Freivalds")
+        print("  check reads.  The expert count lands on the preprocessed weight "
+              "trace, which the")
+        print("  measured rates do not count and which the second table below carries.")
     moes = [s for s in priceable if any(grp["experts"] > 1 for grp in s["groups"])]
     BS = (1, 4, 16, 64, 256)
     print("  the reference is the dense twin at B=1, held fixed, so the column reads")
@@ -2634,36 +2939,45 @@ def main(argv=None):
         same = [at(B, ref_batch=B) for B in BS]
         at_ek = at(max(1, round(ek)))
         moe_rows[s["name"]] = dict(ek=ek, sweep=dict(zip(BS, cells)),
-                                   same_b=dict(zip(BS, same)), at_ek=at_ek)
+                                   same_b=dict(zip(BS, same)), at_ek=at_ek,
+                                   counted=(model_cells(s, 4096, seq=args.seq,
+                                                        batch=batch).get("moe")
+                                            if CELLS == "exact" else None))
         print(f"  {s['name']:<18} {ek:>6.1f} "
               + "".join(f"{c['ratio']:>9.3f}x" for c in cells)
               + f"{at_ek['ratio']:>9.3f}x")
     if CELLS == "exact":
-        print("\n  WHAT AN MoE SEGMENT IS under the exact count, and the layout does "
-              "not settle it:")
-        print("  the `params` block prices the experts a token actually evaluates, a "
-              "feed-forward")
-        print("  block of `topk * dff`.  A prover that covers every expert in full "
-              "would commit the")
-        print("  Freivalds check's activations for all of them -- and no prover in "
-              "this project")
-        print("  builds a routed feed-forward block at all, so that side is counted "
-              "by nothing here.")
-        print("  It is why the B = 1 column below is 1.000: against a dense twin with "
-              "the same active")
-        print("  parameters the counted segment IS the dense twin, and the expert "
-              "count lands")
-        print("  entirely on the preprocessed trace two tables down.  The fitted "
-              "column charged it")
-        print("  at a per-weight constant instead, and that constant is the one #168 "
-              "showed is a")
-        print("  ratio of two quantities that do not scale together.")
+        print("\n  WHAT A COUNTED MIXTURE SEGMENT IS, and it is not a twin of a dense "
+              "one:")
+        print("   * the shared experts are a matmul over every token of the block;")
+        print("   * each ROUTED expert is a matmul over the tokens routed to it "
+              "alone, laid out")
+        print("     the way `MatLayout::choose` and `FreivaldsLayout::choose` lay "
+              "out that many")
+        print("     tokens -- so the row padding a block of a few tokens pays is in "
+              "the number, and")
+        print("     it is most of why the counted column is above 1.00 at B = 1;")
+        print("   * the router's own matmul of `experts` logits is counted like any "
+              "other matmul,")
+        print("     and only the top-k selection on top of it is a bound;")
+        print("   * the preprocessed trace holds the weights of every expert the "
+              "segment TOUCHES,")
+        print("     which under uniform routing is `E * (1 - (1 - k/E)^S)` and is "
+              "not always E.")
         print("  The B = 1 column is counted; every column beside it is the fitted "
               "model, because")
         print("  a proof over B sequences commits B key caches and is not one "
               "`params` block, so")
         print("  the step from the first column to the second is a change of method "
               "as well.")
+        for name, v in sorted(moe_rows.items()):
+            for k2, d2 in sorted((v.get("counted") or {}).items()):
+                how = (d2["distribution"] if isinstance(d2["distribution"], str)
+                       else "measured")
+                print(f"    {name:<18} {k2}: touches {d2['touched_expected']:.1f} of "
+                      f"{d2['experts']} experts a block, {how} routing, "
+                      f"{d2['shared']} shared, expert width {d2['moe_dff']:,} read "
+                      f"at {d2['routed_n_in']:,}")
     print("  It crosses 1.00 at B ~ E/k, which is the whole of section 6.4's counter, and")
     print("  keeps going: past B = E/k a batched MoE proof is *cheaper* than the unbatched")
     print("  dense proof the paper prices today, because the Freivalds check it inflated has gone.")
@@ -3243,7 +3557,8 @@ def main(argv=None):
     # file: the cell costs the model charged, the statement's own layout, and the
     # rate it divided by.  One input from anywhere else and the whole run is a
     # projection over a number that is in no repository, so none of it is recorded.
-    file_only = not elsewhere and shp["source"] == "constants"
+    missing = missing_assumption_keys() if CELLS == "exact" else []
+    file_only = not elsewhere and shp["source"] == "constants" and not missing
     for r in to_record:
         r["recordable"] = bool(file_only and r["entry"]["inputs"]
                                and r["from_constants"])
@@ -3269,6 +3584,12 @@ def main(argv=None):
                           "does not name it")
         if shp["source"] != "constants":
             print("    the statement's own layout is assumed and no key records it")
+        if missing:
+            print(f"    {len(missing)} assumption key(s) this constants file does "
+                  f"not hold yet, which every")
+            print("    projected row names in its `inputs`:")
+            for k in missing:
+                print(f"      {k}")
         print("  The gate counts every cell cost this model can charge, including the "
               "standalone")
         print("  rungs the five reductions replace: it is deliberately over-strict, "

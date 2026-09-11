@@ -34,7 +34,10 @@ micro-benchmark inputs the key tile form does: none.
 The same module writes a `params` block from a model's shape rather than from a
 run (`segment_params`, for a layer segment, the segment that carries the
 embedding lookup and the output head), so a shape no run has proved is counted
-by the function that reproduces every recorded chunk. What a shape cannot give
+by the function that reproduces every recorded chunk. A mixture layer is written
+the way its config describes it: the shared experts as a matmul over every token
+of the block, each routed expert as a matmul over the tokens routed to it alone,
+and the router's own matmul of one logit per expert beside them. What a shape cannot give
 it is the fields a run took off its own witness; those are an assumption, with
 `modal_assumption` for the point estimate and `witness_bounds` for the widest
 value the recorded runs carry, and the self-test checks that the bound dominates
