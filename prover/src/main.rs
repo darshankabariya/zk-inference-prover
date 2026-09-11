@@ -2596,6 +2596,21 @@ fn compose_probes_cmd(args: &[String]) {
     }
     let unstatable = unstatable;
     let statable = |name: &str| !unstatable.iter().any(|(w, _)| name.contains(*w));
+    // Issue #151: a control's own copy of the segment, and how many were built.
+    // Six of the controls below bend the witness rather than the prover, so
+    // each needs a segment of its own, and on a dump that is another read of
+    // the whole witness.  They were built before the filter was read, so a run
+    // that asked for one control paid a reload for every control it was never
+    // going to run: 3,144 s on the 8B chunk, for a segment whose honest proof
+    // takes 137 s.  Every caller asks `selected` first now, and the count goes
+    // to stderr at the end of the run, which is what a filtered run can be read
+    // for.
+    let rebuilds = std::cell::Cell::new(0usize);
+    let rebuild = |what: &str| -> layer::Layer {
+        rebuilds.set(rebuilds.get() + 1);
+        eprintln!("  segment rebuilt for {what}");
+        layer_of(args).0
+    };
     let probe = |name: &str, l2: &layer::Layer, t: &compose::ProverTamper,
                  expect: &str| -> bool {
         if !selected(name) {
@@ -2906,15 +2921,23 @@ fn compose_probes_cmd(args: &[String]) {
             // equality in the chunk still holds -- an honest matmul of the
             // prover's own choice of input, which is exactly what
             // `witness-slack.md` section 1d says the Freivalds check used to allow.
-            let mut lb = layer_of(args).0;
-            let bent = bend_freivalds_qx(&mut lb, &rplan.specs, &rplan.freivalds[rp.freivalds].mats, 41)
-                .unwrap_or_else(|| panic!("requant {n}: the output-side control bent nothing"));
-            eprintln!("  {n}: activation {} bent, {} dequantized outputs moved with it",
-                      bent.0, bent.1);
-            assert!(!probe(&format!("requant {n}: one activation the requantize did not derive"),
-                           &lb, &Default::default(),
-                           &format!("the binding rq_out[{k}] == freivalds_qx[{}]", rp.freivalds)),
-                    "an activation the requantize did not derive accepted");
+            // Issue #151: the name is known before the segment is, so the
+            // filter decides first and a control this run will not reach costs
+            // no rebuild.  `probe` writes the same skip either way.
+            let out_side = format!("requant {n}: one activation the requantize did not derive");
+            let out_expect = format!("the binding rq_out[{k}] == freivalds_qx[{}]", rp.freivalds);
+            if !selected(&out_side) {
+                probe(&out_side, &l, &Default::default(), &out_expect);
+            } else {
+                let mut lb = rebuild(&out_side);
+                let bent = bend_freivalds_qx(&mut lb, &rplan.specs,
+                                             &rplan.freivalds[rp.freivalds].mats, 41)
+                    .unwrap_or_else(|| panic!("requant {n}: the output-side control bent nothing"));
+                eprintln!("  {n}: activation {} bent, {} dequantized outputs moved with it",
+                          bent.0, bent.1);
+                assert!(!probe(&out_side, &lb, &Default::default(), &out_expect),
+                        "an activation the requantize did not derive accepted");
+            }
             assert!(!probe(&format!("requant {n}: the per-token scale, one step up"), &l,
                            &compose::ProverTamper {
                                rq: Some((k, requant::RqTamper::Scale(3))),
@@ -2933,18 +2956,24 @@ fn compose_probes_cmd(args: &[String]) {
         for (k, rp) in rplan.rqs.iter().enumerate() {
             let mats = &rplan.freivalds[rp.freivalds].mats;
             let Some(mi) = mats.get(1).copied() else { continue };
-            let mut lb = layer_of(args).0;
-            let name = lb.mats[mi].name.clone();
+            // Issue #151: the matmul's name is the segment's, and the honest
+            // segment already in hand carries it -- so the probe's name, and
+            // with it the filter, is read before anything is rebuilt.
+            let name = l.mats[mi].name.clone();
+            let sc_side = format!("requant {}: {name} dequantized by another scale", rp.name);
+            let sc_expect = format!("the binding rq_sc[{k}] == deq_sc[{name}]");
+            if !selected(&sc_side) {
+                probe(&sc_side, &l, &Default::default(), &sc_expect);
+                continue;
+            }
+            let mut lb = rebuild(&sc_side);
             match rp.v {
                 requant::SVariant::Pow2 => lb.mats[mi].jx[0] += 1,
                 requant::SVariant::Bf16 => lb.mats[mi].sx[0].1 += 1,
             }
             let at = mats.iter().position(|x| *x == mi).unwrap();
             let base: usize = rplan.rqs[..k].iter().map(|q| rplan.freivalds[q.freivalds].mats.len()).sum();
-            assert!(!probe(&format!("requant {}: {name} dequantized by another scale",
-                                    rp.name),
-                           &lb, &Default::default(),
-                           &format!("the binding rq_sc[{k}] == deq_sc[{name}]")),
+            assert!(!probe(&sc_side, &lb, &Default::default(), &sc_expect),
                     "a dequant under a scale the requantize did not pin accepted");
             let _ = base + at;
         }
@@ -2966,7 +2995,7 @@ fn compose_probes_cmd(args: &[String]) {
             if !(selected(O_SEAM) && statable(O_SEAM)) {
                 probe(O_SEAM, &l, &Default::default(), &expect);
             } else {
-                let mut lb = layer_of(args).0;
+                let mut lb = rebuild(O_SEAM);
                 let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
                 match lb.synth_residual_stream_bent(
                     src_of(args).seed, arg_scalar(args, "--residual-stream-a", 32usize), round, 41)
@@ -3064,12 +3093,13 @@ accepted");
 synthetic generator (Layer::synth_residual_stream_key_tile_bent); on a dump the key_tiles are B1's");
                     continue;
                 }
-                let mut lb = layer_of(args).0;
-                if lb.residual_stream.is_none() {
+                // Issue #151: whether this shape has a wiring family is the
+                // honest segment's answer, so the skip is decided without a
+                // rebuild -- as is the filter below it.
+                if l.residual_stream.is_none() {
                     eprintln!("  key tile {name}: SKIP -- no synthetic wiring family here");
                     continue;
                 }
-                lb.synth_residual_stream_key_tile_bent(seed, ga, round, which, 41);
                 // stream SS: with a folded `v` there is no quantize component on
                 // that side, so the falsified field is the dequant output binding
                 // and not `nn_out_ok` -- the fold publishes the int8 cell
@@ -3079,10 +3109,20 @@ synthetic generator (Layer::synth_residual_stream_key_tile_bent); on a dump the 
                 } else {
                     "the binding nn_out == the sum of the key tiles' own claims"
                 };
-                assert!(!probe(&format!("key tile {name}: one committed cell the matmuls did not produce"), &lb, &Default::default(),
-                               binding),
+                let kt = format!("key tile {name}: one committed cell the matmuls did not produce");
+                if !selected(&kt) {
+                    probe(&kt, &l, &Default::default(), binding);
+                    continue;
+                }
+                let mut lb = rebuild(&kt);
+                lb.synth_residual_stream_key_tile_bent(seed, ga, round, which, 41);
+                assert!(!probe(&kt, &lb, &Default::default(), binding),
                         "a key tile column the layer's matmuls did not produce accepted");
             }
+            // Issue #151: both skips below and the filter are read off the
+            // honest segment, which is what this shape's family and its key
+            // tiles are; nothing is rebuilt for a control that will not run.
+            //
             // stream NN (NN-2): and the prefix key tile's own copy of Q, whose
             // counterparty is its group's diagonal block rather than a quantize component.
             // The bend moves one prefix cell and the key tile's whole attention is
@@ -3092,17 +3132,19 @@ synthetic generator (Layer::synth_residual_stream_key_tile_bent); on a dump the 
             if arg_str(args, "--witness").is_some() {
                 eprintln!("  prefix Q: SKIP -- the consumer-side control needs the \
 synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the key_tiles are B1's");
+            } else if l.residual_stream.is_none() {
+                eprintln!("  prefix Q: SKIP -- no synthetic wiring family here");
+            } else if l.key_tiles.iter().all(|b| b.diagonal_block) {
+                eprintln!("  prefix Q: SKIP -- this shape has no prefix key tile");
             } else {
-                let mut lp = layer_of(args).0;
-                if lp.residual_stream.is_none() {
-                    eprintln!("  prefix Q: SKIP -- no synthetic wiring family here");
-                } else if lp.key_tiles.iter().all(|b| b.diagonal_block) {
-                    eprintln!("  prefix Q: SKIP -- this shape has no prefix key tile");
+                let pq = "prefix key tile Q: one query the diagonal block does not carry";
+                let pq_expect = "the binding prefix.Q == diagonal_block.Q, per key tile group";
+                if !selected(pq) {
+                    probe(pq, &l, &Default::default(), pq_expect);
                 } else {
+                    let mut lp = rebuild(pq);
                     lp.synth_residual_stream_prefix_q_bent(seed, ga, round, 41);
-                    assert!(!probe("prefix key tile Q: one query the diagonal block does not carry", &lp,
-                                   &Default::default(),
-                                   "the binding prefix.Q == diagonal_block.Q, per key tile group"),
+                    assert!(!probe(pq, &lp, &Default::default(), pq_expect),
                             "a prefix key tile's queries that are not the diagonal block's accepted");
                 }
             }
@@ -3118,8 +3160,10 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
     //     weights -- every constraint, every equality and both boundaries hold
     //     -- so the pinned model root is the only thing that can reject, and
     //     the record says which of the two preprocessed roots moved.
-    if statable(MODEL_SWAP) {
-        let mut lm = layer_of(args).0;
+    // Issue #151: the swap rebuilds the whole segment, so the filter is read
+    // here rather than inside `probe`, as it is for the `o` seam above.
+    if selected(MODEL_SWAP) && statable(MODEL_SWAP) {
+        let mut lm = rebuild(MODEL_SWAP);
         let round = Round::parse(&arg_strs(args, "--round", &["even"])[0]);
         let (seed, ga) = (src_of(args).seed, arg_scalar(args, "--residual-stream-a", 32usize));
         lm.synth_model_swap(seed, ga, round, seed ^ 0x0000_0017);
@@ -3127,7 +3171,8 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
                 "a segment proved under another layer's weights accepted");
         drop(lm);
     } else {
-        // `probe` writes the skip and its reason into the record itself
+        // `probe` writes the skip -- the shape's reason, or the filter -- into
+        // the record itself
         probe(MODEL_SWAP, &l, &Default::default(), "the pinned model root");
     }
 
@@ -3362,6 +3407,12 @@ synthetic generator (Layer::synth_residual_stream_prefix_q_bent); on a dump the 
                             "accepted": v.accepts(),
                             "verdict": serde_json::to_value(&v).unwrap()}));
     }
+    // Issue #151: what the run's own filter cost, in segments.  A control that
+    // holds a copy of the witness builds it only where it runs, so this is the
+    // number of controls that ran and needed one -- never the number the suite
+    // has.  The record does not carry it: a control is not a proof of record
+    // and neither is the work a run skipped.
+    eprintln!("compose probes: {} segment rebuilds", rebuilds.get());
     emit("compose_probes", json!({"source": l.source, "probes": recorded_probes(),
                                   "crashed": Value::Null}));
 }
