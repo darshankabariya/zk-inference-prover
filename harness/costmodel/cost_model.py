@@ -19,6 +19,7 @@ import pathlib
 import sys
 
 from harness import constants, inputs
+from harness.costmodel import exact_cells as ec
 from harness.costmodel.key_tile import (  # noqa: F401  (re-exported)
     CELLS_PER_TABLE_ROW, CHAN_TARGET, FIXED_TABLE_ROWS, GRID_TARGET, LOG_TABLE,
     ROW_WIDTH, boundary_cells, key_tile_cells, key_tile_family, key_tile_fresh,
@@ -935,11 +936,98 @@ PROVENANCE["gkrlink_cells_per_chunk"] = dict(
          "shape, so a statement with the reductions on is under-priced by it")
 
 
+# ------------------------------------------- the same count, from the layout --
+# The owner's ruling of 2026-09-11 (`docs/decisions/2026-09-11-cells-are-counted-
+# from-the-layout-wherever-a-shape-can-be-stated.md`): wherever a shape can be
+# stated as a `params` block, the cells are COUNTED and not priced.  So
+# `cells_per_token(..., cells="exact")` builds one block per segment and calls
+# `exact_cells`, which reproduces every recorded chunk in zk-results to the cell,
+# and charges no per-unit constant at all on the committed side.
+#
+# The DEFAULT is still `fitted`, and that is deliberate rather than an oversight:
+# `harness/eval/predict/predict.py` is a registration -- a prediction written
+# down before the measurement and not moved afterwards -- and it reads this
+# function.  Flipping the default moves a registered number, which is a decision
+# for the owner and not a side effect of this change.  `frontier.py` passes
+# `exact` and is the caller the ruling is about.
+
+
+def exact_cells_per_token(cfg, ctx, seq=None, experts=1, topk=1, seq_batch=1,
+                          head=True, gkr=(), diagonal_block=True,
+                          attn_params_per_layer=None, attn_accs_per_layer=None,
+                          witness=None):
+    """Committed cells per decoded token, counted from the layout.
+
+    The stack is one segment that carries the embedding lookup, `L - 1` layer
+    segments and -- with `head=True` -- one output head segment, each over the
+    `seq` positions it covers.  The witness-calibrated fields of a `params` block
+    are the caller's assumption; the default is the modal value of the recorded
+    8B headline runs (`exact_cells.modal_assumption`).
+
+    Returns the layout's own components, which are not the fitted model's terms:
+    a reader comparing the two reads `total` and not a line of it."""
+    L, d, nh, nkv, hd, dff, vocab = cfg
+    if not seq:
+        raise ec.Refused("a segment covers a block of positions, so the exact "
+                         "count needs `seq`")
+    if seq_batch != 1:
+        raise ec.Refused(f"B = {seq_batch} sequences a proof: a batched proof "
+                         f"commits B key caches and B wiring families, and one "
+                         f"`params` block describes one segment of one sequence")
+    if attn_params_per_layer is not None or attn_accs_per_layer is not None:
+        raise ec.Refused("an attention the GQA formulas do not describe -- the "
+                         "latent-attention shapes -- is not a `params` block: the "
+                         "layer's matmuls are five and not four and the key grids "
+                         "read a width the prover has no layout for")
+    out = dict(total=0.0, preprocessed=0.0, components={}, segments={},
+               cells="exact", gkr=tuple(gkr), key_tile_saturated=False,
+               legacy_alpha=False, tokens_per_proof=seq)
+    geom = dict(d=d, nh=nh, nkv=nkv, hd=hd, dff=topk * dff, vocab=vocab, s=seq)
+    plan = [("first", 1, ctx), ("layer", L - 1, ctx)]
+    if head:
+        plan.append(("head", 1, ctx))
+    for kind, n, c in plan:
+        if n <= 0:
+            continue
+        p = ec.segment_params(kind, c=c, witness=witness or ec.modal_assumption(
+            "head" if kind == "head" else "layer"), gkr=gkr,
+            head_groups=ec.head_groups_for(nh), **geom)
+        p["diagonal_block"] = diagonal_block
+        got = ec.cells_of(p)
+        out["segments"][kind] = got["fresh"]
+        out["total"] += n * got["fresh"] / seq
+        for name, (b, i) in got["components"].items():
+            out["components"][name] = out["components"].get(name, 0.0) + n * (b + i) / seq
+        out["components"]["boundary"] = (out["components"].get("boundary", 0.0)
+                                         + n * got["boundary"] / seq)
+    # the weight trace the Freivalds check reads, committed offline and not a
+    # committed cell of any segment, so the exact count says nothing about it
+    params = n_params(cfg, experts=experts, freivalds=True, head=head,
+                      attn_params_per_layer=attn_params_per_layer)
+    out["preprocessed"] = (PREPROCESSED_PER_WEIGHT or 0.0) * params / seq
+    out["freivalds_params"] = params
+    # the routing inputs, which no AIR in this project builds: still an analogy
+    out["route"] = (L * (topk * ROUTE_SEL_CELLS + experts * ROUTE_MAX_CELLS)
+                    if experts > 1 else 0.0)
+    out["total"] += out["route"]
+    out.update(out["components"])
+    out["key_tiles"] = out["attn"] = out["components"].get("key_tiles", 0.0)
+    return out
+
+
+def exact_block_cells(cfg, ctx, seq=512, gkr=REDUCTIONS, witness=None):
+    """The fresh cells of ONE token block's layer segments, per position: the
+    quantity zk-results records as `cells_per_position.headline.c{ctx}.fresh_layers_block`
+    and the one the exact count is calibrated against."""
+    return exact_cells_per_token(cfg, ctx, seq=seq, head=False, gkr=gkr,
+                                 witness=witness)["total"]
+
+
 def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
                     head_dequant=None, experts=1, topk=1, seq_batch=1,
                     head=True, attn_accs_per_layer=None,
                     attn_params_per_layer=None, diagonal_block=True,
-                    gkr=(), log_table=LOG_TABLE):
+                    gkr=(), log_table=LOG_TABLE, cells="fitted"):
     """Committed (fresh) cells per decoded token.
 
     `batch` is the **LogUp lookup-batch size** -- how many lookups share one
@@ -974,11 +1062,26 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     the default is none of them, which is the prover's own default.  `log_table`
     is the master exponent table's height, which the `tables` term charges and
     which a run reports per chunk (`params.log_table`).
+
+    `cells="exact"` counts the same segments from their layout instead of pricing
+    them from the constants above (`exact_cells_per_token`), which is the owner's
+    ruling of 2026-09-11 wherever a shape can be stated as a `params` block.  The
+    default is `fitted` because `predict.py`'s registration reads this function
+    and a registered number does not move; `frontier.py` passes `exact`.
     """
     L, d, nh, nkv, hd, dff, vocab = cfg
     bad = [r for r in gkr if r not in REDUCTIONS]
     if bad:
         raise SystemExit(f"unknown reduction {bad}: gkr names a subset of {REDUCTIONS}")
+    if cells == "exact":
+        return exact_cells_per_token(
+            cfg, ctx, seq=seq, experts=experts, topk=topk, seq_batch=seq_batch,
+            head=head, gkr=gkr, diagonal_block=diagonal_block,
+            attn_params_per_layer=attn_params_per_layer,
+            attn_accs_per_layer=attn_accs_per_layer)
+    if cells != "fitted":
+        raise SystemExit(f"cells={cells!r}: the cell side is counted (`exact`) or "
+                         f"priced from per-unit constants (`fitted`)")
     not_priced = tuple(r for r in gkr if r not in REDUCTIONS_PRICED)
     if not head:
         vocab = 0
@@ -1684,6 +1787,45 @@ def report():
 
 
 # --------------------------------------------------------------- self-test --
+def _exact_selftest():
+    """`cells="exact"` against the two recorded 8B token blocks, and its refusals.
+
+    Two comparisons and they are different claims.  Give the count each recorded
+    segment's OWN witness fields and it is exact, to the cell, on both blocks --
+    that is `exact_cells --selftest`, and this re-checks it through this module's
+    own entry point.  Give it the assumption a projection has to make and the
+    residual is what the assumption costs: +0.09% at C=4,096 and -0.53% at
+    C=16,384, and a change that moves either is a change to the assumption."""
+    bad = 0
+    want = {4096: 87026069.90625, 16384: 140142998.6875}
+    pct = {4096: 0.0941, 16384: -0.5261}
+    for ctx in sorted(want):
+        rec = [p for p in ec.headline_chunks(("layer", "first segment"))
+               if p["params"]["c"] == ctx]
+        own = sum(p["fresh"] for p in rec) / SEQ
+        if own != want[ctx]:
+            print(f"  exact: the recorded block at C={ctx} is {own:,.5f} a position, "
+                  f"not the {want[ctx]:,.5f} this module compares against")
+            bad += 1
+        got = exact_block_cells(LLAMA8B, ctx, seq=SEQ)
+        moved = 100.0 * (got / want[ctx] - 1.0)
+        if abs(moved - pct[ctx]) > 0.005:
+            print(f"  exact: the assumed count at C={ctx} is {moved:+.4f}% against "
+                  f"the recorded block, and the assumption was worth {pct[ctx]:+.4f}%")
+            bad += 1
+    for kw, what in ((dict(seq_batch=4), "a batched proof"),
+                     (dict(attn_accs_per_layer=1024), "latent attention"),
+                     (dict(seq=None), "a segment with no block length")):
+        try:
+            cells_per_token(LLAMA8B, 4096, BATCH, cells="exact",
+                            **dict(dict(seq=SEQ, head=False), **kw))
+        except ec.Refused:
+            continue
+        print(f"  exact: {what} was counted rather than refused")
+        bad += 1
+    return bad
+
+
 def selftest():
     """The readers and the switches, with no constants file and no inputs.
 
@@ -1749,6 +1891,7 @@ def selftest():
     finally:
         LOGUP_MARGINAL.clear()
         LOGUP_MARGINAL.update(saved)
+    bad += _exact_selftest()
     if bad:
         print(f"cost model: {bad} self-test failures")
         return 1
@@ -1756,6 +1899,11 @@ def selftest():
           "residual stream takes back exactly the stub charged, at every measured "
           "batch and three shapes; the reductions switch is closed and moves the "
           "key tile family and the dequant rung")
+    print("  and `cells=\"exact\"` counts the two recorded 8B token blocks at "
+          "+0.09% / -0.53%, which")
+    print("  is what the witness assumption costs and nothing else, and refuses a "
+          "batched proof,")
+    print("  a latent attention and a segment with no block length")
     if not LOGUP_MARGINAL:
         print("  (no constants file and no inputs here, so the batch marginals above "
               "are the self-test's own)")

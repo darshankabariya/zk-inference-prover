@@ -31,6 +31,18 @@ a fitted per-unit constant anywhere. Its recorded points are in
 `costmodel/exact_chunks.json` on the same terms, and it reads the same
 micro-benchmark inputs the key tile form does: none.
 
+The same module writes a `params` block from a model's shape rather than from a
+run (`segment_params`, for a layer segment, the segment that carries the
+embedding lookup and the output head), so a shape no run has proved is counted
+by the function that reproduces every recorded chunk. What a shape cannot give
+it is the fields a run took off its own witness; those are an assumption, with
+`modal_assumption` for the point estimate and `witness_bounds` for the widest
+value the recorded runs carry, and the self-test checks that the bound dominates
+every recorded chunk. `costmodel/frontier.py` counts this way by default and
+keeps the older per-unit path under `--cells fitted`; `cells_per_token` in
+`cost_model.py` takes the same choice as `cells="exact"`, and its default stays
+fitted because `eval/predict/predict.py` is a registration.
+
 The witness package also holds the statement's token generator
 (`gen_ids`, a greedy continuation under the proved variant, and `shift_ids`),
 the shape table (`shapes`) and the plan writer (`plan`) the results drivers

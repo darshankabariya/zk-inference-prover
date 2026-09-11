@@ -45,6 +45,7 @@ import sys
 
 from harness import constants, inputs, provenance
 from . import cost_model as cm
+from . import exact_cells as ec
 from . import key_tile
 
 HERE = pathlib.Path(__file__).parent
@@ -114,6 +115,12 @@ OPTIONAL = dict(
     e11_chunking_net="design.e11_chunking_net_pct",
     e11_chunking_fixed="design.e11_chunking_overhead_pct",
     chunk_floor="attention_grid.chunk_model_fixed_composed",
+    # the fresh cells of the 32 layer segments of ONE token block, per position:
+    # the block whose prefix is the whole context, no output head segment in it.
+    # It is what the exact count is calibrated against, because it is the same
+    # segments the count builds `params` blocks for.
+    block_c4096="cells_per_position.headline.c4096.fresh_layers_block",
+    block_c16384="cells_per_position.headline.c16384.fresh_layers_block",
 )
 
 
@@ -554,21 +561,303 @@ def statement_of(shape, ctx, shp):
                 gkr=tuple(STATEMENT_GKR))
 
 
-def head_chunk(shape, seq, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GKR):
+# --------------------------------------------------- the exact cell count ----
+# The owner's ruling of 2026-09-11 (`docs/decisions/2026-09-11-cells-are-counted-
+# from-the-layout-wherever-a-shape-can-be-stated.md`): wherever a shape can be
+# stated as a `params` block, the cells are COUNTED from the layout and not
+# priced from per-unit constants.  So the cell side of every row below builds
+# one `params` block per segment -- the layer segment, the segment of the stack
+# that carries the embedding lookup, the output head -- and calls `exact_cells`,
+# which reproduces all 1,872 recorded chunks to the cell.
+#
+# Two things stay as they were, and both are named in the output:
+#
+#  * the MoE routing inputs, which the prover does not build at all.  They are
+#    still `route_selection_cells` and `route_topk_cells` out of `cost_model.py`,
+#    priced by analogy, and the ledger says `analogy` beside them.
+#  * the witness-calibrated fields of a `params` block, which a caller who has a
+#    model and a context but no witness cannot know.  They are ONE named
+#    assumption block, `WITNESS_ASSUMPTIONS`, with a stated size in cells; an
+#    upper bound is printed beside every point estimate and `result.assumptions`
+#    carries the block so zk-results can record each field as a named constant.
+CELLS_MODES = ("exact", "fitted")
+CELLS = "exact"
+
+# The fields a `params` block carries that a model and a context do not: the
+# calibration a run took off its own witness, and two knobs of the prover's own
+# command line.  The numbers are the MODAL value of the 64 layer and first
+# segments of the two recorded 8B headline runs, and `check_assumptions` reads
+# the same modes out of `exact_chunks.json` and exits if the two ever part, so
+# nothing here is a number somebody typed once.
+WITNESS_ASSUMPTIONS = dict(
+    # the master exponent table, `5 * 2^log_table` cells and the largest of them
+    log_table=23,
+    # the normalisation table's binades and the fraction table's rows
+    kmax=19,
+    # the attention output's measured exponent ranges: three range tables and
+    # the exponent window `ao_jv - ao_jo`
+    ao_acc_hi_bits=5, ao_acc_lo_bits=16, ao_rem_bits=20, ao_q_bits=11,
+    ao_jo_min=-12, ao_jo_max=-10, ao_jv_min=-7, ao_jv_max=-5,
+    # the fold's own remainder range table
+    fold_rem_bits=15,
+    # The output head is a different plan and its own recorded segments agree on
+    # a narrower remainder window than a layer's.
+    head=dict(ao_rem_bits=15),
+    # `--head-groups`, a run knob: the two headline runs proved 32 attention
+    # heads as 16, 8, 8, so a shape's heads are a half and two quarters
+    head_groups="half-quarter-quarter",
+    # `Variant::parse` and the rounding: every composed segment of the two
+    # headline runs is the integer-exponent softmax rounded to even
+    variant="intexp", round="even",
+)
+# What each field sizes, for the assumption block a driver records.
+ASSUMPTION_SIZES = dict(
+    log_table="log_table", kmax="kmax", ao_acc_hi_bits="ao_ranges",
+    ao_rem_bits="ao_ranges", ao_jo_min="ao_ranges", ao_jo_max="ao_ranges",
+    ao_jv_min="ao_ranges", ao_jv_max="ao_ranges",
+    ao_acc_lo_bits="ao_acc_lo_bits", ao_q_bits="ao_q_bits",
+    fold_rem_bits="fold_rem_bits")
+
+
+def witness_fields(kind="layer"):
+    """The assumption block for one segment kind, as `exact_cells` reads it."""
+    out = {f: WITNESS_ASSUMPTIONS[f] for f in ec.WITNESS_FIELDS}
+    if kind == "head":
+        out.update(WITNESS_ASSUMPTIONS["head"])
+    return out
+
+
+def check_assumptions():
+    """`WITNESS_ASSUMPTIONS` against the modes of the recorded headline runs.
+
+    Returns `{field: (value, run, segment, n, of)}` for the layer side and the
+    head side, and exits where the block above is no longer what the runs say."""
+    modes = dict(layer=ec.modal_witness(("layer", "first segment")),
+                 head=ec.modal_witness("output head"))
+    bad = []
+    for kind, want in (("layer", witness_fields()), ("head", witness_fields("head"))):
+        for f, v in want.items():
+            got = modes[kind][f][0]
+            if got != v:
+                bad.append(f"    {kind} {f}: this module assumes {v}, the recorded "
+                           f"runs' mode is {got} ({modes[kind][f][1]} "
+                           f"{modes[kind][f][2]})")
+    if bad:
+        sys.exit("the witness assumption block is no longer the recorded runs' modal "
+                 "value:\n" + "\n".join(bad)
+                 + "\nEdit `WITNESS_ASSUMPTIONS`, or say why the assumption is not "
+                   "the mode.")
+    return modes
+
+
+def assumption_rows(shape, seq=TOKENS, ctx=4096):
+    """`WITNESS_ASSUMPTIONS` as rows a driver can record, one per field.
+
+    Each row says what the field is, what this table assumes it is, which
+    recorded run and segment that value is the mode of, what it sizes in cells on
+    one 8B layer segment and what that is as a share of the segment -- and the
+    bound the upper column is computed at.  A projected row names these in its
+    `inputs`, so a reader of the constants file can see the assumption rather
+    than find it inside a residual."""
+    grp = shape["groups"][0]
+    geom = dict(d=shape["d"], nh=shape["nh"], nkv=shape["nkv"], hd=shape["hd"],
+                dff=grp["dff"] * grp["topk"], vocab=shape["vocab"], s=seq, c=ctx)
+    p = ec.segment_params("layer", witness=witness_fields(), gkr=STATEMENT_GKR,
+                          head_groups=ec.head_groups_for(
+                              shape["nh"], WITNESS_ASSUMPTIONS["head_groups"]),
+                          **geom)
+    terms = ec.witness_terms(p)
+    fresh = ec.exact_cells(p)["fresh"]
+    modes = check_assumptions()
+    bounds = ec.witness_bounds()
+    rng = ec.witness_range()
+    rows = []
+    for f in ec.WITNESS_FIELDS:
+        value, run, segment, n, of = modes["layer"][f]
+        cells, share = terms.get(ASSUMPTION_SIZES.get(f, ""), (None, None))
+        rows.append(dict(
+            field=f, value=value, grade="derived", bound=bounds[f],
+            recorded_values=rng[f], modal_of=[n, of],
+            source_run=run, source_segment=segment,
+            head_value=witness_fields("head")[f],
+            sizes=ASSUMPTION_SIZES.get(f), cells=cells, share_of_segment=share,
+            note=f"the mode of {f} over the {of} layer and first segments of the "
+                 f"two recorded 8B headline runs, {n} of them; read off "
+                 f"{run} {segment}"))
+    # the two that are not a witness field at all: a flag of the prover's own
+    # command line, and the softmax the recorded runs were proved with
+    rows.append(dict(
+        field="head_groups", value=WITNESS_ASSUMPTIONS["head_groups"],
+        grade="asserted", bound=None, recorded_values=["16,8,8 at 32 heads"],
+        source_run=ec.HEADLINE_RUNS[0], source_segment="every segment",
+        sizes="the three key grids' heights", cells=None,
+        share_of_segment=_head_group_share(shape, geom),
+        note="the prover's --head-groups, a run knob: both headline runs proved "
+             "32 attention heads as 16, 8, 8, so a shape's heads are assumed to "
+             "be a half and two quarters.  `share_of_segment` is what one group "
+             "of all the heads would cost instead"))
+    for f in ("variant", "round"):
+        rows.append(dict(
+            field=f, value=WITNESS_ASSUMPTIONS[f], grade="asserted", bound=None,
+            recorded_values=sorted({q["params"][f] for q in ec.headline_chunks()}),
+            source_run=ec.HEADLINE_RUNS[0], source_segment="every segment",
+            sizes=("an auxiliary column per score and a range table"
+                   if f == "variant" else "the sticky bit of every rounding"),
+            cells=None, share_of_segment=None,
+            note="every composed segment of the two headline runs carries this "
+                 "value; a shape proved at another one is a different statement"))
+    return dict(segment_fresh=fresh, context=ctx, seq=seq, rows=rows)
+
+
+def _head_group_share(shape, geom):
+    """What grouping all the heads into one key tile costs against the rule, as a
+    fraction of the segment: the price of the head-group assumption."""
+    def at(rule):
+        p = ec.segment_params("layer", witness=witness_fields(), gkr=STATEMENT_GKR,
+                              head_groups=ec.head_groups_for(shape["nh"], rule),
+                              **geom)
+        return ec.exact_cells(p)["fresh"]
+    try:
+        return at("one-group") / at(WITNESS_ASSUMPTIONS["head_groups"]) - 1.0
+    except ec.Refused:
+        return None
+
+
+class Refused(Exception):
+    """A shape whose segment is not a `params` block, with the reason."""
+
+
+def refusal(shape):
+    """Why the exact count cannot price this shape, or None.
+
+    A shape is refused rather than smoothed: a row the layout cannot state is a
+    row this table has no number for, and printing the fitted one under the same
+    heading would hide exactly the extrapolation the count is here to remove."""
+    for grp in shape["groups"]:
+        if grp.get("attn_accs_per_layer") or grp.get("attn_params_per_layer"):
+            return ("multi-head latent attention: the q and kv sides are low-rank "
+                    "pairs and the cache is one latent, so the layer's matmuls are "
+                    "five and not four and the key grids read a width the prover "
+                    "has no layout for")
+    try:
+        exact_model_cells(shape, 4096, seq=TOKENS, gkr=STATEMENT_GKR)
+    except (ec.Refused, Refused) as e:
+        return str(e)
+    return None
+
+
+_SEGMENTS = {}
+
+
+def segment_cells(kind, geom, witness, gkr, diagonal_block, bound):
+    """One segment's committed cells, counted from its `params` block.  Memoised:
+    a statement prices the same segment once per (kind, shape, prefix)."""
+    key = (kind, tuple(sorted(geom.items())), tuple(sorted(witness.items())),
+           tuple(gkr), diagonal_block, bound)
+    if key not in _SEGMENTS:
+        p = ec.segment_params(kind, witness=witness, gkr=gkr,
+                              head_groups=ec.head_groups_for(
+                                  geom["nh"], WITNESS_ASSUMPTIONS["head_groups"]),
+                              **geom)
+        p["diagonal_block"] = diagonal_block
+        _SEGMENTS[key] = ec.cells_of(p, bound=bound)
+    return _SEGMENTS[key]
+
+
+def exact_model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
+                      with_head=True, diagonal_block=True, gkr=(), bound=False):
+    """`model_cells`, counted from the layout: one `params` block per segment.
+
+    The unit is the same -- committed cells per decoded token, the layer segments
+    of the whole stack plus the output head, each amortised over the `seq`
+    positions its segment covers."""
+    if alpha is not None:
+        raise Refused("a single attention slope is not a layout; `--cells fitted` "
+                      "is what prices it")
+    if seq_batch != 1:
+        raise Refused(f"B = {seq_batch} sequences a proof: a batched proof commits "
+                      f"B key caches and B wiring families, and one `params` block "
+                      f"describes one segment of one sequence")
+    out = dict(total=0.0, preprocessed=0.0, residual_stream=0.0, parts={},
+               gkr=tuple(gkr), saturated=False, cells="exact", bound=bound,
+               segments={})
+    first = True
+    for i, grp in enumerate(shape["groups"]):
+        geom = dict(d=shape["d"], nh=shape["nh"], nkv=shape["nkv"], hd=shape["hd"],
+                    dff=grp["dff"] * grp["topk"], vocab=shape["vocab"], s=seq,
+                    c=0 if grp["linear"] else ctx)
+        counts = []
+        layers = grp["layers"]
+        if first and layers:
+            counts.append(("first", 1))
+            layers -= 1
+            first = False
+        counts.append(("layer", layers))
+        for kind, n in counts:
+            if not n:
+                continue
+            got = segment_cells(kind, geom, witness_fields(kind), gkr,
+                                diagonal_block, bound)
+            out["segments"][f"{kind} x{n}"] = got["fresh"]
+            out["total"] += n * got["fresh"] / seq
+            out["residual_stream"] += n * sum(got["components"]["residual_stream"]) / seq
+            for name, (b, inter) in got["components"].items():
+                out["parts"][name] = out["parts"].get(name, 0.0) + n * (b + inter) / seq
+            out["parts"]["boundary"] = (out["parts"].get("boundary", 0.0)
+                                        + n * got["boundary"] / seq)
+        # the weight trace the Freivalds check reads, committed offline.  It is
+        # not a committed cell of this segment, so the exact count says nothing
+        # about it and this is `cost_model.py`'s per-weight figure as before.
+        params = cm.n_params(cfg_of(shape, grp), experts=grp["experts"],
+                             freivalds=True, head=(with_head and i == 0))
+        out["preprocessed"] += (cm.PREPROCESSED_PER_WEIGHT or 0.0) * params / seq
+        # the routing inputs, which the prover does not build: an analogy, and
+        # the only per-unit constant left on this side of the table
+        if grp["experts"] > 1:
+            out["parts"]["route"] = out["parts"].get("route", 0.0) + grp["layers"] * (
+                grp["topk"] * cm.ROUTE_SEL_CELLS + grp["experts"] * cm.ROUTE_MAX_CELLS)
+    if with_head:
+        grp = shape["groups"][0]
+        geom = dict(d=shape["d"], nh=shape["nh"], nkv=shape["nkv"], hd=shape["hd"],
+                    dff=grp["dff"] * grp["topk"], vocab=shape["vocab"], s=seq, c=ctx)
+        got = segment_cells("head", geom, witness_fields("head"), gkr,
+                            diagonal_block, bound)
+        out["segments"]["head"] = got["fresh"]
+        out["total"] += got["fresh"] / seq
+        for name, (b, inter) in got["components"].items():
+            out["parts"][name] = out["parts"].get(name, 0.0) + (b + inter) / seq
+        out["parts"]["boundary"] = out["parts"].get("boundary", 0.0) + got["boundary"] / seq
+    out["total"] += out["parts"].get("route", 0.0)
+    # the two names the table's own columns read
+    out["parts"]["attn"] = out["parts"].get("key_tiles", 0.0)
+    out["parts"].setdefault("freivalds", 0.0)
+    return out
+
+
+def head_chunk(shape, seq, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GKR,
+               cells=None, bound=False, ctx=None):
     """One output head segment, at any shape: the model-level terms -- the head's
     accumulators, its lookups, its Freivalds check, the token binding and the final
     norm -- over the `seq` positions the segment covers.
 
     Taken as the difference between the budget with the head charged and the budget
     without it, so the head is priced by the function that prices the layers and no
-    second form of it is written down here.  It does not depend on the context: the
-    head chunk performs no attention."""
-    kw = dict(seq=seq, seq_batch=seq_batch, batch=batch, alpha=alpha, gkr=gkr)
-    return seq * (model_cells(shape, seq, with_head=True, **kw)["total"]
-                  - model_cells(shape, seq, with_head=False, **kw)["total"])
+    second form of it is written down here.
+
+    Under the fitted count it does not depend on the context, because that form of
+    the head chunk performs no attention.  Under the exact count it does: the head
+    segment the two headline runs proved carries a whole layer beside the head, key
+    tiles and all, so `ctx` is the prefix that segment attends over and the caller
+    says which block the head sits on."""
+    kw = dict(seq=seq, seq_batch=seq_batch, batch=batch, alpha=alpha, gkr=gkr,
+              cells=cells, bound=bound)
+    c = seq if ctx is None else ctx
+    return seq * (model_cells(shape, c, with_head=True, **kw)["total"]
+                  - model_cells(shape, c, with_head=False, **kw)["total"])
 
 
-def sound_cells(shape, st, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GKR):
+def sound_cells(shape, st, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GKR,
+                cells=None, bound=False):
     """What one proved position costs under the sound statement, modelled.
 
     Block `b` of the statement attends over the `b * S` positions before it, so the
@@ -579,18 +868,28 @@ def sound_cells(shape, st, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GK
     per_block, total = [], 0.0
     saturated = False
     parts = {}
+    kw = dict(seq_batch=seq_batch, batch=batch, alpha=alpha, gkr=gkr, cells=cells,
+              bound=bound)
     for b in range(st["blocks"]):
-        c = model_cells(shape, b * st["s_chunk"], seq=st["s_chunk"], seq_batch=seq_batch,
-                        batch=batch, alpha=alpha, with_head=False, gkr=gkr)
+        c = model_cells(shape, b * st["s_chunk"], seq=st["s_chunk"], with_head=False,
+                        **kw)
         per_block.append(c["total"])
         total += st["s_chunk"] * c["total"]
         saturated = saturated or bool(c.get("saturated"))
         for k, v in c["parts"].items():
             parts[k] = parts.get(k, 0.0) + st["s_chunk"] * v
     layers = total
-    head = head_chunk(shape, st["s_chunk"], seq_batch=seq_batch, batch=batch,
-                      alpha=alpha, gkr=gkr)
-    total += st["heads"] * head
+    if (cells or CELLS) == "exact":
+        # the head segments sit over the LAST blocks of the statement -- the last
+        # prompt block and the generated one (the decision of 2026-09-08) -- and
+        # each one attends over the prefix its own block does
+        heads = [head_chunk(shape, st["s_chunk"], ctx=(st["blocks"] - k) * st["s_chunk"],
+                            **kw) for k in range(1, st["heads"] + 1)]
+        total += sum(heads)
+        head = sum(heads) / max(1, len(heads))
+    else:
+        head = head_chunk(shape, st["s_chunk"], **kw)
+        total += st["heads"] * head
     return dict(cells=total, per_position=total / st["positions"],
                 layers_cells=layers, layers_per_position=layers / st["positions"],
                 head_chunk=head, heads=st["heads"], per_block=per_block,
@@ -599,11 +898,19 @@ def sound_cells(shape, st, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GK
 
 
 def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
-                with_head=True, diagonal_block=True, gkr=()):
-    """The whole per-token budget for a shape, summed group by group: the cost
-    model's `cells_per_token` plus B10 step 2's residual stream, with the model-level terms
-    (the head's accumulators, its lookups, the token binding, the final norm) charged
-    to exactly one group."""
+                with_head=True, diagonal_block=True, gkr=(), cells=None, bound=False):
+    """The whole per-token budget for a shape, summed group by group.
+
+    `cells="exact"` -- the default, and the owner's ruling -- counts every segment
+    from its own `params` block (`exact_cells`).  `cells="fitted"` is the older
+    path: the cost model's `cells_per_token` plus B10 step 2's residual stream,
+    with the model-level terms (the head's accumulators, its lookups, the token
+    binding, the final norm) charged to exactly one group.  Both are kept so that
+    the two can be printed side by side; nothing falls back from one to the other."""
+    if (cells or CELLS) == "exact":
+        return exact_model_cells(shape, ctx, seq=seq, seq_batch=seq_batch,
+                                 alpha=alpha, batch=batch, with_head=with_head,
+                                 diagonal_block=diagonal_block, gkr=gkr, bound=bound)
     batch = cm.BATCH if batch is None else batch
     out = dict(total=0.0, preprocessed=0.0, residual_stream=0.0, parts={},
                gkr=tuple(gkr))
@@ -626,6 +933,41 @@ def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
             if isinstance(v, (int, float)) and k not in ("dequant_per_acc", "head_per_acc",
                                                          "tokens_per_proof"):
                 out["parts"][k] = out["parts"].get(k, 0.0) + v
+    return out
+
+
+def exact_block_check(shape, consts, seq=TOKENS):
+    """The exact count of one token block's layer segments against the recorded one.
+
+    This is the calibration the owner's ruling asks for, and it compares the same
+    thing on both sides: the 32 layer segments of the block whose prefix is the
+    whole context, over the 512 positions that block proves, with no output head
+    segment on either side (`cells_per_position.headline.c{ctx}.fresh_layers_block`).
+
+    Three rows per context, and the distance between them is the whole of what
+    the assumption costs: the block counted at `WITNESS_ASSUMPTIONS`, the same
+    block counted at each segment's OWN recorded witness fields -- which has to
+    be exact, because then nothing is assumed -- and the block at the bound."""
+    out = {}
+    for ctx in CONTEXTS:
+        e = consts.get(f"block_c{ctx}")
+        rec = [p for p in ec.headline_chunks(("layer", "first segment"))
+               if p["params"]["c"] == ctx]
+        if not rec:
+            continue
+        kw = dict(seq=seq, with_head=False, gkr=STATEMENT_GKR, cells="exact")
+        assumed = model_cells(shape, ctx, **kw)["total"]
+        at_bound = model_cells(shape, ctx, bound=True, **kw)["total"]
+        own = sum(p["fresh"] for p in rec) / seq
+        row = dict(ctx=ctx, segments=len(rec), key=OPTIONAL[f"block_c{ctx}"],
+                   assumed=assumed, at_bound=at_bound, recorded_fields=own,
+                   recorded=None if e is None else e["value"],
+                   run=None if e is None else e.get("run"))
+        for name, v in (("assumed", assumed), ("at_bound", at_bound),
+                        ("recorded_fields", own)):
+            row[f"{name}_pct"] = (None if row["recorded"] in (None, 0)
+                                  else 100.0 * (v / row["recorded"] - 1.0))
+        out[ctx] = row
     return out
 
 
@@ -679,6 +1021,8 @@ def check_8b(card, shape, consts, batch=None, shp=None):
         coeffs_fresh=got_fresh, coeffs_base=got_base,
         frozen_base=want_base,
         coeffs_agree=(want_base is None or got_base == tuple(want_base)),
+        cells=CELLS, assumptions=None if CELLS != "exact" else check_assumptions(),
+        block=exact_block_check(shape, consts, seq=shp["s_chunk"] if shp else TOKENS),
         family=_key_tile_family_check(nh, hd))
     return out
 
@@ -1305,7 +1649,7 @@ TARGET_KEY = "design.frontier_target_positions_per_s"
 
 def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
           usd=None, target_tok_s=20.0, mib_per_chunk=None, batch=None,
-          shp=None):
+          shp=None, cells=None):
     """The reusable per-shape row.  Everything the table prints comes from here.
 
     Two quantities per context, and they are not interchangeable.  `cells_per_token`
@@ -1322,14 +1666,25 @@ def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
                check_total=shape.get("check_total"), check_active=shape.get("check_active"),
                source=shape["source"], seq=seq, seq_batch=seq_batch, contexts={})
     n_chunks = sum(grp["layers"] for grp in shape["groups"]) + 1
+    exact = (cells or CELLS) == "exact"
     for ctx in contexts:
-        c = model_cells(shape, ctx, seq=seq, seq_batch=seq_batch, alpha=alpha,
-                        batch=batch)
+        kw = dict(seq=seq, seq_batch=seq_batch, alpha=alpha, batch=batch, cells=cells)
+        c = model_cells(shape, ctx, **kw)
         st = statement_of(shape, ctx, shp)
-        sc = sound_cells(shape, st, seq_batch=seq_batch, batch=batch, alpha=alpha)
+        sc = sound_cells(shape, st, seq_batch=seq_batch, batch=batch, alpha=alpha,
+                         cells=cells)
+        # the assumption's other end: the same statement with every
+        # witness-calibrated field at the bound of `exact_cells.witness_bounds`
+        hi = (sound_cells(shape, st, seq_batch=seq_batch, batch=batch, alpha=alpha,
+                          cells=cells, bound=True) if exact else None)
         entry = dict(cells_per_token=c["total"], preprocessed_per_token=c["preprocessed"],
                      residual_stream_per_token=c["residual_stream"], parts=c["parts"], chunks=n_chunks,
                      cells_per_position=sc["per_position"],
+                     cells_per_position_bound=None if hi is None else hi["per_position"],
+                     cells_per_token_bound=(None if not exact else
+                                            model_cells(shape, ctx, bound=True,
+                                                        **kw)["total"]),
+                     cells=CELLS if cells is None else cells,
                      layers_per_position=sc["layers_per_position"],
                      head_chunk_cells=sc["head_chunk"], statement=st,
                      cards={})
@@ -1345,6 +1700,7 @@ def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
             for b, m in ref["boundaries"].items():
                 tok_s = m["cells_s"] / c["total"]
                 pos_s = m["cells_s"] / sc["per_position"]
+                lo_s = None if hi is None else m["cells_s"] / hi["per_position"]
                 out[b] = dict(cells_s=m["cells_s"], tok_s=tok_s, pos_s=pos_s,
                               scope=m.get("scope"), rate_key=m.get("key"),
                               rate_source=card.get("source"),
@@ -1352,7 +1708,11 @@ def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
                               cards_for_target=math.ceil(target_tok_s / pos_s),
                               cards_for_target_tok_s=math.ceil(target_tok_s / tok_s),
                               usd_per_mposition=usd_per_mtok(pos_s, usd.get(name)),
-                              usd_per_mtok=usd_per_mtok(tok_s, usd.get(name)))
+                              usd_per_mtok=usd_per_mtok(tok_s, usd.get(name)),
+                              pos_s_bound=lo_s,
+                              cards_for_target_bound=(None if lo_s is None else
+                                                      math.ceil(target_tok_s / lo_s)),
+                              usd_per_mposition_bound=usd_per_mtok(lo_s, usd.get(name)))
             entry["cards"][name] = out
         row["contexts"][ctx] = entry
     return row
@@ -1369,7 +1729,7 @@ def dense_twin(shape):
 
 
 def moe_ratio(shape, ctx, alpha, seq=TOKENS, seq_batch=1, ref_batch=1, batch=None,
-              gkr=STATEMENT_GKR):
+              gkr=STATEMENT_GKR, cells=None):
     """MoE at batch B against its dense twin at batch `ref_batch`.
 
     With `ref_batch=1` the reference is fixed, which is what section 6.4's counter
@@ -1378,9 +1738,9 @@ def moe_ratio(shape, ctx, alpha, seq=TOKENS, seq_batch=1, ref_batch=1, batch=Non
     tokens."""
     dense = dense_twin(shape)
     a = model_cells(shape, ctx, seq=seq, seq_batch=seq_batch, alpha=alpha, batch=batch,
-                    gkr=gkr)
+                    gkr=gkr, cells=cells)
     b = model_cells(dense, ctx, seq=seq, seq_batch=ref_batch, alpha=alpha, batch=batch,
-                    gkr=gkr)
+                    gkr=gkr, cells=cells)
     return dict(moe=a["total"], dense_active=b["total"], ratio=a["total"] / b["total"],
                 moe_pre=a["preprocessed"], dense_pre=b["preprocessed"],
                 ratio_with_pre=(a["total"] + a["preprocessed"])
@@ -1402,6 +1762,31 @@ def read_from_constants():
     """Every cell cost the model charges that a key in the constants file backs."""
     return sorted({e["key"] for e in cm.PROVENANCE.values()
                    if e["source"] == "constants" and e["key"]})
+
+
+# The key a recorded assumption would carry in zk-results.  Proposed, not
+# recorded: no constants file names one of these yet, and the pull request asks
+# the owner to settle the names before a driver writes them.
+ASSUMPTION_KEY = "assumption.cost_model.{field}"
+
+
+def assumption_keys():
+    return [ASSUMPTION_KEY.format(field=f)
+            for f in list(ec.WITNESS_FIELDS) + ["head_groups", "variant", "round"]]
+
+
+def cells_inputs():
+    """Every input the cell side of a priced row read, as constants keys.
+
+    Under the fitted count that is the per-unit cell costs.  Under the exact
+    count the cell side reads no cell cost at all -- it counts columns -- and
+    what it reads instead is the assumption block, plus the one per-weight figure
+    the preprocessed column still charges."""
+    if CELLS != "exact":
+        return read_from_constants()
+    pre = [e["key"] for n, e in cm.PROVENANCE.items()
+           if n == "weight_freivalds_preprocessed_cells_per_weight" and e["key"]]
+    return sorted(set(pre + assumption_keys()))
 
 
 def read_elsewhere():
@@ -1430,9 +1815,10 @@ def entry(key, value, unit, card, context, scope, inputs, note, from_constants=T
         grade="projected", inputs=sorted(set(inputs)), note=note))
 
 
-def projected_rows(priced, moe_rows, cal, cards, usd, target, seq, seq_batch):
+def projected_rows(priced, moe_rows, cal, cards, usd, target, seq, seq_batch,
+                   cells_keys=None):
     """#88's rows, ready to be recorded, each naming what it was computed from."""
-    cells_keys = read_from_constants()
+    cells_keys = read_from_constants() if cells_keys is None else list(cells_keys)
     rows = []
     for r in priced:
         for ctx, e in sorted(r["contexts"].items()):
@@ -1479,11 +1865,17 @@ def projected_rows(priced, moe_rows, cal, cards, usd, target, seq, seq_batch):
                 ("preprocessed_over_fresh", r["ratio_with_pre"],
                  "the same comparison counting the preprocessed weight trace, which "
                  "the measured rates do not count")):
+            how = ("" if CELLS != "exact" else
+                   " Counted from the layout, where the segment prices the experts a "
+                   "token evaluates and the committed side of the Freivalds check "
+                   "does not scale with the expert count; what a prover covering "
+                   "every expert in full would commit for it is a routed layout "
+                   "nobody has built and is counted by nothing here.")
             rows.append(entry(
                 f"moe.{s}.{suffix}", val, "fraction", "none", 4096, "n/a", cells_keys,
                 f"{name}, {v['ek']:.1f} experts a token's top-k: {what}. Modelled at "
                 f"S={seq} and B={seq_batch}, the five reductions on; no measured rate "
-                f"enters it and no card."))
+                f"enters it and no card." + how))
     for ctx, pct in sorted(cal.get("residual_pct", {}).items()):
         rows.append(entry(
             f"frontier.calibration.c{ctx}.residual_pct", pct, "per cent",
@@ -1551,6 +1943,7 @@ def _e11_section(priced, h100, usd, mult, net, fixed):
 
 
 def main(argv=None):
+    global CELLS
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--seq", type=int, default=TOKENS,
                     help="tokens per chunk S (the measured sequence's is 512)")
@@ -1565,6 +1958,12 @@ def main(argv=None):
                          "PROVED POSITIONS per second (the paper's unit).  Default: "
                          f"the constants file's `{TARGET_KEY}`, or 20 where it names "
                          "none")
+    ap.add_argument("--cells", choices=CELLS_MODES, default=CELLS,
+                    help="how the cell side of every row is counted: `exact` "
+                         "builds a `params` block per segment and calls "
+                         "`exact_cells` (the default, and the owner's ruling of "
+                         "2026-09-11); `fitted` is the older per-unit-constant "
+                         "path, kept so the two can be compared")
     ap.add_argument("--json", default="frontier.json")
     constants.add_argument(ap)
     inputs.add_arguments(ap, artifacts=True, inputs=True)
@@ -1574,6 +1973,20 @@ def main(argv=None):
                          "whether the ordering changed")
     args = ap.parse_args(argv)
     constants.load(args.constants)
+    CELLS = args.cells
+    if CELLS == "exact" and args.seq_batch != 1:
+        sys.exit(f"--cells exact --seq-batch {args.seq_batch}: a batched proof "
+                 f"commits B key caches and B wiring families, and one `params` "
+                 f"block describes one segment of one sequence.  Price the batch "
+                 f"sweep with --cells fitted, or leave B at 1.")
+    assumptions = check_assumptions() if CELLS == "exact" else None
+    refusals = ({s["name"]: refusal(s) for s in SHAPES} if CELLS == "exact"
+                else {s["name"]: None for s in SHAPES})
+    priceable = [s for s in SHAPES if not refusals[s["name"]]]
+    if not priceable:
+        sys.exit("no shape in this table can be stated as a `params` block, so "
+                 "there is nothing to count:\n"
+                 + "\n".join(f"  {n}: {w}" for n, w in refusals.items() if w))
 
     consts = load_constants()
     target_key = constants.find(TARGET_KEY)
@@ -1682,6 +2095,24 @@ def main(argv=None):
     print(f"  W0's freeze: {src}")
     for v in consts.values():
         print(f"    {v['key']:<52} {str(v['value']):>8}  [{v['grade']}]")
+    print(f"\n  how the cells are counted: {CELLS}")
+    if CELLS == "exact":
+        print("    Every segment below is counted from its own `params` block "
+              "(`exact_cells.py`),")
+        print("    which reproduces all 1,872 recorded chunks in zk-results to the "
+              "cell.  No cell")
+        print("    cost is read for it and none is fitted.  The list below is what "
+              "the FITTED")
+        print("    count would charge, printed so a reader can see what the exact "
+              "count replaced;")
+        print("    the only entries a row here still reads are the preprocessed "
+              "weight trace's")
+        print("    and the two routing inputs, which the prover does not build at all.")
+    else:
+        print("    Every segment below is priced from the per-unit constants in the "
+              "list, read off")
+        print("    measured runs.  `--cells exact` counts the same segments from "
+              "their layout.")
     print("\n  the cell costs the model charges, and where each one came from")
     print(f"    {'input':<40} {'value':>14}  source")
     for name, e in cm.PROVENANCE.items():
@@ -1705,6 +2136,38 @@ def main(argv=None):
             print(f"        {it['input']:<40} {it['key'] or 'no key names it yet'}")
     if not elsewhere:
         print("      none: every input the model charges is a key of the constants file.")
+    if CELLS == "exact":
+        arows = assumption_rows(llama8b, seq=args.seq)
+        print("\n  the assumption, and it is the whole of what an exact count still "
+              "assumes")
+        print("    A `params` block is not an architecture: some of its fields are "
+              "the calibration")
+        print("    a run took off its own witness, and a caller with a model and a "
+              "context but no")
+        print("    witness has to assume them.  Each one below is the modal value of "
+              "the 64 layer")
+        print("    and first segments of the two recorded 8B headline runs, and the "
+              "bound beside it")
+        print("    is the widest value those runs carry -- which is what the `bound` "
+              "columns price.")
+        print(f"    {'field':<16} {'assumed':>20} {'bound':>7} {'recorded':>18} "
+              f"{'sizes, cells':>14} {'of a segment':>13}  read off")
+        for r in arows["rows"]:
+            sh = r["share_of_segment"]
+            vals = ", ".join(str(v) for v in r["recorded_values"][:4])
+            print(f"    {r['field']:<16} {str(r['value']):>20} "
+                  f"{str(r['bound']) if r['bound'] is not None else '-':>7} "
+                  f"{vals:>18} "
+                  + (f"{r['cells']:>14,}" if r["cells"] else f"{'-':>14}")
+                  + (f" {sh:>12.4%}" if sh is not None else f" {'-':>12}")
+                  + f"  {r['source_run'][:10]} {r['source_segment']}")
+        print(f"    the five `ao_*` range fields size ONE group of tables together, "
+              f"so their cells")
+        print(f"    column is that group's and is not added up.  A driver in "
+              f"zk-results records")
+        print(f"    each row as a named constant ({ASSUMPTION_KEY.format(field='<field>')}"
+              f") and every")
+        print(f"    projected row names them in its `inputs`.")
     for alias in ("h100_usd_per_hour", "h200_usd_per_hour"):
         e = consts[alias]
         print(f"    {e['card']} ${e['value']}/GPU-h  [{e['grade']}]  "
@@ -1808,6 +2271,30 @@ def main(argv=None):
     print("  by a single slope, each read from the key named beside it; where the constants")
     print("  file does not name one the column says so.")
 
+    if cal.get("block"):
+        print("\n  the calibration the exact count is answerable to, and it compares "
+              "the same")
+        print("  segments on both sides: the 32 layer segments of the block whose "
+              "prefix is the")
+        print("  whole context, over the 512 positions that block proves, with no "
+              "output head")
+        print("  segment on either side.")
+        print(f"  {'context':>8} {'recorded /position':>19} {'counted':>16} "
+              f"{'residual':>9} {'at the bound':>16} {'':>9}   at each segment's own "
+              f"recorded fields")
+        for ctx, r in sorted(cal["block"].items()):
+            if r["recorded"] is None:
+                print(f"  {ctx:>8} {'not recorded':>19}   ({r['key']})")
+                continue
+            print(f"  {ctx:>8} {r['recorded']:>19,.0f} {r['assumed']:>16,.0f} "
+                  f"{r['assumed_pct']:>+8.2f}% {r['at_bound']:>16,.0f} "
+                  f"{r['at_bound_pct']:>+8.2f}%   {r['recorded_fields_pct']:>+.4f}%")
+        print("  The last column is the whole point: give the count each segment's own "
+              "recorded")
+        print("  witness fields and it is EXACT, to the cell, on both blocks.  The "
+              "residual beside")
+        print("  it is what the assumption costs and nothing else -- it is not a "
+              "modelling error.")
     print("\n  the coefficients, derived here and measured by `prefill-sweep-8b` -- they")
     print("  must agree exactly, because both claim to be identities of the same layout:")
     print(f"  {'':<10} {'S*C':>10} {'C':>12} {'S':>12}")
@@ -1866,10 +2353,17 @@ def main(argv=None):
     print("      family and `cells_per_token` charges it separately, so there is no double")
     print("      count -- but it is also the one attention component whose price here is a")
     print("      measured per-element constant rather than a derived column count.")
-    sat = [r["name"] for r in
-           [dict(name=s["name"], c=model_cells(s, 16384, seq=args.seq, batch=batch))
-            for s in SHAPES] if r["c"].get("saturated")]
-    print("  layout caps saturated at: " + (", ".join(sat) if sat else "no shape"))
+    if CELLS == "exact":
+        print("  Under the exact count this is not a question the table asks: the "
+              "grids are")
+        print("  built rather than closed-form, so a layout that does not tile is "
+              "counted as it")
+        print("  tiles and nothing is reported as saturated.")
+    else:
+        sat = [r["name"] for r in
+               [dict(name=s["name"], c=model_cells(s, 16384, seq=args.seq, batch=batch))
+                for s in priceable] if r["c"].get("saturated")]
+        print("  layout caps saturated at: " + (", ".join(sat) if sat else "no shape"))
 
 
     # --- the shapes ----------------------------------------------------------
@@ -1914,7 +2408,16 @@ def main(argv=None):
     priced = [price(s, cards, alpha, seq=args.seq, seq_batch=args.seq_batch, usd=usd,
                     target_tok_s=target, mib_per_chunk=mib_per_chunk, batch=batch,
                     shp=shp)
-              for s in SHAPES]
+              for s in priceable]
+    if any(refusals.values()):
+        print("\n  refused, and not priced below: a shape whose segment is not a "
+              "`params` block")
+        print("  has no exact cell count, and this table prints the refusal rather "
+              "than the fitted")
+        print("  number under the same heading.")
+        for name, why in refusals.items():
+            if why:
+                print(f"    {name:<18} {why}")
 
     print(f"\n(2) committed cells, S={args.seq} positions/block, B={args.seq_batch} "
           "sequence(s)/proof, at both statements")
@@ -1923,17 +2426,32 @@ def main(argv=None):
     print("  per DECODED TOKEN is one token against a full C-key prefix, which is what "
           "the archive's")
     print("  sequences prove and what sections (2a) and (6) compare against.")
-    print(f"  {'model':<18} {'C=4K /pos':>11} {'C=16K /pos':>11} {'C=4K /token':>12} "
+    print(f"  {'model':<18} {'C=4K /pos':>11} {'bound':>10} {'C=16K /pos':>11} "
+          f"{'bound':>10} {'C=4K /token':>12} "
           f"{'C=16K /token':>12} {'C=4K pre':>10} {'freivalds %':>11} {'grid %':>7} "
           f"{'segments':>9}")
     for r in priced:
         a, b = r["contexts"][4096], r["contexts"][16384]
         print(f"  {r['name']:<18} {g(a['cells_per_position']):>11} "
-              f"{g(b['cells_per_position']):>11} {g(a['cells_per_token']):>12} "
+              f"{g(a['cells_per_position_bound']):>10} "
+              f"{g(b['cells_per_position']):>11} "
+              f"{g(b['cells_per_position_bound']):>10} {g(a['cells_per_token']):>12} "
               f"{g(b['cells_per_token']):>12} {g(a['preprocessed_per_token']):>10} "
               f"{a['parts']['freivalds']/a['cells_per_token']*100:>10.1f}% "
               f"{a['parts']['attn']/a['cells_per_token']*100:>6.1f}% "
               f"{a['statement']['segments']:>9,}")
+    if CELLS == "exact":
+        print("  `bound` is the same statement with every witness-calibrated field of "
+              "the `params`")
+        print("  block at the widest value the two recorded runs carry.  It is a "
+              "bound over the")
+        print("  evidence and not a theorem: the prover's automatic path caps the "
+              "exponent table")
+        print("  at 2^22 and every value above that is the per-layer calibration a "
+              "model manifest")
+        print("  publishes, so the ceiling a projection can state is the widest one "
+              "a run has")
+        print("  published.")
     print("  `pre` is the preprocessed weight trace, committed offline but read once per")
     print("  proof.  It is NOT in the fresh count the measured rates divide, and it is")
     print("  where MoE's x E lands hardest -- see (4).")
@@ -1965,7 +2483,10 @@ def main(argv=None):
     for shape in (SHAPES if superseded else []):
         row = {}
         for ctx in (4096, 16384):
-            kw = dict(seq=args.seq, seq_batch=args.seq_batch, batch=batch)
+            # the superseded terms are fitted slopes, so this section is the
+            # fitted path on both sides whatever `--cells` says
+            kw = dict(seq=args.seq, seq_batch=args.seq_batch, batch=batch,
+                      cells="fitted")
             row[ctx] = dict(
                 b5=model_cells(shape, ctx, alpha=b5, **kw)["total"],
                 slope=model_cells(shape, ctx, alpha=slope, **kw)["total"],
@@ -2064,7 +2585,8 @@ def main(argv=None):
             money = next((b for b in ("loop", "loop_secs", "whole wall") if b in bnames),
                          bnames[-1])
             hdr = "".join(f"{b:>17}" for b in bnames)
-            print(f"  {'model':<18}{hdr}   {'MiB/pos':>10} {'$/Mpos @ ' + money:>19}")
+            print(f"  {'model':<18}{hdr}   {'MiB/pos':>10} {'$/Mpos @ ' + money:>19}"
+                  f"{'at the bound':>16}")
             for r in priced:
                 e = r["contexts"][ctx]
                 cells = e["cards"].get(cardname)
@@ -2075,10 +2597,12 @@ def main(argv=None):
                     m = cells[b]
                     cs += f"{m['pos_s']:>9.3f}/{m['cards_for_target']:<7}"
                 dollars = cells[money]["usd_per_mposition"]
+                hi = cells[money].get("usd_per_mposition_bound")
                 mib = e["mib_per_token_chunks"]
                 print(f"  {r['name']:<18}{cs}   "
                       + (f"{mib:>10.2f} " if mib else f"{'n/a':>10} ")
-                      + (f"{dollars:>19,.0f}" if dollars else f"{'n/a':>19}"))
+                      + (f"{dollars:>19,.0f}" if dollars else f"{'n/a':>19}")
+                      + (f"{hi:>16,.0f}" if hi else f"{'-':>16}"))
             print("   (each cell is proved positions/s on one card / cards needed for "
                   "the target)")
 
@@ -2090,7 +2614,7 @@ def main(argv=None):
     print("  batches sequences into one proof; at B ~ E/k every expert sees S tokens")
     print("  again and the Freivalds check amortises exactly as a dense matmul's does")
     print("  at B = 1.")
-    moes = [s for s in SHAPES if any(grp["experts"] > 1 for grp in s["groups"])]
+    moes = [s for s in priceable if any(grp["experts"] > 1 for grp in s["groups"])]
     BS = (1, 4, 16, 64, 256)
     print("  the reference is the dense twin at B=1, held fixed, so the column reads")
     print("  'what the MoE proof costs against the dense proof the paper already prices'.")
@@ -2100,17 +2624,46 @@ def main(argv=None):
     for s in moes:
         grp = next(grp for grp in s["groups"] if grp["experts"] > 1)
         ek = grp["experts"] / grp["topk"]
-        cells = [moe_ratio(s, 4096, alpha, seq=args.seq, seq_batch=B, batch=batch)
-                 for B in BS]
-        same = [moe_ratio(s, 4096, alpha, seq=args.seq, seq_batch=B, ref_batch=B,
-                          batch=batch) for B in BS]
-        at_ek = moe_ratio(s, 4096, alpha, seq=args.seq, seq_batch=max(1, round(ek)),
-                          batch=batch)
+        # B = 1 is counted the way the rest of the table is; every B above it is
+        # the fitted model, because a batched proof is not one `params` block
+        def at(B, ref_batch=1):
+            return moe_ratio(s, 4096, alpha, seq=args.seq, seq_batch=B,
+                             ref_batch=ref_batch, batch=batch,
+                             cells=None if B == 1 else "fitted")
+        cells = [at(B) for B in BS]
+        same = [at(B, ref_batch=B) for B in BS]
+        at_ek = at(max(1, round(ek)))
         moe_rows[s["name"]] = dict(ek=ek, sweep=dict(zip(BS, cells)),
                                    same_b=dict(zip(BS, same)), at_ek=at_ek)
         print(f"  {s['name']:<18} {ek:>6.1f} "
               + "".join(f"{c['ratio']:>9.3f}x" for c in cells)
               + f"{at_ek['ratio']:>9.3f}x")
+    if CELLS == "exact":
+        print("\n  WHAT AN MoE SEGMENT IS under the exact count, and the layout does "
+              "not settle it:")
+        print("  the `params` block prices the experts a token actually evaluates, a "
+              "feed-forward")
+        print("  block of `topk * dff`.  A prover that covers every expert in full "
+              "would commit the")
+        print("  Freivalds check's activations for all of them -- and no prover in "
+              "this project")
+        print("  builds a routed feed-forward block at all, so that side is counted "
+              "by nothing here.")
+        print("  It is why the B = 1 column below is 1.000: against a dense twin with "
+              "the same active")
+        print("  parameters the counted segment IS the dense twin, and the expert "
+              "count lands")
+        print("  entirely on the preprocessed trace two tables down.  The fitted "
+              "column charged it")
+        print("  at a per-weight constant instead, and that constant is the one #168 "
+              "showed is a")
+        print("  ratio of two quantities that do not scale together.")
+        print("  The B = 1 column is counted; every column beside it is the fitted "
+              "model, because")
+        print("  a proof over B sequences commits B key caches and is not one "
+              "`params` block, so")
+        print("  the step from the first column to the second is a change of method "
+              "as well.")
     print("  It crosses 1.00 at B ~ E/k, which is the whole of section 6.4's counter, and")
     print("  keeps going: past B = E/k a batched MoE proof is *cheaper* than the unbatched")
     print("  dense proof the paper prices today, because the Freivalds check it inflated has gone.")
@@ -2133,16 +2686,22 @@ def main(argv=None):
     print(f"  {'model':<18} " + "".join(f"{'B=%d' % b:>14}" for b in (1, 4, 16, 64, 256)))
     batch_rows = {}
     cells_s = priced_card["per_ctx"][4096]["boundaries"]["whole wall"]["cells_s"]
-    for s in SHAPES:
+    for s in priceable:
         vals = []
         for B in (1, 4, 16, 64, 256):
             c = sound_cells(s, statement_of(s, 4096, shp), seq_batch=B, batch=batch,
-                            alpha=alpha)["per_position"]
+                            alpha=alpha,
+                            cells=None if B == 1 else "fitted")["per_position"]
             vals.append(cells_s / c)
         batch_rows[s["name"]] = vals
         print(f"  {s['name']:<18} " + "".join(f"{v:>13.3f}" for v in vals))
     print("  proved positions/s per card; B sequences are proven at once, so this is")
     print("  throughput, not latency, and the wall per proof grows with B.")
+    if CELLS == "exact":
+        print("  B = 1 is counted and every column beside it is the fitted model, so "
+              "the step from")
+        print("  the first column to the second is a change of method and not what "
+              "batching buys.")
 
     # --- E11 -----------------------------------------------------------------
     print("\n(6) the full prompt+output statement (E11, decided 2026-08-31)")
@@ -2206,7 +2765,7 @@ def main(argv=None):
               "(one point, C=4K, 8B -- approximate)")
         print(f"  {'model':<18} {'G cells/layer chunk':>20} {'GiB implied':>12} "
               f"{'80 GB':>7} {'141 GB':>7}   at S=512")
-    for s in (SHAPES if ref else []):
+    for s in (priceable if ref else []):
         per_layer = 0.0
         for grp in s["groups"]:
             c = model_cells(dict(s, groups=[grp]), 4096, seq=args.seq,
@@ -2313,7 +2872,7 @@ def main(argv=None):
               f"{'GiB h=25':>9} " + " ".join(f"{c + ' @' + str(h):>10}"
                                              for c, _ in CARDS for h in (23, 25)))
         mem = {}
-        for s in SHAPES:
+        for s in priceable:
             best = None
             for grp in s["groups"]:
                 fresh = model_cells(dict(s, groups=[grp]), 4096, seq=args.seq,
@@ -2678,7 +3237,7 @@ def main(argv=None):
 
     # --- what a driver may record --------------------------------------------
     to_record = projected_rows(priced, moe_rows, cal, cards, usd, target, args.seq,
-                               args.seq_batch)
+                               args.seq_batch, cells_keys=cells_inputs())
     elsewhere = read_elsewhere()
     # A row may be recorded when every input behind it is a key of this constants
     # file: the cell costs the model charged, the statement's own layout, and the
@@ -2790,7 +3349,19 @@ def main(argv=None):
             rows={n: {str(h): v for h, v in r.items()} for n, r in ldeo.items()})))
     result.update(
         statement=shp, target_positions_per_s=target, projected=rows,
-        recordable=recordable, priced_card=priced_card["card"])
+        recordable=recordable, priced_card=priced_card["card"],
+        # how the cell side of every row was counted, what it assumed where a
+        # `params` block carries a field a model does not, and what it refused
+        cells=CELLS,
+        assumptions=(None if CELLS != "exact" else dict(
+            assumption_rows(llama8b, seq=args.seq),
+            key=ASSUMPTION_KEY, modes={k: {f: list(v) for f, v in m.items()}
+                                       for k, m in assumptions.items()},
+            bound=ec.witness_bounds(), block=cal.get("block"),
+            analogy=[dict(input=n, key=e["key"], value=e["value"])
+                     for n, e in sorted(cm.PROVENANCE.items())
+                     if e["source"] == "analogy"])),
+        refused={n: w for n, w in refusals.items() if w})
     doc = dict(
         # The block every run JSON in this project carries, so that a driver in
         # zk-results can write a manifest from this file the way it writes one from

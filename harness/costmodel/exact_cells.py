@@ -49,6 +49,10 @@ CHUNKS = HERE / "exact_chunks.json"
 
 # stwo's SimdBackend needs N_LANES = 16 rows (`common.rs`, `MIN_LOG_ROWS`).
 MIN_LOG_ROWS = 4
+# The five batched GKR reductions, by the name a `params` block's flag carries
+# (`gkr_<name>`).  The two headline runs were proved with all five on.
+REDUCTIONS_ON = ("key_tiles", "dequant", "residual_stream", "freivalds", "attnout")
+
 # A QM31 column is four M31 cells: every interaction column below is counted in
 # QM31 and multiplied by this at the end (`plogup.rs`, `devfrac.rs`).
 M31_PER_QM31 = 4
@@ -826,7 +830,237 @@ def witness_terms(p):
     lo, hi = e_window(p)
     out["ao_ranges"] = 5 * ((1 << p["ao_acc_hi_bits"]) + (1 << p["ao_rem_bits"])
                             + (1 << log_rows_for(hi - lo + 1)))
+    # the accumulator's low limb and the quantize width, one range table each,
+    # and the pair table the quantize width keys
+    out["ao_acc_lo_bits"] = 5 * (1 << p["ao_acc_lo_bits"])
+    out["ao_q_bits"] = 5 * ((1 << p["ao_q_bits"])
+                            + ((1 << (p["ao_q_bits"] + 1)) if p["ao_q_bits"] > 7 else 0))
+    # the fold's own remainder range table, on a segment that folds at all
+    if any(m["variant"] == "fold" for m in p["mats"]):
+        out["fold_rem_bits"] = 5 * (1 << p["fold_rem_bits"])
     return {k: (v, v / total) for k, v in out.items()}
+
+
+# ------------------------------------ what a shape's segment looks like --
+# A `params` block is what `exact_cells` counts, and a run writes one.  The
+# three builders below write one from a model's shape instead, so that a
+# projection at a shape no run has proved is counted by the same function that
+# reproduces every recorded chunk.  What they cannot get from the shape is the
+# witness-calibrated fields and the run knobs: both are arguments, and
+# `frontier.py` names them and states what they are worth.
+
+
+class Refused(Exception):
+    """This shape's segment is not a `params` block: the prover has no layout for
+    it.  Carries the reason, which a caller prints instead of a number."""
+
+
+# The knobs the two headline runs were proved at, read off the fixture's own
+# shared block rather than typed in again: the layout targets, the quantize
+# widths and the attention variant.  They are the prover's flags, not the
+# model's shape, so a projection carries the recorded statement's.
+_KNOB_FIELDS = ("deq_target", "ao_target", "freivalds_p", "chan_target", "grid_target",
+                "rw", "nmax", "z_min", "z_hi_bits", "z_lo_bits", "k_bits", "q_bits",
+                "round", "variant", "layer_boundary", "diagonal_block")
+# `residual_stream.a`: committed leaves per row of the wiring family, 32 on every
+# recorded segment, and `embed_per_row`: the embedding gadget's target width.
+RS_A = 32
+EMBED_PER_ROW = 256
+
+
+def statement_knobs():
+    """The recorded statement's run knobs, from `exact_chunks.json`'s shared block."""
+    d = json.loads(CHUNKS.read_text())["params"]
+    return {k: d[k] for k in _KNOB_FIELDS if k in d}
+
+
+def head_groups_for(nh, rule="half-quarter-quarter"):
+    """How the attention heads are grouped into key tiles.  The prover's
+    `--head-groups`, a run knob: the two headline runs proved 32 heads as 16, 8, 8
+    and the micro-benchmark proved 4 as 2, 2.  The rule here reproduces the
+    headline runs' grouping and is what a projection assumes."""
+    if rule == "one-group":
+        return [nh]
+    if rule != "half-quarter-quarter":
+        raise Refused(f"no such head-group rule: {rule!r}")
+    if nh % 4:
+        raise Refused(f"{nh} attention heads do not split into a half and two "
+                      f"quarters, which is how the recorded runs grouped theirs")
+    return [nh // 2, nh // 4, nh // 4]
+
+
+def layer_mats(d, nh, nkv, hd, dff, tokens):
+    """`compose.rs`, the layer plan's seven matmuls: the three projections, the
+    attention output, the two gates and the down projection.  `v` is folded --
+    its dequantize IS the quantize the attention output reads."""
+    return [dict(name="q", n_in=d, n_out=nh * hd, tokens=tokens, variant="chain"),
+            dict(name="k", n_in=d, n_out=nkv * hd, tokens=tokens, variant="chain"),
+            dict(name="v", n_in=d, n_out=nkv * hd, tokens=tokens, variant="fold"),
+            dict(name="o", n_in=nh * hd, n_out=d, tokens=tokens, variant="chain"),
+            dict(name="gate", n_in=d, n_out=dff, tokens=tokens, variant="chain"),
+            dict(name="up", n_in=d, n_out=dff, tokens=tokens, variant="chain"),
+            dict(name="down", n_in=dff, n_out=d, tokens=tokens, variant="chain")]
+
+
+def head_deq_target(vocab):
+    """The dequantize target the output head segment is planned at.
+
+    `MatLayout::choose` needs the row count `tokens * chunks` to be a power of
+    two, and `tokens` is one, so `chunks` is a power of two and the narrowest
+    row the vocabulary admits is its own odd part.  The two headline runs' head
+    segments were proved at exactly that (501 for a vocabulary of 128,256)."""
+    odd = vocab
+    while odd % 2 == 0:
+        odd //= 2
+    return odd
+
+
+def segment_params(kind, d, nh, nkv, hd, dff, vocab, s, c, witness,
+                   knobs=None, head_groups=None, gkr=REDUCTIONS_ON):
+    """One composed segment of a model, as the `params` block `exact_cells` counts.
+
+    `kind` is `layer`, `first` (the segment of the stack that carries the
+    embedding lookup) or `head` (the output head).  `witness` is the block of
+    witness-calibrated fields the caller assumes; `knobs` the run knobs, the
+    recorded statement's by default.  Raises `Refused` where the shape is not a
+    `params` block at all."""
+    if kind not in ("layer", "first", "head"):
+        raise Refused(f"no such segment kind: {kind!r}")
+    if int(nkv) != nkv or nkv < 1:
+        raise Refused(f"{nkv} key/value heads: the layer plan commits a whole "
+                      f"K and V head per group, so a fractional count is not a "
+                      f"`params` block.  Multi-head latent attention is the case "
+                      f"this refuses, and the prover has no layout for it")
+    nkv = int(nkv)
+    for name, n in (("d", d), ("dff", dff)):
+        if kind != "head" and n % RS_A:
+            raise Refused(f"{name} = {n} is not a multiple of {RS_A}, the wiring "
+                          f"family's committed leaves per row")
+    p = dict(statement_knobs() if knobs is None else knobs)
+    p.update(witness)
+    p.update(s=s, c=c, hd=hd, nh=nh,
+             head_groups=list(head_groups if head_groups is not None
+                              else head_groups_for(nh)))
+    for r in gkr:
+        p[f"gkr_{r}"] = True
+    mats = layer_mats(d, nh, nkv, hd, dff, s)
+    if kind == "head":
+        mats.append(dict(name="lm_head", n_in=d, n_out=vocab, tokens=s,
+                         variant="pow2"))
+        p.update(mats=mats, prove_argmax=True, logits_claim=True,
+                 deq_target=head_deq_target(vocab),
+                 residual_stream=dict(a=RS_A, d=d, dff=0, head_norm=True))
+    else:
+        p.update(mats=mats, kv_boundary=True,
+                 residual_stream=dict(a=RS_A, d=d, dff=dff), rope=dict(nkv=nkv))
+        if kind == "first":
+            p.update(embed_vocab=vocab, embed_per_row=EMBED_PER_ROW, ao_acc_mag=True)
+    return p
+
+
+def cells_of(p, bound=False):
+    """`exact_cells`, with every layout assertion turned into a refusal that says
+    what the shape did to the layout.  `bound=True` counts the same segment with
+    every witness-calibrated field at its bound."""
+    if bound:
+        p = dict(p, **witness_bounds())
+    try:
+        return exact_cells(p)
+    except SystemExit as e:
+        raise Refused(str(e).replace("exact_cells: ", "")) from None
+    except (AssertionError, ZeroDivisionError, ValueError) as e:
+        raise Refused(f"the layout does not tile at this shape: {e}") from None
+
+
+# ----------------------------------------- the assumption and its bound --
+# `witness_terms` says which fields of a `params` block the run took off its own
+# witness.  A caller with a model and a context but no witness has to assume
+# them.  These two read the assumption's two ends off the recorded 8B headline
+# runs: the MODE, which is the point estimate, and the widest recorded value,
+# which is the bound.  Neither is typed in.
+HEADLINE_RUNS = ("2026-09-09-headline-c4096-h100", "2026-09-08-headline-c16384-h100")
+
+WITNESS_FIELDS = ("log_table", "kmax", "ao_acc_hi_bits", "ao_acc_lo_bits",
+                  "ao_rem_bits", "ao_q_bits", "ao_jo_min", "ao_jo_max",
+                  "ao_jv_min", "ao_jv_max", "fold_rem_bits")
+def headline_chunks(kind=None, runs=HEADLINE_RUNS):
+    """The recorded segments of the two headline runs, optionally of one kind or
+    of several (`kind` is one name or a tuple of them)."""
+    want = (kind,) if isinstance(kind, str) else kind
+    return [p for p in chunks()
+            if p["run"] in runs
+            and (want is None or segment_kind(p["params"]) in want)]
+
+
+def modal_witness(kind=None, runs=HEADLINE_RUNS):
+    """Each witness-calibrated field's most common value over those segments, and
+    the run and segment it is read from.  `{field: (value, run, segment, n, of)}`."""
+    pts = headline_chunks(kind, runs)
+    if not pts:
+        raise SystemExit(f"no recorded {kind or 'headline'} segment to read a "
+                         f"modal witness value off")
+    out = {}
+    for f in WITNESS_FIELDS:
+        counts = {}
+        for p in pts:
+            counts[p["params"][f]] = counts.get(p["params"][f], 0) + 1
+        value = max(sorted(counts), key=lambda v: counts[v])
+        first = next(p for p in pts if p["params"][f] == value)
+        out[f] = (value, first["run"], first["segment"], counts[value], len(pts))
+    return out
+
+
+def modal_assumption(kind="layer", runs=HEADLINE_RUNS):
+    """The witness block a projection assumes, as `exact_cells` reads it: each
+    field at the modal value of the recorded runs' segments of that kind.
+
+    `kind="layer"` reads the layer and first segments together, which is the
+    block a shape's layer segment is counted at; `kind="head"` reads the output
+    head's own, which is a different plan and agrees on a narrower remainder."""
+    kinds = ("output head",) if kind == "head" else ("layer", "first segment")
+    return {f: v for f, (v, *_) in modal_witness(kinds, runs).items()}
+
+
+def witness_range(runs=HEADLINE_RUNS):
+    """Every value each witness-calibrated field takes over the recorded runs."""
+    pts = headline_chunks(None, runs)
+    return {f: sorted({p["params"][f] for p in pts}) for f in WITNESS_FIELDS}
+
+
+_BOUND = {}
+
+
+def witness_bounds(runs=HEADLINE_RUNS):
+    """Each witness-calibrated field at the value that makes a segment DEAREST,
+    out of the values the two headline runs carry.
+
+    It is a bound over the evidence and not a theorem: the prover's own automatic
+    path caps the exponent table at `2^22` (`attn_witness.rs`, `d_bits.clamp(4,
+    22)`), and every value above that is the per-layer calibration the model
+    manifest publishes, so the ceiling a projection can state is the widest one a
+    run has published.  `--selftest` checks that it dominates every recorded chunk.
+
+    The widest value is not always the dearest, which is why this maximises
+    rather than taking a maximum: `Plan::new` registers the range tables as a
+    SET, so widening one width can collapse it into a width the segment already
+    carries and take a whole table away."""
+    if runs in _BOUND:
+        return dict(_BOUND[runs])
+    rng = witness_range(runs)
+    ref = headline_chunks("layer", runs)[0]["params"]
+    best = {f: ref[f] for f in WITNESS_FIELDS}
+    for _ in range(2):
+        for f in WITNESS_FIELDS:
+            best[f] = max(rng[f], key=lambda v, f=f: exact_cells(
+                dict(ref, **dict(best, **{f: v})))["fresh"])
+    _BOUND[runs] = dict(best)
+    return dict(best)
+
+
+def bound_cells(p):
+    """The same segment counted with every witness-calibrated field at its bound:
+    the largest this segment can be without the witness that sized it."""
+    return exact_cells(dict(p, **witness_bounds()))
 
 
 # ------------------------------------------------------------- the self-test --
@@ -881,6 +1115,55 @@ def selftest(argv_points=None):
           f"{', '.join(sorted({p['params']['round'] for p in pts}))}")
     print(f"  {len(red)} reduction configurations, from none of the five to all five")
     print("  a one-cell difference is a failure: checked")
+    return bound_selftest(pts) or builder_selftest()
+
+
+def bound_selftest(pts):
+    """The bound has to dominate every recorded chunk, and be reached by one."""
+    bounds = witness_bounds()
+    low = [p for p in pts if bound_cells(p["params"])["fresh"] < p["fresh"]]
+    for p in low[:6]:
+        print(f"exact cells: the bound is under the recorded count at {p['run']} "
+              f"{p['segment']}: {bound_cells(p['params'])['fresh']:,} < {p['fresh']:,}")
+    if low:
+        return 1
+    loose = [f for f, v in bounds.items()
+             if all(p["params"][f] != v for p in headline_chunks())]
+    if loose:
+        print(f"exact cells: no recorded segment reaches the bound on {loose}, so it "
+              f"is not read off the runs it claims to be")
+        return 1
+    print(f"  the witness bound ({', '.join(f'{f} {v}' for f, v in sorted(bounds.items()))})")
+    print(f"  is at or above all {len(pts)} recorded counts and is reached by a "
+          f"recorded segment: checked")
+    return 0
+
+
+def builder_selftest():
+    """`segment_params` against the recorded 8B segments: the block a shape writes
+    has to be the block the run wrote, field for field, once the witness-calibrated
+    fields are taken from that segment."""
+    shape = dict(d=4096, nh=32, nkv=8, hd=128, dff=14336, vocab=128256)
+    want = {"B8_L16": ("layer", 4096), "B8_L0": ("first", 4096), "B8": ("head", 4096),
+            "B7": ("head", 3584), "B32_L16": ("layer", 16384), "B32": ("head", 16384)}
+    bad = 0
+    for p in headline_chunks():
+        if p["segment"] not in want:
+            continue
+        kind, c = want[p["segment"]]
+        rec = p["params"]
+        built = segment_params(kind, s=rec["s"], c=c,
+                               witness={f: rec[f] for f in WITNESS_FIELDS}, **shape)
+        got, recorded = cells_of(built)["fresh"], p["fresh"]
+        if got != recorded:
+            print(f"exact cells: the block built from the 8B shape does not reproduce "
+                  f"{p['run']} {p['segment']}: {got:,} against {recorded:,} "
+                  f"({got - recorded:+,})")
+            bad += 1
+    if bad:
+        return 1
+    print(f"  a `params` block built from the shape alone reproduces the recorded "
+          f"layer, first and output head segments at both contexts: checked")
     return 0
 
 
