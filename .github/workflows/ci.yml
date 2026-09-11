@@ -120,3 +120,4 @@ jobs:
           uv run python -m harness.costmodel.key_tile --selftest
           uv run python -m harness.costmodel.exact_cells --selftest
           uv run python -m harness.costmodel.cost_model --selftest
+          uv run python -m harness.eval.predict.witness_fields --selftest

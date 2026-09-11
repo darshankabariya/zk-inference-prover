@@ -39,9 +39,34 @@ from harness import constants
 from harness import inputs
 from harness.constants import get
 from harness.costmodel import cost_model as cm
+from harness.costmodel import exact_cells as ec
 from harness.costmodel import key_tile
+from harness.eval.predict import witness_fields as wf
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# --------------------------------------------------------------------------
+# HOW THE CELLS ARE PRICED.  Two paths, and the choice is the run's.
+#
+#   fitted  the per-unit constants a measured 8B segment was read off -- cells
+#           per accumulator, per weight, per lookup -- times the shape's own
+#           counts.  This is what the three registrations already recorded were
+#           made on, and it stays the DEFAULT so that none of them moves.
+#   exact   the cells are COUNTED from the prover's trace layout
+#           (`harness/costmodel/exact_cells.py`), segment by segment, with each
+#           segment's witness-calibrated fields READ OFF ITS OWN DUMP
+#           (`--witness-fields FILE`, written by `witness_fields.py`).  Nothing
+#           is fitted and nothing is assumed: the fields exist before any proof
+#           of them does, which is what keeps the registration a registration.
+#
+# The owner's ruling of 2026-09-11 is the exact formula wherever we can
+# (`docs/decisions/2026-09-11-cells-are-counted-from-the-layout-wherever-a-
+# shape-can-be-stated.md`), and the 14B is where it matters most: that model's
+# dumps ask for a master exponent table of 2^21 to 2^25 rows where the fitted
+# model charges the 8B's 2^23 everywhere, and five cells a table row makes the
+# difference tens of millions of cells a segment.
+# --------------------------------------------------------------------------
+CELLS = ("fitted", "exact")
 
 S = 512                     # decoded tokens per chunk: the frozen spec's chunking
 B = cm.BATCH                # the LogUp lookup-batch size the model charges (2)
@@ -89,6 +114,91 @@ SHAPES = {
             "one `SHAPES` in `harness/costmodel/frontier.py` now carries a row "
             "for"),
 }
+
+# --------------------------------------------------------------------------
+# A COUNTED REGISTRATION, shape by shape.  `--cells exact` registers ONE shape,
+# because the witness fields it counts with are one model's dumps, and what the
+# document has to say about that shape's standing is here rather than in
+# `REGISTERED`: the priced registration above was made on 2026-09-01 with
+# nothing at any of those three shapes in existence, and a counted one is made
+# after that shape's witnesses were extracted and before any proof of them was
+# accepted.  Those are two different standings and they are not one row.
+#
+# Everything but the date and the disclosure is the same sentence for every
+# shape, so it is written once, in `counted_standing`, and built from the fields
+# file itself -- the model it names, the spec it was extracted at, the context
+# and the per-dump digests.  ADDING A MODEL IS THEREFORE ONE ROW IN `SHAPES`:
+# the seven-tuple from the model's published config, `hf`, `role`, `why`, and a
+# `counted` block with the date it is registered on, who registers it, the
+# driver that will measure it and any disclosure that shape needs.  Nothing else
+# in this file is shape-specific.
+COUNTED = {
+    "Qwen2.5-14B-Instruct": dict(
+        utc_date="2026-09-11", by="stream E4 (desk lane), the counted registration",
+        driver="tools/drivers/register-14b.sh (zk-results), which passes `--cells "
+               "exact` and the fields file, and tools/drivers/predict-14b.sh, which "
+               "proves every layer of the target shape with these flags",
+        disclosure=(
+            "Two of the 48 layers are NOT blind, and this document says so rather "
+            "than letting a reader assume otherwise: the first attempt to prove "
+            "layers 0 and 1 was REJECTED by the prover's own verification "
+            "(zk-prover issue #172, an honest proof rejected at 40 attention "
+            "heads), and those two rejected documents reported `cells.fresh` "
+            "1,793,630,880 and 1,824,875,168, which that issue states and which "
+            "was visible before this registration was made. Layers 2 to 47 are "
+            "blind. The counted total for those two segments landing on those two "
+            "integers is the expected result of counting a layout, not evidence of "
+            "a fit: nothing here is fitted to them, and the same code reproduces "
+            "all 84 recorded 8B segments to the cell without ever having seen this "
+            "shape.")),
+}
+
+
+def counted_record(name):
+    """The shape's own counted-registration record, or the refusal that says what
+    a new shape needs.  Looked up before anything is read, so a missing row costs
+    nothing."""
+    rec = COUNTED.get(name)
+    if rec is None:
+        raise SystemExit(
+            f"--cells exact --shape {name}: this document carries no counted "
+            f"registration record for that shape. A counted registration states "
+            f"when it was made and what was and was not in existence at the time, "
+            f"and neither is derivable from a witness. Add a row to `COUNTED` "
+            f"naming the date, who registers it, the driver that measures it and "
+            f"any disclosure the shape needs -- and a row to `SHAPES` if the shape "
+            f"itself is new, which is the seven-tuple from the model's published "
+            f"config.\n"
+            f"  the shapes it holds: {', '.join(sorted(COUNTED))}")
+    return rec
+
+
+def counted_standing(name, fields):
+    """What a counted registration's provenance says about its own standing.
+
+    Generic over the shape table on purpose: a counted registration of any shape
+    makes the same claim, and the numbers that back it come out of the fields
+    file rather than out of a sentence somebody has to remember to edit.
+    """
+    rec = counted_record(name)
+    rows = list(fields["layers"].values())
+    model = sorted({r.get("model") for r in rows if r.get("model")}) or ["unnamed"]
+    spec = sorted({r.get("spec") for r in rows if r.get("spec")}) or ["unnamed"]
+    ctx = fields_context(fields)
+    return dict(
+        utc_date=rec["utc_date"], by=rec["by"], driver=rec["driver"],
+        no_measurement_exists=(
+            f"NO accepted proof and NO measured cell count of {model[0]} exists in "
+            f"either repository or on any host. What does exist, and what this "
+            f"registration is made from, is the extracted witness set: "
+            f"{len(rows)} layer dumps of one token block at C={ctx:,}, spec "
+            f"{spec[0]}, whose per-layer digests are in "
+            f"`frozen_inputs.witness_fields`. A dump is not a measurement: every "
+            f"field read off it is a property of the forward pass and is fixed "
+            f"before any proof is built. "
+            + rec.get("disclosure", "No total at this shape was visible when this "
+                                    "registration was made.")))
+
 
 # The shapes a run registers when it is given no `--shape`: E4's three, in the
 # order E4 registered them.  A run of this document is a registration, so which
@@ -291,7 +401,168 @@ def key_tiles_per_chunk(nh, hd, s, c, base_slope=2.0, **kw):
     return b + extra, i, sat
 
 
-def predict(cfg, ctx, seq=S, base_slope=2.0, statement=None, reductions=None):
+def exact_segments(cfg, ctx, fields, seq=S, reductions=None, head_groups=None):
+    """Every layer segment of the stack, counted from its own witness fields.
+
+    The stack is one segment that carries the embedding lookup and `L - 1` layer
+    segments, each over the `seq` positions it covers -- the same split
+    `cost_model.exact_cells_per_token` makes, except that the witness block is
+    per segment here rather than one assumed block for all of them.  That is the
+    whole point: `log_table` is 21 to 25 over this model's 48 layers and a single
+    value for the stack is wrong on 46 of them.
+
+    Three things a `params` block needs that the fields file carries and the
+    modal assumption does not, all of them the dump's own:
+
+      * `ao_acc_mag`, the attention output's accumulator form.  `params_of`
+        takes the magnitude form exactly when the offset window does not fit,
+        and that is a question about the segment's own accumulator;
+      * the dequantize gadget each matmul is on (`deq_variants`).  A
+        `b10-final` dump has every matmul on the chain; the 8B segments the cost
+        model was read off were extracted at a spec that folds `v`, and the fold
+        is not the chain;
+      * the fold's pins, which are zero wherever nothing is folded.
+
+    `bound` beside each count is the same segment with every witness-calibrated
+    field at the dearest value the recorded 8B runs carry
+    (`exact_cells.witness_bounds`): what a projection at this shape would have to
+    state if no witness existed.  It is here to be compared against, not added
+    up.
+    """
+    L, d, nh, nkv, hd, dff, vocab = cfg
+    red = STATEMENT_REDUCTIONS if reductions is None else reductions
+    hg = list(head_groups if head_groups is not None else ec.head_groups_for(nh))
+    if sum(hg) != nh or any(g & (g - 1) for g in hg):
+        raise SystemExit(
+            f"--head-groups {hg} does not group {nh} attention heads into key "
+            f"tiles the prover would build: the groups have to add up to the head "
+            f"count and each one has to be a power of two (`Attn::build`'s "
+            f"`insts must be a power of two`). The run's own grouping belongs in "
+            f"the fields file's `knobs.head_groups`.")
+    rows = []
+    for k in range(L):
+        row = (fields.get("layers") or {}).get(str(k))
+        if row is None:
+            raise SystemExit(
+                f"the fields file names no layer {k}, and this shape has {L}. Every "
+                f"segment is counted at its own witness fields, and a layer that is "
+                f"not in the file is not counted at another layer's.")
+        w = dict(wf.witness_block(row), ao_acc_mag=row["ao_acc_mag"])
+        p = ec.segment_params("first" if k == 0 else "layer", d=d, nh=nh, nkv=nkv,
+                              hd=hd, dff=dff, vocab=vocab, s=seq, c=ctx,
+                              witness=w, gkr=red, head_groups=hg)
+        p["mats"] = wf.mats_of(row, p["mats"])
+        got = ec.cells_of(p)
+        rows.append(dict(
+            layer=k, kind=ec.segment_kind(p), fresh=got["fresh"], base=got["base"],
+            interaction=got["interaction"], boundary=got["boundary"],
+            bound_fresh=ec.cells_of(p, bound=True)["fresh"],
+            table_rows=got["table_rows"],
+            components={n: b + i for n, (b, i) in sorted(got["components"].items())},
+            fields=w, deq_variants=dict(row["deq_variants"]),
+            dump_sha256=row.get("dump_sha256")))
+    return rows
+
+
+def fields_context(fields):
+    """The context the dumps in a fields file were extracted at.
+
+    A witness field is a property of one forward pass over one prefix, and the
+    prefix is part of it: the attention output's divisor range grows with the
+    context, and so does the master exponent table.  So a fields file is for one
+    context and this is how a caller finds out which.
+    """
+    cs = sorted({r["c"] for r in fields["layers"].values() if r.get("c") is not None})
+    if len(cs) != 1:
+        raise SystemExit(f"the fields file names {len(cs)} contexts ({cs}) and a "
+                         f"registration is counted at one: every dump of one block "
+                         f"reads the same prefix")
+    return cs[0]
+
+
+def predict_exact(cfg, ctx, fields, seq=S, statement=None, reductions=None,
+                  head_groups="knobs"):
+    """The same quantity as `predict`, counted instead of priced.
+
+    `total` is the layers-only fresh cells per decoded token: the 48 segments'
+    own counts over the `seq` positions one token block proves.  The key tile
+    half is the layout's own `key_tiles` component rather than the closed form,
+    which is the same integer wherever the three grids tile exactly and is not
+    where they pad.
+    """
+    L = cfg[0]
+    st = STATEMENT if statement is None else statement
+    red = STATEMENT_REDUCTIONS if reductions is None else reductions
+    if head_groups == "knobs":
+        head_groups = (fields.get("knobs") or {}).get("head_groups")
+    at = fields_context(fields)
+    if at != ctx:
+        raise SystemExit(
+            f"the fields file was read off dumps at C={at:,} and this asks for "
+            f"C={ctx:,}. The attention output's divisor range and the master "
+            f"exponent table both grow with the prefix, so a segment at one "
+            f"context is not counted at another's fields: extract that context and "
+            f"read its own.")
+    rows = exact_segments(cfg, ctx, fields, seq=seq, reductions=red,
+                          head_groups=head_groups)
+    fresh = sum(r["fresh"] for r in rows)
+    kt = {r["components"]["key_tiles"] for r in rows}
+    assert len(kt) == 1, f"the key tile count is not one integer over the layers: {kt}"
+    comps = {}
+    for r in rows:
+        for n, v in r["components"].items():
+            comps[n] = comps.get(n, 0) + v
+    key_tiles = sum(r["components"]["key_tiles"] for r in rows) / seq
+    ktb, kti = ec.key_tile_cells(_kt_shape(cfg, ctx, seq, red, head_groups))
+    return dict(key_tiles=key_tiles, rest=fresh / seq - key_tiles, total=fresh / seq,
+                key_tiles_base_per_chunk=ktb, key_tiles_interaction_per_chunk=kti,
+                per_layer_chunk=fresh / L, saturated=False,
+                statement=dict(st), reductions=tuple(red), cells="exact",
+                layers=rows, layers_fresh_sum=fresh,
+                bound_total=sum(r["bound_fresh"] for r in rows) / seq,
+                components={n: v / seq for n, v in sorted(comps.items())},
+                reductions_not_priced=())
+
+
+def _kt_shape(cfg, ctx, seq, red, head_groups):
+    """The one layer segment the key tile integers are read off, as a block."""
+    L, d, nh, nkv, hd, dff, vocab = cfg
+    p = ec.segment_params("layer", d=d, nh=nh, nkv=nkv, hd=hd, dff=dff, vocab=vocab,
+                          s=seq, c=ctx, witness=ec.modal_assumption("layer"), gkr=red,
+                          head_groups=list(head_groups if head_groups is not None
+                                           else ec.head_groups_for(nh)))
+    return p
+
+
+def recorded_8b_fields(ctx):
+    """A fields block for the 8B, out of the recorded segments' own `params`.
+
+    The anchor under `--cells exact` is the same count against the same 32
+    segments the recorded row divides, with each segment's OWN witness fields --
+    which is the strongest statement this document can make about the path it
+    registers with: given the fields, the count is the recorded number.
+    """
+    rows = {}
+    for p in ec.headline_chunks(("layer", "first segment")):
+        q = p["params"]
+        if q["c"] != ctx:
+            continue
+        rows[str(int(p["segment"].split("L")[1]))] = dict(
+            {f: q[f] for f in wf.WITNESS_FIELDS}, c=q["c"],
+            ao_acc_mag=bool(q.get("ao_acc_mag", False)),
+            deq_variants={m["name"]: m["variant"] for m in q["mats"]},
+            dump_sha256=None)
+    hg = sorted({tuple(p["params"]["head_groups"])
+                 for p in ec.headline_chunks(("layer", "first segment"))
+                 if p["params"]["c"] == ctx})
+    assert len(hg) == 1, f"the recorded 8B segments disagree on the head grouping: {hg}"
+    return dict(schema=wf.SCHEMA, layers=rows, knobs=dict(head_groups=list(hg[0])),
+                read_by="the recorded segments' own `params`, out of "
+                        "harness/costmodel/exact_chunks.json")
+
+
+def predict(cfg, ctx, seq=S, base_slope=2.0, statement=None, reductions=None,
+            cells="fitted", fields=None):
     """Layers-only fresh cells per decoded token, split key tiles / rest.
 
     `statement` is the key tile configuration being priced, `STATEMENT` by
@@ -304,7 +575,22 @@ def predict(cfg, ctx, seq=S, base_slope=2.0, statement=None, reductions=None):
     `STATEMENT_REDUCTIONS`, all five, which is what the driver passes.  The two
     arguments have to agree: pricing the key tile family at a reduced statement
     and everything else at an un-reduced one is not a statement any run proves.
+
+    `cells="exact"` counts the segments from the layout instead, at the witness
+    fields `fields` carries.  The default is `fitted` because this document is a
+    registration and the three already recorded were made on that path.
     """
+    if cells not in CELLS:
+        raise SystemExit(f"--cells {cells!r}: the cell side is counted (`exact`) or "
+                         f"priced from per-unit constants (`fitted`)")
+    if cells == "exact":
+        if not fields:
+            raise SystemExit(
+                "--cells exact needs --witness-fields FILE: every segment is counted "
+                "at the fields its own dump carries, and this document assumes none "
+                "of them")
+        return predict_exact(cfg, ctx, fields, seq=seq, statement=statement,
+                             reductions=reductions)
     st = STATEMENT if statement is None else statement
     red = STATEMENT_REDUCTIONS if reductions is None else reductions
     L, d, nh, nkv, hd, dff, vocab = cfg
@@ -326,6 +612,34 @@ def predict(cfg, ctx, seq=S, base_slope=2.0, statement=None, reductions=None):
 
 def head_chunk(cfg, seq=S):
     return cm.lm_head_chunk(cfg, seq)
+
+
+def exact_head_segment(cfg, ctx, seq=S, reductions=None, head_groups=None):
+    """The output head segment, counted at this context.
+
+    Its witness block IS an assumption, and that is said here in as many words:
+    the 14B campaign extracts the 48 layer dumps and no head dump, so there is no
+    head witness of this shape to read, and the modal block of the recorded 8B
+    head segments stands in.  It is outside the registered quantity either way --
+    `cells_per_token_layers` is layers only, and so is the comparison -- and it is
+    counted because a reader of the document asks what the whole model costs.
+    """
+    L, d, nh, nkv, hd, dff, vocab = cfg
+    red = STATEMENT_REDUCTIONS if reductions is None else reductions
+    p = ec.segment_params("head", d=d, nh=nh, nkv=nkv, hd=hd, dff=dff, vocab=vocab,
+                          s=seq, c=ctx, witness=ec.modal_assumption("head"),
+                          gkr=red, head_groups=list(head_groups or ec.head_groups_for(nh)))
+    got = ec.cells_of(p)
+    return dict(fresh=got["fresh"], per_token=got["fresh"] / seq,
+                fields=ec.modal_assumption("head"),
+                fields_source="ASSUMED: the modal block of the recorded 8B output "
+                              "head segments. This campaign extracts no head dump "
+                              "at the registered shape, so the head's fields are "
+                              "the only ones in this document that are not read "
+                              "off a witness",
+                preprocessed_note="the weight trace the Freivalds check reads is "
+                                  "committed offline and is no committed cell of "
+                                  "this segment, so the count says nothing about it")
 
 
 # --------------------------------------------------------------------------
@@ -404,11 +718,19 @@ def recorded_layer_block(ctx):
                      "accumulator")
 
 
-def anchors():
+def anchors(cells="fitted"):
+    """What the predictor says about the two scales it WAS built from.
+
+    Under `--cells exact` the 8B side is counted on exactly the path the
+    registration is made on, with each recorded segment's own witness fields
+    (`recorded_8b_fields`).  That is the anchor's whole value there: the same
+    function, the same fields, against the number the runs recorded.
+    """
     out = {}
     for ctx in CONTEXTS:
         key = FROZEN_8B_KEYS[ctx]
-        p = predict(cm.LLAMA8B, ctx)
+        p = predict(cm.LLAMA8B, ctx, cells=cells,
+                    fields=recorded_8b_fields(ctx) if cells == "exact" else None)
         e = constants.find(key)
         if e is None:
             out[f"llama8b_c{ctx}"] = dict(
@@ -474,6 +796,15 @@ def anchors():
     # is not a residual of the model: its `cells.fresh` is exactly its base plus
     # its interaction, so it commits no boundary tree at all, and its
     # `family_cells` names no lookup-table, quantize or residual-stream family.
+    #
+    # It stays on the PRICED path under `--cells exact`, and the entry says so:
+    # that chunk's witness is in neither repository, so there are no fields to
+    # read, and a segment counted at another shape's fields is not this one.
+    weak = dict(cells="fitted",
+                cells_note="the priced path, whatever this document registers "
+                           "with: no witness of this chunk is in either "
+                           "repository, so its fields cannot be read") \
+        if cells == "exact" else {}
     L, d, nh, nkv, hd, dff, vocab = cm.QWEN
     r = cm.cells_per_token(cm.QWEN, 1024, B, seq=S, head=False, diagonal_block=False)
     mixed = L * (((nh + 2 * nkv) * hd + d) * cm.HEAD_DEQUANT_PER_ACC
@@ -486,7 +817,8 @@ def anchors():
             scale="Qwen2.5-0.5B", ctx=1024, predicted=tot, measured=None, ratio=None,
             source="b65/compose_host.json under --inputs DIR", grade="absent",
             note="the composed 0.5B layer is in no constants file and no key names "
-                 "it; without the inputs directory this anchor is not evaluated")
+                 "it; without the inputs directory this anchor is not evaluated",
+            **weak)
         return out
     out["qwen0p5b_c1024"] = dict(
         scale="Qwen2.5-0.5B", ctx=1024, predicted=tot, measured=meas,
@@ -504,7 +836,8 @@ def anchors():
                 "`family_cells` names no lookup-table, quantize or "
                 "residual-stream family. Charged, they are most of the chunk."),
         note="weak anchor: no residual-stream family, no diagonal block key tile, mixed dequant rungs, "
-             "and a prover generation older than the seq5 statement")
+             "and a prover generation older than the seq5 statement",
+        **weak)
     return out
 
 
@@ -667,7 +1000,7 @@ BRACKET = dict(
 )
 
 
-def registered_statement(names=E4_SHAPES):
+def registered_statement(names=E4_SHAPES, cells="fitted"):
     """What the registered key tile integers price, said in the document itself.
 
     Four settings and the driver flags they correspond to, so that a reader of
@@ -681,7 +1014,8 @@ def registered_statement(names=E4_SHAPES):
     """
     return dict(
         STATEMENT,
-        driver=REGISTERED[tuple(names)]["driver"],
+        driver=(counted_record(names[0])["driver"] if cells == "exact"
+                else REGISTERED[tuple(names)]["driver"]),
         driver_flags="--diagonal-block --gkr-key-tiles --gkr-dequant "
                      "--gkr-residual-stream --gkr-freivalds --gkr-attnout",
         flags=dict(STATEMENT_FLAGS),
@@ -732,16 +1066,35 @@ def selfcheck():
     return out
 
 
+def _closed_form_key_tiles(cfg, ctx, seq=S):
+    """The key tile family's closed form at this shape, beside the counted pair.
+
+    They are the same integers wherever the three grids tile exactly and they are
+    not where the grids pad, which is what a head count that is not a power of
+    two does.  Both are in the document so the difference is visible rather than
+    inferred: the closed form is what `compare.py` used to check a chunk
+    against, and the count is what the layout builds.
+    """
+    _, _, nh, _, hd, _, _ = cfg
+    b, i, sat = key_tiles_per_chunk(nh, hd, seq, ctx, **STATEMENT)
+    return dict(base=int(b), interaction=int(round(i)), saturated=sat)
+
+
 def canonical(block):
     return json.dumps(block, sort_keys=True, separators=(",", ":")).encode()
 
 
-def build(names=E4_SHAPES):
+def build(names=E4_SHAPES, cells="fitted", fields=None):
     """The registration's `shapes` block, one entry per shape in `names`.
 
     The selection is an argument and not `SHAPES` itself: this document is a
     registration, and a row added to the registry for another campaign must not
-    change the one E4 registered."""
+    change the one E4 registered.
+
+    Under `--cells exact` the entry carries one row per layer segment -- the
+    fields it was counted at, its count and its bound -- and the fields file is
+    the shape's own, so only a shape whose dumps it names can be counted.  A
+    shape it does not name is priced by nothing rather than assumed."""
     reg = {}
     ref8b_cells = ref8b()
     for name in names:
@@ -756,9 +1109,23 @@ def build(names=E4_SHAPES):
         for ctx in CONTEXTS:
             if meta["role"] == "fallback-large" and ctx == 16384:
                 continue
-            p = predict(cfg, ctx)
-            # caveat 1: what the refuted `p * S^2` reading's base slope would do
-            hi = predict(cfg, ctx, base_slope=72.083 / 32.0)
+            if cells == "exact" and fields_context(fields) != ctx:
+                # not registered rather than counted at the other context's
+                # fields: the divisor range and the table both move with the
+                # prefix, and a number under a heading that assumed they did not
+                # is worse than no number
+                entry.setdefault("contexts_not_registered", {})[str(ctx)] = (
+                    f"the fields these segments are counted at were read off dumps "
+                    f"at C={fields_context(fields):,}, and this document registers "
+                    f"only the context its witnesses were extracted at")
+                continue
+            p = predict(cfg, ctx, cells=cells, fields=fields)
+            # caveat 1: what the refuted `p * S^2` reading's base slope would do.
+            # A counted key tile family has no slope to move: the grids are built
+            # and their padding is in the number, so the row below is the witness
+            # bound instead, which is the assumption the counted path still makes.
+            hi = (predict(cfg, ctx, base_slope=72.083 / 32.0)
+                  if cells != "exact" else None)
             ref8 = ref8b_cells[ctx]
             entry["contexts"][str(ctx)] = dict(
                 cells_per_token_layers=p["total"],
@@ -771,9 +1138,20 @@ def build(names=E4_SHAPES):
                                                        + p["key_tiles_interaction_per_chunk"])),
                 key_tile_layout_saturated=p["saturated"],
                 chunk_over_8b_l16_chunk=p["per_layer_chunk"] / ref8,
-                sensitivity_base_slope_2p2526=dict(
-                    cells_per_token_layers=hi["total"],
-                    shift_pct=100.0 * (hi["total"] / p["total"] - 1.0)),
+                **({} if cells == "exact" else dict(
+                    sensitivity_base_slope_2p2526=dict(
+                        cells_per_token_layers=hi["total"],
+                        shift_pct=100.0 * (hi["total"] / p["total"] - 1.0)))),
+                **({} if cells != "exact" else dict(
+                    cells="exact",
+                    cells_per_token_layers_bound=p["bound_total"],
+                    bound_shift_pct=100.0 * (p["bound_total"] / p["total"] - 1.0),
+                    layers_fresh_sum=p["layers_fresh_sum"],
+                    components_per_token=p["components"],
+                    key_tiles_closed_form_per_chunk=_closed_form_key_tiles(cfg, ctx),
+                    head_segment=exact_head_segment(
+                        cfg, ctx, head_groups=(fields.get("knobs") or {}).get("head_groups")),
+                    layers=p["layers"])),
             )
         h = head_chunk(cfg)
         entry["head_chunk"] = dict(fresh=h["fresh"], per_token=h["per_token"],
@@ -787,11 +1165,12 @@ def _sha(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def provenance(names=E4_SHAPES):
-    rec = REGISTERED[tuple(names)]
+def provenance(names=E4_SHAPES, cells="fitted", fields=None, fields_path=None):
+    rec = (counted_standing(names[0], fields) if cells == "exact"
+           else REGISTERED[tuple(names)])
     return dict(
         # the same digests the frozen inputs carry, so the two cannot drift
-        inputs_sha256=dict(frozen_inputs(names)["code_sha256"],
+        inputs_sha256=dict(frozen_inputs(names, cells, fields, fields_path)["code_sha256"],
                            **{"constants.json": _sha(constants.path())}),
         registers=list(names),
         registered_utc_date=rec["utc_date"],
@@ -810,11 +1189,25 @@ def provenance(names=E4_SHAPES):
                            "alpha=4.00 path is NOT used -- section 7.5(e)'s ruling "
                            "is that the paper uses the composed-chunk value.",
             lookup_batch=B, seq_per_chunk=S,
+            # said only where it is true, so that a priced registration is the
+            # document it was before this flag existed, key for key
+            **({} if cells != "exact" else dict(
+                cells=cells,
+                counted_by="harness/costmodel/exact_cells.py, which rebuilds the "
+                           "prover's trace layout component by component and "
+                           "reproduces every recorded chunk in zk-results to the "
+                           "cell",
+                counted_entry_points=["exact_cells.segment_params", "exact_cells",
+                                      "exact_cells.bound_cells",
+                                      "witness_fields.fields_of"],
+                fields_read_from="the witness dumps themselves, before any proof "
+                                 "of them exists")),
         ),
     )
 
 
-def frozen_inputs(names=E4_SHAPES):
+def frozen_inputs(names=E4_SHAPES, cells_mode="fitted", fields=None,
+                  fields_path=None):
     """What this prediction actually read, frozen with it.
 
     It used to be a list of constants keys, and most of them were in no
@@ -849,21 +1242,69 @@ def frozen_inputs(names=E4_SHAPES):
     from_constants = {e["key"]: entry(e["key"])
                       for e in cells.values() if e["source"] == "constants" and e["key"]}
     unpriced = sorted(n for n, e in cells.items() if e["source"] == "absent")
-    return dict(
+    code = {
+        "harness/costmodel/cost_model.py": _sha(cm.__file__),
+        "harness/costmodel/key_tile.py": _sha(key_tile.__file__),
+        "harness/costmodel/layer_chunks.json": _sha(str(key_tile.CHUNKS)),
+        "harness/costmodel/composed_rungs.json": _sha(str(cm.COMPOSED_RUNGS)),
+        "harness/eval/predict/predict.py": _sha(os.path.join(HERE, "predict.py")),
+    }
+    if cells_mode == "exact":
+        # the two files that do the counting, and the one that reads the fields
+        # off the dumps, by digest -- the counted path reads no constant on the
+        # committed side, so these are what the numbers are a function of
+        code["harness/costmodel/exact_cells.py"] = _sha(ec.__file__)
+        code["harness/costmodel/exact_chunks.json"] = _sha(str(ec.CHUNKS))
+        code["harness/eval/predict/witness_fields.py"] = _sha(wf.__file__)
+    out = dict(
         cell_costs=cells,
         constants_entries=from_constants,
         constants_file_sha256=_sha(constants.path()),
         n_from_constants=len(from_constants), n_inputs=len(cells),
         not_priced=unpriced,
-        statement=registered_statement(names),
+        statement=registered_statement(names, cells_mode),
         reference_chunks={str(c): _seq5_source(c) for c in CONTEXTS},
-        code_sha256={
-            "harness/costmodel/cost_model.py": _sha(cm.__file__),
-            "harness/costmodel/key_tile.py": _sha(key_tile.__file__),
-            "harness/costmodel/layer_chunks.json": _sha(str(key_tile.CHUNKS)),
-            "harness/costmodel/composed_rungs.json": _sha(str(cm.COMPOSED_RUNGS)),
-            "harness/eval/predict/predict.py": _sha(os.path.join(HERE, "predict.py")),
-        })
+        code_sha256=code)
+    if cells_mode == "exact":
+        out["cells"] = "exact"
+        out["witness_fields"] = witness_fields_record(fields, fields_path)
+        out["cell_costs_charged_on_the_counted_side"] = []
+        out["cell_costs_note"] = (
+            "the counted path charges NO per-unit cell cost on the committed "
+            "side: every cell of every layer segment is counted from the trace "
+            "layout. `cell_costs` above is the model's own record of what it "
+            "COULD price and what each of those would have come from, kept so a "
+            "reader can see the two paths side by side and so the driver's gate "
+            "still reads one record; the only figure in this document that still "
+            "comes from a per-unit constant is the output head's preprocessed "
+            "weight trace, which is no committed cell of any segment")
+        out["constants_keys_read"] = sorted(from_constants)
+    return out
+
+
+def witness_fields_record(fields, path):
+    """What the counted registration read, frozen with it.
+
+    The fields file by digest, the knobs it was read under, and every layer's
+    block in full: the document has to carry the numbers themselves, or the
+    digest names a file and the reader still cannot check the count.
+    """
+    if not fields:
+        raise SystemExit("--cells exact needs --witness-fields FILE")
+    rows = fields["layers"]
+    return dict(
+        file=os.path.basename(path) if path else None,
+        file_sha256=wf.sha256(path) if path else None,
+        schema=fields.get("schema"), knobs=fields.get("knobs"),
+        read_by=fields.get("read_by"),
+        summary=fields.get("summary"),
+        layers={k: dict(wf.witness_block(r), ao_acc_mag=r["ao_acc_mag"],
+                        deq_variants=dict(r["deq_variants"]),
+                        dump_sha256=r.get("dump_sha256"))
+                for k, r in sorted(rows.items())},
+        note="every field here is a property of the dump and exists before any "
+             "proof of it does. The rule for each one, and the line of the prover "
+             "it comes from, is in `harness/eval/predict/witness_fields.py`")
 
 
 # The card rate the secondary tok/s column would need, and the key that would
@@ -972,18 +1413,54 @@ def main():
                     help="the shape to register, repeatable; default: the three "
                          f"E4 registered ({', '.join(E4_SHAPES)}). Known: "
                          f"{', '.join(SHAPES)}")
+    ap.add_argument("--cells", choices=CELLS, default="fitted",
+                    help="`fitted`: the committed cells are priced from the "
+                         "per-unit constants a measured 8B segment was read off, "
+                         "which is what the three recorded registrations were made "
+                         "on and is the default. `exact`: they are COUNTED from the "
+                         "prover's trace layout, segment by segment, at the witness "
+                         "fields --witness-fields names")
+    ap.add_argument("--witness-fields", metavar="FILE",
+                    help="the per-layer witness-calibrated fields, read off the "
+                         "dumps by `harness.eval.predict.witness_fields`. Required "
+                         "by --cells exact and refused without it")
     constants.add_argument(ap)
     ap.add_argument("--inputs", metavar="DIR", help="cost-model inputs (read at import; or set ZK_COSTMODEL_INPUTS)")
     inputs.add_arguments(ap)
     a = ap.parse_args()
     constants.load(a.constants)
 
+    fields = fields_path = None
+    if a.cells == "exact":
+        if not a.witness_fields:
+            raise SystemExit(
+                "--cells exact needs --witness-fields FILE: every layer segment is "
+                "counted at the fields its own dump carries, and this document "
+                "assumes none of them. Write the file first:\n"
+                "  uv run python -m harness.eval.predict.witness_fields "
+                "--dir <witness base> --layers <L> --out fields.json")
+        fields_path = a.witness_fields
+        fields = wf.load(fields_path)
+    elif a.witness_fields:
+        raise SystemExit("--witness-fields is read only by --cells exact: the priced "
+                         "path charges per-unit constants and reads no witness")
+
     names = tuple(a.shape) if a.shape else E4_SHAPES
     unknown = [n for n in names if n not in SHAPES]
     if unknown:
         raise SystemExit(f"--shape {', '.join(unknown)}: this document holds no such "
                          f"shape. Known: {', '.join(SHAPES)}")
-    if names not in REGISTERED:
+    if a.cells == "exact" and len(names) != 1:
+        raise SystemExit(
+            "--cells exact registers ONE shape: the witness fields it counts with "
+            "are one model's dumps, and a document that counted two shapes from "
+            "one file would be counting one of them at the other's witness.\n"
+            "  pass --shape <name> once. Known: " + ", ".join(SHAPES))
+    if a.cells == "exact":
+        # the record has to exist before anything is counted, so the refusal
+        # comes with nothing read rather than after the work
+        counted_record(names[0])
+    elif names not in REGISTERED:
         raise SystemExit(
             f"--shape {', '.join(names)}: this document carries no registration record "
             "for that selection, and a prediction registered under another selection's "
@@ -994,18 +1471,32 @@ def main():
               "measured at those shapes, and register that.")
 
     chk = selfcheck()
-    reg = build(names)
-    anc = anchors()
+    reg = build(names, cells=a.cells, fields=fields)
+    anc = anchors(cells=a.cells)
     # The falsifiable content, hashed ALONE.  This must not move when an
     # unrelated constant is edited, or the hash cannot answer the only question
     # a later reader asks of it: is this the prediction that was registered?
-    content = dict(schema="e4-registration/1", statement=registered_statement(names),
-                   shapes=reg, bracket=BRACKET,
+    # The acceptance range is the one E4 registered and is not rebased here.  What
+    # a counted registration adds to it is one more way for a run to be VOID: the
+    # fields were read off named dumps, so a run that proves other dumps is not
+    # the run this was registered against.
+    br = BRACKET if a.cells != "exact" else dict(
+        BRACKET,
+        counted_invalidation=(
+            "Also void, and for the same reason the clause above is: a run whose "
+            "layer segments were not proved from the dumps this registration was "
+            "counted from. `frozen_inputs.witness_fields.layers[<k>].dump_sha256` "
+            "names each one, the run's own manifest names what it proved, and the "
+            "two have to be the same 48 dumps. A re-extraction at the same spec is "
+            "a different witness and a different registration."))
+    content = dict(schema="e4-registration/1",
+                   statement=registered_statement(names, a.cells),
+                   shapes=reg, bracket=br,
                    anchors=anc, key_tiles_selfcheck_8b=chk,
                    chunk_identity=chunk_identity(), layer_spread=layer_spread(),
-                   frozen_inputs=frozen_inputs(names))
+                   frozen_inputs=frozen_inputs(names, a.cells, fields, fields_path))
     content_digest = hashlib.sha256(canonical(content)).hexdigest()
-    block = dict(content, provenance=provenance(names))
+    block = dict(content, provenance=provenance(names, a.cells, fields, fields_path))
     digest = hashlib.sha256(canonical(block)).hexdigest()
     doc = dict(block, prediction_sha256=content_digest,
                prediction_block_sha256=digest,
@@ -1017,7 +1508,10 @@ def main():
     print("E4 -- unfitted-scale prediction, registered before measurement")
     print("=" * 78)
     print()
-    st = registered_statement(names)
+    st = registered_statement(names, a.cells)
+    print(f"the cells: {a.cells}" + ("" if a.cells != "exact" else
+          f" -- counted from the trace layout, at the witness fields of "
+          f"{a.witness_fields} (sha256 {wf.sha256(fields_path)[:12]}...)"))
     print("the statement priced:", " ".join(f"{k}={STATEMENT[k]}" for k in sorted(STATEMENT)))
     print(f"  the run it is registered against: {st['driver_flags']}")
     print(f"  not priced: {STATEMENT_NOT_PRICED['flags']} -- {STATEMENT_NOT_PRICED['effect']}")
@@ -1071,6 +1565,24 @@ def main():
             print(f"    {'':<8} one layer chunk, fresh {c['per_layer_chunk_fresh']:>13,.0f}"
                   f"   key tiles family/chunk: base {c['key_tiles_family_base_per_chunk']:,}"
                   f"  interaction {c['key_tiles_family_interaction_per_chunk']:,}")
+            if a.cells == "exact":
+                lt = sorted({r["fields"]["log_table"] for r in c["layers"]})
+                print(f"    {'':<8} counted from the layout at each layer's own "
+                      f"witness fields: log_table {lt[0]}..{lt[-1]}, "
+                      f"the bound {c['bound_shift_pct']:+.2f}%"
+                      f"   chunk vs 8B L16 x{c['chunk_over_8b_l16_chunk']:.3f}")
+                cf = c["key_tiles_closed_form_per_chunk"]
+                same = (cf["base"] == c["key_tiles_family_base_per_chunk"]
+                        and cf["interaction"] == c["key_tiles_family_interaction_per_chunk"])
+                print(f"    {'':<8} key tile family, counted against the closed form: "
+                      f"{'the same integers' if same else 'they differ'} "
+                      f"({cf['base']:,} / {cf['interaction']:,} closed form)")
+                lo = min(c["layers"], key=lambda r: r["fresh"])
+                hi_ = max(c["layers"], key=lambda r: r["fresh"])
+                print(f"    {'':<8} the 48 segments: {lo['fresh']:,} (L{lo['layer']}) "
+                      f"to {hi_['fresh']:,} (L{hi_['layer']}), "
+                      f"{100 * (hi_['fresh'] / lo['fresh'] - 1):.1f}% apart")
+                continue
             print(f"    {'':<8} caveat-1 sensitivity (base slope 2.0 -> 2.2526): "
                   f"{c['sensitivity_base_slope_2p2526']['shift_pct']:+.2f}%"
                   f"   saturated={c['key_tile_layout_saturated']}"

@@ -46,6 +46,20 @@ keeps the older per-unit path under `--cells fitted`; `cells_per_token` in
 `cost_model.py` takes the same choice as `cells="exact"`, and its default stays
 fitted because `eval/predict/predict.py` is a registration.
 
+The fields a run takes off its own witness need not be assumed where the witness
+exists. `eval/predict/witness_fields.py` reads them off a dump directory and
+writes them down, without proving anything: the master exponent table's size
+under `--tight-table` (the largest key the key tiles look up, which it recomputes
+the way the loader does), the normalisation width, the attention output's five
+exponent and accumulator widths, the fold's pins and the dequantize gadget each
+matmul is on. Each rule is the prover's own and the module's table names the line
+it comes from. `eval/predict/predict.py --cells exact --witness-fields FILE` then
+registers a prediction in which every layer segment is counted at its own dump's
+fields rather than at one assumed block for the stack, and `eval/predict/compare.py`
+reads that registration back: it compares every layer's count against that
+layer's proved chunk, and the fields the registration counted at against the
+fields the run proved at.
+
 The witness package also holds the statement's token generator
 (`gen_ids`, a greedy continuation under the proved variant, and `shift_ids`),
 the shape table (`shapes`) and the plan writer (`plan`) the results drivers

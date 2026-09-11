@@ -57,6 +57,12 @@ SHAPES = {"qwen2p5_14b": "Qwen2.5-14B-Instruct",
 REGISTRATION = {"llama3p1_70b": os.path.join(HERE, "out",
                                              "registration-llama-3-1-70b.json")}
 
+# The shapes E4 registered, whatever document they are registered in: the
+# counted registration of the 14B is its own file and its own selection, and it
+# is still E4's shape and still graded by E4's acceptance range.
+E4_REGISTERED = ("Qwen2.5-14B-Instruct", "Qwen2.5-3B-Instruct",
+                 "Qwen2.5-32B-Instruct")
+
 
 def load_run(path):
     r = json.load(open(path))
@@ -80,8 +86,21 @@ def load_run(path):
         # every lookup table's rows, which is what the whole-chunk identity is
         # exact in; `log_table` alone is only the master exponent table of them
         table_rows=sum(1 << t["log_rows"] for t in fc["tables"]),
+        # issue #171: the prover renamed this statement key to `head_groups` in
+        # 81a5ec9 and every chunk proved from that commit on carries the new
+        # name.  The record's own field is renamed with it, because `head_groups`
+        # is what the statement calls it; the fallback keeps the chunks proved
+        # before the rename readable, and both headline runs are pre-rename.
         params=dict(log_table=pa["log_table"], ao_rem_bits=pa["ao_rem_bits"],
-                    ao_q_bits=pa["ao_q_bits"], key_tiles=pa["key_tiles"], nh=pa["nh"], hd=pa["hd"],
+                    ao_q_bits=pa["ao_q_bits"],
+                    head_groups=pa.get("head_groups", pa.get("key_tiles")),
+                    ao_acc_lo_bits=pa.get("ao_acc_lo_bits"),
+                    ao_acc_hi_bits=pa.get("ao_acc_hi_bits"),
+                    ao_acc_mag=bool(pa.get("ao_acc_mag", False)),
+                    ao_jo_min=pa.get("ao_jo_min"), ao_jo_max=pa.get("ao_jo_max"),
+                    ao_jv_min=pa.get("ao_jv_min"), ao_jv_max=pa.get("ao_jv_max"),
+                    fold_rem_bits=pa.get("fold_rem_bits", 0),
+                    nh=pa["nh"], hd=pa["hd"],
                     s=pa["s"], c=pa["c"], diagonal_block=pa.get("diagonal_block", False), layer_boundary=pa.get("layer_boundary", False),
                     kv_boundary=pa.get("kv_boundary"), rope=pa.get("rope"),
                     gkr_key_tiles=pa.get("gkr_key_tiles"),
@@ -159,12 +178,16 @@ def main():
     ap.add_argument("--runs", required=True, help="directory of the prover's L<k>.json files")
     ap.add_argument("--shape", default="qwen2p5_14b")
     ap.add_argument("--ctx", type=int, default=4096)
+    ap.add_argument("--registration", metavar="FILE",
+                    help="the registration to compare against; default: the "
+                         "document `out/registration.json`, which is where "
+                         "zk-results' register driver copies the recorded one")
     ap.add_argument("--card", default="H200")
     ap.add_argument("--backend", default="ref (SimdBackend)")
     ap.add_argument("--out", default=os.path.join(HERE, "out"))
     a = ap.parse_args()
 
-    reg_file = REGISTRATION.get(a.shape, REG)
+    reg_file = a.registration or REGISTRATION.get(a.shape, REG)
     reg = json.load(open(reg_file))
     shape = reg["shapes"][SHAPES[a.shape]]
     L = shape["cfg"][0]
@@ -261,6 +284,47 @@ def main():
         boundary_rows.append(dict(layer=r["layer"], boundary=got, expected=want,
                                   delta=got - want, exact=(got == want)))
     boundary_exact = all(x["exact"] for x in boundary_rows)
+
+    # ---- (a3) the counted registration, layer by layer ------------------------
+    # A registration made on the counted path states what EVERY segment costs,
+    # not one number for the stack, and it states the witness fields it counted
+    # each of them at.  Both halves are checked here:
+    #
+    #   * the count against the chunk's own `cells.fresh`, per layer.  There is
+    #     no averaging in this and no protocol widening: the registration named
+    #     48 integers before the run and the run reports 48;
+    #   * the FIELDS against the chunk's own `params`.  They were read off the
+    #     dumps before anything was proved, so the proof has to agree with them
+    #     -- and if it does not, the registration counted a statement this run
+    #     did not prove, which voids the comparison rather than failing it.
+    counted = pc.get("layers")
+    layer_rows, field_rows = [], []
+    if counted:
+        by_layer = {int(k) if not isinstance(k, int) else k: v
+                    for k, v in ((r["layer"], r) for r in counted)}
+        for r in runs:
+            k = r["layer"]
+            pred = by_layer.get(k)
+            if pred is None:
+                problems.append(f"L{k}: the registration counts no layer {k}")
+                continue
+            got, want = r["cells"]["fresh"], pred["fresh"]
+            layer_rows.append(dict(layer=k, predicted=want, measured=got,
+                                   delta=got - want,
+                                   residual_pct=100.0 * (got / want - 1.0),
+                                   exact=(got == want), bound=pred["bound_fresh"]))
+            bad_fields = {f: [pred["fields"][f], r["params"].get(f)]
+                          for f in sorted(pred["fields"])
+                          if r["params"].get(f) is not None
+                          and r["params"][f] != pred["fields"][f]}
+            field_rows.append(dict(layer=k, fields=pred["fields"],
+                                   disagrees=bad_fields, agrees=not bad_fields))
+            if bad_fields:
+                problems.append(
+                    f"L{k}: the registration counted this segment at fields the run "
+                    f"did not prove it at: "
+                    + ", ".join(f"{f} {v[0]} against {v[1]}" for f, v in bad_fields.items()))
+    counted_exact = bool(layer_rows) and all(x["exact"] for x in layer_rows)
 
     # ---- (b) rho, with the protocol widening ------------------------------
     n = len(runs)
@@ -368,6 +432,19 @@ def main():
                                registered_statement=registered_st,
                                layers_not_at_the_registered_statement=off_statement,
                                rows=key_tiles_rows),
+        a3_counted_per_layer=(None if not counted else dict(
+            exact_on_every_layer=counted_exact,
+            layers_counted=len(counted), layers_proved=len(layer_rows),
+            worst_residual_pct=max((abs(x["residual_pct"]) for x in layer_rows),
+                                   default=None),
+            sum_predicted=sum(x["predicted"] for x in layer_rows),
+            sum_measured=sum(x["measured"] for x in layer_rows),
+            fields_agree_on_every_layer=all(x["agrees"] for x in field_rows),
+            rows=layer_rows, fields=field_rows,
+            note="the registration counted every segment from the prover's trace "
+                 "layout at the witness fields its own dump carries, so these are "
+                 "48 integers named before the run and 48 reported by it, compared "
+                 "one for one and with no widening")),
         b_rho=dict(protocol=protocol, layers_proved=n, widen_pct_lower=widen_lo,
                    widen_pct_upper=widen_hi, measured_cells_per_token_layers=measured_cpt,
                    predicted_cells_per_token_layers=pred_cpt, rho=rho,
@@ -428,6 +505,23 @@ def main():
                 print(f"    L{x['layer']}: {x['boundary']:,} ({x['delta']:+,}) against "
                       f"{x['expected']:,} -- a finding in its own right, reported "
                       f"whatever rho does, and not a void")
+    if counted:
+        worst = max(layer_rows, key=lambda x: abs(x["residual_pct"]), default=None)
+        print(f"(a3) counted per layer, exact on every layer: {counted_exact}  "
+              f"({len(layer_rows)} of {len(counted)} counted layers proved)")
+        if worst is not None and not counted_exact:
+            print(f"     worst layer L{worst['layer']}: measured "
+                  f"{worst['measured']:,} against {worst['predicted']:,} counted "
+                  f"({worst['delta']:+,}, {worst['residual_pct']:+.4f}%)")
+        agree = all(x["agrees"] for x in field_rows)
+        print(f"     the fields the registration counted at are the fields the run "
+              f"proved at: {agree}")
+        if not agree:
+            for x in field_rows:
+                if x["disagrees"]:
+                    print(f"     L{x['layer']}: "
+                          + ", ".join(f"{f} registered {v[0]}, proved {v[1]}"
+                                      for f, v in x["disagrees"].items()))
     print(f"(b) protocol {protocol}: {n}/{L} layers; measured {measured_cpt:,.1f} cells/token "
           f"(layers), predicted {pred_cpt:,.1f}; rho = {rho:.5f} ({(rho - 1) * 100:+.3f}%)")
     print(f"    per-chunk ratio range {comparison['b_rho']['chunk_ratio_min']:.4f} .. "
@@ -435,7 +529,10 @@ def main():
           f"rest after key tiles, boundary trees and tables constant: "
           f"{len(set(rest)) == 1} {sorted(set(rest))[:4]}")
     print(f"(c) tier: {tier.upper()} -- {CONSEQUENCE[tier]}")
-    if reg_file != REG:
+    # E4's three shapes are graded by E4's range wherever their registration
+    # lives; a shape E4 did not register is not, and the sentence is for that
+    # case and not for "the document is not the default file"
+    if SHAPES[a.shape] not in E4_REGISTERED:
         print("    the tier and the consequence above are E4's acceptance range, applied "
               "to a shape E4 did not register: what is measured against this "
               "registration is in its own document, and whether that run is graded this "
