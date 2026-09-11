@@ -6,12 +6,13 @@ directory, after `uv sync`:
 
     uv run python -m harness.witness.selftest
 
-Every self-test runs on the CPU, and CI runs the five: `witness.selftest` on the
+Every self-test runs on the CPU, and CI runs the six: `witness.selftest` on the
 small model, `eval.selftest --cpu` on a model with no weights (the task loaders,
 the decode the task runner drives, the scoring and the two report writers),
-`witness.extract --selftest`, `eval.baseline.decode_bench --selftest` and
-`costmodel.key_tile --selftest` on neither. `eval.selftest` without `--cpu` is
-the model's own row and needs a card and the 8B weights.
+`witness.extract --selftest`, `eval.baseline.decode_bench --selftest`,
+`costmodel.key_tile --selftest` and `costmodel.exact_cells --selftest` on
+neither. `eval.selftest` without `--cpu` is the model's own row and needs a card
+and the 8B weights.
 
 `costmodel.key_tile --selftest` is the cost model's own: it evaluates the
 attention key tile closed form against the measured cell counts of every
@@ -21,6 +22,14 @@ directory and no other repository, and a one-cell difference is a failure with
 no tolerance to widen. The form lives in `costmodel/key_tile.py` rather than in
 `cost_model.py` because `cost_model.py` reads its micro-benchmark inputs at
 import time and the check has to run where those do not exist.
+
+`costmodel.exact_cells --selftest` is the same check over a whole segment.
+`costmodel/exact_cells.py` rebuilds the trace layout component by component
+from a run's `params` block and multiplies columns by rows, so it reproduces a
+recorded segment's `cells.base`, `cells.interaction` and `cells.fresh` without
+a fitted per-unit constant anywhere. Its recorded points are in
+`costmodel/exact_chunks.json` on the same terms, and it reads the same
+micro-benchmark inputs the key tile form does: none.
 
 The witness package also holds the statement's token generator
 (`gen_ids`, a greedy continuation under the proved variant, and `shift_ids`),

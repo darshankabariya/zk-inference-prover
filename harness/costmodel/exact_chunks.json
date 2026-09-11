@@ -1,0 +1,3109 @@
+{
+ "_file": "harness/costmodel/exact_chunks.json",
+ "_purpose": "What `exact_cells.py --selftest` checks against: every chunk of one token block of each headline run, and one chunk of each configuration of the reduction ablation, so the count is checked against layer segments, the first segment of a stack, the output head, and the five reductions on and off -- with no artifacts directory and no path into another repository.",
+ "_source": "Copied from the zk-results run outputs each point names: `runs/<run>/<output>`, `result.chunks[]`, or `result.point` where the run proved one segment.  `params` is the chunk's own `params` block with only `rope.nkv` kept (the rest of `rope` is angles, which no layout reads).  `base`, `interaction` and `fresh` are its `cells`.  The ablation run's outputs predate `params.head_groups` and `params.gkr_key_tiles`: the first is that run's own `provenance.args` entry (`--bands 16,8,8`, the flag's earlier name) and the second is its `params.gkr_bands`.  Nothing is derived and nothing is rounded.",
+ "_shape": "`params` is what every point shares; a point repeats only the fields whose value differs from it.",
+ "params": {
+  "ao_acc_hi_bits": 5,
+  "ao_acc_lo_bits": 16,
+  "ao_jo_max": -10,
+  "ao_jo_min": -12,
+  "ao_jv_max": -5,
+  "ao_jv_min": -7,
+  "ao_q_bits": 11,
+  "ao_rem_bits": 20,
+  "ao_target": 16,
+  "c": 4096,
+  "chan_target": 128,
+  "deq_target": 16,
+  "diagonal_block": true,
+  "freivalds_p": 136,
+  "gkr_attnout": true,
+  "gkr_freivalds": true,
+  "gkr_residual_stream": true,
+  "grid_target": 64,
+  "hd": 128,
+  "head_groups": [
+   16,
+   8,
+   8
+  ],
+  "k_bits": 11,
+  "kmax": 19,
+  "layer_boundary": true,
+  "log_table": 23,
+  "mats": [
+   {
+    "n_in": 4096,
+    "n_out": 4096,
+    "name": "q",
+    "tokens": 512,
+    "variant": "chain"
+   },
+   {
+    "n_in": 4096,
+    "n_out": 1024,
+    "name": "k",
+    "tokens": 512,
+    "variant": "chain"
+   },
+   {
+    "n_in": 4096,
+    "n_out": 1024,
+    "name": "v",
+    "tokens": 512,
+    "variant": "fold"
+   },
+   {
+    "n_in": 4096,
+    "n_out": 4096,
+    "name": "o",
+    "tokens": 512,
+    "variant": "chain"
+   },
+   {
+    "n_in": 4096,
+    "n_out": 14336,
+    "name": "gate",
+    "tokens": 512,
+    "variant": "chain"
+   },
+   {
+    "n_in": 4096,
+    "n_out": 14336,
+    "name": "up",
+    "tokens": 512,
+    "variant": "chain"
+   },
+   {
+    "n_in": 14336,
+    "n_out": 4096,
+    "name": "down",
+    "tokens": 512,
+    "variant": "chain"
+   }
+  ],
+  "nh": 32,
+  "nmax": 511,
+  "q_bits": 12,
+  "residual_stream": {
+   "a": 32,
+   "bind_matmul_outputs": true,
+   "d": 4096,
+   "dff": 14336,
+   "eps": 14120,
+   "inv_d": 14720
+  },
+  "round": "even",
+  "rw": 16,
+  "s": 512,
+  "variant": "intexp",
+  "z_hi_bits": 7,
+  "z_lo_bits": 16,
+  "z_min": 511
+ },
+ "points": [
+  {
+   "run": "2026-09-09-microbench-cells-h100",
+   "output": "compose-simd.json",
+   "segment": "the run's single segment",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_jo_max": -12,
+    "ao_jo_min": -13,
+    "ao_jv_max": -8,
+    "ao_jv_min": -14,
+    "ao_q_bits": 7,
+    "ao_rem_bits": 18,
+    "c": 128,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "hd": 32,
+    "head_groups": [
+     2,
+     2
+    ],
+    "kmax": 16,
+    "kv_boundary": true,
+    "log_table": 22,
+    "mats": [
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "q",
+      "tokens": 32,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "k",
+      "tokens": 32,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "v",
+      "tokens": 32,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "o",
+      "tokens": 32,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "gate",
+      "tokens": 32,
+      "variant": "chain"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "up",
+      "tokens": 32,
+      "variant": "chain"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "down",
+      "tokens": 32,
+      "variant": "chain"
+     }
+    ],
+    "nh": 4,
+    "nmax": 255,
+    "residual_stream": {
+     "a": 32,
+     "d": 128,
+     "dff": 128,
+     "eps": 14120,
+     "inv_d": 15360
+    },
+    "rope": {
+     "nkv": 4
+    },
+    "round": "away",
+    "s": 32,
+    "variant": "intsplit6",
+    "z_hi_bits": 6,
+    "z_min": 255
+   },
+   "base": 6607776,
+   "interaction": 21697920,
+   "fresh": 28387616
+  },
+  {
+   "run": "2026-09-08-prefill-sweep-h100",
+   "output": "check_intsplit6.json",
+   "segment": "the run's single segment",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_jo_max": -11,
+    "ao_jo_min": -14,
+    "ao_jv_max": -9,
+    "ao_jv_min": -15,
+    "ao_q_bits": 7,
+    "c": 128,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "hd": 32,
+    "head_groups": [
+     2,
+     2
+    ],
+    "kmax": 16,
+    "kv_boundary": true,
+    "log_table": 22,
+    "mats": [
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "q",
+      "tokens": 128,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "k",
+      "tokens": 128,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "v",
+      "tokens": 128,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "o",
+      "tokens": 128,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "gate",
+      "tokens": 128,
+      "variant": "chain"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "up",
+      "tokens": 128,
+      "variant": "chain"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "down",
+      "tokens": 128,
+      "variant": "chain"
+     }
+    ],
+    "nh": 4,
+    "residual_stream": {
+     "a": 32,
+     "bind_matmul_outputs": true,
+     "d": 128,
+     "dff": 128,
+     "eps": 14120,
+     "inv_d": 15360
+    },
+    "rope": {
+     "nkv": 4
+    },
+    "s": 128,
+    "variant": "intsplit6"
+   },
+   "base": 11490400,
+   "interaction": 26090880,
+   "fresh": 37712352
+  },
+  {
+   "run": "2026-09-08-prefill-sweep-h100",
+   "output": "dd_s256.json",
+   "segment": "the run's single segment",
+   "params": {
+    "ao_jo_max": -13,
+    "ao_jo_min": -14,
+    "ao_jv_max": -8,
+    "ao_jv_min": -14,
+    "ao_q_bits": 7,
+    "c": 256,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "hd": 32,
+    "head_groups": [
+     2,
+     2
+    ],
+    "kmax": 16,
+    "kv_boundary": true,
+    "log_table": 22,
+    "mats": [
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "q",
+      "tokens": 256,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "k",
+      "tokens": 256,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "v",
+      "tokens": 256,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "o",
+      "tokens": 256,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "gate",
+      "tokens": 256,
+      "variant": "chain"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "up",
+      "tokens": 256,
+      "variant": "chain"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "down",
+      "tokens": 256,
+      "variant": "chain"
+     }
+    ],
+    "nh": 4,
+    "residual_stream": {
+     "a": 32,
+     "bind_matmul_outputs": true,
+     "d": 128,
+     "dff": 128,
+     "eps": 14120,
+     "inv_d": 15360
+    },
+    "rope": {
+     "nkv": 4
+    },
+    "s": 256,
+    "variant": "intsplit6"
+   },
+   "base": 17656432,
+   "interaction": 27833792,
+   "fresh": 45752368
+  },
+  {
+   "run": "2026-09-08-prefill-sweep-h100",
+   "output": "dd_s512.json",
+   "segment": "the run's single segment",
+   "params": {
+    "ao_jo_max": -12,
+    "ao_jo_min": -15,
+    "ao_jv_max": -8,
+    "ao_jv_min": -14,
+    "ao_q_bits": 7,
+    "c": 512,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "hd": 32,
+    "head_groups": [
+     2,
+     2
+    ],
+    "kmax": 16,
+    "kv_boundary": true,
+    "log_table": 22,
+    "mats": [
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "q",
+      "tokens": 512,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "k",
+      "tokens": 512,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "v",
+      "tokens": 512,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "o",
+      "tokens": 512,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "gate",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "up",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "down",
+      "tokens": 512,
+      "variant": "chain"
+     }
+    ],
+    "nh": 4,
+    "residual_stream": {
+     "a": 32,
+     "bind_matmul_outputs": true,
+     "d": 128,
+     "dff": 128,
+     "eps": 14120,
+     "inv_d": 15360
+    },
+    "rope": {
+     "nkv": 4
+    },
+    "variant": "intsplit6"
+   },
+   "base": 32347760,
+   "interaction": 31772096,
+   "fresh": 64644144
+  },
+  {
+   "run": "2026-09-08-prefill-sweep-h100",
+   "output": "dd_s1024.json",
+   "segment": "the run's single segment",
+   "params": {
+    "ao_acc_hi_bits": 6,
+    "ao_jo_max": -13,
+    "ao_jo_min": -15,
+    "ao_jv_max": -8,
+    "ao_jv_min": -14,
+    "ao_q_bits": 7,
+    "ao_rem_bits": 21,
+    "c": 1024,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "hd": 32,
+    "head_groups": [
+     2,
+     2
+    ],
+    "kmax": 16,
+    "kv_boundary": true,
+    "log_table": 22,
+    "mats": [
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "q",
+      "tokens": 1024,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "k",
+      "tokens": 1024,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "v",
+      "tokens": 1024,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "o",
+      "tokens": 1024,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "gate",
+      "tokens": 1024,
+      "variant": "chain"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "up",
+      "tokens": 1024,
+      "variant": "chain"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "down",
+      "tokens": 1024,
+      "variant": "chain"
+     }
+    ],
+    "nh": 4,
+    "residual_stream": {
+     "a": 32,
+     "bind_matmul_outputs": true,
+     "d": 128,
+     "dff": 128,
+     "eps": 14120,
+     "inv_d": 15360
+    },
+    "rope": {
+     "nkv": 4
+    },
+    "s": 1024,
+    "variant": "intsplit6"
+   },
+   "base": 72216144,
+   "interaction": 44721472,
+   "fresh": 117986192
+  },
+  {
+   "run": "2026-09-08-prefill-sweep-h100",
+   "output": "dd_s2048.json",
+   "segment": "the run's single segment",
+   "params": {
+    "ao_acc_hi_bits": 6,
+    "ao_jo_max": -14,
+    "ao_jo_min": -17,
+    "ao_jv_max": -9,
+    "ao_jv_min": -14,
+    "ao_q_bits": 7,
+    "ao_rem_bits": 22,
+    "c": 2048,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "hd": 32,
+    "head_groups": [
+     2,
+     2
+    ],
+    "kmax": 16,
+    "kv_boundary": true,
+    "log_table": 22,
+    "mats": [
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "q",
+      "tokens": 2048,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "k",
+      "tokens": 2048,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "v",
+      "tokens": 2048,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "o",
+      "tokens": 2048,
+      "variant": "pow2"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "gate",
+      "tokens": 2048,
+      "variant": "chain"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "up",
+      "tokens": 2048,
+      "variant": "chain"
+     },
+     {
+      "n_in": 128,
+      "n_out": 128,
+      "name": "down",
+      "tokens": 2048,
+      "variant": "chain"
+     }
+    ],
+    "nh": 4,
+    "residual_stream": {
+     "a": 32,
+     "bind_matmul_outputs": true,
+     "d": 128,
+     "dff": 128,
+     "eps": 14120,
+     "inv_d": 15360
+    },
+    "rope": {
+     "nkv": 4
+    },
+    "s": 2048,
+    "variant": "intsplit6"
+   },
+   "base": 189701712,
+   "interaction": 78097728,
+   "fresh": 269896592
+  },
+  {
+   "run": "2026-09-08-reference-digest-plain-h100",
+   "output": "plain-simd.json",
+   "segment": "the run's single segment",
+   "params": {
+    "ao_jo_max": -6,
+    "ao_jo_min": -8,
+    "ao_q_bits": 7,
+    "ao_rem_bits": 15,
+    "c": 16384,
+    "gkr_attnout": false,
+    "gkr_freivalds": false,
+    "gkr_residual_stream": false,
+    "kv_boundary": true,
+    "log_table": 25,
+    "mats": [
+     {
+      "n_in": 4096,
+      "n_out": 4096,
+      "name": "q",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 1024,
+      "name": "k",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 1024,
+      "name": "v",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 4096,
+      "name": "o",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 14336,
+      "name": "gate",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 14336,
+      "name": "up",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 14336,
+      "n_out": 4096,
+      "name": "down",
+      "tokens": 512,
+      "variant": "chain"
+     }
+    ],
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1603306032,
+   "interaction": 2031880384,
+   "fresh": 3912010480
+  },
+  {
+   "run": "2026-09-08-reference-digest-plain-h100",
+   "output": "full-simd.json",
+   "segment": "the run's single segment",
+   "params": {
+    "ao_jo_max": -6,
+    "ao_jo_min": -8,
+    "ao_q_bits": 7,
+    "ao_rem_bits": 15,
+    "c": 16384,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 25,
+    "mats": [
+     {
+      "n_in": 4096,
+      "n_out": 4096,
+      "name": "q",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 1024,
+      "name": "k",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 1024,
+      "name": "v",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 4096,
+      "name": "o",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 14336,
+      "name": "gate",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 14336,
+      "name": "up",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 14336,
+      "n_out": 4096,
+      "name": "down",
+      "tokens": 512,
+      "variant": "chain"
+     }
+    ],
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1603306032,
+   "interaction": 482695360,
+   "fresh": 2362825456
+  },
+  {
+   "run": "2026-09-08-reference-digest-plain-h100",
+   "output": "short-simd.json",
+   "segment": "the run's single segment",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_jo_max": -6,
+    "ao_jo_min": -8,
+    "ao_q_bits": 7,
+    "ao_rem_bits": 16,
+    "gkr_attnout": false,
+    "gkr_freivalds": false,
+    "gkr_residual_stream": false,
+    "kv_boundary": true,
+    "log_table": 25,
+    "mats": [
+     {
+      "n_in": 4096,
+      "n_out": 4096,
+      "name": "q",
+      "tokens": 128,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 1024,
+      "name": "k",
+      "tokens": 128,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 1024,
+      "name": "v",
+      "tokens": 128,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 4096,
+      "name": "o",
+      "tokens": 128,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 14336,
+      "name": "gate",
+      "tokens": 128,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 14336,
+      "name": "up",
+      "tokens": 128,
+      "variant": "chain"
+     },
+     {
+      "n_in": 14336,
+      "n_out": 4096,
+      "name": "down",
+      "tokens": 128,
+      "variant": "chain"
+     }
+    ],
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    },
+    "s": 128
+   },
+   "base": 324283424,
+   "interaction": 513847424,
+   "fresh": 907336864
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B7",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_rem_bits": 15,
+    "c": 3584,
+    "deq_target": 501,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "logits_claim": true,
+    "mats": [
+     {
+      "n_in": 4096,
+      "n_out": 4096,
+      "name": "q",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 1024,
+      "name": "k",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 1024,
+      "name": "v",
+      "tokens": 512,
+      "variant": "fold"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 4096,
+      "name": "o",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 14336,
+      "name": "gate",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 14336,
+      "name": "up",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 14336,
+      "n_out": 4096,
+      "name": "down",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 128256,
+      "name": "lm_head",
+      "tokens": 512,
+      "variant": "pow2"
+     }
+    ],
+    "prove_argmax": true,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 0,
+     "eps": 14120,
+     "head_norm": true,
+     "inv_d": 14720
+    }
+   },
+   "base": 1430244768,
+   "interaction": 394626688,
+   "fresh": 1826968608
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L0",
+   "params": {
+    "ao_acc_hi_bits": 8,
+    "ao_acc_mag": true,
+    "ao_denp2": true,
+    "ao_jo_max": -12,
+    "ao_jo_min": -14,
+    "ao_jv_max": -8,
+    "ao_jv_min": -11,
+    "embed_per_row": 256,
+    "embed_vocab": 128256,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 25,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1052296592,
+   "interaction": 412182080,
+   "fresh": 1539976144
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L1",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -12,
+    "ao_jo_min": -14,
+    "ao_jv_min": -10,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 24,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1027122592,
+   "interaction": 332392064,
+   "fresh": 1435012128
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L2",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -11,
+    "ao_jo_min": -14,
+    "ao_jv_max": -6,
+    "ao_jv_min": -9,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 24,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1027122592,
+   "interaction": 332392064,
+   "fresh": 1435012128
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L3",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -11,
+    "ao_jo_min": -14,
+    "ao_jv_min": -8,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539680,
+   "interaction": 282060416,
+   "fresh": 1372097568
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L4",
+   "params": {
+    "ao_denp2": true,
+    "ao_jo_min": -13,
+    "ao_jv_min": -8,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1018734000,
+   "interaction": 298837696,
+   "fresh": 1393069168
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L5",
+   "params": {
+    "ao_denp2": true,
+    "ao_jv_min": -8,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1018734000,
+   "interaction": 298837696,
+   "fresh": 1393069168
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L6",
+   "params": {
+    "ao_acc_hi_bits": 6,
+    "ao_denp2": true,
+    "ao_jv_min": -8,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1018734032,
+   "interaction": 298837824,
+   "fresh": 1393069328
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L7",
+   "params": {
+    "ao_acc_hi_bits": 6,
+    "ao_denp2": true,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1018734032,
+   "interaction": 298837824,
+   "fresh": 1393069328
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L8",
+   "params": {
+    "ao_denp2": true,
+    "ao_jv_min": -8,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 24,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1027122608,
+   "interaction": 332392128,
+   "fresh": 1435012208
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L9",
+   "params": {
+    "ao_denp2": true,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539696,
+   "interaction": 282060480,
+   "fresh": 1372097648
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L10",
+   "params": {
+    "ao_denp2": true,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 24,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1027122608,
+   "interaction": 332392128,
+   "fresh": 1435012208
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L11",
+   "params": {
+    "ao_denp2": true,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1018734000,
+   "interaction": 298837696,
+   "fresh": 1393069168
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L12",
+   "params": {
+    "ao_denp2": true,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539696,
+   "interaction": 282060480,
+   "fresh": 1372097648
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L13",
+   "params": {
+    "ao_acc_hi_bits": 7,
+    "ao_denp2": true,
+    "ao_jo_min": -11,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539664,
+   "interaction": 282060352,
+   "fresh": 1372097488
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L14",
+   "params": {
+    "ao_denp2": true,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1018734000,
+   "interaction": 298837696,
+   "fresh": 1393069168
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L15",
+   "params": {
+    "ao_denp2": true,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1018734000,
+   "interaction": 298837696,
+   "fresh": 1393069168
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L16",
+   "params": {
+    "ao_denp2": true,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1018734000,
+   "interaction": 298837696,
+   "fresh": 1393069168
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L17",
+   "params": {
+    "ao_acc_hi_bits": 6,
+    "ao_denp2": true,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1018734032,
+   "interaction": 298837824,
+   "fresh": 1393069328
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L18",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539680,
+   "interaction": 282060416,
+   "fresh": 1372097568
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L19",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_min": -13,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539680,
+   "interaction": 282060416,
+   "fresh": 1372097568
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L20",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_min": -13,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539680,
+   "interaction": 282060416,
+   "fresh": 1372097568
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L21",
+   "params": {
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539696,
+   "interaction": 282060480,
+   "fresh": 1372097648
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L22",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_min": -13,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539680,
+   "interaction": 282060416,
+   "fresh": 1372097568
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L23",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_min": -13,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539680,
+   "interaction": 282060416,
+   "fresh": 1372097568
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L24",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jo_min": -13,
+    "ao_jv_max": -4,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539680,
+   "interaction": 282060416,
+   "fresh": 1372097568
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L25",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jv_max": -4,
+    "ao_jv_min": -6,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539680,
+   "interaction": 282060416,
+   "fresh": 1372097568
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L26",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jv_max": -4,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539680,
+   "interaction": 282060416,
+   "fresh": 1372097568
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L27",
+   "params": {
+    "ao_acc_hi_bits": 6,
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jv_max": -4,
+    "ao_jv_min": -6,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539728,
+   "interaction": 282060608,
+   "fresh": 1372097808
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L28",
+   "params": {
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jo_min": -11,
+    "ao_jv_max": -4,
+    "ao_jv_min": -6,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539696,
+   "interaction": 282060480,
+   "fresh": 1372097648
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L29",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jo_min": -11,
+    "ao_jv_max": -4,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1018733984,
+   "interaction": 298837632,
+   "fresh": 1393069088
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L30",
+   "params": {
+    "ao_acc_hi_bits": 6,
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jo_min": -11,
+    "ao_jv_max": -4,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1014539728,
+   "interaction": 282060608,
+   "fresh": 1372097808
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8_L31",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -8,
+    "ao_jo_min": -10,
+    "ao_jv_max": -4,
+    "ao_jv_min": -6,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 14336,
+     "eps": 14120,
+     "inv_d": 14720
+    },
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1018733984,
+   "interaction": 298837632,
+   "fresh": 1393069088
+  },
+  {
+   "run": "2026-09-09-headline-c4096-h100",
+   "output": "slice_0256.json",
+   "segment": "B8",
+   "params": {
+    "ao_rem_bits": 15,
+    "deq_target": 501,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "logits_claim": true,
+    "mats": [
+     {
+      "n_in": 4096,
+      "n_out": 4096,
+      "name": "q",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 1024,
+      "name": "k",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 1024,
+      "name": "v",
+      "tokens": 512,
+      "variant": "fold"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 4096,
+      "name": "o",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 14336,
+      "name": "gate",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 14336,
+      "name": "up",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 14336,
+      "n_out": 4096,
+      "name": "down",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 128256,
+      "name": "lm_head",
+      "tokens": 512,
+      "variant": "pow2"
+     }
+    ],
+    "prove_argmax": true,
+    "residual_stream": {
+     "a": 32,
+     "d": 4096,
+     "dff": 0,
+     "eps": 14120,
+     "head_norm": true,
+     "inv_d": 14720
+    }
+   },
+   "base": 1432341936,
+   "interaction": 407209664,
+   "fresh": 1841648752
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B31",
+   "params": {
+    "ao_rem_bits": 15,
+    "c": 15872,
+    "deq_target": 501,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "logits_claim": true,
+    "mats": [
+     {
+      "n_in": 4096,
+      "n_out": 4096,
+      "name": "q",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 1024,
+      "name": "k",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 1024,
+      "name": "v",
+      "tokens": 512,
+      "variant": "fold"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 4096,
+      "name": "o",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 14336,
+      "name": "gate",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 14336,
+      "name": "up",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 14336,
+      "n_out": 4096,
+      "name": "down",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 128256,
+      "name": "lm_head",
+      "tokens": 512,
+      "variant": "pow2"
+     }
+    ],
+    "prove_argmax": true,
+    "residual_stream": {
+     "a": 32,
+     "bind_matmul_outputs": true,
+     "d": 4096,
+     "dff": 0,
+     "eps": 14120,
+     "head_norm": true,
+     "inv_d": 14720
+    }
+   },
+   "base": 1933561264,
+   "interaction": 537757376,
+   "fresh": 2473415792
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L0",
+   "params": {
+    "ao_acc_hi_bits": 8,
+    "ao_acc_mag": true,
+    "ao_denp2": true,
+    "ao_jo_max": -12,
+    "ao_jo_min": -14,
+    "ao_jv_max": -8,
+    "ao_jv_min": -11,
+    "c": 16384,
+    "embed_per_row": 256,
+    "embed_vocab": 128256,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 25,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1605944720,
+   "interaction": 493971008,
+   "fresh": 2376739792
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L1",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -12,
+    "ao_jo_min": -14,
+    "ao_jv_min": -10,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 25,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1597547936,
+   "interaction": 481289856,
+   "fresh": 2355661856
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L2",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -11,
+    "ao_jo_min": -14,
+    "ao_jv_max": -6,
+    "ao_jv_min": -9,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 24,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1580770720,
+   "interaction": 414180992,
+   "fresh": 2271775776
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L3",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -11,
+    "ao_jo_min": -14,
+    "ao_jv_min": -8,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1568187808,
+   "interaction": 363849344,
+   "fresh": 2208861216
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L4",
+   "params": {
+    "ao_acc_hi_bits": 6,
+    "ao_denp2": true,
+    "ao_jo_max": -11,
+    "ao_jo_min": -13,
+    "ao_jv_min": -8,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382160,
+   "interaction": 380626752,
+   "fresh": 2229832976
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L5",
+   "params": {
+    "ao_denp2": true,
+    "ao_jv_min": -8,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382128,
+   "interaction": 380626624,
+   "fresh": 2229832816
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L6",
+   "params": {
+    "ao_acc_hi_bits": 7,
+    "ao_denp2": true,
+    "ao_jv_min": -8,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 24,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1580770704,
+   "interaction": 414180928,
+   "fresh": 2271775696
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L7",
+   "params": {
+    "ao_acc_hi_bits": 7,
+    "ao_denp2": true,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 24,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1580770704,
+   "interaction": 414180928,
+   "fresh": 2271775696
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L8",
+   "params": {
+    "ao_acc_hi_bits": 6,
+    "ao_denp2": true,
+    "ao_jv_min": -8,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 24,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1580770768,
+   "interaction": 414181184,
+   "fresh": 2271776016
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L9",
+   "params": {
+    "ao_acc_hi_bits": 6,
+    "ao_denp2": true,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382160,
+   "interaction": 380626752,
+   "fresh": 2229832976
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L10",
+   "params": {
+    "ao_acc_hi_bits": 6,
+    "ao_denp2": true,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 24,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1580770768,
+   "interaction": 414181184,
+   "fresh": 2271776016
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L11",
+   "params": {
+    "ao_acc_hi_bits": 6,
+    "ao_denp2": true,
+    "ao_jo_min": -11,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382160,
+   "interaction": 380626752,
+   "fresh": 2229832976
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L12",
+   "params": {
+    "ao_denp2": true,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382128,
+   "interaction": 380626624,
+   "fresh": 2229832816
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L13",
+   "params": {
+    "ao_acc_hi_bits": 7,
+    "ao_denp2": true,
+    "ao_jo_min": -11,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382096,
+   "interaction": 380626496,
+   "fresh": 2229832656
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L14",
+   "params": {
+    "ao_acc_hi_bits": 6,
+    "ao_denp2": true,
+    "ao_jo_min": -11,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382160,
+   "interaction": 380626752,
+   "fresh": 2229832976
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L15",
+   "params": {
+    "ao_denp2": true,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382128,
+   "interaction": 380626624,
+   "fresh": 2229832816
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L16",
+   "params": {
+    "ao_denp2": true,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382128,
+   "interaction": 380626624,
+   "fresh": 2229832816
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L17",
+   "params": {
+    "ao_acc_hi_bits": 7,
+    "ao_denp2": true,
+    "ao_jo_min": -11,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382096,
+   "interaction": 380626496,
+   "fresh": 2229832656
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L18",
+   "params": {
+    "ao_denp2": true,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382128,
+   "interaction": 380626624,
+   "fresh": 2229832816
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L19",
+   "params": {
+    "ao_denp2": true,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382128,
+   "interaction": 380626624,
+   "fresh": 2229832816
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L20",
+   "params": {
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jo_min": -13,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1568187824,
+   "interaction": 363849408,
+   "fresh": 2208861296
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L21",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382112,
+   "interaction": 380626560,
+   "fresh": 2229832736
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L22",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jo_min": -13,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382112,
+   "interaction": 380626560,
+   "fresh": 2229832736
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L23",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jo_min": -13,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1568187808,
+   "interaction": 363849344,
+   "fresh": 2208861216
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L24",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jo_min": -13,
+    "ao_jv_max": -4,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382112,
+   "interaction": 380626560,
+   "fresh": 2229832736
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L25",
+   "params": {
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jv_max": -4,
+    "ao_jv_min": -6,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382128,
+   "interaction": 380626624,
+   "fresh": 2229832816
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L26",
+   "params": {
+    "ao_acc_hi_bits": 4,
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jv_max": -4,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382112,
+   "interaction": 380626560,
+   "fresh": 2229832736
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L27",
+   "params": {
+    "ao_acc_hi_bits": 6,
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jv_max": -4,
+    "ao_jv_min": -6,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382160,
+   "interaction": 380626752,
+   "fresh": 2229832976
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L28",
+   "params": {
+    "ao_denp2": true,
+    "ao_jo_max": -8,
+    "ao_jo_min": -11,
+    "ao_jv_max": -4,
+    "ao_jv_min": -6,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382128,
+   "interaction": 380626624,
+   "fresh": 2229832816
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L29",
+   "params": {
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jo_min": -11,
+    "ao_jv_max": -4,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382128,
+   "interaction": 380626624,
+   "fresh": 2229832816
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L30",
+   "params": {
+    "ao_acc_hi_bits": 6,
+    "ao_denp2": true,
+    "ao_jo_max": -9,
+    "ao_jo_min": -11,
+    "ao_jv_max": -4,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "log_table": 22,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1568187856,
+   "interaction": 363849536,
+   "fresh": 2208861456
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32_L31",
+   "params": {
+    "ao_denp2": true,
+    "ao_jo_max": -8,
+    "ao_jo_min": -10,
+    "ao_jv_max": -4,
+    "ao_jv_min": -6,
+    "c": 16384,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "kv_boundary": true,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1572382128,
+   "interaction": 380626624,
+   "fresh": 2229832816
+  },
+  {
+   "run": "2026-09-08-headline-c16384-h100",
+   "output": "slice_1024.json",
+   "segment": "B32",
+   "params": {
+    "ao_rem_bits": 15,
+    "c": 16384,
+    "deq_target": 501,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "gkr_key_tiles": true,
+    "logits_claim": true,
+    "mats": [
+     {
+      "n_in": 4096,
+      "n_out": 4096,
+      "name": "q",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 1024,
+      "name": "k",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 1024,
+      "name": "v",
+      "tokens": 512,
+      "variant": "fold"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 4096,
+      "name": "o",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 14336,
+      "name": "gate",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 14336,
+      "name": "up",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 14336,
+      "n_out": 4096,
+      "name": "down",
+      "tokens": 512,
+      "variant": "chain"
+     },
+     {
+      "n_in": 4096,
+      "n_out": 128256,
+      "name": "lm_head",
+      "tokens": 512,
+      "variant": "pow2"
+     }
+    ],
+    "prove_argmax": true,
+    "residual_stream": {
+     "a": 32,
+     "bind_matmul_outputs": true,
+     "d": 4096,
+     "dff": 0,
+     "eps": 14120,
+     "head_norm": true,
+     "inv_d": 14720
+    }
+   },
+   "base": 1935658416,
+   "interaction": 537757376,
+   "fresh": 2475512944
+  },
+  {
+   "run": "2026-09-07-gkr-ablation-c4096-h100",
+   "output": "all_five.json",
+   "segment": "B8_L0",
+   "params": {
+    "ao_acc_hi_bits": 8,
+    "ao_acc_mag": true,
+    "ao_denp2": true,
+    "ao_jo_max": -12,
+    "ao_jo_min": -14,
+    "ao_jv_max": -8,
+    "ao_jv_min": -11,
+    "embed_per_row": 256,
+    "embed_vocab": 128256,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_dequant": true,
+    "kv_boundary": true,
+    "log_table": 25,
+    "rope": {
+     "nkv": 8
+    },
+    "gkr_key_tiles": true
+   },
+   "base": 1052296592,
+   "interaction": 412182080,
+   "fresh": 1539976144
+  },
+  {
+   "run": "2026-09-07-gkr-ablation-c4096-h100",
+   "output": "bands.json",
+   "segment": "B8_L0",
+   "params": {
+    "ao_acc_hi_bits": 8,
+    "ao_acc_mag": true,
+    "ao_denp2": true,
+    "ao_jo_max": -12,
+    "ao_jo_min": -14,
+    "ao_jv_max": -8,
+    "ao_jv_min": -11,
+    "embed_per_row": 256,
+    "embed_vocab": 128256,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_attnout": false,
+    "gkr_freivalds": false,
+    "gkr_residual_stream": false,
+    "kv_boundary": true,
+    "log_table": 25,
+    "rope": {
+     "nkv": 8
+    },
+    "gkr_key_tiles": true
+   },
+   "base": 1052296592,
+   "interaction": 996230720,
+   "fresh": 2124024784
+  },
+  {
+   "run": "2026-09-07-gkr-ablation-c4096-h100",
+   "output": "bands_attnout.json",
+   "segment": "B8_L0",
+   "params": {
+    "ao_acc_hi_bits": 8,
+    "ao_acc_mag": true,
+    "ao_denp2": true,
+    "ao_jo_max": -12,
+    "ao_jo_min": -14,
+    "ao_jv_max": -8,
+    "ao_jv_min": -11,
+    "embed_per_row": 256,
+    "embed_vocab": 128256,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_freivalds": false,
+    "gkr_residual_stream": false,
+    "kv_boundary": true,
+    "log_table": 25,
+    "rope": {
+     "nkv": 8
+    },
+    "gkr_key_tiles": true
+   },
+   "base": 1052296592,
+   "interaction": 968967744,
+   "fresh": 2096761808
+  },
+  {
+   "run": "2026-09-07-gkr-ablation-c4096-h100",
+   "output": "bands_dequant.json",
+   "segment": "B8_L0",
+   "params": {
+    "ao_acc_hi_bits": 8,
+    "ao_acc_mag": true,
+    "ao_denp2": true,
+    "ao_jo_max": -12,
+    "ao_jo_min": -14,
+    "ao_jv_max": -8,
+    "ao_jv_min": -11,
+    "embed_per_row": 256,
+    "embed_vocab": 128256,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_attnout": false,
+    "gkr_dequant": true,
+    "gkr_freivalds": false,
+    "gkr_residual_stream": false,
+    "kv_boundary": true,
+    "log_table": 25,
+    "rope": {
+     "nkv": 8
+    },
+    "gkr_key_tiles": true
+   },
+   "base": 1052296592,
+   "interaction": 740378176,
+   "fresh": 1868172240
+  },
+  {
+   "run": "2026-09-07-gkr-ablation-c4096-h100",
+   "output": "bands_freivalds.json",
+   "segment": "B8_L0",
+   "params": {
+    "ao_acc_hi_bits": 8,
+    "ao_acc_mag": true,
+    "ao_denp2": true,
+    "ao_jo_max": -12,
+    "ao_jo_min": -14,
+    "ao_jv_max": -8,
+    "ao_jv_min": -11,
+    "embed_per_row": 256,
+    "embed_vocab": 128256,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_attnout": false,
+    "gkr_residual_stream": false,
+    "kv_boundary": true,
+    "log_table": 25,
+    "rope": {
+     "nkv": 8
+    },
+    "gkr_key_tiles": true
+   },
+   "base": 1052296592,
+   "interaction": 972113472,
+   "fresh": 2099907536
+  },
+  {
+   "run": "2026-09-07-gkr-ablation-c4096-h100",
+   "output": "bands_residual_stream.json",
+   "segment": "B8_L0",
+   "params": {
+    "ao_acc_hi_bits": 8,
+    "ao_acc_mag": true,
+    "ao_denp2": true,
+    "ao_jo_max": -12,
+    "ao_jo_min": -14,
+    "ao_jv_max": -8,
+    "ao_jv_min": -11,
+    "embed_per_row": 256,
+    "embed_vocab": 128256,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_attnout": false,
+    "gkr_freivalds": false,
+    "kv_boundary": true,
+    "log_table": 25,
+    "rope": {
+     "nkv": 8
+    },
+    "gkr_key_tiles": true
+   },
+   "base": 1052296592,
+   "interaction": 731997760,
+   "fresh": 1859791824
+  },
+  {
+   "run": "2026-09-07-gkr-ablation-c4096-h100",
+   "output": "none.json",
+   "segment": "B8_L0",
+   "params": {
+    "ao_acc_hi_bits": 8,
+    "ao_acc_mag": true,
+    "ao_denp2": true,
+    "ao_jo_max": -12,
+    "ao_jo_min": -14,
+    "ao_jv_max": -8,
+    "ao_jv_min": -11,
+    "embed_per_row": 256,
+    "embed_vocab": 128256,
+    "fold_alpha": 6,
+    "fold_rem_bits": 15,
+    "gkr_attnout": false,
+    "gkr_freivalds": false,
+    "gkr_residual_stream": false,
+    "kv_boundary": true,
+    "log_table": 25,
+    "rope": {
+     "nkv": 8
+    }
+   },
+   "base": 1052296592,
+   "interaction": 1258821184,
+   "fresh": 2386615248
+  }
+ ]
+}
