@@ -178,6 +178,30 @@ def logup_marginal_by_batch(value, where=LOGUP_MARGINAL_KEY):
     return out
 
 
+def logup_marginal_at(batch, what="the cell count"):
+    """The marginal cells one lookup adds at this batch size, or a refusal.
+
+    Every priced term that counts lookups multiplies by this number, so a batch
+    the mapping does not hold is not a zero and not the nearest batch that was
+    measured: it is a term nothing can price.  A constants file that names no
+    LogUp marginal leaves the mapping empty and every batch is that case, which
+    used to raise `KeyError` out of the arithmetic two frames below the caller
+    (zk-prover #164).  `frontier.py` refuses it before it prices anything; this
+    is the same refusal, by the name of the key, for every other caller."""
+    if batch in LOGUP_MARGINAL:
+        return LOGUP_MARGINAL[batch]
+    raise SystemExit(
+        f"the LogUp marginal at batch {batch} is not there, so {what} can charge "
+        f"nothing for a lookup.\n"
+        f"  measured batches: {sorted(LOGUP_MARGINAL) or 'none'}\n"
+        f"  the key that backs it: {LOGUP_MARGINAL_KEY}, recorded as\n"
+        f"    {LOGUP_MARGINAL_SHAPE}\n"
+        f"  record it in zk-results, or pass --inputs DIR to read it from "
+        f"logup.json -- which is\n"
+        f"  a directory in no repository, so a number priced that way is printed "
+        f"and is not recordable.")
+
+
 _logup_marginal = cell("logup_marginal_cells_per_lookup", LOGUP_MARGINAL_KEY,
                        LOGUP_MARGINAL.get(LOGUP_BATCH), "logup.json",
                        note=f"recorded as {LOGUP_MARGINAL_SHAPE}")
@@ -843,7 +867,8 @@ def residual_stream_cells(cfg, order="tree", topk=1, final_norm=True, batch=None
     # stream by one marginal per lookup.
     stub = (L * (2 * dff + 4 * d)
             + (L * (2 * dff + 2 * (2 * d + 1)))
-            * LOGUP_MARGINAL[BATCH if batch is None else batch])
+            * logup_marginal_at(BATCH if batch is None else batch,
+                                "the residual stream's stub"))
     return dict(order=order, adds=so["adds"], components=so["components"],
                 err_ulps=so["err_ulps"],
                 norm_square=sq, norm_reduce=red, norm_scale=scale,
@@ -1134,7 +1159,7 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
             gkr="key_tiles" in gkr)
         attn = L * per_layer / (seq or 1)
     n_lookups = L * (2 * dff_active + 2 * (2 * d + 1)) + vocab
-    logup = n_lookups * LOGUP_MARGINAL[batch]
+    logup = n_lookups * logup_marginal_at(batch, "the lookup term")
     # B3: the weight Freivalds check's accumulators, and a range check per int8
     # activation.  The check is a per-*proof* cost, so it divides by the tokens
     # the proof covers
@@ -1146,7 +1171,7 @@ def cells_per_token(cfg, ctx, batch, seq=None, alpha=None, dequant=None,
     freivalds = per_weight * params / tokens if seq else 0.0
     # B4: the packed pair table halves B3's per-activation range check
     rng_cells = (RANGE_CELLS_PER_ACTIVATION if RANGE_CELLS_PER_ACTIVATION is not None
-                 else LOGUP_MARGINAL[batch])
+                 else logup_marginal_at(batch, "the range check"))
     rng = act * rng_cells if seq else 0.0
     # B4 read the accumulator as an integer and stopped there; B6 rounds it too, and
     # its normalisation *is* the integer reading, so this replaces B4's limb term
@@ -1859,6 +1884,36 @@ def selftest():
         print(f"  logup marginal: {wrong!r} was accepted; a scalar or an unkeyed "
               "object has to be refused, not charged at one batch")
         bad += 1
+    # a batch the mapping does not hold -- which is every batch when the constants
+    # file names no LogUp marginal and there is no inputs directory -- is refused
+    # by the name of the key, and the counted path, which multiplies by no cell
+    # cost at all, goes on counting (zk-prover #164)
+    empty = dict(LOGUP_MARGINAL)
+    LOGUP_MARGINAL.clear()
+    try:
+        try:
+            cells_per_token(LLAMA8B, 4096, LOGUP_BATCH, seq=SEQ, head=False)
+        except SystemExit as e:
+            if LOGUP_MARGINAL_KEY not in str(e):
+                print(f"  logup marginal: the refusal does not name "
+                      f"{LOGUP_MARGINAL_KEY}")
+                bad += 1
+        except KeyError:
+            print("  logup marginal: an absent mapping raised KeyError out of the "
+                  "arithmetic rather than refusing by the name of the key")
+            bad += 1
+        else:
+            print("  logup marginal: a priced count was charged at a batch nothing "
+                  "measured")
+            bad += 1
+        counted = cells_per_token(LLAMA8B, 4096, LOGUP_BATCH, seq=SEQ, head=False,
+                                  cells="exact")
+        if not counted["total"] > 0:
+            print("  logup marginal: the counted path stopped without the mapping, "
+                  "which it does not read")
+            bad += 1
+    finally:
+        LOGUP_MARGINAL.update(empty)
     # (2) and (3) need a marginal per batch; without inputs and without a
     # constants file there is none, so the self-test supplies its own and says so
     marginal = dict(LOGUP_MARGINAL) or {1: 4.0, 2: 2.0}
@@ -1905,7 +1960,9 @@ def selftest():
     if bad:
         print(f"cost model: {bad} self-test failures")
         return 1
-    print("cost model: the LogUp marginal reads per batch and refuses a scalar; the "
+    print("cost model: the LogUp marginal reads per batch, refuses a scalar and "
+          "refuses a batch nothing measured by the name of its key, while the "
+          "counted path, which reads no cell cost, goes on counting; the "
           "residual stream takes back exactly the stub charged, at every measured "
           "batch and three shapes; the reductions switch is closed and moves the "
           "key tile family and the dequant rung")
