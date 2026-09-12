@@ -787,6 +787,24 @@ def assumption_rows(shape, seq=TOKENS, ctx=4096):
              "32 attention heads as 16, 8, 8, so a shape's heads are assumed to "
              "be a half and two quarters.  `share_of_segment` is what one group "
              "of all the heads would cost instead"))
+    kv = ec.kv_sharing(p)
+    rows.append(dict(
+        field="kv_per_head", value="per attention head", grade="asserted", bound=None,
+        recorded_values=[f"{kv['nh']} heads over {kv['nkv']} kv"],
+        source_run=ec.HEADLINE_RUNS[0], source_segment="every segment",
+        sizes="the key cache, the value cache and the boundary trees that hand "
+              "them on", cells=kv["saving"], share_of_segment=kv["saving_of_fresh"],
+        note=f"`LayoutChan` and `LayoutKey` are built from `Shape::chans()` and "
+             f"`Shape::keys()`, both carrying `insts` = attention heads, and "
+             f"`boundary.rs`'s `kv_sides` hands on a cache of that width, so a key "
+             f"and a value are committed once per attention head and not once per "
+             f"key/value head.  On this segment that term is "
+             f"{kv['as_built']['total']:,} cells, {kv['share_of_fresh']:.2%} of it; "
+             f"a prover that shared them across the {kv['nh'] // kv['nkv']} heads of "
+             f"a group would commit {kv['shared']['total']:,}, which is "
+             f"{kv['saving']:,} cells and {kv['saving_of_fresh']:.2%} of the segment "
+             f"less.  Not built: no AIR here shares a key tile's K and V columns "
+             f"between two heads' score grids.  Counted per shape in section (2c)"))
     for f in ("variant", "round"):
         rows.append(dict(
             field=f, value=WITNESS_ASSUMPTIONS[f], grade="asserted", bound=None,
@@ -948,11 +966,16 @@ def group_geom(shape, grp, seq, ctx):
                 vocab=shape["vocab"], s=seq, c=0 if grp["linear"] else ctx)
 
 
-def segment_cells(kind, geom, witness, gkr, diagonal_block, bound, moe=None):
+def segment_cells(kind, geom, witness, gkr, diagonal_block, bound, moe=None,
+                  kv_shared=False):
     """One segment's committed cells, counted from its `params` block.  Memoised:
-    a statement prices the same segment once per (kind, shape, prefix)."""
+    a statement prices the same segment once per (kind, shape, prefix).
+
+    `kv_shared=True` counts the same segment with its keys and values committed
+    once per key/value head instead of once per attention head, which is the
+    unbuilt layout section (2c) prices."""
     key = (kind, tuple(sorted(geom.items())), tuple(sorted(witness.items())),
-           tuple(gkr), diagonal_block, bound,
+           tuple(gkr), diagonal_block, bound, kv_shared,
            json.dumps(moe, sort_keys=True, default=str))
     if key not in _SEGMENTS:
         p = ec.segment_params(kind, witness=witness, gkr=gkr, moe=moe,
@@ -960,8 +983,27 @@ def segment_cells(kind, geom, witness, gkr, diagonal_block, bound, moe=None):
                                   geom["nh"], WITNESS_ASSUMPTIONS["head_groups"]),
                               **geom)
         p["diagonal_block"] = diagonal_block
-        _SEGMENTS[key] = ec.cells_of(p, bound=bound)
+        _SEGMENTS[key] = ec.cells_of(p, bound=bound, kv_shared=kv_shared)
     return _SEGMENTS[key]
+
+
+def kv_term(shape, ctx, seq=TOKENS):
+    """What one layer segment of this shape commits to hold its key and value
+    cache, counted per ATTENTION head as the prover builds it and per KEY/VALUE
+    head as the sharing allows (`exact_cells.kv_sharing`).
+
+    Read off the first group whose layers have an attention grid at all: a run of
+    linear-attention layers is priced at no grid, and it is not the segment this
+    term is about.
+    """
+    grp = next((g for g in shape["groups"] if not g["linear"]), shape["groups"][0])
+    geom = group_geom(shape, grp, seq, ctx)
+    p = ec.segment_params("layer", witness=witness_fields(), gkr=STATEMENT_GKR,
+                          moe=moe_of(shape, grp, seq),
+                          head_groups=ec.head_groups_for(
+                              geom["nh"], WITNESS_ASSUMPTIONS["head_groups"]),
+                          **geom)
+    return ec.kv_sharing(p)
 
 
 def moe_weights(shape, grp, moe):
@@ -977,7 +1019,8 @@ def moe_weights(shape, grp, moe):
 
 
 def exact_model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
-                      with_head=True, diagonal_block=True, gkr=(), bound=False):
+                      with_head=True, diagonal_block=True, gkr=(), bound=False,
+                      kv_shared=False):
     """`model_cells`, counted from the layout: one `params` block per segment.
 
     The unit is the same -- committed cells per decoded token, the layer segments
@@ -999,7 +1042,7 @@ def exact_model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=Non
                       f"describes one segment of one sequence")
     out = dict(total=0.0, preprocessed=0.0, residual_stream=0.0, parts={},
                gkr=tuple(gkr), saturated=False, cells="exact", bound=bound,
-               segments={}, moe={})
+               kv_shared=kv_shared, segments={}, moe={})
     first = True
     for grp in shape["groups"]:
         geom = group_geom(shape, grp, seq, ctx)
@@ -1015,7 +1058,7 @@ def exact_model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=Non
             if not n:
                 continue
             got = segment_cells(kind, geom, witness_fields(kind), gkr,
-                                diagonal_block, bound, moe=moe)
+                                diagonal_block, bound, moe=moe, kv_shared=kv_shared)
             out["segments"][f"{kind} x{n}"] = got["fresh"]
             out["total"] += n * got["fresh"] / seq
             out["residual_stream"] += n * sum(got["components"]["residual_stream"]) / seq
@@ -1048,7 +1091,8 @@ def exact_model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=Non
         grp = shape["groups"][0]
         geom = dict(group_geom(shape, grp, seq, ctx), c=ctx)
         got = segment_cells("head", geom, witness_fields("head"), gkr,
-                            diagonal_block, bound, moe=moe_of(shape, grp, seq))
+                            diagonal_block, bound, moe=moe_of(shape, grp, seq),
+                            kv_shared=kv_shared)
         out["segments"]["head"] = got["fresh"]
         out["total"] += got["fresh"] / seq
         for name, (b, inter) in got["components"].items():
@@ -1062,7 +1106,7 @@ def exact_model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=Non
 
 
 def head_chunk(shape, seq, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GKR,
-               cells=None, bound=False, ctx=None):
+               cells=None, bound=False, ctx=None, kv_shared=False):
     """One output head segment, at any shape: the model-level terms -- the head's
     accumulators, its lookups, its Freivalds check, the token binding and the final
     norm -- over the `seq` positions the segment covers.
@@ -1077,14 +1121,14 @@ def head_chunk(shape, seq, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GK
     tiles and all, so `ctx` is the prefix that segment attends over and the caller
     says which block the head sits on."""
     kw = dict(seq=seq, seq_batch=seq_batch, batch=batch, alpha=alpha, gkr=gkr,
-              cells=cells, bound=bound)
+              cells=cells, bound=bound, kv_shared=kv_shared)
     c = seq if ctx is None else ctx
     return seq * (model_cells(shape, c, with_head=True, **kw)["total"]
                   - model_cells(shape, c, with_head=False, **kw)["total"])
 
 
 def sound_cells(shape, st, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GKR,
-                cells=None, bound=False):
+                cells=None, bound=False, kv_shared=False):
     """What one proved position costs under the sound statement, modelled.
 
     Block `b` of the statement attends over the `b * S` positions before it, so the
@@ -1096,7 +1140,7 @@ def sound_cells(shape, st, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GK
     saturated = False
     parts = {}
     kw = dict(seq_batch=seq_batch, batch=batch, alpha=alpha, gkr=gkr, cells=cells,
-              bound=bound)
+              bound=bound, kv_shared=kv_shared)
     for b in range(st["blocks"]):
         c = model_cells(shape, b * st["s_chunk"], seq=st["s_chunk"], with_head=False,
                         **kw)
@@ -1125,7 +1169,8 @@ def sound_cells(shape, st, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GK
 
 
 def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
-                with_head=True, diagonal_block=True, gkr=(), cells=None, bound=False):
+                with_head=True, diagonal_block=True, gkr=(), cells=None, bound=False,
+                kv_shared=False):
     """The whole per-token budget for a shape, summed group by group.
 
     `cells="exact"` -- the default, and the owner's ruling -- counts every segment
@@ -1137,7 +1182,12 @@ def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
     if (cells or CELLS) == "exact":
         return exact_model_cells(shape, ctx, seq=seq, seq_batch=seq_batch,
                                  alpha=alpha, batch=batch, with_head=with_head,
-                                 diagonal_block=diagonal_block, gkr=gkr, bound=bound)
+                                 diagonal_block=diagonal_block, gkr=gkr, bound=bound,
+                                 kv_shared=kv_shared)
+    if kv_shared:
+        raise Refused("what the key/value sharing would save is counted from the "
+                      "layout and the fitted path has no layout: it charges the "
+                      "cache through a per-unit constant read off one segment")
     batch = cm.BATCH if batch is None else batch
     out = dict(total=0.0, preprocessed=0.0, residual_stream=0.0, parts={},
                gkr=tuple(gkr))
@@ -1904,13 +1954,25 @@ def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
         # witness-calibrated field at the bound of `exact_cells.witness_bounds`
         hi = (sound_cells(shape, st, seq_batch=seq_batch, batch=batch, alpha=alpha,
                           cells=cells, bound=True) if exact else None)
+        # and the same statement with the keys and values committed once per
+        # key/value head: the layout nobody has built, priced (section 2c)
+        kv = (sound_cells(shape, st, seq_batch=seq_batch, batch=batch, alpha=alpha,
+                          cells=cells, kv_shared=True) if exact else None)
         entry = dict(cells_per_token=c["total"], preprocessed_per_token=c["preprocessed"],
                      residual_stream_per_token=c["residual_stream"], parts=c["parts"], chunks=n_chunks,
                      cells_per_position=sc["per_position"],
                      cells_per_position_bound=None if hi is None else hi["per_position"],
+                     cells_per_position_kv_shared=(None if kv is None
+                                                   else kv["per_position"]),
+                     kv_shared_saving_pct=(None if kv is None else 100.0 *
+                                           (kv["per_position"] / sc["per_position"] - 1.0)),
+                     kv=None if not exact else kv_term(shape, ctx, seq=seq),
                      cells_per_token_bound=(None if not exact else
                                             model_cells(shape, ctx, bound=True,
                                                         **kw)["total"]),
+                     cells_per_token_kv_shared=(None if not exact else
+                                                model_cells(shape, ctx, kv_shared=True,
+                                                            **kw)["total"]),
                      cells=CELLS if cells is None else cells,
                      layers_per_position=sc["layers_per_position"],
                      head_chunk_cells=sc["head_chunk"], statement=st,
@@ -1928,6 +1990,7 @@ def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
                 tok_s = m["cells_s"] / c["total"]
                 pos_s = m["cells_s"] / sc["per_position"]
                 lo_s = None if hi is None else m["cells_s"] / hi["per_position"]
+                kv_s = None if kv is None else m["cells_s"] / kv["per_position"]
                 out[b] = dict(cells_s=m["cells_s"], tok_s=tok_s, pos_s=pos_s,
                               scope=m.get("scope"), rate_key=m.get("key"),
                               rate_source=card.get("source"),
@@ -1939,7 +2002,12 @@ def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
                               pos_s_bound=lo_s,
                               cards_for_target_bound=(None if lo_s is None else
                                                       math.ceil(target_tok_s / lo_s)),
-                              usd_per_mposition_bound=usd_per_mtok(lo_s, usd.get(name)))
+                              usd_per_mposition_bound=usd_per_mtok(lo_s, usd.get(name)),
+                              pos_s_kv_shared=kv_s,
+                              cards_for_target_kv_shared=(None if kv_s is None else
+                                                          math.ceil(target_tok_s / kv_s)),
+                              usd_per_mposition_kv_shared=usd_per_mtok(kv_s,
+                                                                       usd.get(name)))
             entry["cards"][name] = out
         row["contexts"][ctx] = entry
     return row
@@ -2014,7 +2082,7 @@ MOE_ASSUMPTIONS = ("moe_routing", "moe_router")
 
 
 def assumption_keys(moe=True):
-    fields = list(ec.WITNESS_FIELDS) + ["head_groups", "variant", "round"]
+    fields = list(ec.WITNESS_FIELDS) + ["head_groups", "kv_per_head", "variant", "round"]
     return [ASSUMPTION_KEY.format(field=f)
             for f in fields + (list(MOE_ASSUMPTIONS) if moe else [])]
 
@@ -2116,6 +2184,43 @@ def projected_rows(priced, moe_rows, cal, cards, usd, target, seq, seq_batch,
                         inputs + [usd_key],
                         f"Dollars a million proved positions at "
                         f"{usd.get(cname)} USD/GPU-h. " + common, from_constants=ours))
+                    if m.get("usd_per_mposition_kv_shared") is not None:
+                        rows.append(entry(
+                            f"{base}.usd_per_mposition_kv_shared",
+                            m["usd_per_mposition_kv_shared"],
+                            "USD/1000000 positions", card["card"], ctx, bname,
+                            inputs + [usd_key],
+                            f"The same row for a prover that committed each key and "
+                            f"each value once per KEY/VALUE head rather than once per "
+                            f"attention head, which this shape shares "
+                            f"{e['kv']['nh'] // e['kv']['nkv']} ways. Not built: no "
+                            f"AIR in this project shares a key tile's K and V columns "
+                            f"between two heads' score grids, and the row beside this "
+                            f"one is what the prover commits today. "
+                            f"{e['cells_per_position_kv_shared']:,.0f} modelled cells "
+                            f"a proved position against {e['cells_per_position']:,.0f}. "
+                            + common, from_constants=ours))
+    # one derived row per shape and context: the saving is a ratio of two cell
+    # counts, so no card and no timing scope enters it and every dollar column
+    # above moves by exactly this per cent.
+    for r in priced:
+        for ctx, e in sorted(r["contexts"].items()):
+            if e.get("kv_shared_saving_pct") is None:
+                continue
+            kv = e["kv"]
+            rows.append(entry(
+                f"frontier.{r['slug']}.c{ctx}.kv_shared_saving_pct",
+                e["kv_shared_saving_pct"], "per cent", "none", ctx, "n/a",
+                cells_keys + list(e["statement"]["keys"]),
+                f"{r['name']} at {ctx:,} context: what committing each key and each "
+                f"value once per key/value head instead of once per attention head "
+                f"takes off a proved position. {kv['nh']} attention heads over "
+                f"{kv['nkv']} key/value heads; on one layer segment at the full "
+                f"prefix the two caches and the boundary trees that hand them on are "
+                f"{kv['share_of_fresh']:.2%} of the segment and the sharing leaves "
+                f"{kv['saving_of_fresh']:.2%} of it uncommitted. Not built, and the "
+                f"figure is a floor: the interaction columns those columns carry are "
+                f"in the batched reduction and are counted by nothing here."))
     for name, v in sorted(moe_rows.items()):
         s = slug(name)
         r = v["sweep"][1]
@@ -2621,11 +2726,28 @@ def main(argv=None):
     print("   1. **K and V are committed per ATTENTION head, not per KV group.**")
     print("      `LayoutChan`/`LayoutKey` are built from `Shape::chans()`/`keys()`, both")
     print("      carrying `insts` = attention heads, so the `C` term is 2*nh*hd and `nkv`")
-    print("      does not appear.  Grouped-query attention buys this prover nothing on the")
-    print("      committed KV side today.  At 8B nh/nkv is 4; at Llama-405B and Qwen3 it")
-    print("      is 16, and at the MLA shapes higher still.  A GQA-aware layout would")
-    print("      divide that term by nh/nkv -- a named, unbuilt optimisation, and the")
-    print("      single largest structural saving this table can see.")
+    print("      does not appear, and the boundary trees hand on a cache of the same")
+    print("      width.  At 8B nh/nkv is 4; at Llama-405B and Qwen3 it is 16, and at the")
+    print("      MLA shapes higher still.")
+    if CELLS == "exact":
+        kv8 = {ctx: kv_term(llama8b, ctx, seq=args.seq) for ctx in CONTEXTS}
+        print(f"      What that is worth is now COUNTED and not named: on one 8B layer "
+              f"segment")
+        print(f"      the two caches and the boundary trees that hand them on are "
+              f"{kv8[4096]['share_of_fresh']:.1%} of the")
+        print(f"      segment at C=4,096 and {kv8[16384]['share_of_fresh']:.1%} at "
+              f"C=16,384, and committing them once per key/value")
+        print(f"      head instead would leave {kv8[4096]['saving_of_fresh']:.1%} and "
+              f"{kv8[16384]['saving_of_fresh']:.1%} of the segment uncommitted.  Per proved")
+        print("      position over the whole statement, shape by shape, that is section (2c).")
+        print("      Not built: no AIR in this project shares a key tile's K and V columns")
+        print("      between two heads' score grids, and what this table prices is what the")
+        print("      prover commits today.")
+    else:
+        print("      Grouped query attention buys this prover nothing on the committed KV")
+        print("      side today.  What a layout that used it would save is counted under")
+        print("      `--cells exact`, shape by shape, and this path does not count it: it")
+        print("      charges the cache through a per-unit constant read off one segment.")
     print("   2. **gt / ct / rw are run knobs, not constants.**  The composed sequence used")
     print("      64 / 128 / 16 and this model keeps them.  They tile exactly only when S,")
     print("      C, hd and `insts` are powers of two and the target divides; `Grid::new`")
@@ -2850,6 +2972,93 @@ def main(argv=None):
     print("  at 405B is very likely an order of magnitude too high.  Neither is measured at")
     print("  frontier scale; the left column also holds the per-chunk size fixed, so it is")
     print("  a floor.  **Open: this needs one measured point at a wider shape.**")
+
+    if CELLS == "exact":
+        print("\n(2c) the keys and values, counted per attention head and per "
+              "key/value head")
+        print("  The AIR commits one K and one V column set per ATTENTION head: "
+              "`LayoutChan` and")
+        print("  `LayoutKey` are built from `Shape::chans()` and `Shape::keys()`, "
+              "both carrying")
+        print("  `insts` = attention heads, and the boundary trees hand on a cache "
+              "of that same")
+        print("  width.  Every shape below shares its keys and values across heads, "
+              "so each one is")
+        print("  committed `nh/nkv` times over.  The right-hand columns count the "
+              "same three terms")
+        print("  at the key/value head count instead -- the layout is BUILT at that "
+              "instance count,")
+        print("  not divided by anything.  No AIR in this project builds it: this "
+              "prices it.")
+        print(f"  {'model':<18} {'nh':>4} {'nkv':>4} {'nh/nkv':>7} "
+              f"{'C=4K /pos':>11} {'kv-shared':>11} {'saving':>8} "
+              f"{'C=16K /pos':>11} {'kv-shared':>11} {'saving':>8}")
+        for r in priced:
+            a, b = r["contexts"][4096], r["contexts"][16384]
+            kv = a["kv"]
+            print(f"  {r['name']:<18} {kv['nh']:>4} {kv['nkv']:>4} "
+                  f"{kv['nh'] // kv['nkv']:>6}x "
+                  f"{g(a['cells_per_position']):>11} "
+                  f"{g(a['cells_per_position_kv_shared']):>11} "
+                  f"{a['kv_shared_saving_pct']:>+7.1f}% "
+                  f"{g(b['cells_per_position']):>11} "
+                  f"{g(b['cells_per_position_kv_shared']):>11} "
+                  f"{b['kv_shared_saving_pct']:>+7.1f}%")
+        print("\n  the term itself, on ONE layer segment at the full prefix: the key "
+              "cache in the")
+        print("  channel component, the value cache in the key grid, and the "
+              "boundary trees that")
+        print("  hand both on.  `of segment` is their share of that segment's "
+              "committed cells.")
+        print(f"  {'model':<18} {'C':>7} {'keys':>10} {'values':>10} "
+              f"{'boundary':>10} {'as built':>10} {'of segment':>11} {'shared':>10} "
+              f"{'saving':>10} {'of segment':>11}")
+        for r in priced:
+            for ctx in CONTEXTS:
+                kv = r["contexts"][ctx]["kv"]
+                print(f"  {r['name']:<18} {ctx:>7,} {g(kv['as_built']['keys']):>10} "
+                      f"{g(kv['as_built']['values']):>10} "
+                      f"{g(kv['as_built']['boundary']):>10} "
+                      f"{g(kv['as_built']['total']):>10} "
+                      f"{kv['share_of_fresh']:>10.2%} "
+                      f"{g(kv['shared']['total']):>10} {g(kv['saving']):>10} "
+                      f"{kv['saving_of_fresh']:>10.2%}")
+        bnd = priced_card["per_ctx"][4096]["boundaries"]
+        bname = next(b for b in ("loop", "loop_secs", "whole wall", *bnd) if b in bnd)
+        rate = usd.get(priced_card["card"])
+        print(f"\n  what that is worth on the priced card, at the {bname} boundary"
+              + (f" and ${rate:.2f}/GPU-h:" if rate else ":"))
+        at = f"cards@{target:g}"
+        print(f"  {'model':<18} " + " ".join(
+            f"{h:>12}" for h in ("C=4K $/Mpos", "kv-shared", at, "kv-shared",
+                                 "C=16K $/Mpos", "kv-shared", at, "kv-shared")))
+        for r in priced:
+            cells = []
+            for ctx in CONTEXTS:
+                m = r["contexts"][ctx]["cards"].get(priced_card["card"], {}).get(bname)
+                cells += ([m["usd_per_mposition"], m["usd_per_mposition_kv_shared"],
+                           m["cards_for_target"], m["cards_for_target_kv_shared"]]
+                          if m else [None] * 4)
+            print(f"  {r['name']:<18} "
+                  + " ".join(f"{x:>12,.0f}" if isinstance(x, (int, float)) else f"{'n/a':>12}"
+                             for x in cells))
+        print("  Every dollar column moves by exactly the cells' own fraction, so "
+              "the other three")
+        print("  timing scopes move by the same per cent.  What is NOT in the saving: "
+              "the interaction")
+        print("  columns those same key and value columns carry.  With the five "
+              "reductions on -- the")
+        print("  statement both headline runs prove -- their LogUp running sums are "
+              "in the batched")
+        print("  reduction, and what the link pays is one price per distinct trace "
+              "height, which a")
+        print("  layout nobody has built decides.  So each saving above is a floor.")
+        print("  The projections the q, k and v matmuls pay are already per key/value "
+              "head, at the")
+        print("  narrower output width the shape gives them; this term is the "
+              "attention grid's own")
+        print("  cache and the boundary trees, and it is the whole of what the "
+              "sharing would move.")
 
     for n_card, cardname in enumerate(sorted(cards, key=lambda c: c != priced_card["card"])):
         card = cards[cardname]

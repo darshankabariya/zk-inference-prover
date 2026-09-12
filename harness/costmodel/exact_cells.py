@@ -1018,7 +1018,11 @@ def segment_params(kind, d, nh, nkv, hd, dff, vocab, s, c, witness,
                           f"family's committed leaves per row")
     p = dict(statement_knobs() if knobs is None else knobs)
     p.update(witness)
-    p.update(s=s, c=c, hd=hd, nh=nh,
+    # `nkv` is on the block itself and not only on the rotation, because the
+    # output head segment carries a key tile family and no rotation, and
+    # `kv_cells` prices its cache like any other.  Nothing in `exact_cells`
+    # reads it: what the count charges per key is `nh`, which is the point.
+    p.update(s=s, c=c, hd=hd, nh=nh, nkv=nkv,
              head_groups=list(head_groups if head_groups is not None
                               else head_groups_for(nh)))
     for r in gkr:
@@ -1072,18 +1076,150 @@ def segment_params(kind, d, nh, nkv, hd, dff, vocab, s, c, witness,
     return p
 
 
-def cells_of(p, bound=False):
+def cells_of(p, bound=False, kv_shared=False):
     """`exact_cells`, with every layout assertion turned into a refusal that says
     what the shape did to the layout.  `bound=True` counts the same segment with
-    every witness-calibrated field at its bound."""
+    every witness-calibrated field at its bound; `kv_shared=True` counts it with
+    the keys and values committed once per key/value head (`kv_shared_cells`)."""
     if bound:
         p = dict(p, **witness_bounds())
     try:
-        return exact_cells(p)
+        return kv_shared_cells(p) if kv_shared else exact_cells(p)
     except SystemExit as e:
         raise Refused(str(e).replace("exact_cells: ", "")) from None
     except (AssertionError, ZeroDivisionError, ValueError) as e:
         raise Refused(f"the layout does not tile at this shape: {e}") from None
+
+
+# ------------------------------------------- the keys and values, both ways --
+# The AIR commits one K and one V column set per ATTENTION head.  `LayoutChan`
+# and `LayoutKey` are built from `Shape::chans()` and `Shape::keys()`, both of
+# which carry `insts` = attention heads (`layout.rs`), and `boundary.rs`'s
+# `kv_sides` hands on a cache of that same width.  A shape with `nkv < nh` reads
+# each key and each value `nh / nkv` times, so a prover that committed them once
+# per KEY/VALUE head -- a key tile's K and V columns shared by the score grids
+# of the `nh / nkv` heads of the group -- would commit that many fewer cells.
+# No AIR in this project builds that layout.  What the two functions below do is
+# PRICE it: `kv_cells` counts the same three terms at either instance count, and
+# `kv_sharing` reports the pair and their difference.
+#
+# What moves and what does not.  The score grid, its numerator, the queries the
+# channel component re-commits per key tile and the per-token component are per
+# QUERY head either way and are untouched.  The K columns of the channel
+# component, the V columns of the key grid and the boundary trees that hand the
+# cache on are the whole of the term, and each is counted from the layout at
+# `insts * nkv / nh` key/value instances rather than divided by anything.
+#
+# What is NOT in the saving, so that the difference is a floor and not a guess:
+# the interaction columns those same columns carry.  With the five reductions on
+# -- the statement both headline runs prove -- the K and V LogUp running sums
+# are in the batched reduction rather than in the components, and what the link
+# pays is one price per distinct trace height, which is a property of a layout
+# nobody has built.  With the reductions off those sums are committed and would
+# fall too, which this does not count either.
+
+
+def kv_heads(p):
+    """This segment's key/value head count.
+
+    A `params` block a shape builder wrote names it (`nkv`); a run's block names
+    it on the rotation, which is the component whose width the sharing sets
+    (`rope.nkv`).  A block that names neither is refused rather than assumed to
+    share nothing: an output head segment written before this field existed
+    carries a key tile family whose instance count no field of it states."""
+    n = p.get("nkv")
+    if n is None:
+        n = (p.get("rope") or {}).get("nkv")
+    if n is None:
+        raise Refused("this params block names no key/value head count, and how "
+                      "many attention heads share one key and one value is not "
+                      "something the rest of the block says")
+    return int(n)
+
+
+def kv_instances(p):
+    """Each head group's key/value instances, `insts * nkv / nh`.
+
+    A key tile covers a group of attention heads; under the sharing it would
+    cover that group's key/value heads, and a group that carries a fractional
+    number of them is not a tile the layout can state."""
+    nh, nkv = p["nh"], kv_heads(p)
+    if nkv < 1 or nh % nkv:
+        raise Refused(f"{nh} attention heads over {nkv} key/value heads: the heads "
+                      f"of one key/value head are a group of the same size, so a "
+                      f"count that does not divide is not this attention")
+    out = []
+    for insts in p["head_groups"]:
+        if insts * nkv % nh:
+            raise Refused(f"a head group of {insts} of the {nh} attention heads "
+                          f"carries {insts * nkv / nh:g} of the {nkv} key/value "
+                          f"heads, and a key tile commits whole ones")
+        out.append(insts * nkv // nh)
+    return out
+
+
+def kv_cells(p, per_kv_head=False):
+    """The cells this segment commits to hold its key and value cache, counted
+    per attention head as the prover builds them and per KEY/VALUE head as the
+    sharing allows.  `{"keys", "values", "boundary", "total"}`."""
+    nh = p["nh"]
+    n = kv_heads(p) if per_kv_head else nh
+    kv_instances(p)                      # refuses a group the sharing cannot tile
+    keys = values = 0
+    for insts, c_tile, _rows_comp, _diagonal in _key_tile_shapes(p):
+        i = insts * n // nh
+        lc = chan_layout(p, i, c_tile)
+        lk = key_layout(p, i, c_tile)
+        # `attn_trace.rs`, `commit_base`: the key cache is the channel
+        # component's `pk` columns and the value cache the key grid's `pv`
+        keys += lc["pk"] << lc["log_rows"]
+        values += lk["pv"] << lk["log_rows"]
+    g = p.get("residual_stream") or {}
+    head = bool(g.get("head_norm"))
+    # `boundary.rs`, `kv_sides`: the keys and values a layer segment hands on,
+    # `n * hd` wide over the blocks it publishes and the blocks it read.  Taken
+    # as the boundary form at `n` heads less the same form at none, so that the
+    # form stays `key_tile.py`'s one and is not written down twice here.  An
+    # output head publishes no cache and pays none of this.
+    bd = [boundary_cells(m, p["hd"], g.get("d", 0), p["s"], p["c"], head=head)
+          for m in (n, 0)]
+    return {"keys": keys, "values": values, "boundary": bd[0] - bd[1],
+            "total": keys + values + bd[0] - bd[1]}
+
+
+def kv_sharing(p):
+    """The K/V term both ways, and what the difference is worth on this segment.
+
+    `as_built` is what the prover commits today; `shared` is the same three terms
+    at the key/value head count; `saving` is the difference and
+    `saving_of_fresh` its share of the segment's committed cells.  A shape with
+    `nkv == nh` saves nothing at all, which is the control."""
+    built, shared = kv_cells(p), kv_cells(p, per_kv_head=True)
+    fresh = exact_cells(p)["fresh"]
+    saving = built["total"] - shared["total"]
+    return dict(nh=p["nh"], nkv=kv_heads(p), groups=list(p["head_groups"]),
+                kv_groups=kv_instances(p), as_built=built, shared=shared,
+                fresh=fresh, fresh_kv_shared=fresh - saving, saving=saving,
+                share_of_fresh=built["total"] / fresh,
+                saving_of_fresh=saving / fresh)
+
+
+def kv_shared_cells(p):
+    """The same segment with the keys and values committed once per key/value
+    head: `exact_cells` less what the sharing saves, in the same shape, with the
+    `kv` block beside it.  The key tile family and the boundary trees are the
+    only two that move."""
+    got = exact_cells(p)
+    sav = kv_sharing(p)
+    grids = ((sav["as_built"]["keys"] + sav["as_built"]["values"])
+             - (sav["shared"]["keys"] + sav["shared"]["values"]))
+    base, inter = got["components"]["key_tiles"]
+    got = dict(got, components=dict(got["components"], key_tiles=(base - grids, inter)),
+               base=got["base"] - grids,
+               boundary=got["boundary"] - (sav["as_built"]["boundary"]
+                                           - sav["shared"]["boundary"]),
+               fresh=got["fresh"] - sav["saving"], kv=sav)
+    return got
 
 
 # ----------------------------------------- the assumption and its bound --
@@ -1230,7 +1366,7 @@ def selftest(argv_points=None):
     print(f"  {len(red)} reduction configurations, from none of the five to all five")
     print("  a one-cell difference is a failure: checked")
     return (bound_selftest(pts) or seam_selftest() or builder_selftest()
-            or moe_selftest())
+            or moe_selftest() or gqa_selftest(pts))
 
 
 def bound_selftest(pts):
@@ -1295,6 +1431,63 @@ def moe_selftest():
           f"the same matmuls")
     print(f"  written out one by one count, and conserve the {slots:,} token "
           f"slots: checked")
+    return 0
+
+
+def gqa_selftest(pts):
+    """The keys and values counted per head and per key/value head.
+
+    Three things.  On every recorded chunk that names a key/value head count the
+    two counts stand in exactly the ratio `nkv / nh`: the grids tile there, so
+    the cache laid out at the key/value head count is exactly the fraction of the
+    cache it shares, and nothing is divided -- the layout is built at the other
+    instance count and the integers come out.  On a shape with `nkv == nh` the
+    saving is zero to the cell, and CodeLlama-13B is the one shape this
+    repository registers with one key/value head per attention head (40 heads of
+    128, hidden 5,120, inner 13,824, vocabulary 32,016).  And the segment the
+    sharing leaves still adds up: base, interaction and boundary to `fresh`."""
+    bad, shares = [], []
+    for p in pts:
+        q = p["params"]
+        try:
+            sav = kv_sharing(q)
+        except Refused:
+            continue                     # a block that names no key/value count
+        shares.append((sav["saving_of_fresh"], p, sav))
+        nh, nkv = sav["nh"], sav["nkv"]
+        if sav["shared"]["total"] * nh != sav["as_built"]["total"] * nkv:
+            bad.append(f"{p['run']} {p['segment']}: the K/V term is "
+                       f"{sav['as_built']['total']:,} per head and "
+                       f"{sav['shared']['total']:,} per key/value head, which is not "
+                       f"the {nkv}/{nh} the shape shares")
+        got = kv_shared_cells(q)
+        if got["base"] + got["interaction"] + got["boundary"] != got["fresh"]:
+            bad.append(f"{p['run']} {p['segment']}: the shared segment's trees do "
+                       f"not add up to its fresh count")
+    # the control: one key/value head per attention head saves nothing
+    wit = modal_assumption()
+    shape = dict(d=5120, nh=40, nkv=40, hd=128, dff=13824, vocab=32016)
+    for c in (4096, 16384):
+        p13 = segment_params("layer", s=512, c=c, witness=wit, **shape)
+        s13 = kv_sharing(p13)
+        if s13["saving"] or kv_shared_cells(p13)["fresh"] != exact_cells(p13)["fresh"]:
+            bad.append(f"a shape with {shape['nkv']} key/value heads over "
+                       f"{shape['nh']} attention heads saves {s13['saving']:,} cells "
+                       f"at C={c:,}, and it shares nothing to save")
+    for b in bad:
+        print("exact cells:", b)
+    if bad:
+        return 1
+    _, ref, sav = max(shares, key=lambda r: r[0])
+    print(f"  the keys and values are {sav['share_of_fresh']:.2%} of the recorded "
+          f"segment they cost most on ({ref['segment']}, {sav['nh']} heads over "
+          f"{sav['nkv']},")
+    print(f"  C={ref['params']['c']:,}) and committing them once per key/value head "
+          f"would leave {sav['saving_of_fresh']:.2%}")
+    print(f"  of it uncommitted; the two counts are in the ratio the shape shares on "
+          f"every recorded")
+    print(f"  chunk, and a shape with one key/value head per attention head saves "
+          f"nothing: checked")
     return 0
 
 
