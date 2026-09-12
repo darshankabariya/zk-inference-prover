@@ -224,13 +224,19 @@ def key_tile_family(nh, hd, s, c, diagonal_block=True, kv_boundary=None, **kw):
 #
 # An output head chunk publishes no keys and no values and reads the residual
 # stream without handing one on, so it commits the one input side alone.
-def boundary_cells(nh, hd, d, s, c, head=False):
+def boundary_cells(nh, hd, d, s, c, head=False, kv_per_key=None):
     """The boundary trees of ONE composed chunk, in cells.  An identity of the
     layout, exact on every recorded chunk (`--selftest`), and the only term
-    besides the key tile family that grows with the context."""
+    besides the key tile family that grows with the context.
+
+    `kv_per_key` is what one key costs the two caches, `2 nh hd` where a head
+    holds a whole K and a whole V.  A latent attention holds neither: its cache
+    is one latent per key whatever the head count, so the caller states the
+    width and this form stays the one it was."""
     if head:
         return d * s
-    return 2 * d * s + 2 * nh * hd * (2 * c + s)
+    kv = 2 * nh * hd if kv_per_key is None else kv_per_key
+    return 2 * d * s + kv * (2 * c + s)
 
 
 # --------------------------------------------------------- the lookup tables --

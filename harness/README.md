@@ -37,7 +37,16 @@ embedding lookup and the output head), so a shape no run has proved is counted
 by the function that reproduces every recorded chunk. A mixture layer is written
 the way its config describes it: the shared experts as a matmul over every token
 of the block, each routed expert as a matmul over the tokens routed to it alone,
-and the router's own matmul of one logit per expert beside them. What a shape cannot give
+and the router's own matmul of one logit per expert beside them. A latent
+attention is written the way its own config describes it
+(`costmodel/attention/latent.py`): both sides of the attention through a low
+rank, a decoupled key of `qk_rope_head_dim` computed once per KEY rather than
+once per head, and the score grid and the value side at two widths an ordinary
+attention shares. It is written BOTH ways, because such an attention can be
+proved either by expanding the keys and the values per head or by folding the
+low-rank pair into the query and the output projection and caching the latent
+itself -- the same weights in a different order -- and the table counts both.
+What a shape cannot give
 it is the fields a run took off its own witness; those are an assumption, with
 `modal_assumption` for the point estimate and `witness_bounds` for the widest
 value the recorded runs carry, and the self-test checks that the bound dominates

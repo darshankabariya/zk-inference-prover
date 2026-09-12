@@ -42,6 +42,7 @@ import json
 import pathlib
 import sys
 
+from harness.costmodel.attention import latent as latent_attention
 from harness.costmodel.key_tile import boundary_cells
 
 HERE = pathlib.Path(__file__).parent
@@ -264,10 +265,18 @@ def residual_stream_components(p):
         # `Prog::pairs`: the SwiGLU product, group 0 under the silu lookup
         return n * UN_LEAF + n * LEAF + n * mul, looks(2 * n, n, "mul")
 
+    def plain_norm(tag, width):
+        # `Prog`'s three components for a norm with no residual add: the output
+        # head's final norm, and the norm a latent attention puts on each of its
+        # two low-rank reads (`q_a_layernorm`, `kv_a_layernorm`).  The tiling is
+        # `a` rows a token whatever the width, so only the columns move.
+        n = width // a
+        return [(f"{tag}", *square_tree(n), lr1, 2),
+                (f"{tag}b", *tree_plain(a), lr2, 2),
+                (f"{tag}t", *norm_scale(n), lr1, 3)]
+
     if g.get("head_norm"):
-        out.append(("gnf", *square_tree(nreal), lr1, 2))
-        out.append(("gnfb", *tree_plain(a), lr2, 2))
-        out.append(("ntf", *norm_scale(nreal), lr1, 3))
+        out += plain_norm("gnf", d)
         return [(t, c, lr, b, lk) for t, c, lk, lr, b in out]
 
     # a layer: two norms, each a level-1 reduction folded with a residual add,
@@ -280,9 +289,15 @@ def residual_stream_components(p):
         out.append((tag, *norm_scale(nreal), lr1, 3))
     t2_nreal = g["dff"] // a
     out.append(("gsw", *pairs_silu(t2_nreal), log_rows_for(a * s), 3))
+    for i, width in enumerate(g.get("norms") or []):
+        if width % a:
+            raise ValueError(f"a norm of width {width} does not tile {a} rows")
+        out += plain_norm(f"ln{i}", width)
     rope = p.get("rope")
     if rope:
-        hd = p["hd"]
+        # a latent attention rotates the decoupled key alone, which is narrower
+        # than a head and is one per key rather than one per head
+        hd = rope.get("hd", p["hd"])
         for name, heads in (("q", p["nh"]), ("k", rope["nkv"])):
             lr = log_rows_for(s * heads)
             # `Prog::rope_mul`: `hd` leaves, `2 hd` multiply slots
@@ -433,14 +448,27 @@ V_BITS = 8       # `rope.rs`, `V_BITS`: the value side's quantize width
 
 
 def _quant_widths(p):
-    return sorted({bits for _, _, bits in _quant_sides(p)})
+    return sorted({bits for *_, bits in _quant_sides(p)})
 
 
 def _quant_sides(p):
     """`compose.rs`: q, k and v get a quantize component, except a `v` whose
-    dequantize is the fold -- the fold IS the quantize."""
+    dequantize is the fold -- the fold IS the quantize.  Each is (name, values,
+    tokens, width): the quantize width has to divide the head's own width, which
+    a latent attention states separately for the two sides.
+
+    A block may name the sides itself (`quant_sides`), which is what a latent
+    attention does: its key side is one latent per key and not one key a head,
+    and its absorbed form quantizes no value at all, because the value the grid
+    reads IS that latent."""
+    if not p.get("residual_stream"):
+        return []
+    if p.get("quant_sides") is not None:
+        return [(q["name"], q["n_out"], q["tokens"], q["hd"],
+                 p[q["bits"]] if isinstance(q["bits"], str) else q["bits"])
+                for q in p["quant_sides"]]
     rope = p.get("rope")
-    if not rope or not p.get("residual_stream"):
+    if not rope:
         return []
     out = []
     for name, heads, bits in (("q", p["nh"], p["q_bits"]),
@@ -451,7 +479,7 @@ def _quant_sides(p):
             continue
         if name == "v" and m["variant"] == "fold":
             continue
-        out.append((name, m, bits))
+        out.append((name, m["n_out"], m["tokens"], p["hd"], bits))
     return out
 
 
@@ -468,17 +496,27 @@ def _seam_names(p):
     A block may name them instead (`seams`), which is what a mixture layer whose
     feed-forward matmuls are all routed has to do: it requantizes the residual
     once before its experts and once before their down projections, and neither
-    of those seams is a group of this segment's own name."""
+    of those seams is a group of this segment's own name.  A latent attention
+    names them too, and its own are narrower than the residual: a low-rank read
+    is requantized at the rank it wrote."""
     if p.get("seams") is not None:
-        return list(p["seams"])
+        return [s[0] if isinstance(s, (tuple, list)) else s for s in p["seams"]]
     g = p.get("residual_stream") or {}
     names = ["head"] if g.get("head_norm") else ["qkv", "gateup", "down"]
     return [n for n in names if any(g2 == n for g2, _ in _freivalds_groups(p))]
 
 
+def _seam_members(p, name):
+    """The matmuls one seam feeds.  A seam a block states carries its own list;
+    a seam of a dense layer is the Freivalds group of the same name."""
+    for s in (p.get("seams") or []):
+        if isinstance(s, (tuple, list)) and s[0] == name:
+            return tuple(s[2])
+    return dict(FREIVALDS_GROUPS).get(name, ())
+
+
 def _seam_variant(p, name):
-    mats = dict(FREIVALDS_GROUPS)[name]
-    for mn in mats:
+    for mn in _seam_members(p, name):
         m = _mat(p, mn)
         if m is not None:
             return m["variant"]
@@ -486,6 +524,9 @@ def _seam_variant(p, name):
 
 
 def _seam_width(p, name):
+    for s in (p.get("seams") or []):
+        if isinstance(s, (tuple, list)) and s[0] == name:
+            return s[1]
     g = p["residual_stream"]
     return g["dff"] if name == "down" else g["d"]
 
@@ -555,7 +596,7 @@ def exact_cells(p):
     comp["dequant"] = (deq_b, deq_i)
 
     # ---- the attention output
-    ao_pr, _, ao_lr = ao_layout(nh, s, hd, p["ao_target"])
+    ao_pr, _, ao_lr = ao_layout(nh, s, hd_v(p), p["ao_target"])
     # `layer.rs`, `ao_component`: the row's `den` and `joff`, then per slot
     # acc, sg, qm, nz2, denp, d, num, pj, alo -- and `mag` tenth under `acc_mag`
     ao_cols = 2 + ao_pr * (9 + int(p.get("ao_acc_mag", False)))
@@ -591,8 +632,8 @@ def exact_cells(p):
 
     # ---- the rotation's quantize components
     q_b = q_i = 0
-    for _name, m, _bits in _quant_sides(p):
-        pr, _, lr = q_layout(m["n_out"], hd, m["tokens"], p["deq_target"])
+    for _name, n_out, toks, width, _bits in _quant_sides(p):
+        pr, _, lr = q_layout(n_out, width, toks, p["deq_target"])
         # `rope.rs`, `Q_PER_SLOT`: ef, m7, q, nz, sm, sg, cl
         q_b += (7 * pr) << lr
         # five lookups per slot, batched in pairs, plus the two Horner claims
@@ -658,7 +699,7 @@ def exact_cells(p):
     base = sum(b for b, _ in comp.values())
     inter = sum(i for _, i in comp.values())
     boundary = boundary_cells(nh, hd, (p.get("residual_stream") or {}).get("d", 0),
-                              s, c, head=head)
+                              s, c, head=head, kv_per_key=cache_per_key(p))
     return {"components": comp, "base": base, "interaction": inter,
             "boundary": boundary, "fresh": base + inter + boundary,
             "table_rows": rows}
@@ -674,6 +715,11 @@ def _has_output_claim(p, name):
             return True
         if p.get("rope") and name in ("q", "k", "v"):
             return True
+        # a latent attention's five matmuls are read the same way a dense
+        # layer's seven are: every one of them by the wiring family, a norm, a
+        # rotation or the attention output
+        if p.get("latent"):
+            return True
     return bool(p.get("logits_claim")) and name == "lm_head"
 
 
@@ -684,7 +730,7 @@ def _has_scale_claim(p, m):
     if m["variant"] == "fold":
         return False
     for name in _seam_names(p):
-        if m["name"] in dict(FREIVALDS_GROUPS)[name]:
+        if m["name"] in _seam_members(p, name):
             return True
     return False
 
@@ -694,9 +740,8 @@ def link_heights(p, mat_lays, fv_lays, rs_comps, ao_lr):
     reduction reads, which is what the link pays 16 committed columns for."""
     hs = set()
     if p.get("gkr_key_tiles") or p.get("gkr_bands"):
+        hs.update(lay["log_rows"] for _n, lay, _acc, _look in tile_components(p))
         for insts, c_tile, rows_comp, _diag in _key_tile_shapes(p):
-            hs.add(chan_layout(p, insts, c_tile)["log_rows"])
-            hs.add(key_layout(p, insts, c_tile)["log_rows"])
             if rows_comp:
                 hs.add(row_layout(insts * p["s"], p["rw"])[1])
     if p.get("gkr_dequant"):
@@ -735,29 +780,13 @@ def key_tile_cells(p):
     (the output head's `C = 3584`, whose key grid carries 32,768 inert rows)
     counts right instead of counting `saturated`."""
     base = inter = 0
-    bind = p.get("rope") is not None
     gkr = p.get("gkr_key_tiles", False) or p.get("gkr_bands", False)
-    split = attn_variant(p)[0] == "intsplit"
-    for insts, c_tile, rows_comp, diagonal in _key_tile_shapes(p):
-        lc = chan_layout(p, insts, c_tile)
-        lk = key_layout(p, insts, c_tile)
-        # `attn_trace.rs`, `commit_base`: the channel component commits the key
-        # cache and the queries; the grid commits the score, its numerator, the
-        # `intsplit` variant's auxiliary column per score, and the value cache
-        n_aux = lk["q"] if split else 0
-        base += (lc["pk"] + lc["pq"]) << lc["log_rows"]
-        base += (2 * lk["q"] + n_aux + lk["pv"]) << lk["log_rows"]
-        # `attn_trace.rs`, `interaction_phase`: three Horner accumulator pairs on
-        # the channel component, six on the grid, and stream NN's root-equality
-        # claims -- Q on every bound key tile, K and V on the diagonal block
-        ci = 12 + (M31_PER_QM31 * (2 if diagonal else 1) if bind else 0)
-        gi = 24 + (M31_PER_QM31 if bind and diagonal else 0)
-        if not gkr:
-            # the LogUp running sums, batched in pairs
-            ci += M31_PER_QM31 * -(-(lc["pk"] + lc["pq"]) // 2)
-            gi += M31_PER_QM31 * -(-(lk["q"] + n_aux + lk["pv"]) // 2)
-        inter += ci << lc["log_rows"]
-        inter += gi << lk["log_rows"]
+    for n, lay, acc, look in tile_components(p):
+        base += n << lay["log_rows"]
+        # the LogUp running sums, batched in pairs, where the reduction is off
+        qm = acc + (0 if gkr else M31_PER_QM31 * -(-look // 2))
+        inter += qm << lay["log_rows"]
+    for insts, _c_tile, rows_comp, _diagonal in _key_tile_shapes(p):
         if rows_comp:
             # the per-token component: one row maximum, one denominator and its
             # two limbs per token, `rw` tokens per row
@@ -766,6 +795,67 @@ def key_tile_cells(p):
             ri = 8 + (0 if gkr else M31_PER_QM31 * 2 * rw)
             inter += ri << lr
     return base, inter
+
+
+def cache_per_key(p):
+    """What one key costs the boundary trees, `2 nh hd` where a head holds a
+    whole K and a whole V and the latent's own width where it does not."""
+    lat = p.get("latent")
+    return None if not lat else lat["cache_per_key"]
+
+
+def cache_instances(p, insts):
+    """How many copies of the key and the value cache one key tile of `insts`
+    attention heads commits.
+
+    The AIR commits one per HEAD: `Shape::chans()` and `Shape::keys()` both carry
+    `insts` (#178).  An absorbed latent attention is the one shape where that is
+    not what the model holds -- its cache is ONE latent for every head at once --
+    so a key tile that holds it holds it once, and the columns that hold it are
+    their own component at that instance count rather than a share of the
+    component the queries and the scores are in."""
+    lat = p.get("latent")
+    return 1 if lat and lat.get("cache_shared") else insts
+
+
+def tile_components(p):
+    """The components of every key tile, as (committed columns, layout, Horner
+    and claim columns, LogUp running sums).
+
+    `attn_trace.rs`, `commit_base`: the channel component commits the key cache
+    and the queries; the grid commits the score, its numerator, the `intsplit`
+    variant's auxiliary column per score, and the value cache.
+    `interaction_phase`: three Horner accumulator pairs on the channel component,
+    six on the grid, and stream NN's root-equality claims -- Q on every bound key
+    tile, K and V on the diagonal block.
+
+    Where the cache is committed at its own instance count (an absorbed latent)
+    the cache columns are a second channel component and a second grid, each
+    built at that count and each carrying its own accumulators and the claim over
+    its own columns.  That is the one place this module charges a component it
+    has not seen: it is 12 and 24 columns over a tile whose rows are the cache's
+    and not the heads', and `--selftest` prints what it comes to."""
+    bind = p.get("rope") is not None
+    split = attn_variant(p)[0] == "intsplit"
+    q_claim = M31_PER_QM31 if bind else 0
+    out = []
+    for insts, c_tile, _rows_comp, diagonal in _key_tile_shapes(p):
+        kvi = cache_instances(p, insts)
+        kv_claim = M31_PER_QM31 if bind and diagonal else 0
+        lc, lk = chan_layout(p, insts, c_tile), key_layout(p, insts, c_tile)
+        n_aux = lk["q"] if split else 0
+        if kvi == insts:
+            out.append((lc["pk"] + lc["pq"], lc, 12 + q_claim + kv_claim,
+                        lc["pk"] + lc["pq"]))
+            out.append((2 * lk["q"] + n_aux + lk["pv"], lk, 24 + kv_claim,
+                        lk["q"] + n_aux + lk["pv"]))
+            continue
+        lcc, lkc = chan_layout(p, kvi, c_tile), key_layout(p, kvi, c_tile)
+        out.append((lc["pq"], lc, 12 + q_claim, lc["pq"]))
+        out.append((lcc["pk"], lcc, 12 + kv_claim, lcc["pk"]))
+        out.append((2 * lk["q"] + n_aux, lk, 24, lk["q"] + n_aux))
+        out.append((lkc["pv"], lkc, 24 + kv_claim, lkc["pv"]))
+    return out
 
 
 def row_layout(toks, rw_target):
@@ -788,12 +878,23 @@ def _grid_chunks(groups, log_rows, cap):
     return min(rows // groups, max(cap, 1))
 
 
+def hd_qk(p):
+    """The channel width the score grid runs over: the head width, unless the
+    attention states its two sides separately (a latent attention does)."""
+    return p.get("hd_qk", p["hd"])
+
+
+def hd_v(p):
+    """The width the value cache and the attention output run over."""
+    return p.get("hd_v", p["hd"])
+
+
 def chan_layout(p, insts, c_tile):
     """`layout.rs`, `LayoutChan::choose`: one row group per (instance, channel),
     the height whose keys per row is nearest `chan_target`."""
     best = None
     for lr in range(MIN_LOG_ROWS, 27):
-        chunks = _grid_chunks(p["hd"] * insts, lr, min(c_tile, p["s"]))
+        chunks = _grid_chunks(hd_qk(p) * insts, lr, min(c_tile, p["s"]))
         if chunks is None:
             continue
         pk = -(-c_tile // chunks)
@@ -811,13 +912,13 @@ def key_layout(p, insts, c_tile):
     want = -(-p["s"] // p["grid_target"])
     best = None
     for lr in range(MIN_LOG_ROWS, 27):
-        chunks = _grid_chunks(c_tile * insts, lr, min(p["s"], p["hd"]))
+        chunks = _grid_chunks(c_tile * insts, lr, min(p["s"], hd_v(p)))
         if chunks is None or p["s"] % chunks:
             continue
         key = (abs(chunks - want), 1 << lr)
         if best is None or key < best[0]:
             best = (key, {"log_rows": lr, "chunks": chunks,
-                          "q": -(-p["s"] // chunks), "pv": -(-p["hd"] // chunks)})
+                          "q": -(-p["s"] // chunks), "pv": -(-hd_v(p) // chunks)})
     assert best is not None, "no key layout"
     return best[1]
 
@@ -983,7 +1084,8 @@ def head_deq_target(vocab):
 
 
 def segment_params(kind, d, nh, nkv, hd, dff, vocab, s, c, witness,
-                   knobs=None, head_groups=None, gkr=REDUCTIONS_ON, moe=None):
+                   knobs=None, head_groups=None, gkr=REDUCTIONS_ON, moe=None,
+                   latent=None):
     """One composed segment of a model, as the `params` block `exact_cells` counts.
 
     `kind` is `layer`, `first` (the segment of the stack that carries the
@@ -1001,15 +1103,27 @@ def segment_params(kind, d, nh, nkv, hd, dff, vocab, s, c, witness,
     `n_in` the width a routed expert reads, which is not always the model's
     (Kimi K3 projects to `routed_expert_hidden_size` first).  `distribution`
     overrides the uniform split with `[(tokens, matmuls), ...]` measured on a real
-    run of the model, which is the one way to remove the routing assumption."""
+    run of the model, which is the one way to remove the routing assumption.
+
+    `latent` makes it a multi-head latent attention (`attention/latent.py`): the
+    widths a config states, at one of the two forms.  Then the attention side is
+    five matmuls and not four, each low-rank read carries a norm, the rotation is
+    over the decoupled key alone, and what a key costs the cache is that form's
+    own width rather than `2 nkv hd`."""
     if kind not in ("layer", "first", "head"):
         raise Refused(f"no such segment kind: {kind!r}")
-    if int(nkv) != nkv or nkv < 1:
-        raise Refused(f"{nkv} key/value heads: the layer plan commits a whole "
-                      f"K and V head per group, so a fractional count is not a "
-                      f"`params` block.  Multi-head latent attention is the case "
-                      f"this refuses, and the prover has no layout for it")
-    nkv = int(nkv)
+    lat = None if latent is None else dict(latent)
+    if lat is None:
+        if int(nkv) != nkv or nkv < 1:
+            raise Refused(f"{nkv} key/value heads: the layer plan commits a whole "
+                          f"K and V head per group, so a fractional count is not a "
+                          f"`params` block.  Multi-head latent attention is the "
+                          f"case this refuses, and `latent=` is how it is stated")
+        nkv = int(nkv)
+    else:
+        # the cache a MODEL holds: one latent for every head under the absorbed
+        # form, one K and one V a head under the materialised one
+        nkv = 1 if lat["cache_shared"] else nh
     moe = dict(moe or {})
     active = dff + (moe.get("topk", 0) * moe.get("moe_dff", 0))
     for name, n in (("d", d), ("the active feed-forward width", active)):
@@ -1027,7 +1141,13 @@ def segment_params(kind, d, nh, nkv, hd, dff, vocab, s, c, witness,
                               else head_groups_for(nh)))
     for r in gkr:
         p[f"gkr_{r}"] = True
-    mats = layer_mats(d, nh, nkv, hd, dff, s)
+    if lat is None:
+        mats, spec = layer_mats(d, nh, nkv, hd, dff, s), None
+    else:
+        spec = latent_attention.layer(lat, d, s, rope=lat.get("rope", True))
+        p.update(hd_qk=lat["hd_qk"], hd_v=lat["hd_v"], latent=lat)
+        mats = spec["mats"] + [m for m in layer_mats(d, nh, nkv, hd, dff, s)
+                               if m["name"] in ("gate", "up", "down")]
     if not dff:
         # a layer whose feed-forward side is entirely routed builds no matmul
         # over all `s` tokens there
@@ -1061,10 +1181,17 @@ def segment_params(kind, d, nh, nkv, hd, dff, vocab, s, c, witness,
                              variant="chain", group="router"))
         # both seams are built whatever the groups are called: the residual is
         # requantized once before the experts and once before their outputs
-        p["seams"] = ["qkv", "gateup", "down"]
+        p["seams"] = (spec["seams"] if spec else ["qkv"]) + ["gateup", "down"]
         p["moe"] = moe
     p.update(mats=mats, kv_boundary=True,
              residual_stream=dict(a=RS_A, d=d, dff=active), rope=dict(nkv=nkv))
+    if spec:
+        # the rotation, the quantize sides and the two low-rank norms are the
+        # latent attention's own, and so are the seams its ranks requantize at
+        p["rope"] = spec["rope"]
+        p["quant_sides"] = spec["quant_sides"]
+        p["residual_stream"]["norms"] = spec["norms"]
+        p.setdefault("seams", spec["seams"] + ["gateup", "down"])
     if kind == "first":
         # The magnitude form is what the recorded first segments take, and it is
         # not a property of being first: `params_of` takes it exactly when the
@@ -1162,6 +1289,11 @@ def kv_cells(p, per_kv_head=False):
     """The cells this segment commits to hold its key and value cache, counted
     per attention head as the prover builds them and per KEY/VALUE head as the
     sharing allows.  `{"keys", "values", "boundary", "total"}`."""
+    if p.get("latent"):
+        raise Refused("this segment's cache is a latent and not a K and a V per "
+                      "key/value head, so there is nothing here for a prover to "
+                      "share: what the two latent-attention forms commit is "
+                      "counted as they are, side by side")
     nh = p["nh"]
     n = kv_heads(p) if per_kv_head else nh
     kv_instances(p)                      # refuses a group the sharing cannot tile
@@ -1183,6 +1315,32 @@ def kv_cells(p, per_kv_head=False):
     # output head publishes no cache and pays none of this.
     bd = [boundary_cells(m, p["hd"], g.get("d", 0), p["s"], p["c"], head=head)
           for m in (n, 0)]
+    return {"keys": keys, "values": values, "boundary": bd[0] - bd[1],
+            "total": keys + values + bd[0] - bd[1]}
+
+
+def cache_cells(p):
+    """What this segment commits to HOLD its keys and its values, whatever the
+    attention is: the key cache in the channel component, the value cache in the
+    key grid, and the boundary trees that hand both on.
+
+    Counted at the instance count the cache is committed at (`cache_instances`),
+    so a latent attention that holds one cache for every head is counted holding
+    one.  `kv_cells` is this at an attention that holds a K and a V per head, and
+    `--selftest` checks the two agree there."""
+    keys = values = 0
+    for insts, c_tile, _rows_comp, _diagonal in _key_tile_shapes(p):
+        kvi = cache_instances(p, insts)
+        lc, lk = chan_layout(p, kvi, c_tile), key_layout(p, kvi, c_tile)
+        keys += lc["pk"] << lc["log_rows"]
+        values += lk["pv"] << lk["log_rows"]
+    g = p.get("residual_stream") or {}
+    head = bool(g.get("head_norm"))
+    # `boundary.rs`, `kv_sides`, as the difference of the boundary form with the
+    # cache and without it, so that form stays `key_tile.py`'s one
+    bd = [boundary_cells(p["nh"], p["hd"], g.get("d", 0), p["s"], p["c"],
+                         head=head, kv_per_key=k)
+          for k in (cache_per_key(p), 0)]
     return {"keys": keys, "values": values, "boundary": bd[0] - bd[1],
             "total": keys + values + bd[0] - bd[1]}
 
@@ -1366,7 +1524,7 @@ def selftest(argv_points=None):
     print(f"  {len(red)} reduction configurations, from none of the five to all five")
     print("  a one-cell difference is a failure: checked")
     return (bound_selftest(pts) or seam_selftest() or builder_selftest()
-            or moe_selftest() or gqa_selftest(pts))
+            or moe_selftest() or gqa_selftest(pts) or latent_selftest())
 
 
 def bound_selftest(pts):
@@ -1565,6 +1723,96 @@ def builder_selftest():
         return 1
     print(f"  a `params` block built from the shape alone reproduces the recorded "
           f"layer, first and output head segments at both contexts: checked")
+    return 0
+
+
+def latent_selftest():
+    """Multi-head latent attention, at both forms (`attention/latent.py`).
+
+    Four checks, and the first two are the ones that say the generalisation did
+    not move the layout: a latent attention whose two widths are one head width
+    counts exactly what the ordinary attention at that head width counts, and the
+    two forms hold the same weights.  Then the two identities that separate them:
+    what a key costs the cache, and how many copies of it a segment holds."""
+    lat = latent_attention
+    w = modal_assumption("layer")
+    d, nh, s, c, dff, vocab = 4096, 32, 512, 4096, 14336, 128256
+
+    def block(cfg, form, **kw):
+        z = lat.dims(cfg, nh, form)
+        return segment_params("layer", d=d, nh=nh, nkv=nh, hd=z["hd_v"], dff=dff,
+                              vocab=vocab, s=s, c=c, witness=w, latent=z, **kw), z
+
+    # (0) the cache term is the key/value term wherever a shape has one
+    for q in chunks():
+        try:
+            want_kv = kv_cells(q["params"])
+        except Refused:
+            continue
+        if cache_cells(q["params"]) != want_kv:
+            print(f"exact cells: the cache term and the key/value term part on "
+                  f"{q['run']} {q['segment']}")
+            return 1
+
+    # (1) a latent attention of one head width is the ordinary one at that width
+    flat = dict(q_lora_rank=1536, kv_lora_rank=512, qk_nope_head_dim=64,
+                qk_rope_head_dim=64, v_head_dim=128)
+    p_lat, _z = block(flat, "materialised")
+    p_gqa = segment_params("layer", d=d, nh=nh, nkv=nh, hd=128, dff=dff,
+                           vocab=vocab, s=s, c=c, witness=w)
+    a, b = key_tile_cells(p_lat), key_tile_cells(p_gqa)
+    if a != b:
+        print(f"exact cells: a latent attention of one head width does not count "
+              f"what the ordinary attention at that width counts: {a} against {b}")
+        return 1
+    ga = boundary_cells(nh, 128, d, s, c, kv_per_key=cache_per_key(p_lat))
+    gb = boundary_cells(nh, 128, d, s, c)
+    if ga != gb:
+        print(f"exact cells: its boundary trees do not agree either: {ga:,} "
+              f"against {gb:,}")
+        return 1
+
+    # (2) the weights are the same either way: `W_UK` and `W_UV` ARE `kv_b`
+    cfg = dict(q_lora_rank=1536, kv_lora_rank=512, qk_nope_head_dim=128,
+               qk_rope_head_dim=64, v_head_dim=128)
+    ws = {f: lat.attn_params(lat.dims(cfg, nh, f), d) for f in lat.FORMS}
+    if len(set(ws.values())) != 1:
+        print(f"exact cells: the two latent-attention forms do not hold the same "
+              f"weights: {ws}")
+        return 1
+
+    # (3) what one key costs the cache, and (4) how many copies a segment holds
+    out = {}
+    for form in lat.FORMS:
+        q, z = block(cfg, form)
+        out[form] = (z, exact_cells(q)["fresh"], cache_cells(q), q)
+    want = {"materialised": nh * (cfg["qk_nope_head_dim"] + cfg["qk_rope_head_dim"]
+                                  + cfg["v_head_dim"]),
+            "absorbed": cfg["kv_lora_rank"] + cfg["qk_rope_head_dim"]}
+    for form, (z, _fresh, _cache, _q) in out.items():
+        if z["cache_per_key"] != want[form]:
+            print(f"exact cells: the {form} form caches {z['cache_per_key']} a key "
+                  f"and not {want[form]}")
+            return 1
+    q = out["absorbed"][3]
+    groups = len(q["head_groups"])
+    tiles = {lay["log_rows"] for n, lay, _a, _l in tile_components(q)}
+    if cache_instances(q, q["head_groups"][0]) != 1:
+        print("exact cells: the absorbed form does not hold ONE cache a key tile")
+        return 1
+    ratio = out["materialised"][2]["total"] / out["absorbed"][2]["total"]
+    fresh = {f: out[f][1] for f in lat.FORMS}
+    print(f"  the cache term is the key/value term on every recorded chunk, a "
+          f"latent attention of one head width counts what the")
+    print(f"  ordinary one counts, the two forms hold the same weights "
+          f"({ws['absorbed']:,}),")
+    print(f"  and one key costs the cache {want['materialised']:,} cells "
+          f"materialised against {want['absorbed']:,} absorbed, which is "
+          f"{ratio:.1f}x")
+    print(f"  of the segment's cache term over {groups} head groups and "
+          f"{len(tiles)} distinct tile heights; the segment itself is")
+    print(f"  {fresh['materialised']:,} cells materialised and "
+          f"{fresh['absorbed']:,} absorbed: checked")
     return 0
 
 

@@ -976,9 +976,11 @@ def exact_cells_per_token(cfg, ctx, seq=None, experts=1, topk=1, seq_batch=1,
                          f"`params` block describes one segment of one sequence")
     if attn_params_per_layer is not None or attn_accs_per_layer is not None:
         raise ec.Refused("an attention the GQA formulas do not describe -- the "
-                         "latent-attention shapes -- is not a `params` block: the "
-                         "layer's matmuls are five and not four and the key grids "
-                         "read a width the prover has no layout for")
+                         "latent-attention shapes -- is five matmuls and two "
+                         "low-rank ranks, and one (nh, nkv, hd) triple cannot say "
+                         "what a key holds.  `frontier.py` builds it from the "
+                         "model's published config (`attention/latent.py`); this "
+                         "entry point takes one head width")
     if experts > 1 or topk > 1:
         raise ec.Refused("a mixture layer is three feed-forward sides -- the shared "
                          "experts over every token, the routed experts over the "

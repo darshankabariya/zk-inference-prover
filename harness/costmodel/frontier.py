@@ -4,7 +4,7 @@ The paper's thesis is that the cost of verified inference is a *computable
 function* of a model's architecture and a card's measured hash rate.  This module
 is that computation: it takes the B2 cost model (`cost_model.py`, extended by this
 stream with experts / top-k / sequence-batch terms), calibrates it against the two
-sequences zk-results has measured end to end, and prices eight frontier shapes at
+sequences zk-results has measured end to end, and prices nine frontier shapes at
 both contexts, at all four boundaries, on both cards.
 
 What the table prices is the SOUND STATEMENT: a prompt and the output the model
@@ -46,6 +46,7 @@ import sys
 from harness import constants, inputs, provenance
 from . import cost_model as cm
 from . import exact_cells as ec
+from .attention import latent as la
 from . import key_tile
 
 HERE = pathlib.Path(__file__).parent
@@ -347,20 +348,27 @@ def h100_card():
 # have fewer.  So no dimension in this table is solved or approximated except
 # where the row says so, and each row names the repository its config was read
 # from and the date.
-def mla(d, nh, q_lora, kv_lora, qk_nope=128, qk_rope=64, v_head=128):
+def mla(d, nh, q_lora, kv_lora, qk_nope=128, qk_rope=64, v_head=128, rope=True):
     """DeepSeek-V3-family multi-head latent attention, as parameters and as
     committed accumulators per layer.  The cost model's GQA formulas do not
     describe MLA: the q and kv sides are low-rank pairs, so both the weight count
     and the accumulator count differ, and the cache is one latent (kv_lora +
-    qk_rope) rather than a K and a V."""
-    q_out, kv_a_out, kv_b_out = nh * (qk_nope + qk_rope), kv_lora + qk_rope, nh * (qk_nope + v_head)
-    params = (d * q_lora + q_lora * q_out + d * kv_a_out + kv_lora * kv_b_out
-              + nh * v_head * d)
-    accs = q_lora + q_out + kv_a_out + kv_b_out + d
+    qk_rope) rather than a K and a V.
+
+    `cfg` beside them is the five published fields themselves, which is what the
+    counted path builds a `params` block from, and both counts below are that
+    module's own so the two paths read one formula (`attention/latent.py`).
+    `rope` is `False` where a config says its attention applies no rotation."""
+    cfg = dict(q_lora_rank=q_lora, kv_lora_rank=kv_lora, qk_nope_head_dim=qk_nope,
+               qk_rope_head_dim=qk_rope, v_head_dim=v_head)
+    # the fitted path takes the materialised form's accumulators, which is the
+    # form a counted row records; the weights are the same in both
+    z = la.dims(cfg, nh, "materialised")
     # what the model caches per key per layer, expressed as the GQA term
     # `2 * nkv * hd` the cost model charges, so that nkv is an *effective* number
-    return dict(attn_params_per_layer=params, attn_accs_per_layer=accs,
-                nkv_eff=kv_a_out / (2.0 * v_head))
+    return dict(attn_params_per_layer=la.attn_params(z, d),
+                attn_accs_per_layer=la.attn_accs(z, d),
+                nkv_eff=z["latent"] / (2.0 * v_head), cfg=cfg, rope=rope)
 
 
 def group(layers, dff=0, routed=0, per_token=0, shared=0, moe_dff=0,
@@ -389,7 +397,9 @@ def group(layers, dff=0, routed=0, per_token=0, shared=0, moe_dff=0,
 # `kv_lora_rank`, `qk_nope_head_dim`, `qk_rope_head_dim` and `v_head_dim`.
 DS3 = mla(7168, 128, 1536, 512)
 K2 = mla(7168, 64, 1536, 512)
-K3 = mla(7168, 96, 1536, 512)
+# `mla_use_nope` is true in Kimi K3's config: the widths are K2's, the rotation
+# is not there, and the position is the linear-attention layers' business
+K3 = mla(7168, 96, 1536, 512, rope=False)
 
 # Every field below is read out of the model's own published `config.json`,
 # fetched 2026-09-11 (2026-09-10 for the 70B, which has not moved).  Values only:
@@ -431,6 +441,7 @@ SHAPES = [
                 "solved for that target"),
     dict(name="DeepSeek-V3", tag="MoE 256/8", d=7168, nh=128, nkv=DS3["nkv_eff"], hd=128,
          vocab=129280,
+         latent=DS3["cfg"], latent_rope=DS3["rope"],
          groups=[group(3, dff=18432, **{k: DS3[k] for k in ("attn_params_per_layer",
                                                             "attn_accs_per_layer")}),
                  group(58, routed=256, per_token=8, shared=1, moe_dff=2048,
@@ -447,6 +458,7 @@ SHAPES = [
                 "untied embeddings"),
     dict(name="Kimi K2", tag="MoE 384/8", d=7168, nh=64, nkv=K2["nkv_eff"], hd=128,
          vocab=163840,
+         latent=K2["cfg"], latent_rope=K2["rope"],
          groups=[group(1, dff=18432, **{k: K2[k] for k in ("attn_params_per_layer",
                                                            "attn_accs_per_layer")}),
                  group(60, routed=384, per_token=8, shared=1, moe_dff=2048,
@@ -462,6 +474,7 @@ SHAPES = [
                 "n_shared_experts 1, num_experts_per_tok 8, untied embeddings"),
     dict(name="Kimi K3", tag="MoE 896/16", d=7168, nh=96, nkv=K3["nkv_eff"], hd=128,
          vocab=163840,
+         latent=K3["cfg"], latent_rope=K3["rope"],
          groups=[group(1, dff=33792, linear=True,
                        **{k: K3[k] for k in ("attn_params_per_layer",
                                              "attn_accs_per_layer")}),
@@ -478,7 +491,11 @@ SHAPES = [
                 "2026-09-11: num_hidden_layers 93, hidden_size 7168, "
                 "num_attention_heads 96, vocab_size 163840, MLA q_lora_rank 1536 "
                 "kv_lora_rank 512 qk_nope_head_dim 128 qk_rope_head_dim 64 "
-                "v_head_dim 128, first_k_dense_replace 1 at intermediate_size "
+                "v_head_dim 128 -- K2's attention exactly -- and mla_use_nope "
+                "true, so the widths are there and the rotation is not: the "
+                "counted row builds no rotation for this shape and the position "
+                "is the linear layers' business.  first_k_dense_replace 1 at "
+                "intermediate_size "
                 "33792, moe_intermediate_size 3072, num_experts 896, "
                 "num_shared_experts 2, num_experts_per_token 16, "
                 "routed_expert_hidden_size 3584 -- the routed experts read a "
@@ -815,13 +832,19 @@ def assumption_rows(shape, seq=TOKENS, ctx=4096):
             cells=None, share_of_segment=None,
             note="every composed segment of the two headline runs carries this "
                  "value; a shape proved at another one is a different statement"))
-    # and the two a mixture row adds, measured on the one row that is all mixture
+    # and the two a mixture row adds, on the row every one of whose layers is a
+    # mixture layer, so they are read off a segment with nothing else in it
     moe_ref = next((s for s in SHAPES if not refusal(s)
-                    and any(g["routed"] for g in s["groups"])), None)
+                    and all(g["routed"] for g in s["groups"])), None)
     moe_rows = [] if moe_ref is None else moe_assumption_rows(moe_ref, seq=seq, ctx=ctx)
     rows += moe_rows
+    # and the four a latent-attention row adds, on the first row that has one
+    lat_ref = next((s for s in SHAPES if not refusal(s) and s.get("latent")), None)
+    if lat_ref is not None:
+        rows += latent_assumption_rows(lat_ref, seq=seq, ctx=ctx)
     return dict(segment_fresh=fresh, context=ctx, seq=seq, rows=rows,
-                moe_reference=None if moe_ref is None else moe_ref["name"])
+                moe_reference=None if moe_ref is None else moe_ref["name"],
+                latent_reference=None if lat_ref is None else lat_ref["name"])
 
 
 def moe_assumption_rows(shape, seq=TOKENS, ctx=4096, gkr=STATEMENT_GKR):
@@ -918,18 +941,50 @@ def refusal(shape):
 
     A shape is refused rather than smoothed: a row the layout cannot state is a
     row this table has no number for, and printing the fitted one under the same
-    heading would hide exactly the extrapolation the count is here to remove."""
-    for grp in shape["groups"]:
-        if grp.get("attn_accs_per_layer") or grp.get("attn_params_per_layer"):
-            return ("multi-head latent attention: the q and kv sides are low-rank "
-                    "pairs and the cache is one latent, so the layer's matmuls are "
-                    "five and not four and the key grids read a width the prover "
-                    "has no layout for")
+    heading would hide exactly the extrapolation the count is here to remove.
+
+    Multi-head latent attention was refused here until #183: the q and kv sides
+    are low-rank pairs and the cache is one latent, so the layer's matmuls are
+    five and not four and the key grids read a width no field of a GQA shape
+    states.  Those widths are now read off each config and counted, both ways
+    (`attention/latent.py`), and what is left is named in the assumption block."""
+    if not shape.get("latent") and any(g.get("attn_accs_per_layer")
+                                       for g in shape["groups"]):
+        return ("multi-head latent attention with no published widths: the cache "
+                "is one latent and its width is the five fields of a config, "
+                "which this shape does not carry")
     try:
         exact_model_cells(shape, 4096, seq=TOKENS, gkr=STATEMENT_GKR)
     except (ec.Refused, Refused) as e:
         return str(e)
     return None
+
+
+# Which of the two latent-attention layouts a counted row uses.  Both are
+# projections -- no AIR in this project proves either -- and the table prints
+# them side by side; this is the one the row records.
+#
+# It is the materialised one, for two reasons.  It is the layout the key tile
+# family ALREADY builds: a K and a V per head, at two widths the config states,
+# and nothing in it is a component no recorded segment shows.  And it is the
+# cheaper of the two at every shape and both contexts, so it is what a prover
+# choosing between them would build -- the absorbed form saves the cache and
+# pays for it three times over in a score grid of `kv_lora + qk_rope` channels,
+# an attention output of `kv_lora`, and two more matmuls a token.  Flipping it
+# is decision 1 of #183.
+LATENT_FORM = "materialised"
+
+
+def latent_of(shape, form=None):
+    """This shape's latent attention at one of the two forms, or None where its
+    attention is the ordinary one.  The widths are the config's own five fields
+    and the head count, and nothing else."""
+    cfg = shape.get("latent")
+    if not cfg:
+        return None
+    z = la.dims(cfg, shape["nh"], form or LATENT_FORM)
+    z["rope"] = bool(shape.get("latent_rope", True))
+    return z
 
 
 _SEGMENTS = {}
@@ -967,7 +1022,7 @@ def group_geom(shape, grp, seq, ctx):
 
 
 def segment_cells(kind, geom, witness, gkr, diagonal_block, bound, moe=None,
-                  kv_shared=False):
+                  kv_shared=False, latent=None):
     """One segment's committed cells, counted from its `params` block.  Memoised:
     a statement prices the same segment once per (kind, shape, prefix).
 
@@ -976,9 +1031,11 @@ def segment_cells(kind, geom, witness, gkr, diagonal_block, bound, moe=None,
     unbuilt layout section (2c) prices."""
     key = (kind, tuple(sorted(geom.items())), tuple(sorted(witness.items())),
            tuple(gkr), diagonal_block, bound, kv_shared,
-           json.dumps(moe, sort_keys=True, default=str))
+           json.dumps(moe, sort_keys=True, default=str),
+           json.dumps(latent, sort_keys=True, default=str))
     if key not in _SEGMENTS:
         p = ec.segment_params(kind, witness=witness, gkr=gkr, moe=moe,
+                              latent=latent,
                               head_groups=ec.head_groups_for(
                                   geom["nh"], WITNESS_ASSUMPTIONS["head_groups"]),
                               **geom)
@@ -999,11 +1056,147 @@ def kv_term(shape, ctx, seq=TOKENS):
     grp = next((g for g in shape["groups"] if not g["linear"]), shape["groups"][0])
     geom = group_geom(shape, grp, seq, ctx)
     p = ec.segment_params("layer", witness=witness_fields(), gkr=STATEMENT_GKR,
-                          moe=moe_of(shape, grp, seq),
+                          moe=moe_of(shape, grp, seq), latent=latent_of(shape),
                           head_groups=ec.head_groups_for(
                               geom["nh"], WITNESS_ASSUMPTIONS["head_groups"]),
                           **geom)
     return ec.kv_sharing(p)
+
+
+# what each layout does, in one clause, for the notes that name them
+LATENT_WHAT = {
+    "materialised": "expands the keys and the values per head before the "
+                    "attention, as a prover with no latent layout builds it",
+    "absorbed": "folds `kv_b` into the query and the output projection and caches "
+                "the latent itself, as the published implementations decode",
+}
+
+
+def other_form(form):
+    """The latent-attention layout a row does NOT count."""
+    return la.FORMS[1] if form == la.FORMS[0] else la.FORMS[0]
+
+
+def latent_segment(shape, ctx, seq=TOKENS, form=None, **kw):
+    """One layer segment of a latent-attention shape, as a `params` block."""
+    grp = next((g for g in shape["groups"] if not g["linear"]), shape["groups"][0])
+    geom = group_geom(shape, grp, seq, ctx)
+    return ec.segment_params("layer", witness=witness_fields(), gkr=STATEMENT_GKR,
+                             moe=moe_of(shape, grp, seq),
+                             latent=latent_of(shape, form),
+                             head_groups=ec.head_groups_for(
+                                 geom["nh"], WITNESS_ASSUMPTIONS["head_groups"]),
+                             **dict(geom, **kw))
+
+
+def latent_term(shape, ctx, seq=TOKENS):
+    """What one layer segment of a latent-attention shape commits to hold its
+    keys and its values, at both forms (`exact_cells.cache_cells`).
+
+    The materialised form holds a K of `qk_nope + qk_rope` and a V of `v_head`
+    for every head; the absorbed form holds one latent of `kv_lora + qk_rope` for
+    every head at once, and pays for it in a wider score grid and a wider
+    attention output, which are in `fresh` and not in this term."""
+    out = {}
+    for form in la.FORMS:
+        p = latent_segment(shape, ctx, seq, form)
+        z, cache = latent_of(shape, form), ec.cache_cells(p)
+        fresh = ec.exact_cells(p)["fresh"]
+        out[form] = dict(cache, fresh=fresh, hd_qk=z["hd_qk"], hd_v=z["hd_v"],
+                         nh=z["nh"],
+                         cache_per_key=z["cache_per_key"],
+                         share_of_fresh=cache["total"] / fresh)
+    return out
+
+
+def latent_assumption_rows(shape, seq=TOKENS, ctx=4096):
+    """The four assumptions a counted latent-attention row makes, and what each
+    is worth on one layer segment of it.
+
+    Everything else about these three shapes is the published config and the
+    prover's own layout.  These four are not: which of the two layouts the row
+    counts, how many copies of a shared cache a segment holds, the program the
+    two low-rank norms build, and where the low-rank chain is requantized."""
+    p = latent_segment(shape, ctx, seq)
+    fresh = ec.exact_cells(p)["fresh"]
+    z = latent_of(shape)
+    row = f"{shape['name']}, one layer segment at C={ctx:,}, S={seq}"
+    alt = other_form(z["form"])
+    alt_fresh = ec.exact_cells(latent_segment(shape, ctx, seq, alt))["fresh"]
+    groups = len(p["head_groups"])
+    cache = ec.cache_cells(p)
+    copies = (groups - 1) * (cache["keys"] + cache["values"]) // groups
+    # what the two low-rank norms cost, and what the chain's own seams cost,
+    # each as the segment without them
+    no_norm = ec.exact_cells(dict(
+        p, residual_stream=dict(p["residual_stream"], norms=[])))["fresh"]
+    dense_seams = [s for s in p["seams"] if not isinstance(s, (tuple, list))
+                   or s[0] == "qkv"]
+    no_seams = ec.exact_cells(dict(p, seams=dense_seams))["fresh"]
+    rows = [dict(
+        field="mla_form", value=z["form"], grade="asserted", bound=None,
+        recorded_values=["no AIR in this project proves either"],
+        source_run="none", source_segment=row,
+        sizes="where the low-rank pair `kv_b` is applied, and so what a key costs "
+              "the cache and how wide the score grid is",
+        cells=abs(alt_fresh - fresh), share_of_segment=abs(alt_fresh - fresh) / fresh,
+        note=f"the row counts the {z['form']} layout, which {LATENT_WHAT[z['form']]}: "
+             f"the cache is {z['cache_per_key']:,} cells a key and the score grid "
+             f"runs over {z['hd_qk']} channels a head.  The {alt} layout "
+             f"{LATENT_WHAT[alt]}, and the same segment counted that way is "
+             f"{alt_fresh:,} cells against {fresh:,}.  The model's weights are the "
+             f"same either way -- `W_UK` and `W_UV` together ARE `kv_b` -- so this "
+             f"is a choice of layout and not of architecture, and section (2d) "
+             f"prices the whole statement both ways"),
+        dict(
+        field="mla_cache_per_tile", value="once per key tile", grade="asserted",
+        bound=None, recorded_values=[f"{groups} head groups"],
+        source_run="none", source_segment=row,
+        sizes="how many copies of a shared cache one segment commits",
+        cells=copies if z["cache_shared"] else 0,
+        share_of_segment=(copies if z["cache_shared"] else 0) / fresh,
+        note=f"under the absorbed layout a key tile is a component and commits the "
+             f"columns it reads, so the {groups} head groups each hold the latent of "
+             f"every key in that tile: {groups} copies.  One channel component and "
+             f"one grid shared between the {groups} grids would commit {copies:,} "
+             f"cells fewer, and the split cache component also carries the "
+             f"accumulator set of the component it splits from -- 12 and 24 columns "
+             f"over its own rows, the one column group here no recorded segment "
+             f"shows."
+             + (f"  The row records the {z['form']} layout, which holds a K and a V "
+                f"per head and shares nothing, so on the recorded row this "
+                f"assumption costs no cells at all."
+                if not z["cache_shared"] else "")),
+        dict(
+        field="mla_latent_norm", value="the output head's plain norm at the rank's "
+                                       "width", grade="asserted", bound=None,
+        recorded_values=["`q_a_layernorm` and `kv_a_layernorm` are config fields; "
+                         "the program they build is not"],
+        source_run=ec.HEADLINE_RUNS[0], source_segment=row,
+        sizes="the wiring family of the two low-rank norms",
+        cells=fresh - no_norm, share_of_segment=(fresh - no_norm) / fresh,
+        note=f"each low-rank read is normed before the matmul that follows it.  The "
+             f"program counted here is the one the OUTPUT HEAD's final norm already "
+             f"builds -- a squares tree, its second-level reduction and a scale -- "
+             f"at {z['q_lora_rank']} and {z['kv_lora_rank']} channels instead of the "
+             f"model's width, so no new program is assumed, only that these two "
+             f"norms are that one"),
+        dict(
+        field="mla_seams", value="one requantize seam per rank the chain passes",
+        grade="asserted", bound=None,
+        recorded_values=["a dense layer requantizes at qkv, gateup and down"],
+        source_run=ec.HEADLINE_RUNS[0], source_segment=row,
+        sizes="the requantize seams between the low-rank matmuls",
+        cells=fresh - no_seams, share_of_segment=(fresh - no_seams) / fresh,
+        note="a low-rank pair is two matmuls, and the second reads what the first "
+             "wrote, so the rank is requantized between them exactly as the "
+             "residual is requantized before the projections.  The seams counted "
+             "here are "
+             + ", ".join(f"`{s[0]}` at {s[1]:,}" for s in p["seams"]
+                         if isinstance(s, (tuple, list)))
+             + "; a layout that carried the rank in the dequantized form instead "
+               "would not build them")]
+    return rows
 
 
 def moe_weights(shape, grp, moe):
@@ -1020,7 +1213,7 @@ def moe_weights(shape, grp, moe):
 
 def exact_model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
                       with_head=True, diagonal_block=True, gkr=(), bound=False,
-                      kv_shared=False):
+                      kv_shared=False, latent_form=None):
     """`model_cells`, counted from the layout: one `params` block per segment.
 
     The unit is the same -- committed cells per decoded token, the layer segments
@@ -1040,9 +1233,11 @@ def exact_model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=Non
         raise Refused(f"B = {seq_batch} sequences a proof: a batched proof commits "
                       f"B key caches and B wiring families, and one `params` block "
                       f"describes one segment of one sequence")
+    lat = latent_of(shape, latent_form)
     out = dict(total=0.0, preprocessed=0.0, residual_stream=0.0, parts={},
                gkr=tuple(gkr), saturated=False, cells="exact", bound=bound,
-               kv_shared=kv_shared, segments={}, moe={})
+               kv_shared=kv_shared, segments={}, moe={},
+               latent=None if lat is None else lat["form"])
     first = True
     for grp in shape["groups"]:
         geom = group_geom(shape, grp, seq, ctx)
@@ -1058,7 +1253,8 @@ def exact_model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=Non
             if not n:
                 continue
             got = segment_cells(kind, geom, witness_fields(kind), gkr,
-                                diagonal_block, bound, moe=moe, kv_shared=kv_shared)
+                                diagonal_block, bound, moe=moe, kv_shared=kv_shared,
+                                latent=lat)
             out["segments"][f"{kind} x{n}"] = got["fresh"]
             out["total"] += n * got["fresh"] / seq
             out["residual_stream"] += n * sum(got["components"]["residual_stream"]) / seq
@@ -1092,7 +1288,7 @@ def exact_model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=Non
         geom = dict(group_geom(shape, grp, seq, ctx), c=ctx)
         got = segment_cells("head", geom, witness_fields("head"), gkr,
                             diagonal_block, bound, moe=moe_of(shape, grp, seq),
-                            kv_shared=kv_shared)
+                            kv_shared=kv_shared, latent=lat)
         out["segments"]["head"] = got["fresh"]
         out["total"] += got["fresh"] / seq
         for name, (b, inter) in got["components"].items():
@@ -1106,7 +1302,8 @@ def exact_model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=Non
 
 
 def head_chunk(shape, seq, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GKR,
-               cells=None, bound=False, ctx=None, kv_shared=False):
+               cells=None, bound=False, ctx=None, kv_shared=False,
+               latent_form=None):
     """One output head segment, at any shape: the model-level terms -- the head's
     accumulators, its lookups, its Freivalds check, the token binding and the final
     norm -- over the `seq` positions the segment covers.
@@ -1121,14 +1318,15 @@ def head_chunk(shape, seq, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GK
     tiles and all, so `ctx` is the prefix that segment attends over and the caller
     says which block the head sits on."""
     kw = dict(seq=seq, seq_batch=seq_batch, batch=batch, alpha=alpha, gkr=gkr,
-              cells=cells, bound=bound, kv_shared=kv_shared)
+              cells=cells, bound=bound, kv_shared=kv_shared,
+              latent_form=latent_form)
     c = seq if ctx is None else ctx
     return seq * (model_cells(shape, c, with_head=True, **kw)["total"]
                   - model_cells(shape, c, with_head=False, **kw)["total"])
 
 
 def sound_cells(shape, st, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GKR,
-                cells=None, bound=False, kv_shared=False):
+                cells=None, bound=False, kv_shared=False, latent_form=None):
     """What one proved position costs under the sound statement, modelled.
 
     Block `b` of the statement attends over the `b * S` positions before it, so the
@@ -1140,7 +1338,7 @@ def sound_cells(shape, st, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GK
     saturated = False
     parts = {}
     kw = dict(seq_batch=seq_batch, batch=batch, alpha=alpha, gkr=gkr, cells=cells,
-              bound=bound, kv_shared=kv_shared)
+              bound=bound, kv_shared=kv_shared, latent_form=latent_form)
     for b in range(st["blocks"]):
         c = model_cells(shape, b * st["s_chunk"], seq=st["s_chunk"], with_head=False,
                         **kw)
@@ -1170,7 +1368,7 @@ def sound_cells(shape, st, seq_batch=1, batch=None, alpha=None, gkr=STATEMENT_GK
 
 def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
                 with_head=True, diagonal_block=True, gkr=(), cells=None, bound=False,
-                kv_shared=False):
+                kv_shared=False, latent_form=None):
     """The whole per-token budget for a shape, summed group by group.
 
     `cells="exact"` -- the default, and the owner's ruling -- counts every segment
@@ -1183,11 +1381,15 @@ def model_cells(shape, ctx, seq=TOKENS, seq_batch=1, alpha=None, batch=None,
         return exact_model_cells(shape, ctx, seq=seq, seq_batch=seq_batch,
                                  alpha=alpha, batch=batch, with_head=with_head,
                                  diagonal_block=diagonal_block, gkr=gkr, bound=bound,
-                                 kv_shared=kv_shared)
+                                 kv_shared=kv_shared, latent_form=latent_form)
     if kv_shared:
         raise Refused("what the key/value sharing would save is counted from the "
                       "layout and the fitted path has no layout: it charges the "
                       "cache through a per-unit constant read off one segment")
+    if latent_form:
+        raise Refused("which of the two latent-attention layouts a row counts is a "
+                      "property of the counted path; the fitted one reads one "
+                      "accumulator count off the config and builds no layout")
     batch = cm.BATCH if batch is None else batch
     out = dict(total=0.0, preprocessed=0.0, residual_stream=0.0, parts={},
                gkr=tuple(gkr))
@@ -1955,9 +2157,18 @@ def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
         hi = (sound_cells(shape, st, seq_batch=seq_batch, batch=batch, alpha=alpha,
                           cells=cells, bound=True) if exact else None)
         # and the same statement with the keys and values committed once per
-        # key/value head: the layout nobody has built, priced (section 2c)
+        # key/value head: the layout nobody has built, priced (section 2c).  A
+        # latent attention holds no K and no V per key/value head at all, so
+        # there is nothing there to share and the row carries the two latent
+        # forms instead (section 2d).
+        lat = latent_of(shape) if exact else None
         kv = (sound_cells(shape, st, seq_batch=seq_batch, batch=batch, alpha=alpha,
-                          cells=cells, kv_shared=True) if exact else None)
+                          cells=cells, kv_shared=True)
+              if exact and lat is None else None)
+        alt_form = None if lat is None else other_form(lat["form"])
+        alt = (sound_cells(shape, st, seq_batch=seq_batch, batch=batch, alpha=alpha,
+                           cells=cells, latent_form=alt_form)
+               if alt_form else None)
         entry = dict(cells_per_token=c["total"], preprocessed_per_token=c["preprocessed"],
                      residual_stream_per_token=c["residual_stream"], parts=c["parts"], chunks=n_chunks,
                      cells_per_position=sc["per_position"],
@@ -1966,11 +2177,23 @@ def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
                                                    else kv["per_position"]),
                      kv_shared_saving_pct=(None if kv is None else 100.0 *
                                            (kv["per_position"] / sc["per_position"] - 1.0)),
-                     kv=None if not exact else kv_term(shape, ctx, seq=seq),
+                     kv=None if not exact or lat else kv_term(shape, ctx, seq=seq),
+                     latent=None if lat is None else lat["form"],
+                     latent_alt=alt_form,
+                     latent_term=(None if lat is None
+                                  else latent_term(shape, ctx, seq=seq)),
+                     cells_per_position_latent_alt=(None if alt is None
+                                                    else alt["per_position"]),
+                     latent_alt_pct=(None if alt is None else 100.0 *
+                                     (alt["per_position"] / sc["per_position"] - 1.0)),
+                     cells_per_token_latent_alt=(
+                         None if alt_form is None else
+                         model_cells(shape, ctx, latent_form=alt_form,
+                                     **kw)["total"]),
                      cells_per_token_bound=(None if not exact else
                                             model_cells(shape, ctx, bound=True,
                                                         **kw)["total"]),
-                     cells_per_token_kv_shared=(None if not exact else
+                     cells_per_token_kv_shared=(None if not exact or lat else
                                                 model_cells(shape, ctx, kv_shared=True,
                                                             **kw)["total"]),
                      cells=CELLS if cells is None else cells,
@@ -1991,6 +2214,7 @@ def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
                 pos_s = m["cells_s"] / sc["per_position"]
                 lo_s = None if hi is None else m["cells_s"] / hi["per_position"]
                 kv_s = None if kv is None else m["cells_s"] / kv["per_position"]
+                alt_s = None if alt is None else m["cells_s"] / alt["per_position"]
                 out[b] = dict(cells_s=m["cells_s"], tok_s=tok_s, pos_s=pos_s,
                               scope=m.get("scope"), rate_key=m.get("key"),
                               rate_source=card.get("source"),
@@ -2007,7 +2231,13 @@ def price(shape, cards, alpha, contexts=(4096, 16384), seq=TOKENS, seq_batch=1,
                               cards_for_target_kv_shared=(None if kv_s is None else
                                                           math.ceil(target_tok_s / kv_s)),
                               usd_per_mposition_kv_shared=usd_per_mtok(kv_s,
-                                                                       usd.get(name)))
+                                                                       usd.get(name)),
+                              pos_s_latent_alt=alt_s,
+                              cards_for_target_latent_alt=(
+                                  None if alt_s is None else
+                                  math.ceil(target_tok_s / alt_s)),
+                              usd_per_mposition_latent_alt=usd_per_mtok(
+                                  alt_s, usd.get(name)))
             entry["cards"][name] = out
         row["contexts"][ctx] = entry
     return row
@@ -2079,12 +2309,18 @@ ASSUMPTION_KEY = "assumption.cost_model.{field}"
 # The two a counted mixture row adds: how the tokens are spread over the experts,
 # and the selection argument on the router's logits, which is a stated bound.
 MOE_ASSUMPTIONS = ("moe_routing", "moe_router")
+# The four a counted latent-attention row adds: which of the two layouts it
+# counts, how many copies of a shared cache a segment holds, the program the two
+# low-rank norms build, and where the low-rank chain is requantized.
+LATENT_ASSUMPTIONS = ("mla_form", "mla_cache_per_tile", "mla_latent_norm",
+                      "mla_seams")
 
 
-def assumption_keys(moe=True):
+def assumption_keys(moe=True, latent=True):
     fields = list(ec.WITNESS_FIELDS) + ["head_groups", "kv_per_head", "variant", "round"]
     return [ASSUMPTION_KEY.format(field=f)
-            for f in fields + (list(MOE_ASSUMPTIONS) if moe else [])]
+            for f in fields + (list(MOE_ASSUMPTIONS) if moe else [])
+            + (list(LATENT_ASSUMPTIONS) if latent else [])]
 
 
 def missing_assumption_keys():
@@ -2200,6 +2436,24 @@ def projected_rows(priced, moe_rows, cal, cards, usd, target, seq, seq_batch,
                             f"{e['cells_per_position_kv_shared']:,.0f} modelled cells "
                             f"a proved position against {e['cells_per_position']:,.0f}. "
                             + common, from_constants=ours))
+                    if m.get("usd_per_mposition_latent_alt") is not None:
+                        lt = e["latent_term"][e["latent_alt"]]
+                        rows.append(entry(
+                            f"{base}.usd_per_mposition_mla_{e['latent_alt']}",
+                            m["usd_per_mposition_latent_alt"],
+                            "USD/1000000 positions", card["card"], ctx, bname,
+                            inputs + [usd_key],
+                            f"The same row at the OTHER latent-attention layout. The "
+                            f"row beside this one counts the {e['latent']} form; this "
+                            f"one counts the {e['latent_alt']} form, whose cache is "
+                            f"{lt['cache_per_key']:,} cells a key and whose score "
+                            f"grid runs over {lt['hd_qk']} channels a head. Neither "
+                            f"is built: no AIR in this project proves a latent "
+                            f"attention, and the model's weights are the same either "
+                            f"way. {e['cells_per_position_latent_alt']:,.0f} modelled "
+                            f"cells a proved position against "
+                            f"{e['cells_per_position']:,.0f}. "
+                            + common, from_constants=ours))
     # one derived row per shape and context: the saving is a ratio of two cell
     # counts, so no card and no timing scope enters it and every dollar column
     # above moves by exactly this per cent.
@@ -2221,6 +2475,27 @@ def projected_rows(priced, moe_rows, cal, cards, usd, target, seq, seq_batch,
                 f"{kv['saving_of_fresh']:.2%} of it uncommitted. Not built, and the "
                 f"figure is a floor: the interaction columns those columns carry are "
                 f"in the batched reduction and are counted by nothing here."))
+    # and one derived row per latent-attention shape and context: what the other
+    # layout costs, as a ratio of two cell counts and so of no card and no scope
+    for r in priced:
+        for ctx, e in sorted(r["contexts"].items()):
+            if e.get("latent_alt_pct") is None:
+                continue
+            lt = e["latent_term"]
+            rows.append(entry(
+                f"frontier.{r['slug']}.c{ctx}.mla_{e['latent_alt']}_pct",
+                e["latent_alt_pct"], "per cent", "none", ctx, "n/a",
+                cells_keys + list(e["statement"]["keys"]),
+                f"{r['name']} at {ctx:,} context: what counting its attention at the "
+                f"{e['latent_alt']} layout costs a proved position against the "
+                f"{e['latent']} one, which is what the row records. On one layer "
+                f"segment at the full prefix the cache and the boundary trees that "
+                f"hand it on are {lt[e['latent']]['share_of_fresh']:.2%} of the "
+                f"segment at the {e['latent']} layout and "
+                f"{lt[e['latent_alt']]['share_of_fresh']:.2%} at the "
+                f"{e['latent_alt']} one. Neither layout is built, and the model's "
+                f"weights are the same either way: it is a choice of where the "
+                f"low-rank pair is applied."))
     for name, v in sorted(moe_rows.items()):
         s = slug(name)
         r = v["sweep"][1]
@@ -2530,7 +2805,8 @@ def main(argv=None):
               "columns price.")
         print(f"    {'field':<16} {'assumed':>20} {'bound':>7} {'recorded':>18} "
               f"{'sizes, cells':>14} {'of a segment':>13}  read off")
-        for r in [q for q in arows["rows"] if q["field"] not in MOE_ASSUMPTIONS]:
+        own = set(MOE_ASSUMPTIONS) | set(LATENT_ASSUMPTIONS)
+        for r in [q for q in arows["rows"] if q["field"] not in own]:
             sh = r["share_of_segment"]
             vals = ", ".join(str(v) for v in r["recorded_values"][:4])
             print(f"    {r['field']:<16} {str(r['value']):>20} "
@@ -2546,6 +2822,16 @@ def main(argv=None):
             for r in moe_rows:
                 print(f"      {r['field']:<12} {r['value']:<38} [{r['grade']}]  "
                       f"{r['cells']:>14,.0f} cells  {r['share_of_segment']:>8.2%}")
+                for line in _wrap(r["note"], 88):
+                    print(f"        {line}")
+        lat_rows = [q for q in arows["rows"] if q["field"] in LATENT_ASSUMPTIONS]
+        if lat_rows:
+            print(f"\n    and the four a counted LATENT-ATTENTION row adds, on "
+                  f"{arows['latent_reference']}, one layer segment:")
+            for r in lat_rows:
+                print(f"      {r['field']:<19} {str(r['value']):<31} [{r['grade']}]  "
+                      f"{(r['cells'] or 0):>14,.0f} cells  "
+                      f"{r['share_of_segment']:>8.2%}")
                 for line in _wrap(r["note"], 88):
                     print(f"        {line}")
         print(f"    the five `ao_*` range fields size ONE group of tables together, "
@@ -2727,8 +3013,11 @@ def main(argv=None):
     print("      `LayoutChan`/`LayoutKey` are built from `Shape::chans()`/`keys()`, both")
     print("      carrying `insts` = attention heads, so the `C` term is 2*nh*hd and `nkv`")
     print("      does not appear, and the boundary trees hand on a cache of the same")
-    print("      width.  At 8B nh/nkv is 4; at Llama-405B and Qwen3 it is 16, and at the")
-    print("      MLA shapes higher still.")
+    print("      width.  At 8B nh/nkv is 4; at Llama-405B and Qwen3 it is 16.  The three")
+    print("      latent-attention shapes hold no K and no V per key/value head at all"
+          + (" --" if CELLS == "exact" else "."))
+    if CELLS == "exact":
+        print("      what a key costs their cache, both ways, is section (2d).")
     if CELLS == "exact":
         kv8 = {ctx: kv_term(llama8b, ctx, seq=args.seq) for ctx in CONTEXTS}
         print(f"      What that is worth is now COUNTED and not named: on one 8B layer "
@@ -2947,7 +3236,10 @@ def main(argv=None):
     print("     charged the committed K/V at `nkv` while the AIR charges it at `nh`, so the")
     print("     correction tracks nh/nkv: +4.3% at Qwen3 (nh/nkv=16) and +4.0% at")
     print("     DeepSeek-V3, against +2.0% at Maverick (5) and +1.5% at Kimi K3, whose")
-    print("     69 linear-attention layers have no grid to correct.")
+    print("     69 linear-attention layers have no grid to correct.  Those three ratios")
+    print("     are the old model's own reading of an attention it describes as GQA.")
+    if CELLS == "exact":
+        print("     What their attention actually holds is section (2d).")
 
     print("\n(2b) proof bytes: two estimates that disagree, and neither is measured above 8B")
     if not mib_per_chunk:
@@ -2990,10 +3282,15 @@ def main(argv=None):
               "instance count,")
         print("  not divided by anything.  No AIR in this project builds it: this "
               "prices it.")
+        print("  A latent attention holds neither a K nor a V per key/value head, "
+              "so the three")
+        print("  latent rows are not here: what their cache costs, both ways, is "
+              "section (2d).")
+        gqa = [r for r in priced if r["contexts"][4096]["kv"]]
         print(f"  {'model':<18} {'nh':>4} {'nkv':>4} {'nh/nkv':>7} "
               f"{'C=4K /pos':>11} {'kv-shared':>11} {'saving':>8} "
               f"{'C=16K /pos':>11} {'kv-shared':>11} {'saving':>8}")
-        for r in priced:
+        for r in gqa:
             a, b = r["contexts"][4096], r["contexts"][16384]
             kv = a["kv"]
             print(f"  {r['name']:<18} {kv['nh']:>4} {kv['nkv']:>4} "
@@ -3013,7 +3310,7 @@ def main(argv=None):
         print(f"  {'model':<18} {'C':>7} {'keys':>10} {'values':>10} "
               f"{'boundary':>10} {'as built':>10} {'of segment':>11} {'shared':>10} "
               f"{'saving':>10} {'of segment':>11}")
-        for r in priced:
+        for r in gqa:
             for ctx in CONTEXTS:
                 kv = r["contexts"][ctx]["kv"]
                 print(f"  {r['name']:<18} {ctx:>7,} {g(kv['as_built']['keys']):>10} "
@@ -3032,7 +3329,7 @@ def main(argv=None):
         print(f"  {'model':<18} " + " ".join(
             f"{h:>12}" for h in ("C=4K $/Mpos", "kv-shared", at, "kv-shared",
                                  "C=16K $/Mpos", "kv-shared", at, "kv-shared")))
-        for r in priced:
+        for r in gqa:
             cells = []
             for ctx in CONTEXTS:
                 m = r["contexts"][ctx]["cards"].get(priced_card["card"], {}).get(bname)
@@ -3059,6 +3356,100 @@ def main(argv=None):
               "attention grid's own")
         print("  cache and the boundary trees, and it is the whole of what the "
               "sharing would move.")
+
+    lat_rows = ([r for r in priced if r["contexts"][4096]["latent"]]
+                if CELLS == "exact" else [])
+    if lat_rows:
+        print("\n(2d) multi-head latent attention, counted both ways")
+        print("  These three shapes project no key and no value per head.  Both "
+              "sides of the")
+        print("  attention go through a low rank -- the queries through "
+              "`q_lora_rank`, the keys and")
+        print("  values through `kv_lora_rank` -- and the position is carried by a "
+              "decoupled key of")
+        print("  `qk_rope_head_dim` computed once per KEY rather than once per head. "
+              " So what is")
+        print("  committed per key is the latent plus that key, not `2 nh hd`, and "
+              "the layer's")
+        print("  matmuls are five and not four.  Every width below is one of the "
+              "five fields of the")
+        print("  model's own config.json, named in its source line above.")
+        print("  The two ways are where the low-rank pair `kv_b` is applied, and "
+              "the model's")
+        print("  weights are the SAME either way -- `W_UK` and `W_UV` together ARE "
+              "`kv_b`:")
+        print("    materialised  the keys and values are expanded per head before "
+              "the attention,")
+        print("                  which is what a prover with no latent layout "
+              "builds;")
+        print("    absorbed      `kv_b` is folded into the query and the output "
+              "projection, and the")
+        print("                  cache IS the latent, one for every head at once.")
+        print("  NEITHER is built: no AIR in this project proves a latent "
+              "attention.  The row")
+        print(f"  records the {LATENT_FORM} one (`assumption.cost_model.mla_form`) "
+              "and prints both.")
+        print(f"  {'model':<18} {'n_h':>4} {'hd_qk':>6} {'hd_v':>5} "
+              f"{'cache/key':>10} {'C=4K /pos':>11} {'other way':>11} {'move':>8} "
+              f"{'C=16K /pos':>11} {'other way':>11} {'move':>8}")
+        for r in lat_rows:
+            a, b = r["contexts"][4096], r["contexts"][16384]
+            lt = a["latent_term"][a["latent"]]
+            print(f"  {r['name']:<18} "
+                  f"{lt['nh']:>4} {lt['hd_qk']:>6} "
+                  f"{lt['hd_v']:>5} {lt['cache_per_key']:>10,} "
+                  f"{g(a['cells_per_position']):>11} "
+                  f"{g(a['cells_per_position_latent_alt']):>11} "
+                  f"{a['latent_alt_pct']:>+7.1f}% "
+                  f"{g(b['cells_per_position']):>11} "
+                  f"{g(b['cells_per_position_latent_alt']):>11} "
+                  f"{b['latent_alt_pct']:>+7.1f}%")
+        print("\n  the cache itself, on ONE layer segment at the full prefix: the "
+              "key side in the")
+        print("  channel component, the value side in the key grid, and the "
+              "boundary trees that")
+        print("  hand both on.  `of segment` is their share of that segment's "
+              "committed cells.")
+        print(f"  {'model':<18} {'C':>7} {'form':<13} {'keys':>10} {'values':>10} "
+              f"{'boundary':>11} {'total':>11} {'of segment':>11} {'segment':>11}")
+        for r in lat_rows:
+            for ctx in CONTEXTS:
+                for form in la.FORMS:
+                    lt = r["contexts"][ctx]["latent_term"][form]
+                    mark = "*" if form == r["contexts"][ctx]["latent"] else " "
+                    print(f"  {r['name']:<18} {ctx:>7,} {form + mark:<13} "
+                          f"{g(lt['keys']):>10} {g(lt['values']):>10} "
+                          f"{g(lt['boundary']):>11} {g(lt['total']):>11} "
+                          f"{lt['share_of_fresh']:>10.2%} {g(lt['fresh']):>11}")
+        print("  * the form the row records.")
+        bnd = priced_card["per_ctx"][4096]["boundaries"]
+        bname = next(b for b in ("loop", "loop_secs", "whole wall", *bnd) if b in bnd)
+        rate = usd.get(priced_card["card"])
+        print(f"\n  what that is worth on the priced card, at the {bname} boundary"
+              + (f" and ${rate:.2f}/GPU-h:" if rate else ":"))
+        at = f"cards@{target:g}"
+        print(f"  {'model':<18} " + " ".join(
+            f"{h:>12}" for h in ("C=4K $/Mpos", "other way", at, "other way",
+                                 "C=16K $/Mpos", "other way", at, "other way")))
+        for r in lat_rows:
+            cells = []
+            for ctx in CONTEXTS:
+                m = r["contexts"][ctx]["cards"].get(priced_card["card"], {}).get(bname)
+                cells += ([m["usd_per_mposition"], m["usd_per_mposition_latent_alt"],
+                           m["cards_for_target"], m["cards_for_target_latent_alt"]]
+                          if m else [None] * 4)
+            print(f"  {r['name']:<18} "
+                  + " ".join(f"{x:>12,.0f}" if isinstance(x, (int, float)) else f"{'n/a':>12}"
+                             for x in cells))
+        print("  What is NOT counted either way: a selection over the cache, a "
+              "paged cache, and")
+        print("  the top-k the mixture side needs, which section (2b)'s assumption "
+              "block states.")
+        print("  What the two forms do not move at all is the weight trace: the "
+              "preprocessed")
+        print("  column is the same number in both, because the two are the same "
+              "weights applied")
+        print("  in a different order.")
 
     for n_card, cardname in enumerate(sorted(cards, key=lambda c: c != priced_card["card"])):
         card = cards[cardname]
@@ -3749,13 +4140,21 @@ def main(argv=None):
         def order(rows, key):
             return [n for n, _ in sorted(rows, key=key, reverse=True)]
         cardname = next(iter(priced[0]["contexts"][4096]["cards"]))
-        oa = order([(r["name"], po[r["name"]]) for r in priced if r["name"] in po],
+        # the ordering is compared over the rows BOTH runs carry: a run that
+        # prices a shape the other refused has a longer list, and a longer list
+        # is not a row that moved
+        both = [r for r in priced if r["name"] in po]
+        oa = order([(r["name"], po[r["name"]]) for r in both],
                    lambda kv: kv[1]["contexts"]["4096"]["cards"][cardname]["commit"][rate])
-        ob = order([(r["name"], r) for r in priced],
+        ob = order([(r["name"], r) for r in both],
                    lambda kv: kv[1]["contexts"][4096]["cards"][cardname]["commit"][rate])
         changed = [f"{n} {a}->{b}" for n, a, b in moved if a != b]
         print(f"  ordering by {cardname} commit {rate} at C=4K: "
-              f"{'UNCHANGED' if oa == ob else 'CHANGED'}")
+              f"{'UNCHANGED' if oa == ob else 'CHANGED'}"
+              f" ({len(both)} row(s) in both runs)")
+        added = [r["name"] for r in priced if r["name"] not in po]
+        if added:
+            print("  priced here and not there: " + ", ".join(added))
         print("  cards-at-target changes: " + (", ".join(changed) if changed else "none"))
 
     # --- what a driver may record --------------------------------------------
