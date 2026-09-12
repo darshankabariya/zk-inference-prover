@@ -2036,8 +2036,8 @@ def cells_inputs():
     the preprocessed column still charges."""
     if CELLS != "exact":
         return read_from_constants()
-    pre = [e["key"] for n, e in cm.PROVENANCE.items()
-           if n == "weight_freivalds_preprocessed_cells_per_weight" and e["key"]]
+    pre = [e["key"] for e in cm.PROVENANCE.values()
+           if e["key"] == "model_constants.weight_freivalds_preprocessed_cells_per_weight"]
     return sorted(set(pre + assumption_keys()))
 
 
