@@ -104,11 +104,10 @@ for a component and change the proof, not the statement.
 Every digest below was taken after the binding work of 2026-09-03 to 2026-09-06
 and the sound defaults of 2026-09-07; the shapes whose requantize seam scales by
 a bf16 value were read again on 2026-09-11, when the scale table stopped
-wrapping -- every one of them but the full-size reference, which no run has
-proved since 2026-09-08 and whose own rows say what that costs. The
-preprocessed trace is two committed trees (a shape tree whose root the verifier
-derives from the public parameters, and a model tree whose root is compared with
-the published model commitment).
+wrapping, and the full-size reference on 2026-09-13, at a commit on `main` and
+from a dump that run names. The preprocessed trace is two committed trees (a
+shape tree whose root the verifier derives from the public parameters, and a
+model tree whose root is compared with the published model commitment).
 
 **The scale table stopped wrapping (issue #143).** `bf16::from_f64` wrote
 `e + 127` into the 8-bit exponent field whatever `e` was, so a value below
@@ -230,45 +229,48 @@ RAYON_NUM_THREADS=16 zk-prover compose --round even --numbits 9 --z-hi-bits 7 \
 
 | proof | digest (first 16 hex) | dump (first 16 hex) | recorded at | recorded |
 |---|---|---|---|---|
-| Llama-3.1-8B layer 16, `S = 512`, `C = 16384` | `05580c4a4b766666` | not recorded | `16b75db`, 2026-09-08 | both backends; no skip in effect, every edge bound, no kernel fallback; `zk-results` run `2026-09-08-reference-digest-plain-h100` |
+| Llama-3.1-8B layer 16, `S = 512`, `C = 16384` | `c5c75572ca078b6c` | `1fb845bc19955bd8` | `6589471`, 2026-09-13 | both backends; no skip in effect, every edge bound, no kernel fallback; `zk-results` run `2026-09-13-reference-digest-plain-h100` |
 
-**Where the record lives, and what it is not.** The row is the one recorded run
-that proved this segment, and the run is the record: `zk-results` run
-`2026-09-08-reference-digest-plain-h100`, whose `manifest.json` names the
+**Where the record lives.** The row is the recorded run that proved this
+segment, and the run is the record: `zk-results` run
+`2026-09-13-reference-digest-plain-h100`, whose `manifest.json` names the
 commit, the command, both backends and the binding table, and whose
-`full-cuda.json` and `full-simd.json` carry the digest itself. Nothing in this
-repository re-derives it.
+`full-cuda.json` and `full-simd.json` carry the digest itself, the dump digest
+beside it. Nothing in this repository re-derives it.
 
-**This is not a digest the current commit proves.** Two things stand between the
-row and the rule the digest gate states above, and neither is fixed by writing a
-number down. The commit is `16b75db`, the head of pull request 107, which was
-rebased before it merged: `main` carries that change under another id, the
-commit the proof was made at is reachable as `refs/pull/107/head` and nowhere
-on `main`, and the run reports the tree as dirty, so what was built was that
-commit plus edits nothing names. And the scale table stopped wrapping on
-2026-09-11, after it. This segment is proved with no skip in effect, so it
-carries the residual-stream components and with them a bf16-scaled requantize
-seam, and the shape root moved under it exactly as it moved under the synthetic
-shapes that carry one -- which were re-proved that day and this one was not. So
-the row says what was proved and where it is written down, and a reader who
-proves this segment at `main` today should expect a number no run has recorded
-rather than this one.
+**What the commit column means here.** `6589471` is a commit on `main`, and the
+reference backend proved this segment from a tree holding that commit and
+nothing else. The CUDA backend's build is the same commit with the generated
+kernel store installed into the vendored library, which is how a device build is
+made at all; the run records that tree as dirty for it, and the two backends
+prove the same bytes, which is what "both backends" in the row says.
 
-**The row is a function of the dump as well as of the commit.** The digest above
-replaces `25741d12f315aae7`, recorded on 2026-09-07, which reproduces nowhere.
-No prover commit is behind that move: the same command at the commit that row
-named proves the same number as the commit this one names, and what moved
-between the two measurements is the dump the proof was made from (issue #130).
-The most likely part of it is the attention calibration, which is computed once
-per host and which nothing pinned. So the dump column says `not recorded`: the
-run behind this row named the commit, the command and the proof, and about the
-dump it named nothing, which is why "the same command at this commit" is not yet
-a check a reader can make. Every run now names the dump it proved on --
-`provenance.dump_sha256`, the roll-up over the per-array digests the dump's
-manifest lists, beside the digest of the calibration that dump was quantized
-under -- and re-recording the row from a run that carries both, at a commit on
-`main`, is the card job issue #130 keeps open. The predecessor row below is in
-the same position and cannot leave it: no host holds that dump.
+**What moved since 2026-09-08.** The digest above replaces `05580c4a4b766666`,
+proved at `16b75db`, the head of pull request 107, which was rebased before it
+merged: `main` carries that change under another id and the commit that proof
+was made at is reachable as `refs/pull/107/head` and nowhere on `main`. The
+number moved for the reason the synthetic shapes moved on 2026-09-11. This
+segment is proved with no skip in effect, so it carries the residual-stream
+components and with them a bf16-scaled requantize seam, and the scale table
+preprocessed under its shape root stopped wrapping (issue #143); those shapes
+were re-proved that day and this one was not. Nothing about the shape moved with
+it: the segment commits 2,583,414,208 cells over an interaction tree 5,600
+columns wide at both measurements, and the serialized proof went from
+170,620,431 to 169,277,485 bytes.
+
+**The row is a function of the dump as well as of the commit.** The digest
+`05580c4a4b766666` had itself replaced `25741d12f315aae7`, recorded on
+2026-09-07, and no prover commit was behind that move: the same command at the
+commit the one row named proves the same number as the commit the other named,
+and what moved between those two measurements is the dump the proof was made
+from (issue #130). The most likely part of it is the attention calibration,
+which is computed once per host and which nothing pinned. Neither row named a
+dump, which is why "the same command at this commit" was not a check a reader
+could make. This row is: the dump column is `provenance.dump_sha256`, the
+roll-up over the per-array digests the dump's own manifest lists, and the run
+carries the digest of the attention calibration that dump was quantized under
+beside it. The predecessor row below cannot leave the position those two were
+in: no host holds that dump.
 
 The dump carries its own diagonal block and the residual-stream columns, so
 every binding gadget the defaults switch on is stated on it and the proof
@@ -300,9 +302,11 @@ and no page here should read the row as an extraction recipe: the loader now
 refuses that pairing.
 
 The synthetic cases need nothing but the binary and take seconds each. Older
-values of the 8B digest (`25741d12f315aae7`, recorded on 2026-09-07 from a dump
-no host holds, `6c3fb61524dee2ec` before the binding work, `616d6a80ca9c003f`
-before the tree split) are history and reproduce on no current commit.
+values of the 8B digest (`05580c4a4b766666`, recorded on 2026-09-08 before the
+scale table stopped wrapping, `25741d12f315aae7`, recorded on 2026-09-07 from a
+dump no host holds, `6c3fb61524dee2ec` before the binding work,
+`616d6a80ca9c003f` before the tree split) are history and reproduce on no
+current commit.
 
 ## Configuration in the JSON
 
