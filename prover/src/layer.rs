@@ -2431,6 +2431,16 @@ off it");
         let mut mats = vec![];
         // matmuls in one Freivalds group share one committed input, as the real layer's do
         let mut group_qx: std::collections::HashMap<&str, Vec<i32>> = Default::default();
+        // Issue #192: `ZK_SYNTHETIC_V_SCALE_BINADES=n` is the width, in binades, of
+        // the window the `v` matmul's per-channel weight-scale exponent is drawn from
+        // where `v` is on the chain gadget.  The default is 3 -- the narrow draw the
+        // fold arm below already takes, for the reason it gives there -- so a driver
+        // that states nothing gets the narrow one, and a driver that wants the old
+        // 20-binade window states it and the run records what it was built at.
+        let v_binades: u32 = std::env::var("ZK_SYNTHETIC_V_SCALE_BINADES")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+        assert!(v_binades > 0,
+                "ZK_SYNTHETIC_V_SCALE_BINADES is a window width and must be at least 1");
         for (name, var) in mat_variants(&cfg.layout) {
             let (ni, no) = if name == "down" { (n_out, n_in) } else { (n_in, n_out) };
             // B7b (README 26): `ZK_SYNTHETIC_DIMS=q:3584x3584,k:3584x512,...` sets a
@@ -2505,6 +2515,26 @@ off it");
                 m.jv2 = m.sw.iter()
                     .map(|(_, ew)| (gc + rng.random_range(0..2) - 134 + *ew as i64) as i32)
                     .collect();
+            }
+            // Issue #192: the same narrowing, for the same reason, on the gadget
+            // `--layout b10` puts `v` on.  The chain's per-channel scale is `sw[c]`,
+            // `jv` is `pow2_scale` over this matmul's dequantize output and so carries
+            // that spread, and the attention output's `e` is `jv - jo` -- so a
+            // 20-binade draw comes straight back as the width of `ao_rem`: at the 70B
+            // width it read 35 bits against the field wall `ao_q_bits + ao_rem_bits
+            // <= 30`, and no flag may state a narrower attention output than the
+            // witness needs.  A real checkpoint's per-channel V scales span two to
+            // five binades; a synthetic weight scale is arbitrary, and what matters is
+            // that it is stated.  Nothing with `v` off the chain reaches this arm, and
+            // no recorded synthetic run puts it there.
+            if name == "v" && var == DeqVariant::Chain {
+                let m = mats.last_mut().unwrap();
+                m.sw = (0..no)
+                    .map(|_| (rng.random_range(0..128), 110 + rng.random_range(0..v_binades)))
+                    .collect();
+                eprintln!("synthetic layer: v is on the chain, so its weight scale is drawn \
+from a {v_binades}-binade window (ZK_SYNTHETIC_V_SCALE_BINADES) -- that spread is the width of \
+the attention output's remainder");
             }
         }
         // attnout from the key tiles, with scales that keep the quotient inside int8
