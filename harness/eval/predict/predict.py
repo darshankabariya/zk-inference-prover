@@ -197,6 +197,35 @@ COUNTED = {
             "result of counting a layout, not evidence of a fit: nothing here is "
             "fitted to it, and the same code reproduces all 84 recorded 8B segments "
             "to the cell without ever having seen this shape.")),
+    # zk-results #93.  The one counted registration here whose segments are not
+    # dumps: what is measured against it is a SYNTHETIC layer segment at this
+    # width, built by the prover's own generator, so there is no witness of the
+    # model to read fields off and the fields are stated instead.  Which of them
+    # is a flag the prover takes verbatim, which is the generator's own and
+    # which is the assumption is in the fields file's `stated_from` and travels
+    # into this document with it.
+    "Llama-3.1-70B": dict(
+        utc_date="2026-09-13", by="zk-results #93, the 70B campaign (desk lane)",
+        driver="tools/drivers/register-70b.sh (zk-results), which passes `--cells "
+               "exact`, the stated fields file and the block length, and "
+               "tools/drivers/predict-70b.sh, which proves ONE synthetic layer "
+               "segment at this width per context with these flags -- not the "
+               "model's layers, and not a weight of it",
+        disclosure=(
+            "Nothing at this width has been proved, counted or measured, so no "
+            "segment of this registration is anything but blind. What the "
+            "registration assumes, and what the measurement therefore tests, is "
+            "two things and they are not the same thing. The first is the count "
+            "itself: the trace layout at this shape, which is the same code that "
+            "reproduces all 84 recorded 8B segments to the cell. The second is the "
+            "attention output's measured windows -- the divisor's range and the "
+            "accumulator's two limbs -- which no flag pins and which a synthetic "
+            "segment only settles when it is built; they are stated here at the "
+            "values the same generator produced at the 8B attention width, and a "
+            "run that produces others is a run at other fields and not a miss of "
+            "the count. The master exponent table and the normalisation window are "
+            "not in that second group: the driver passes both and the prover takes "
+            "both verbatim.")),
 }
 
 
@@ -240,19 +269,38 @@ def counted_standing(name, fields):
            f"refused to write that dump, so no witness of it exists and no proof "
            f"of it will. Every per-token figure here is over the segments this "
            f"file names and not over the stack. ")
+    # A synthetic segment has no dump, so the sentence above would be false of
+    # it in every clause: there is no witness set, nothing was extracted, and no
+    # digest names anything.  What the registration is made from is a block of
+    # fields somebody stated, and the file says which of them the prover takes
+    # verbatim and which are the assumption.
+    if fields.get("synthetic"):
+        what = (f"What does exist, and what this registration is made from, is a "
+                f"STATED block of fields for a segment the prover BUILDS: "
+                f"{len(rows)} synthetic segments of one token block at "
+                f"C={ctx:,}, spec {spec[0]}, every one of them the same segment, "
+                f"because a synthetic stack at one width has one. No weight of "
+                f"this model is read anywhere, no dump of it exists and no digest "
+                f"of one is in this document. The block is in "
+                f"`frozen_inputs.witness_fields` and `stated_from` beside it says "
+                f"of each field whether the prover takes it from the driver's own "
+                f"flag, whether it is a property of the generator, or whether it "
+                f"is the value a recorded synthetic segment of the same generator "
+                f"carried -- which is the assumption this registration makes. ")
+    else:
+        what = (f"What does exist, and what this registration is made from, is the "
+                f"extracted witness set: {len(rows)} layer dumps of one token "
+                f"block at C={ctx:,}, spec {spec[0]}, whose per-layer digests are "
+                f"in `frozen_inputs.witness_fields`. A dump is not a measurement: "
+                f"every field read off it is a property of the forward pass and is "
+                f"fixed before any proof is built. ")
     return dict(
         utc_date=rec["utc_date"], by=rec["by"], driver=rec["driver"],
         layers_counted=sorted(int(k) for k in fields["layers"]),
         layers_absent=absent,
         no_measurement_exists=(
             f"NO accepted proof and NO measured cell count of {model[0]} exists in "
-            f"either repository or on any host. What does exist, and what this "
-            f"registration is made from, is the extracted witness set: "
-            f"{len(rows)} layer dumps of one token block at C={ctx:,}, spec "
-            f"{spec[0]}, whose per-layer digests are in "
-            f"`frozen_inputs.witness_fields`. A dump is not a measurement: every "
-            f"field read off it is a property of the forward pass and is fixed "
-            f"before any proof is built. " + gap
+            f"either repository or on any host. " + what + gap
             + rec.get("disclosure", "No total at this shape was visible when this "
                                     "registration was made.")))
 
@@ -1067,7 +1115,7 @@ BRACKET = dict(
 )
 
 
-def registered_statement(names=E4_SHAPES, cells="fitted"):
+def registered_statement(names=E4_SHAPES, cells="fitted", block=S):
     """What the registered key tile integers price, said in the document itself.
 
     Four settings and the driver flags they correspond to, so that a reader of
@@ -1078,9 +1126,18 @@ def registered_statement(names=E4_SHAPES, cells="fitted"):
     The flags are the same set for every selection -- the five reductions and the
     diagonal block -- and the driver that proves them is not, so the driver is
     read from the selection's own record rather than named once here.
+
+    `block` is the run's own `--block`, and it is in the statement exactly when
+    it is not the 512 every recorded run proves: the registered quantity is per
+    decoded token at a (shape, block, context), a segment over a shorter block
+    is a different segment, and a document that did not say which one it counted
+    would be comparable with a run it does not describe.  Said only where it
+    moves, so that every registration made before this flag existed is the
+    document it was, key for key.
     """
     return dict(
         STATEMENT,
+        **({} if block == S else dict(block=block)),
         driver=(counted_record(names[0])["driver"] if cells == "exact"
                 else REGISTERED[tuple(names)]["driver"]),
         driver_flags="--diagonal-block --gkr-key-tiles --gkr-dequant "
@@ -1151,7 +1208,7 @@ def canonical(block):
     return json.dumps(block, sort_keys=True, separators=(",", ":")).encode()
 
 
-def build(names=E4_SHAPES, cells="fitted", fields=None):
+def build(names=E4_SHAPES, cells="fitted", fields=None, block=S):
     """The registration's `shapes` block, one entry per shape in `names`.
 
     The selection is an argument and not `SHAPES` itself: this document is a
@@ -1161,7 +1218,15 @@ def build(names=E4_SHAPES, cells="fitted", fields=None):
     Under `--cells exact` the entry carries one row per layer segment -- the
     fields it was counted at, its count and its bound -- and the fields file is
     the shape's own, so only a shape whose dumps it names can be counted.  A
-    shape it does not name is priced by nothing rather than assumed."""
+    shape it does not name is priced by nothing rather than assumed.
+
+    `block` is how many decoded tokens one segment covers, 512 everywhere it is
+    not said otherwise.  It is an argument because a shape whose segment does
+    not fit the card at 512 is measured at a shorter block, and then the
+    registration has to be counted at the block the run will prove: the cells of
+    a segment are not linear in it -- the key tile family's diagonal block goes
+    with the square of it and the prefix's tiles with the ratio -- so a
+    registration at another block is a registration of another segment."""
     reg = {}
     ref8b_cells = ref8b()
     for name in names:
@@ -1182,19 +1247,32 @@ def build(names=E4_SHAPES, cells="fitted", fields=None):
                 # prefix, and a number under a heading that assumed they did not
                 # is worse than no number
                 entry.setdefault("contexts_not_registered", {})[str(ctx)] = (
+                    f"the fields these segments are counted at are stated for "
+                    f"C={fields_context(fields):,}, and this document registers only "
+                    f"the context they are stated for: the attention output's "
+                    f"divisor range and the master exponent table both grow with "
+                    f"the prefix, and no synthetic segment at another context has "
+                    f"been built for anyone to state them from"
+                    if fields.get("synthetic") else
                     f"the fields these segments are counted at were read off dumps "
                     f"at C={fields_context(fields):,}, and this document registers "
                     f"only the context its witnesses were extracted at")
                 continue
-            p = predict(cfg, ctx, cells=cells, fields=fields)
+            if ctx % block:
+                raise SystemExit(
+                    f"--block {block}: C={ctx:,} is not a multiple of it, so the "
+                    f"prefix is not tiled into blocks of it and the segment this "
+                    f"would count is one no run proves")
+            p = predict(cfg, ctx, seq=block, cells=cells, fields=fields)
             # caveat 1: what the refuted `p * S^2` reading's base slope would do.
             # A counted key tile family has no slope to move: the grids are built
             # and their padding is in the number, so the row below is the witness
             # bound instead, which is the assumption the counted path still makes.
-            hi = (predict(cfg, ctx, base_slope=72.083 / 32.0)
+            hi = (predict(cfg, ctx, seq=block, base_slope=72.083 / 32.0)
                   if cells != "exact" else None)
             ref8 = ref8b_cells[ctx]
             entry["contexts"][str(ctx)] = dict(
+                **({} if block == S else dict(block=block)),
                 cells_per_token_layers=p["total"],
                 cells_per_token_layers_key_tiles=p["key_tiles"],
                 cells_per_token_layers_rest=p["rest"],
@@ -1215,9 +1293,11 @@ def build(names=E4_SHAPES, cells="fitted", fields=None):
                     bound_shift_pct=100.0 * (p["bound_total"] / p["total"] - 1.0),
                     layers_fresh_sum=p["layers_fresh_sum"],
                     components_per_token=p["components"],
-                    key_tiles_closed_form_per_chunk=_closed_form_key_tiles(cfg, ctx),
+                    key_tiles_closed_form_per_chunk=_closed_form_key_tiles(cfg, ctx,
+                                                                          seq=block),
                     head_segment=exact_head_segment(
-                        cfg, ctx, head_groups=(fields.get("knobs") or {}).get("head_groups")),
+                        cfg, ctx, seq=block,
+                        head_groups=(fields.get("knobs") or {}).get("head_groups")),
                     layers=p["layers"])),
             )
         h = head_chunk(cfg)
@@ -1232,12 +1312,14 @@ def _sha(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def provenance(names=E4_SHAPES, cells="fitted", fields=None, fields_path=None):
+def provenance(names=E4_SHAPES, cells="fitted", fields=None, fields_path=None,
+               block=S):
     rec = (counted_standing(names[0], fields) if cells == "exact"
            else REGISTERED[tuple(names)])
     return dict(
         # the same digests the frozen inputs carry, so the two cannot drift
-        inputs_sha256=dict(frozen_inputs(names, cells, fields, fields_path)["code_sha256"],
+        inputs_sha256=dict(frozen_inputs(names, cells, fields, fields_path,
+                                         block)["code_sha256"],
                            **{"constants.json": _sha(constants.path())}),
         registers=list(names),
         registered_utc_date=rec["utc_date"],
@@ -1255,7 +1337,7 @@ def provenance(names=E4_SHAPES, cells="fitted", fields=None, fields_path=None):
             attention_term="the KEY_TILE MODEL (alpha=None). The legacy single-slope "
                            "alpha=4.00 path is NOT used -- section 7.5(e)'s ruling "
                            "is that the paper uses the composed-chunk value.",
-            lookup_batch=B, seq_per_chunk=S,
+            lookup_batch=B, seq_per_chunk=block,
             # said only where it is true, so that a priced registration is the
             # document it was before this flag existed, key for key
             **({} if cells != "exact" else dict(
@@ -1274,7 +1356,7 @@ def provenance(names=E4_SHAPES, cells="fitted", fields=None, fields_path=None):
 
 
 def frozen_inputs(names=E4_SHAPES, cells_mode="fitted", fields=None,
-                  fields_path=None):
+                  fields_path=None, block=S):
     """What this prediction actually read, frozen with it.
 
     It used to be a list of constants keys, and most of them were in no
@@ -1329,7 +1411,7 @@ def frozen_inputs(names=E4_SHAPES, cells_mode="fitted", fields=None,
         constants_file_sha256=_sha(constants.path()),
         n_from_constants=len(from_constants), n_inputs=len(cells),
         not_priced=unpriced,
-        statement=registered_statement(names, cells_mode),
+        statement=registered_statement(names, cells_mode, block),
         reference_chunks={str(c): _seq5_source(c) for c in CONTEXTS},
         code_sha256=code)
     if cells_mode == "exact":
@@ -1368,6 +1450,10 @@ def witness_fields_record(fields, path):
         # count is over fewer segments than the model has layers.
         absent=sorted(fields.get("absent") or ()),
         read_by=fields.get("read_by"),
+        # A stated block says where each of its fields came from; a block read
+        # off dumps does not, and carries no such key rather than a null one.
+        **({} if not fields.get("stated_from") else
+           dict(synthetic=True, stated_from=fields["stated_from"])),
         summary=fields.get("summary"),
         layers={k: dict(wf.witness_block(r), ao_acc_mag=r["ao_acc_mag"],
                         deq_variants=dict(r["deq_variants"]),
@@ -1495,6 +1581,13 @@ def main():
                     help="the per-layer witness-calibrated fields, read off the "
                          "dumps by `harness.eval.predict.witness_fields`. Required "
                          "by --cells exact and refused without it")
+    ap.add_argument("--block", type=int, default=S, choices=(16, 32, 64, 128, 256, 512),
+                    help=f"decoded tokens per segment ({S} by default, which is what "
+                         f"every recorded run proves and what the three recorded "
+                         f"registrations were made at). A shape whose segment does "
+                         f"not fit the card at {S} is measured at a shorter block, "
+                         f"and then this is the block the run will prove: the "
+                         f"registration is counted at it and says so")
     constants.add_argument(ap)
     ap.add_argument("--inputs", metavar="DIR", help="cost-model inputs (read at import; or set ZK_COSTMODEL_INPUTS)")
     inputs.add_arguments(ap)
@@ -1542,7 +1635,7 @@ def main():
               "measured at those shapes, and register that.")
 
     chk = selfcheck()
-    reg = build(names, cells=a.cells, fields=fields)
+    reg = build(names, cells=a.cells, fields=fields, block=a.block)
     anc = anchors(cells=a.cells)
     # The falsifiable content, hashed ALONE.  This must not move when an
     # unrelated constant is edited, or the hash cannot answer the only question
@@ -1554,6 +1647,16 @@ def main():
     br = BRACKET if a.cells != "exact" else dict(
         BRACKET,
         counted_invalidation=(
+            # a stated block names no dump, so what would void the run is the
+            # other half of the same rule: a segment built at other fields
+            "Also void, and for the same reason the clause above is: a run whose "
+            "segments were not built at the fields this registration was counted "
+            "at. `frozen_inputs.witness_fields.layers[<k>]` states each one and "
+            "the run's own `params` block reports what it proved; the two have to "
+            "agree, and where they do not the comparison is against a segment "
+            "this document does not describe. A segment built at other fields is "
+            "reported, never adjusted for."
+            if fields.get("synthetic") else
             "Also void, and for the same reason the clause above is: a run whose "
             "layer segments were not proved from the dumps this registration was "
             "counted from. `frozen_inputs.witness_fields.layers[<k>].dump_sha256` "
@@ -1561,15 +1664,17 @@ def main():
             "two have to be the same 48 dumps. A re-extraction at the same spec is "
             "a different witness and a different registration."))
     content = dict(schema="e4-registration/1",
-                   statement=registered_statement(names, a.cells),
+                   statement=registered_statement(names, a.cells, a.block),
                    shapes=reg, bracket=br,
                    anchors=anc, key_tiles_selfcheck_8b=chk,
                    chunk_identity=chunk_identity(), layer_spread=layer_spread(),
-                   frozen_inputs=frozen_inputs(names, a.cells, fields, fields_path))
+                   frozen_inputs=frozen_inputs(names, a.cells, fields, fields_path,
+                                               a.block))
     content_digest = hashlib.sha256(canonical(content)).hexdigest()
-    block = dict(content, provenance=provenance(names, a.cells, fields, fields_path))
-    digest = hashlib.sha256(canonical(block)).hexdigest()
-    doc = dict(block, prediction_sha256=content_digest,
+    whole = dict(content, provenance=provenance(names, a.cells, fields, fields_path,
+                                                a.block))
+    digest = hashlib.sha256(canonical(whole)).hexdigest()
+    doc = dict(whole, prediction_sha256=content_digest,
                prediction_block_sha256=digest,
                implied_tok_s_secondary=implied_tok_s(reg),
                integrator_notes=integrator_notes(reg),
@@ -1579,10 +1684,13 @@ def main():
     print("E4 -- unfitted-scale prediction, registered before measurement")
     print("=" * 78)
     print()
-    st = registered_statement(names, a.cells)
+    st = registered_statement(names, a.cells, a.block)
     print(f"the cells: {a.cells}" + ("" if a.cells != "exact" else
           f" -- counted from the trace layout, at the witness fields of "
           f"{a.witness_fields} (sha256 {wf.sha256(fields_path)[:12]}...)"))
+    if a.block != S:
+        print(f"the block: {a.block} decoded tokens a segment, not the {S} every "
+              f"recorded run proves -- every integer below is at that block")
     print("the statement priced:", " ".join(f"{k}={STATEMENT[k]}" for k in sorted(STATEMENT)))
     print(f"  the run it is registered against: {st['driver_flags']}")
     print(f"  not priced: {STATEMENT_NOT_PRICED['flags']} -- {STATEMENT_NOT_PRICED['effect']}")

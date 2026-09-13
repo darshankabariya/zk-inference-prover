@@ -416,6 +416,78 @@ def build(base, layers, numbits=9, tight=True, table_bits=0, check_derived=False
     return doc
 
 
+# ------------------------------------------- a segment the prover BUILDS --
+# The `--synthetic` half of this module.  Everything above reads a dump; a
+# synthetic layer segment has none, and a registration made before it is proved
+# still has to state the fields it will be counted at.
+#
+# They are not guesses in the same way for every field, and the difference is
+# the whole value of writing them down:
+#
+#   * `log_table` and `kmax` are the run's own flags.  `params_of` takes
+#     `--table-bits` and `--kmax` verbatim, so a driver that passes them has
+#     stated them and nothing is assumed;
+#   * `ao_q_bits` and the fold's two pins are the generator's.  A synthetic
+#     layer sets `attn_out_bits` to 8 and `--layout b10` delays no matmul, so
+#     the first is 7 and the other two are 0;
+#   * the attention output's measured windows -- `ao_rem_bits`, the two
+#     accumulator limbs, the `jo` and `jv` extremes -- are the witness's own,
+#     and the witness does not exist yet.  Those are the assumption, and the
+#     caller says where each one came from in `stated_from`, which is written
+#     into the file and travels into the registration with it.
+#
+# Every row of the file is the same block, because every segment of a synthetic
+# stack at one width IS the same segment: there is no model behind it for one
+# layer to differ from another in.
+SYNTHETIC_READ_BY = (
+    "not read off a dump: the prover's own fixed-seed synthetic layer generator "
+    "builds this segment (`Layer::synthetic` and `synth_residual_stream` in "
+    "prover/src/layer.rs), so no witness of this shape exists and none was read. "
+    "`stated_from` says where each field came from")
+
+
+def synthetic_fields(stated, layers, head_groups=None):
+    """A fields file for a stack of synthetic segments, from the stated block.
+
+    `stated` is one segment's row -- the shape it is built at, the run knobs and
+    the witness-calibrated fields -- plus an optional `stated_from` naming where
+    each field came from.  Nothing here derives a field: a synthetic segment's
+    are the driver's to state, and this refuses a block that leaves one out
+    rather than filling it in from a dump that does not exist.
+    """
+    stated_from = stated.get("stated_from")
+    row = {k: v for k, v in stated.items() if k != "stated_from"}
+    miss = [f for f in ROW_FIELDS if f not in row]
+    if miss:
+        raise SystemExit(f"the stated block names no {', '.join(miss)}. A synthetic "
+                         f"segment has no dump to read them off, so every field it "
+                         f"is counted at is stated or the file is not written.")
+    miss = [f for f in ("c", "s", "model", "spec") if f not in row]
+    if miss:
+        raise SystemExit(f"the stated block names no {', '.join(miss)}: the context "
+                         f"and the block length are part of what the fields are for, "
+                         f"and the model and the spec are what the registration says "
+                         f"it counted")
+    if row.get("dump_sha256"):
+        raise SystemExit("the stated block names a dump digest, and a synthetic "
+                         "segment has no dump: what is registered is the shape")
+    if layers < 1:
+        raise SystemExit("--layers N: a stack has at least one segment")
+    rows = {str(k): dict(row, layer=k, synthetic=True, dump_sha256=None)
+            for k in range(layers)}
+    doc = dict(schema=SCHEMA, layers=rows,
+               # no segment is missing: nothing refused to write a dump, because
+               # there is no dump
+               absent=[],
+               synthetic=True, read_by=SYNTHETIC_READ_BY, stated_from=stated_from,
+               knobs=dict(numbits=int(row["nmax"] + 1).bit_length() - 1,
+                          tight_table=False, table_bits=int(row["log_table"]),
+                          head_groups=list(head_groups) if head_groups else None),
+               witness_fields=list(WITNESS_FIELDS), row_fields=list(ROW_FIELDS))
+    doc["summary"] = summary(doc)
+    return doc
+
+
 # ------------------------------------------------------------- the self-test --
 def _synthetic(d, nh=4, s=8, c=16, hd=4, fracs=(12.0, 13.0, 15.0, 15.0), seed=7):
     """A dump with the files this module reads and no others.
@@ -552,11 +624,38 @@ def selftest():
             bad.append("a row with no `kmax` was accepted")
         except SystemExit:
             pass
+        # (6) the stated block of a segment that has no dump: the same schema,
+        # every row the same, and a block short of a field refused
+        stated = dict(row, c=4096, s=128, model="a synthetic layer", spec="b10-final",
+                      stated_from={"log_table": "--table-bits"})
+        stated.pop("dump_sha256", None)
+        syn = synthetic_fields(stated, 3, head_groups=[16, 16, 8])
+        with open(f, "w") as fh:
+            json.dump(syn, fh, indent=1, sort_keys=True)
+        back = load(f)
+        if sorted(back["layers"]) != ["0", "1", "2"]:
+            bad.append("the synthetic file does not carry one row per layer")
+        if not all(r["synthetic"] and r["dump_sha256"] is None
+                   for r in back["layers"].values()):
+            bad.append("a synthetic row does not say it is one, or names a dump")
+        if witness_block(back["layers"]["2"]) != witness_block(row):
+            bad.append("the synthetic rows are not the stated block")
+        try:
+            synthetic_fields({k: v for k, v in stated.items() if k != "kmax"}, 1)
+            bad.append("a stated block with no `kmax` was accepted")
+        except SystemExit:
+            pass
+        try:
+            synthetic_fields(dict(stated, dump_sha256="0" * 64), 1)
+            bad.append("a stated block naming a dump digest was accepted")
+        except SystemExit:
+            pass
     for b in bad:
         print("FAIL:", b)
     print(f"witness_fields selftest: {'FAILED' if bad else 'ok'} -- the key max against a "
           f"brute force over every visible entry, the three ways the table size is "
-          f"decided, the per-field rules, and the file's refusals")
+          f"decided, the per-field rules, the file's refusals, and the stated block a "
+          f"synthetic segment is counted at")
     return 1 if bad else 0
 
 
@@ -590,20 +689,40 @@ def main(argv=None):
                          "that is merely missing is still a refusal; this is for "
                          "one the harness itself would not write, and the "
                          "registration counted from the file says so")
+    ap.add_argument("--synthetic", metavar="FILE",
+                    help="the stated block of a segment the prover BUILDS rather "
+                         "than reads: its shape, the run knobs and the witness "
+                         "fields, with a `stated_from` saying where each one came "
+                         "from. Every one of the --layers rows is that block, "
+                         "because a synthetic stack at one width is one segment")
     ap.add_argument("--out", metavar="FILE", help="write the fields file here")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args(argv)
     if a.selftest:
         return selftest()
-    if not a.dir and not a.dump:
-        raise SystemExit("--dir BASE (with --layers N) or --dump DIR")
-    if a.dir and not a.layers:
-        raise SystemExit("--dir needs --layers N")
-    hg = [int(x) for x in a.head_groups.split(",")] if a.head_groups else None
-    ab = [int(x) for x in a.absent.split(",") if x != ""] if a.absent else ()
-    doc = build(a.dir, a.layers, numbits=a.numbits, tight=a.tight,
-                table_bits=a.table_bits, check_derived=a.check_derived, dump=a.dump,
-                head_groups=hg, absent=ab)
+    if a.synthetic:
+        if a.dir or a.dump:
+            raise SystemExit("--synthetic states a segment that has no dump, so "
+                             "there is nothing for --dir or --dump to read")
+        if not a.layers:
+            raise SystemExit("--synthetic needs --layers N: the stack's own length")
+        with open(a.synthetic) as fh:
+            stated = json.load(fh)
+        hg = [int(x) for x in a.head_groups.split(",")] if a.head_groups else None
+        doc = synthetic_fields(stated, a.layers, head_groups=hg)
+        print(f"  {a.layers} synthetic segment(s) at C={doc['layers']['0']['c']:,}, "
+              f"S={doc['layers']['0']['s']}, none of them read off a dump")
+    else:
+        if not a.dir and not a.dump:
+            raise SystemExit("--dir BASE (with --layers N), --dump DIR, or "
+                             "--synthetic FILE")
+        if a.dir and not a.layers:
+            raise SystemExit("--dir needs --layers N")
+        hg = [int(x) for x in a.head_groups.split(",")] if a.head_groups else None
+        ab = [int(x) for x in a.absent.split(",") if x != ""] if a.absent else ()
+        doc = build(a.dir, a.layers, numbits=a.numbits, tight=a.tight,
+                    table_bits=a.table_bits, check_derived=a.check_derived,
+                    dump=a.dump, head_groups=hg, absent=ab)
     print()
     for f, v in doc["summary"].items():
         if v["min"] != v["max"]:
