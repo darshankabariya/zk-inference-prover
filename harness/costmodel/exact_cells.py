@@ -1057,6 +1057,56 @@ def routed_blocks(s, topk, touched):
     return te, slots // te
 
 
+def has_layout(n_out, tokens):
+    """Whether `MatLayout::choose_or_padded` has a layout for `tokens` tokens of
+    `n_out` outputs at all: an exact tiling, or a padded one whose lead is at most
+    a quarter of the rows.  `_mat_layout_padded` asserts where this is false."""
+    for pr in range(1, n_out + 1):
+        if n_out % pr:
+            continue
+        active = tokens * (n_out // pr)
+        log_rows = max(MIN_LOG_ROWS, (active - 1).bit_length())
+        if ((1 << log_rows) - active) / (1 << log_rows) <= 0.25:
+            return True
+    return False
+
+
+def measured_blocks(distribution, widths):
+    """How a routing MEASURED on a real run is laid out, at the output widths a
+    routed expert's matmuls are built at.
+
+    `distribution` is `[(tokens, matmuls), ...]`: that many experts of the block
+    took that many tokens each.  An expert is ONE matmul wherever the layout
+    chooser has a layout for its own token count at every one of those widths --
+    463 tokens of a 4,096-output `down` matmul are 512 rows with 49 of lead, which
+    `choose_padded` takes -- and that is what the prover builds.  Where it has
+    none, the count falls back to the rule `routed_blocks` lays the uniform share
+    out by: the largest power of two at or below the count, then the remainder the
+    same way.  268 tokens are such a count, because a `down` matmul's width has no
+    divisor but a power of two, so its rows are the token count shifted and a lead
+    of 244 in 512 is over the quarter; the count builds 256 + 8 + 4 for it, three
+    matmuls over that expert's own weights.
+
+    Both ends are stated: a single padded matmul commits rows for tokens that are
+    not there, and a split pays the fixed side of a matmul once per block.  The
+    token count is conserved in the split and rounded up in the padding, and how
+    many experts the segment reads is neither: that is `touched`, and it is what
+    the preprocessed trace holds the weights of."""
+    out = {}
+    for tokens, mats in distribution:
+        t, n = int(tokens), int(mats)
+        if t <= 0 or n <= 0:
+            continue
+        if all(has_layout(w, t) for w in widths):
+            out[t] = out.get(t, 0) + n
+            continue
+        while t:
+            b = 1 << (t.bit_length() - 1)
+            out[b] = out.get(b, 0) + n
+            t -= b
+    return sorted(out.items(), reverse=True)
+
+
 def layer_mats(d, nh, nkv, hd, dff, tokens):
     """`compose.rs`, the layer plan's seven matmuls: the three projections, the
     attention output, the two gates and the down projection.  `v` is folded --
@@ -1162,10 +1212,19 @@ def segment_params(kind, d, nh, nkv, hd, dff, vocab, s, c, witness,
     if moe.get("experts", 0) > 1:
         w, n_in = moe["moe_dff"], moe.get("n_in") or d
         dist = moe.get("distribution")
-        if not dist:
+        if dist:
+            # a measured routing is a routing OF THIS BLOCK: the token slots it
+            # spreads are `s` positions' top-k and not another block length's
+            slots = sum(int(t) * int(n) for t, n in dist)
+            if slots != s * moe["topk"]:
+                raise Refused(f"the measured routing spreads {slots} token slots "
+                              f"and a block of {s} positions at top-{moe['topk']} "
+                              f"has {s * moe['topk']}; it was measured at another "
+                              f"block length")
+        else:
             te, blocks = routed_blocks(s, moe["topk"], moe["touched"])
             dist = [(te, blocks)]
-        moe["distribution"] = dist = [(int(t), int(n)) for t, n in dist if t and n]
+        moe["distribution"] = dist = measured_blocks(dist, (w, n_in))
         for j, (te, blocks) in enumerate(dist):
             for name in ("gate", "up"):
                 mats.append(dict(name=name, n_in=n_in, n_out=w, tokens=te,

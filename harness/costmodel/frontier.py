@@ -858,7 +858,11 @@ def moe_assumption_rows(shape, seq=TOKENS, ctx=4096, gkr=STATEMENT_GKR):
     if grp is None:
         return []
     geom = group_geom(shape, grp, seq, ctx)
+    # what the ASSUMPTION is worth, so the row is counted at the uniform routing
+    # even where `--routing FILE` names this shape and the priced row is not
     moe = moe_of(shape, grp, seq)
+    moe = dict(moe, distribution=None,
+               touched=max(1, int(round(moe["touched_expected"]))))
     wit = witness_fields()
 
     def at(**kw):
@@ -1004,10 +1008,16 @@ def moe_of(shape, grp, seq):
     if not grp["routed"]:
         return None
     touched = ec.expected_distinct_experts(grp["routed"], grp["per_token"], seq)
+    dist = ROUTING.get(slug(shape["name"]))
+    # A measured routing says how many experts the block touched, and that is the
+    # count the segment's preprocessed trace holds the weights of (`moe_weights`).
+    # The uniform answer stays beside it as `touched_expected`, which is what the
+    # assumption row prices and what the table prints the measurement against.
     return dict(experts=grp["routed"], topk=grp["per_token"], moe_dff=grp["moe_dff"],
-                n_in=grp["routed_n_in"], touched=max(1, int(round(touched))),
-                touched_expected=touched, router=True,
-                distribution=ROUTING.get(slug(shape["name"])))
+                n_in=grp["routed_n_in"],
+                touched=(sum(int(n) for _, n in dist) if dist
+                         else max(1, int(round(touched)))),
+                touched_expected=touched, router=True, distribution=dist)
 
 
 def group_geom(shape, grp, seq, ctx):
@@ -3572,9 +3582,11 @@ def main(argv=None):
               "as well.")
         for name, v in sorted(moe_rows.items()):
             for k2, d2 in sorted((v.get("counted") or {}).items()):
-                how = (d2["distribution"] if isinstance(d2["distribution"], str)
-                       else "measured")
-                print(f"    {name:<18} {k2}: touches {d2['touched_expected']:.1f} of "
+                uniform = isinstance(d2["distribution"], str)
+                how = d2["distribution"] if uniform else "measured"
+                # the count the segment was built at, which a measurement replaces
+                n = d2["touched_expected"] if uniform else d2["touched"]
+                print(f"    {name:<18} {k2}: touches {n:.1f} of "
                       f"{d2['experts']} experts a block, {how} routing, "
                       f"{d2['shared']} shared, expert width {d2['moe_dff']:,} read "
                       f"at {d2['routed_n_in']:,}")
