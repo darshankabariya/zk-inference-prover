@@ -2912,6 +2912,34 @@ pub fn norm_drift(dir: &str, d: usize, tokens_cap: usize, round: Round, which: &
 // a function of `round` and `kmax` alone, so the check `residual_stream_mult_cols`
 // makes can be exercised without a witness, a plan or a proof.
 
+
+/// The wiring family: the two norms, the two residual adds and the SwiGLU, which
+/// is what threads the residual stream through a layer.
+pub struct ResidualStream;
+
+/// Everything about a wiring run that is not the witness.
+pub struct Cfg {
+    /// what every row computes
+    pub prog: Prog,
+    pub round: Round,
+    pub kmax: u32,
+}
+
+impl crate::gadgets::Gadget for ResidualStream {
+    type Witness = ResidualStreamWitness;
+    type Cfg = Cfg;
+    type Tamper = Tamper;
+    type Outcome = Outcome;
+
+    fn run(w: &ResidualStreamWitness, cfg: &Cfg, bad: Option<Tamper>) -> Outcome {
+        run(w, &cfg.prog, cfg.round, cfg.kmax, bad)
+    }
+
+    fn accepts(o: &Outcome) -> bool {
+        o.accepts()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

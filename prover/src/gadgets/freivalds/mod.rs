@@ -477,3 +477,32 @@ impl FrameworkEval for AttnOutEval {
         eval
     }
 }
+
+/// The `r^T W` check: that a matmul's committed input times the pinned weights
+/// is its committed accumulator.
+pub struct Freivalds;
+
+/// Which of the layer's matmul groups the check is over.
+pub struct Cfg {
+    pub group: String,
+    /// the group's matmuls, as indices into the layer's own list
+    pub mats: Vec<usize>,
+    pub p_target: usize,
+}
+
+impl crate::gadgets::Gadget for Freivalds {
+    type Witness = crate::layer::Layer;
+    type Cfg = Cfg;
+    /// What a Freivalds control corrupts is a weight or an activation of the
+    /// layer it is handed, not a value beside it.
+    type Tamper = ();
+    type Outcome = run::Outcome;
+
+    fn run(l: &crate::layer::Layer, cfg: &Cfg, _bad: Option<()>) -> run::Outcome {
+        run::run(l, &cfg.group, &cfg.mats, cfg.p_target)
+    }
+
+    fn accepts(o: &run::Outcome) -> bool {
+        o.accepts()
+    }
+}

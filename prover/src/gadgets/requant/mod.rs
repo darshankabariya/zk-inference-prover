@@ -1586,3 +1586,30 @@ pub fn check_tables(v: SVariant, samples: usize) -> Value {
     json!({"variant": v.name(), "rq_rows": rq.len(), "rq_tested": tested,
            "rq_mismatch": bad, "scl_rows": scl.len(), "scl_mismatch": sbad})
 }
+
+/// The requantize seam in front of a matmul.
+pub struct Requant;
+
+/// Everything about a seam's own run that is not the witness.
+pub struct Cfg {
+    /// which scale the seam divides by, which is which tables it reads
+    pub variant: SVariant,
+    /// commit the attained maximum beside the seam
+    pub with_max: bool,
+    pub per_row: usize,
+}
+
+impl crate::gadgets::Gadget for Requant {
+    type Witness = RWitness;
+    type Cfg = Cfg;
+    type Tamper = Tamper;
+    type Outcome = Outcome;
+
+    fn run(w: &RWitness, cfg: &Cfg, bad: Option<Tamper>) -> Outcome {
+        run(w, cfg.variant, cfg.with_max, cfg.per_row, bad)
+    }
+
+    fn accepts(o: &Outcome) -> bool {
+        o.accepts()
+    }
+}

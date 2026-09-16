@@ -762,6 +762,32 @@ pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
 
 // ------------------------------------------------------------------- tests ----
 
+
+/// The argmax over the head's output: which token the logits emit.
+pub struct Argmax;
+
+/// Everything about an argmax run that is not the witness.
+pub struct Cfg {
+    /// the weaker statement, which is a control and never a result
+    pub lax: bool,
+    pub per_row: usize,
+}
+
+impl crate::gadgets::Gadget for Argmax {
+    type Witness = AWitness;
+    type Cfg = Cfg;
+    type Tamper = Tamper;
+    type Outcome = Outcome;
+
+    fn run(w: &AWitness, cfg: &Cfg, bad: Option<Tamper>) -> Outcome {
+        run(w, cfg.lax, cfg.per_row, bad).0
+    }
+
+    fn accepts(o: &Outcome) -> bool {
+        o.accepts()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

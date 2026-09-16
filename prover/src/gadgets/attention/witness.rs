@@ -978,7 +978,7 @@ impl Attn {
     /// This and the `off_table` count in `retable` below are the two passes
     /// `--tight-table` makes over every shift a layer holds -- 76 M entries a
     /// chunk at the sequence's sizes, twice -- and they ran serially, in
-    /// `main.rs`'s `tighten_of`, after `Layer::load` had returned. They were
+    /// `cli.rs`'s `tighten_of`, after `Layer::load` had returned. They were
     /// therefore inside `build_secs` and inside no scope, which is most of the
     /// 15 s stream P's split could not attribute (`construct/tighten`, 9.79 s
     /// of a 68.9 s pipelined build; allocation, the term the brief expected,

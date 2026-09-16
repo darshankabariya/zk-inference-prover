@@ -17,3 +17,23 @@ pub mod layout;
 pub mod run;
 pub mod trace;
 pub mod witness;
+
+/// The attention block: the three components over one grid.
+pub struct Attention;
+
+impl crate::gadgets::Gadget for Attention {
+    type Witness = witness::Attn;
+    type Cfg = trace::Cfg;
+    /// What an attention control corrupts is the witness it is handed
+    /// (`witness::Corrupt`), not a value beside it.
+    type Tamper = ();
+    type Outcome = run::Outcome;
+
+    fn run(w: &witness::Attn, cfg: &trace::Cfg, _bad: Option<()>) -> run::Outcome {
+        run::run(w, cfg)
+    }
+
+    fn accepts(o: &run::Outcome) -> bool {
+        o.accepts()
+    }
+}

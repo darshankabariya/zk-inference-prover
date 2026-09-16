@@ -1924,3 +1924,21 @@ pub fn check_tables(kmax: u32, round: Round, samples: usize) -> Value {
 
 /// The ladder, in the order the README's table reads.
 pub const LADDER: [&str; 5] = ["limbs", "round", "pow2", "chain", "int8"];
+
+/// The quantized matmul and the dequantization of its accumulator.
+pub struct Dequant;
+
+impl crate::gadgets::Gadget for Dequant {
+    type Witness = Witness;
+    type Cfg = Spec;
+    type Tamper = Tamper;
+    type Outcome = Outcome;
+
+    fn run(w: &Witness, sp: &Spec, bad: Option<Tamper>) -> Outcome {
+        run(w, sp, bad)
+    }
+
+    fn accepts(o: &Outcome) -> bool {
+        o.accepts()
+    }
+}

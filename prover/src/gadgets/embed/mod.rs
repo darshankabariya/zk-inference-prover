@@ -949,6 +949,31 @@ pub fn price(d: usize, tokens: usize, vocab: usize, target: usize) -> Value {
 
 // ------------------------------------------------------------------- tests ----
 
+
+/// The embedding row: that the layer-0 residual stream is row `tok[t]` of the
+/// pinned embedding matrix.
+pub struct Embed;
+
+/// Everything about an embedding run that is not the witness.
+pub struct Cfg {
+    pub per_row: usize,
+}
+
+impl crate::gadgets::Gadget for Embed {
+    type Witness = EWitness;
+    type Cfg = Cfg;
+    type Tamper = Tamper;
+    type Outcome = Outcome;
+
+    fn run(w: &EWitness, cfg: &Cfg, bad: Option<Tamper>) -> Outcome {
+        run(w, cfg.per_row, bad).0
+    }
+
+    fn accepts(o: &Outcome) -> bool {
+        o.accepts()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
