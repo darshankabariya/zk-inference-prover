@@ -450,7 +450,7 @@ REF8B_SOURCE = "<--artifacts>/seq5/seq_c{4096,16384}_L16.json (result.point.cell
 # and never left to default.
 #
 # `kv_boundary` and `bind` are not flags: the prover derives `kv_boundary =
-# diagonal_block && !head` (`main.rs`) and publishes the root-equality claims
+# diagonal_block && !head` (`cli.rs`) and publishes the root-equality claims
 # whenever the segment has `Params::rope`, which every layer segment does.
 # --------------------------------------------------------------------------
 STATEMENT = dict(diagonal_block=True, kv_boundary=True, bind=True, gkr=True)
@@ -463,7 +463,7 @@ STATEMENT_REDUCTIONS = cm.REDUCTIONS
 
 STATEMENT_FLAGS = dict(
     diagonal_block="--diagonal-block",
-    kv_boundary="not a flag: `kv_boundary = diagonal_block && !head` (`main.rs`), "
+    kv_boundary="not a flag: `kv_boundary = diagonal_block && !head` (`cli.rs`), "
                 "so every layer segment of the run has it",
     bind="not a flag: `Params::rope`, which every layer segment has and no "
          "output head does",

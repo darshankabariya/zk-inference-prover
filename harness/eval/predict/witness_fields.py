@@ -25,7 +25,7 @@ own, named where it lives.
 
     field              rule                                        prover source
     ---------------    -----------------------------------------   -------------
-    log_table          without `--tight-table`, the manifest's      main.rs
+    log_table          without `--tight-table`, the manifest's      cli.rs
                        `master_table_bits`.  With it (slack 0),     `tighten_of`,
                        `min(master_table_bits, bits(key_max))`      layer.rs
                        -- `set_master_table` clamps to the size     `set_master_table`,
@@ -41,19 +41,19 @@ own, named where it lives.
                        layer-wide master exponent `F = max frac`.
                        The diagonal block's masked half is not in
                        it: token `t` sees key `c` only for `c <= t`.
-    kmax               `min(max_m kmax_worst_case(m), KMAX_SOUND)`  main.rs
+    kmax               `min(max_m kmax_worst_case(m), KMAX_SOUND)`  cli.rs
                        over the dump's own accumulators; 21 is      `params_of`,
                        `bf16::KMAX_SOUND`.                          bf16.rs
     ao_rem_bits        `bits(2 * max_{h,t} (zz[h,t] <<              layer.rs
                        max(jo[t] - min_j jv[h,j], 0)))`, which is   `rem_bits`
                        what `harness/witness/shapes.py` already
                        reads for the chunk loop's pin.
-    ao_q_bits          `attn_out_bits - 1`, the fold's target       main.rs
+    ao_q_bits          `attn_out_bits - 1`, the fold's target       cli.rs
                        width minus one.                             `params_of`
     ao_jo_min/max      the extremes of `jo.i32`, the attention      manifest
     ao_jv_min/max      output's per-token and per-channel scale     `attn_out`
                        exponents.
-    ao_acc_lo_bits     `params_of`'s two limbs of the committed     main.rs
+    ao_acc_lo_bits     `params_of`'s two limbs of the committed     cli.rs
     ao_acc_hi_bits     accumulator: the low one takes what it can   `params_of`
     ao_acc_mag         up to 16, the high one the rest, neither     `split`,
                        below `MIN_LOG_ROWS`.  The offset form       shapes.py
@@ -61,13 +61,13 @@ own, named where it lives.
                        form `acc_bits`, and the prover takes the
                        magnitude form exactly when
                        `1 + lo + hi + e_hi > 31` refuses the other.
-    fold_rem_bits      the dump's own fold pins, zero on a dump     main.rs
+    fold_rem_bits      the dump's own fold pins, zero on a dump     cli.rs
     fold_alpha         whose `deq_variants` names no `fold`         `params_of`,
                        matmul -- which every `b10-final` dump is.   layer.rs
                                                                     `fold_pins`
     k_bits, q_bits     the manifest's `qk_bits`, which is where     attn_witness.rs
                        `Attn::load_from` reads them.                `load_from`
-    nmax, z_min        `2^numbits - 1`: the run's `--numbits`, a    main.rs
+    nmax, z_min        `2^numbits - 1`: the run's `--numbits`, a    cli.rs
                        command-line knob and not a witness field,   `src_of`
                        so it is an argument here and recorded as
                        a knob.

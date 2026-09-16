@@ -240,7 +240,7 @@ pub struct Params {
     /// `1 + lo + hi + max(e_hi, 0) <= 31` window admits one more bit of
     /// exponent.  It costs one committed column per slot and no lookup.
     ///
-    /// It is **off unless the offset form does not fit** (`main.rs`'s
+    /// It is **off unless the offset form does not fit** (`cli.rs`'s
     /// `params_of`), so every chunk that composed before this field existed
     /// keeps the offset form, its columns, its proof and its digest; the field
     /// is skipped in the serialization then, so the statement bytes do not move
