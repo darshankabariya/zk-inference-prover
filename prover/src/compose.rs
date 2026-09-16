@@ -40,7 +40,7 @@ use stwo::core::verifier::verify;
 use stwo::core::vcs::blake2_merkle::Blake2sM31MerkleChannel;
 use stwo::prover::ComponentProver;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
+use stwo_constraint_framework::{FrameworkComponent, FrameworkEval, TraceLocationAllocator};
 
 use crate::gadgets::attention::air::{
     ChanEval, ExpRel, ExpTableEval, KeyEval, Offsets, Powers, RangeRel, RowEval, key_tile_id, id,
@@ -3011,117 +3011,57 @@ pub struct BuiltComponents {
     pub has_rows: Vec<bool>,
 }
 
+/// One pass over a chunk's components, in commit order.
+///
+/// A trait and not an iterator because what a caller wants from a component is
+/// not always the component: two of the three want the *evaluator*, and the
+/// generated kernel a chunk dispatches is looked up by that evaluator's own
+/// type, which an iterator would have had to erase.
+pub trait Visit<'a> {
+    /// One component of `family`, with its evaluator still typed.
+    fn at<E: FrameworkEval + Sync>(&mut self, family: &'static str,
+                                   c: &'a FrameworkComponent<E>);
+    /// The GKR link binding: a component that carries no evaluator of its own,
+    /// so it has no generated kernel and the callers that want one skip it.
+    fn tie(&mut self, _family: &'static str, _t: &'a crate::gkrlink::LinkTie) {}
+}
+
 impl BuiltComponents {
     /// B7a milestone 3: lower every component's constraints to its kernel
     /// parameter blob once, in parallel, before proving. The fork calls
     /// `cuda_eval_blob()` from its sequential component loop, which put the
     /// whole lowering on one thread with the device idle (16.5's 85 ms).
-    /// One list of closures over the *evals*, then one `par_iter`.
+    ///
+    /// The list has to be *every* dispatched component, which is why it is
+    /// `walk`'s list and no longer a copy of it. `cudagen`'s blob cache is keyed
+    /// by the evaluator's address, and the pipelined loop proves 32 chunks in
+    /// one process, so a chunk's components are dropped and the next chunk's are
+    /// allocated over the same addresses: a component that *is* prewarmed
+    /// overwrites the stale entry before anything dispatches it, and one that is
+    /// not can only read what another family left there. That is a correctness
+    /// matter and not a speed one, and stream X measured it -- while five of
+    /// thirteen families were missing from the copy this kept, two runs in nine
+    /// stopped at one of the generated dispatch's own checks. Fail-stop, so no
+    /// digest was ever reached from it, which is why every completed run has
+    /// reproduced stream O's references.
     ///
     /// Not `par_iter` over the components: `FrameworkComponent` holds an
     /// `InfoEvaluator`, whose `ArithmeticCounter` is an `Rc<RefCell<..>>`
     /// (`constraint-framework/src/info.rs:166`), so a component is `!Sync` and
-    /// cannot cross a thread boundary. The evals themselves are plain data.
+    /// cannot cross a thread boundary. The evaluators themselves are plain data.
     pub fn prewarm_blobs(&self) {
         use rayon::prelude::*;
-        let mut tasks: Vec<Box<dyn Fn() + Send + Sync + '_>> = Vec::new();
-        for c in &self.chans {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        struct Tasks<'a>(Vec<Box<dyn Fn() + Send + Sync + 'a>>);
+        impl<'a> Visit<'a> for Tasks<'a> {
+            fn at<E: FrameworkEval + Sync>(&mut self, _f: &'static str,
+                                           c: &'a FrameworkComponent<E>) {
+                let e = &c.eval;
+                self.0.push(Box::new(move || crate::cudagen::prewarm(e)));
+            }
         }
-        for c in &self.keys {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.rows {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.mats {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.freivalds {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.tables {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        let ao = &self.ao.eval;
-        tasks.push(Box::new(move || crate::cudagen::prewarm(ao)));
-        let exp_t = &self.exp_t.eval;
-        tasks.push(Box::new(move || crate::cudagen::prewarm(exp_t)));
-        // B11 stream X: the list has to be *every* dispatched component, and
-        // until here it was eight of thirteen -- the residual stream, the residual stream's tables,
-        // the links and the argmax were dispatched but never prewarmed.
-        //
-        // That is a correctness matter and not a speed one. `cudagen`'s blob
-        // cache is keyed by the evaluator's address, on the stated assumption
-        // that an address is "stable for as long as its `FrameworkComponent`
-        // lives -- i.e. for the whole proof". The pipelined loop proves 32
-        // chunks in one process, so a chunk's components are dropped and the
-        // next chunk's are allocated over the same addresses. A component that
-        // *is* prewarmed overwrites the stale entry at its address before
-        // anything dispatches it, so it is safe by construction; a component
-        // that is dispatched but never prewarmed can only ever *read* an entry
-        // some other family wrote in an earlier chunk. Measured at C=4096 over
-        // the 32-chunk pipelined loop, that happened twice in nine runs, and
-        // both times in exactly one of the five families missing here:
-        // `evaluate_zk_residual_stream_eval: scalar count` and
-        // `evaluate_zk_residual_stream_table_eval: shape id out of range`. Both are the
-        // generated dispatch's own checks, so the failure is fail-stop and
-        // cannot reach a digest -- which is why every completed run has always
-        // reproduced stream O's references. Completing the list restores the
-        // invariant the cache's comment already claims.
-        for c in &self.residual_stream {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.gtables {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.links {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        if let Some(c) = &self.argmax {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        // B11 stream BB: and the embedding gadget's two, in the commit that
-        // adds them. The list has to be every dispatched component: a
-        // component that is dispatched but never prewarmed can only read the
-        // blob some other family left at its address, and the pipelined loop
-        // reuses addresses across chunks. Stream X measured that failing twice
-        // in nine runs on the five families that were missing then.
-        if let Some(c) = &self.embed {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        // stream II: and the requantize seams'.  Every dispatched component has
-        // to be here: the blob cache is keyed by the evaluator's address and the
-        // pipelined loop reuses addresses across chunks, so a component that is
-        // dispatched but never prewarmed can only read what another family left.
-        for c in &self.rqs {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.quants {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.rq_tabs {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        if let Some(c) = &self.emb_tab {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        tasks.par_iter().for_each(|t| t());
+        let mut t = Tasks(vec![]);
+        self.walk(&mut t);
+        t.0.par_iter().for_each(|f| f());
     }
 
     /// Stream EE (open item 21): the fingerprint every dispatched component
@@ -3179,124 +3119,134 @@ impl BuiltComponents {
         if let Some(c) = &self.emb_tab {
             v.push(crate::cudagen::fp_row(&c.eval, "emb_table"));
         }
+        // The order above is `cudaemit`'s and not `walk`'s, but the *list* is
+        // the same one: a family added to `walk` and forgotten here would be a
+        // row `cudaemit` printed and this did not.
+        assert_eq!(v.len(), self.n_evals(),
+                   "the fingerprint report covers {} of this chunk's {} components \
+                    that carry an evaluator",
+                   v.len(), self.n_evals());
         v
     }
 
-    pub fn provers(&self) -> Vec<&dyn ComponentProver<crate::common::PcsB>> {
-        let mut v: Vec<&dyn ComponentProver<_>> = vec![];
+    /// Every component of this chunk, in commit order.
+    ///
+    /// That order is the one `build_components` handed the trace location
+    /// allocator, so it is the order the proof is over and therefore the order
+    /// the digest is of: a family inserted anywhere but the end moves every
+    /// digest after it.
+    ///
+    /// It is written here once because it was written four times. `provers`,
+    /// `components` and `prewarm_blobs` each carried a copy, and stream X
+    /// measured what one missing family in one copy costs -- five of thirteen
+    /// were missing from `prewarm_blobs`, and two runs in nine stopped at
+    /// `evaluate_zk_residual_stream_eval: scalar count` off a blob another chunk
+    /// had left at the same address. `fp_rows` keeps an order of its own,
+    /// because `cudaemit`'s report is compared against it line for line, but it
+    /// checks its length against this list rather than trusting it.
+    pub fn walk<'a, V: Visit<'a>>(&'a self, v: &mut V) {
         let mut ri = 0usize;
         for b in 0..self.chans.len() {
-            v.push(&self.chans[b]);
-            v.push(&self.keys[b]);
+            v.at("chan", &self.chans[b]);
+            v.at("key", &self.keys[b]);
+            // stream AA: a key tile without the group's per-token component rides
+            // on the group's first, so `rows` is shorter than `chans`
             if self.has_rows[b] {
-                v.push(&self.rows[ri]);
+                v.at("row", &self.rows[ri]);
                 ri += 1;
             }
         }
-        for l in &self.links {
-            v.push(l);
+        for c in &self.links {
+            v.at("link", c);
         }
         if let Some(t) = &self.link_binding {
-            v.push(t);
+            v.tie("link_binding", t);
         }
-        v.push(&self.ao);
-        for m in &self.mats {
-            v.push(m);
+        v.at("attnout", &self.ao);
+        for c in &self.mats {
+            v.at("dequant", c);
         }
-        for w in &self.freivalds {
-            v.push(w);
+        for c in &self.freivalds {
+            v.at("freivalds", c);
         }
-        for g in &self.residual_stream {
-            v.push(g);
+        for c in &self.residual_stream {
+            v.at("residual_stream", c);
         }
-        v.push(&self.exp_t);
-        for t in &self.tables {
-            v.push(t);
+        v.at("exp_table", &self.exp_t);
+        for c in &self.tables {
+            v.at("table", c);
         }
-        for t in &self.gtables {
-            v.push(t);
+        for c in &self.gtables {
+            v.at("gtable", c);
         }
         // stream II: the requantize seams and their tables, before the two ends,
-        // as `Plan::pre_ids` has them
-        for r in &self.rqs {
-            v.push(r);
+        // as `Plan::pre_ids` has them; stream NN puts the quantize components
+        // between the seams and the shared tables, where their selectors are too
+        for c in &self.rqs {
+            v.at("requant", c);
         }
-        // stream NN: the quantize components sit between the seams and their shared
-        // tables, which is where `Plan::pre_ids` puts their selectors too
-        for r in &self.quants {
-            v.push(r);
+        for c in &self.quants {
+            v.at("quant", c);
         }
-        for t in &self.rq_tabs {
-            v.push(t);
+        for c in &self.rq_tabs {
+            v.at("rqtable", c);
         }
-        if let Some(a) = &self.argmax {
-            v.push(a);
+        if let Some(c) = &self.argmax {
+            v.at("argmax", c);
         }
-        if let Some(e) = &self.embed {
-            v.push(e);
+        if let Some(c) = &self.embed {
+            v.at("embed", c);
         }
-        if let Some(e) = &self.emb_tab {
-            v.push(e);
+        if let Some(c) = &self.emb_tab {
+            v.at("emb_table", c);
         }
-        v
     }
-    pub fn components(&self) -> Vec<&dyn Component> {
-        let mut v: Vec<&dyn Component> = vec![];
-        let mut ri = 0usize;
-        for b in 0..self.chans.len() {
-            v.push(&self.chans[b]);
-            v.push(&self.keys[b]);
-            if self.has_rows[b] {
-                v.push(&self.rows[ri]);
-                ri += 1;
+
+    /// How many of `walk`'s components carry an evaluator: all of them but the
+    /// link binding.
+    pub fn n_evals(&self) -> usize {
+        struct Count(usize);
+        impl<'a> Visit<'a> for Count {
+            fn at<E: FrameworkEval + Sync>(&mut self, _f: &'static str,
+                                           _c: &'a FrameworkComponent<E>) {
+                self.0 += 1;
             }
         }
-        for l in &self.links {
-            v.push(l);
+        let mut c = Count(0);
+        self.walk(&mut c);
+        c.0
+    }
+
+    pub fn provers(&self) -> Vec<&dyn ComponentProver<crate::common::PcsB>> {
+        struct Take<'a>(Vec<&'a dyn ComponentProver<crate::common::PcsB>>);
+        impl<'a> Visit<'a> for Take<'a> {
+            fn at<E: FrameworkEval + Sync>(&mut self, _f: &'static str,
+                                           c: &'a FrameworkComponent<E>) {
+                self.0.push(c);
+            }
+            fn tie(&mut self, _f: &'static str, t: &'a crate::gkrlink::LinkTie) {
+                self.0.push(t);
+            }
         }
-        if let Some(t) = &self.link_binding {
-            v.push(t);
+        let mut t = Take(vec![]);
+        self.walk(&mut t);
+        t.0
+    }
+
+    pub fn components(&self) -> Vec<&dyn Component> {
+        struct Take<'a>(Vec<&'a dyn Component>);
+        impl<'a> Visit<'a> for Take<'a> {
+            fn at<E: FrameworkEval + Sync>(&mut self, _f: &'static str,
+                                           c: &'a FrameworkComponent<E>) {
+                self.0.push(c);
+            }
+            fn tie(&mut self, _f: &'static str, t: &'a crate::gkrlink::LinkTie) {
+                self.0.push(t);
+            }
         }
-        v.push(&self.ao);
-        for m in &self.mats {
-            v.push(m);
-        }
-        for w in &self.freivalds {
-            v.push(w);
-        }
-        for g in &self.residual_stream {
-            v.push(g);
-        }
-        v.push(&self.exp_t);
-        for t in &self.tables {
-            v.push(t);
-        }
-        for t in &self.gtables {
-            v.push(t);
-        }
-        // stream II: the requantize seams and their tables, before the two ends,
-        // as `Plan::pre_ids` has them
-        for r in &self.rqs {
-            v.push(r);
-        }
-        // stream NN: the quantize components sit between the seams and their shared
-        // tables, which is where `Plan::pre_ids` puts their selectors too
-        for r in &self.quants {
-            v.push(r);
-        }
-        for t in &self.rq_tabs {
-            v.push(t);
-        }
-        if let Some(a) = &self.argmax {
-            v.push(a);
-        }
-        if let Some(e) = &self.embed {
-            v.push(e);
-        }
-        if let Some(e) = &self.emb_tab {
-            v.push(e);
-        }
-        v
+        let mut t = Take(vec![]);
+        self.walk(&mut t);
+        t.0
     }
 }
 

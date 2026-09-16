@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::{
     bf16, boundary, chunks, common, compose, cudagen, device, exprprobe, gkr_key_tile, layer,
-    logup_run, plogup, shaperoot, spans, util, witread,
+    logup_run, plogup, shaperoot, spans, witread,
 };
 use crate::gadgets::{argmax, attention, dequant, embed, freivalds, requant, residual_stream, rope};
 

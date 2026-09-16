@@ -1204,6 +1204,10 @@ mod tests {
             assert_eq!(after - before, n as u64,
                        "prewarm_blobs covers {} of {n} dispatched components (embed={embed})",
                        after - before);
+            // and the fingerprint report, which keeps `cudaemit`'s order but
+            // must keep this list: `n_evals` is `walk`'s entries less the link
+            // binding, which carries no evaluator and no kernel.
+            assert_eq!(b.fp_rows().len(), b.n_evals());
             if embed {
                 // the two are the last two components, so their interaction and
                 // base spans are after every family that already exists
