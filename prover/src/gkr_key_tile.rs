@@ -1727,14 +1727,14 @@ pub fn cmd(args: &[String]) {
     // load; on the cuda build the sumcheck below must not be billed for it.
     crate::util::touch_device();
 
-    let src = crate::src_of(args);
+    let src = crate::cli::src_of(args);
     let sh = Shape {
-        s: crate::arg_scalar(args, "--s", 64usize),
-        c: crate::arg_scalar(args, "--ctx", 256usize),
-        hd: crate::arg_scalar(args, "--hd", 64usize),
-        insts: crate::arg_scalar(args, "--insts", 4usize),
+        s: crate::cli::arg_scalar(args, "--s", 64usize),
+        c: crate::cli::arg_scalar(args, "--ctx", 256usize),
+        hd: crate::cli::arg_scalar(args, "--hd", 64usize),
+        insts: crate::cli::arg_scalar(args, "--insts", 4usize),
     };
-    let cfg = crate::attn_cfg(args, crate::arg_scalar(args, "--scores-per-row", 16usize));
+    let cfg = crate::cli::attn_cfg(args, crate::cli::arg_scalar(args, "--scores-per-row", 16usize));
     let a = Attn::get(&src, sh, Variant::IntExp);
     let l = crate::attn_trace::Layouts::choose(&sh, &cfg);
     let widths = crate::attn_trace::range_widths(&a, &cfg);

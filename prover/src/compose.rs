@@ -8289,7 +8289,7 @@ impl Plan {
         if self.argmax_mat().is_some() && p.prove_argmax_lax {
             // the lax form is a weaker statement, not the same one proved
             // cheaply, so the edge it states is not the edge this table means by
-            // bound: see `crate::ARGMAX_LAX`
+            // bound: see `crate::cli::ARGMAX_LAX`
             put(16, Unbound, Some("the argmax is proved in its lax form \
                                    (--unsound-argmax-lax): it binds the emitted token to a \
                                    maximum of the logits and not to the lowest-indexed \
@@ -8440,8 +8440,8 @@ mod tests {
 
     /// The binding table, on the synthetic shapes the digest gate pins.
     fn params_of(args: &[String]) -> Params {
-        let (l, vname) = crate::layer_of(args);
-        crate::params_of(&l, args, &vname)
+        let (l, vname) = crate::cli::layer_of(args);
+        crate::cli::params_of(&l, args, &vname)
     }
 
     fn plan_of(args: Vec<String>) -> Plan {

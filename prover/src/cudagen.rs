@@ -1434,12 +1434,12 @@ fn check_component<E: FrameworkEval>(
 /// `cudacheck`: lower every component of the composed proof and prove the
 /// lowering right against `CpuDomainEvaluator`, with no CUDA in the loop.
 pub fn cmd(args: &[String]) {
-    let (l, vname) = crate::layer_of(args);
-    let params = crate::params_of(&l, args, &vname);
+    let (l, vname) = crate::cli::layer_of(args);
+    let params = crate::cli::params_of(&l, args, &vname);
     let plan = crate::compose::Plan::new(&params);
-    let log_size: u32 = crate::arg_scalar(args, "--check-log-size", 8u32);
-    let max_rows: usize = crate::arg_scalar(args, "--check-rows", 512usize);
-    let muts: Vec<String> = crate::arg_strs(
+    let log_size: u32 = crate::cli::arg_scalar(args, "--check-log-size", 8u32);
+    let max_rows: usize = crate::cli::arg_scalar(args, "--check-rows", 512usize);
+    let muts: Vec<String> = crate::cli::arg_strs(
         args,
         "--mutate",
         &["none", "relbyname", "colshift", "constorder", "packwidth"],
@@ -2391,8 +2391,8 @@ pub fn fp_write(path: &str, side: &str, source: &str, rows: &[serde_json::Value]
 static FP_OUT: std::sync::OnceLock<Option<(String, bool)>> = std::sync::OnceLock::new();
 
 pub fn fp_out_set(args: &[String]) {
-    let _ = FP_OUT.set(crate::arg_str(args, "--fp-out")
-                       .map(|p| (p, crate::flag(args, "--fp-only"))));
+    let _ = FP_OUT.set(crate::cli::arg_str(args, "--fp-out")
+                       .map(|p| (p, crate::cli::flag(args, "--fp-only"))));
 }
 
 pub fn fp_out() -> Option<&'static (String, bool)> {
@@ -2521,15 +2521,15 @@ fn fill_binding_claims(plan: &crate::compose::Plan, claims: &mut crate::compose:
 /// `cudaemit`: lower every component, group by fingerprint into kernels, and
 /// write the generated CUDA, the Rust shape table and a manifest.
 pub fn emit_cmd(args: &[String]) {
-    let (source, params) = crate::plan_params(args);
+    let (source, params) = crate::cli::plan_params(args);
     let plan = crate::compose::Plan::new(&params);
-    let out = crate::arg_str(args, "--out").expect("cudaemit needs --out DIR");
+    let out = crate::cli::arg_str(args, "--out").expect("cudaemit needs --out DIR");
     let launch = Launch {
-        block: crate::arg_scalar(args, "--block", 256u32),
-        min_blocks: crate::arg_scalar(args, "--min-blocks", 2u32),
+        block: crate::cli::arg_scalar(args, "--block", 256u32),
+        min_blocks: crate::cli::arg_scalar(args, "--min-blocks", 2u32),
     };
     // B11 stream K: instruction count above which a shape's kernel is split.
-    let seg_cap: usize = crate::arg_scalar(args, "--seg-cap", 3000usize);
+    let seg_cap: usize = crate::cli::arg_scalar(args, "--seg-cap", 3000usize);
     let dir = std::path::Path::new(&out);
     std::fs::create_dir_all(dir).unwrap();
 
@@ -2845,7 +2845,7 @@ pub fn emit_cmd(args: &[String]) {
     }
     // Stream EE (open item 21): the set this line installs, for the pre-run
     // comparison against what a chunk on the same line asks for.
-    if let Some(p) = crate::arg_str(args, "--fp-out") {
+    if let Some(p) = crate::cli::arg_str(args, "--fp-out") {
         fp_write(&p, "cudaemit", &source, &rows);
     }
     crate::util::emit("cudaemit", man);
@@ -3023,8 +3023,8 @@ fn logup_report<E: FrameworkEval>(name: String, c: &FrameworkComponent<E>) -> Va
 /// or out of the interaction trace, either of which a generation kernel would
 /// have to handle specially.
 pub fn logup_cmd(args: &[String]) {
-    let (l, vname) = crate::layer_of(args);
-    let params = crate::params_of(&l, args, &vname);
+    let (l, vname) = crate::cli::layer_of(args);
+    let params = crate::cli::params_of(&l, args, &vname);
     let plan = crate::compose::Plan::new(&params);
 
     let mut ch = stwo::core::channel::Blake2sM31Channel::default();
@@ -3425,8 +3425,8 @@ pub fn emit_frac_family(family: &str, shapes: &[(String, Ir)], launch: Launch, s
 /// end to end beats four ported and none verified, and `logupcheck` already
 /// says the other ten are reachable by the same route.
 pub fn gen_emit_cmd(args: &[String]) {
-    let (l, vname) = crate::layer_of(args);
-    let mut params = crate::params_of(&l, args, &vname);
+    let (l, vname) = crate::cli::layer_of(args);
+    let mut params = crate::cli::params_of(&l, args, &vname);
     // The GKR backend asks for no fraction shape of its own.  `gkr_key_tile::feed_site`
     // lowers the *un-ablated* evaluator -- stream S's lever 1 makes a flag-on
     // evaluator emit no lookups at all -- so every fingerprint the feed looks
@@ -3448,15 +3448,15 @@ pub fn gen_emit_cmd(args: &[String]) {
     }
     let params = params;
     let plan = crate::compose::Plan::new(&params);
-    let out = crate::arg_str(args, "--out").expect("genemit needs --out DIR");
+    let out = crate::cli::arg_str(args, "--out").expect("genemit needs --out DIR");
     let want: Vec<String> =
-        crate::arg_strs(args, "--families", &["zk_dequant_eval"]);
+        crate::cli::arg_strs(args, "--families", &["zk_dequant_eval"]);
     let launch = Launch {
-        block: crate::arg_scalar(args, "--block", 256u32),
-        min_blocks: crate::arg_scalar(args, "--min-blocks", 2u32),
+        block: crate::cli::arg_scalar(args, "--block", 256u32),
+        min_blocks: crate::cli::arg_scalar(args, "--min-blocks", 2u32),
     };
     // B11 stream K: instruction count above which a shape's kernel is split.
-    let seg_cap: usize = crate::arg_scalar(args, "--seg-cap", 3000usize);
+    let seg_cap: usize = crate::cli::arg_scalar(args, "--seg-cap", 3000usize);
     let dir = std::path::Path::new(&out);
     std::fs::create_dir_all(dir).unwrap();
 

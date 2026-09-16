@@ -7,7 +7,9 @@
 //! laid out `(look, row)` and every look's numerator and denominator *affine*
 //! in committed columns, an instance's input-layer claim collapses to
 //!
+//! ```text
 //!     claim + (verifier scalar)  =  sum_c w_c * col_c~(x_row)
+//! ```
 //!
 //! -- one affine combination of committed-column MLEs at the row part of the
 //! OOD point, with weights `w_c` the verifier computes from `ood_point` and

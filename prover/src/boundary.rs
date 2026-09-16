@@ -772,21 +772,21 @@ fn at(args: &[String], dir: &str) -> Vec<String> {
 fn prove_one(tag: &str, name: &str, dir: &str, out_dir: &str, args: &[String],
              tamper: &crate::compose::ProverTamper) -> Chunk {
     let a = at(args, dir);
-    let (l, vname) = crate::layer_of(&a);
-    let mut params = crate::params_of(&l, &a, &vname);
+    let (l, vname) = crate::cli::layer_of(&a);
+    let mut params = crate::cli::params_of(&l, &a, &vname);
     params.layer_boundary = true;
     assert!(params.residual_stream.is_some(),
             "{name}: the boundary is the wiring family's two stream bindings, and this \
              witness has no residual-stream columns -- extract it with `extract.py --residual-stream`");
     let out = crate::compose::prove_layer(&l, &params, tamper);
-    let ser = crate::compose_ser(&out);
+    let ser = crate::cli::compose_ser(&out);
     std::fs::create_dir_all(out_dir).expect("the output directory");
     let fixed_path = format!("{out_dir}/{tag}.fixed.json");
     let proof_path = format!("{out_dir}/{tag}.proof.json");
     std::fs::write(&fixed_path, &ser.fixed_bytes).expect("writing the statement");
     std::fs::write(&proof_path, ser.proof_bytes.clone().unwrap_or_default())
         .expect("writing the proof");
-    let (json, accepts) = crate::compose_finish(out, ser, &params);
+    let (json, accepts) = crate::cli::compose_finish(out, ser, &params);
     Chunk { name: name.into(), dir: dir.into(), fixed_path, proof_path, accepts, json }
 }
 
@@ -823,13 +823,13 @@ fn chunk_json(c: &Chunk) -> Value {
 /// boundary column tampered *alone*, because that is the equality constraint's
 /// job.
 pub fn cmd(args: &[String]) {
-    let a_dir = crate::arg_str(args, "--a").expect("boundary needs --a <witness dir>");
-    let b_dir = crate::arg_str(args, "--b").expect("boundary needs --b <witness dir>");
-    let c_dir = crate::arg_str(args, "--c");
-    let a_out = crate::arg_str(args, "--a-out-tampered");
-    let b_in = crate::arg_str(args, "--b-in-tampered");
-    let binding_cell: usize = crate::arg_scalar(args, "--binding-cell", 4321usize);
-    let out_dir = crate::arg_str(args, "--out-dir").unwrap_or_else(|| "bounds_out".into());
+    let a_dir = crate::cli::arg_str(args, "--a").expect("boundary needs --a <witness dir>");
+    let b_dir = crate::cli::arg_str(args, "--b").expect("boundary needs --b <witness dir>");
+    let c_dir = crate::cli::arg_str(args, "--c");
+    let a_out = crate::cli::arg_str(args, "--a-out-tampered");
+    let b_in = crate::cli::arg_str(args, "--b-in-tampered");
+    let binding_cell: usize = crate::cli::arg_scalar(args, "--binding-cell", 4321usize);
+    let out_dir = crate::cli::arg_str(args, "--out-dir").unwrap_or_else(|| "bounds_out".into());
     let none = crate::compose::ProverTamper::default();
 
     // the honest pair
@@ -948,8 +948,8 @@ pub fn cmd(args: &[String]) {
 /// chunk's input and the last chunk's output are unchecked inputs under the v1
 /// ground rule, so a sequence of `n` chunks has `n - 1` links.
 pub fn chain_cmd(args: &[String]) {
-    let dir = crate::arg_str(args, "--dir").expect("boundary-chain needs --dir <serialized dir>");
-    let tags = crate::arg_str(args, "--tags")
+    let dir = crate::cli::arg_str(args, "--dir").expect("boundary-chain needs --dir <serialized dir>");
+    let tags = crate::cli::arg_str(args, "--tags")
         .expect("boundary-chain needs --tags <t0,t1,...> in sequence order");
     let tags: Vec<String> = tags.split(',').map(|t| t.trim().to_string()).collect();
     assert!(tags.len() >= 2, "a chain wants at least two chunks");
@@ -964,7 +964,7 @@ pub fn chain_cmd(args: &[String]) {
     // statements, and this only turns "the pair is on the other axis" from a
     // thing the reader has to notice into a failed link.  A gate that names its
     // axis cannot silently pass by having been given the wrong tags.
-    let want_axis = crate::arg_str(args, "--axis").map(|a| {
+    let want_axis = crate::cli::arg_str(args, "--axis").map(|a| {
         Axis::parse(&a).unwrap_or_else(|| panic!("--axis takes `layer` or `token`, got `{a}`"))
     });
 
@@ -1065,7 +1065,7 @@ pub fn plan_tags(path: &str) -> Vec<String> {
         .enumerate()
         .map(|(i, l)| {
             let a: Vec<String> = l.split_whitespace().map(str::to_string).collect();
-            crate::arg_str(&a, "--ser-tag").unwrap_or_else(|| format!("chunk{i}"))
+            crate::cli::arg_str(&a, "--ser-tag").unwrap_or_else(|| format!("chunk{i}"))
         })
         .collect()
 }
@@ -1155,15 +1155,15 @@ struct GridChunk {
 /// `verify_composed` (`Fixed::tok_in`, `Fixed::tok_out`), so this comparison is
 /// between two proved values and not between two declarations.
 pub fn grid_cmd(args: &[String]) {
-    let dir = crate::arg_str(args, "--dir").expect("boundary-grid needs --dir <serialized dir>");
-    let allow_gaps = crate::flag(args, "--allow-gaps");
-    let expect_layer: Option<usize> = crate::arg_str(args, "--expect-layer-links")
+    let dir = crate::cli::arg_str(args, "--dir").expect("boundary-grid needs --dir <serialized dir>");
+    let allow_gaps = crate::cli::flag(args, "--allow-gaps");
+    let expect_layer: Option<usize> = crate::cli::arg_str(args, "--expect-layer-links")
         .map(|s| s.parse().expect("--expect-layer-links takes a count"));
-    let expect_token: Option<usize> = crate::arg_str(args, "--expect-token-links")
+    let expect_token: Option<usize> = crate::cli::arg_str(args, "--expect-token-links")
         .map(|s| s.parse().expect("--expect-token-links takes a count"));
     // stream KK: the verifier, and the one declaration the sequence still needs
-    let verify = crate::flag(args, "--verify");
-    let prompt: Option<Vec<u32>> = crate::arg_str(args, "--prompt").map(|f| {
+    let verify = crate::cli::flag(args, "--verify");
+    let prompt: Option<Vec<u32>> = crate::cli::arg_str(args, "--prompt").map(|f| {
         let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--prompt {f}: {e}"));
         let v: Value = serde_json::from_slice(&bytes)
             .unwrap_or_else(|e| panic!("--prompt {f}: not JSON: {e}"));
@@ -1178,7 +1178,7 @@ pub fn grid_cmd(args: &[String]) {
     // `pre_root` is a declaration; deriving it from the model for that chunk's
     // shape is LL's, and this is where the derived table is compared.  The file
     // is a list of `{"layer": k, "c": n, "pre_root": "..."}`.
-    let expect_pre: Option<Vec<Value>> = crate::arg_str(args, "--expect-pre-roots").map(|f| {
+    let expect_pre: Option<Vec<Value>> = crate::cli::arg_str(args, "--expect-pre-roots").map(|f| {
         let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--expect-pre-roots {f}: {e}"));
         let v: Value = serde_json::from_slice(&bytes)
             .unwrap_or_else(|e| panic!("--expect-pre-roots {f}: not JSON: {e}"));
@@ -1193,7 +1193,7 @@ pub fn grid_cmd(args: &[String]) {
     // this is where it is pinned to a model.  The file is `zk-prover model-roots`'
     // own manifest; the same file serves `--expect-pre-roots`, whose rows are
     // keyed by `(layer, c)` because the shape moves with the chunk.
-    let expect_model: Option<Vec<Value>> = crate::arg_str(args, "--expect-model-roots").map(|f| {
+    let expect_model: Option<Vec<Value>> = crate::cli::arg_str(args, "--expect-model-roots").map(|f| {
         let bytes = std::fs::read(&f).unwrap_or_else(|e| panic!("--expect-model-roots {f}: {e}"));
         let v: Value = serde_json::from_slice(&bytes)
             .unwrap_or_else(|e| panic!("--expect-model-roots {f}: not JSON: {e}"));
@@ -1220,9 +1220,9 @@ pub fn grid_cmd(args: &[String]) {
     }
 
     // ---- which tags make up the grid ------------------------------------
-    let (source, tags): (Value, Vec<String>) = if let Some(p) = crate::arg_str(args, "--plan") {
+    let (source, tags): (Value, Vec<String>) = if let Some(p) = crate::cli::arg_str(args, "--plan") {
         (json!({"plan": p}), plan_tags(&p))
-    } else if let Some(t) = crate::arg_str(args, "--tags") {
+    } else if let Some(t) = crate::cli::arg_str(args, "--tags") {
         (json!({"tags": t}), t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
     } else {
         let mut v: Vec<String> = std::fs::read_dir(&dir)
@@ -1850,12 +1850,12 @@ pub fn grid_cmd(args: &[String]) {
             "verify": verify,
             "verified": {"run": verified.len(), "accepted": n_accept,
                          "all": all_verified, "chunks": verified},
-            "tokens": {"prompt_file": crate::arg_str(args, "--prompt"),
+            "tokens": {"prompt_file": crate::cli::arg_str(args, "--prompt"),
                        "prompt_len": prompt.as_ref().map(|p| p.len()),
                        "blocks_with_ids": ids.len(), "blocks_with_emits": emits.len(),
                        "prompt_positions": n_prompt, "generated_positions": n_generated,
                        "mismatches": bad_ids, "unbacked": unbacked, "all": ids_ok},
-            "pre_roots": {"table": crate::arg_str(args, "--expect-pre-roots"),
+            "pre_roots": {"table": crate::cli::arg_str(args, "--expect-pre-roots"),
                           "chunks": pre_rows},
             // Issue #95: the shape root the verifier derived per chunk, and
             // what the derivations cost.  `matched` counts chunks whose
@@ -1864,12 +1864,12 @@ pub fn grid_cmd(args: &[String]) {
             // `verified` with both roots beside it.  `derivations` is how many
             // shape trees this run built -- one per `(layer, shape)`, not one
             // per chunk, which is what makes the check affordable.
-            "shape_roots": {"calibration": crate::arg_str(args, "--verify-calibration"),
+            "shape_roots": {"calibration": crate::cli::arg_str(args, "--verify-calibration"),
                             "matched": n_shape, "of": verified.len(),
                             "secs": shape_secs,
                             "derivations": crate::shaperoot::derivations_json()},
             // stream PP: the published model commitment, per chunk
-            "model_roots": {"manifest": crate::arg_str(args, "--expect-model-roots"),
+            "model_roots": {"manifest": crate::cli::arg_str(args, "--expect-model-roots"),
                             "chunks": model_rows},
             // stream LL: which model each chunk named, and how many the grid
             // used -- one is the only answer that is not a failure

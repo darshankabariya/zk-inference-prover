@@ -183,7 +183,7 @@ fn noted() -> &'static Mutex<Option<(String, Value)>> {
 /// line. Without the directory the cache is off and every run derives its own
 /// root, exactly as it did before this existed.
 pub fn configure(args: &[String]) {
-    let dir = crate::arg_str(args, "--shape-cache").map(PathBuf::from);
+    let dir = crate::cli::arg_str(args, "--shape-cache").map(PathBuf::from);
     if let Some(d) = dir.as_ref() {
         // A tamper bends a committed shape column after the statement and the
         // calibration are fixed, so the root moves under a key that does not.
@@ -200,7 +200,7 @@ pub fn configure(args: &[String]) {
     let _ = VERIFY.set(args.iter().any(|a| a == "--shape-cache-verify"));
     // Issue #95: and the verifier's own input, read here because it is read
     // once per process and because every command that verifies takes it.
-    let _ = VERIFY_CALIB.set(crate::arg_str(args, "--verify-calibration").map(|f| {
+    let _ = VERIFY_CALIB.set(crate::cli::arg_str(args, "--verify-calibration").map(|f| {
         let bytes = std::fs::read(&f)
             .unwrap_or_else(|e| panic!("--verify-calibration {f}: {e}"));
         let v: Value = serde_json::from_slice(&bytes)

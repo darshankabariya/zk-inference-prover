@@ -120,7 +120,7 @@ pub struct ArgmaxEval {
     pub per_row: usize,
     /// prove only "the token attains the maximum" -- B6.5's argument unchanged,
     /// and a weaker statement than the default: see this module's header and
-    /// `crate::ARGMAX_LAX`
+    /// `crate::cli::ARGMAX_LAX`
     pub lax: bool,
     pub rk: RangeRel,
     /// stream E: the binding to the head's dequant output, when this component is

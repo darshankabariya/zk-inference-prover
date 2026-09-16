@@ -5642,7 +5642,7 @@ mod tests {
              "--synth-residual-stream", "--diagonal-block", "--s", "128", "--ctx", "128"]
                 .iter().chain(extra.iter()).map(|s| s.to_string()).collect()
         };
-        let (l, _) = crate::layer_of(&argv(&["--table-bits", "23"]));
+        let (l, _) = crate::cli::layer_of(&argv(&["--table-bits", "23"]));
         let bits = l.key_tiles[0].log_table;
         assert!(bits > 22, "the exp table is still clamped to 2^{bits} rows");
         assert!(l.key_tiles.iter().all(|b| b.log_table == bits), "key tiles disagree on table rows");
@@ -5670,7 +5670,7 @@ mod tests {
              "--residual-stream-a", "32", "--kmax", "19", "--ao-rem-bits", "22",
              "--synth-residual-stream", "--diagonal-block", "--s", "64", "--ctx", "64"]
             .iter().map(|x| x.to_string()).collect();
-        let (l, _) = crate::layer_of(&argv);
+        let (l, _) = crate::cli::layer_of(&argv);
         let round = bf16::Round::Even;
         let tokens = l.ao.s;
         let dff = l.mats.iter().find(|m| m.name == "gate").unwrap().n_out;

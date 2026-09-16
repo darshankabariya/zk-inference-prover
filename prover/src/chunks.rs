@@ -109,7 +109,7 @@ use serde_json::{Value, json};
 use crate::compose::{self, Params, ProverTamper};
 use crate::layer::Layer;
 use crate::util::emit;
-use crate::{arg_list, arg_scalar, arg_str};
+use crate::cli::{arg_list, arg_scalar, arg_str};
 
 /// What determines every cell of the preprocessed tree in this binary: the
 /// layer (its source names its data, witness directory or synthetic seed) and
@@ -136,7 +136,7 @@ fn layers_of(args: &[String]) -> (Vec<Layer>, String) {
             let mut a: Vec<String> = args.to_vec();
             a.push("--witness".into());
             a.push(d.trim().to_string());
-            let (l, v) = crate::layer_of(&a);
+            let (l, v) = crate::cli::layer_of(&a);
             assert!(l.source.contains(d.trim()), "no real layer witness at {d}");
             vname = v;
             out.push(l);
@@ -151,13 +151,13 @@ fn layers_of(args: &[String]) -> (Vec<Layer>, String) {
             let mut a: Vec<String> = args.to_vec();
             a.push("--seed".into());
             a.push(s.to_string());
-            let (l, v) = crate::layer_of(&a);
+            let (l, v) = crate::cli::layer_of(&a);
             vname = v;
             out.push(l);
         }
         return (out, vname);
     }
-    let (l, v) = crate::layer_of(args);
+    let (l, v) = crate::cli::layer_of(args);
     (vec![l], v)
 }
 
@@ -324,8 +324,8 @@ impl Source {
             }
             Source::Plan(specs) => {
                 let s = &specs[k];
-                let (layer, vname) = crate::layer_of(&s.args);
-                let params = crate::params_of(&layer, &s.args, &vname);
+                let (layer, vname) = crate::cli::layer_of(&s.args);
+                let params = crate::cli::params_of(&layer, &s.args, &vname);
                 let key = key_of(&layer, &params, tamper);
                 Built::Own(Box::new(Shape { layer, params, vname, key }))
             }
@@ -448,7 +448,7 @@ struct Row {
     vname: String,
     params: Params,
     out: compose::Composed,
-    ser: crate::Ser,
+    ser: crate::cli::Ser,
     /// the wall of this chunk on its own thread: generate + prove + serialize
     /// (serial), or prove + serialize (pipelined, where generation is elsewhere)
     secs: f64,
@@ -487,9 +487,9 @@ fn model_layer_of(out: &compose::Composed, p: &Params) -> Option<usize> {
 /// `whole_wall` is built from and the one-shot `compose` path this loop is
 /// compared against does its file writing outside that sum as well. Timing it
 /// separately keeps the boundary the same and still says what the write cost.
-fn write_ser(dir: &str, tag: &str, ser: &crate::Ser) {
+fn write_ser(dir: &str, tag: &str, ser: &crate::cli::Ser) {
     let t = Instant::now();
-    crate::ser_write(dir, tag, ser);
+    crate::cli::ser_write(dir, tag, ser);
     crate::util::add_phase("wall/ser_write", t.elapsed().as_secs_f64());
 }
 
@@ -506,9 +506,9 @@ pub fn chunks_cmd(args: &[String]) {
         Some(path) => Source::Plan(plan_of(&path, args)),
         None => {
             let (layers, vname) = layers_of(args);
-            let params = crate::params_of(&layers[0], args, &vname);
+            let params = crate::cli::params_of(&layers[0], args, &vname);
             for l in &layers[1..] {
-                let p2 = crate::params_of(l, args, &vname);
+                let p2 = crate::cli::params_of(l, args, &vname);
                 assert_eq!(
                     serde_json::to_value(&p2).unwrap(),
                     serde_json::to_value(&params).unwrap(),
@@ -569,7 +569,7 @@ pub fn chunks_cmd(args: &[String]) {
             let mem_after_gen = crate::device::mem_used_bytes();
             let out = compose::prove_gen(built.layer(), built.params(), g);
             let mem_after_prove = crate::device::mem_used_bytes();
-            let ser = crate::compose_ser(&out);
+            let ser = crate::cli::compose_ser(&out);
             if let Some(dir) = &ser_dir {
                 write_ser(dir, &src.tag(k), &ser);
             }
@@ -644,7 +644,7 @@ pub fn chunks_cmd(args: &[String]) {
                 let mem_after_gen = crate::device::mem_used_bytes();
                 let out = compose::prove_gen(built.layer(), built.params(), g);
                 let mem_after_prove = crate::device::mem_used_bytes();
-                let ser = crate::compose_ser(&out);
+                let ser = crate::cli::compose_ser(&out);
                 if let Some(dir) = &ser_dir {
                     write_ser(dir, &src.tag(k), &ser);
                 }
@@ -712,7 +712,7 @@ pub fn chunks_cmd(args: &[String]) {
             + r.ser.fixed_bytes.len()
             + r.ser.proof_bytes.as_ref().map_or(0, |b| b.len());
         tags.push(r.tag.clone());
-        let (mut j, accepts) = crate::compose_finish(r.out, r.ser, &r.params);
+        let (mut j, accepts) = crate::cli::compose_finish(r.out, r.ser, &r.params);
         assert!(accepts, "compose-chunks: chunk {} rejected: {j}", r.k);
         assert_eq!(j["ref_mismatch"], 0, "chunk {}: witness disagrees with the f64 reference", r.k);
         assert_eq!(j["off_table"], 0, "chunk {}: off-table values", r.k);

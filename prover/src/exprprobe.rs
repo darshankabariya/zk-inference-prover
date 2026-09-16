@@ -751,8 +751,8 @@ pub fn claims_for(plan: &crate::compose::Plan, seed: u64) -> crate::compose::Cla
 /// Takes the same shape flags as `compose`; runs no trace generation and no
 /// prover.
 pub fn cmd(args: &[String]) {
-    let (l, vname) = crate::layer_of(args);
-    let params = crate::params_of(&l, args, &vname);
+    let (l, vname) = crate::cli::layer_of(args);
+    let params = crate::cli::params_of(&l, args, &vname);
     let plan = crate::compose::Plan::new(&params);
     eprintln!(
         "exprprobe: {} key_tiles={:?} variant={} widths={:?}",

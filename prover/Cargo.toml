@@ -25,6 +25,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["registry", "std"] }
 
 
+[lib]
+# Edition 2024 stops auto-discovering targets once one is named, so the
+# library is declared beside the binary rather than found beside it.
+name = "zk_prover"
+path = "src/lib.rs"
+
 [[bin]]
 name = "zk-prover"
 path = "src/main.rs"
