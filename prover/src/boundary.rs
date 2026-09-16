@@ -51,7 +51,7 @@ use stwo::prover::backend::Column;
 
 use crate::common::{Eval, eval_of};
 use crate::compose::{Fixed, ResidualStreamPlan};
-use crate::residual_stream::{ResidualStreamComponent, BindingKind};
+use crate::gadgets::residual_stream::{ResidualStreamComponent, BindingKind};
 
 /// The multiplier that folds a value's `(sm, ef)` pair into one cell.
 ///
@@ -152,7 +152,7 @@ pub fn cols(component: &ResidualStreamComponent, side: &Side, tamper: Option<usi
             let mut v: Vec<M31> = (0..rows)
                 .map(|m| {
                     let (sm, ef) = vals[m * w + j];
-                    crate::residual_stream::m31_of(sm * PACK + ef)
+                    crate::gadgets::residual_stream::m31_of(sm * PACK + ef)
                 })
                 .collect();
             if let Some(t) = tamper {

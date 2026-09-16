@@ -107,7 +107,7 @@ impl PairRel {
 }
 // one range-relation type across the whole crate, so a composed proof's range
 // tables serve the attention key tiles and the dequant components alike
-pub use crate::attn_air::RangeRel;
+pub use crate::gadgets::attention::air::RangeRel;
 
 pub fn id(s: impl Into<String>) -> PreProcessedColumnId {
     PreProcessedColumnId { id: s.into() }

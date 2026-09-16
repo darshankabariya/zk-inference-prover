@@ -40,9 +40,9 @@ use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, Relation,
                                 RelationEntry, TraceLocationAllocator};
 
-use crate::attn_air::{RangeRel, id, tbl_range};
+use crate::gadgets::attention::air::{RangeRel, id, tbl_range};
 use crate::common::{Eval, Proven, Session, Sums, eval_of, m31_u32, twiddles};
-use crate::dequant::{PairRel, QNZ_COLS, TableEval, TableKind};
+use crate::gadgets::dequant::{PairRel, QNZ_COLS, TableEval, TableKind};
 use crate::plogup;
 
 /// Which of the crate's tables the lookup is against.

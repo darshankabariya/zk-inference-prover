@@ -68,8 +68,8 @@ use stwo::core::fields::m31::M31;
 use stwo::prover::backend::Column as _;
 use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
 
-use crate::attn_trace::{Layouts, m31_of};
-use crate::attn_witness::{Attn, Variant};
+use crate::gadgets::attention::trace::{Layouts, m31_of};
+use crate::gadgets::attention::witness::{Attn, Variant};
 use crate::bf16::{EXP_BIAS, Round};
 use crate::common::Eval;
 use crate::devacc::FGridA;
@@ -576,7 +576,7 @@ pub fn key_tile_dev(a: &Attn, l: &Layouts, want_cols: bool, with_rows: bool) -> 
     // the end of the grid's block and a device key tile is never a diagonal block key tile, so
     // on this side it is slot 8 of the key group and the two lists still line up
     // column for column (`check_run` is what says so).
-    let n_key = 8 + usize::from(crate::attn_air::act_id(0, a.diagonal_block, l.key.g.lead)
+    let n_key = 8 + usize::from(crate::gadgets::attention::air::act_id(0, a.diagonal_block, l.key.g.lead)
                                 .is_some());
     let shapes: &[(u32, FGridA, u32, u32, usize, u32)] = if with_rows {
         &[

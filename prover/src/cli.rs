@@ -9,15 +9,15 @@
 use serde_json::{Value, json};
 
 use crate::{
-    argmax, attn_air, attn_run, attn_trace, attn_witness, bf16, boundary, chunks, common, compose,
-    cudagen, dequant, device, embed, exprprobe, freivalds_run, gkr_key_tile, layer, layout,
-    logup_run, plogup, requant, residual_stream, rope, shaperoot, spans, util, witread,
+    bf16, boundary, chunks, common, compose, cudagen, device, exprprobe, gkr_key_tile, layer,
+    logup_run, plogup, shaperoot, spans, util, witread,
 };
+use crate::gadgets::{argmax, attention, dequant, embed, freivalds, requant, residual_stream, rope};
 
-use crate::attn_witness::{Attn, Corrupt, Src};
+use crate::gadgets::attention::witness::{Attn, Corrupt, Src};
 use crate::bf16::Round;
-use crate::dequant::{Spec, Tamper, Variant, Witness};
-use crate::layout::Shape;
+use crate::gadgets::dequant::{Spec, Tamper, Variant, Witness};
+use crate::gadgets::attention::layout::Shape;
 use crate::util::emit;
 
 /// The value of `key` on a command line: **the last occurrence wins** (issue #30).
@@ -166,9 +166,9 @@ pub fn src_of(args: &[String]) -> Src {
     }
 }
 
-pub fn attn_cfg(args: &[String], grid_target: usize) -> attn_trace::Cfg {
+pub fn attn_cfg(args: &[String], grid_target: usize) -> attention::trace::Cfg {
     let nmax = (1u32 << arg_scalar(args, "--numbits", 8u32)) - 1;
-    attn_trace::Cfg {
+    attention::trace::Cfg {
         chan_target: arg_scalar(args, "--keys-per-row", 128usize),
         grid_target,
         rw: arg_scalar(args, "--tokens-per-row", 16usize),
@@ -320,8 +320,8 @@ fn freivalds_cmd(args: &[String]) {
     let mut points = vec![];
     for p in arg_list(args, "--widths", &[8usize, 16, 32, 64]) {
         eprintln!("freivalds {group} weights_per_row={p}");
-        let small = freivalds_run::run(&l1, &group, &mats, p);
-        let large = freivalds_run::run(&l2, &group, &mats, p);
+        let small = freivalds::run::run(&l1, &group, &mats, p);
+        let large = freivalds::run::run(&l2, &group, &mats, p);
         for (o, n) in [(&small, n_out), (&large, 2 * n_out)] {
             assert!(o.accepts(),
                     "honest Freivalds proof rejected at p={p}, n_out={n}: stark={} sums={} \
@@ -329,7 +329,7 @@ fn freivalds_cmd(args: &[String]) {
                     o.proven.stark_ok, o.sums.cancels(), o.off_table, o.ref_n - o.ref_ok,
                     o.proven.prove_error);
         }
-        points.push(freivalds_run::marginal(&small, &large));
+        points.push(freivalds::run::marginal(&small, &large));
     }
     emit("freivalds", json!({"points": points, "group": group,
                              "n_out": [n_out, 2 * n_out], "source": l2.source}));
@@ -519,7 +519,7 @@ fn probes_cmd(args: &[String]) {
 /// counts that already fit do not move under the flag.  Where the bound cannot
 /// hold the keys the sweep refuses, before the first commitment, with the number
 /// to pass.
-fn packed_key_tile(src: &Src, sh: Shape, variant: attn_witness::Variant) -> Attn {
+fn packed_key_tile(src: &Src, sh: Shape, variant: attention::witness::Variant) -> Attn {
     let ceiling = src.log_table.max(22);
     // pass 1: the witness's own sizing, capped as it always was
     let a = Attn::get(&Src { log_table: 0, ..src.clone() }, sh, variant);
@@ -550,7 +550,7 @@ fn pack_cmd(args: &[String]) {
     let hd: usize = arg_scalar(args, "--hd", 64usize);
     let reps: usize = arg_scalar(args, "--reps", 1usize);
     let cfg = attn_cfg(args, arg_scalar(args, "--scores-per-row", 64usize));
-    let v = attn_witness::Variant::parse(&arg_strs(args, "--variants", &["intexp"])[0]);
+    let v = attention::witness::Variant::parse(&arg_strs(args, "--variants", &["intexp"])[0]);
     let mut points = vec![];
     for insts in arg_list(args, "--insts", &[1usize, 2, 4, 8, 16]) {
         assert!(insts.is_power_of_two(), "insts must be a power of two (see layout.rs)");
@@ -560,7 +560,7 @@ fn pack_cmd(args: &[String]) {
         for rep in 0..reps.max(1) {
             eprintln!("pack {} {} (rep {}, exp table 2^{} rows)",
                       sh.label(), v.name(), rep + 1, a.log_table);
-            let o = attn_run::run(&a, &cfg);
+            let o = attention::run::run(&a, &cfg);
             if !o.accepts() {
                 eprintln!("  REJECTED: stark={} qk={} av={} den={} sums={} off={}",
                           o.proven.stark_ok, o.qk_ok, o.av_ok, o.den_ok, o.sums.cancels(),
@@ -586,8 +586,8 @@ fn attn_probes_cmd(args: &[String]) {
         insts: arg_scalar(args, "--insts", 4usize),
     };
     let cfg = attn_cfg(args, arg_scalar(args, "--scores-per-row", 16usize));
-    let v = attn_witness::Variant::IntExp;
-    let honest = attn_run::run(&Attn::get(&src, sh, v), &cfg);
+    let v = attention::witness::Variant::IntExp;
+    let honest = attention::run::run(&Attn::get(&src, sh, v), &cfg);
     assert!(honest.accepts(), "honest packed proof rejected");
     let mut out = vec![json!({"probe": "honest",
                               "result": honest.json(&Attn::get(&src, sh, v), &cfg)})];
@@ -606,7 +606,7 @@ fn attn_probes_cmd(args: &[String]) {
     for (name, bad) in cases {
         eprintln!("attn probe {name}");
         let a = Attn::corrupted(&src, sh, v, bad);
-        let o = attn_run::run(&a, &cfg);
+        let o = attention::run::run(&a, &cfg);
         assert!(!o.accepts(), "{name} must be rejected");
         out.push(json!({"probe": name, "result": o.json(&a, &cfg)}));
     }
@@ -753,7 +753,7 @@ fn embed_cmd(args: &[String]) {
             let rk = {
                 let mut ch = stwo::core::channel::Blake2sM31Channel::default();
                 stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_BB02);
-                attn_air::RangeRel::draw(&mut ch)
+                attention::air::RangeRel::draw(&mut ch)
             };
             let felt = |a: u32| stwo::core::fields::qm31::SecureField::from_m31_array(
                 [common::m31_u32(a), common::m31_u32(a + 1),
@@ -936,7 +936,7 @@ fn calibration_of_args(args: &[String], p: &compose::Params)
 
 pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
     let vname = arg_strs(args, "--variants", &["intsplit6"])[0].clone();
-    let variant = attn_witness::Variant::parse(&vname);
+    let variant = attention::witness::Variant::parse(&vname);
     let head_groups = arg_list(args, "--head-groups", &[8usize, 4, 2]);
     let src = src_of(args);
     // Issue #112: the parameter-only load, before the dump's -- the statement
@@ -1004,8 +1004,8 @@ pub fn layer_of(args: &[String]) -> (layer::Layer, String) {
             eprintln!("expect-root: model-only load from the statement \
 (variant={} head_groups={:?} diagonal_block={} kv_boundary={} log_table={} nmax={})",
                       p.variant, p.head_groups, p.diagonal_block, p.kv_boundary, p.log_table, p.nmax);
-            (attn_witness::Variant::parse(&p.variant), p.variant.clone(), p.head_groups.clone(),
-             attn_witness::Src { log_table: p.log_table, nmax: p.nmax,
+            (attention::witness::Variant::parse(&p.variant), p.variant.clone(), p.head_groups.clone(),
+             attention::witness::Src { log_table: p.log_table, nmax: p.nmax,
                                  diagonal_block: p.diagonal_block, tile: p.kv_boundary, ..src.clone() })
         } else {
             (variant, vname, head_groups, src.clone())
@@ -3534,8 +3534,8 @@ fn layer_clone(l: &layer::Layer) -> layer::Layer {
     }
 }
 
-fn attn_clone(a: &attn_witness::Attn) -> attn_witness::Attn {
-    attn_witness::Attn {
+fn attn_clone(a: &attention::witness::Attn) -> attention::witness::Attn {
+    attention::witness::Attn {
         shape: a.shape, variant: a.variant, qq: a.qq.clone(), kk: a.kk.clone(),
         vv: a.vv.clone(), sc: a.sc.clone(), mm: a.mm.clone(), dd: a.dd.clone(),
         xx: a.xx.clone(), num: a.num.clone(), zz: a.zz.clone(), out: a.out.clone(),
@@ -3817,9 +3817,9 @@ fn selftest(args: &[String]) {
         let sh = Shape { s: 32, c: 128, hd: 64, insts };
         let cfg = attn_cfg(args, 8);
         for name in ["bf16x", "intsplit6"] {
-            let v = attn_witness::Variant::parse(name);
+            let v = attention::witness::Variant::parse(name);
             let a = Attn::get(&src_of(args), sh, v);
-            let o = attn_run::run(&a, &cfg);
+            let o = attention::run::run(&a, &cfg);
             if !o.accepts() {
                 eprintln!("  attn {name} insts={insts}: stark={} qk={} av={} den={} sums={} \
                            off={} err={:?}", o.proven.stark_ok, o.qk_ok, o.av_ok, o.den_ok,
@@ -4010,7 +4010,7 @@ mod tests {
                                  "--variants", "intexp"]
             .iter().chain(extra.iter()).map(|s| s.to_string()).collect();
         packed_key_tile(&src_of(&argv), Shape { s: 512, c: 1024, hd: 64, insts },
-                        attn_witness::Variant::IntExp)
+                        attention::witness::Variant::IntExp)
     }
 
     /// Issue #89: `--table-bits` bounds the packed key tile's exp table.

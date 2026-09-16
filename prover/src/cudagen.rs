@@ -2635,7 +2635,7 @@ pub fn emit_cmd(args: &[String]) {
         // `build_components_linked` per emit run and installs nothing; and if
         // the rule were ever undone it would install the second shape rather
         // than say so, so the store would grow quietly.
-        let key_fp = |e: &crate::attn_air::KeyEval| {
+        let key_fp = |e: &crate::gadgets::attention::air::KeyEval| {
             lower(e, SecureField::zero(), e.log_size(), e.max_constraint_log_degree_bound())
                 .fingerprint()
         };
@@ -2714,7 +2714,7 @@ pub fn emit_cmd(args: &[String]) {
         // installing a shape no chunk will ask for.
         if let Some(am) = &b.argmax {
             go!(am, "argmax".to_string());
-            let fp = |e: &crate::argmax::ArgmaxEval| {
+            let fp = |e: &crate::gadgets::argmax::ArgmaxEval| {
                 lower(e, SecureField::zero(), e.log_size(), e.max_constraint_log_degree_bound())
                     .fingerprint()
             };

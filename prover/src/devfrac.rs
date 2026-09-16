@@ -118,9 +118,9 @@ impl Cols<'_> {
 /// (mode 2 asserts `at == dev.at`).
 pub struct KeyTileAir<'a> {
     pub tag: usize,
-    pub chan: &'a crate::attn_air::ChanEval,
-    pub key: &'a crate::attn_air::KeyEval,
-    pub row: &'a crate::attn_air::RowEval,
+    pub chan: &'a crate::gadgets::attention::air::ChanEval,
+    pub key: &'a crate::gadgets::attention::air::KeyEval,
+    pub row: &'a crate::gadgets::attention::air::RowEval,
     pub dev: Option<&'a crate::dev_attention_freivalds_witness_gen::DevKeyTile>,
     /// B7a milestone 4 (section 3 row 1): this key tile's selector columns and the
     /// flags they came from. `Some` whenever `dev` is, because the accumulators

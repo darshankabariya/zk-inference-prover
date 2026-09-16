@@ -30,7 +30,7 @@ use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 
 use crate::bf16;
-use crate::layout::Shape;
+use crate::gadgets::attention::layout::Shape;
 use crate::witread::{self, Site};
 
 /// A raw column, read and widened.  `site` says which decode the widening is,

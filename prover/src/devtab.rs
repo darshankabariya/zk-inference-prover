@@ -37,7 +37,7 @@ use rayon::prelude::*;
 use stwo::prover::backend::Column as _;
 use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
 
-use crate::attn_witness::{Attn, Variant};
+use crate::gadgets::attention::witness::{Attn, Variant};
 use crate::common::Eval;
 use crate::devfrac::Cols;
 

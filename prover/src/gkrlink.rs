@@ -69,7 +69,7 @@ use stwo::prover::ComponentProver;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, INTERACTION_TRACE_IDX};
 
-use crate::attn_witness::Variant as AttnVariant;
+use crate::gadgets::attention::witness::Variant as AttnVariant;
 use crate::common::Eval;
 use crate::gkr_key_tile::Inst;
 
@@ -405,7 +405,7 @@ pub struct SiteLooks {
     pub looks: Vec<LinkLook>,
 }
 
-fn range_den(rel: &crate::attn_air::RangeRel, slot: Affine) -> Affine {
+fn range_den(rel: &crate::gadgets::attention::air::RangeRel, slot: Affine) -> Affine {
     let (z, al) = rel.parts();
     let mut den = Affine {
         terms: slot.terms.iter().map(|(c, w)| (*c, *w * al[0])).collect(),
@@ -576,7 +576,7 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
     let one = SecureField::one();
     let mut out = vec![];
     for (m, sp) in plan.specs.iter().enumerate() {
-        let map = crate::dequant::Map::new(sp);
+        let map = crate::gadgets::dequant::Map::new(sp);
         let f = map.f;
         let sticky = sp.round.needs_sticky();
         let mut looks = vec![];
@@ -600,9 +600,9 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
             // stream Z: the fold has no normalisation core; its eight range
             // looks stand alone, in the AIR's `add_to_relation` order
             // (`dequant.rs`'s `Fold` arm)
-            if sp.variant == crate::dequant::Variant::Fold {
+            if sp.variant == crate::gadgets::dequant::Variant::Fold {
                 let two = one + one;
-                let lim = crate::dequant::FOLD_LIMB;
+                let lim = crate::gadgets::dequant::FOLD_LIMB;
                 looks.push(LinkLook { num: None, den: range_den(
                     rels.range(sp.q_bits), Affine::col(RCol::Deq(map.at(s, f.qm)), one)) });
                 looks.push(LinkLook { num: None, den: range_den(
@@ -641,12 +641,12 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
                     Some(RCol::Deq(map.at(s, f.ph))), Some(RCol::Deq(map.at(s, f.r))), st]),
             });
             match sp.variant {
-                crate::dequant::Variant::Pow2 => looks.push(LinkLook {
+                crate::gadgets::dequant::Variant::Pow2 => looks.push(LinkLook {
                     num: None,
                     den: range_den(rels.range(8),
                                    Affine::col(RCol::Deq(map.at(s, f.eo)), one)),
                 }),
-                crate::dequant::Variant::Chain => {
+                crate::gadgets::dequant::Variant::Chain => {
                     for t in 0..2 {
                         let m_in = if t == 0 { RCol::Deq(map.at(s, f.m7)) }
                                    else { RCol::Deq(map.at(s, f.mul[0][0])) };
@@ -704,11 +704,11 @@ pub fn deq_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
 /// nothing else -- the verifier has no evaluator to lower.
 pub fn residual_stream_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
                   -> Vec<SiteLooks> {
-    use crate::residual_stream::{Kind, Src, UnKind};
+    use crate::gadgets::residual_stream::{Kind, Src, UnKind};
     let Some(gp) = plan.residual_stream.as_ref() else { return vec![] };
     let Some(gr) = rels.residual_stream.as_ref() else { return vec![] };
     let one = SecureField::one();
-    let dmax = SecureField::from(M31::from_u32_unchecked(crate::residual_stream::DMAX));
+    let dmax = SecureField::from(M31::from_u32_unchecked(crate::gadgets::residual_stream::DMAX));
     let mut out = vec![];
     for (g, r) in gp.components.iter().enumerate() {
         let prog = &r.prog;
@@ -947,10 +947,10 @@ pub fn ao_looks(plan: &crate::compose::Plan, rels: &crate::compose::Rels)
 /// without an evaluator to lower, and this is the count `residual_stream_looks` produces:
 /// one per committed leaf, then five per Add-tree slot or two per Mul slot.
 /// Every one is unit.
-pub fn residual_stream_look_count(prog: &crate::residual_stream::Prog) -> usize {
+pub fn residual_stream_look_count(prog: &crate::gadgets::residual_stream::Prog) -> usize {
     let per_slot = match prog.kind {
-        crate::residual_stream::Kind::Add => 5,
-        crate::residual_stream::Kind::Mul => 2,
+        crate::gadgets::residual_stream::Kind::Add => 5,
+        crate::gadgets::residual_stream::Kind::Mul => 2,
     };
     prog.groups.iter().map(|g| g.n).sum::<usize>() + per_slot * prog.slots.len()
 }

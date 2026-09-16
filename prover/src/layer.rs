@@ -25,15 +25,15 @@ use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
 use num_traits::{One, Zero};
 
-use crate::attn_witness::{Attn, LayerRaw as AttnRaw, Src, Variant};
+use crate::gadgets::attention::witness::{Attn, LayerRaw as AttnRaw, Src, Variant};
 use crate::bf16;
 use crate::common::{Eval, eval_of, m31_u32};
-use crate::dequant::{Map, Spec, Variant as DeqVariant};
-use crate::layout::{Grid, Shape};
+use crate::gadgets::dequant::{Map, Spec, Variant as DeqVariant};
+use crate::gadgets::attention::layout::{Grid, Shape};
 use crate::witread::{self, Site};
 
 pub fn m31_of(v: i64) -> M31 {
-    crate::attn_trace::m31_of(v)
+    crate::gadgets::attention::trace::m31_of(v)
 }
 
 /// Stream LL (E11), `notes/inconsistency-log.md` row 58: the precondition tree 0
@@ -747,7 +747,7 @@ impl ResidualStreamCols {
                 .map(|_| {
                     let e: i32 = rng.random_range(-spread..spread);
                     let m: f64 = rng.random_range(-2.0f64..2.0);
-                    crate::residual_stream::canon(bf16::from_f64(m * (e as f64).exp2()))
+                    crate::gadgets::residual_stream::canon(bf16::from_f64(m * (e as f64).exp2()))
                 })
                 .collect()
         };
@@ -1800,7 +1800,7 @@ impl Layer {
     /// data.
     pub fn rope_from_mats(&mut self, round: bf16::Round, bend: Option<(usize, usize)>,
                           pinned: bool) -> Option<RopeCols> {
-        use crate::residual_stream::{Prog, UnKind, reference};
+        use crate::gadgets::residual_stream::{Prog, UnKind, reference};
         let (nh, hd, tokens) = (self.ao.nh, self.ao.hd, self.ao.s);
         // stream NN-3: a tiled prefix (`--kv-boundary`) is rebuilt like any other
         // now, so `nsub` is no longer a reason to leave the family off
@@ -1843,9 +1843,9 @@ impl Layer {
         // a synthetic layer has no model, so it takes Llama's default branch at
         // theta = 10000 and this block's own offset; a real dump carries both
         let (theta, kind) = (10000.0f64, "default".to_string());
-        let inv_freq = crate::rope::inv_freq_of(hd, theta, &kind, &[]);
+        let inv_freq = crate::gadgets::rope::inv_freq_of(hd, theta, &kind, &[]);
         let pos0 = self.block.unwrap_or(0) * tokens;
-        let sp = |m: &Mat| crate::dequant::Spec {
+        let sp = |m: &Mat| crate::gadgets::dequant::Spec {
             variant: m.variant, round, kmax: 0, per_row: 1, limb_bits: (16, 14),
             q_bits: 0, rem_bits: 0, fold_alpha: 0,
         };
@@ -1871,8 +1871,8 @@ impl Layer {
         let bias_frac = std::env::var("ZK_SYNTHETIC_QKV_BIAS").ok()
             .and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
         let val = |p: u16| -> f64 {
-            let (sm, ef) = crate::residual_stream::split(crate::residual_stream::canon(p));
-            crate::residual_stream::to_f64(sm, ef)
+            let (sm, ef) = crate::gadgets::residual_stream::split(crate::gadgets::residual_stream::canon(p));
+            crate::gadgets::residual_stream::to_f64(sm, ef)
         };
         let add_bias = |x: Vec<u16>, n: usize| -> Vec<u16> {
             if bias_frac == 0.0 {
@@ -1891,7 +1891,7 @@ impl Layer {
             let mut out = x;
             out.par_chunks_mut(n).for_each(|row| {
                 for (c, slot) in row.iter_mut().enumerate() {
-                    *slot = crate::residual_stream::canon(bf16::from_f64(val(*slot) + b[c]));
+                    *slot = crate::gadgets::residual_stream::canon(bf16::from_f64(val(*slot) + b[c]));
                 }
             });
             out
@@ -1907,7 +1907,7 @@ projection bias the statement has no site for (a rejection is the pass)");
             let rows = tokens * heads;
             let mut pre = vec![0u16; rows * 2 * hd];
             pre.par_chunks_mut(2 * hd).enumerate().for_each(|(j, row)| {
-                row.copy_from_slice(&crate::rope::pre_row(&inv_freq, hd, pos0 + j / heads));
+                row.copy_from_slice(&crate::gadgets::rope::pre_row(&inv_freq, hd, pos0 + j / heads));
             });
             let prod = reference(&[x.to_vec()], &pre, rows, &Prog::rope_mul(hd), round);
             let out = reference(&[prod[0].clone()], &[], rows, &Prog::rope_add(hd), round);
@@ -1931,7 +1931,7 @@ projection bias the statement has no site for (a rejection is the pass)");
             (0..n)
                 .map(|c| {
                     let col: Vec<u16> = (0..tokens).map(|t| x[t * n + c]).collect();
-                    crate::rope::pow2_scale(&col, qmax) as i32
+                    crate::gadgets::rope::pow2_scale(&col, qmax) as i32
                 })
                 .collect()
         };
@@ -1955,7 +1955,7 @@ exponent(s) small, so B1's clamp fires");
         let jv_kv = if v_fold {
             self.mats[vmi].jv2.clone()
         } else {
-            down(scale(&vdeq, nv, crate::rope::qmax_of(crate::rope::V_BITS)))
+            down(scale(&vdeq, nv, crate::gadgets::rope::qmax_of(crate::gadgets::rope::V_BITS)))
         };
         // and on the query-head grid, which is where B1 applies them and where
         // the statement carries them
@@ -1979,7 +1979,7 @@ exponent(s) small, so B1's clamp fires");
                 for (i, slot) in row.iter_mut().enumerate() {
                     let (h, ch) = (i / hd, i % hd);
                     let c = (h / (nh / (n / hd))) * hd + ch;
-                    *slot = crate::rope::quant_ref(x[t * n + c], jj[c] as i64, qmax) as i32;
+                    *slot = crate::gadgets::rope::quant_ref(x[t * n + c], jj[c] as i64, qmax) as i32;
                 }
             });
             out
@@ -2728,7 +2728,7 @@ impl Layer {
     fn synth_family(&mut self, seed: u64, a: usize, round: bf16::Round, head_vocab: usize,
                     o_bend: Option<usize>, rope_bend: Option<(usize, usize)>,
                     model_swap: Option<u64>) {
-        use crate::residual_stream::{Kind, Prog, Tiling, UnKind, canon, reference};
+        use crate::gadgets::residual_stream::{Kind, Prog, Tiling, UnKind, canon, reference};
         let head = head_vocab > 0;
         // Issue #134: which of the two rebuilds this is.  An honest construction
         // -- `synth_residual_stream`, `synth_head` -- runs before the statement is
@@ -2777,10 +2777,10 @@ impl Layer {
         // one Freivalds group's input, scale and accumulators, from a bf16 column
         let mut wire = |me: &mut Self, names: &[&str], x: &[u16], n: usize| {
             let v = match me.mats.iter().find(|m| names.contains(&m.name.as_str())) {
-                Some(m) if m.variant == DeqVariant::Pow2 => crate::requant::SVariant::Pow2,
-                _ => crate::requant::SVariant::Bf16,
+                Some(m) if m.variant == DeqVariant::Pow2 => crate::gadgets::requant::SVariant::Pow2,
+                _ => crate::gadgets::requant::SVariant::Bf16,
             };
-            let (qx, jx, sx) = crate::requant::requant_ref(x, tokens, n, v);
+            let (qx, jx, sx) = crate::gadgets::requant::requant_ref(x, tokens, n, v);
             for name in names {
                 let Some(mi) = me.mats.iter().position(|m| m.name == *name) else { continue };
                 let m = &mut me.mats[mi];
@@ -2828,7 +2828,7 @@ impl Layer {
         }
         // the dequant reference of one matmul's output, under the spec the
         // plan builds for it -- `deq_ref` reads only `variant` and `round`
-        let sp = |m: &Mat| crate::dequant::Spec {
+        let sp = |m: &Mat| crate::gadgets::dequant::Spec {
             variant: m.variant, round, kmax: 0, per_row: 1, limb_bits: (16, 14),
             q_bits: 0, rem_bits: 0, fold_alpha: 0,
         };
@@ -2984,8 +2984,8 @@ impl Layer {
         let outside = |g: &[u16]| -> usize {
             g.par_iter().zip(up_out.par_iter())
                 .filter(|(a, b)| {
-                    crate::residual_stream::mul_exponent(
-                        crate::residual_stream::un_image(UnKind::Silu, **a), **b, round).is_none()
+                    crate::gadgets::residual_stream::mul_exponent(
+                        crate::gadgets::residual_stream::un_image(UnKind::Silu, **a), **b, round).is_none()
                 })
                 .count()
         };
@@ -3980,12 +3980,12 @@ fn witness_gen_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables:
             let mxw = (128 + ms as i64) * (128 + mw as i64);
             let sg = u32::from(a < 0);
             let mag = a.unsigned_abs() as i64;
-            assert!(mag < 1i64 << (2 * crate::dequant::FOLD_LIMB),
+            assert!(mag < 1i64 << (2 * crate::gadgets::dequant::FOLD_LIMB),
                     "{}: fold |acc| {mag} above the two-limb window", m.name);
-            let limb = (1i64 << crate::dequant::FOLD_LIMB) - 1;
-            let (flo, fhi) = (mag & limb, mag >> crate::dequant::FOLD_LIMB);
+            let limb = (1i64 << crate::gadgets::dequant::FOLD_LIMB) - 1;
+            let (flo, fhi) = (mag & limb, mag >> crate::gadgets::dequant::FOLD_LIMB);
             let lo_prod = flo * mxw;
-            let (fa, fb) = (lo_prod >> crate::dequant::FOLD_LIMB, lo_prod & limb);
+            let (fa, fb) = (lo_prod >> crate::gadgets::dequant::FOLD_LIMB, lo_prod & limb);
             // `round_hafz` on the magnitude: half away from zero
             let tt = (mag as i128) * (mxw as i128);
             let mut qm = ((tt + (1i128 << (g - 1))) >> g) as i64;
@@ -4027,8 +4027,8 @@ fn witness_gen_mat_row(m: &Mat, spec: &Spec, lay: &MatLayout, map: &Map, tables:
             *brw.entry((spec.q_bits, qm)).or_default() += 1;
             *brw.entry((7, qc)).or_default() += 1;
             *brw.entry((spec.q_bits, qm - qc)).or_default() += 1;
-            *brw.entry((crate::dequant::FOLD_LIMB, flo)).or_default() += 1;
-            *brw.entry((crate::dequant::FOLD_LIMB, fb)).or_default() += 1;
+            *brw.entry((crate::gadgets::dequant::FOLD_LIMB, flo)).or_default() += 1;
+            *brw.entry((crate::gadgets::dequant::FOLD_LIMB, fb)).or_default() += 1;
             *brw.entry((16, fa)).or_default() += 1;
             *brw.entry((spec.rem_bits, fe)).or_default() += 1;
             *brw.entry((spec.rem_bits, 2 * fdp - 1 - fe)).or_default() += 1;
@@ -4144,7 +4144,7 @@ pub struct OutputClaimW {
     pub lam: SecureField,
     pub k_in: SecureField,
     pub k_bd: SecureField,
-    pub kind: crate::dequant::OKind,
+    pub kind: crate::gadgets::dequant::OKind,
     /// Stream SS: rows per kv head, on the one output side that folds under the
     /// key tile grid (a folded `v`).  `None` everywhere else, and then `k_bd` is
     /// taken at a token boundary exactly as stream E wrote it.  Whatever this
@@ -4167,12 +4167,12 @@ pub struct OutputClaimW {
 #[allow(clippy::too_many_arguments)]
 pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureField,
                        rels: &crate::compose::Rels, out: Option<&OutputClaimW>,
-                       air: &crate::dequant::DequantEval, gkr: bool,
+                       air: &crate::gadgets::dequant::DequantEval, gkr: bool,
                        sc: Option<(SecureField, SecureField)>)
                        -> MatInteraction {
     let lay = r.lay;
     let rows = 1usize << lay.log_rows;
-    let (rv_pow, rv_step) = crate::attn_air::powers(rv, lay.per_row);
+    let (rv_pow, rv_step) = crate::gadgets::attention::air::powers(rv, lay.per_row);
     // B7a milestone 4 (section 3 row 1): `z` and `h` where the component's own
     // accumulator columns are. `ZK_DEVICE_ACCUMULATORS=2` runs both and asserts every cell.
     let acc_dev = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
@@ -4256,16 +4256,16 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
         Some(d) => {
             let got = crate::devacc::deq(d, &lay, &r.map, r.map.f.acc, rv, s_ch);
             let hh = acc_host.then(|| {
-                let mut e = crate::attn_trace::secure_cols_pub(lay.log_rows, &z);
-                e.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
+                let mut e = crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &z);
+                e.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &h));
                 (e, vec![h[rows - 1]])
             });
             crate::devacc::place(&format!("deq {} 2^{}", m.name, lay.log_rows), got, hh,
                                  &mut sink)[0]
         }
         None => {
-            sink.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &z));
-            sink.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
+            sink.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &z));
+            sink.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &h));
             h[rows - 1]
         }
     };
@@ -4285,23 +4285,23 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
                     let c = b * lay.per_row + s;
                     // stream SS: the fold has no bf16 image, so its reference is
                     // the integer itself and `deq_ref` is not asked for one.
-                    if o.kind == crate::dequant::OKind::Int {
+                    if o.kind == crate::gadgets::dequant::OKind::Int {
                         f += SecureField::from(m31_of(fold_out(m, t, c))) * o.w[s];
                         continue;
                     }
-                    let pat = crate::residual_stream::canon(deq_ref(m, &r.spec, t, c));
+                    let pat = crate::gadgets::residual_stream::canon(deq_ref(m, &r.spec, t, c));
                     f += match o.kind {
-                        crate::dequant::OKind::Pair => {
-                            let (sm, ef) = crate::residual_stream::split(pat);
+                        crate::gadgets::dequant::OKind::Pair => {
+                            let (sm, ef) = crate::gadgets::residual_stream::split(pat);
                             (SecureField::from(m31_of(sm))
                              + SecureField::from(m31_u32(ef)) * o.lam) * o.w[s]
                         }
                         // the same key the argmax component compares, off the same
                         // host function the extractor's column was built with
                         // taken above, off `fold_out`, before `deq_ref` is asked
-                        crate::dequant::OKind::Int => unreachable!(),
-                        crate::dequant::OKind::Key => SecureField::from(
-                            m31_u32(crate::argmax::order_key(pat))) * o.w[s],
+                        crate::gadgets::dequant::OKind::Int => unreachable!(),
+                        crate::gadgets::dequant::OKind::Key => SecureField::from(
+                            m31_u32(crate::gadgets::argmax::order_key(pat))) * o.w[s],
                     };
                 }
             }
@@ -4323,7 +4323,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
             u[j] = if j == 0 { f } else { u[j - 1] * mult + f };
         }
         let claimed = u[n_rows - 1];
-        cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &u)
+        cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &u)
             .into_iter().map(crate::device::AnyCol::OwnedHost));
         claimed
     });
@@ -4351,7 +4351,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
             v[j] = if j == 0 { f } else { v[j - 1] * mult + f };
         }
         let claimed = v[n_rows - 1];
-        cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &v)
+        cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &v)
             .into_iter().map(crate::device::AnyCol::OwnedHost));
         claimed
     });
@@ -4404,7 +4404,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
 /// backend would have built, so the lowering is of the *un-ablated* evaluator
 /// and asks for the flag-off shape, which is stream T's precedent for the key
 /// tiles and is why the kernel store already carries this fingerprint.
-pub fn deq_logup_eval(air: &crate::dequant::DequantEval) -> crate::dequant::DequantEval {
+pub fn deq_logup_eval(air: &crate::gadgets::dequant::DequantEval) -> crate::gadgets::dequant::DequantEval {
     let mut eval = air.clone();
     eval.output_claim = None;
     eval.sside = None;
@@ -4415,7 +4415,7 @@ pub fn deq_logup_eval(air: &crate::dequant::DequantEval) -> crate::dequant::Dequ
     eval
 }
 
-fn mat_logup_ir(r: &MatComponent, air: &crate::dequant::DequantEval, on_device: bool)
+fn mat_logup_ir(r: &MatComponent, air: &crate::gadgets::dequant::DequantEval, on_device: bool)
                 -> (Vec<crate::device::AnyCol<'static>>, SecureField) {
     use stwo::prover::backend::simd::m31::PackedM31;
     let eval = deq_logup_eval(air);
@@ -4429,7 +4429,7 @@ fn mat_logup_ir(r: &MatComponent, air: &crate::dequant::DequantEval, on_device: 
         // The same IR, run by the generated kernel instead of the interpreter.
         // The shape id comes from the compiled table by fingerprint, so a
         // stale library is a loud failure and never a wrong proof.
-        let family = <crate::dequant::DequantEval as
+        let family = <crate::gadgets::dequant::DequantEval as
             stwo_constraint_framework::FrameworkEval>::cuda_eval_name(&eval);
         let fp = ir.fingerprint();
         let (shape, looks) = crate::gencudakernels::gen_shape_of(family, fp).unwrap_or_else(|| {
@@ -4483,7 +4483,7 @@ fn mat_logup_ir(r: &MatComponent, air: &crate::dequant::DequantEval, on_device: 
 }
 
 fn mat_logup(m: &Mat, r: &MatComponent, rels: &crate::compose::Rels,
-             air: &crate::dequant::DequantEval)
+             air: &crate::gadgets::dequant::DequantEval)
              -> (Vec<crate::device::AnyCol<'static>>, SecureField) {
     // B7a milestone 4 (19.6): with the generate its witness on the device there is no host
     // column to build the fractions from, so the device path is the only one
@@ -4539,8 +4539,8 @@ fn mat_logup(m: &Mat, r: &MatComponent, rels: &crate::compose::Rels,
             looks.push(L::Range(7, Src2::B(map.at(s, f.qc))));
             looks.push(L::Diff(sp.q_bits, Src2::B(map.at(s, f.qm)),
                                Src2::B(map.at(s, f.qc))));
-            looks.push(L::Range(crate::dequant::FOLD_LIMB, Src2::B(map.at(s, f.flo))));
-            looks.push(L::Range(crate::dequant::FOLD_LIMB, Src2::B(map.at(s, f.fb))));
+            looks.push(L::Range(crate::gadgets::dequant::FOLD_LIMB, Src2::B(map.at(s, f.flo))));
+            looks.push(L::Range(crate::gadgets::dequant::FOLD_LIMB, Src2::B(map.at(s, f.fb))));
             looks.push(L::Range(16, Src2::B(map.at(s, f.fa))));
             looks.push(L::Range(sp.rem_bits, Src2::B(map.at(s, f.fe))));
             looks.push(L::Rem2(sp.rem_bits, Src2::B(map.at(s, f.fdp)),
@@ -5092,16 +5092,16 @@ pub struct AoInteraction {
 #[allow(clippy::too_many_arguments)]
 pub fn ao_interaction(ao: &AttnOut, r: &AoComponent, rr: SecureField, s_ch: SecureField,
                       rv: SecureField, c_ctx: usize, rels: &crate::compose::Rels,
-                      air: &crate::freivalds::AttnOutEval, gkr: bool) -> AoInteraction {
+                      air: &crate::gadgets::freivalds::AttnOutEval, gkr: bool) -> AoInteraction {
     use stwo::prover::backend::simd::qm31::PackedQM31;
     use stwo_constraint_framework::Relation;
     let lay = r.lay;
     let rows = 1usize << lay.log_rows;
     let pr = lay.per_row;
-    let (rv_pow, rv_step) = crate::attn_air::powers(rv, pr);
-    let (_, rv_hd) = crate::attn_air::powers(rv, ao.hd);
-    let (_, r_c) = crate::attn_air::powers(rr, c_ctx);
-    let (_, s_span) = crate::attn_air::powers(s_ch, ao.s - 1);
+    let (rv_pow, rv_step) = crate::gadgets::attention::air::powers(rv, pr);
+    let (_, rv_hd) = crate::gadgets::attention::air::powers(rv, ao.hd);
+    let (_, r_c) = crate::gadgets::attention::air::powers(rr, c_ctx);
+    let (_, s_span) = crate::gadgets::attention::air::powers(s_ch, ao.s - 1);
     let mu_out = rv_hd * s_span.inverse();
     let mu_den = r_c * s_span.inverse();
 
@@ -5160,9 +5160,9 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoComponent, rr: SecureField, s_ch: Secu
         Some(d) => {
             let got = crate::devacc::ao(d, &lay, ao.nh, ao.s, rv, s_ch, mu_out, mu_den);
             let hh = acc_host.then(|| {
-                let mut e = crate::attn_trace::secure_cols_pub(lay.log_rows, &z);
-                e.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
-                e.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &dz));
+                let mut e = crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &z);
+                e.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &h));
+                e.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &dz));
                 (e, vec![h[rows - 1], dz[rows - 1]])
             });
             let c = crate::devacc::place(&format!("attnout 2^{}", lay.log_rows), got, hh,
@@ -5170,9 +5170,9 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoComponent, rr: SecureField, s_ch: Secu
             (c[0], c[1])
         }
         None => {
-            cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &z));
-            cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
-            cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &dz));
+            cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &z));
+            cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &h));
+            cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &dz));
             (h[rows - 1], dz[rows - 1])
         }
     };
@@ -5215,9 +5215,9 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoComponent, rr: SecureField, s_ch: Secu
         }
     }
     let claimed_q = hq[n_rows - 1];
-    cols.extend_any(crate::attn_trace::secure_cols_pub(lay.log_rows, &zq)
+    cols.extend_any(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &zq)
                         .into_iter().map(crate::device::AnyCol::OwnedHost).collect::<Vec<_>>());
-    cols.extend_any(crate::attn_trace::secure_cols_pub(lay.log_rows, &hq)
+    cols.extend_any(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &hq)
                         .into_iter().map(crate::device::AnyCol::OwnedHost).collect::<Vec<_>>());
 
     // lookups in AIR order, per slot: the `EPOW` window, (qm, nz2), d, dp,
@@ -5464,14 +5464,14 @@ pub struct FreivaldsInteraction {
 
 pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureField, s_ch: SecureField,
                              rels: &crate::compose::Rels, range_check: bool,
-                             air: &crate::freivalds::FreivaldsEval, gkr: bool) -> FreivaldsInteraction {
+                             air: &crate::gadgets::freivalds::FreivaldsEval, gkr: bool) -> FreivaldsInteraction {
     use stwo::prover::backend::simd::qm31::PackedQM31;
     use stwo_constraint_framework::Relation;
     let lay = r.lay;
     let rows = 1usize << lay.g.log_rows;
     let m0 = &layer.mats[r.mats[0]];
-    let (rv_pow, rv_step) = crate::attn_air::powers(rv, lay.pk);
-    let (s_pow, s_step) = crate::attn_air::powers(s_ch, lay.pq);
+    let (rv_pow, rv_step) = crate::gadgets::attention::air::powers(rv, lay.pk);
+    let (s_pow, s_step) = crate::gadgets::attention::air::powers(s_ch, lay.pq);
 
     // B7a milestone 4 (section 3 row 1): the Freivalds checks' v, us and accs, on the same
     // three-value mode every witness generation in this series uses.
@@ -5533,10 +5533,10 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
         Some(d) => {
             let got = crate::devacc::freivalds(d, &lay, r.mats.len(), rv, s_ch);
             let hh = acc_host.then(|| {
-                let mut e = crate::attn_trace::secure_cols_pub(lay.g.log_rows, &v);
+                let mut e = crate::gadgets::attention::trace::secure_cols_pub(lay.g.log_rows, &v);
                 for m in 0..r.mats.len() {
-                    e.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &us[m]));
-                    e.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &accs[m]));
+                    e.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.g.log_rows, &us[m]));
+                    e.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.g.log_rows, &accs[m]));
                 }
                 (e, accs.iter().map(|a| a[rows - 1]).collect::<Vec<_>>())
             });
@@ -5544,10 +5544,10 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
                                  hh, &mut cols)
         }
         None => {
-            cols.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &v));
+            cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.g.log_rows, &v));
             for m in 0..r.mats.len() {
-                cols.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &us[m]));
-                cols.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &accs[m]));
+                cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.g.log_rows, &us[m]));
+                cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.g.log_rows, &accs[m]));
             }
             accs.iter().map(|a| a[rows - 1]).collect()
         }
@@ -5596,7 +5596,7 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
             xs[j] = carry + inner_x[j];
         }
         qx_claim = xs[nrows - 1];
-        cols.extend(crate::attn_trace::secure_cols_pub(lay.g.log_rows, &xs));
+        cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.g.log_rows, &xs));
     }
     let mut use_sum = SecureField::zero();
     // B11 stream V, lever 4: under `--gkr-freivalds` this group's range checks were
@@ -5662,7 +5662,7 @@ mod tests {
     /// the run's own.
     #[test]
     fn the_synthetic_swiglu_stays_in_bf16_range_at_the_8b_width() {
-        use crate::residual_stream::{UnKind, mul_exponent, un_image};
+        use crate::gadgets::residual_stream::{UnKind, mul_exponent, un_image};
         let argv: Vec<String> =
             ["compose", "--round", "even", "--numbits", "9", "--z-hi-bits", "7",
              "--variants", "intexp", "--table-bits", "24", "--hd", "128",

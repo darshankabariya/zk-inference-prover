@@ -44,14 +44,14 @@ use stwo_constraint_framework::{
     Relation, RelationEntry, TraceLocationAllocator,
 };
 
-use crate::attn_air::RangeRel;
+use crate::gadgets::attention::air::RangeRel;
 use crate::bf16;
 use crate::common::{Eval, Proven, Session, Sums, eval_of, m31_u32, twiddles};
-use crate::dequant::{FracRel, MulRel, PairRel, TableEval, TableKind, id};
+use crate::gadgets::dequant::{FracRel, MulRel, PairRel, TableEval, TableKind, id};
 use crate::layer::MatLayout;
 
 pub fn m31_of(v: i64) -> M31 {
-    crate::attn_trace::m31_of(v)
+    crate::gadgets::attention::trace::m31_of(v)
 }
 
 pub const RQ3_COLS: [&str; 3] = ["zk_rq_t", "zk_rq_m", "zk_rq_q"];
@@ -1090,7 +1090,7 @@ pub fn requant_ref(x: &[u16], tokens: usize, n: usize, v: SVariant)
         // its magnitudes: bf16 magnitude order is pattern order
         let mut pm = 0u32;
         for i in 0..n {
-            let (sm, ef) = crate::residual_stream::split(crate::residual_stream::canon(x[t * n + i]));
+            let (sm, ef) = crate::gadgets::residual_stream::split(crate::gadgets::residual_stream::canon(x[t * n + i]));
             let m7 = if sm == 0 { 0 } else { sm.unsigned_abs() as u32 - 128 };
             pm = pm.max(ef * 128 + m7);
         }
@@ -1110,7 +1110,7 @@ pub fn requant_ref(x: &[u16], tokens: usize, n: usize, v: SVariant)
             SVariant::Bf16 => (sx[t].1 as i64 - 1) * 128 + sx[t].0 as i64,
         };
         for i in 0..n {
-            let (sm, ef) = crate::residual_stream::split(crate::residual_stream::canon(x[t * n + i]));
+            let (sm, ef) = crate::gadgets::residual_stream::split(crate::gadgets::residual_stream::canon(x[t * n + i]));
             let m7 = if sm == 0 { 0 } else { sm.unsigned_abs() as u32 - 128 };
             let pat = (ef * 128 + m7) as i64;
             if pat < path {
@@ -1241,7 +1241,7 @@ pub fn rq_component(tag: &str, x: &[u16], qx: &[i32], jx: &[i64], sx: &[(u32, u3
     // the committed values, per element: the producer's pair, bent if a probe
     // aims here, and the magnitude pattern the max argument compares
     let bend = |i: usize| -> u16 {
-        let p = crate::residual_stream::canon(x[i]);
+        let p = crate::gadgets::residual_stream::canon(x[i]);
         match tamper {
             // to another legal pattern, so `VAL`, `RQV` and the division table
             // all still find a row and only the binding can reject
@@ -1250,7 +1250,7 @@ pub fn rq_component(tag: &str, x: &[u16], qx: &[i32], jx: &[i64], sx: &[(u32, u3
         }
     };
     let pat_of = |i: usize| -> (i64, u32, u32, u32, u32) {
-        let (sm, ef) = crate::residual_stream::split(bend(i));
+        let (sm, ef) = crate::gadgets::residual_stream::split(bend(i));
         let m7 = if sm == 0 { 0 } else { sm.unsigned_abs() as u32 - 128 };
         let sg = u32::from(sm < 0);
         (sm, ef, m7, sg, ef * 128 + m7)
@@ -1459,7 +1459,7 @@ pub fn rq_interaction(r: &RqComponent, binding: &RqTie, qnz: &PairRel, rq3: &Fra
             h[j] = if j == 0 { f } else { h[j - 1] * step + f };
         }
         claims[side] = h[rows - 1];
-        cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
+        cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &h));
     }
 
     // stream II (E11): the third, the per-token scale on the `last` rows.  The
@@ -1485,7 +1485,7 @@ pub fn rq_interaction(r: &RqComponent, binding: &RqTie, qnz: &PairRel, rq3: &Fra
                        else if last { binding.mu } else { SecureField::one() };
             h[j] = if j == 0 { f } else { h[j - 1] * step + f };
         }
-        cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
+        cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &h));
         h[rows - 1]
     };
 

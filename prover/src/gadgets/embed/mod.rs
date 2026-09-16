@@ -103,8 +103,8 @@ use stwo_constraint_framework::{
     Relation, RelationEFTraitBound, RelationEntry, TraceLocationAllocator,
 };
 
-use crate::attn_air::{RangeRel, RangeTableEval, tbl_range};
-use crate::attn_trace::m31_of;
+use crate::gadgets::attention::air::{RangeRel, RangeTableEval, tbl_range};
+use crate::gadgets::attention::trace::m31_of;
 use crate::boundary::PACK;
 use crate::common::{Eval, Proven, Session, Sums, eval_of, log_rows_for, m31_u32, twiddles};
 
@@ -519,8 +519,8 @@ impl EWitness {
         if xin.len() != tokens * d {
             return Err(format!("stream input: {} values, want {tokens} x {d}", xin.len()));
         }
-        let tab: Vec<u16> = tab.into_iter().map(crate::residual_stream::canon).collect();
-        let xin: Vec<u16> = xin.into_iter().map(crate::residual_stream::canon).collect();
+        let tab: Vec<u16> = tab.into_iter().map(crate::gadgets::residual_stream::canon).collect();
+        let xin: Vec<u16> = xin.into_iter().map(crate::gadgets::residual_stream::canon).collect();
         for t in 0..tokens {
             let v = tok[t] as usize;
             if v >= vocab {
@@ -625,7 +625,7 @@ pub fn component(w: &EWitness, lay: EmbLayout, m_ef: &mut [u32], bad: Option<Tam
         cols[0][j] = m31_u32(tok[t]);
         ids[j] = tok[t];
         for sl in 0..pe {
-            let (sm, ef) = crate::residual_stream::split(xin[t * d + cb * pe + sl]);
+            let (sm, ef) = crate::gadgets::residual_stream::split(xin[t * d + cb * pe + sl]);
             cols[1 + 2 * sl][j] = m31_of(sm);
             cols[2 + 2 * sl][j] = m31_u32(ef);
             vals[j * pe + sl] = (sm, ef as i64);
@@ -665,7 +665,7 @@ pub fn component(w: &EWitness, lay: EmbLayout, m_ef: &mut [u32], bad: Option<Tam
             continue;
         }
         for sl in 0..pe {
-            let (sm, ef) = crate::residual_stream::split(tab[v * d + cb * pe + sl]);
+            let (sm, ef) = crate::gadgets::residual_stream::split(tab[v * d + cb * pe + sl]);
             tcols[2 + sl][n] = m31_of(PACK * sm + ef as i64);
         }
     }
@@ -729,7 +729,7 @@ pub fn logup(r: &EComponent, rel: &EmbRel, rel_ef: &RangeRel) -> (Vec<Eval>, Sec
 /// The table side's one LogUp column and its claimed sum.
 pub fn table_side(r: &EComponent, rel: &EmbRel) -> (Vec<Eval>, SecureField) {
     let refs: Vec<&Eval> = r.tab_pre.iter().collect();
-    crate::attn_trace::table_col(r.lay.log_tab, rel, &refs, &r.tab_mult)
+    crate::gadgets::attention::trace::table_col(r.lay.log_tab, rel, &refs, &r.tab_mult)
 }
 
 /// The two Horner columns and the two claims they close on: the stream binding and
@@ -771,8 +771,8 @@ pub fn binding_cols(r: &EComponent, t: &ETie) -> (Vec<Eval>, SecureField, Secure
         g[j] = prev_g * kmult + add;
     }
     let (hc, gc) = (h[n_use - 1], g[n_use - 1]);
-    let mut cols = crate::attn_trace::secure_cols_pub(r.lay.log_use, &h);
-    cols.extend(crate::attn_trace::secure_cols_pub(r.lay.log_use, &g));
+    let mut cols = crate::gadgets::attention::trace::secure_cols_pub(r.lay.log_use, &h);
+    cols.extend(crate::gadgets::attention::trace::secure_cols_pub(r.lay.log_use, &g));
     (cols, hc, gc)
 }
 
@@ -860,7 +860,7 @@ pub fn run(w: &EWitness, target: usize, bad: Option<Tamper>) -> (Outcome, EmbLay
     let (binding, tcols) = binding;
     let (lcols, use_sum) = logup(&r, &rel, &rel_ef);
     let (tbcols, tab_sum) = table_side(&r, &rel);
-    let (efcols, ef_sum) = crate::attn_trace::table_col(EF_BITS, &rel_ef, &[&tbl_ef], &mult_ef);
+    let (efcols, ef_sum) = crate::gadgets::attention::trace::table_col(EF_BITS, &rel_ef, &[&tbl_ef], &mult_ef);
     let mut icols = tcols;
     icols.extend(lcols);
     icols.extend(tbcols);
@@ -873,7 +873,7 @@ pub fn run(w: &EWitness, target: usize, bad: Option<Tamper>) -> (Outcome, EmbLay
         let mut acc = SecureField::zero();
         for t in 0..w.tokens {
             for c in 0..w.d {
-                let (sm, ef) = crate::residual_stream::split(w.xin[t * w.d + c]);
+                let (sm, ef) = crate::gadgets::residual_stream::split(w.xin[t * w.d + c]);
                 acc += (SecureField::from(m31_of(sm))
                         + SecureField::from(m31_u32(ef)) * binding.lam)
                     * wpow(ch[0], n - 1 - (c as i128 * tok + t as i128));
@@ -971,7 +971,7 @@ mod tests {
             let (r, t) = (m / tokens, m % tokens);
             let mut f = SecureField::zero();
             for j in 0..nreal {
-                let (sm, ef) = crate::residual_stream::split(xin[t * d + r + j * a]);
+                let (sm, ef) = crate::gadgets::residual_stream::split(xin[t * d + r + j * a]);
                 f += (SecureField::from(m31_of(sm)) + SecureField::from(m31_u32(ef)) * lam)
                     * wpow(w, (a * tokens * (nreal - 1 - j)) as i128);
             }

@@ -30,10 +30,10 @@ use stwo::prover::backend::simd::m31::PackedM31;
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_constraint_framework::Relation;
 
-use crate::attn_air::{ExpRel, Powers, RangeRel};
+use crate::gadgets::attention::air::{ExpRel, Powers, RangeRel};
 use crate::common::{Eval, eval_of, m31_u32};
-use crate::layout::{Cells, LayoutChan, LayoutKey, LayoutOut, Shape};
-use crate::attn_witness::{Attn, Variant};
+use crate::gadgets::attention::layout::{Cells, LayoutChan, LayoutKey, LayoutOut, Shape};
+use crate::gadgets::attention::witness::{Attn, Variant};
 
 pub fn m31_of(v: i64) -> M31 {
     let p = P as i64;
@@ -261,7 +261,7 @@ pub fn commit_pre(a: &Attn, l: &Layouts, with_out: bool, with_rows: bool)
     // the index it always was.  On a prefix key tile there are no mask columns, so it
     // lands at slot 8 of the key group, which is where `devpre`'s `zk_pre_sel`
     // writes it.
-    if crate::attn_air::act_id(0, a.diagonal_block, lk.g.lead).is_some() {
+    if crate::gadgets::attention::air::act_id(0, a.diagonal_block, lk.g.lead).is_some() {
         // Stream JJ (E11), `witness-slack.md` section 7 item 7: `KeyEval` reads
         // the numerator fold's visibility as `act - msk[i]` rather than
         // `act * (1 - msk[i])` to keep the factor degree 1, and that is the same
@@ -308,7 +308,7 @@ pub fn commit_pre(a: &Attn, l: &Layouts, with_out: bool, with_rows: bool)
 /// The causal mask's predicate: key `k` is in token `t`'s future exactly when
 /// `k > t`, and an inert row is masked nowhere.  One function so that
 /// `commit_pre` and the assertion beside it cannot drift apart.
-fn masked(lk: &crate::layout::LayoutKey, c: usize, j: usize, i: usize) -> bool {
+fn masked(lk: &crate::gadgets::attention::layout::LayoutKey, c: usize, j: usize, i: usize) -> bool {
     matches!(lk.g.row(j), Some((g, chunk)) if split(g, c).1 > chunk * lk.q + i)
 }
 
@@ -717,9 +717,9 @@ pub struct Interaction {
 /// counterparty is its group's diagonal block rather than a quantize component.  `Q` is
 /// therefore never optional and `K`/`V` always are.
 pub struct NnBind<'a> {
-    pub k: Option<&'a crate::attn_air::KeyTileTie>,
-    pub q: &'a crate::attn_air::KeyTileTie,
-    pub v: Option<&'a crate::attn_air::KeyTileTie>,
+    pub k: Option<&'a crate::gadgets::attention::air::KeyTileTie>,
+    pub q: &'a crate::gadgets::attention::air::KeyTileTie,
+    pub v: Option<&'a crate::gadgets::attention::air::KeyTileTie>,
 }
 
 /// Everything committed after the challenges: the Horner accumulators and the
@@ -841,7 +841,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         // K first where the key tile publishes one (the diagonal block), then Q, which
         // every bound key tile publishes -- the order `ChanEval::evaluate` reads
         // the two masks in.
-        let sides: Vec<(&crate::attn_air::KeyTileTie, usize)> = b.k.map(|k| (k, 0usize))
+        let sides: Vec<(&crate::gadgets::attention::air::KeyTileTie, usize)> = b.k.map(|k| (k, 0usize))
             .into_iter()
             .chain(std::iter::once((b.q, 1usize)))
             .collect();
@@ -1093,7 +1093,7 @@ pub fn interaction_phase(a: &Attn, l: &Layouts, cfg: &Cfg, pow: &Powers, exp: &E
         let n_aux = if a.variant == Variant::IntExp { 0 } else { lk.q };
         let mut looks = vec![];
         // where the diagonal block's mask columns sit in `pre` (commit_pre's order)
-        let msk0 = crate::attn_air::CHAN_SEL.len() + crate::attn_air::DIAGONAL_BLOCK_SEL.len();
+        let msk0 = crate::gadgets::attention::air::CHAN_SEL.len() + crate::gadgets::attention::air::DIAGONAL_BLOCK_SEL.len();
         for i in 0..lk.q {
             let key = if a.variant == Variant::Bf16x { b + 2 * lk.q + i } else { b + i };
             looks.push(if a.diagonal_block {
@@ -1294,16 +1294,16 @@ pub fn table_sides(a: &Attn, widths: &[u32], exp: &ExpRel, ranges: &[RangeRel],
 
 /// Index of the exp table's first preprocessed column.
 pub fn pre_exp_x(a: &Attn, l: &Layouts) -> usize {
-    crate::attn_air::CHAN_SEL.len()
+    crate::gadgets::attention::air::CHAN_SEL.len()
         + if a.diagonal_block {
-            crate::attn_air::DIAGONAL_BLOCK_SEL.len() + l.key.q
+            crate::gadgets::attention::air::DIAGONAL_BLOCK_SEL.len() + l.key.q
         } else {
-            crate::attn_air::KEY_SEL.len()
+            crate::gadgets::attention::air::KEY_SEL.len()
         }
         // stream CC (E11): the inert-lead-row selector, when the grid has one
-        + usize::from(crate::attn_air::act_id(0, a.diagonal_block, l.key.g.lead).is_some())
-        + crate::attn_air::OUT_SEL.len()
-        + crate::attn_air::ROW_SEL.len()
+        + usize::from(crate::gadgets::attention::air::act_id(0, a.diagonal_block, l.key.g.lead).is_some())
+        + crate::gadgets::attention::air::OUT_SEL.len()
+        + crate::gadgets::attention::air::ROW_SEL.len()
 }
 
 /// Is row `j` the first row of an instance in the channel component?
@@ -1351,15 +1351,15 @@ pub fn cells(a: &Attn, l: &Layouts, cfg: &Cfg) -> Cells {
     let range_tbl: usize = widths.iter().map(|w| 1usize << w).sum();
 
     let key_sel = if a.diagonal_block {
-        crate::attn_air::DIAGONAL_BLOCK_SEL.len() + lk.q       // + one mask column per slot
+        crate::gadgets::attention::air::DIAGONAL_BLOCK_SEL.len() + lk.q       // + one mask column per slot
     } else {
-        crate::attn_air::KEY_SEL.len()
+        crate::gadgets::attention::air::KEY_SEL.len()
     // stream CC (E11): + the inert-lead-row selector, when the grid has one
-    } + usize::from(crate::attn_air::act_id(0, a.diagonal_block, lk.g.lead).is_some());
-    let pre = crate::attn_air::CHAN_SEL.len() * lc.g.rows
+    } + usize::from(crate::gadgets::attention::air::act_id(0, a.diagonal_block, lk.g.lead).is_some());
+    let pre = crate::gadgets::attention::air::CHAN_SEL.len() * lc.g.rows
         + key_sel * lk.g.rows
-        + crate::attn_air::OUT_SEL.len() * lo.g.rows
-        + crate::attn_air::ROW_SEL.len() * rrows
+        + crate::gadgets::attention::air::OUT_SEL.len() * lo.g.rows
+        + crate::gadgets::attention::air::ROW_SEL.len() * rrows
         + 2 * tbl + range_tbl;
     let base = (lc.pk + lc.pq) * lc.g.rows
         + (2 * lk.q + n_aux + lk.pv) * lk.g.rows

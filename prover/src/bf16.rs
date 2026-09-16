@@ -454,7 +454,7 @@ mod tests {
         assert_eq!(from_f64_round(1.9 * step, Round::Zero), 1);
         // the first quotient `requant::scl_table` asks for, which used to wrap
         assert_eq!(from_f64(to_f32(1) as f64 / 127.0), 0);
-        assert_eq!(crate::requant::bf16_ceil_f64(to_f32(1) as f64 / 127.0), 1);
+        assert_eq!(crate::gadgets::requant::bf16_ceil_f64(to_f32(1) as f64 / 127.0), 1);
     }
 
     /// Below the last subnormal the answer is zero, with the sign kept -- issue

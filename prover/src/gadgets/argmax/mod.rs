@@ -66,7 +66,7 @@ use stwo_constraint_framework::{
     Relation, RelationEntry, TraceLocationAllocator,
 };
 
-use crate::attn_air::{RangeRel, RangeTableEval, tbl_range};
+use crate::gadgets::attention::air::{RangeRel, RangeTableEval, tbl_range};
 use crate::common::{Eval, Proven, Session, Sums, eval_of, m31_u32, twiddles};
 use crate::layer::MatLayout;
 
@@ -242,11 +242,11 @@ impl FrameworkEval for ArgmaxEval {
         // head dequant's component.
         if let Some(t) = &self.binding {
             let oin = eval.get_preprocessed_column(
-                crate::dequant::deq_sel(&t.tag, crate::dequant::DEQ_OSEL[0]));
+                crate::gadgets::dequant::deq_sel(&t.tag, crate::gadgets::dequant::DEQ_OSEL[0]));
             let obd = eval.get_preprocessed_column(
-                crate::dequant::deq_sel(&t.tag, crate::dequant::DEQ_OSEL[1]));
+                crate::gadgets::dequant::deq_sel(&t.tag, crate::gadgets::dequant::DEQ_OSEL[1]));
             let oact = eval.get_preprocessed_column(
-                crate::dequant::deq_sel(&t.tag, crate::dequant::DEQ_OSEL[2]));
+                crate::gadgets::dequant::deq_sel(&t.tag, crate::gadgets::dequant::DEQ_OSEL[2]));
             let [u_prev, u] =
                 eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
             let mut f = E::EF::zero();
@@ -614,7 +614,7 @@ pub fn component(w: &AWitness, lax: bool, lay: MatLayout, m_rk: &mut [u32],
             }
             ss_carry += ind as i64;
         }
-        cols[col_ss][j] = crate::attn_trace::m31_of(ss_carry);
+        cols[col_ss][j] = crate::gadgets::attention::trace::m31_of(ss_carry);
     }
 
     let sel = |f: &dyn Fn(usize) -> bool| {
@@ -686,8 +686,8 @@ pub fn binding_col(r: &AComponent, tokens: usize, t: &ArgmaxBinding) -> (Vec<Eva
         u[j] = if j == 0 { f } else { u[j - 1] * mult + f };
         g[j] = if j == 0 { add } else { g[j - 1] * kmult + add };
     }
-    let mut cols = crate::attn_trace::secure_cols_pub(r.lay.log_rows, &u);
-    cols.extend(crate::attn_trace::secure_cols_pub(r.lay.log_rows, &g));
+    let mut cols = crate::gadgets::attention::trace::secure_cols_pub(r.lay.log_rows, &u);
+    cols.extend(crate::gadgets::attention::trace::secure_cols_pub(r.lay.log_rows, &g));
     (cols, u[rows - 1], g[rows - 1])
 }
 
@@ -732,7 +732,7 @@ pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
         });
         crate::plogup::build(lay.log_rows, n, f)
     };
-    let (tcols, tsum) = crate::attn_trace::table_col(KEY_BITS, &rk, &[&tbl], &mult);
+    let (tcols, tsum) = crate::gadgets::attention::trace::table_col(KEY_BITS, &rk, &[&tbl], &mult);
     let mut icols = inter;
     icols.extend(tcols);
     sess.commit(icols.clone());

@@ -71,7 +71,7 @@ use stwo::prover::lookups::gkr_verifier::{
 use stwo::prover::lookups::mle::Mle;
 use stwo_constraint_framework::FrameworkEval;
 
-use crate::attn_witness::Variant as AttnVariant;
+use crate::gadgets::attention::witness::Variant as AttnVariant;
 
 /// One key tile component's lookup site, as `interaction_phase` reaches it.
 ///
@@ -278,18 +278,18 @@ impl Collect {
         &mut self,
         which: usize,
         log_rows: u32,
-        looks: &[crate::attn_trace::Look],
+        looks: &[crate::gadgets::attention::trace::Look],
         cols: &[crate::common::Eval],
         pre: &[crate::common::Eval],
-        exp: &crate::attn_air::ExpRel,
-        ranges: &[crate::attn_air::RangeRel],
+        exp: &crate::gadgets::attention::air::ExpRel,
+        ranges: &[crate::gadgets::attention::air::RangeRel],
     ) {
         let t0 = Instant::now();
         let site = Site {
             reg: self.reg,
             which,
             log_rows,
-            unit: looks.iter().map(crate::attn_trace::look_is_unit).collect(),
+            unit: looks.iter().map(crate::gadgets::attention::trace::look_is_unit).collect(),
         };
         let at = self.sites.len();
         // B11 stream S, lever 3: the looks feed the circuit *unpaired* -- one
@@ -298,7 +298,7 @@ impl Collect {
         // `mle_eval` link can binding them down. The circuit's own first layer now
         // does the pairing stream R precomputed outside the proof.
         let frac = |look: usize, vr: usize| {
-            crate::attn_trace::look_frac(&looks[look], vr, cols, pre, exp, ranges)
+            crate::gadgets::attention::trace::look_frac(&looks[look], vr, cols, pre, exp, ranges)
         };
         let mut direct = SecureField::zero();
         for inst in plan(std::slice::from_ref(&site)) {
@@ -375,8 +375,8 @@ fn feedcheck_on() -> bool {
 }
 
 /// The key tiles' numerator kinds, in look order.
-fn unit_of(looks: &[crate::attn_trace::Look]) -> Vec<bool> {
-    looks.iter().map(crate::attn_trace::look_is_unit).collect()
+fn unit_of(looks: &[crate::gadgets::attention::trace::Look]) -> Vec<bool> {
+    looks.iter().map(crate::gadgets::attention::trace::look_is_unit).collect()
 }
 
 /// Whether `cols` actually holds this component's committed span. A
@@ -392,12 +392,12 @@ pub fn feed_site(
     air: Option<&crate::devfrac::KeyTileAir<'_>>,
     which: usize,
     log_rows: u32,
-    looks: &[crate::attn_trace::Look],
+    looks: &[crate::gadgets::attention::trace::Look],
     at: &[usize],
     cols: &[crate::common::Eval],
     pre: &[crate::common::Eval],
-    exp: &crate::attn_air::ExpRel,
-    ranges: &[crate::attn_air::RangeRel],
+    exp: &crate::gadgets::attention::air::ExpRel,
+    ranges: &[crate::gadgets::attention::air::RangeRel],
 ) {
     let dev = air.and_then(|a| a.dev);
     let Some(d) = dev else {
@@ -478,7 +478,7 @@ pub fn feed_site(
 pub fn deq_site(
     c: &mut Collect,
     reg: usize,
-    eval: &crate::dequant::DequantEval,
+    eval: &crate::gadgets::dequant::DequantEval,
     r: &crate::layer::MatComponent,
 ) {
     fam_site(c, FamSite {
@@ -487,7 +487,7 @@ pub fn deq_site(
         mut_env: "ZK_MUT_DEQUANT",
         mut_key: reg,
         log_rows: r.lay.log_rows,
-        unit: crate::dequant::look_units(&r.spec),
+        unit: crate::gadgets::dequant::look_units(&r.spec),
         pre: &r.pre,
         base: &r.base,
         #[cfg(feature = "cuda")]
@@ -507,8 +507,8 @@ pub fn deq_site(
 pub fn residual_stream_site(
     c: &mut Collect,
     reg: usize,
-    eval: &crate::residual_stream::ResidualStreamEval,
-    r: &crate::residual_stream::ResidualStreamComponent,
+    eval: &crate::gadgets::residual_stream::ResidualStreamEval,
+    r: &crate::gadgets::residual_stream::ResidualStreamComponent,
 ) {
     let log_rows = r.log_rows;
     let ir = crate::scalars::cached_ir(eval, log_rows, log_rows, true, || {
@@ -540,7 +540,7 @@ pub fn residual_stream_site(
 pub fn freivalds_site(
     c: &mut Collect,
     reg: usize,
-    eval: &crate::freivalds::FreivaldsEval,
+    eval: &crate::gadgets::freivalds::FreivaldsEval,
     r: &crate::layer::FreivaldsComponent,
 ) {
     fam_site(c, FamSite {
@@ -562,7 +562,7 @@ pub fn freivalds_site(
 /// two limbs to `denp`'s own range check.
 pub fn ao_site(
     c: &mut Collect,
-    eval: &crate::freivalds::AttnOutEval,
+    eval: &crate::gadgets::freivalds::AttnOutEval,
     r: &crate::layer::AoComponent,
 ) {
     fam_site(c, FamSite {
@@ -1040,12 +1040,12 @@ mod feedimpl {
             air: &crate::devfrac::KeyTileAir<'_>,
             which: usize,
             log_rows: u32,
-            looks: &[crate::attn_trace::Look],
+            looks: &[crate::gadgets::attention::trace::Look],
             at: &[usize],
             cols: &[crate::common::Eval],
             pre: &[crate::common::Eval],
-            exp: &crate::attn_air::ExpRel,
-            ranges: &[crate::attn_air::RangeRel],
+            exp: &crate::gadgets::attention::air::ExpRel,
+            ranges: &[crate::gadgets::attention::air::RangeRel],
         ) {
             use stwo::prover::backend::Column as _;
             use stwo::stwo_cuda::base_field_vec::BaseFieldVec;
@@ -1080,15 +1080,15 @@ mod feedimpl {
         pub fn check_fed(
             &self,
             first: usize,
-            looks: &[crate::attn_trace::Look],
+            looks: &[crate::gadgets::attention::trace::Look],
             cols: &[crate::common::Eval],
             pre: &[crate::common::Eval],
-            exp: &crate::attn_air::ExpRel,
-            ranges: &[crate::attn_air::RangeRel],
+            exp: &crate::gadgets::attention::air::ExpRel,
+            ranges: &[crate::gadgets::attention::air::RangeRel],
         ) {
             use stwo::prover::backend::Column as _;
             let frac = |look: usize, vr: usize| {
-                crate::attn_trace::look_frac(&looks[look], vr, cols, pre, exp, ranges)
+                crate::gadgets::attention::trace::look_frac(&looks[look], vr, cols, pre, exp, ranges)
             };
             let n_dev = self.dev_layers.len();
             let mut cells = 0usize;
@@ -1719,8 +1719,8 @@ const _: () = assert!(N_LANES == 1usize << LOG_N_LANES);
 /// 5. **What it cost**: instances, fractions, the input-layer build, the
 ///    sumcheck, and the proof bytes.
 pub fn cmd(args: &[String]) {
-    use crate::attn_witness::{Attn, Variant};
-    use crate::layout::Shape;
+    use crate::gadgets::attention::witness::{Attn, Variant};
+    use crate::gadgets::attention::layout::Shape;
     use stwo::core::channel::Blake2sM31Channel;
 
     // The first CUDA call in the process pays context creation and the fatbin
@@ -1736,9 +1736,9 @@ pub fn cmd(args: &[String]) {
     };
     let cfg = crate::cli::attn_cfg(args, crate::cli::arg_scalar(args, "--scores-per-row", 16usize));
     let a = Attn::get(&src, sh, Variant::IntExp);
-    let l = crate::attn_trace::Layouts::choose(&sh, &cfg);
-    let widths = crate::attn_trace::range_widths(&a, &cfg);
-    let com = crate::attn_trace::commit_phase(&a, &l, &cfg);
+    let l = crate::gadgets::attention::trace::Layouts::choose(&sh, &cfg);
+    let widths = crate::gadgets::attention::trace::range_widths(&a, &cfg);
+    let com = crate::gadgets::attention::trace::commit_phase(&a, &l, &cfg);
 
     // The challenges have to be drawn the way the proof draws them, or the
     // relations are different relations and the sums are incomparable. This is
@@ -1746,16 +1746,16 @@ pub fn cmd(args: &[String]) {
     // fractions depend on is the drawn elements, not the Merkle roots.
     let mut ch = Blake2sM31Channel::default();
     crate::util::pcs_config().mix_into(&mut ch);
-    let rel_exp = crate::attn_air::ExpRel::draw(&mut ch);
-    let rels: Vec<crate::attn_air::RangeRel> =
-        widths.iter().map(|_| crate::attn_air::RangeRel::draw(&mut ch)).collect();
+    let rel_exp = crate::gadgets::attention::air::ExpRel::draw(&mut ch);
+    let rels: Vec<crate::gadgets::attention::air::RangeRel> =
+        widths.iter().map(|_| crate::gadgets::attention::air::RangeRel::draw(&mut ch)).collect();
     let f = ch.draw_secure_felts(3);
-    let pow = crate::attn_air::Powers::new(f[0], f[1], f[2], &sh, &l.chan, &l.key, &l.out, l.rw);
+    let pow = crate::gadgets::attention::air::Powers::new(f[0], f[1], f[2], &sh, &l.chan, &l.key, &l.out, l.rw);
 
     let mut collect = Collect::with_direct(true);
     collect.reg = crate::gkrlink::Comp::KeyTile(0);
     let t0 = Instant::now();
-    let inter = crate::attn_trace::interaction_phase(
+    let inter = crate::gadgets::attention::trace::interaction_phase(
         &a, &l, &cfg, &pow, &rel_exp, &rels, &com, &widths, true, !a.diagonal_block,
         None, Some(&mut collect), None);
     let committed_secs = t0.elapsed().as_secs_f64();
@@ -1944,7 +1944,7 @@ pub fn sites_of(plan: &crate::compose::Plan) -> Vec<Site> {
                 reg: crate::gkrlink::Comp::Deq(m),
                 which: 0,
                 log_rows: plan.mat_lays[m].log_rows,
-                unit: crate::dequant::look_units(sp),
+                unit: crate::gadgets::dequant::look_units(sp),
             });
         }
     }
