@@ -38,7 +38,7 @@ use crate::bf16;
 use crate::common::{Eval, eval_of, m31_u32};
 use crate::encoding::{canon, join, m31_of, secure_cols_pub, split};
 use crate::gadgets::requant::tables::{TT_POW2, TT_RANGE, rqv_at};
-use crate::layer::MatLayout;
+use crate::layout::MatLayout;
 use crate::relations::{FracRel, PairRel, RangeRel, id};
 
 // ------------------------------------------------------------------- angles ---

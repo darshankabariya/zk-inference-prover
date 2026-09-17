@@ -57,6 +57,15 @@
 //! round bit and drops a column from the witness and from both tables.  Both are
 //! measured, because the difference lands on the model's second-largest rung.
 
+/// The component a segment composes, split the way every gadget directory is:
+/// `layout` which matmul takes which variant, `trace` the columns and the
+/// reference they are checked against, `claims` what the component publishes,
+/// `device` the same columns born on the card.
+pub mod claims;
+pub mod device;
+pub mod layout;
+pub mod trace;
+
 use num_traits::{One, Zero};
 use serde_json::{Value, json};
 use stwo::core::air::Component;
@@ -228,7 +237,7 @@ impl Spec {
 /// Unit everywhere except the `chain` variant's two `mul` lookups, whose
 /// multiplicity is the committed `nz` (a zero result skips the lookup rather
 /// than needing a table row). Only `pow2` and `chain` are reachable, exactly as
-/// in `layer::mat_logup`'s hand-written builder, which answers `unreachable!()`
+/// in `claims::mat_logup`'s hand-written builder, which answers `unreachable!()`
 /// for the rest.
 pub fn look_units(sp: &Spec) -> Vec<bool> {
     let mut u = vec![];

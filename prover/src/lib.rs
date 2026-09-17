@@ -20,7 +20,6 @@ pub mod compose;
 pub mod cudagen;
 pub mod cudakernels;
 pub mod dev_attention_freivalds_witness_gen;
-pub mod dev_dequant_witness_gen;
 pub mod dev_residual_stream_witness_gen;
 pub mod devacc;
 pub mod devfrac;
@@ -35,6 +34,7 @@ pub mod gencudakernels;
 pub mod gkr_key_tile;
 pub mod gkrlink;
 pub mod layer;
+pub mod layout;
 pub mod logup_run;
 pub mod plogup;
 pub mod precache;
@@ -44,3 +44,7 @@ pub mod shaperoot;
 pub mod spans;
 pub mod util;
 pub mod witread;
+
+/// The dequant gadget's device witness generation, under the name `devacc.rs`
+/// still reaches it by. The file is `gadgets/dequant/device.rs` since #197.
+pub use gadgets::dequant::device as dev_dequant_witness_gen;

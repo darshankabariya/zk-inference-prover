@@ -67,7 +67,7 @@ use stwo_constraint_framework::{
 
 use crate::common::{Eval, Proven, Session, Sums, eval_of, m31_u32, twiddles};
 use crate::encoding::{m31_of, secure_cols_pub};
-use crate::layer::MatLayout;
+use crate::layout::MatLayout;
 use crate::relations::{RangeRel, RangeTableEval, id, table_col, tbl_range};
 
 /// The order key's width: a bf16 sign-flipped pattern is 16 bits.
