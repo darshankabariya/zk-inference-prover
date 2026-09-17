@@ -15,6 +15,7 @@
 
 pub mod argmax;
 pub mod attention;
+pub mod attn_out;
 pub mod dequant;
 pub mod embed;
 pub mod freivalds;
