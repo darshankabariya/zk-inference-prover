@@ -15,6 +15,7 @@ pub mod bf16;
 pub mod boundary;
 pub mod chunks;
 pub mod cli;
+pub mod columns;
 pub mod common;
 pub mod compose;
 pub mod cudagen;

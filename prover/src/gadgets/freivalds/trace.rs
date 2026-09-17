@@ -6,6 +6,7 @@ use stwo::core::fields::m31::M31;
 use crate::common::{Eval, eval_of, m31_u32};
 use crate::encoding::m31_of;
 use crate::dev_attention_freivalds_witness_gen::sub_slice;
+use crate::gadgets::freivalds::columns::{FreivaldsBase, FreivaldsPre, FreivaldsShape};
 use crate::gadgets::freivalds::layout::FreivaldsLayout;
 use crate::layer::{Layer, Tables};
 
@@ -83,7 +84,10 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
     };
     let snap_before = (witness_gen_mode == 2).then(|| snap_tables(tables));
 
-    let mut base = vec![];
+    // #221: the two trees are filled through the row schema and handed back in
+    // committed order by it, so nothing here counts columns.
+    let sh = FreivaldsShape::new(name, &lay, mat_idx.len(), false);
+    let mut act = vec![];
     for p in 0..lay.pq {
         let mut col = vec![M31::zero(); rows];
         for (j, slot) in col.iter_mut().enumerate() {
@@ -109,12 +113,14 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
             tables.bump_r(act_bits, v as i64);
             *slot = m31_of(v as i64);
         }
-        base.push(eval_of(lay.g.log_rows, col));
+        act.push(eval_of(lay.g.log_rows, col));
     }
+    let base = FreivaldsBase { act }.into_committed();
 
-    let mut pre = vec![];
+    let mut w = vec![];
     for mi in mat_idx {
         let m = &layer.mats[*mi];
+        let mut row = vec![];
         for p in 0..lay.pk {
             let mut col = vec![M31::zero(); rows];
             for (j, slot) in col.iter_mut().enumerate() {
@@ -125,17 +131,24 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
                     }
                 }
             }
-            pre.push(eval_of(lay.g.log_rows, col));
+            row.push(eval_of(lay.g.log_rows, col));
         }
+        w.push(row);
     }
     let sel = |fsel: &dyn Fn(usize) -> bool| {
         eval_of(lay.g.log_rows, (0..rows).map(|j| m31_u32(fsel(j) as u32)).collect())
     };
     let ch = |j: usize| lay.g.row(j).map(|(_, c)| c);
-    pre.push(sel(&|j| matches!(ch(j), Some(c) if c + 1 < lay.g.chunks)));
-    pre.push(sel(&|j| matches!(ch(j), Some(0))));
-    pre.push(sel(&|j| j > 0));
-    pre.push(sel(&|j| j + 1 == rows));
+    let pre = FreivaldsPre {
+        nofirst: sel(&|j| matches!(ch(j), Some(c) if c + 1 < lay.g.chunks)),
+        last: sel(&|j| matches!(ch(j), Some(0))),
+        notzero: sel(&|j| j > 0),
+        end: sel(&|j| j + 1 == rows),
+        w,
+    }
+    .into_committed();
+    assert_eq!(base.len(), sh.n_base(), "{name}: the base tree is not the row's");
+    assert_eq!(pre.len(), sh.n_pre(), "{name}: the preprocessed tree is not the row's");
 
     if witness_gen_mode == 2 {
         // the check with teeth, before any column has changed hands

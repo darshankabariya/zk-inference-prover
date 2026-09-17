@@ -5,6 +5,7 @@ use rayon::prelude::*;
 use stwo::core::fields::qm31::SecureField;
 
 use crate::encoding::m31_of;
+use crate::gadgets::freivalds::columns::{FreivaldsInter, FreivaldsMat, FreivaldsShape};
 use crate::gadgets::freivalds::trace::FreivaldsComponent;
 use crate::layer::Layer;
 
@@ -84,26 +85,34 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
         }
     }
     let mut cols = crate::device::ColSink::new();
+    // #221: the accumulators go into the tree through the row schema's
+    // interaction half, so their order is the order the AIR reads them in and it
+    // is written down once.  `qx` is `None` here because it is built below, out
+    // of `m0.qx` rather than out of these, and appended where the schema has it.
+    let sh = FreivaldsShape::new(&r.name, &lay, r.mats.len(), air.qx.is_some());
+    let acc_cols = || -> Vec<crate::common::Eval> {
+        FreivaldsInter {
+            v: v.as_slice(),
+            mats: us.iter().zip(accs.iter())
+                .map(|(u, a)| FreivaldsMat { u: u.as_slice(), acc: a.as_slice() })
+                .collect(),
+            qx: None,
+        }
+        .into_committed()
+        .into_iter()
+        .flat_map(|c| crate::encoding::secure_cols_pub(lay.g.log_rows, c))
+        .collect()
+    };
     let claimed: Vec<SecureField> = match acc_dev {
         Some(d) => {
             let got = crate::devacc::freivalds(d, &lay, r.mats.len(), rv, s_ch);
-            let hh = acc_host.then(|| {
-                let mut e = crate::encoding::secure_cols_pub(lay.g.log_rows, &v);
-                for m in 0..r.mats.len() {
-                    e.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &us[m]));
-                    e.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &accs[m]));
-                }
-                (e, accs.iter().map(|a| a[rows - 1]).collect::<Vec<_>>())
-            });
+            let hh = acc_host
+                .then(|| (acc_cols(), accs.iter().map(|a| a[rows - 1]).collect::<Vec<_>>()));
             crate::devacc::place(&format!("freivalds {} 2^{}", r.name, lay.g.log_rows), got,
                                  hh, &mut cols)
         }
         None => {
-            cols.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &v));
-            for m in 0..r.mats.len() {
-                cols.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &us[m]));
-                cols.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &accs[m]));
-            }
+            cols.extend(acc_cols());
             accs.iter().map(|a| a[rows - 1]).collect()
         }
     };
@@ -151,7 +160,14 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
             xs[j] = carry + inner_x[j];
         }
         qx_claim = xs[nrows - 1];
+        // the schema's last interaction column, after the per-matmul accumulators
         cols.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &xs));
+    }
+    // the row's own interaction columns are in; the LogUp columns below are the
+    // relation's and the schema does not name them
+    if acc_dev.is_none() {
+        assert_eq!(cols.len(), 4 * sh.n_inter(),
+                   "freivalds {}: the interaction tree is not the row's", r.name);
     }
     let mut use_sum = SecureField::zero();
     // B11 stream V, lever 4: under `--gkr-freivalds` this group's range checks were

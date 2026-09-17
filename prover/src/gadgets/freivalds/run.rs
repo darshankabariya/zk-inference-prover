@@ -34,8 +34,9 @@ use crate::relations::{RangeRel, RangeTableEval, powers, table_col, tbl_range};
 use crate::bf16::Round;
 use crate::common::{Proven, Session, Sums, eval_of, m31_u32, twiddles};
 use crate::compose::Rels;
-use crate::gadgets::freivalds::{FREIVALDS_SEL, FreivaldsEval, freivalds_sel, freivalds_w};
+use crate::gadgets::freivalds::FreivaldsEval;
 use crate::gadgets::freivalds::claims::freivalds_interaction;
+use crate::gadgets::freivalds::columns::{FreivaldsPre, FreivaldsShape};
 use crate::gadgets::freivalds::layout::FreivaldsLayout;
 use crate::gadgets::freivalds::trace::freivalds_component;
 use crate::layer::{Layer, Tables};
@@ -118,7 +119,7 @@ impl Outcome {
 /// so the rest are drawn from a channel of their own: no column here combines
 /// against them, and a composed segment draws them for components this proof does
 /// not build.
-fn rels_of(range: &RangeRel) -> Rels {
+pub fn rels_of(range: &RangeRel) -> Rels {
     let mut spare = Blake2sM31Channel::default();
     let mut r = Rels::draw(&mut spare, &[ACT_BITS], None, None, false, 0);
     r.ranges = vec![range.clone()];
@@ -203,13 +204,8 @@ pub fn run(layer: &Layer, group: &str, mats: &[usize], p_target: usize) -> Outco
     // the components fix them, or a prover picks them adaptively.
     sess.mix(&it.claimed);
 
-    let mut ids = vec![];
-    for (mi, _) in mats.iter().enumerate() {
-        for pp in 0..lay.pk {
-            ids.push(freivalds_w(group, mi, pp));
-        }
-    }
-    ids.extend(FREIVALDS_SEL.iter().map(|n| freivalds_sel(group, n)));
+    // #221: the committed order is the schema's, not this file's
+    let mut ids = FreivaldsPre::committed_ids(&FreivaldsShape::new(group, &lay, mats.len(), false));
     ids.push(tbl_range(ACT_BITS));
     let alloc = &mut TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let fr = FrameworkComponent::<FreivaldsEval>::new(alloc, air(it.claimed.clone()), it.use_sum);

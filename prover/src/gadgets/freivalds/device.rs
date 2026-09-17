@@ -8,6 +8,7 @@ use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
 use crate::dev_attention_freivalds_witness_gen::{FGrid, FMult, Fam, add_into, pack_i8,
                                                  pack_i8_into, ptrs, timed_up_into, uninit,
                                                  witness_gen_mut, zeroes};
+use crate::gadgets::freivalds::columns::FreivaldsShape;
 use crate::gadgets::freivalds::layout::FreivaldsLayout;
 use crate::layer::{Layer, Tables};
 
@@ -86,8 +87,11 @@ pub fn freivalds_component_dev(
     crate::util::add_phase("gen/witness_gen_freivalds_up", t_up.elapsed().as_secs_f64());
 
     let t_alloc = std::time::Instant::now();
-    let base = uninit(lay.pq, rows);
-    let pre = uninit(mat_idx.len() * lay.pk + 4, rows);
+    // #221: the kernel keeps its own column order -- rewriting it is out of the
+    // scheme's scope -- but the trees it fills are sized from the row schema now.
+    let sh = FreivaldsShape::new("", lay, mat_idx.len(), false);
+    let base = uninit(sh.n_base(), rows);
+    let pre = uninit(sh.n_pre(), rows);
     let base_p = ptrs(&base);
     let pre_p = ptrs(&pre);
     let r8 = tables.ridx(8);
@@ -104,6 +108,16 @@ pub fn freivalds_component_dev(
         n_mats: mat_idx.len() as u32,
         mutate: witness_gen_mut(Fam::Freivalds),
     };
+
+    // #221: and the shape the kernel is handed has to describe the same trees.
+    // A kernel writing a different number of columns than the AIR reads would be
+    // a wrong proof rather than a build error, and this is the cheapest thing
+    // that ties the two sides together without touching the kernel.
+    assert_eq!((base.len(), pre.len()),
+               (cfg.pq as usize,
+                (cfg.n_mats * cfg.pk) as usize + crate::gadgets::freivalds::FREIVALDS_SEL.len()),
+               "the Freivalds witness-generation kernel is handed a different tree than the \
+                row schema declares");
 
     let t_k = std::time::Instant::now();
     unsafe {
