@@ -152,7 +152,7 @@ pub fn cols(component: &ResidualStreamComponent, side: &Side, tamper: Option<usi
             let mut v: Vec<M31> = (0..rows)
                 .map(|m| {
                     let (sm, ef) = vals[m * w + j];
-                    crate::gadgets::residual_stream::m31_of(sm * PACK + ef)
+                    crate::encoding::m31_of(sm * PACK + ef)
                 })
                 .collect();
             if let Some(t) = tamper {

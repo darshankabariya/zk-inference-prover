@@ -405,7 +405,7 @@ pub struct SiteLooks {
     pub looks: Vec<LinkLook>,
 }
 
-fn range_den(rel: &crate::gadgets::attention::air::RangeRel, slot: Affine) -> Affine {
+fn range_den(rel: &crate::relations::RangeRel, slot: Affine) -> Affine {
     let (z, al) = rel.parts();
     let mut den = Affine {
         terms: slot.terms.iter().map(|(c, w)| (*c, *w * al[0])).collect(),

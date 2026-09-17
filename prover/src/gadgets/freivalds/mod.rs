@@ -34,13 +34,9 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, INTERACTION_TRACE_IDX,
                                 ORIGINAL_TRACE_IDX, RelationEntry};
 
-use crate::gadgets::attention::air::RangeRel;
-use crate::gadgets::dequant::{FracRel, PairRel};
 use crate::gadgets::attention::layout::Grid;
+use crate::relations::{FracRel, PairRel, RangeRel, id};
 
-pub fn id(s: impl Into<String>) -> PreProcessedColumnId {
-    PreProcessedColumnId { id: s.into() }
-}
 pub const FREIVALDS_SEL: [&str; 4] = ["nofirst", "last", "notzero", "end"];
 pub fn freivalds_sel(tag: &str, name: &str) -> PreProcessedColumnId {
     id(format!("zk_freivalds{tag}_{name}"))

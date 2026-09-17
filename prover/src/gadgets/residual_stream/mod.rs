@@ -96,7 +96,7 @@ use rayon::prelude::*;
 use serde_json::{Value, json};
 use stwo::core::air::Component;
 use stwo::core::fields::FieldExpOps;
-use stwo::core::fields::m31::{M31, P};
+use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
 use stwo::prover::ComponentProver;
 use stwo::prover::backend::simd::qm31::PackedQM31;
@@ -108,7 +108,8 @@ use stwo_constraint_framework::{
 
 use crate::bf16::{self, EXP_BIAS, Round};
 use crate::common::{Eval, Proven, Session, Sums, eval_of, log_rows_for, m31_u32, twiddles};
-use crate::gadgets::dequant::{FracRel, NormRel, id};
+use crate::encoding::{canon, is_odd_pattern, join, m31_of, sgn_of, split, to_f64};
+use crate::relations::{FRAC_COLS, FracRel, NORM_COLS, NormRel, id};
 
 relation!(PowRel, 2);
 relation!(SMulRel, 5);
@@ -166,59 +167,6 @@ pub fn un_col(kind: &str, i: usize) -> PreProcessedColumnId {
 pub const DMAX: u32 = 12;
 /// How far below the anchor `POW` still carries a (dropping) row.
 pub const UMIN: i64 = 260;
-
-pub fn m31_of(v: i64) -> M31 {
-    crate::gadgets::attention::trace::m31_of(v)
-}
-
-// ------------------------------------------------------------------ values ----
-
-/// A bf16 pattern as `(sm, ef)`.  Subnormals (`ef = 0, m7 != 0`) and
-/// infinities/NaN collapse to zero, which is a *different value*; the witness
-/// builders count them and the run reports the count, so one would show up as a
-/// reference mismatch rather than pass silently.
-pub fn split(pat: u16) -> (i64, u32) {
-    let (sg, ef, m7) = bf16::decode(pat);
-    if ef == 0 || ef == 0xff {
-        (0, 0)
-    } else {
-        let m = (128 + m7) as i64;
-        (if sg == 1 { -m } else { m }, ef)
-    }
-}
-
-pub fn join(sm: i64, ef: u32) -> u16 {
-    if sm == 0 {
-        0
-    } else {
-        bf16::pattern(u32::from(sm < 0), ef, sm.unsigned_abs() as u32 - 128)
-    }
-}
-
-/// bf16 has two zeros and the `(sm, ef)` representation has one, deliberately:
-/// `sm = 0` *is* zero, with no side condition, which is what keeps the add's
-/// constraints degree 2.  A negative zero -- which B1 commits whenever a product
-/// has one negative operand and one zero one -- is therefore canonicalised to
-/// `+0`.  Nothing downstream can see the difference: the requantize sends both to
-/// `q = 0`, and every add and multiply here treats them alike.  The runs count
-/// how many the real columns actually carry.
-pub fn canon(pat: u16) -> u16 {
-    if pat == 0x8000 { 0 } else { pat }
-}
-
-pub fn is_odd_pattern(pat: u16) -> bool {
-    let (_, ef, m7) = bf16::decode(pat);
-    (ef == 0 && m7 != 0) || ef == 0xff
-}
-
-pub fn to_f64(sm: i64, ef: u32) -> f64 {
-    if sm == 0 { 0.0 } else { sm as f64 * (ef as f64 - EXP_BIAS as f64).exp2() }
-}
-
-/// A signed significand held as a field element, back to `i64`.
-pub fn sgn_of(v: M31) -> i64 {
-    if v.0 > P / 2 { v.0 as i64 - P as i64 } else { v.0 as i64 }
-}
 
 // ------------------------------------------------------------------ tables ----
 
@@ -2055,7 +2003,7 @@ pub fn residual_stream_interaction(r: &ResidualStreamComponent, rels: &ResidualS
                     h[j] = if j == 0 { f } else { h[j - 1] * spec.step + f };
                 }
                 host_claims.push(h[rows - 1]);
-                host_cols.extend(crate::gadgets::attention::trace::secure_cols_pub(r.log_rows, &h));
+                host_cols.extend(crate::encoding::secure_cols_pub(r.log_rows, &h));
             }
         }
         match bind_dev {
@@ -2200,7 +2148,7 @@ pub fn residual_stream_interaction(r: &ResidualStreamComponent, rels: &ResidualS
 
 // ---------------------------------------------------------------- the tables --
 
-/// The residual stream's own tables, in the shape `dequant::TableEval` has for B6's: a
+/// The residual stream's own tables, in the shape `relations::TableEval` has for B6's: a
 /// preprocessed row, a committed multiplicity, yielded at `-m`.
 #[derive(Clone)]
 pub enum GKind {
@@ -2548,12 +2496,12 @@ pub fn run(w: &ResidualStreamWitness, prog: &Prog, round: Round, kmax: u32,
         let get: [fn(&bf16::NormRow) -> u32; 6] =
             [|r| r.m2, |r| r.ph, |r| r.st, |r| r.m7, |r| r.expfield, |r| r.nz];
         for (t, g) in get.into_iter().enumerate() {
-            ids.push(id(crate::gadgets::dequant::NORM_COLS[t]));
+            ids.push(id(NORM_COLS[t]));
             pre.push(eval_of(tables.log_norm, (0..pad(tables.log_norm))
                 .map(|i| m31_u32(tables.norm.get(i).map(g).unwrap_or(0))).collect()));
         }
         for t in 0..3 {
-            ids.push(id(crate::gadgets::dequant::FRAC_COLS[t]));
+            ids.push(id(FRAC_COLS[t]));
             pre.push(eval_of(tables.log_frac, (0..pad(tables.log_frac))
                 .map(|i| {
                     let x = tables.frac.get(i).copied().unwrap_or((0, 0, 0));
@@ -2636,9 +2584,9 @@ pub fn run(w: &ResidualStreamWitness, prog: &Prog, round: Round, kmax: u32,
 
     // the tables' own sides
     let mut kinds = residual_stream_table_kinds(&tables.uns, &rels);
-    kinds.push((tables.log_norm, crate::gadgets::dequant::NORM_COLS.iter().map(|c| id(*c)).collect(),
+    kinds.push((tables.log_norm, NORM_COLS.iter().map(|c| id(*c)).collect(),
                 GKind::Norm(rels.norm.clone())));
-    kinds.push((tables.log_frac, crate::gadgets::dequant::FRAC_COLS.iter().map(|c| id(*c)).collect(),
+    kinds.push((tables.log_frac, FRAC_COLS.iter().map(|c| id(*c)).collect(),
                 GKind::Frac(rels.frac.clone())));
     let mults: Vec<&Eval> = base[mult_start..].iter().collect();
     let mut tsums: Vec<SecureField> = vec![];

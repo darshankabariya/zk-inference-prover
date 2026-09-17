@@ -30,11 +30,8 @@ use crate::bf16;
 use crate::common::{Eval, eval_of, m31_u32};
 use crate::gadgets::dequant::{Map, Spec, Variant as DeqVariant};
 use crate::gadgets::attention::layout::{Grid, Shape};
+use crate::encoding::m31_of;
 use crate::witread::{self, Site};
-
-pub fn m31_of(v: i64) -> M31 {
-    crate::gadgets::attention::trace::m31_of(v)
-}
 
 /// Stream LL (E11), `notes/inconsistency-log.md` row 58: the precondition tree 0
 /// silently depends on, pinned.
@@ -747,7 +744,7 @@ impl ResidualStreamCols {
                 .map(|_| {
                     let e: i32 = rng.random_range(-spread..spread);
                     let m: f64 = rng.random_range(-2.0f64..2.0);
-                    crate::gadgets::residual_stream::canon(bf16::from_f64(m * (e as f64).exp2()))
+                    crate::encoding::canon(bf16::from_f64(m * (e as f64).exp2()))
                 })
                 .collect()
         };
@@ -1871,8 +1868,8 @@ impl Layer {
         let bias_frac = std::env::var("ZK_SYNTHETIC_QKV_BIAS").ok()
             .and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
         let val = |p: u16| -> f64 {
-            let (sm, ef) = crate::gadgets::residual_stream::split(crate::gadgets::residual_stream::canon(p));
-            crate::gadgets::residual_stream::to_f64(sm, ef)
+            let (sm, ef) = crate::encoding::split(crate::encoding::canon(p));
+            crate::encoding::to_f64(sm, ef)
         };
         let add_bias = |x: Vec<u16>, n: usize| -> Vec<u16> {
             if bias_frac == 0.0 {
@@ -1891,7 +1888,7 @@ impl Layer {
             let mut out = x;
             out.par_chunks_mut(n).for_each(|row| {
                 for (c, slot) in row.iter_mut().enumerate() {
-                    *slot = crate::gadgets::residual_stream::canon(bf16::from_f64(val(*slot) + b[c]));
+                    *slot = crate::encoding::canon(bf16::from_f64(val(*slot) + b[c]));
                 }
             });
             out
@@ -2728,7 +2725,8 @@ impl Layer {
     fn synth_family(&mut self, seed: u64, a: usize, round: bf16::Round, head_vocab: usize,
                     o_bend: Option<usize>, rope_bend: Option<(usize, usize)>,
                     model_swap: Option<u64>) {
-        use crate::gadgets::residual_stream::{Kind, Prog, Tiling, UnKind, canon, reference};
+        use crate::encoding::canon;
+        use crate::gadgets::residual_stream::{Kind, Prog, Tiling, UnKind, reference};
         let head = head_vocab > 0;
         // Issue #134: which of the two rebuilds this is.  An honest construction
         // -- `synth_residual_stream`, `synth_head` -- runs before the statement is
@@ -4172,7 +4170,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
                        -> MatInteraction {
     let lay = r.lay;
     let rows = 1usize << lay.log_rows;
-    let (rv_pow, rv_step) = crate::gadgets::attention::air::powers(rv, lay.per_row);
+    let (rv_pow, rv_step) = crate::relations::powers(rv, lay.per_row);
     // B7a milestone 4 (section 3 row 1): `z` and `h` where the component's own
     // accumulator columns are. `ZK_DEVICE_ACCUMULATORS=2` runs both and asserts every cell.
     let acc_dev = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
@@ -4256,16 +4254,16 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
         Some(d) => {
             let got = crate::devacc::deq(d, &lay, &r.map, r.map.f.acc, rv, s_ch);
             let hh = acc_host.then(|| {
-                let mut e = crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &z);
-                e.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &h));
+                let mut e = crate::encoding::secure_cols_pub(lay.log_rows, &z);
+                e.extend(crate::encoding::secure_cols_pub(lay.log_rows, &h));
                 (e, vec![h[rows - 1]])
             });
             crate::devacc::place(&format!("deq {} 2^{}", m.name, lay.log_rows), got, hh,
                                  &mut sink)[0]
         }
         None => {
-            sink.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &z));
-            sink.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &h));
+            sink.extend(crate::encoding::secure_cols_pub(lay.log_rows, &z));
+            sink.extend(crate::encoding::secure_cols_pub(lay.log_rows, &h));
             h[rows - 1]
         }
     };
@@ -4289,10 +4287,10 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
                         f += SecureField::from(m31_of(fold_out(m, t, c))) * o.w[s];
                         continue;
                     }
-                    let pat = crate::gadgets::residual_stream::canon(deq_ref(m, &r.spec, t, c));
+                    let pat = crate::encoding::canon(deq_ref(m, &r.spec, t, c));
                     f += match o.kind {
                         crate::gadgets::dequant::OKind::Pair => {
-                            let (sm, ef) = crate::gadgets::residual_stream::split(pat);
+                            let (sm, ef) = crate::encoding::split(pat);
                             (SecureField::from(m31_of(sm))
                              + SecureField::from(m31_u32(ef)) * o.lam) * o.w[s]
                         }
@@ -4323,7 +4321,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
             u[j] = if j == 0 { f } else { u[j - 1] * mult + f };
         }
         let claimed = u[n_rows - 1];
-        cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &u)
+        cols.extend(crate::encoding::secure_cols_pub(lay.log_rows, &u)
             .into_iter().map(crate::device::AnyCol::OwnedHost));
         claimed
     });
@@ -4351,7 +4349,7 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
             v[j] = if j == 0 { f } else { v[j - 1] * mult + f };
         }
         let claimed = v[n_rows - 1];
-        cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &v)
+        cols.extend(crate::encoding::secure_cols_pub(lay.log_rows, &v)
             .into_iter().map(crate::device::AnyCol::OwnedHost));
         claimed
     });
@@ -5098,10 +5096,10 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoComponent, rr: SecureField, s_ch: Secu
     let lay = r.lay;
     let rows = 1usize << lay.log_rows;
     let pr = lay.per_row;
-    let (rv_pow, rv_step) = crate::gadgets::attention::air::powers(rv, pr);
-    let (_, rv_hd) = crate::gadgets::attention::air::powers(rv, ao.hd);
-    let (_, r_c) = crate::gadgets::attention::air::powers(rr, c_ctx);
-    let (_, s_span) = crate::gadgets::attention::air::powers(s_ch, ao.s - 1);
+    let (rv_pow, rv_step) = crate::relations::powers(rv, pr);
+    let (_, rv_hd) = crate::relations::powers(rv, ao.hd);
+    let (_, r_c) = crate::relations::powers(rr, c_ctx);
+    let (_, s_span) = crate::relations::powers(s_ch, ao.s - 1);
     let mu_out = rv_hd * s_span.inverse();
     let mu_den = r_c * s_span.inverse();
 
@@ -5160,9 +5158,9 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoComponent, rr: SecureField, s_ch: Secu
         Some(d) => {
             let got = crate::devacc::ao(d, &lay, ao.nh, ao.s, rv, s_ch, mu_out, mu_den);
             let hh = acc_host.then(|| {
-                let mut e = crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &z);
-                e.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &h));
-                e.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &dz));
+                let mut e = crate::encoding::secure_cols_pub(lay.log_rows, &z);
+                e.extend(crate::encoding::secure_cols_pub(lay.log_rows, &h));
+                e.extend(crate::encoding::secure_cols_pub(lay.log_rows, &dz));
                 (e, vec![h[rows - 1], dz[rows - 1]])
             });
             let c = crate::devacc::place(&format!("attnout 2^{}", lay.log_rows), got, hh,
@@ -5170,9 +5168,9 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoComponent, rr: SecureField, s_ch: Secu
             (c[0], c[1])
         }
         None => {
-            cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &z));
-            cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &h));
-            cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &dz));
+            cols.extend(crate::encoding::secure_cols_pub(lay.log_rows, &z));
+            cols.extend(crate::encoding::secure_cols_pub(lay.log_rows, &h));
+            cols.extend(crate::encoding::secure_cols_pub(lay.log_rows, &dz));
             (h[rows - 1], dz[rows - 1])
         }
     };
@@ -5215,9 +5213,9 @@ pub fn ao_interaction(ao: &AttnOut, r: &AoComponent, rr: SecureField, s_ch: Secu
         }
     }
     let claimed_q = hq[n_rows - 1];
-    cols.extend_any(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &zq)
+    cols.extend_any(crate::encoding::secure_cols_pub(lay.log_rows, &zq)
                         .into_iter().map(crate::device::AnyCol::OwnedHost).collect::<Vec<_>>());
-    cols.extend_any(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &hq)
+    cols.extend_any(crate::encoding::secure_cols_pub(lay.log_rows, &hq)
                         .into_iter().map(crate::device::AnyCol::OwnedHost).collect::<Vec<_>>());
 
     // lookups in AIR order, per slot: the `EPOW` window, (qm, nz2), d, dp,
@@ -5470,8 +5468,8 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
     let lay = r.lay;
     let rows = 1usize << lay.g.log_rows;
     let m0 = &layer.mats[r.mats[0]];
-    let (rv_pow, rv_step) = crate::gadgets::attention::air::powers(rv, lay.pk);
-    let (s_pow, s_step) = crate::gadgets::attention::air::powers(s_ch, lay.pq);
+    let (rv_pow, rv_step) = crate::relations::powers(rv, lay.pk);
+    let (s_pow, s_step) = crate::relations::powers(s_ch, lay.pq);
 
     // B7a milestone 4 (section 3 row 1): the Freivalds checks' v, us and accs, on the same
     // three-value mode every witness generation in this series uses.
@@ -5533,10 +5531,10 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
         Some(d) => {
             let got = crate::devacc::freivalds(d, &lay, r.mats.len(), rv, s_ch);
             let hh = acc_host.then(|| {
-                let mut e = crate::gadgets::attention::trace::secure_cols_pub(lay.g.log_rows, &v);
+                let mut e = crate::encoding::secure_cols_pub(lay.g.log_rows, &v);
                 for m in 0..r.mats.len() {
-                    e.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.g.log_rows, &us[m]));
-                    e.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.g.log_rows, &accs[m]));
+                    e.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &us[m]));
+                    e.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &accs[m]));
                 }
                 (e, accs.iter().map(|a| a[rows - 1]).collect::<Vec<_>>())
             });
@@ -5544,10 +5542,10 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
                                  hh, &mut cols)
         }
         None => {
-            cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.g.log_rows, &v));
+            cols.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &v));
             for m in 0..r.mats.len() {
-                cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.g.log_rows, &us[m]));
-                cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.g.log_rows, &accs[m]));
+                cols.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &us[m]));
+                cols.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &accs[m]));
             }
             accs.iter().map(|a| a[rows - 1]).collect()
         }
@@ -5596,7 +5594,7 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
             xs[j] = carry + inner_x[j];
         }
         qx_claim = xs[nrows - 1];
-        cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.g.log_rows, &xs));
+        cols.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &xs));
     }
     let mut use_sum = SecureField::zero();
     // B11 stream V, lever 4: under `--gkr-freivalds` this group's range checks were

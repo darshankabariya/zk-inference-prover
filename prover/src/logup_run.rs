@@ -2,7 +2,7 @@
 //!
 //! Seven subcommands report a whole gadget's marginal cells with its own lookups
 //! inside; this one reports the lookup. The use side commits `per_row` lookups a
-//! row and the table side is `dequant::TableEval`, the shape every shared table in
+//! row and the table side is `relations::TableEval`, the shape every shared table in
 //! this crate commits, so the two sides are the crate's own and not a model of
 //! them. Two kinds and the two batch sizes the crate uses:
 //!
@@ -40,9 +40,9 @@ use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, Relation,
                                 RelationEntry, TraceLocationAllocator};
 
-use crate::gadgets::attention::air::{RangeRel, id, tbl_range};
 use crate::common::{Eval, Proven, Session, Sums, eval_of, m31_u32, twiddles};
-use crate::gadgets::dequant::{PairRel, QNZ_COLS, TableEval, TableKind};
+use crate::gadgets::dequant::QNZ_COLS;
+use crate::relations::{PairRel, RangeRel, TableEval, TableKind, id, tbl_range};
 use crate::plogup;
 
 /// Which of the crate's tables the lookup is against.

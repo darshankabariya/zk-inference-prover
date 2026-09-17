@@ -27,14 +27,15 @@ use stwo::prover::ComponentProver;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::gadgets::attention::air::{
-    ChanEval, ExpRel, ExpTableEval, KeyEval, Offsets, OutEval, Powers, RangeRel, RangeTableEval,
-    RowEval, key_tile_id, id, msk_id, tbl_range, CHAN_SEL, DIAGONAL_BLOCK_SEL, KEY_SEL, OUT_SEL, ROW_SEL,
+    ChanEval, ExpRel, ExpTableEval, KeyEval, Offsets, OutEval, Powers,
+    RowEval, key_tile_id, msk_id, CHAN_SEL, DIAGONAL_BLOCK_SEL, KEY_SEL, OUT_SEL, ROW_SEL,
     TBL_EXP_X, TBL_EXP_Y,
 };
 use crate::common::{Proven, Session, Sums, twiddles};
 use crate::gadgets::attention::layout::Cells;
 use crate::gadgets::attention::trace::{self as attn_trace, Cfg, Layouts};
 use crate::gadgets::attention::witness::{Attn, Variant};
+use crate::relations::{RangeRel, RangeTableEval, id, tbl_range};
 
 pub struct Outcome {
     pub proven: Proven,

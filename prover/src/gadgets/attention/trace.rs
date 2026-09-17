@@ -24,33 +24,17 @@
 
 use num_traits::{One, Zero};
 use rayon::prelude::*;
-use stwo::core::fields::m31::{M31, P};
+use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
-use stwo::prover::backend::simd::m31::PackedM31;
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_constraint_framework::Relation;
 
-use crate::gadgets::attention::air::{ExpRel, Powers, RangeRel};
+use crate::gadgets::attention::air::{ExpRel, Powers};
 use crate::common::{Eval, eval_of, m31_u32};
+use crate::encoding::{m31_of, secure_cols};
 use crate::gadgets::attention::layout::{Cells, LayoutChan, LayoutKey, LayoutOut, Shape};
 use crate::gadgets::attention::witness::{Attn, Variant};
-
-pub fn m31_of(v: i64) -> M31 {
-    let p = P as i64;
-    M31::from_u32_unchecked((((v % p) + p) % p) as u32)
-}
-
-/// Split a QM31 accumulator into its four M31 columns.
-///
-/// Each of the four is an independent pass with its own bit-reversal, so they go in
-/// parallel: 13 accumulators x 4 columns is the second-largest block of our own
-/// interaction work after the inner sums.
-pub fn secure_cols(log_size: u32, vals: &[SecureField]) -> Vec<Eval> {
-    (0..4)
-        .into_par_iter()
-        .map(|i| eval_of(log_size, vals.iter().map(|v| v.to_m31_array()[i]).collect()))
-        .collect()
-}
+use crate::relations::{RangeRel, table_col};
 
 /// One lookup, as the AIR adds it: which relation, and which columns carry it.
 #[derive(Clone)]
@@ -109,19 +93,6 @@ pub fn look_frac(l: &Look, vec_row: usize, cols: &[Eval], pre: &[Eval], exp: &Ex
 /// needs to carry numerators at all.
 pub fn look_is_unit(l: &Look) -> bool {
     !matches!(l, Look::ExpVis(..))
-}
-
-/// A table's own side: `-multiplicity / (z - combine(row))`.
-pub fn table_col<R: Relation<PackedM31, PackedQM31> + Sync>(
-    log_rows: u32,
-    rel: &R,
-    row: &[&Eval],
-    mult: &Eval,
-) -> (Vec<Eval>, SecureField) {
-    crate::plogup::build(log_rows, 1, |_, vec_row| {
-        let vals: Vec<_> = row.iter().map(|c| c.data[vec_row]).collect();
-        (-PackedQM31::from(mult.data[vec_row]), rel.combine(&vals))
-    })
 }
 
 pub struct Cfg {
@@ -1390,9 +1361,4 @@ pub fn cells(a: &Attn, l: &Layouts, cfg: &Cfg) -> Cells {
         exp: exp_logup + 5 * tbl,
         range: chan_logup + grid_logup.saturating_sub(exp_logup) + row_logup + 5 * range_tbl,
     }
-}
-
-/// Public alias for the component builders outside this module.
-pub fn secure_cols_pub(log_size: u32, vals: &[SecureField]) -> Vec<Eval> {
-    secure_cols(log_size, vals)
 }
