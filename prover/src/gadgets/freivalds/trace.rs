@@ -1,4 +1,11 @@
-//! The Freivalds component's committed and preprocessed columns.
+//! Before the challenges: the columns that are committed, and the constants the
+//! verifier already holds.
+//!
+//! Nothing here depends on `rv` or `s` -- it cannot, because those are drawn
+//! from the transcript only after these columns have been committed.  What is
+//! built here is the activation bytes `A`, the preprocessed weights `M` and the
+//! four row flags, and the range-table multiplicities the activations bump.  The
+//! running sums and the claims are `claims.rs`, after the draw.
 
 use num_traits::Zero;
 use stwo::core::fields::m31::M31;
@@ -6,7 +13,7 @@ use stwo::core::fields::m31::M31;
 use crate::common::{Eval, eval_of, m31_u32};
 use crate::encoding::m31_of;
 use crate::dev_attention_freivalds_witness_gen::sub_slice;
-use crate::gadgets::freivalds::columns::{FreivaldsBase, FreivaldsPre, FreivaldsShape};
+use crate::gadgets::freivalds::columns::{Activations, FreivaldsShape, Known};
 use crate::gadgets::freivalds::layout::FreivaldsLayout;
 use crate::layer::{Layer, Tables};
 
@@ -14,16 +21,17 @@ pub struct FreivaldsComponent {
     pub name: String,
     pub lay: FreivaldsLayout,
     pub mats: Vec<usize>,
-    /// Stream Z: the activation cells' range width (8, or 12 for the widened
-    /// attention output's group).  The offset is `2^(act_bits - 1)`.
+    /// the activation cells' range width: 8 everywhere, 12 for the widened
+    /// attention output's group.  The offset is `2^(act_bits - 1)`.
     pub act_bits: u32,
-    /// Under `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS=1` these are the *mirror* -- the device columns, back
-    /// on the host, because `freivalds_interaction` still reads them there. The
-    /// commitment takes `dev`, so they never go back up.
+    /// Under `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS=1` these are the
+    /// *mirror* -- the device columns, back on the host, because
+    /// `freivalds_interaction` still reads them there.  The commitment takes
+    /// `dev`, so they never go back up.
     pub pre: Vec<Eval>,
     pub base: Vec<Eval>,
     pub n_weights: usize,
-    /// B7a milestone 4 (section 3 row 1): the same columns, born on the device.
+    /// the same columns, built on the device instead
     pub dev: Option<crate::dev_attention_freivalds_witness_gen::DevFreivalds>,
 }
 
@@ -58,22 +66,21 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
         assert_eq!(layer.mats[*i].qx, m0.qx, "Freivalds group inputs differ");
     }
 
-    // B7a milestone 4 (section 3 row 1): which witness generation runs. 1 is the device's
-    // alone -- `pre` and `base` become the mirror the interaction reads -- and
-    // 2 builds both and asserts every cell equal before either is used.
+    // Which witness generation runs: 0 the host's, 1 the device's alone, 2 both
+    // with every cell asserted equal before either is used.
     //
-    // Stream Z: the device witness generation packs activations as int8 and bumps the 8-bit
-    // table in its kernel, so a wide group takes the host witness generation whatever the
-    // switch says -- the diagonal block key tiles' pattern, and `devpre::note_host_witness_gen`
-    // is told in `generate`.
+    // The device witness generation packs activations as int8 and bumps the
+    // 8-bit table in its kernel, so a group with wider activations takes the host
+    // path whatever the switch says, and `devpre::note_host_witness_gen` is told
+    // in `generate`.
     let witness_gen_mode = if act_bits == 8 { crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS") } else { 0 };
     assert!(witness_gen_mode == 0 || corrupt_qx.is_none(),
             "{name}: the device Freivalds witness generation has no `corrupt_qx` path");
     if witness_gen_mode == 1 {
         let dev = crate::dev_attention_freivalds_witness_gen::freivalds_component_dev(layer, mat_idx, &lay, tables);
-        // B7a milestone 4 (section 3 row 1): no mirror. `freivalds_interaction` reads
-        // the device columns now, and nothing else reads a device component's host
-        // columns -- `base_cells` counts them off `dev`.
+        // no mirror: `freivalds_interaction` reads the device columns directly,
+        // and nothing else reads a device component's host columns --
+        // `base_cells` counts them off `dev`.
         return FreivaldsComponent { name: name.into(), lay, mats: mat_idx.to_vec(), act_bits,
                             pre: vec![], base: vec![],
                             n_weights: mat_idx.iter().map(|i| layer.mats[*i].qw.len()).sum(),
@@ -84,7 +91,7 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
     };
     let snap_before = (witness_gen_mode == 2).then(|| snap_tables(tables));
 
-    // #221: the two trees are filled through the row schema and handed back in
+    // The two trees are filled through the row declaration and handed back in
     // committed order by it, so nothing here counts columns.
     let sh = FreivaldsShape::new(name, &lay, mat_idx.len(), false);
     let mut act = vec![];
@@ -100,8 +107,8 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
                         if corrupt_qx == Some(idx) {
                             x = if x < qmax { x + 1 } else { x - 1 };
                         }
-                        // stream Z's bend control: one committed activation set
-                        // one past its range table -- the o-limb window
+                        // the control that puts one committed activation one
+                        // past its range table
                         if oversize_qx == Some(idx) { x = off } // x + off = 2^act_bits
                         x + off
                     } else {
@@ -115,7 +122,7 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
         }
         act.push(eval_of(lay.g.log_rows, col));
     }
-    let base = FreivaldsBase { act }.into_committed();
+    let base = Activations { x: act }.into_committed();
 
     let mut w = vec![];
     for mi in mat_idx {
@@ -135,16 +142,18 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
         }
         w.push(row);
     }
-    let sel = |fsel: &dyn Fn(usize) -> bool| {
-        eval_of(lay.g.log_rows, (0..rows).map(|j| m31_u32(fsel(j) as u32)).collect())
+    let flag = |f: &dyn Fn(usize) -> bool| {
+        eval_of(lay.g.log_rows, (0..rows).map(|j| m31_u32(f(j) as u32)).collect())
     };
-    let ch = |j: usize| lay.g.row(j).map(|(_, c)| c);
-    let pre = FreivaldsPre {
-        nofirst: sel(&|j| matches!(ch(j), Some(c) if c + 1 < lay.g.chunks)),
-        last: sel(&|j| matches!(ch(j), Some(0))),
-        notzero: sel(&|j| j > 0),
-        end: sel(&|j| j + 1 == rows),
-        w,
+    // the row's chunk index, which counts *down* inside an input channel, so
+    // chunk `chunks - 1` is the input channel's first row and chunk 0 its last
+    let chunk = |j: usize| lay.g.row(j).map(|(_, c)| c);
+    let pre = Known {
+        carry_in_input_channel: flag(&|j| matches!(chunk(j), Some(c) if c + 1 < lay.g.chunks)),
+        input_channel_done: flag(&|j| matches!(chunk(j), Some(0))),
+        carry_in_table: flag(&|j| j > 0),
+        table_done: flag(&|j| j + 1 == rows),
+        weights: w,
     }
     .into_committed();
     assert_eq!(base.len(), sh.n_base(), "{name}: the base tree is not the row's");

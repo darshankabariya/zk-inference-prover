@@ -19,6 +19,10 @@ use crate::gadgets::dequant::trace::{Mat, MatComponent, deq_ref, fold_out};
 /// The matmul component's Freivalds claimed side and LogUp columns.
 pub struct MatInteraction {
     pub cols: Vec<crate::device::AnyCol<'static>>,
+    /// `rv^T C s`: the projection of the committed accumulator that this
+    /// component publishes on the Freivalds gadget's behalf.  `C` is committed
+    /// here and nowhere else, and `freivalds::claims::identity_holds` is what
+    /// compares this against the Freivalds component's own side.
     pub claimed_h: SecureField,
     pub use_sum: SecureField,
     /// stream E: the output side's closing value, when this component carries one
@@ -158,7 +162,22 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
         None => {
             sink.extend(crate::encoding::secure_cols_pub(lay.log_rows, &z));
             sink.extend(crate::encoding::secure_cols_pub(lay.log_rows, &h));
-            h[rows - 1]
+            // What this component publishes for the Freivalds check is the
+            // projection `rv^T C s` of the accumulator it commits: each row of
+            // `C` folded against `rv` -- that is `z`, complete on the token's
+            // last row -- and those folded against `s`.  `h` is the same Horner
+            // carried row by row so the AIR can constrain it, and it closes on
+            // this value; `project` is where the value is defined, in the gadget
+            // that consumes it.
+            let projected = crate::gadgets::freivalds::claims::project(
+                (0..rows)
+                    .filter(|j| matches!(lay.at_opt(m.tokens, *j), Some((_, 0))))
+                    .map(|j| z[j]),
+                s_ch);
+            debug_assert_eq!(projected, h[rows - 1],
+                             "{}: the claimed side and the column that carries it disagree",
+                             m.name);
+            projected
         }
     };
     let mut cols = sink.into_inner();

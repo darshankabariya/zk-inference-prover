@@ -1,11 +1,13 @@
-//! Which matmuls share one check, and the grid it runs over.
+//! Which matmuls share one check, and the tiling its rows run over.
 
 use crate::layout::Grid;
 
-/// The Freivalds groups: matmuls sharing one committed input.
-/// B10 step 4: `lm_head` is its own group.  It shares no committed input with the
-/// layer's matmuls -- its input is the *final* norm's output, not any layer's --
-/// so it Freivalds checks alone, over `d` input channels like every other group.
+/// The Freivalds groups: the matmuls that share one committed input, so that
+/// `A` is committed once for all of them.
+///
+/// `lm_head` is its own group.  It shares no committed input with the layer's
+/// matmuls -- its input is the *final* norm's output, not any layer's -- so it
+/// is checked alone, over `d` input channels like every other group.
 pub const FREIVALDS_GROUPS: [(&str, &[&str]); 5] =
     [("qkv", &["q", "k", "v"]), ("o", &["o"]), ("gateup", &["gate", "up"]),
      ("down", &["down"]), ("head", &["lm_head"])];

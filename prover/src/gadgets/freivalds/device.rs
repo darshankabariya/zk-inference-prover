@@ -1,6 +1,6 @@
-//! The Freivalds check's witness generation, on the device.
+//! Before the challenges, on the GPU: the same columns `trace.rs` builds.
 //!
-//! The uploads, the packing helpers and the counter mirrors are still
+//! The uploads, the packing helpers and the counter mirrors are
 //! `dev_attention_freivalds_witness_gen.rs`'s, shared with the key tiles.
 
 use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
@@ -44,8 +44,7 @@ pub struct DevFreivalds {
     pub pre: Vec<BaseFieldVec>,
     pub base: Vec<BaseFieldVec>,
     pub log_rows: u32,
-    /// B7a milestone 4 (section 3 row 1): the 8-bit range counter, left where
-    /// the scatter-add put it.
+    /// the 8-bit range counter, left where the scatter-add put it
     pub m_r8: Uint32Vec,
 }
 
@@ -65,9 +64,9 @@ pub fn freivalds_component_dev(
     let rows = 1usize << lay.g.log_rows;
     let t_up = std::time::Instant::now();
 
-    // The quantised weights are the Freivalds check's bytes (stream F: 231.7 MB a chunk,
-    // 218.10 of it `qw`), and their pack is a four-to-a-word narrowing -- the
-    // case the pinned pool is for.
+    // The quantised weights are almost all of what this component uploads, and
+    // their pack is a four-to-a-word narrowing -- the case the pinned pool is
+    // for.
     let d_qx = timed_up_into("gen/witness_gen_freivalds_pack", "gen/witness_gen_freivalds_h2d", "freivalds/qx",
                              m0.qx.len().div_ceil(4),
                              |d| pack_i8_into(d, &m0.qx, "freivalds qx"),
@@ -87,8 +86,8 @@ pub fn freivalds_component_dev(
     crate::util::add_phase("gen/witness_gen_freivalds_up", t_up.elapsed().as_secs_f64());
 
     let t_alloc = std::time::Instant::now();
-    // #221: the kernel keeps its own column order -- rewriting it is out of the
-    // scheme's scope -- but the trees it fills are sized from the row schema now.
+    // The kernel keeps its own internal column order; the trees it fills are
+    // sized from the row declaration.
     let sh = FreivaldsShape::new("", lay, mat_idx.len(), false);
     let base = uninit(sh.n_base(), rows);
     let pre = uninit(sh.n_pre(), rows);
@@ -109,15 +108,15 @@ pub fn freivalds_component_dev(
         mutate: witness_gen_mut(Fam::Freivalds),
     };
 
-    // #221: and the shape the kernel is handed has to describe the same trees.
-    // A kernel writing a different number of columns than the AIR reads would be
-    // a wrong proof rather than a build error, and this is the cheapest thing
-    // that ties the two sides together without touching the kernel.
+    // And the shape the kernel is handed has to describe the same trees.  A
+    // kernel writing a different number of columns than the AIR reads would be a
+    // wrong proof rather than a build error, and this is the cheapest thing that
+    // ties the two sides together without touching the kernel.
     assert_eq!((base.len(), pre.len()),
                (cfg.pq as usize,
                 (cfg.n_mats * cfg.pk) as usize + crate::gadgets::freivalds::FREIVALDS_SEL.len()),
                "the Freivalds witness-generation kernel is handed a different tree than the \
-                row schema declares");
+                row declaration has");
 
     let t_k = std::time::Instant::now();
     unsafe {

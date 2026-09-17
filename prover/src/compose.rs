@@ -2803,12 +2803,10 @@ impl Plan {
             }
         }
         for w in &self.freivalds {
-            for (mi, _) in w.mats.iter().enumerate() {
-                for pp in 0..w.lay.pk {
-                    ids.push(freivalds_w(&w.name, mi, pp));
-                }
-            }
-            ids.extend(FREIVALDS_SEL.iter().map(|n| freivalds_sel(&w.name, n)));
+            // the committed order is the Freivalds gadget's own row declaration's
+            ids.extend(crate::gadgets::freivalds::columns::Known::committed_ids(
+                &crate::gadgets::freivalds::columns::FreivaldsShape::new(
+                    &w.name, &w.lay, w.mats.len(), false)));
         }
         if let Some(g) = &self.residual_stream {
             for r in &g.components {
@@ -7614,15 +7612,12 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         .collect();
     let av_ok = av_sum == unqm(claims.ao_out);
     let den_link_ok = az_sum == unqm(claims.ao_den);
-    let freivalds_ok: Vec<bool> = plan
-        .freivalds
-        .iter()
-        .enumerate()
-        .flat_map(|(wi, w)| {
-            w.mats.iter().enumerate().map(move |(k, mi)| (wi, k, *mi))
-        })
-        .map(|(wi, k, mi)| unqm(claims.freivalds_acc[wi][k]) == unqm(claims.mat_h[mi]))
-        .collect();
+    // The Freivalds identity, `rv^T C s == (rv^T W)(X s)` once per matmul: the
+    // dequant component's published projection of the product against the
+    // Freivalds component's own accumulation of it.  The gadget states its own
+    // equality; this is the call.
+    let freivalds_ok =
+        crate::gadgets::freivalds::claims::identity_holds(&claims, &plan.freivalds);
 
     // B10 step 2: the wiring family's equalities, from the parsed claims alone.
     // `gn1.roots == gn1b.in` and `gn2.roots == gn2b.in` say each norm's two

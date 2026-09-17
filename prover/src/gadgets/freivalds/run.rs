@@ -1,23 +1,37 @@
-//! Prove the weight Freivalds check on its own over a weight block, and report what
-//! it costs in committed cells per weight.
+//! Prove this component on its own over one weight block, and report what it
+//! costs in committed cells per weight.
 //!
-//! The component is the composed segment's own: `trace::freivalds_component` builds the
-//! trace and `claims::freivalds_interaction` the accumulators and the LogUp columns,
+//! The component is the composed segment's own: `trace::freivalds_component`
+//! builds the columns committed before the challenges and
+//! `claims::freivalds_interaction` the running sums and the LogUp columns,
 //! exactly as `compose` calls them.  Nothing else is in the proof but the range
-//! table the committed activations are checked against, which is a shared table and
-//! is reported apart.
+//! table the committed activations are checked against, which is a shared table
+//! and is reported apart.
+//!
+//! **Half of the identity is here and half is not.**  What this proves is the
+//! `(rv^T W)(X s)` side: the weights are pinned, the activations are committed
+//! and range-checked, and the running product closes on the claim.  The other
+//! side, `rv^T C s`, is the dequant component's, and that component is not built
+//! here -- a standalone dequant proof would need its own norm, fraction,
+//! multiplication and pair tables, which is a second harness this file does not
+//! have.  So `ref_ok`/`ref_n` below, and `reference_ok` in the JSON, are a
+//! **self-check and not part of the proof**: they recompute `rv^T C s` on the
+//! host with `claims::project_product`, straight out of the witness's exact
+//! accumulators, and compare.  A composed proof is where the two sides are both
+//! proved and compared, by `claims::identity_holds`.
 //!
 //! What the cost model multiplies by a parameter count is the *marginal*: how many
-//! fresh cells one more weight costs.  A group's grid runs one row group per input
-//! channel, cut into `chunks` chunks, and a row carries `pk` weights of each matmul
-//! and `pq` committed activations.  So the committed activations are `tokens x n_in`
-//! whatever `chunks` is, their range check is two more cells each at pairwise
-//! batching, and the only thing that grows with the weights is the three QM31
-//! accumulator columns `v`, `u` and `acc` -- 12 M31 cells a row for a group of one
-//! matmul.  A row carries `pk` weights, so the marginal is `12/pk` and the two fixed
-//! parts drop out of a difference.  `run` proves one build; `marginal` takes two
-//! builds of the same block at two output widths and reports the difference over the
-//! weights they differ by, so nothing here has to be assumed.
+//! fresh cells one more weight costs.  A group's table runs one row group per
+//! input channel, cut into `chunks` row chunks, and a row carries `pk` weights of each
+//! matmul and `pq` committed activations.  So the committed activations are
+//! `tokens x n_in` whatever `chunks` is, their range check is two more cells each
+//! at pairwise batching, and the only thing that grows with the weights is the
+//! three QM31 running columns `x_fold`, `w_fold` and `product` -- 12 M31 cells a
+//! row for a group of one matmul.  A row carries `pk` weights, so the marginal
+//! is `12/pk` and the two fixed parts drop out of a difference.  `run` proves one
+//! build; `marginal` takes two builds of the same block at two output widths and
+//! reports the difference over the weights they differ by, so nothing here has
+//! to be assumed.
 
 use std::time::Instant;
 
@@ -29,14 +43,13 @@ use stwo::core::fields::qm31::SecureField;
 use stwo::prover::ComponentProver;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
-use crate::encoding::m31_of;
 use crate::relations::{RangeRel, RangeTableEval, powers, table_col, tbl_range};
 use crate::bf16::Round;
 use crate::common::{Proven, Session, Sums, eval_of, m31_u32, twiddles};
 use crate::compose::Rels;
 use crate::gadgets::freivalds::FreivaldsEval;
-use crate::gadgets::freivalds::claims::freivalds_interaction;
-use crate::gadgets::freivalds::columns::{FreivaldsPre, FreivaldsShape};
+use crate::gadgets::freivalds::claims::{freivalds_interaction, project_product};
+use crate::gadgets::freivalds::columns::{FreivaldsShape, Known};
 use crate::gadgets::freivalds::layout::FreivaldsLayout;
 use crate::gadgets::freivalds::trace::freivalds_component;
 use crate::layer::{Layer, Tables};
@@ -64,8 +77,10 @@ pub struct Outcome {
     pub table_cells_pre: usize,
     pub table_cells_fresh: usize,
     pub off_table: usize,
-    /// claims that match the Freivalds identity recomputed from the exact
-    /// integer accumulators
+    /// The self-check, not a proof: how many of the published claims match
+    /// `rv^T C s` recomputed on the host from the witness's exact integer
+    /// accumulators.  A composed proof compares the same two values with both
+    /// sides proved; this run proves only one of them.
     pub ref_ok: usize,
     pub ref_n: usize,
     pub trace_secs: f64,
@@ -74,6 +89,9 @@ pub struct Outcome {
 }
 
 impl Outcome {
+    /// The proof verified, the lookups cancel, no activation fell off its range
+    /// table -- and the host-side self-check agrees, which is *not* a proof of
+    /// the other side of the identity.  See this module's comment.
     pub fn accepts(&self) -> bool {
         self.proven.stark_ok && self.sums.cancels() && self.off_table == 0
             && self.ref_ok == self.ref_n
@@ -98,8 +116,14 @@ impl Outcome {
                         "interaction": self.n_columns[2],
                         "total": self.n_columns.iter().sum::<usize>()},
             "off_table": self.off_table,
+            // the host-side self-check; see `reference_note`
             "reference_checked": self.ref_n, "reference_ok": self.ref_ok,
             "reference_mismatch": self.ref_n - self.ref_ok,
+            "reference_is_proved": false,
+            "reference_note": "self-check, not part of the proof: this run proves \
+the (rv^T W)(X s) side only, and recomputes rv^T C s on the host from the witness's \
+exact accumulators to compare against it. A composed proof proves both sides and \
+compares them in freivalds::claims::identity_holds.",
             "trace_secs": self.trace_secs, "interaction_secs": self.interaction_secs,
             "proof_bytes": self.proven.proof_bytes,
             "sums": self.sums.json(), "accepts": self.accepts(),
@@ -114,11 +138,11 @@ impl Outcome {
     }
 }
 
-/// The relation set `freivalds_interaction` takes.  The component reads exactly one
-/// of them -- the activations' range check, drawn from this proof's own transcript --
-/// so the rest are drawn from a channel of their own: no column here combines
-/// against them, and a composed segment draws them for components this proof does
-/// not build.
+/// The relation set `freivalds_interaction` takes.  The component reads exactly
+/// one of them -- the activations' range check, drawn from this proof's own
+/// transcript -- so the rest are drawn from a transcript of their own: no column
+/// here combines against them, and a composed segment draws them for components
+/// this proof does not build.
 pub fn rels_of(range: &RangeRel) -> Rels {
     let mut spare = Blake2sM31Channel::default();
     let mut r = Rels::draw(&mut spare, &[ACT_BITS], None, None, false, 0);
@@ -181,7 +205,7 @@ pub fn run(layer: &Layer, group: &str, mats: &[usize], p_target: usize) -> Outco
         gkr: false,
         // the activation claim binds a group to whichever component produced its
         // input; a weight block on its own has no producer and publishes none,
-        // which is what a composed chunk without the residual stream also does
+        // which is what a composed segment without the residual stream also does
         qx: None,
     };
     let rels = rels_of(&rel_act);
@@ -204,8 +228,8 @@ pub fn run(layer: &Layer, group: &str, mats: &[usize], p_target: usize) -> Outco
     // the components fix them, or a prover picks them adaptively.
     sess.mix(&it.claimed);
 
-    // #221: the committed order is the schema's, not this file's
-    let mut ids = FreivaldsPre::committed_ids(&FreivaldsShape::new(group, &lay, mats.len(), false));
+    // the committed order is the row declaration's, not this file's
+    let mut ids = Known::committed_ids(&FreivaldsShape::new(group, &lay, mats.len(), false));
     ids.push(tbl_range(ACT_BITS));
     let alloc = &mut TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let fr = FrameworkComponent::<FreivaldsEval>::new(alloc, air(it.claimed.clone()), it.use_sum);
@@ -215,23 +239,14 @@ pub fn run(layer: &Layer, group: &str, mats: &[usize], p_target: usize) -> Outco
     let components: Vec<&dyn Component> = vec![&fr, &tb];
     let proven = sess.prove(&provers, &components);
 
-    // The Freivalds identity itself, recomputed from the exact integer accumulators
-    // the witness carries: `acc_m == sum_{t, i} s^t rv^i acc[t, i]`, which is what a
-    // composed chunk compares each claim against on the dequant's side.
+    // The other side of the identity, recomputed on the host: `rv^T C s` over
+    // the exact integer accumulators the witness carries.  In a composed proof
+    // this value is the dequant component's published claim and *is* proved; here
+    // nothing proves it, so this is a self-check and `accepts()` says so.
     let (mut ref_ok, ref_n) = (0usize, mats.len());
     for (mi, claimed) in mats.iter().zip(&it.claimed) {
         let m = &layer.mats[*mi];
-        let (rvp, _) = powers(rv, m.n_out);
-        let (sp, _) = powers(s_ch, m.tokens);
-        let mut h = SecureField::zero();
-        for t in 0..m.tokens {
-            let mut row = SecureField::zero();
-            for i in 0..m.n_out {
-                row += rvp[i] * SecureField::from(m31_of(m.acc[t * m.n_out + i]));
-            }
-            h += sp[t] * row;
-        }
-        if h == *claimed {
+        if project_product(&m.acc, m.tokens, m.n_out, rv, s_ch) == *claimed {
             ref_ok += 1;
         }
     }
@@ -276,7 +291,7 @@ pub fn marginal(small: &Outcome, large: &Outcome) -> Value {
     assert_eq!(small.base_cells, large.base_cells,
                "the two builds commit {} and {} activation cells: the difference is \
                 then not the weights' alone, which needs an exact token tiling \
-                (`tokens` a multiple of the chunk count at both widths)",
+                (`tokens` a multiple of the row-chunk count at both widths)",
                small.base_cells, large.base_cells);
     let dw = (large.weights - small.weights) as f64;
     let fresh = (large.fresh() - small.fresh()) as f64;
