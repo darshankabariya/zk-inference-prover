@@ -1,4 +1,5 @@
-//! The row map a matmul-shaped component tiles its rows over.
+//! The row maps a component tiles its rows over, where more than one gadget
+//! lays its rows out the same way.
 //!
 //! `MatLayout` is the matmul dequant component's tiling, and it is crate-level
 //! rather than the dequant gadget's own because four other places lay their rows
@@ -14,6 +15,13 @@
 //! gating).  Tokens and chunks descend, slots ascend: row `j` holds token
 //! `T-1 - j/chunks`, chunk `b = chunks-1 - j%chunks`, channel
 //! `c = b*per_row + slot`.
+//!
+//! `Grid` is the other one: the attention block's tiling, which the Freivalds
+//! check runs over its input channels and `devacc` reads to place a device
+//! accumulator. It was `attention::layout`'s, which made every reader of a grid
+//! a reader of the attention gadget.
+
+use serde_json::{Value, json};
 
 /// SIMD lane floor, as `common.rs`'s `MIN_LOG_ROWS`.
 pub const MIN_MAT_LOG_ROWS: u32 = 4;
@@ -128,5 +136,54 @@ impl MatLayout {
     /// row -> (token, chunk); tokens and chunks descend
     pub fn at(&self, tokens: usize, j: usize) -> (usize, usize) {
         (tokens - 1 - j / self.chunks, self.chunks - 1 - j % self.chunks)
+    }
+}
+
+/// Rows grouped by `groups`, `chunks` rows each, padded up to a power of two with
+/// inert leading rows whose selectors are all zero.
+#[derive(Clone, Copy, Debug)]
+pub struct Grid {
+    pub log_rows: u32,
+    pub rows: usize,
+    pub groups: usize,
+    pub chunks: usize,
+    pub lead: usize,
+    /// group index counts down with the row index (needed when a Horner over
+    /// groups has to assign `x^g` to group `g`)
+    pub descending: bool,
+}
+
+impl Grid {
+    pub fn new(groups: usize, log_rows: u32, cap: usize, descending: bool) -> Option<Self> {
+        let rows = 1usize << log_rows;
+        if rows < groups {
+            return None;
+        }
+        // Open item 1: a `c = 0` key tile (block 0 has no prefix) reaches here with
+        // `groups = c * insts = 0`, slips past the guard above and divides by
+        // zero.  Block 0 is a solo diagonal block and must never build a prefix key tile at
+        // all; this says so rather than panicking in arithmetic.
+        assert!(groups > 0, "a c = 0 key tile has no key grid: block 0 is the solo                              diagonal block and builds no prefix key tile (open item 1)");
+        let chunks = (rows / groups).min(cap.max(1));
+        Some(Self { log_rows, rows, groups, chunks, lead: rows - groups * chunks, descending })
+    }
+
+    /// `(group, chunk)` of a row, or `None` for an inert row.  Chunks always
+    /// count down so a Horner walking the rows in order leaves the group's total
+    /// on its last row.
+    pub fn row(&self, j: usize) -> Option<(usize, usize)> {
+        if j < self.lead {
+            return None;
+        }
+        let idx = j - self.lead;
+        let g = idx / self.chunks;
+        let g = if self.descending { self.groups - 1 - g } else { g };
+        Some((g, self.chunks - 1 - (idx % self.chunks)))
+    }
+
+    pub fn json(&self) -> Value {
+        json!({"log_rows": self.log_rows, "rows": self.rows, "groups": self.groups,
+               "chunks": self.chunks, "lead_rows": self.lead,
+               "row_padding_frac": self.lead as f64 / self.rows as f64})
     }
 }

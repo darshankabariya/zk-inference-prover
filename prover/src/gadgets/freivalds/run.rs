@@ -1,8 +1,8 @@
 //! Prove the weight Freivalds check on its own over a weight block, and report what
 //! it costs in committed cells per weight.
 //!
-//! The component is the composed segment's own: `layer::freivalds_component` builds the
-//! trace and `layer::freivalds_interaction` the accumulators and the LogUp columns,
+//! The component is the composed segment's own: `trace::freivalds_component` builds the
+//! trace and `claims::freivalds_interaction` the accumulators and the LogUp columns,
 //! exactly as `compose` calls them.  Nothing else is in the proof but the range
 //! table the committed activations are checked against, which is a shared table and
 //! is reported apart.
@@ -35,7 +35,10 @@ use crate::bf16::Round;
 use crate::common::{Proven, Session, Sums, eval_of, m31_u32, twiddles};
 use crate::compose::Rels;
 use crate::gadgets::freivalds::{FREIVALDS_SEL, FreivaldsEval, freivalds_sel, freivalds_w};
-use crate::layer::{FreivaldsLayout, Layer, Tables, freivalds_component, freivalds_interaction};
+use crate::gadgets::freivalds::claims::freivalds_interaction;
+use crate::gadgets::freivalds::layout::FreivaldsLayout;
+use crate::gadgets::freivalds::trace::freivalds_component;
+use crate::layer::{Layer, Tables};
 
 /// The activation width every Freivalds group but the widened attention output's
 /// commits at, and the width of the range table this proof carries.

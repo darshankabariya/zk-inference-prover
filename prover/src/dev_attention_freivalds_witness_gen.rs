@@ -48,11 +48,11 @@ use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
 use crate::gadgets::attention::trace::{Cfg, Layouts};
 use crate::gadgets::attention::witness::{Attn, Variant};
 use crate::common::Eval;
-use crate::layer::{FreivaldsLayout, Layer, Tables};
 
 // The attnout half of this file is `gadgets/attn_out/device.rs` since #197;
 // `compose.rs` and `devacc.rs` still name both through this module.
 pub use crate::gadgets::attn_out::device::{DevAo, ao_component_dev};
+pub use crate::gadgets::freivalds::device::{DevFreivalds, freivalds_component_dev};
 
 // ---------------------------------------------------------------- the FFI shapes --
 
@@ -69,7 +69,7 @@ pub struct FGrid {
 }
 
 impl FGrid {
-    fn of(g: &crate::gadgets::attention::layout::Grid) -> Self {
+    pub(crate) fn of(g: &crate::layout::Grid) -> Self {
         Self {
             log_rows: g.log_rows,
             rows: g.rows as u32,
@@ -98,18 +98,6 @@ impl FMult {
     pub(crate) fn of(v: &Uint32Vec) -> Self {
         Self { m: v.device_ptr as *mut u32, n: v.size as u32 }
     }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct FFreivaldsCfg {
-    pub g: FGrid,
-    pub pq: u32,
-    pub pk: u32,
-    pub n_in: u32,
-    pub tokens: u32,
-    pub n_mats: u32,
-    pub mutate: u32,
 }
 
 #[repr(C)]
@@ -146,18 +134,6 @@ pub struct FKeyTileCfg {
 }
 
 unsafe extern "C" {
-    fn zk_witness_gen_freivalds(
-        qx: *const i8,
-        qw: *const *const i8,
-        n_out: *const u32,
-        base_cols: *const *mut u32,
-        n_base: u32,
-        pre_cols: *const *mut u32,
-        n_pre: u32,
-        m_r8: FMult,
-        counts: *mut u32,
-        cfg: FFreivaldsCfg,
-    );
     fn zk_witness_gen_key_tile_chan(
         kk: *const i32,
         qq: *const i32,
@@ -406,7 +382,7 @@ pub(crate) fn timed_up(
 /// narrowing, `_h2d` the copy. What moves between the arms is `_h2d`, and that
 /// is the whole measurement.
 #[cfg(feature = "cuda")]
-fn timed_up_into(
+pub(crate) fn timed_up_into(
     pack_tag: &'static str,
     h2d_tag: &'static str,
     byte_tag: &'static str,
@@ -428,7 +404,7 @@ fn timed_up_into(
 }
 
 #[cfg(not(feature = "cuda"))]
-fn timed_up_into(
+pub(crate) fn timed_up_into(
     pack_tag: &'static str,
     h2d_tag: &'static str,
     byte_tag: &'static str,
@@ -535,7 +511,7 @@ fn word_i8(v: &[i32], w: usize, bad: &std::sync::atomic::AtomicBool) -> u32 {
     acc
 }
 
-fn pack_i8(v: &[i32], what: &str) -> Vec<u32> {
+pub(crate) fn pack_i8(v: &[i32], what: &str) -> Vec<u32> {
     let bad = std::sync::atomic::AtomicBool::new(false);
     let out: Vec<u32> =
         (0..v.len().div_ceil(4)).into_par_iter().map(|w| word_i8(v, w, &bad)).collect();
@@ -546,7 +522,7 @@ fn pack_i8(v: &[i32], what: &str) -> Vec<u32> {
     out
 }
 
-fn pack_i8_into(dst: &mut [u32], v: &[i32], what: &str) {
+pub(crate) fn pack_i8_into(dst: &mut [u32], v: &[i32], what: &str) {
     let bad = std::sync::atomic::AtomicBool::new(false);
     dst.par_iter_mut().enumerate().for_each(|(w, d)| *d = word_i8(v, w, &bad));
     assert!(
@@ -676,103 +652,6 @@ pub(crate) fn sub_slice(a: &[u32], b: &[u32]) -> Vec<u32> {
 pub(crate) fn add_into(dst: &mut [u32], src: &[u32]) {
     assert_eq!(dst.len(), src.len(), "multiplicity counter length");
     dst.par_iter_mut().zip(src.par_iter()).for_each(|(d, s)| *d += *s);
-}
-
-// ====================================================== the Freivalds checks ==
-
-/// One Freivalds group's columns, on the device, in committed order.
-pub struct DevFreivalds {
-    pub pre: Vec<BaseFieldVec>,
-    pub base: Vec<BaseFieldVec>,
-    pub log_rows: u32,
-    /// B7a milestone 4 (section 3 row 1): the 8-bit range counter, left where
-    /// the scatter-add put it.
-    pub m_r8: Uint32Vec,
-}
-
-/// Build one Freivalds group's component on the device.
-///
-/// `tables` is read for the 8-bit range table's length and *written* for its
-/// multiplicities: the counters come back and are added in, which is the same
-/// arithmetic the host's serial bumps do and in an order that cannot matter,
-/// because counting is commutative.
-pub fn freivalds_component_dev(
-    layer: &Layer,
-    mat_idx: &[usize],
-    lay: &FreivaldsLayout,
-    tables: &mut Tables,
-) -> DevFreivalds {
-    let m0 = &layer.mats[mat_idx[0]];
-    let rows = 1usize << lay.g.log_rows;
-    let t_up = std::time::Instant::now();
-
-    // The quantised weights are the Freivalds check's bytes (stream F: 231.7 MB a chunk,
-    // 218.10 of it `qw`), and their pack is a four-to-a-word narrowing -- the
-    // case the pinned pool is for.
-    let d_qx = timed_up_into("gen/witness_gen_freivalds_pack", "gen/witness_gen_freivalds_h2d", "freivalds/qx",
-                             m0.qx.len().div_ceil(4),
-                             |d| pack_i8_into(d, &m0.qx, "freivalds qx"),
-                             || pack_i8(&m0.qx, "freivalds qx"));
-    let d_qw: Vec<Uint32Vec> = mat_idx
-        .iter()
-        .map(|i| {
-            let qw = &layer.mats[*i].qw;
-            timed_up_into("gen/witness_gen_freivalds_pack", "gen/witness_gen_freivalds_h2d", "freivalds/qw",
-                          qw.len().div_ceil(4),
-                          |d| pack_i8_into(d, qw, "freivalds qw"),
-                          || pack_i8(qw, "freivalds qw"))
-        })
-        .collect();
-    let qw_ptrs: Vec<*const i8> = d_qw.iter().map(|d| d.device_ptr as *const i8).collect();
-    let n_out: Vec<u32> = mat_idx.iter().map(|i| layer.mats[*i].n_out as u32).collect();
-    crate::util::add_phase("gen/witness_gen_freivalds_up", t_up.elapsed().as_secs_f64());
-
-    let t_alloc = std::time::Instant::now();
-    let base = uninit(lay.pq, rows);
-    let pre = uninit(mat_idx.len() * lay.pk + 4, rows);
-    let base_p = ptrs(&base);
-    let pre_p = ptrs(&pre);
-    let r8 = tables.ridx(8);
-    let m_r8 = zeroes(tables.m_r[r8].len());
-    let counts = zeroes(3);
-    crate::util::add_phase("gen/witness_gen_alloc", t_alloc.elapsed().as_secs_f64());
-
-    let cfg = FFreivaldsCfg {
-        g: FGrid::of(&lay.g),
-        pq: lay.pq as u32,
-        pk: lay.pk as u32,
-        n_in: m0.n_in as u32,
-        tokens: m0.tokens as u32,
-        n_mats: mat_idx.len() as u32,
-        mutate: witness_gen_mut(Fam::Freivalds),
-    };
-
-    let t_k = std::time::Instant::now();
-    unsafe {
-        zk_witness_gen_freivalds(
-            d_qx.device_ptr as *const i8,
-            qw_ptrs.as_ptr(),
-            n_out.as_ptr(),
-            base_p.as_ptr(),
-            base_p.len() as u32,
-            pre_p.as_ptr(),
-            pre_p.len() as u32,
-            FMult::of(&m_r8),
-            counts.device_ptr as *mut u32,
-            cfg,
-        );
-    }
-    crate::util::add_phase("gen/witness_gen_freivalds_kernel", t_k.elapsed().as_secs_f64());
-
-    let t_d = std::time::Instant::now();
-    let got = counts.to_vec();
-    if crate::devpre::merge_counters() {
-        add_into(&mut tables.m_r[r8], &m_r8.to_vec());
-    }
-    tables.off_table += got[0] as usize;
-    crate::util::add_phase("gen/witness_gen_counters", t_d.elapsed().as_secs_f64());
-
-    DevFreivalds { pre, base, log_rows: lay.g.log_rows, m_r8 }
 }
 
 // ================================================================= the key tiles ==

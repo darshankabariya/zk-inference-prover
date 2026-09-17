@@ -16,17 +16,11 @@
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
-use stwo::core::fields::m31::M31;
-use stwo::core::fields::qm31::SecureField;
-use num_traits::{One, Zero};
 
 use crate::gadgets::attention::witness::{Attn, LayerRaw as AttnRaw, Src, Variant};
 use crate::bf16;
-use crate::common::{Eval, eval_of, m31_u32};
-use crate::dev_attention_freivalds_witness_gen::sub_slice;
 use crate::gadgets::dequant::{Spec, Variant as DeqVariant};
-use crate::gadgets::attention::layout::{Grid, Shape};
-use crate::encoding::m31_of;
+use crate::gadgets::attention::layout::Shape;
 use crate::witread::{self, Site};
 
 // The dequant gadget's own names, under the spellings the rest of the crate
@@ -50,6 +44,13 @@ pub use crate::gadgets::attn_out::claims::{AoInteraction, ao_interaction};
 pub use crate::gadgets::attn_out::layout::AoLayout;
 pub use crate::gadgets::attn_out::trace::{AoComponent, ao_component};
 pub use crate::gadgets::attn_out::witness::AttnOut;
+
+// The Freivalds check's names, likewise: `compose.rs`, `cli.rs`, `cudagen.rs`,
+// `devacc.rs`, `devpre.rs`, `gkrlink.rs` and `gkr_key_tile.rs` say
+// `crate::layer::X` for these.
+pub use crate::gadgets::freivalds::claims::{FreivaldsInteraction, freivalds_interaction};
+pub use crate::gadgets::freivalds::layout::{FREIVALDS_GROUPS, FreivaldsLayout};
+pub use crate::gadgets::freivalds::trace::{FreivaldsComponent, freivalds_component};
 
 /// Stream LL (E11), `notes/inconsistency-log.md` row 58: the precondition tree 0
 /// silently depends on, pinned.
@@ -691,14 +692,6 @@ fn read_i32_narrow(path: &str) -> Result<Vec<i32>, String> {
     let _s = witread::scope(Site::DecodeRecast);
     Ok(v.par_iter().map(|x| *x as i32).collect())
 }
-
-/// The Freivalds groups: matmuls sharing one committed input.
-/// B10 step 4: `lm_head` is its own group.  It shares no committed input with the
-/// layer's matmuls -- its input is the *final* norm's output, not any layer's --
-/// so it Freivalds checks alone, over `d` input channels like every other group.
-pub const FREIVALDS_GROUPS: [(&str, &[&str]); 5] =
-    [("qkv", &["q", "k", "v"]), ("o", &["o"]), ("gateup", &["gate", "up"]),
-     ("down", &["down"]), ("head", &["lm_head"])];
 
 impl Layer {
     pub fn load(dir: &str, cfg: &Src, key_tile_sizes: &[usize], variant: Variant,
@@ -2794,44 +2787,6 @@ so the SwiGLU stays inside bf16's normal range");
     }
 }
 
-// -------------------------------------------------------------- component layouts --
-
-/// One Freivalds component's layout: `Grid` over input channels.
-#[derive(Clone, Copy, Debug)]
-pub struct FreivaldsLayout {
-    pub g: Grid,
-    pub pk: usize,
-    pub pq: usize,
-}
-
-impl FreivaldsLayout {
-    pub fn choose(n_in: usize, n_out_max: usize, tokens: usize, p_target: usize) -> Self {
-        // pick the chunk count whose weights-per-row is closest to the target,
-        // preferring fewer padded rows on bindings
-        let mut best: Option<(isize, usize, Self)> = None;
-        for chunks in 1..=n_out_max {
-            let pk = n_out_max.div_ceil(chunks);
-            let pq = tokens.div_ceil(chunks);
-            let rows = n_in * chunks;
-            let log_rows = (usize::BITS - (rows - 1).leading_zeros()).max(4);
-            let Some(g) = Grid::new(n_in, log_rows, chunks, true) else { continue };
-            if g.chunks != chunks {
-                continue;
-            }
-            let score = (pk as isize - p_target as isize).abs();
-            let pad = (1usize << log_rows) - rows;
-            let better = match &best {
-                None => true,
-                Some((s, p, _)) => score < *s || (score == *s && pad < *p),
-            };
-            if better {
-                best = Some((score, pad, Self { g, pk, pq }));
-            }
-        }
-        best.expect("no Freivalds layout").2
-    }
-}
-
 // -------------------------------------------------------- shared table registry --
 
 /// Every shared table's contents and multiplicities, accumulated across components.
@@ -3107,329 +3062,6 @@ pub fn bump(m: &mut [u32], v: i64, off: &mut usize) {
     } else {
         *off += 1;
     }
-}
-
-// ------------------------------------------------------------- Freivalds components --
-
-pub struct FreivaldsComponent {
-    pub name: String,
-    pub lay: FreivaldsLayout,
-    pub mats: Vec<usize>,
-    /// Stream Z: the activation cells' range width (8, or 12 for the widened
-    /// attention output's group).  The offset is `2^(act_bits - 1)`.
-    pub act_bits: u32,
-    /// Under `ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS=1` these are the *mirror* -- the device columns, back
-    /// on the host, because `freivalds_interaction` still reads them there. The
-    /// commitment takes `dev`, so they never go back up.
-    pub pre: Vec<Eval>,
-    pub base: Vec<Eval>,
-    pub n_weights: usize,
-    /// B7a milestone 4 (section 3 row 1): the same columns, born on the device.
-    pub dev: Option<crate::dev_attention_freivalds_witness_gen::DevFreivalds>,
-}
-
-impl FreivaldsComponent {
-    pub fn base_cells(&self) -> usize {
-        let n = match &self.dev { Some(d) => d.base.len(), None => self.base.len() };
-        n << self.lay.g.log_rows
-    }
-    pub fn pre_cells(&self) -> usize {
-        let n = match &self.dev { Some(d) => d.pre.len(), None => self.pre.len() };
-        n << self.lay.g.log_rows
-    }
-}
-
-/// Build one Freivalds group's component: activations committed (offset
-/// `2^(act_bits-1)`), weights preprocessed, range multiplicities bumped at
-/// `act_bits` -- 8 everywhere but the widened attention output's group.
-pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_target: usize,
-                        act_bits: u32, tables: &mut Tables,
-                        corrupt_qx: Option<usize>, oversize_qx: Option<usize>) -> FreivaldsComponent {
-    let m0 = &layer.mats[mat_idx[0]];
-    let n_in = m0.n_in;
-    let tokens = m0.tokens;
-    let n_out_max = mat_idx.iter().map(|i| layer.mats[*i].n_out).max().unwrap();
-    let lay = FreivaldsLayout::choose(n_in, n_out_max, tokens, p_target);
-    let rows = 1usize << lay.g.log_rows;
-    let off = 1i32 << (act_bits - 1);
-    let qmax = off - 1;
-    for i in mat_idx {
-        assert_eq!(layer.mats[*i].n_in, n_in, "Freivalds group mixes input widths");
-        // q/k/v (and gate/up) must share one committed input
-        assert_eq!(layer.mats[*i].qx, m0.qx, "Freivalds group inputs differ");
-    }
-
-    // B7a milestone 4 (section 3 row 1): which witness generation runs. 1 is the device's
-    // alone -- `pre` and `base` become the mirror the interaction reads -- and
-    // 2 builds both and asserts every cell equal before either is used.
-    //
-    // Stream Z: the device witness generation packs activations as int8 and bumps the 8-bit
-    // table in its kernel, so a wide group takes the host witness generation whatever the
-    // switch says -- the diagonal block key tiles' pattern, and `devpre::note_host_witness_gen`
-    // is told in `generate`.
-    let witness_gen_mode = if act_bits == 8 { crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS") } else { 0 };
-    assert!(witness_gen_mode == 0 || corrupt_qx.is_none(),
-            "{name}: the device Freivalds witness generation has no `corrupt_qx` path");
-    if witness_gen_mode == 1 {
-        let dev = crate::dev_attention_freivalds_witness_gen::freivalds_component_dev(layer, mat_idx, &lay, tables);
-        // B7a milestone 4 (section 3 row 1): no mirror. `freivalds_interaction` reads
-        // the device columns now, and nothing else reads a device component's host
-        // columns -- `base_cells` counts them off `dev`.
-        return FreivaldsComponent { name: name.into(), lay, mats: mat_idx.to_vec(), act_bits,
-                            pre: vec![], base: vec![],
-                            n_weights: mat_idx.iter().map(|i| layer.mats[*i].qw.len()).sum(),
-                            dev: Some(dev) };
-    }
-    let snap_tables = |t: &Tables| -> (Vec<u32>, usize) {
-        (t.m_r[t.ridx(8)].clone(), t.off_table)
-    };
-    let snap_before = (witness_gen_mode == 2).then(|| snap_tables(tables));
-
-    let mut base = vec![];
-    for p in 0..lay.pq {
-        let mut col = vec![M31::zero(); rows];
-        for (j, slot) in col.iter_mut().enumerate() {
-            let v = match lay.g.row(j) {
-                Some((k, chunk)) => {
-                    let t = chunk * lay.pq + p;
-                    if t < tokens {
-                        let idx = t * n_in + k;
-                        let mut x = m0.qx[idx];
-                        if corrupt_qx == Some(idx) {
-                            x = if x < qmax { x + 1 } else { x - 1 };
-                        }
-                        // stream Z's bend control: one committed activation set
-                        // one past its range table -- the o-limb window
-                        if oversize_qx == Some(idx) { x = off } // x + off = 2^act_bits
-                        x + off
-                    } else {
-                        off
-                    }
-                }
-                None => off,
-            };
-            tables.bump_r(act_bits, v as i64);
-            *slot = m31_of(v as i64);
-        }
-        base.push(eval_of(lay.g.log_rows, col));
-    }
-
-    let mut pre = vec![];
-    for mi in mat_idx {
-        let m = &layer.mats[*mi];
-        for p in 0..lay.pk {
-            let mut col = vec![M31::zero(); rows];
-            for (j, slot) in col.iter_mut().enumerate() {
-                if let Some((k, chunk)) = lay.g.row(j) {
-                    let i = chunk * lay.pk + p;
-                    if i < m.n_out {
-                        *slot = m31_of(m.qw[k * m.n_out + i] as i64);
-                    }
-                }
-            }
-            pre.push(eval_of(lay.g.log_rows, col));
-        }
-    }
-    let sel = |fsel: &dyn Fn(usize) -> bool| {
-        eval_of(lay.g.log_rows, (0..rows).map(|j| m31_u32(fsel(j) as u32)).collect())
-    };
-    let ch = |j: usize| lay.g.row(j).map(|(_, c)| c);
-    pre.push(sel(&|j| matches!(ch(j), Some(c) if c + 1 < lay.g.chunks)));
-    pre.push(sel(&|j| matches!(ch(j), Some(0))));
-    pre.push(sel(&|j| j > 0));
-    pre.push(sel(&|j| j + 1 == rows));
-
-    if witness_gen_mode == 2 {
-        // the check with teeth, before any column has changed hands
-        let after = snap_tables(tables);
-        let before = snap_before.unwrap();
-        let dev = crate::dev_attention_freivalds_witness_gen::freivalds_component_dev(layer, mat_idx, &lay, tables);
-        crate::dev_attention_freivalds_witness_gen::check_cols(&format!("freivalds {name} base"), &base, &dev.base);
-        crate::dev_attention_freivalds_witness_gen::check_cols(&format!("freivalds {name} pre"), &pre, &dev.pre);
-        let r8 = tables.ridx(8);
-        crate::dev_attention_freivalds_witness_gen::check_delta(&format!("freivalds {name} m_r8"), &before.0, &after.0,
-                                     &sub_slice(&tables.m_r[r8], &after.0));
-        assert_eq!(tables.off_table - after.1, after.1 - before.1,
-                   "freivalds {name}: off-table bumps differ");
-        // the device's own bumps are the check's, not the proof's
-        tables.m_r[r8].copy_from_slice(&after.0);
-        tables.off_table = after.1;
-        eprintln!("witness_gen-dev: freivalds {name} -- {} base and {} pre columns, {} cells, \
-the 8-bit range multiplicities all match",
-                  base.len(), pre.len(), (base.len() + pre.len()) << lay.g.log_rows);
-    }
-    FreivaldsComponent { name: name.into(), lay, mats: mat_idx.to_vec(), act_bits, pre, base,
-                 n_weights: mat_idx.iter().map(|i| layer.mats[*i].qw.len()).sum(),
-                 dev: None }
-}
-
-pub struct FreivaldsInteraction {
-    pub cols: Vec<crate::device::AnyCol<'static>>,
-    pub claimed: Vec<SecureField>,
-    pub use_sum: SecureField,
-    /// Stream II: the group's claim over its own committed activations, in the
-    /// canonical channel-major order, or zero when the AIR carries none.
-    pub qx_claim: SecureField,
-}
-
-pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureField, s_ch: SecureField,
-                             rels: &crate::compose::Rels, range_check: bool,
-                             air: &crate::gadgets::freivalds::FreivaldsEval, gkr: bool) -> FreivaldsInteraction {
-    use stwo::prover::backend::simd::qm31::PackedQM31;
-    use stwo_constraint_framework::Relation;
-    let lay = r.lay;
-    let rows = 1usize << lay.g.log_rows;
-    let m0 = &layer.mats[r.mats[0]];
-    let (rv_pow, rv_step) = crate::relations::powers(rv, lay.pk);
-    let (s_pow, s_step) = crate::relations::powers(s_ch, lay.pq);
-
-    // B7a milestone 4 (section 3 row 1): the Freivalds checks' v, us and accs, on the same
-    // three-value mode every witness generation in this series uses.
-    let acc_dev = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
-    let acc_host = acc_dev.is_none() || crate::devacc::mode() == 2;
-    let rows = if acc_host { rows } else { 0 };
-    // v's inner sums in parallel (the activations), u's per matmul
-    let inner: Vec<(SecureField, Vec<SecureField>)> = (0..rows)
-        .into_par_iter()
-        .map(|j| {
-            let mut vf = SecureField::zero();
-            let mut ufs = vec![SecureField::zero(); r.mats.len()];
-            if let Some((k, chunk)) = lay.g.row(j) {
-                for p in 0..lay.pq {
-                    let t = chunk * lay.pq + p;
-                    if t < m0.tokens {
-                        let x = m0.qx[t * m0.n_in + k];
-                        if x != 0 {
-                            vf += s_pow[p] * SecureField::from(m31_of(x as i64));
-                        }
-                    }
-                }
-                for (mi, uf) in r.mats.iter().zip(ufs.iter_mut()) {
-                    let m = &layer.mats[*mi];
-                    for p in 0..lay.pk {
-                        let i = chunk * lay.pk + p;
-                        if i < m.n_out {
-                            let w = m.qw[k * m.n_out + i];
-                            if w != 0 {
-                                *uf += rv_pow[p] * SecureField::from(m31_of(w as i64));
-                            }
-                        }
-                    }
-                }
-            }
-            (vf, ufs)
-        })
-        .collect();
-    let mut v = vec![SecureField::zero(); rows];
-    let mut us = vec![vec![SecureField::zero(); rows]; r.mats.len()];
-    let mut accs = vec![vec![SecureField::zero(); rows]; r.mats.len()];
-    for j in 0..rows {
-        let (nofirst, last) = match lay.g.row(j) {
-            Some((_, c)) => (c + 1 < lay.g.chunks, c == 0),
-            None => (false, false),
-        };
-        v[j] = if nofirst { v[j - 1] * s_step } else { SecureField::zero() } + inner[j].0;
-        for m in 0..r.mats.len() {
-            us[m][j] = if nofirst { us[m][j - 1] * rv_step } else { SecureField::zero() }
-                + inner[j].1[m];
-            accs[m][j] = if j > 0 { accs[m][j - 1] } else { SecureField::zero() };
-            if last {
-                accs[m][j] += us[m][j] * v[j];
-            }
-        }
-    }
-    let mut cols = crate::device::ColSink::new();
-    let claimed: Vec<SecureField> = match acc_dev {
-        Some(d) => {
-            let got = crate::devacc::freivalds(d, &lay, r.mats.len(), rv, s_ch);
-            let hh = acc_host.then(|| {
-                let mut e = crate::encoding::secure_cols_pub(lay.g.log_rows, &v);
-                for m in 0..r.mats.len() {
-                    e.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &us[m]));
-                    e.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &accs[m]));
-                }
-                (e, accs.iter().map(|a| a[rows - 1]).collect::<Vec<_>>())
-            });
-            crate::devacc::place(&format!("freivalds {} 2^{}", r.name, lay.g.log_rows), got,
-                                 hh, &mut cols)
-        }
-        None => {
-            cols.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &v));
-            for m in 0..r.mats.len() {
-                cols.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &us[m]));
-                cols.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &accs[m]));
-            }
-            accs.iter().map(|a| a[rows - 1]).collect()
-        }
-    };
-    // stream II: the activation claim, in the AIR's own mask order -- after the
-    // per-matmul accumulators and before the LogUp columns.  It is built from
-    // `m0.qx` and not from `r.base`, so it is the same column whether the witness generation
-    // left the component on the host or on the card, and it does not depend on
-    // `rows` having been zeroed for the device accumulator path above.
-    let mut qx_claim = SecureField::zero();
-    if let Some(q) = air.qx.as_ref() {
-        let nrows = 1usize << lay.g.log_rows;
-        let inner_x: Vec<SecureField> = (0..nrows)
-            .into_par_iter()
-            .map(|j| {
-                let mut f = SecureField::zero();
-                if let Some((k, chunk)) = lay.g.row(j) {
-                    for p in 0..lay.pq {
-                        let t = chunk * lay.pq + p;
-                        if t < m0.tokens {
-                            let x = m0.qx[t * m0.n_in + k];
-                            if x != 0 {
-                                f += q.w[p] * SecureField::from(m31_of(x as i64));
-                            }
-                        }
-                    }
-                }
-                f
-            })
-            .collect();
-        let mut xs = vec![SecureField::zero(); nrows];
-        for j in 0..nrows {
-            let (nofirst, notzero) = match lay.g.row(j) {
-                Some((_, c)) => (c + 1 < lay.g.chunks, j > 0),
-                None => (false, j > 0),
-            };
-            let carry = if j == 0 {
-                SecureField::zero()
-            } else if nofirst {
-                xs[j - 1] * q.m_in
-            } else if notzero {
-                xs[j - 1] * q.m_bd
-            } else {
-                SecureField::zero()
-            };
-            xs[j] = carry + inner_x[j];
-        }
-        qx_claim = xs[nrows - 1];
-        cols.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &xs));
-    }
-    let mut use_sum = SecureField::zero();
-    // B11 stream V, lever 4: under `--gkr-freivalds` this group's range checks were
-    // handed to the collector before the GKR proof ran, in `compose`'s own pass,
-    // so there are no running-sum columns to build and no claimed sum to carry.
-    // The `v`, `u` and `acc` columns above stay: they are Horner accumulators
-    // and 38.9% of this family's interaction cells, which the forecast priced.
-    if range_check && !gkr {
-        let one = PackedQM31::broadcast(SecureField::one());
-        let fr = |i: usize, vr: usize|
-            (one, rels.range(r.act_bits).combine(&[r.base[i].data[vr]]));
-        let (lcols, s) = crate::devfrac::frac_cols(
-            air, &format!("freivalds {}", r.name), lay.g.log_rows,
-            crate::devfrac::cols_of(&r.pre, r.dev.as_ref().map(|d| &d.pre[..])),
-            crate::devfrac::cols_of(&r.base, r.dev.as_ref().map(|d| &d.base[..])),
-            || {
-                let (n_pairs, fpair) = crate::plogup::paired(lay.pq, fr);
-                crate::plogup::build(lay.g.log_rows, n_pairs, fpair)
-            });
-        cols.extend_any(lcols);
-        use_sum = s;
-    }
-    FreivaldsInteraction { cols: cols.into_inner(), claimed, use_sum, qx_claim }
 }
 
 #[cfg(test)]

@@ -9,7 +9,11 @@
 //! over the *same committed accumulator cells* the dequant rounds — that equality
 //! is the Freivalds identity `acc = qX qW` (mod p), with nothing committed twice.
 
+pub mod claims;
+pub mod device;
+pub mod layout;
 pub mod run;
+pub mod trace;
 
 use num_traits::{One, Zero};
 use stwo::core::fields::m31::M31;
@@ -18,7 +22,7 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, INTERACTION_TRACE_IDX,
                                 RelationEntry};
 
-use crate::gadgets::attention::layout::Grid;
+use crate::layout::Grid;
 use crate::relations::{RangeRel, id};
 
 // The attention-output component is `gadgets/attn_out` since #197, and
