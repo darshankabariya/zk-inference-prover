@@ -15,10 +15,27 @@
 //!
 //! | holder | preprocessed or base column | interaction column |
 //! |---|---|---|
-//! | the AIR (`read`) | this row's cell, `E::F` | `Run<E::EF>` -- this row's and the previous row's |
+//! | the AIR (`read`) | this row's cell, `E::F` | `fold::Run<E::EF>` -- this row's and the previous row's |
 //! | the trace builder | the whole column, an `Eval` | -- |
 //! | the interaction builder | -- | the whole column's values |
 //! | the id list | the column's `PreProcessedColumnId` | -- |
+//!
+//! ## Cell kinds
+//!
+//! A field of a row declaration is usually a plain cell: the reader takes the
+//! next mask and the writer hands a column over, and nothing else follows from
+//! it.  Two kinds carry more than that, and a gadget gets it by declaring the
+//! kind rather than by writing it out:
+//!
+//! - [`Bytes`], below: committed cells that are values of a range table.  The
+//!   reader takes the masks *and* the row owes the lookups; the writer builds
+//!   the columns *and* bumps the table's multiplicities; and [`ByteCells`] holds
+//!   the one decision the gadget has no opinion about -- whether the lookups are
+//!   proved by this component's own LogUp columns or by the batched backend.
+//! - `fold::Run`, in `crate::fold`: one running column at the `[-1, 0]` mask its
+//!   two constraint rows come from.  `crate::fold::Fold` is what a gadget
+//!   declares over it, and it owns the recurrence on both sides and the column's
+//!   place in the tree.
 //!
 //! ## Why this is not a macro
 //!
@@ -42,12 +59,13 @@
 //!
 //! ```text
 //! column_group! {
-//!     /// The Freivalds check's preprocessed tree.
-//!     pub struct FreivaldsPre<C>;
+//!     /// M: the pinned weights, and the four row flags.
+//!     pub struct Known<Cell>;
 //!     cells F;                       // which of the evaluator's two field types
 //!     read(ev, sh: &FreivaldsShape); // the bindings the field expressions see
-//!     nofirst: C   = ev.get_preprocessed_column(freivalds_sel(&sh.tag, "nofirst"));
-//!     w: Vec<Vec<C>> = (0..sh.n_mats).map(|m| ...).collect();
+//!     carry_in_input_channel: Cell =
+//!         ev.get_preprocessed_column(freivalds_sel(sh.tag, "nofirst"));
+//!     weights: Vec<Vec<Cell>> = (0..sh.n_mats).map(|m| ...).collect();
 //! }
 //! ```
 //!
@@ -71,28 +89,180 @@
 //! through the writer, evaluates the AIR through the reader on the same witness,
 //! and names the constraint and the row.
 
-use stwo_constraint_framework::{EvalAtRow, INTERACTION_TRACE_IDX};
+use num_traits::{One, Zero};
+use stwo::core::fields::m31::M31;
+use stwo::core::fields::qm31::SecureField;
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval, Relation, RelationEntry};
 
-/// One running column, at the two row offsets an accumulator's constraint reads
-/// it at: `prev` is the previous row (`-1`) and `cur` is this one (`0`).
+use crate::common::Eval;
+use crate::device::AnyCol;
+use crate::layer::Tables;
+use crate::relations::RangeRel;
+
+// ------------------------------------------------------ bytes, and a table ---
+
+/// Who proves a lookup.
 ///
-/// It is one column, not two.  A writer holds the column itself and never a
-/// `Run`; only the AIR sees the pair, which is why the reader's row is the only
-/// one whose interaction columns are `Run`s.
-#[derive(Clone, Debug)]
-pub struct Run<T> {
-    pub prev: T,
-    pub cur: T,
+/// It is a property of the lookup and not of the gadget that makes it: a gadget
+/// states that its cells are values of a table, and the plan says which backend
+/// carries that statement.  Nothing in a gadget branches on this.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lookups {
+    /// this component's own LogUp fraction columns, in its interaction tree
+    Own,
+    /// the batched backend, which proves them outside this component and takes
+    /// the site registration instead of the columns
+    Batched,
 }
 
-impl<T> Run<T> {
-    /// The next interaction column, at `[-1, 0]`.  Every gadget's running
-    /// columns are read this way, so the offsets are written down once.
-    pub fn read<E: EvalAtRow<EF = T>>(eval: &mut E) -> Self {
-        let [prev, cur] = eval.next_extension_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]);
-        Run { prev, cur }
+/// The declaration of a row's byte cells: committed values that are values of a
+/// range table.
+///
+/// "Byte" is the usual case and not the only width -- the widened attention
+/// output's activations are one cell in a 12-bit table.  What the kind carries
+/// is everything that follows from the cells being a table's values and nothing
+/// that follows from what the gadget does with them: the width, the offset that
+/// puts a signed value inside an unsigned table, the relation, and who proves
+/// the lookups.
+#[derive(Clone)]
+pub struct ByteCells {
+    /// the table's width in bits, so a cell is in `[0, 2^bits)`
+    pub bits: u32,
+    /// What a cell carries on top of the signed value it stands for, so that it
+    /// lands inside the table: `2^(bits-1)` for a signed value, and whatever a
+    /// widened cell needs.  The gadget's constraints subtract it back out where
+    /// they fold the cell.
+    pub off: u32,
+    /// the relation the cells are looked up in
+    pub rel: RangeRel,
+    /// who proves the lookups
+    pub by: Lookups,
+}
+
+/// A row's byte cells, as whoever holds the row sees them.
+pub struct Bytes<Cell> {
+    pub cells: Vec<Cell>,
+}
+
+impl<Cell> Bytes<Cell> {
+    /// Read `n` byte cells off the row.  What they owe the table is
+    /// `ByteCells::look`, which the AIR calls where its constraints end -- the
+    /// relation entries have to follow the constraints, or the component's
+    /// lowering records them in a different order than it does today.
+    pub fn read<E: EvalAtRow<F = Cell>>(eval: &mut E, n: usize) -> Self {
+        Bytes { cells: (0..n).map(|_| eval.next_trace_mask()).collect() }
+    }
+
+    pub fn into_committed(self) -> Vec<Cell> {
+        self.cells
+    }
+
+    pub fn len(&self) -> usize {
+        self.cells.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
     }
 }
+
+impl Bytes<Eval> {
+    /// Build `n` byte columns of `2^log_rows` rows, and bump the table's
+    /// multiplicities as they are built.
+    ///
+    /// `value(p, j)` is cell `p` of row `j` with the offset already on it -- a
+    /// writer that commits a cell and forgets to count it is the one mistake
+    /// this half can make on its own, and it cannot make it here.
+    ///
+    /// The width is a parameter rather than a `ByteCells` because this side of
+    /// the transcript does not have one: the relation the cells are looked up in
+    /// is drawn from the transcript *after* they are committed, so the table's
+    /// width is all a writer can know and all it needs.
+    pub fn write(log_rows: u32, bits: u32, n: usize, tables: &mut Tables,
+                 value: impl Fn(usize, usize) -> i64) -> Self {
+        let rows = 1usize << log_rows;
+        let mut cells = Vec::with_capacity(n);
+        for p in 0..n {
+            let mut col = vec![M31::zero(); rows];
+            for (j, slot) in col.iter_mut().enumerate() {
+                let v = value(p, j);
+                tables.bump_r(bits, v);
+                *slot = crate::encoding::m31_of(v);
+            }
+            cells.push(crate::common::eval_of(log_rows, col));
+        }
+        Bytes { cells }
+    }
+}
+
+impl ByteCells {
+    /// Whether the lookups are this component's own columns.
+    pub fn own(&self) -> bool {
+        self.by == Lookups::Own
+    }
+
+    /// The same cells with their lookups proved here, whatever the plan said.
+    ///
+    /// The batched backend reads the fractions the component *would* have built,
+    /// so the site is registered against this and not against the ablated form.
+    pub fn proved_here(&self) -> Self {
+        ByteCells { by: Lookups::Own, ..self.clone() }
+    }
+
+    /// One unit lookup per cell, which is what a site's instance split is
+    /// derived from: every byte look has the literal one as its numerator.
+    pub fn units(&self, n: usize) -> Vec<bool> {
+        vec![true; n]
+    }
+
+    /// The lookups the cells owe, where the AIR's constraints end.
+    ///
+    /// Under the batched backend there is nothing here at all: no relation
+    /// entries, and so no interaction columns allocated for them either.  The
+    /// finalisation is inside, because a component whose only lookups are these
+    /// has nothing else to batch them with -- a gadget that looks up more than
+    /// one kind of cell wants the two halves apart, and that is the first thing
+    /// the fan-out will ask for.
+    pub fn look<E: EvalAtRow>(&self, eval: &mut E, bytes: &Bytes<E::F>) {
+        if !self.own() {
+            return;
+        }
+        for a in &bytes.cells {
+            eval.add_to_relation(RelationEntry::new(&self.rel, E::EF::one(),
+                                                    core::slice::from_ref(a)));
+        }
+        eval.finalize_logup_in_pairs();
+    }
+
+    /// The interaction columns the lookups own: this component's LogUp
+    /// fractions, batched in pairs, or nothing at all when the batched backend
+    /// proves them elsewhere.
+    ///
+    /// `cells` are the committed byte columns on the host, which only the host
+    /// fraction builder reads -- on a component whose trace stayed on the card
+    /// the generated builder reads the card's and this list is empty.
+    pub fn frac_cols<E: FrameworkEval>(
+        &self,
+        air: &E,
+        tag: &str,
+        log_rows: u32,
+        pre: crate::devfrac::Cols<'_>,
+        base: crate::devfrac::Cols<'_>,
+        cells: &[Eval],
+        n: usize,
+    ) -> (Vec<AnyCol<'static>>, SecureField) {
+        use stwo::prover::backend::simd::qm31::PackedQM31;
+        if !self.own() {
+            return (vec![], SecureField::zero());
+        }
+        let one = PackedQM31::broadcast(SecureField::one());
+        let fr = |i: usize, vr: usize| (one, self.rel.combine(&[cells[i].data[vr]]));
+        crate::devfrac::frac_cols(air, tag, log_rows, pre, base, || {
+            let (n_pairs, fpair) = crate::plogup::paired(n, fr);
+            crate::plogup::build(log_rows, n_pairs, fpair)
+        })
+    }
+}
+
 
 // --------------------------------------------------- the row-level checker ---
 

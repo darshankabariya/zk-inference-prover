@@ -30,6 +30,7 @@ pub mod devtab;
 pub mod device;
 pub mod encoding;
 pub mod exprprobe;
+pub mod fold;
 pub mod gadgets;
 pub mod gencudakernels;
 pub mod gkr_key_tile;

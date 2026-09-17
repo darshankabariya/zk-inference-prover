@@ -29,7 +29,8 @@
 use stwo_constraint_framework::EvalAtRow;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
-use crate::columns::Run;
+use crate::columns::Bytes;
+use crate::fold::Run;
 use crate::gadgets::freivalds::layout::FreivaldsLayout;
 use crate::gadgets::freivalds::{FREIVALDS_SEL, FreivaldsEval, freivalds_sel, freivalds_w};
 
@@ -63,7 +64,7 @@ impl<'a> FreivaldsShape<'a> {
 
     /// How many columns each tree holds, off the same declaration the structs
     /// are: the weights and the four row flags, the activations, and the running
-    /// sums.  The last count is in *running columns*; each is four M31 columns
+    /// sums.  The last count is in *folds*; each costs `fold::M31_COLS` columns
     /// once encoded, and the LogUp columns that follow them belong to the
     /// relation rather than to the row.
     pub fn n_pre(&self) -> usize {
@@ -143,20 +144,54 @@ impl Known<PreProcessedColumnId> {
     }
 }
 
+/// The four row flags at one row, off the layout that tiles the table.
+///
+/// The AIR reads them as preprocessed columns, which is what `Known`'s four
+/// fields are.  `trace.rs` builds those columns out of this and `claims.rs`
+/// drives its folds by it, so the loop the flags stand for is written down once
+/// and the two sides cannot drift apart.
+#[derive(Clone, Copy, Debug)]
+pub struct RowFlags {
+    pub carry_in_input_channel: bool,
+    pub input_channel_done: bool,
+    pub carry_in_table: bool,
+    pub table_done: bool,
+}
+
+impl RowFlags {
+    /// Row `j`'s flags.  A row outside the table -- padding above the last input
+    /// channel -- carries neither fold and passes the product through.
+    pub fn at(lay: &FreivaldsLayout, j: usize) -> Self {
+        // the row's chunk index, which counts *down* inside an input channel, so
+        // chunk `chunks - 1` is the input channel's first row and chunk 0 its last
+        let chunk = lay.g.row(j).map(|(_, c)| c);
+        RowFlags {
+            carry_in_input_channel: matches!(chunk, Some(c) if c + 1 < lay.g.chunks),
+            input_channel_done: matches!(chunk, Some(0)),
+            carry_in_table: j > 0,
+            table_done: j + 1 == 1usize << lay.g.log_rows,
+        }
+    }
+}
+
 // ------------------------------------------------ what the prover commits ----
 
-/// A: one token chunk of the activations, committed as bytes.
+/// A: one token chunk of the activations.
 ///
-/// Each cell carries the signed activation plus `act_off`, so it is in range for
-/// the byte table it is looked up in; the constraints subtract the offset back
-/// out where they fold it.
+/// The cells are *bytes* -- `crate::columns::Bytes`, the cell kind for values of
+/// a range table -- so the lookups, the multiplicity bumps and the choice of who
+/// proves them all follow from this declaration and are written nowhere in this
+/// gadget.  `FreivaldsEval::acts` is the width, the offset and the relation.
+/// Each cell carries the signed activation plus that offset, so it is in range
+/// for the table; the constraints subtract the offset back out where they fold
+/// it.
 pub struct Activations<Cell> {
-    pub x: Vec<Cell>,
+    pub x: Bytes<Cell>,
 }
 
 impl<Cell> Activations<Cell> {
     pub fn into_committed(self) -> Vec<Cell> {
-        self.x
+        self.x.into_committed()
     }
 }
 
@@ -231,7 +266,7 @@ impl<F, EF> FreivaldsRow<F, EF> {
                     .map(|m| m.into_iter().map(|id| eval.get_preprocessed_column(id)).collect())
                     .collect(),
             },
-            acts: Activations { x: (0..sh.pq).map(|_| eval.next_trace_mask()).collect() },
+            acts: Activations { x: Bytes::read(eval, sh.pq) },
             sums: RunningSums {
                 x_fold: Run::read(eval),
                 mats: (0..sh.n_mats)

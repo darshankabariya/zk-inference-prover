@@ -4,16 +4,24 @@
 //! Nothing here depends on `rv` or `s` -- it cannot, because those are drawn
 //! from the transcript only after these columns have been committed.  What is
 //! built here is the activation bytes `A`, the preprocessed weights `M` and the
-//! four row flags, and the range-table multiplicities the activations bump.  The
-//! running sums and the claims are `claims.rs`, after the draw.
+//! four row flags.  The running sums and the claims are `claims.rs`, after the
+//! draw.
+//!
+//! The activations go through `columns::Bytes`, the cell kind for values of a
+//! range table, so the multiplicities they bump are counted by the same call
+//! that builds them -- a writer that commits a cell and forgets to count it is
+//! the one mistake this half can make on its own.  `device.rs` is the same two
+//! trees built on the card; which side runs is its `mode`, and this file is the
+//! only caller of either.
 
 use num_traits::Zero;
 use stwo::core::fields::m31::M31;
 
+use crate::columns::Bytes;
 use crate::common::{Eval, eval_of, m31_u32};
 use crate::encoding::m31_of;
-use crate::dev_attention_freivalds_witness_gen::sub_slice;
-use crate::gadgets::freivalds::columns::{Activations, FreivaldsShape, Known};
+use crate::gadgets::freivalds::columns::{Activations, FreivaldsShape, Known, RowFlags};
+use crate::gadgets::freivalds::device;
 use crate::gadgets::freivalds::layout::FreivaldsLayout;
 use crate::layer::{Layer, Tables};
 
@@ -32,7 +40,7 @@ pub struct FreivaldsComponent {
     pub base: Vec<Eval>,
     pub n_weights: usize,
     /// the same columns, built on the device instead
-    pub dev: Option<crate::dev_attention_freivalds_witness_gen::DevFreivalds>,
+    pub dev: Option<device::DevFreivalds>,
 }
 
 impl FreivaldsComponent {
@@ -66,18 +74,13 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
         assert_eq!(layer.mats[*i].qx, m0.qx, "Freivalds group inputs differ");
     }
 
-    // Which witness generation runs: 0 the host's, 1 the device's alone, 2 both
-    // with every cell asserted equal before either is used.
-    //
-    // The device witness generation packs activations as int8 and bumps the
-    // 8-bit table in its kernel, so a group with wider activations takes the host
-    // path whatever the switch says, and `devpre::note_host_witness_gen` is told
-    // in `generate`.
-    let witness_gen_mode = if act_bits == 8 { crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS") } else { 0 };
+    // Which witness generation runs is `device::mode`; the device path has no
+    // `corrupt_qx` in it, so a control asks for the host's.
+    let witness_gen_mode = device::mode(act_bits);
     assert!(witness_gen_mode == 0 || corrupt_qx.is_none(),
             "{name}: the device Freivalds witness generation has no `corrupt_qx` path");
     if witness_gen_mode == 1 {
-        let dev = crate::dev_attention_freivalds_witness_gen::freivalds_component_dev(layer, mat_idx, &lay, tables);
+        let dev = device::freivalds_component_dev(layer, mat_idx, &lay, tables);
         // no mirror: `freivalds_interaction` reads the device columns directly,
         // and nothing else reads a device component's host columns --
         // `base_cells` counts them off `dev`.
@@ -86,18 +89,16 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
                             n_weights: mat_idx.iter().map(|i| layer.mats[*i].qw.len()).sum(),
                             dev: Some(dev) };
     }
-    let snap_tables = |t: &Tables| -> (Vec<u32>, usize) {
-        (t.m_r[t.ridx(8)].clone(), t.off_table)
-    };
-    let snap_before = (witness_gen_mode == 2).then(|| snap_tables(tables));
+    let mirror = device::Mirror::before(witness_gen_mode, tables);
 
     // The two trees are filled through the row declaration and handed back in
     // committed order by it, so nothing here counts columns.
     let sh = FreivaldsShape::new(name, &lay, mat_idx.len(), false);
-    let mut act = vec![];
-    for p in 0..lay.pq {
-        let mut col = vec![M31::zero(); rows];
-        for (j, slot) in col.iter_mut().enumerate() {
+    // A: one token chunk a row, each cell the signed activation plus the table's
+    // offset.  The cells are `Bytes`, so the same call that builds a column is
+    // the one that counts what it committed in the range table.
+    let base = Activations {
+        x: Bytes::<Eval>::write(lay.g.log_rows, act_bits, lay.pq, tables, |p, j| {
             let v = match lay.g.row(j) {
                 Some((k, chunk)) => {
                     let t = chunk * lay.pq + p;
@@ -117,12 +118,10 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
                 }
                 None => off,
             };
-            tables.bump_r(act_bits, v as i64);
-            *slot = m31_of(v as i64);
-        }
-        act.push(eval_of(lay.g.log_rows, col));
+            v as i64
+        }),
     }
-    let base = Activations { x: act }.into_committed();
+    .into_committed();
 
     let mut w = vec![];
     for mi in mat_idx {
@@ -142,41 +141,24 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
         }
         w.push(row);
     }
-    let flag = |f: &dyn Fn(usize) -> bool| {
-        eval_of(lay.g.log_rows, (0..rows).map(|j| m31_u32(f(j) as u32)).collect())
+    // the four row flags, off the one place that says what they are on a row
+    let flag = |f: &dyn Fn(RowFlags) -> bool| {
+        eval_of(lay.g.log_rows,
+                (0..rows).map(|j| m31_u32(f(RowFlags::at(&lay, j)) as u32)).collect())
     };
-    // the row's chunk index, which counts *down* inside an input channel, so
-    // chunk `chunks - 1` is the input channel's first row and chunk 0 its last
-    let chunk = |j: usize| lay.g.row(j).map(|(_, c)| c);
     let pre = Known {
-        carry_in_input_channel: flag(&|j| matches!(chunk(j), Some(c) if c + 1 < lay.g.chunks)),
-        input_channel_done: flag(&|j| matches!(chunk(j), Some(0))),
-        carry_in_table: flag(&|j| j > 0),
-        table_done: flag(&|j| j + 1 == rows),
+        carry_in_input_channel: flag(&|r| r.carry_in_input_channel),
+        input_channel_done: flag(&|r| r.input_channel_done),
+        carry_in_table: flag(&|r| r.carry_in_table),
+        table_done: flag(&|r| r.table_done),
         weights: w,
     }
     .into_committed();
     assert_eq!(base.len(), sh.n_base(), "{name}: the base tree is not the row's");
     assert_eq!(pre.len(), sh.n_pre(), "{name}: the preprocessed tree is not the row's");
 
-    if witness_gen_mode == 2 {
-        // the check with teeth, before any column has changed hands
-        let after = snap_tables(tables);
-        let before = snap_before.unwrap();
-        let dev = crate::dev_attention_freivalds_witness_gen::freivalds_component_dev(layer, mat_idx, &lay, tables);
-        crate::dev_attention_freivalds_witness_gen::check_cols(&format!("freivalds {name} base"), &base, &dev.base);
-        crate::dev_attention_freivalds_witness_gen::check_cols(&format!("freivalds {name} pre"), &pre, &dev.pre);
-        let r8 = tables.ridx(8);
-        crate::dev_attention_freivalds_witness_gen::check_delta(&format!("freivalds {name} m_r8"), &before.0, &after.0,
-                                     &sub_slice(&tables.m_r[r8], &after.0));
-        assert_eq!(tables.off_table - after.1, after.1 - before.1,
-                   "freivalds {name}: off-table bumps differ");
-        // the device's own bumps are the check's, not the proof's
-        tables.m_r[r8].copy_from_slice(&after.0);
-        tables.off_table = after.1;
-        eprintln!("witness_gen-dev: freivalds {name} -- {} base and {} pre columns, {} cells, \
-the 8-bit range multiplicities all match",
-                  base.len(), pre.len(), (base.len() + pre.len()) << lay.g.log_rows);
+    if let Some(m) = mirror {
+        m.check(name, layer, mat_idx, &lay, tables, &base, &pre);
     }
     FreivaldsComponent { name: name.into(), lay, mats: mat_idx.to_vec(), act_bits, pre, base,
                  n_weights: mat_idx.iter().map(|i| layer.mats[*i].qw.len()).sum(),

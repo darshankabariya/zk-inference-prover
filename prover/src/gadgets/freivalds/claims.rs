@@ -6,14 +6,22 @@
 //! every commitment `trace.rs` made.  It also holds `project`, the one written
 //! definition of the projection `rv^T C s` that the two sides of the identity
 //! are compared at.
+//!
+//! The four running columns are four `crate::fold::Fold`s, and this file builds
+//! each of them the same way: every row's own term in parallel, and then the
+//! primitive's serial carry at the step the row flags say.  Where they are built
+//! -- on the host, on the card, or both with every cell compared -- is
+//! `fold::sides` and `fold::place`, and the lookups' columns are the byte cells'
+//! own.
 
-use num_traits::{One, Zero};
+use num_traits::Zero;
 use rayon::prelude::*;
 use stwo::core::fields::qm31::SecureField;
 
 use crate::compose::{Claims, FreivaldsPlan, unqm};
 use crate::encoding::m31_of;
-use crate::gadgets::freivalds::columns::{FreivaldsShape, Matmul, RunningSums};
+use crate::fold::{Step, carry_down};
+use crate::gadgets::freivalds::columns::{FreivaldsShape, Matmul, RowFlags, RunningSums};
 use crate::gadgets::freivalds::trace::FreivaldsComponent;
 use crate::layer::Layer;
 
@@ -79,25 +87,22 @@ pub struct FreivaldsInteraction {
     pub qx_claim: SecureField,
 }
 
-pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureField, s_ch: SecureField,
-                             rels: &crate::compose::Rels, range_check: bool,
-                             air: &crate::gadgets::freivalds::FreivaldsEval, gkr: bool) -> FreivaldsInteraction {
-    use stwo::prover::backend::simd::qm31::PackedQM31;
-    use stwo_constraint_framework::Relation;
+pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureField,
+                             s_ch: SecureField,
+                             air: &crate::gadgets::freivalds::FreivaldsEval) -> FreivaldsInteraction {
     let lay = r.lay;
     let rows = 1usize << lay.g.log_rows;
     let m0 = &layer.mats[r.mats[0]];
     let (rv_pow, rv_step) = crate::relations::powers(rv, lay.pk);
     let (s_pow, s_step) = crate::relations::powers(s_ch, lay.pq);
 
-    // Where the running sums are built: on the host, on the card, or both with
-    // every cell compared (`ZK_DEVICE_ACCUMULATORS` = 0, 1, 2).
-    let acc_dev = r.dev.as_ref().filter(|_| crate::devacc::mode() >= 1);
-    let acc_host = acc_dev.is_none() || crate::devacc::mode() == 2;
-    let rows = if acc_host { rows } else { 0 };
-    // each row's own two folds in parallel -- the activations against `s`, and
-    // each matmul's weights against `rv`.  The carries down the rows are serial
-    // and come after.
+    // Where the folds are built: on the host, on the card, or both with every
+    // cell compared.
+    let sides = crate::fold::sides(r.dev.is_some());
+    let rows = if sides.host { rows } else { 0 };
+    // each row's own two terms in parallel -- the activations against `s`, and
+    // each matmul's weights against `rv`.  The carries down the rows are the
+    // fold's and come after.
     let inner: Vec<(SecureField, Vec<SecureField>)> = (0..rows)
         .into_par_iter()
         .map(|j| {
@@ -129,59 +134,52 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
             (vf, ufs)
         })
         .collect();
-    let mut x_fold = vec![SecureField::zero(); rows];
-    let mut w_folds = vec![vec![SecureField::zero(); rows]; r.mats.len()];
-    let mut products = vec![vec![SecureField::zero(); rows]; r.mats.len()];
-    for j in 0..rows {
-        // the same two row flags the AIR reads, here as the loop they encode
-        let (carry_in_input_channel, input_channel_done) = match lay.g.row(j) {
-            Some((_, c)) => (c + 1 < lay.g.chunks, c == 0),
-            None => (false, false),
-        };
-        x_fold[j] = if carry_in_input_channel { x_fold[j - 1] * s_step }
-                    else { SecureField::zero() } + inner[j].0;
-        for m in 0..r.mats.len() {
-            w_folds[m][j] = if carry_in_input_channel { w_folds[m][j - 1] * rv_step }
-                            else { SecureField::zero() } + inner[j].1[m];
-            products[m][j] = if j > 0 { products[m][j - 1] } else { SecureField::zero() };
-            if input_channel_done {
-                products[m][j] += w_folds[m][j] * x_fold[j];
-            }
-        }
-    }
+    // the same row flags the AIR reads, here as the loop they stand for
+    let flags = |j: usize| RowFlags::at(&lay, j);
+    let restart = |j: usize| flags(j).carry_in_input_channel;
+    let in_table = |j: usize| flags(j).carry_in_table;
+    // x_fold and w_fold restart at each input channel; product carries across
+    // the whole table and takes the two finished folds once per input channel
+    let x_fold = carry_down(&inner.iter().map(|t| t.0).collect::<Vec<_>>(),
+                            Step::Restart { step: s_step, flag: &restart });
+    let w_folds: Vec<Vec<SecureField>> = (0..r.mats.len())
+        .map(|m| carry_down(&inner.iter().map(|t| t.1[m]).collect::<Vec<_>>(),
+                            Step::Restart { step: rv_step, flag: &restart }))
+        .collect();
+    let products: Vec<Vec<SecureField>> = (0..r.mats.len())
+        .map(|m| {
+            let term: Vec<SecureField> = (0..rows)
+                .map(|j| if flags(j).input_channel_done { w_folds[m][j] * x_fold[j] }
+                         else { SecureField::zero() })
+                .collect();
+            carry_down(&term, Step::Gate(&in_table))
+        })
+        .collect();
     let mut cols = crate::device::ColSink::new();
     // The running sums go into the tree through the row declaration, so their
     // order is the order the AIR reads them in and it is written down once.
     // `x_claim` is `None` here because it is built below, out of `m0.qx` rather
     // than out of these, and appended where the declaration has it.
     let sh = FreivaldsShape::new(&r.name, &lay, r.mats.len(), air.qx.is_some());
-    let acc_cols = || -> Vec<crate::common::Eval> {
-        RunningSums {
-            x_fold: x_fold.as_slice(),
-            mats: w_folds.iter().zip(products.iter())
-                .map(|(w, p)| Matmul { w_fold: w.as_slice(), product: p.as_slice() })
-                .collect(),
-            x_claim: None,
-        }
-        .into_committed()
-        .into_iter()
-        .flat_map(|c| crate::encoding::secure_cols_pub(lay.g.log_rows, c))
-        .collect()
-    };
-    let claimed: Vec<SecureField> = match acc_dev {
-        Some(d) => {
-            let got = crate::devacc::freivalds(d, &lay, r.mats.len(), rv, s_ch);
-            let hh = acc_host.then(|| {
-                (acc_cols(), products.iter().map(|a| a[rows - 1]).collect::<Vec<_>>())
-            });
-            crate::devacc::place(&format!("freivalds {} 2^{}", r.name, lay.g.log_rows), got,
-                                 hh, &mut cols)
-        }
-        None => {
-            cols.extend(acc_cols());
-            products.iter().map(|a| a[rows - 1]).collect()
-        }
-    };
+    let claimed: Vec<SecureField> = crate::fold::place(
+        &format!("freivalds {} 2^{}", r.name, lay.g.log_rows), sides, &mut cols,
+        || crate::devacc::freivalds(
+            r.dev.as_ref().expect("the card builds a group's folds off its own columns"),
+            &lay, r.mats.len(), rv, s_ch),
+        || {
+            let built = RunningSums {
+                x_fold: x_fold.as_slice(),
+                mats: w_folds.iter().zip(products.iter())
+                    .map(|(w, p)| Matmul { w_fold: w.as_slice(), product: p.as_slice() })
+                    .collect(),
+                x_claim: None,
+            }
+            .into_committed()
+            .into_iter()
+            .flat_map(|c| crate::fold::column(lay.g.log_rows, c))
+            .collect();
+            (built, products.iter().map(|a| a[rows - 1]).collect())
+        });
     // The published claim over the committed activations, in the AIR's own mask
     // order -- after the per-matmul running sums and before the LogUp columns.
     // It is built from `m0.qx` and not from `r.base`, so it is the same column
@@ -209,53 +207,35 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
                 f
             })
             .collect();
-        let mut xs = vec![SecureField::zero(); nrows];
-        for j in 0..nrows {
-            let (carry_in_input_channel, carry_in_table) = match lay.g.row(j) {
-                Some((_, c)) => (c + 1 < lay.g.chunks, j > 0),
-                None => (false, j > 0),
-            };
-            let carry = if j == 0 {
-                SecureField::zero()
-            } else if carry_in_input_channel {
-                xs[j - 1] * q.m_in
-            } else if carry_in_table {
-                xs[j - 1] * q.m_bd
-            } else {
-                SecureField::zero()
-            };
-            xs[j] = carry + inner_x[j];
-        }
+        // This table's rows step at two rates -- one inside an input channel and
+        // one where a new one begins -- so the carry is built here and the fold
+        // takes it ready-made.
+        let mult = |j: usize| {
+            let f = flags(j);
+            if f.carry_in_input_channel { q.m_in }
+            else if f.carry_in_table { q.m_bd }
+            else { SecureField::zero() }
+        };
+        let xs = carry_down(&inner_x, Step::By(&mult));
         qx_claim = xs[nrows - 1];
         // the declaration's last running column, after the per-matmul pairs
-        cols.extend(crate::encoding::secure_cols_pub(lay.g.log_rows, &xs));
+        cols.extend(crate::fold::column(lay.g.log_rows, &xs));
     }
-    // the row's own running columns are in; the LogUp columns below are the
-    // relation's and the row declaration does not name them
-    if acc_dev.is_none() {
-        assert_eq!(cols.len(), 4 * sh.n_inter(),
+    // the row's own folds are in; the lookups' columns below are the relation's
+    // and the row declaration does not name them
+    if !sides.device {
+        assert_eq!(cols.len(), crate::fold::M31_COLS * sh.n_inter(),
                    "freivalds {}: the interaction tree is not the row's", r.name);
     }
-    let mut use_sum = SecureField::zero();
-    // Under `--gkr-freivalds` this group's range checks were handed to the GKR
-    // collector before its proof ran, in `compose`'s own pass, so there are no
-    // running-sum columns to build for them and no claimed sum to carry.  The
-    // `x_fold`, `w_fold` and `product` columns above stay: they are the
-    // identity's own accumulators and not lookups.
-    if range_check && !gkr {
-        let one = PackedQM31::broadcast(SecureField::one());
-        let fr = |i: usize, vr: usize|
-            (one, rels.range(r.act_bits).combine(&[r.base[i].data[vr]]));
-        let (lcols, s) = crate::devfrac::frac_cols(
-            air, &format!("freivalds {}", r.name), lay.g.log_rows,
-            crate::devfrac::cols_of(&r.pre, r.dev.as_ref().map(|d| &d.pre[..])),
-            crate::devfrac::cols_of(&r.base, r.dev.as_ref().map(|d| &d.base[..])),
-            || {
-                let (n_pairs, fpair) = crate::plogup::paired(lay.pq, fr);
-                crate::plogup::build(lay.g.log_rows, n_pairs, fpair)
-            });
-        cols.extend_any(lcols);
-        use_sum = s;
-    }
+    // And the activations' lookups, which are the byte cells' own: their
+    // fraction columns, or nothing at all when the plan has them proved
+    // elsewhere and the site was registered instead.  The folds above stay
+    // either way -- they are the identity's accumulators and not lookups.
+    let (lcols, use_sum) = air.acts.frac_cols(
+        air, &format!("freivalds {}", r.name), lay.g.log_rows,
+        crate::devfrac::cols_of(&r.pre, r.dev.as_ref().map(|d| &d.pre[..])),
+        crate::devfrac::cols_of(&r.base, r.dev.as_ref().map(|d| &d.base[..])),
+        &r.base, lay.pq);
+    cols.extend_any(lcols);
     FreivaldsInteraction { cols: cols.into_inner(), claimed, use_sum, qx_claim }
 }

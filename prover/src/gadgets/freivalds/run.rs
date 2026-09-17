@@ -38,15 +38,14 @@ use std::time::Instant;
 use num_traits::Zero;
 use serde_json::{Value, json};
 use stwo::core::air::Component;
-use stwo::core::channel::Blake2sM31Channel;
 use stwo::core::fields::qm31::SecureField;
 use stwo::prover::ComponentProver;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::relations::{RangeRel, RangeTableEval, powers, table_col, tbl_range};
 use crate::bf16::Round;
+use crate::columns::{ByteCells, Lookups};
 use crate::common::{Proven, Session, Sums, eval_of, m31_u32, twiddles};
-use crate::compose::Rels;
 use crate::gadgets::freivalds::FreivaldsEval;
 use crate::gadgets::freivalds::claims::{freivalds_interaction, project_product};
 use crate::gadgets::freivalds::columns::{FreivaldsShape, Known};
@@ -138,18 +137,6 @@ compares them in freivalds::claims::identity_holds.",
     }
 }
 
-/// The relation set `freivalds_interaction` takes.  The component reads exactly
-/// one of them -- the activations' range check, drawn from this proof's own
-/// transcript -- so the rest are drawn from a transcript of their own: no column
-/// here combines against them, and a composed segment draws them for components
-/// this proof does not build.
-pub fn rels_of(range: &RangeRel) -> Rels {
-    let mut spare = Blake2sM31Channel::default();
-    let mut r = Rels::draw(&mut spare, &[ACT_BITS], None, None, false, 0);
-    r.ranges = vec![range.clone()];
-    r
-}
-
 /// One weight block's check, proved on its own at `p_target` weights a row.
 pub fn run(layer: &Layer, group: &str, mats: &[usize], p_target: usize) -> Outcome {
     let m0 = &layer.mats[mats[0]];
@@ -199,20 +186,18 @@ pub fn run(layer: &Layer, group: &str, mats: &[usize], p_target: usize) -> Outco
         s_pow: s_pow.clone(),
         s_step,
         claimed,
-        rel_act: rel_act.clone(),
-        act_off: 1 << (ACT_BITS - 1),
-        range_check: true,
-        gkr: false,
+        // the committed activations, as bytes of this proof's own range table
+        acts: ByteCells { bits: ACT_BITS, off: 1 << (ACT_BITS - 1), rel: rel_act.clone(),
+                          by: Lookups::Own },
         // the activation claim binds a group to whichever component produced its
         // input; a weight block on its own has no producer and publishes none,
         // which is what a composed segment without the residual stream also does
         qx: None,
     };
-    let rels = rels_of(&rel_act);
 
     let t1 = Instant::now();
-    let it = freivalds_interaction(layer, &r, rv, s_ch, &rels, true,
-                                   &air(vec![SecureField::zero(); mats.len()]), false);
+    let it = freivalds_interaction(layer, &r, rv, s_ch,
+                                   &air(vec![SecureField::zero(); mats.len()]));
     let interaction_secs = t1.elapsed().as_secs_f64();
     let inter_cells: usize = it.cols.iter().map(|c| c.size()).sum();
     let n_inter_cols = it.cols.len();

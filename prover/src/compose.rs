@@ -68,7 +68,7 @@ use crate::gadgets::residual_stream::{self, Binding, BindingKind, GKind, GTableE
                   UnKind};
 use crate::gadgets::attention::layout::Shape;
 use crate::gadgets::freivalds::{AO_SEL, AttnOutEval, EPOW_COLS, FREIVALDS_SEL, FreivaldsEval, ao_chan,
-                       ao_sel, freivalds_sel, freivalds_w};
+                       ao_sel};
 
 // ---------------------------------------------------------------- relations ----
 
@@ -2469,15 +2469,18 @@ impl Plan {
             }
         }
         for w in &self.freivalds {
-            for (mi, _) in w.mats.iter().enumerate() {
-                for pp in 0..w.lay.pk {
-                    put(freivalds_w(&w.name, mi, pp), "freivalds/weight", w.lay.g.log_rows,
-                        PreNeeds::Model, PreVaries::Layer);
-                }
-            }
-            for n in FREIVALDS_SEL {
-                put(freivalds_sel(&w.name, n), "freivalds/sel", w.lay.g.log_rows, PreNeeds::Params,
-                    PreVaries::Layer);
+            // The ids and their order are the Freivalds row declaration's, the
+            // same list `preprocessed_ids` takes.  What splits it is what a
+            // verifier needs to rebuild a column: the weights are the model's
+            // and the row flags are the parameters'.
+            let sh = crate::gadgets::freivalds::columns::FreivaldsShape::new(
+                &w.name, &w.lay, w.mats.len(), false);
+            let n_weights = sh.n_pre() - FREIVALDS_SEL.len();
+            let ids = crate::gadgets::freivalds::columns::Known::committed_ids(&sh);
+            for (i, id) in ids.into_iter().enumerate() {
+                let (kind, needs) = if i < n_weights { ("freivalds/weight", PreNeeds::Model) }
+                                    else { ("freivalds/sel", PreNeeds::Params) };
+                put(id, kind, w.lay.g.log_rows, needs, PreVaries::Layer);
             }
         }
         if let Some(g) = &self.residual_stream {
@@ -3530,10 +3533,15 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 s_pow,
                 s_step,
                 claimed: claims.freivalds_acc[wi].iter().map(|x| unqm(*x)).collect(),
-                rel_act: rels.range(w.act_bits).clone(),
-                act_off: 1 << (w.act_bits - 1),
-                range_check: true,
-                gkr: p.gkr_freivalds,
+                // the committed activations, as bytes of a range table, and who
+                // proves that they are
+                acts: crate::columns::ByteCells {
+                    bits: w.act_bits,
+                    off: 1 << (w.act_bits - 1),
+                    rel: rels.range(w.act_bits).clone(),
+                    by: if p.gkr_freivalds { crate::columns::Lookups::Batched }
+                        else { crate::columns::Lookups::Own },
+                },
                 // stream II: the group's own claim over its committed
                 // activations, in the canonical channel-major order.  Present
                 // exactly when the chunk carries the wiring family, so a chunk
@@ -6067,9 +6075,7 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
         let g = gkr.as_mut().expect("--gkr-freivalds needs --gkr-key-tiles");
         let phase_t = std::time::Instant::now();
         for (wi, reg) in freivalds_components.iter().enumerate() {
-            let mut ev = components.freivalds[wi].eval.clone();
-            ev.gkr = false;
-            crate::gkr_key_tile::freivalds_site(g, wi, &ev, reg);
+            crate::gkr_key_tile::freivalds_site(g, wi, &components.freivalds[wi].eval, reg);
         }
         crate::util::add_phase("int/freivalds_gkr", phase_t.elapsed().as_secs_f64());
     }
@@ -6392,8 +6398,7 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
     let phase_t = std::time::Instant::now();
     for (wi, reg) in freivalds_components.iter().enumerate() {
         let t_iw = std::time::Instant::now();
-        let it = freivalds_interaction(layer, reg, rv, s, &rels, true,
-                                       &components.freivalds[wi].eval, p.gkr_freivalds);
+        let it = freivalds_interaction(layer, reg, rv, s, &components.freivalds[wi].eval);
         crate::util::add_phase("int/freivalds_build", t_iw.elapsed().as_secs_f64());
         inter_all.extend(it.cols);
         inter_mark(&format!("freivalds/{}", reg.name), &inter_all, &mut inter_seen,

@@ -31,10 +31,10 @@
 //!   there is nothing to commit and nothing a prover could swap.  They enter as
 //!   the `weights` columns.
 //! - **A, the activations `X`.** Committed here, as bytes offset into a range
-//!   table (`act_off`), one token chunk per row.  Because they are this
-//!   component's own commitment, the component also *publishes* a projection of
-//!   them (`x_claim`), so that whichever component produced `X` can be bound to
-//!   the same values.  A segment with no producer publishes none.
+//!   table, one token chunk per row.  Because they are this component's own
+//!   commitment, the component also *publishes* a projection of them
+//!   (`x_claim`), so that whichever component produced `X` can be bound to the
+//!   same values.  A segment with no producer publishes none.
 //! - **C, the product.** Not committed here at all.  The dequant gadget commits
 //!   it -- it is the accumulator dequant rounds -- and publishes the projection
 //!   `rv^T C s` as its claim `claimed_h`, computed through
@@ -98,15 +98,43 @@
 //!
 //! - `mod.rs` -- this comment, `FreivaldsEval` and its constraints.
 //! - `columns.rs` -- the column declaration: one struct per tree, the reader the
-//!   AIR uses, and the committed order the builders use.
+//!   AIR uses, the committed order the builders use, and the row flags both
+//!   sides read.
 //! - `layout.rs` -- which matmuls share a group, and how the rows are tiled.
 //! - `trace.rs` -- *before the challenges*: the committed activation bytes, the
-//!   preprocessed weights and row flags, the range-table multiplicities.
+//!   preprocessed weights and row flags.
 //! - `claims.rs` -- *after the challenges*: the running sums, the claims this
-//!   component publishes, the LogUp columns, and `project`.
-//! - `device.rs` -- the same columns `trace.rs` builds, built on the GPU.
+//!   component publishes, the lookups' columns, and `project`.
+//! - `device.rs` -- the same columns `trace.rs` builds, built on the GPU, and
+//!   the switch that says which of the two runs.  Nothing here but the module
+//!   list below names it, and `trace.rs` is its only caller: which side built a
+//!   column is not something a constraint can see.
 //! - `run.rs` -- the standalone proof of this component alone, and what it costs
 //!   per weight.
+//!
+//! # What this gadget does not say
+//!
+//! Three things a Freivalds check has no opinion about are declared here and
+//! implemented elsewhere, so that a reader of this directory meets them once
+//! each and can read the primitive on its own (#221):
+//!
+//! - **The running sums are folds.** `crate::fold::Fold` is one running column:
+//!   what carries in from the previous row, what this row adds, and the claim
+//!   the last row is pinned to.  The four columns below are four of those, and
+//!   the two constraints each one owns, the serial recurrence that fills it, and
+//!   its place in the interaction tree all come from that one declaration.
+//!   Where the columns are built -- on the host, on the card, or both with every
+//!   cell compared -- is the fold's too.
+//! - **The activations are bytes.** `crate::columns::Bytes` is the cell kind for
+//!   committed values of a range table, and `crate::columns::ByteCells` is the
+//!   table: the width, the offset a signed value carries to land inside it, the
+//!   relation, and *who proves the lookups*.  Whether they are proved by this
+//!   component's own LogUp columns or by the batched backend is a property of
+//!   the lookup and not of this check, so the word for the second backend does
+//!   not appear in this directory.
+//! - **The layout's loop is the row flags.** `columns::RowFlags` is the four
+//!   flags at one row; `trace.rs` turns them into the preprocessed columns the
+//!   AIR reads and `claims.rs` drives the folds by them.
 //!
 //! # The columns
 //!
@@ -121,7 +149,7 @@
 //! | `known.input_channel_done` | 1 on a last row | pre | `zk_freivalds{tag}_last` |
 //! | `known.carry_in_table` | 0 on row 0 | pre | `zk_freivalds{tag}_notzero` |
 //! | `known.table_done` | 1 on the last row | pre | `zk_freivalds{tag}_end` |
-//! | `acts.x[p]` | `X[k, t] + act_off` | base | -- |
+//! | `acts.x.cells[p]` | `X[k, t] + acts.off` | base | -- |
 //! | `sums.x_fold` | `X s` so far | inter | -- |
 //! | `sums.mats[m].w_fold` | `rv^T W_m` so far | inter | -- |
 //! | `sums.mats[m].product` | `(rv^T W_m)(X s)` so far | inter | -- |
@@ -146,7 +174,7 @@
 //! | `pre.notzero` | `known.carry_in_table` | `zk_freivalds{tag}_notzero` |
 //! | `pre.end` | `known.table_done` | `zk_freivalds{tag}_end` |
 //! | `pre.w` | `known.weights` | `zk_freivalds{tag}_w{m}_{p:04}` |
-//! | `base.act` | `acts.x` | -- |
+//! | `base.act` | `acts.x.cells` | -- |
 //! | `inter.v` | `sums.x_fold` | -- |
 //! | `inter.mats[m].u` | `sums.mats[m].w_fold` | -- |
 //! | `inter.mats[m].acc` | `sums.mats[m].product` | -- |
@@ -163,15 +191,17 @@ pub mod layout;
 pub mod run;
 pub mod trace;
 
-use num_traits::{One, Zero};
+use num_traits::Zero;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry};
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
+use crate::columns::ByteCells;
+use crate::fold::{Carry, Close, Fold, constrain, dot};
 use crate::gadgets::freivalds::columns::{FreivaldsRow, FreivaldsShape};
 use crate::layout::Grid;
-use crate::relations::{RangeRel, id};
+use crate::relations::id;
 
 // The attention-output component is `gadgets/attn_out` since #197, and
 // `compose.rs`, `cli.rs` and `gkr_key_tile.rs` still reach its eval and its
@@ -237,20 +267,14 @@ pub struct FreivaldsEval {
     /// one claimed `(rv^T W_m)(X s)` per matmul: what the running product is
     /// pinned to on the table's last row
     pub claimed: Vec<SecureField>,
-    /// the range relation the committed activations are looked up in
-    pub rel_act: RangeRel,
-    /// What the committed activation cells carry on top of the signed value, so
-    /// that they land inside an unsigned range table: 128 for the int8 groups,
-    /// 2^11 for the widened attention output's group, whose activations are one
-    /// cell in `[1, 2^12)` against a 12-bit table rather than two limbs.
-    pub act_off: u32,
-    /// whether the committed activations are range-checked at all
-    pub range_check: bool,
-    /// Whether the batched GKR proves this component's range checks instead of
-    /// committed running-sum columns.  The AIR then emits neither the relation
-    /// entries nor the interaction masks they would allocate.  `range_check`
-    /// says whether the checks exist; this says who owns them.
-    pub gkr: bool,
+    /// The committed activations as what they are: bytes of a range table, 8
+    /// bits wide everywhere but the widened attention output's group, whose
+    /// activations are one cell in `[1, 2^12)` against a 12-bit table rather
+    /// than two limbs.  Everything that follows from a cell being a table's
+    /// value -- the offset it carries so a signed activation lands in an
+    /// unsigned table, the relation, the lookups and which backend proves them
+    /// -- is in `crate::columns::ByteCells` and nowhere in this gadget.
+    pub acts: ByteCells,
     /// The claim this component publishes over its own committed activations,
     /// or `None` on a segment with no producer to bind to -- which is what keeps
     /// such a segment's proof exactly what it was.
@@ -285,72 +309,66 @@ impl FrameworkEval for FreivaldsEval {
         // what the committed activation cells carry on top of the signed value
         let off_sum: SecureField =
             self.s_pow.iter().fold(SecureField::zero(), |a, b| a + *b)
-                * SecureField::from_u32_unchecked(self.act_off, 0, 0, 0);
+                * SecureField::from_u32_unchecked(self.acts.off, 0, 0, 0);
         // x_fold: this row's activations folded against s, on top of the
         // previous row's fold shifted by s^pq -- except on an input channel's
         // first row, where the fold restarts
-        eval.add_constraint(sums.x_fold.cur.clone()
-                            - (sums.x_fold.prev * self.s_step)
-                              * known.carry_in_input_channel.clone()
-                            - (fold::<E>(&x, &self.s_pow) - off_sum));
+        let x_fold = sums.x_fold.cur.clone();
+        constrain(&mut eval, sums.x_fold, Fold {
+            carry: Carry::Restart { step: self.s_step,
+                                    flag: known.carry_in_input_channel.clone() },
+            term: dot::<E>(&x.cells, &self.s_pow) - off_sum,
+            close: None,
+        });
 
         for (m, mat) in sums.mats.into_iter().enumerate() {
             // w_fold_m: this row's weights folded against rv, on the same carry
-            eval.add_constraint(mat.w_fold.cur.clone()
-                                - (mat.w_fold.prev * self.rv_step)
-                                  * known.carry_in_input_channel.clone()
-                                - fold::<E>(&known.weights[m], &self.rv_pow));
+            let w_fold = mat.w_fold.cur.clone();
+            constrain(&mut eval, mat.w_fold, Fold {
+                carry: Carry::Restart { step: self.rv_step,
+                                        flag: known.carry_in_input_channel.clone() },
+                term: dot::<E>(&known.weights[m], &self.rv_pow),
+                close: None,
+            });
             // product_m: the two folds multiplied and added in once per input
-            // channel, on the input channel's last row; carried otherwise
-            eval.add_constraint(mat.product.cur.clone()
-                                - mat.product.prev * known.carry_in_table.clone()
-                                - (mat.w_fold.cur * sums.x_fold.cur.clone())
-                                  * known.input_channel_done.clone());
-            // and the product closes on the claim the statement carries
-            let claim = eval.claim(self.claimed[m]);
-            eval.add_constraint((mat.product.cur - claim) * known.table_done.clone());
+            // channel, on the input channel's last row and carried otherwise,
+            // and closing on the claim the statement carries
+            constrain(&mut eval, mat.product, Fold {
+                carry: Carry::Gate(known.carry_in_table.clone()),
+                term: (w_fold * x_fold.clone()) * known.input_channel_done.clone(),
+                close: Some(Close { claim: self.claimed[m],
+                                    at: known.table_done.clone() }),
+            });
         }
         // The published claim over the committed activations, allocated before
         // the LogUp columns so that the interaction order is claims first and
         // fractions after, as the components it is compared against already are.
         // What is folded is `a - act_off`, the signed activation, which is what
-        // a producer's requantize publishes.
+        // a producer's requantize publishes.  Its rows step at two rates, so its
+        // carry is one the fold takes ready-made rather than one of the two
+        // shapes it names.
         if let Some(q) = &self.qx {
             let x_claim = sums.x_claim
                 .expect("the row carries the activation claim exactly when the AIR does");
-            let off = E::F::from(M31::from_u32_unchecked(self.act_off));
+            let off = E::F::from(M31::from_u32_unchecked(self.acts.off));
             let mut xf = E::EF::zero();
-            for (pp, a) in x.iter().enumerate() {
+            for (pp, a) in x.cells.iter().enumerate() {
                 xf += (E::EF::from(a.clone()) - E::EF::from(off.clone())) * q.w[pp];
             }
             let mult = E::EF::from(known.carry_in_input_channel.clone()) * q.m_in
                 + (E::EF::from(known.carry_in_table.clone())
                    - E::EF::from(known.carry_in_input_channel.clone())) * q.m_bd;
-            // the published claim's own Horner run, at the table's two row steps
-            eval.add_constraint(x_claim.cur.clone() - x_claim.prev * mult - xf);
-            // and it closes on the value the consumer compares against
-            let claim = eval.claim(q.claimed);
-            eval.add_constraint((x_claim.cur - claim) * known.table_done.clone());
+            constrain(&mut eval, x_claim, Fold {
+                carry: Carry::By(mult),
+                term: xf,
+                close: Some(Close { claim: q.claimed, at: known.table_done.clone() }),
+            });
         }
-        if self.range_check && !self.gkr {
-            for a in &x {
-                eval.add_to_relation(RelationEntry::new(&self.rel_act, E::EF::one(),
-                                                        core::slice::from_ref(a)));
-            }
-            eval.finalize_logup_in_pairs();
-        }
+        // and the activations are a range table's values, which is the cell
+        // kind's business and not this check's
+        self.acts.look(&mut eval, &x);
         eval
     }
-}
-
-/// `sum_p cells[p] * w[p]`: a row's cells folded against fixed challenge powers,
-/// which is what every Horner term of this check is.
-fn fold<E: EvalAtRow>(cells: &[E::F], w: &[SecureField]) -> E::EF {
-    let mut f = E::EF::zero();
-    for (p, c) in cells.iter().enumerate() {
-        f += c.clone() * w[p];
-    }
-    f
 }
 
 /// The `r^T W` check: that a matmul's committed input times the pinned weights
@@ -394,9 +412,11 @@ mod tests {
     use stwo::core::pcs::TreeVec;
     use stwo::prover::backend::Column;
 
+    use num_traits::One;
+
     use super::*;
     use crate::bf16::Round;
-    use crate::columns::constraint_values;
+    use crate::columns::{Lookups, constraint_values};
     use crate::common::Eval;
     use crate::gadgets::attention::witness::{Src, Variant};
     use crate::compose::{Claims, FreivaldsPlan, qm, unqm};
@@ -468,12 +488,12 @@ mod tests {
         let air = |claimed: Vec<SecureField>, qx| FreivaldsEval {
             tag: group.to_string(), g: lay.g, pk: lay.pk, pq: lay.pq, n_mats: mats.len(),
             rv_pow: rv_pow.clone(), rv_step, s_pow: s_pow.clone(), s_step, claimed,
-            rel_act: rel_act.clone(), act_off: 1 << (ACT_BITS - 1), range_check: true,
-            gkr: false, qx,
+            acts: ByteCells { bits: ACT_BITS, off: 1 << (ACT_BITS - 1),
+                              rel: rel_act.clone(), by: Lookups::Own },
+            qx,
         };
-        let rels = run::rels_of(&rel_act);
         let open = air(vec![SecureField::zero(); mats.len()], qx(SecureField::zero()));
-        let it = freivalds_interaction(&l, &r, rv, s_ch, &rels, true, &open, false);
+        let it = freivalds_interaction(&l, &r, rv, s_ch, &open);
         // the claims the component publishes close the last two constraints
         let air = air(it.claimed.clone(), qx(it.qx_claim));
         Built {

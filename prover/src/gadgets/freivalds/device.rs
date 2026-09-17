@@ -1,16 +1,81 @@
-//! Before the challenges, on the GPU: the same columns `trace.rs` builds.
+//! Before the challenges, on the GPU: the same columns `trace.rs` builds, and
+//! the switch that says which of the two runs.
 //!
-//! The uploads, the packing helpers and the counter mirrors are
+//! `trace.rs` is the only caller, and the AIR never names this file: which side
+//! built a column is not something a constraint can see.  The uploads, the
+//! packing helpers and the counter mirrors are
 //! `dev_attention_freivalds_witness_gen.rs`'s, shared with the key tiles.
 
 use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
 
-use crate::dev_attention_freivalds_witness_gen::{FGrid, FMult, Fam, add_into, pack_i8,
-                                                 pack_i8_into, ptrs, timed_up_into, uninit,
+use crate::common::Eval;
+use crate::dev_attention_freivalds_witness_gen::{FGrid, FMult, Fam, add_into, check_cols,
+                                                 check_delta, pack_i8, pack_i8_into, ptrs,
+                                                 sub_slice, timed_up_into, uninit,
                                                  witness_gen_mut, zeroes};
 use crate::gadgets::freivalds::columns::FreivaldsShape;
 use crate::gadgets::freivalds::layout::FreivaldsLayout;
 use crate::layer::{Layer, Tables};
+
+/// Which witness generation runs: 0 the host's, 1 the device's alone, 2 both
+/// with every cell asserted equal before either is used.
+///
+/// The device witness generation packs activations as int8 and bumps the 8-bit
+/// table in its kernel, so a group with wider activations takes the host path
+/// whatever the switch says, and `devpre::note_host_witness_gen` is told in
+/// `generate`.
+pub fn mode(act_bits: u32) -> u32 {
+    if act_bits == 8 {
+        crate::util::path_mode("ZK_DEVICE_WITNESS_GEN_ATTENTION_FREIVALDS")
+    } else {
+        0
+    }
+}
+
+/// The host/device mirror of one group's two committed trees, in mode 2.
+///
+/// Both sides build, and every cell of both trees, every 8-bit range
+/// multiplicity and the off-table count are asserted equal before either tree is
+/// used.  The device's bumps are the check's and not the proof's, so they are
+/// rolled back afterwards: a mirror run's digest is the host path's digest, and
+/// a difference is a panic that names the cell rather than a hash that does not.
+pub struct Mirror {
+    /// the 8-bit multiplicities as they stood before the host built anything
+    m_r8: Vec<u32>,
+    off_table: usize,
+}
+
+impl Mirror {
+    /// The counters as they stand before the host builds, or `None` outside
+    /// mode 2.
+    pub fn before(mode: u32, tables: &Tables) -> Option<Self> {
+        (mode == 2).then(|| Mirror {
+            m_r8: tables.m_r[tables.ridx(8)].clone(),
+            off_table: tables.off_table,
+        })
+    }
+
+    /// Build the same two trees on the card and assert them against the host's.
+    pub fn check(self, name: &str, layer: &Layer, mat_idx: &[usize], lay: &FreivaldsLayout,
+                 tables: &mut Tables, base: &[Eval], pre: &[Eval]) {
+        // the check with teeth, before any column has changed hands
+        let r8 = tables.ridx(8);
+        let after = (tables.m_r[r8].clone(), tables.off_table);
+        let dev = freivalds_component_dev(layer, mat_idx, lay, tables);
+        check_cols(&format!("freivalds {name} base"), base, &dev.base);
+        check_cols(&format!("freivalds {name} pre"), pre, &dev.pre);
+        check_delta(&format!("freivalds {name} m_r8"), &self.m_r8, &after.0,
+                    &sub_slice(&tables.m_r[r8], &after.0));
+        assert_eq!(tables.off_table - after.1, after.1 - self.off_table,
+                   "freivalds {name}: off-table bumps differ");
+        // the device's own bumps are the check's, not the proof's
+        tables.m_r[r8].copy_from_slice(&after.0);
+        tables.off_table = after.1;
+        eprintln!("witness_gen-dev: freivalds {name} -- {} base and {} pre columns, {} cells, \
+the 8-bit range multiplicities all match",
+                  base.len(), pre.len(), (base.len() + pre.len()) << lay.g.log_rows);
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]

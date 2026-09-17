@@ -537,24 +537,33 @@ pub fn residual_stream_site(
 }
 
 /// B11 stream V, lever 4: one Freivalds group's range checks.
+///
+/// The site reads the fractions the component *would* have built, so the
+/// evaluator is the component's own with its activation cells' lookups put back
+/// where the plan took them from -- `ByteCells::proved_here`.  The gadget itself
+/// says nothing about which backend carries them; that is the whole of why this
+/// un-ablation is here and not in `compose`.
 pub fn freivalds_site(
     c: &mut Collect,
     reg: usize,
     eval: &crate::gadgets::freivalds::FreivaldsEval,
     r: &crate::layer::FreivaldsComponent,
 ) {
+    let mut ev = eval.clone();
+    ev.acts = ev.acts.proved_here();
     fam_site(c, FamSite {
         reg: crate::gkrlink::Comp::Freivalds(reg),
         tag: format!("freivalds/{}", r.name),
         mut_env: "ZK_MUT_FREIVALDS",
         mut_key: reg,
         log_rows: r.lay.g.log_rows,
-        unit: vec![true; r.lay.pq],
+        // one unit look per byte cell, which is the lookup's own statement
+        unit: ev.acts.units(r.lay.pq),
         pre: &r.pre,
         base: &r.base,
         #[cfg(feature = "cuda")]
         dev: r.dev.as_ref().map(|d| (&d.pre[..], &d.base[..])),
-    }, eval);
+    }, &ev);
 }
 
 /// B11 stream V, lever 4: the attention-output component's looks -- seven per
