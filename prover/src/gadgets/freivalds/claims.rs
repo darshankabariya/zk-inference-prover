@@ -9,8 +9,10 @@
 //!
 //! The four running columns are four `crate::fold::Fold`s, and this file builds
 //! each of them the same way: every row's own term in parallel, and then the
-//! primitive's serial carry at the step the row flags say.  Where they are built
-//! -- on the host, on the card, or both with every cell compared -- is
+//! primitive's serial carry, under the same `Carry` and `Term` rules the AIR
+//! states -- so the two sides of each column are one declaration read twice, and
+//! the table's grouping is stated once, in the shape.  Where they are built --
+//! on the host, on the card, or both with every cell compared -- is
 //! `fold::sides` and `fold::place`, and the lookups' columns are the byte cells'
 //! own.
 
@@ -20,8 +22,8 @@ use stwo::core::fields::qm31::SecureField;
 
 use crate::compose::{Claims, FreivaldsPlan, unqm};
 use crate::encoding::m31_of;
-use crate::fold::{Step, carry_down};
-use crate::gadgets::freivalds::columns::{FreivaldsShape, Matmul, RowFlags, RunningSums};
+use crate::fold::{Carry, Term, carry_down};
+use crate::gadgets::freivalds::columns::{FreivaldsShape, Matmul, RunningSums};
 use crate::gadgets::freivalds::trace::FreivaldsComponent;
 use crate::layer::Layer;
 
@@ -134,33 +136,26 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
             (vf, ufs)
         })
         .collect();
-    // the same row flags the AIR reads, here as the loop they stand for
-    let flags = |j: usize| RowFlags::at(&lay, j);
-    let restart = |j: usize| flags(j).carry_in_input_channel;
-    let in_table = |j: usize| flags(j).carry_in_table;
-    // x_fold and w_fold restart at each input channel; product carries across
-    // the whole table and takes the two finished folds once per input channel
-    let x_fold = carry_down(&inner.iter().map(|t| t.0).collect::<Vec<_>>(),
-                            Step::Restart { step: s_step, flag: &restart });
+    // The same rules the AIR states, here as the loop they stand for: x_fold
+    // and w_fold restart at each input channel, and the product carries across
+    // the whole table and takes the two finished folds once per input channel.
+    let sh = FreivaldsShape::new(&r.name, &lay, r.mats.len(), air.qx.is_some());
+    let groups = sh.groups();
+    let x_fold = carry_down(&groups, rows, Term::Each(&|j| inner[j].0),
+                            Carry::PerGroup { step: s_step });
     let w_folds: Vec<Vec<SecureField>> = (0..r.mats.len())
-        .map(|m| carry_down(&inner.iter().map(|t| t.1[m]).collect::<Vec<_>>(),
-                            Step::Restart { step: rv_step, flag: &restart }))
+        .map(|m| carry_down(&groups, rows, Term::Each(&|j| inner[j].1[m]),
+                            Carry::PerGroup { step: rv_step }))
         .collect();
     let products: Vec<Vec<SecureField>> = (0..r.mats.len())
-        .map(|m| {
-            let term: Vec<SecureField> = (0..rows)
-                .map(|j| if flags(j).input_channel_done { w_folds[m][j] * x_fold[j] }
-                         else { SecureField::zero() })
-                .collect();
-            carry_down(&term, Step::Gate(&in_table))
-        })
+        .map(|m| carry_down(&groups, rows, Term::PerGroup(&|j| w_folds[m][j] * x_fold[j]),
+                            Carry::WholeTable))
         .collect();
     let mut cols = crate::device::ColSink::new();
     // The running sums go into the tree through the row declaration, so their
     // order is the order the AIR reads them in and it is written down once.
     // `x_claim` is `None` here because it is built below, out of `m0.qx` rather
     // than out of these, and appended where the declaration has it.
-    let sh = FreivaldsShape::new(&r.name, &lay, r.mats.len(), air.qx.is_some());
     let claimed: Vec<SecureField> = crate::fold::place(
         &format!("freivalds {} 2^{}", r.name, lay.g.log_rows), sides, &mut cols,
         || crate::devacc::freivalds(
@@ -208,15 +203,10 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
             })
             .collect();
         // This table's rows step at two rates -- one inside an input channel and
-        // one where a new one begins -- so the carry is built here and the fold
-        // takes it ready-made.
-        let mult = |j: usize| {
-            let f = flags(j);
-            if f.carry_in_input_channel { q.m_in }
-            else if f.carry_in_table { q.m_bd }
-            else { SecureField::zero() }
-        };
-        let xs = carry_down(&inner_x, Step::By(&mult));
+        // one where a new one begins -- which is a rule about the grouping and
+        // so one the fold states, exactly as the AIR states it.
+        let xs = carry_down(&groups, nrows, Term::Each(&|j| inner_x[j]),
+                            Carry::Rates { inside: q.m_in, across: q.m_bd });
         qx_claim = xs[nrows - 1];
         // the declaration's last running column, after the per-matmul pairs
         cols.extend(crate::fold::column(lay.g.log_rows, &xs));

@@ -24,8 +24,8 @@
 //!
 //! A field of a row declaration is usually a plain cell: the reader takes the
 //! next mask and the writer hands a column over, and nothing else follows from
-//! it.  Two kinds carry more than that, and a gadget gets it by declaring the
-//! kind rather than by writing it out:
+//! it.  Three things carry more than that, and a gadget gets each by declaring
+//! it rather than by writing it out:
 //!
 //! - [`Bytes`], below: committed cells that are values of a range table.  The
 //!   reader takes the masks *and* the row owes the lookups; the writer builds
@@ -36,6 +36,13 @@
 //!   two constraint rows come from.  `crate::fold::Fold` is what a gadget
 //!   declares over it, and it owns the recurrence on both sides and the column's
 //!   place in the tree.
+//! - `fold::Groups`, in the same module: not a field but the *table's* own
+//!   shape, and the four preprocessed 0/1 columns that stand for the loop the
+//!   constraints cannot write out.  A gadget states how its rows are grouped --
+//!   how many rows a group takes, how tall the table is, what prefix the
+//!   columns carry -- and the primitive writes them, names them, reads them and
+//!   resolves a fold's carry rules against them.  A row declaration reads it
+//!   first and hands it on; the gadget never names one of the four.
 //!
 //! ## Why this is not a macro
 //!
@@ -59,13 +66,14 @@
 //!
 //! ```text
 //! column_group! {
-//!     /// M: the pinned weights, and the four row flags.
+//!     /// M: the pinned weights.
 //!     pub struct Known<Cell>;
 //!     cells F;                       // which of the evaluator's two field types
 //!     read(ev, sh: &FreivaldsShape); // the bindings the field expressions see
-//!     carry_in_input_channel: Cell =
-//!         ev.get_preprocessed_column(freivalds_sel(sh.tag, "nofirst"));
-//!     weights: Vec<Vec<Cell>> = (0..sh.n_mats).map(|m| ...).collect();
+//!     weights: Vec<Vec<Cell>> = (0..sh.n_mats)
+//!         .map(|m| (0..sh.pk).map(|p| ev.get_preprocessed_column(freivalds_w(sh.tag, m, p)))
+//!                            .collect())
+//!         .collect();
 //! }
 //! ```
 //!

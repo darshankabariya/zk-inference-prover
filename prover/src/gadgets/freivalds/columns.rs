@@ -14,34 +14,45 @@
 //! builder, a slice of extension-field values in the claims builder, a
 //! `PreProcessedColumnId` in the id list.  One declaration, four readings.
 //!
+//! The table's *grouping* -- one group per input channel, `chunks` rows each --
+//! is `crate::fold::Groups`, and the four preprocessed columns it stands for are
+//! the fold primitive's.  `FreivaldsShape::groups` is the one place this gadget
+//! states it; nothing here names one of those columns, and `Known` is the
+//! weights alone.
+//!
 //! Two orders live here and they are not the same one:
 //!
 //! - **the read order**, which is the field order of each struct.  It is what
 //!   the AIR's masks are numbered by and therefore what `cudagen`'s lowering
 //!   records, so moving a field moves a generated kernel's fingerprint.  The
-//!   preprocessed tree is read row flags first, then the weights.
+//!   preprocessed tree is read the grouping's columns first, then the weights.
 //! - **the committed order**, which is `into_committed`.  For the activations
 //!   and the running sums it is the read order.  For the preprocessed tree it is
-//!   *not*: `compose.rs` and `run.rs` register the weights first and the four row
-//!   flags after, and a preprocessed column is resolved by id rather than by
-//!   position, so the two orders are free to differ and do.
+//!   *not*: `compose.rs` and `run.rs` register the weights first and the
+//!   grouping's columns after, and a preprocessed column is resolved by id
+//!   rather than by position, so the two orders are free to differ and do.
 
 use stwo_constraint_framework::EvalAtRow;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
 use crate::columns::Bytes;
-use crate::fold::Run;
+use crate::fold::{Groups, Rows, Run};
 use crate::gadgets::freivalds::layout::FreivaldsLayout;
-use crate::gadgets::freivalds::{FREIVALDS_SEL, FreivaldsEval, freivalds_sel, freivalds_w};
+use crate::gadgets::freivalds::{FreivaldsEval, freivalds_pre, freivalds_w};
+use crate::layout::Grid;
 
 /// What the row's lengths come from: one Freivalds component's shape.
 ///
 /// It borrows the group's name rather than owning it: the AIR builds one of
 /// these on every `evaluate`, which is once per row of the evaluation domain.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct FreivaldsShape<'a> {
     /// the group's name, which every preprocessed id carries
     pub tag: &'a str,
+    /// the prefix the grouping's own preprocessed ids carry
+    pre: String,
+    /// the row tiling the grouping is read off
+    g: Grid,
     pub n_mats: usize,
     /// weights per row per matmul
     pub pk: usize,
@@ -54,21 +65,32 @@ pub struct FreivaldsShape<'a> {
 impl<'a> FreivaldsShape<'a> {
     /// The shape the AIR is over.
     pub fn of(air: &'a FreivaldsEval) -> Self {
-        FreivaldsShape { tag: &air.tag, n_mats: air.n_mats, pk: air.pk, pq: air.pq,
+        FreivaldsShape { tag: &air.tag, pre: freivalds_pre(&air.tag), g: air.g,
+                         n_mats: air.n_mats, pk: air.pk, pq: air.pq,
                          x_claim: air.qx.is_some() }
     }
     /// The shape a builder is over, off the layout it tiles.
     pub fn new(tag: &'a str, lay: &FreivaldsLayout, n_mats: usize, x_claim: bool) -> Self {
-        FreivaldsShape { tag, n_mats, pk: lay.pk, pq: lay.pq, x_claim }
+        FreivaldsShape { tag, pre: freivalds_pre(tag), g: lay.g, n_mats, pk: lay.pk,
+                         pq: lay.pq, x_claim }
+    }
+
+    /// How the table's rows are grouped: one group per input channel, `chunks`
+    /// rows each, padded at the top.  The loop that grouping stands for -- the
+    /// four preprocessed 0/1 columns, their ids, and the carry rules that read
+    /// them -- is `crate::fold`'s, and this is the only place this gadget says
+    /// what its grouping is.
+    pub fn groups(&self) -> Groups<'_> {
+        Groups::of(&self.g, &self.pre)
     }
 
     /// How many columns each tree holds, off the same declaration the structs
-    /// are: the weights and the four row flags, the activations, and the running
-    /// sums.  The last count is in *folds*; each costs `fold::M31_COLS` columns
-    /// once encoded, and the LogUp columns that follow them belong to the
-    /// relation rather than to the row.
+    /// are: the weights and the grouping's columns, the activations, and the
+    /// running sums.  The last count is in *folds*; each costs `fold::M31_COLS`
+    /// columns once encoded, and the LogUp columns that follow them belong to
+    /// the relation rather than to the row.
     pub fn n_pre(&self) -> usize {
-        self.n_mats * self.pk + FREIVALDS_SEL.len()
+        self.n_mats * self.pk + Groups::COLS
     }
     pub fn n_base(&self) -> usize {
         self.pq
@@ -80,97 +102,43 @@ impl<'a> FreivaldsShape<'a> {
 
 // ----------------------------------------- what the verifier already knows ---
 
-/// M: the pinned weights, and the four row flags that drive the loop.
+/// M: the pinned weights.
 ///
-/// Both halves are preprocessed -- the verifier holds them itself and the prover
-/// commits to neither.  The flags are the loop control: the AIR is one set of
-/// constraints that runs on *every* row, so where an arkworks circuit would
-/// write `for k in input_channels { for chunk in .. }` and unroll it, this says the
-/// same thing with four 0/1 columns.  See the module comment of
-/// `gadgets/freivalds/mod.rs` for the shape they control.
+/// Preprocessed -- the verifier holds them itself and the prover commits to
+/// nothing here.  The tree also carries the grouping's four columns, which are
+/// the fold primitive's and are appended to this one's by `into_committed`.
 pub struct Known<Cell> {
-    /// 0 on an input channel's first row, 1 on its later rows: whether the previous
-    /// row's folds carry into this one, or the folds restart here.
-    pub carry_in_input_channel: Cell,
-    /// 1 on an input channel's last row, where its two folds are complete and their
-    /// product is added into the running product once.
-    pub input_channel_done: Cell,
-    /// 0 on row 0 and 1 everywhere else: whether the running product carries in
-    /// from the previous row.  The trace domain is cyclic, so row 0's "previous
-    /// row" is the table's *last* row, and without this flag the finished
-    /// product would be carried back into the start.
-    pub carry_in_table: Cell,
-    /// 1 on the table's last row, where the running product is pinned to the
-    /// claim the statement carries.
-    pub table_done: Cell,
     /// `[matmul][weight in the row]`: M's cells, `pk` of each matmul per row.
     pub weights: Vec<Vec<Cell>>,
 }
 
 impl<Cell> Known<Cell> {
     /// The tree's columns in *committed* order: every matmul's weights, then the
-    /// four row flags.  `compose.rs` and `run.rs` build the id list in this order
-    /// and the device witness generation writes its columns in it.
-    pub fn into_committed(self) -> Vec<Cell> {
+    /// grouping's own, which the caller passes in because they are not this
+    /// gadget's to order.  `compose.rs` and `run.rs` build the id list in this
+    /// order and the device witness generation writes its columns in it.
+    pub fn into_committed(self, groups: Vec<Cell>) -> Vec<Cell> {
         let mut v: Vec<Cell> = self.weights.into_iter().flatten().collect();
-        v.push(self.carry_in_input_channel);
-        v.push(self.input_channel_done);
-        v.push(self.carry_in_table);
-        v.push(self.table_done);
+        v.extend(groups);
         v
     }
 }
 
 impl Known<PreProcessedColumnId> {
-    /// The component's preprocessed ids, one per field.  The id strings are
-    /// pinned -- they are the keys a verifier resolves a preprocessed column by
-    /// -- so they keep the four original flag names (`nofirst`, `last`,
-    /// `notzero`, `end`); the glossary in `mod.rs` maps them to the fields.
+    /// The weights' preprocessed ids, one per field.  The id strings are pinned
+    /// -- they are the keys a verifier resolves a preprocessed column by.
     pub fn ids(sh: &FreivaldsShape) -> Self {
         Known {
-            carry_in_input_channel: freivalds_sel(sh.tag, FREIVALDS_SEL[0]),
-            input_channel_done: freivalds_sel(sh.tag, FREIVALDS_SEL[1]),
-            carry_in_table: freivalds_sel(sh.tag, FREIVALDS_SEL[2]),
-            table_done: freivalds_sel(sh.tag, FREIVALDS_SEL[3]),
             weights: (0..sh.n_mats)
                 .map(|m| (0..sh.pk).map(|p| freivalds_w(sh.tag, m, p)).collect())
                 .collect(),
         }
     }
-    /// The same ids in committed order -- the list the trace location allocator
+    /// The component's whole preprocessed tree in committed order -- the weights
+    /// and the grouping's four -- which is the list the trace location allocator
     /// takes.
     pub fn committed_ids(sh: &FreivaldsShape) -> Vec<PreProcessedColumnId> {
-        Self::ids(sh).into_committed()
-    }
-}
-
-/// The four row flags at one row, off the layout that tiles the table.
-///
-/// The AIR reads them as preprocessed columns, which is what `Known`'s four
-/// fields are.  `trace.rs` builds those columns out of this and `claims.rs`
-/// drives its folds by it, so the loop the flags stand for is written down once
-/// and the two sides cannot drift apart.
-#[derive(Clone, Copy, Debug)]
-pub struct RowFlags {
-    pub carry_in_input_channel: bool,
-    pub input_channel_done: bool,
-    pub carry_in_table: bool,
-    pub table_done: bool,
-}
-
-impl RowFlags {
-    /// Row `j`'s flags.  A row outside the table -- padding above the last input
-    /// channel -- carries neither fold and passes the product through.
-    pub fn at(lay: &FreivaldsLayout, j: usize) -> Self {
-        // the row's chunk index, which counts *down* inside an input channel, so
-        // chunk `chunks - 1` is the input channel's first row and chunk 0 its last
-        let chunk = lay.g.row(j).map(|(_, c)| c);
-        RowFlags {
-            carry_in_input_channel: matches!(chunk, Some(c) if c + 1 < lay.g.chunks),
-            input_channel_done: matches!(chunk, Some(0)),
-            carry_in_table: j > 0,
-            table_done: j + 1 == 1usize << lay.g.log_rows,
-        }
+        Self::ids(sh).into_committed(sh.groups().ids())
     }
 }
 
@@ -239,6 +207,10 @@ impl<Cell> RunningSums<Cell> {
 
 /// One row of the Freivalds check, as the AIR sees it.
 pub struct FreivaldsRow<F, EF> {
+    /// the grouping's own columns, which the fold primitive reads and its carry
+    /// rules resolve against.  This gadget passes it along and never looks
+    /// inside.
+    pub rows: Rows<F>,
     pub known: Known<F>,
     pub acts: Activations<F>,
     pub sums: RunningSums<Run<EF>>,
@@ -247,19 +219,17 @@ pub struct FreivaldsRow<F, EF> {
 impl<F, EF> FreivaldsRow<F, EF> {
     /// Pull the component's columns out of `eval` in declaration order.
     ///
-    /// This is the order the masks are numbered in and so the order the
-    /// generated kernel is emitted against; it is the same order the check has
-    /// read its columns in since it was written, and
+    /// The grouping's own columns come first, off the fold primitive, and then
+    /// this gadget's.  That is the order the masks are numbered in and so the
+    /// order the generated kernel is emitted against; it is the same order the
+    /// check has read its columns in since it was written, and
     /// `the_honest_trace_satisfies_every_constraint_on_every_row` is what says
     /// so rather than this comment.
     pub fn read<E: EvalAtRow<F = F, EF = EF>>(eval: &mut E, sh: &FreivaldsShape) -> Self {
         let ids = Known::ids(sh);
         FreivaldsRow {
+            rows: sh.groups().read(eval),
             known: Known {
-                carry_in_input_channel: eval.get_preprocessed_column(ids.carry_in_input_channel),
-                input_channel_done: eval.get_preprocessed_column(ids.input_channel_done),
-                carry_in_table: eval.get_preprocessed_column(ids.carry_in_table),
-                table_done: eval.get_preprocessed_column(ids.table_done),
                 weights: ids
                     .weights
                     .into_iter()

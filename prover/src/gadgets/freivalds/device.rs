@@ -151,8 +151,9 @@ pub fn freivalds_component_dev(
     crate::util::add_phase("gen/witness_gen_freivalds_up", t_up.elapsed().as_secs_f64());
 
     let t_alloc = std::time::Instant::now();
-    // The kernel keeps its own internal column order; the trees it fills are
-    // sized from the row declaration.
+    // The kernel keeps its own internal column order and writes the grouping's
+    // four columns itself, in CUDA; the trees it fills are sized from the row
+    // declaration, which is the only thing Rust can hold it to here.
     let sh = FreivaldsShape::new("", lay, mat_idx.len(), false);
     let base = uninit(sh.n_base(), rows);
     let pre = uninit(sh.n_pre(), rows);
@@ -179,7 +180,7 @@ pub fn freivalds_component_dev(
     // ties the two sides together without touching the kernel.
     assert_eq!((base.len(), pre.len()),
                (cfg.pq as usize,
-                (cfg.n_mats * cfg.pk) as usize + crate::gadgets::freivalds::FREIVALDS_SEL.len()),
+                (cfg.n_mats * cfg.pk) as usize + crate::fold::Groups::COLS),
                "the Freivalds witness-generation kernel is handed a different tree than the \
                 row declaration has");
 

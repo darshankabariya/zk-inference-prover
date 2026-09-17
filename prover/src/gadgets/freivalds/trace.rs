@@ -3,9 +3,9 @@
 //!
 //! Nothing here depends on `rv` or `s` -- it cannot, because those are drawn
 //! from the transcript only after these columns have been committed.  What is
-//! built here is the activation bytes `A`, the preprocessed weights `M` and the
-//! four row flags.  The running sums and the claims are `claims.rs`, after the
-//! draw.
+//! built here is the activation bytes `A` and the preprocessed weights `M`; the
+//! grouping's own columns come from `crate::fold`, which owns them on both
+//! sides.  The running sums and the claims are `claims.rs`, after the draw.
 //!
 //! The activations go through `columns::Bytes`, the cell kind for values of a
 //! range table, so the multiplicities they bump are counted by the same call
@@ -18,9 +18,9 @@ use num_traits::Zero;
 use stwo::core::fields::m31::M31;
 
 use crate::columns::Bytes;
-use crate::common::{Eval, eval_of, m31_u32};
+use crate::common::{Eval, eval_of};
 use crate::encoding::m31_of;
-use crate::gadgets::freivalds::columns::{Activations, FreivaldsShape, Known, RowFlags};
+use crate::gadgets::freivalds::columns::{Activations, FreivaldsShape, Known};
 use crate::gadgets::freivalds::device;
 use crate::gadgets::freivalds::layout::FreivaldsLayout;
 use crate::layer::{Layer, Tables};
@@ -141,19 +141,9 @@ pub fn freivalds_component(layer: &Layer, name: &str, mat_idx: &[usize], p_targe
         }
         w.push(row);
     }
-    // the four row flags, off the one place that says what they are on a row
-    let flag = |f: &dyn Fn(RowFlags) -> bool| {
-        eval_of(lay.g.log_rows,
-                (0..rows).map(|j| m31_u32(f(RowFlags::at(&lay, j)) as u32)).collect())
-    };
-    let pre = Known {
-        carry_in_input_channel: flag(&|r| r.carry_in_input_channel),
-        input_channel_done: flag(&|r| r.input_channel_done),
-        carry_in_table: flag(&|r| r.carry_in_table),
-        table_done: flag(&|r| r.table_done),
-        weights: w,
-    }
-    .into_committed();
+    // the weights, and after them the columns the grouping owns, which the
+    // fold primitive writes off the same layout the AIR reads them against
+    let pre = Known { weights: w }.into_committed(sh.groups().write());
     assert_eq!(base.len(), sh.n_base(), "{name}: the base tree is not the row's");
     assert_eq!(pre.len(), sh.n_pre(), "{name}: the preprocessed tree is not the row's");
 

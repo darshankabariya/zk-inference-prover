@@ -68,28 +68,30 @@
 //! read one committed input share a group -- q/k/v, and gate/up -- so `X` is
 //! committed once for all of them.
 //!
-//! # Why there are four row flags
+//! # The loop, and who owns it
 //!
 //! A STARK has one set of constraints and they run on *every* row, so the loop
-//! an arkworks circuit would write out has to be expressed as data.  The four
-//! preprocessed 0/1 columns are that loop's control:
+//! an arkworks circuit would write out has to be expressed as data: preprocessed
+//! 0/1 columns saying where an input channel begins, where it ends, and where
+//! the table begins and ends.  None of that is a fact about Freivalds' check --
+//! it is a fact about a table whose rows come in groups -- so this gadget states
+//! its *grouping* and `crate::fold::Groups` owns the columns.  One row group per
+//! input channel, `chunks` rows each, in a table of `2^log_rows` rows:
+//! `columns::FreivaldsShape::groups` is the one place that is said, the
+//! primitive writes the four columns, names them and reads them back, and
+//! nothing in this directory names one of them.
 //!
-//! - **`carry_in_input_channel`** (id `nofirst`) is 1 on an input channel's rows
-//!   after its first, and carries the two folds in from the previous row.  It is
-//!   0 on an input channel's first row, so the folds restart there.
-//! - **`input_channel_done`** (id `last`) is 1 on an input channel's last row,
-//!   where the two folds are complete and `w_fold * x_fold` is added into the
-//!   product -- once per input channel and nowhere else.
-//! - **`carry_in_table`** (id `notzero`) is 1 on every row but row 0, and carries
-//!   the product in from the previous row.  The trace domain is *cyclic*: row
-//!   0's previous row is the table's *last* row, so without this flag the
-//!   finished product would be carried back into the start.
-//! - **`table_done`** (id `end`) is 1 on the table's last row, where the product
-//!   is pinned to the claim the statement carries.
+//! What the constraints below say instead is which *rule* about the grouping
+//! each fold carries under: `Carry::PerGroup` restarts at each input channel's
+//! first row, `Carry::WholeTable` carries the product down the whole table,
+//! `Term::PerGroup` adds the two finished folds in once per input channel on its
+//! last row, `Carry::Rates` steps the published activation claim at one rate
+//! inside an input channel and another where a new one begins, and `Close` pins
+//! a fold to its claim on the table's last row.  The four columns' pinned ids
+//! are in the table below; they did not change.
 //!
-//! A padding row has `carry_in_input_channel = 0`, `input_channel_done = 0` and
-//! `carry_in_table = 1`: its folds are zero and it passes the product through
-//! unchanged.
+//! A padding row is in no input channel: its folds are zero and it passes the
+//! product through unchanged.
 //!
 //! # The files
 //!
@@ -98,11 +100,12 @@
 //!
 //! - `mod.rs` -- this comment, `FreivaldsEval` and its constraints.
 //! - `columns.rs` -- the column declaration: one struct per tree, the reader the
-//!   AIR uses, the committed order the builders use, and the row flags both
-//!   sides read.
+//!   AIR uses, the committed order the builders use, and the grouping the table
+//!   is tiled by.
 //! - `layout.rs` -- which matmuls share a group, and how the rows are tiled.
-//! - `trace.rs` -- *before the challenges*: the committed activation bytes, the
-//!   preprocessed weights and row flags.
+//! - `trace.rs` -- *before the challenges*: the committed activation bytes and
+//!   the preprocessed weights.  The grouping's own columns are written beside
+//!   them by the fold primitive.
 //! - `claims.rs` -- *after the challenges*: the running sums, the claims this
 //!   component publishes, the lookups' columns, and `project`.
 //! - `device.rs` -- the same columns `trace.rs` builds, built on the GPU, and
@@ -132,9 +135,13 @@
 //!   component's own LogUp columns or by the batched backend is a property of
 //!   the lookup and not of this check, so the word for the second backend does
 //!   not appear in this directory.
-//! - **The layout's loop is the row flags.** `columns::RowFlags` is the four
-//!   flags at one row; `trace.rs` turns them into the preprocessed columns the
-//!   AIR reads and `claims.rs` drives the folds by them.
+//! - **The layout's loop is the grouping.** `crate::fold::Groups` is how a
+//!   table's rows are grouped -- how many rows a group takes, how tall the
+//!   table is, how many rows it is padded with, and the prefix its columns are
+//!   named under.  It emits the four preprocessed 0/1 columns on the host,
+//!   names them and reads them in the AIR, and the carry rules a fold declares
+//!   are rules about it.  So this gadget states its tiling once and never names
+//!   a flag.
 //!
 //! # The columns
 //!
@@ -145,19 +152,21 @@
 //! | field | holds | tree | pinned id |
 //! |---|---|---|---|
 //! | `known.weights[m][p]` | `W_m[i, k]` | pre | `zk_freivalds{tag}_w{m}_{p:04}` |
-//! | `known.carry_in_input_channel` | 0 on a first row | pre | `zk_freivalds{tag}_nofirst` |
-//! | `known.input_channel_done` | 1 on a last row | pre | `zk_freivalds{tag}_last` |
-//! | `known.carry_in_table` | 0 on row 0 | pre | `zk_freivalds{tag}_notzero` |
-//! | `known.table_done` | 1 on the last row | pre | `zk_freivalds{tag}_end` |
+//! | the grouping's, `fold::Groups` | 1 after an input channel's first row | pre | `zk_freivalds{tag}_nofirst` |
+//! | the grouping's, `fold::Groups` | 1 on an input channel's last row | pre | `zk_freivalds{tag}_last` |
+//! | the grouping's, `fold::Groups` | 1 on every row but row 0 | pre | `zk_freivalds{tag}_notzero` |
+//! | the grouping's, `fold::Groups` | 1 on the table's last row | pre | `zk_freivalds{tag}_end` |
 //! | `acts.x.cells[p]` | `X[k, t] + acts.off` | base | -- |
 //! | `sums.x_fold` | `X s` so far | inter | -- |
 //! | `sums.mats[m].w_fold` | `rv^T W_m` so far | inter | -- |
 //! | `sums.mats[m].product` | `(rv^T W_m)(X s)` so far | inter | -- |
 //! | `sums.x_claim` | the published projection of `X` | inter | -- |
 //!
-//! `pre` is the preprocessed tree (the verifier holds it, `pk` weights and four
-//! flags a row), `base` the committed trace (`pq` activation cells a row),
-//! `inter` the interaction tree (the running sums, each one QM31 column).
+//! `pre` is the preprocessed tree (the verifier holds it: `pk` weights a matmul
+//! and the grouping's four columns, which the fold primitive emits under the
+//! ids above), `base` the committed trace (`pq` activation cells a row), `inter`
+//! the interaction tree (the running sums, each one QM31 column).  The four ids
+//! are the only place this directory writes those names down.
 //!
 //! # Glossary
 //!
@@ -169,10 +178,11 @@
 //! | `FreivaldsBase` | `Activations` | -- |
 //! | `FreivaldsInter` | `RunningSums` | -- |
 //! | `FreivaldsMat` | `Matmul` | -- |
-//! | `pre.nofirst` | `known.carry_in_input_channel` | `zk_freivalds{tag}_nofirst` |
-//! | `pre.last` | `known.input_channel_done` | `zk_freivalds{tag}_last` |
-//! | `pre.notzero` | `known.carry_in_table` | `zk_freivalds{tag}_notzero` |
-//! | `pre.end` | `known.table_done` | `zk_freivalds{tag}_end` |
+//! | `pre.nofirst`, `known.carry_in_input_channel` | the grouping's, read by `Carry::PerGroup` and `Carry::Rates` | `zk_freivalds{tag}_nofirst` |
+//! | `pre.last`, `known.input_channel_done` | the grouping's, read by `Term::PerGroup` | `zk_freivalds{tag}_last` |
+//! | `pre.notzero`, `known.carry_in_table` | the grouping's, read by `Carry::WholeTable` and `Carry::Rates` | `zk_freivalds{tag}_notzero` |
+//! | `pre.end`, `known.table_done` | the grouping's, read by `Close` | `zk_freivalds{tag}_end` |
+//! | `columns::RowFlags` | `fold::Groups` | -- |
 //! | `pre.w` | `known.weights` | `zk_freivalds{tag}_w{m}_{p:04}` |
 //! | `base.act` | `acts.x.cells` | -- |
 //! | `inter.v` | `sums.x_fold` | -- |
@@ -198,7 +208,7 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 
 use crate::columns::ByteCells;
-use crate::fold::{Carry, Close, Fold, constrain, dot};
+use crate::fold::{Carry, Close, Fold, Term, constrain, dot};
 use crate::gadgets::freivalds::columns::{FreivaldsRow, FreivaldsShape};
 use crate::layout::Grid;
 use crate::relations::id;
@@ -208,9 +218,11 @@ use crate::relations::id;
 // preprocessed ids through this module.
 pub use crate::gadgets::attn_out::air::{AO_SEL, AttnOutEval, EPOW_COLS, ao_chan, ao_sel};
 
-pub const FREIVALDS_SEL: [&str; 4] = ["nofirst", "last", "notzero", "end"];
-pub fn freivalds_sel(tag: &str, name: &str) -> PreProcessedColumnId {
-    id(format!("zk_freivalds{tag}_{name}"))
+/// The prefix every one of this component's preprocessed ids carries.  The row
+/// grouping's four columns are `{prefix}_{name}` for the names `crate::fold`
+/// pins, and it emits them; the weights are below.
+pub fn freivalds_pre(tag: &str) -> String {
+    format!("zk_freivalds{tag}")
 }
 pub fn freivalds_w(tag: &str, mat: usize, p: usize) -> PreProcessedColumnId {
     id(format!("zk_freivalds{tag}_w{mat}_{p:04}"))
@@ -227,11 +239,10 @@ pub fn freivalds_w(tag: &str, mat: usize, p: usize) -> PreProcessedColumnId {
 /// The table runs `(input channel, token chunk)` down the rows with the tokens
 /// in the slots, so the row step takes two values -- `m_in` inside one input
 /// channel's chunks and `m_bd` where a new input channel begins -- which is the
-/// shape `dequant::OutputClaim` already runs at.  Both row flags it needs are
-/// ones this component already has: `carry_in_input_channel` is 1 only away from
-/// an input channel's first row and `carry_in_table` is 1 away from row 0, so
-/// their difference is exactly "this row begins an input channel and is not row
-/// 0".  No new preprocessed column.
+/// shape `dequant::OutputClaim` already runs at.  That is `fold::Carry::Rates`,
+/// a rule about the table's grouping and nothing this component has to spell
+/// out: it costs no preprocessed column of its own, because the grouping
+/// already says where an input channel begins.
 #[derive(Clone)]
 pub struct FreivaldsQx {
     /// one weight per token slot
@@ -301,9 +312,11 @@ impl FrameworkEval for FreivaldsEval {
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         // The columns come out of the one declaration in `columns.rs`, in the
-        // order it declares them.  Nothing below names a column by position.
+        // order it declares them.  Nothing below names a column by position,
+        // and `rows` is the table's grouping, which the fold primitive reads
+        // and its carry rules resolve against.
         let sh = FreivaldsShape::of(self);
-        let FreivaldsRow { known, acts, sums } = FreivaldsRow::read(&mut eval, &sh);
+        let FreivaldsRow { rows, known, acts, sums } = FreivaldsRow::read(&mut eval, &sh);
         let x = acts.x;
 
         // what the committed activation cells carry on top of the signed value
@@ -314,39 +327,37 @@ impl FrameworkEval for FreivaldsEval {
         // previous row's fold shifted by s^pq -- except on an input channel's
         // first row, where the fold restarts
         let x_fold = sums.x_fold.cur.clone();
-        constrain(&mut eval, sums.x_fold, Fold {
-            carry: Carry::Restart { step: self.s_step,
-                                    flag: known.carry_in_input_channel.clone() },
-            term: dot::<E>(&x.cells, &self.s_pow) - off_sum,
+        constrain(&mut eval, &rows, sums.x_fold, Fold {
+            carry: Carry::PerGroup { step: self.s_step },
+            term: Term::Each(dot::<E>(&x.cells, &self.s_pow) - off_sum),
             close: None,
         });
 
         for (m, mat) in sums.mats.into_iter().enumerate() {
             // w_fold_m: this row's weights folded against rv, on the same carry
             let w_fold = mat.w_fold.cur.clone();
-            constrain(&mut eval, mat.w_fold, Fold {
-                carry: Carry::Restart { step: self.rv_step,
-                                        flag: known.carry_in_input_channel.clone() },
-                term: dot::<E>(&known.weights[m], &self.rv_pow),
+            constrain(&mut eval, &rows, mat.w_fold, Fold {
+                carry: Carry::PerGroup { step: self.rv_step },
+                term: Term::Each(dot::<E>(&known.weights[m], &self.rv_pow)),
                 close: None,
             });
             // product_m: the two folds multiplied and added in once per input
             // channel, on the input channel's last row and carried otherwise,
             // and closing on the claim the statement carries
-            constrain(&mut eval, mat.product, Fold {
-                carry: Carry::Gate(known.carry_in_table.clone()),
-                term: (w_fold * x_fold.clone()) * known.input_channel_done.clone(),
-                close: Some(Close { claim: self.claimed[m],
-                                    at: known.table_done.clone() }),
+            constrain(&mut eval, &rows, mat.product, Fold {
+                carry: Carry::WholeTable,
+                term: Term::PerGroup(w_fold * x_fold.clone()),
+                close: Some(Close { claim: self.claimed[m] }),
             });
         }
         // The published claim over the committed activations, allocated before
         // the LogUp columns so that the interaction order is claims first and
         // fractions after, as the components it is compared against already are.
         // What is folded is `a - act_off`, the signed activation, which is what
-        // a producer's requantize publishes.  Its rows step at two rates, so its
-        // carry is one the fold takes ready-made rather than one of the two
-        // shapes it names.
+        // a producer's requantize publishes.  Its rows step at two rates -- one
+        // from one row of an input channel to the next and one where a new input
+        // channel begins -- which is a rule about the grouping and so one the
+        // fold states.
         if let Some(q) = &self.qx {
             let x_claim = sums.x_claim
                 .expect("the row carries the activation claim exactly when the AIR does");
@@ -355,13 +366,10 @@ impl FrameworkEval for FreivaldsEval {
             for (pp, a) in x.cells.iter().enumerate() {
                 xf += (E::EF::from(a.clone()) - E::EF::from(off.clone())) * q.w[pp];
             }
-            let mult = E::EF::from(known.carry_in_input_channel.clone()) * q.m_in
-                + (E::EF::from(known.carry_in_table.clone())
-                   - E::EF::from(known.carry_in_input_channel.clone())) * q.m_bd;
-            constrain(&mut eval, x_claim, Fold {
-                carry: Carry::By(mult),
-                term: xf,
-                close: Some(Close { claim: q.claimed, at: known.table_done.clone() }),
+            constrain(&mut eval, &rows, x_claim, Fold {
+                carry: Carry::Rates { inside: q.m_in, across: q.m_bd },
+                term: Term::Each(xf),
+                close: Some(Close { claim: q.claimed }),
             });
         }
         // and the activations are a range table's values, which is the cell

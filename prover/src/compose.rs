@@ -67,7 +67,7 @@ use crate::gadgets::residual_stream::{self, Binding, BindingKind, GKind, GTableE
                   ResidualStreamEval, ResidualStreamRels, ResidualStreamTables, TieSpec, Tiling,
                   UnKind};
 use crate::gadgets::attention::layout::Shape;
-use crate::gadgets::freivalds::{AO_SEL, AttnOutEval, EPOW_COLS, FREIVALDS_SEL, FreivaldsEval, ao_chan,
+use crate::gadgets::freivalds::{AO_SEL, AttnOutEval, EPOW_COLS, FreivaldsEval, ao_chan,
                        ao_sel};
 
 // ---------------------------------------------------------------- relations ----
@@ -2472,10 +2472,10 @@ impl Plan {
             // The ids and their order are the Freivalds row declaration's, the
             // same list `preprocessed_ids` takes.  What splits it is what a
             // verifier needs to rebuild a column: the weights are the model's
-            // and the row flags are the parameters'.
+            // and the row grouping's columns are the parameters'.
             let sh = crate::gadgets::freivalds::columns::FreivaldsShape::new(
                 &w.name, &w.lay, w.mats.len(), false);
-            let n_weights = sh.n_pre() - FREIVALDS_SEL.len();
+            let n_weights = sh.n_pre() - crate::fold::Groups::COLS;
             let ids = crate::gadgets::freivalds::columns::Known::committed_ids(&sh);
             for (i, id) in ids.into_iter().enumerate() {
                 let (kind, needs) = if i < n_weights { ("freivalds/weight", PreNeeds::Model) }
