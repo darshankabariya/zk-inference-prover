@@ -35,44 +35,36 @@
 use stwo_constraint_framework::EvalAtRow;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
+use crate::air::Ids;
 use crate::columns::Bytes;
 use crate::fold::{Groups, Rows, Run};
 use crate::gadgets::freivalds::layout::FreivaldsLayout;
-use crate::gadgets::freivalds::{FreivaldsEval, freivalds_pre, freivalds_w};
-use crate::layout::Grid;
 
-/// What the row's lengths come from: one Freivalds component's shape.
+/// What the row's lengths and its columns' names come from: one Freivalds
+/// component's shape.
 ///
-/// It borrows the group's name rather than owning it: the AIR builds one of
-/// these on every `evaluate`, which is once per row of the evaluation domain.
+/// The group's name, the tiling its rows run over and the two widths a row is
+/// cut at are stated here once, and the AIR carries one of these rather than
+/// five fields of its own.  `ids` is where the component's preprocessed columns
+/// are named, which is the one thing about this gadget that is pinned.
 #[derive(Clone, Debug)]
-pub struct FreivaldsShape<'a> {
-    /// the group's name, which every preprocessed id carries
-    pub tag: &'a str,
-    /// the prefix the grouping's own preprocessed ids carry
-    pre: String,
-    /// the row tiling the grouping is read off
-    g: Grid,
+pub struct FreivaldsShape {
+    /// the group's name
+    pub tag: String,
+    /// where this component's preprocessed columns are named
+    ids: Ids,
+    /// the row tiling, and the two widths a row is cut at (`pk`, `pq`)
+    pub lay: FreivaldsLayout,
     pub n_mats: usize,
-    /// weights per row per matmul
-    pub pk: usize,
-    /// activation cells per row
-    pub pq: usize,
     /// whether the component publishes a claim over its own activations
     pub x_claim: bool,
 }
 
-impl<'a> FreivaldsShape<'a> {
-    /// The shape the AIR is over.
-    pub fn of(air: &'a FreivaldsEval) -> Self {
-        FreivaldsShape { tag: &air.tag, pre: freivalds_pre(&air.tag), g: air.g,
-                         n_mats: air.n_mats, pk: air.pk, pq: air.pq,
-                         x_claim: air.qx.is_some() }
-    }
-    /// The shape a builder is over, off the layout it tiles.
-    pub fn new(tag: &'a str, lay: &FreivaldsLayout, n_mats: usize, x_claim: bool) -> Self {
-        FreivaldsShape { tag, pre: freivalds_pre(tag), g: lay.g, n_mats, pk: lay.pk,
-                         pq: lay.pq, x_claim }
+impl FreivaldsShape {
+    /// The shape one group's component is over.
+    pub fn new(tag: &str, lay: &FreivaldsLayout, n_mats: usize, x_claim: bool) -> Self {
+        FreivaldsShape { tag: tag.to_string(), ids: Ids::of("freivalds", tag), lay: *lay,
+                         n_mats, x_claim }
     }
 
     /// How the table's rows are grouped: one group per input channel, `chunks`
@@ -81,7 +73,13 @@ impl<'a> FreivaldsShape<'a> {
     /// them -- is `crate::fold`'s, and this is the only place this gadget says
     /// what its grouping is.
     pub fn groups(&self) -> Groups<'_> {
-        Groups::of(&self.g, &self.pre)
+        Groups::of(&self.lay.g, self.ids.prefix())
+    }
+
+    /// One weight's preprocessed id.  The strings are pinned: they are the keys
+    /// a verifier resolves a preprocessed column by.
+    pub fn weight_id(&self, mat: usize, p: usize) -> PreProcessedColumnId {
+        self.ids.at(format_args!("w{mat}_{p:04}"))
     }
 
     /// How many columns each tree holds, off the same declaration the structs
@@ -90,10 +88,10 @@ impl<'a> FreivaldsShape<'a> {
     /// columns once encoded, and the LogUp columns that follow them belong to
     /// the relation rather than to the row.
     pub fn n_pre(&self) -> usize {
-        self.n_mats * self.pk + Groups::COLS
+        self.n_mats * self.lay.pk + Groups::COLS
     }
     pub fn n_base(&self) -> usize {
-        self.pq
+        self.lay.pq
     }
     pub fn n_inter(&self) -> usize {
         1 + 2 * self.n_mats + usize::from(self.x_claim)
@@ -130,7 +128,7 @@ impl Known<PreProcessedColumnId> {
     pub fn ids(sh: &FreivaldsShape) -> Self {
         Known {
             weights: (0..sh.n_mats)
-                .map(|m| (0..sh.pk).map(|p| freivalds_w(sh.tag, m, p)).collect())
+                .map(|m| (0..sh.lay.pk).map(|p| sh.weight_id(m, p)).collect())
                 .collect(),
         }
     }
@@ -236,7 +234,7 @@ impl<F, EF> FreivaldsRow<F, EF> {
                     .map(|m| m.into_iter().map(|id| eval.get_preprocessed_column(id)).collect())
                     .collect(),
             },
-            acts: Activations { x: Bytes::read(eval, sh.pq) },
+            acts: Activations { x: Bytes::read(eval, sh.lay.pq) },
             sums: RunningSums {
                 x_fold: Run::read(eval),
                 mats: (0..sh.n_mats)

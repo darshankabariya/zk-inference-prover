@@ -3518,21 +3518,27 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
 
     let mut freivalds = vec![];
     for (wi, w) in plan.freivalds.iter().enumerate() {
-        let (rv_pow, rv_step) = powers(rv, w.lay.pk);
-        let (s_pow, s_step) = powers(s, w.lay.pq);
         freivalds.push(FrameworkComponent::<FreivaldsEval>::new(
             alloc,
             FreivaldsEval {
-                tag: w.name.clone(),
-                g: w.lay.g,
-                pk: w.lay.pk,
-                pq: w.lay.pq,
-                n_mats: w.mats.len(),
-                rv_pow,
-                rv_step,
-                s_pow,
-                s_step,
-                claimed: claims.freivalds_acc[wi].iter().map(|x| unqm(*x)).collect(),
+                shape: crate::gadgets::freivalds::columns::FreivaldsShape::new(
+                    &w.name, &w.lay, w.mats.len(), plan.residual_stream.is_some()),
+                // the two challenges, at the widths this group's rows are cut
+                // at; the powers they fold and carry at are the fold's
+                rv: crate::fold::Powers::against(rv, w.lay.pk),
+                s: crate::fold::Powers::against(s, w.lay.pq),
+                claims: crate::gadgets::freivalds::claims::FreivaldsClaims {
+                    product: claims.freivalds_acc[wi].iter().map(|x| unqm(*x)).collect(),
+                    // stream II: the group's own claim over its committed
+                    // activations, present exactly when the chunk carries the
+                    // wiring family
+                    x_claim: plan.residual_stream.as_ref().map(|_| {
+                        claim_at(claims.freivalds_qx.get(wi).copied(), "freivalds_qx")
+                    }),
+                    // the other side of the identity is not the AIR's: it is
+                    // filled where `identity_holds` is called
+                    consumed: vec![],
+                },
                 // the committed activations, as bytes of a range table, and who
                 // proves that they are
                 acts: crate::columns::ByteCells {
@@ -3542,14 +3548,13 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     by: if p.gkr_freivalds { crate::columns::Lookups::Batched }
                         else { crate::columns::Lookups::Own },
                 },
-                // stream II: the group's own claim over its committed
-                // activations, in the canonical channel-major order.  Present
-                // exactly when the chunk carries the wiring family, so a chunk
-                // without it proves what it always proved.
+                // stream II: how the group's own claim over its committed
+                // activations is folded, in the canonical channel-major order.
+                // Present exactly when the chunk carries the wiring family, so
+                // a chunk without it proves what it always proved.
                 qx: plan.residual_stream.as_ref().map(|_| {
                     let m0 = &p.mats[w.mats[0]];
                     let nn = (m0.tokens * m0.n_in) as i128;
-                    let claimed = claim_at(claims.freivalds_qx.get(wi).copied(), "freivalds_qx");
                     // Stream II (E11), at the JJ merge: the `o` group folds
                     // under the *attnout* component's weights, not the wiring
                     // family's.  Every other group's counterparty is a
@@ -3570,7 +3575,6 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                             w: spow,
                             m_in: sstep,
                             m_bd: rv * sstep.inverse().pow(w.lay.g.chunks as u128 - 1),
-                            claimed,
                         };
                     }
                     crate::gadgets::freivalds::FreivaldsQx {
@@ -3578,7 +3582,6 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         m_in: wpow(w_residual_stream, -(w.lay.pq as i128)),
                         m_bd: wpow(w_residual_stream, (w.lay.pq as i128) * (w.lay.g.chunks as i128 - 1)
                                    - m0.tokens as i128),
-                        claimed,
                     }
                 }),
             },
@@ -4572,7 +4575,9 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     let phase_t = std::time::Instant::now();
     let mut freivalds_components = vec![];
     for w in &plan.freivalds {
-        let r = freivalds_component(layer, &w.name, &w.mats, p.freivalds_p, w.act_bits, &mut tables,
+        let wit = crate::gadgets::freivalds::witness::FreivaldsWitness::of_layer(
+            layer, &w.name, &w.mats);
+        let r = freivalds_component(&wit, p.freivalds_p, w.act_bits, &mut tables,
                                  None, tamper.freivalds_over.filter(|_| w.act_bits != 8));
         freivalds_components.push(r);
     }
@@ -6398,18 +6403,21 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
     let phase_t = std::time::Instant::now();
     for (wi, reg) in freivalds_components.iter().enumerate() {
         let t_iw = std::time::Instant::now();
-        let it = freivalds_interaction(layer, reg, rv, s, &components.freivalds[wi].eval);
+        let wit = crate::gadgets::freivalds::witness::FreivaldsWitness::of_layer(
+            layer, &reg.name, &reg.mats);
+        let it = freivalds_interaction(&wit, reg, &components.freivalds[wi].eval);
         crate::util::add_phase("int/freivalds_build", t_iw.elapsed().as_secs_f64());
         inter_all.extend(it.cols);
         inter_mark(&format!("freivalds/{}", reg.name), &inter_all, &mut inter_seen,
                    &mut inter_split);
-        claims.freivalds_acc.push(it.claimed.iter().map(|v| qm(*v)).collect());
+        claims.freivalds_acc.push(it.claims.product.iter().map(|v| qm(*v)).collect());
         // stream II: and the group's claim over its own committed activations,
         // pushed for every group whether or not a seam consumes it -- `o`'s
         // counterparty is stream JJ's to publish, and this is the half of that
         // seam II owns.
         if plan.residual_stream.is_some() {
-            claims.freivalds_qx.push(qm(it.qx_claim));
+            claims.freivalds_qx.push(qm(it.claims.x_claim
+                .expect("a chunk with the wiring family publishes an activation claim")));
         }
         if !p.gkr_freivalds {
             claims.use_sums.push(qm(it.use_sum));
@@ -7617,12 +7625,18 @@ pub fn verify_composed(fixed_bytes: &[u8], claims_bytes: &[u8], proof_bytes: &[u
         .collect();
     let av_ok = av_sum == unqm(claims.ao_out);
     let den_link_ok = az_sum == unqm(claims.ao_den);
-    // The Freivalds identity, `rv^T C s == (rv^T W)(X s)` once per matmul: the
-    // dequant component's published projection of the product against the
-    // Freivalds component's own accumulation of it.  The gadget states its own
-    // equality; this is the call.
-    let freivalds_ok =
-        crate::gadgets::freivalds::claims::identity_holds(&claims, &plan.freivalds);
+    // The Freivalds identity, `rv^T C s == (rv^T W)(X s)` once per matmul.  The
+    // gadget states its own equality over its own claims; this is where the two
+    // halves of them are put side by side -- the products each Freivalds
+    // component published, and the projections the dequant components did.
+    let freivalds_ok = crate::gadgets::freivalds::claims::identity_holds(
+        &plan.freivalds.iter().enumerate()
+            .map(|(wi, w)| crate::gadgets::freivalds::claims::FreivaldsClaims {
+                product: claims.freivalds_acc[wi].iter().map(|x| unqm(*x)).collect(),
+                x_claim: claims.freivalds_qx.get(wi).copied().map(unqm),
+                consumed: w.mats.iter().map(|mi| unqm(claims.mat_h[*mi])).collect(),
+            })
+            .collect::<Vec<_>>());
 
     // B10 step 2: the wiring family's equalities, from the parsed claims alone.
     // `gn1.roots == gn1b.in` and `gn2.roots == gn2b.in` say each norm's two

@@ -11,6 +11,8 @@
 //! What the proof binds, edge by edge, is `docs/statement.md`; the recorded
 //! digests are `prover/README.md`.
 
+pub mod air;
+pub mod alone;
 pub mod bf16;
 pub mod boundary;
 pub mod chunks;

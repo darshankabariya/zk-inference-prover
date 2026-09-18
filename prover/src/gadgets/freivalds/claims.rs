@@ -1,31 +1,95 @@
-//! After the challenges: the running sums, what the component publishes, and
-//! its LogUp columns.
+//! After the challenges: what the statement carries, the equality over it, and
+//! the running sums that reach it.
 //!
 //! This is the half of the witness that depends on `rv` and `s`, so none of it
 //! can be built before those are drawn from the transcript -- which is after
-//! every commitment `trace.rs` made.  It also holds `project`, the one written
-//! definition of the projection `rv^T C s` that the two sides of the identity
-//! are compared at.
+//! every commitment `trace.rs` made.
 //!
-//! The four running columns are four `crate::fold::Fold`s, and this file builds
-//! each of them the same way: every row's own term in parallel, and then the
-//! primitive's serial carry, under the same `Carry` and `Term` rules the AIR
-//! states -- so the two sides of each column are one declaration read twice, and
-//! the table's grouping is stated once, in the shape.  Where they are built --
-//! on the host, on the card, or both with every cell compared -- is
-//! `fold::sides` and `fold::place`, and the lookups' columns are the byte cells'
-//! own.
+//! [`FreivaldsClaims`] is the *public input*: what this component publishes and
+//! what it consumes, as values rather than as columns.  It and the AIR are two
+//! objects on purpose.  The AIR is the constraint definition -- which columns
+//! exist and what holds between them -- and it reads the published half only
+//! for the rows its folds close on; a verifier parses these values, and
+//! [`identity_holds`] is the whole of what it then does with this gadget.
+//! [`project`] is the one written definition of the projection `rv^T C s` the
+//! two sides are compared at.
+//!
+//! The four running columns are four `crate::fold::Fold`s, and
+//! [`freivalds_interaction`] builds each of them the same way: every row's own
+//! term in parallel, and then the primitive's serial carry, under the same
+//! `Carry` and `Term` rules the AIR states -- so the two sides of each column
+//! are one declaration read twice, and the table's grouping is stated once, in
+//! the shape.  Where they are built -- on the host, on the card, or both with
+//! every cell compared -- is `fold::sides` and `fold::place`, and the lookups'
+//! columns are the byte cells' own.
 
 use num_traits::Zero;
 use rayon::prelude::*;
 use stwo::core::fields::qm31::SecureField;
 
-use crate::compose::{Claims, FreivaldsPlan, unqm};
 use crate::encoding::m31_of;
 use crate::fold::{Carry, Term, carry_down};
-use crate::gadgets::freivalds::columns::{FreivaldsShape, Matmul, RunningSums};
+use crate::gadgets::freivalds::columns::{Matmul, RunningSums};
 use crate::gadgets::freivalds::trace::FreivaldsComponent;
-use crate::layer::Layer;
+use crate::gadgets::freivalds::witness::FreivaldsWitness;
+
+// ------------------------------------------------ what the statement says ---
+
+/// The values one Freivalds group's statement carries.
+///
+/// Not the AIR: the AIR says what holds between the columns, and this says what
+/// the two ends of them are.  Both halves are public input -- a verifier reads
+/// them out of the proof's claims and never recomputes them -- and the proofs
+/// are what tie each of them to a committed column.
+#[derive(Clone, Debug, Default)]
+pub struct FreivaldsClaims {
+    /// **Published**, one per matmul in the group's order: `(rv^T W_m)(X s)`,
+    /// what the product fold is pinned to on the table's last row.
+    pub product: Vec<SecureField>,
+    /// **Published**: the projection of this component's own committed
+    /// activations, so whichever component produced them can be bound to the
+    /// same values.  `None` on a segment with no producer to bind to.
+    pub x_claim: Option<SecureField>,
+    /// **Consumed**, one per matmul: `rv^T C s`, the projection of the product.
+    /// This component never commits `C`; the dequant component does, and
+    /// publishes this through [`project`].  Nothing constrains it here -- the
+    /// comparison is [`identity_holds`].
+    pub consumed: Vec<SecureField>,
+}
+
+impl FreivaldsClaims {
+    /// The claims a builder starts from: zero everywhere.
+    ///
+    /// An AIR has to exist before the columns that close on it are built -- the
+    /// interaction builder is handed one to read the group's shape off -- and
+    /// this is what it is built with until the values are known.
+    pub fn open(n_mats: usize, x_claim: bool) -> Self {
+        FreivaldsClaims {
+            product: vec![SecureField::zero(); n_mats],
+            x_claim: x_claim.then(SecureField::zero),
+            consumed: vec![],
+        }
+    }
+}
+
+/// The Freivalds identity, once per matmul of every group and in the order the
+/// plan runs them: the projection the dequant component published against the
+/// one this component accumulated.
+///
+/// This is the whole of what a verifier does with this gadget's claims, and
+/// `compose::verify_composed` calls it.  Neither side commits `C` twice; the
+/// check is that two independently accumulated field elements agree.
+pub fn identity_holds(groups: &[FreivaldsClaims]) -> Vec<bool> {
+    groups
+        .iter()
+        .flat_map(|g| {
+            assert_eq!(g.product.len(), g.consumed.len(),
+                       "a Freivalds group published {} products and consumed {} projections",
+                       g.product.len(), g.consumed.len());
+            g.product.iter().zip(&g.consumed).map(|(a, b)| a == b)
+        })
+        .collect()
+}
 
 /// `rv^T C s`: the product matrix projected down to one field element, which is
 /// the value both sides of the Freivalds identity are compared at.
@@ -37,8 +101,7 @@ use crate::layer::Layer;
 ///
 /// `C` itself is committed by the dequant gadget and never by this one, so it is
 /// the dequant component that publishes this value, as its claim `claimed_h`,
-/// and this gadget that consumes it: `identity_holds` compares it against the
-/// `(rv^T W)(X s)` the Freivalds component accumulated.
+/// and this gadget that consumes it.
 pub fn project(token_folds: impl IntoIterator<Item = SecureField>,
                s: SecureField) -> SecureField {
     token_folds.into_iter().fold(SecureField::zero(), |h, z| h * s + z)
@@ -62,41 +125,23 @@ pub fn project_product(c: &[i64], tokens: usize, n_out: usize, rv: SecureField,
     }), s)
 }
 
-/// The Freivalds identity, once per matmul of every group and in the order the
-/// plan runs them: the dequant component's published `rv^T C s` against the
-/// Freivalds component's published `(rv^T W)(X s)`.
-///
-/// This is the whole of what a verifier does with this gadget's claims, and
-/// `compose::verify_composed` calls it.  Both sides are values the statement
-/// carries; the proofs are what tie each of them to a committed column.
-pub fn identity_holds(claims: &Claims, groups: &[FreivaldsPlan]) -> Vec<bool> {
-    groups
-        .iter()
-        .enumerate()
-        .flat_map(|(wi, w)| w.mats.iter().enumerate().map(move |(k, mi)| (wi, k, *mi)))
-        .map(|(wi, k, mi)| unqm(claims.freivalds_acc[wi][k]) == unqm(claims.mat_h[mi]))
-        .collect()
-}
+// ------------------------------------------------------- the running sums ---
 
 pub struct FreivaldsInteraction {
     pub cols: Vec<crate::device::AnyCol<'static>>,
-    /// one `(rv^T W_m)(X s)` per matmul: the side of the identity this gadget
-    /// publishes
-    pub claimed: Vec<SecureField>,
+    /// what the component published: one `(rv^T W_m)(X s)` per matmul, and the
+    /// claim over its own activations where the AIR carries one.  `consumed` is
+    /// empty -- the other side of the identity is not this builder's to know.
+    pub claims: FreivaldsClaims,
     pub use_sum: SecureField,
-    /// the group's claim over its own committed activations, in the canonical
-    /// input-channel-major order, or zero when the AIR publishes none
-    pub qx_claim: SecureField,
 }
 
-pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureField,
-                             s_ch: SecureField,
-                             air: &crate::gadgets::freivalds::FreivaldsEval) -> FreivaldsInteraction {
+pub fn freivalds_interaction(w: &FreivaldsWitness, r: &FreivaldsComponent,
+                             air: &crate::gadgets::freivalds::FreivaldsEval)
+                             -> FreivaldsInteraction {
     let lay = r.lay;
     let rows = 1usize << lay.g.log_rows;
-    let m0 = &layer.mats[r.mats[0]];
-    let (rv_pow, rv_step) = crate::relations::powers(rv, lay.pk);
-    let (s_pow, s_step) = crate::relations::powers(s_ch, lay.pq);
+    let (rv, s_ch) = (air.rv.c, air.s.c);
 
     // Where the folds are built: on the host, on the card, or both with every
     // cell compared.
@@ -109,25 +154,24 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
         .into_par_iter()
         .map(|j| {
             let mut vf = SecureField::zero();
-            let mut ufs = vec![SecureField::zero(); r.mats.len()];
+            let mut ufs = vec![SecureField::zero(); w.mats.len()];
             if let Some((k, chunk)) = lay.g.row(j) {
                 for p in 0..lay.pq {
                     let t = chunk * lay.pq + p;
-                    if t < m0.tokens {
-                        let x = m0.qx[t * m0.n_in + k];
+                    if t < w.tokens {
+                        let x = w.x[t * w.n_in + k];
                         if x != 0 {
-                            vf += s_pow[p] * SecureField::from(m31_of(x as i64));
+                            vf += air.s.cells[p] * SecureField::from(m31_of(x as i64));
                         }
                     }
                 }
-                for (mi, uf) in r.mats.iter().zip(ufs.iter_mut()) {
-                    let m = &layer.mats[*mi];
+                for (m, uf) in w.mats.iter().zip(ufs.iter_mut()) {
                     for p in 0..lay.pk {
                         let i = chunk * lay.pk + p;
                         if i < m.n_out {
-                            let w = m.qw[k * m.n_out + i];
-                            if w != 0 {
-                                *uf += rv_pow[p] * SecureField::from(m31_of(w as i64));
+                            let wt = m.w[k * m.n_out + i];
+                            if wt != 0 {
+                                *uf += air.rv.cells[p] * SecureField::from(m31_of(wt as i64));
                             }
                         }
                     }
@@ -139,33 +183,32 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
     // The same rules the AIR states, here as the loop they stand for: x_fold
     // and w_fold restart at each input channel, and the product carries across
     // the whole table and takes the two finished folds once per input channel.
-    let sh = FreivaldsShape::new(&r.name, &lay, r.mats.len(), air.qx.is_some());
+    let sh = &air.shape;
     let groups = sh.groups();
-    let x_fold = carry_down(&groups, rows, Term::Each(&|j| inner[j].0),
-                            Carry::PerGroup { step: s_step });
-    let w_folds: Vec<Vec<SecureField>> = (0..r.mats.len())
-        .map(|m| carry_down(&groups, rows, Term::Each(&|j| inner[j].1[m]),
-                            Carry::PerGroup { step: rv_step }))
+    let x_fold = carry_down(&groups, rows, Term::Each(&|j| inner[j].0), air.s.per_group());
+    let w_folds: Vec<Vec<SecureField>> = (0..w.mats.len())
+        .map(|m| carry_down(&groups, rows, Term::Each(&|j| inner[j].1[m]), air.rv.per_group()))
         .collect();
-    let products: Vec<Vec<SecureField>> = (0..r.mats.len())
+    let products: Vec<Vec<SecureField>> = (0..w.mats.len())
         .map(|m| carry_down(&groups, rows, Term::PerGroup(&|j| w_folds[m][j] * x_fold[j]),
                             Carry::WholeTable))
         .collect();
     let mut cols = crate::device::ColSink::new();
     // The running sums go into the tree through the row declaration, so their
     // order is the order the AIR reads them in and it is written down once.
-    // `x_claim` is `None` here because it is built below, out of `m0.qx` rather
-    // than out of these, and appended where the declaration has it.
-    let claimed: Vec<SecureField> = crate::fold::place(
+    // `x_claim` is `None` here because it is built below, out of the witness's
+    // activations rather than out of these, and appended where the declaration
+    // has it.
+    let product: Vec<SecureField> = crate::fold::place(
         &format!("freivalds {} 2^{}", r.name, lay.g.log_rows), sides, &mut cols,
         || crate::devacc::freivalds(
             r.dev.as_ref().expect("the card builds a group's folds off its own columns"),
-            &lay, r.mats.len(), rv, s_ch),
+            &lay, w.mats.len(), rv, s_ch),
         || {
             let built = RunningSums {
                 x_fold: x_fold.as_slice(),
                 mats: w_folds.iter().zip(products.iter())
-                    .map(|(w, p)| Matmul { w_fold: w.as_slice(), product: p.as_slice() })
+                    .map(|(wf, p)| Matmul { w_fold: wf.as_slice(), product: p.as_slice() })
                     .collect(),
                 x_claim: None,
             }
@@ -177,11 +220,11 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
         });
     // The published claim over the committed activations, in the AIR's own mask
     // order -- after the per-matmul running sums and before the LogUp columns.
-    // It is built from `m0.qx` and not from `r.base`, so it is the same column
-    // whether the witness generation left the component on the host or on the
-    // card, and it does not depend on `rows` having been zeroed for the device
-    // accumulator path above.
-    let mut qx_claim = SecureField::zero();
+    // It is built from the witness and not from `r.base`, so it is the same
+    // column whether the witness generation left the component on the host or on
+    // the card, and it does not depend on `rows` having been zeroed for the
+    // device accumulator path above.
+    let mut x_claim = None;
     if let Some(q) = air.qx.as_ref() {
         let nrows = 1usize << lay.g.log_rows;
         let inner_x: Vec<SecureField> = (0..nrows)
@@ -191,8 +234,8 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
                 if let Some((k, chunk)) = lay.g.row(j) {
                     for p in 0..lay.pq {
                         let t = chunk * lay.pq + p;
-                        if t < m0.tokens {
-                            let x = m0.qx[t * m0.n_in + k];
+                        if t < w.tokens {
+                            let x = w.x[t * w.n_in + k];
                             if x != 0 {
                                 f += q.w[p] * SecureField::from(m31_of(x as i64));
                             }
@@ -207,7 +250,7 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
         // so one the fold states, exactly as the AIR states it.
         let xs = carry_down(&groups, nrows, Term::Each(&|j| inner_x[j]),
                             Carry::Rates { inside: q.m_in, across: q.m_bd });
-        qx_claim = xs[nrows - 1];
+        x_claim = Some(xs[nrows - 1]);
         // the declaration's last running column, after the per-matmul pairs
         cols.extend(crate::fold::column(lay.g.log_rows, &xs));
     }
@@ -227,5 +270,9 @@ pub fn freivalds_interaction(layer: &Layer, r: &FreivaldsComponent, rv: SecureFi
         crate::devfrac::cols_of(&r.base, r.dev.as_ref().map(|d| &d.base[..])),
         &r.base, lay.pq);
     cols.extend_any(lcols);
-    FreivaldsInteraction { cols: cols.into_inner(), claimed, use_sum, qx_claim }
+    FreivaldsInteraction {
+        cols: cols.into_inner(),
+        claims: FreivaldsClaims { product, x_claim, consumed: vec![] },
+        use_sum,
+    }
 }

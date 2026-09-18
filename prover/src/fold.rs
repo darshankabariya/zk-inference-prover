@@ -64,6 +64,12 @@
 //!   last row, which is the grouping's business too.  A column nothing
 //!   publishes has none.
 //!
+//! [`Powers`] is the other half of most folds: a Horner over a stream cut into
+//! rows runs at `c^p` across a row's cells and at `c^width` from one row to the
+//! next, and both follow from the challenge and the width.  A gadget names
+//! those two ([`Powers::against`]) and the fold derives the rest, so an AIR
+//! carries a challenge rather than two precomputed vectors.
+//!
 //! [`constrain`] emits the one or two constraints, [`carry_down`] runs the
 //! recurrence on the host, [`column`] puts the result in the tree and
 //! [`M31_COLS`] is what it costs there.  [`place`] is the same group of columns
@@ -322,6 +328,48 @@ pub fn dot<E: EvalAtRow>(cells: &[E::F], w: &[SecureField]) -> E::EF {
 /// A value the host's side of a fold asks for row by row: it is not asked for
 /// on a row that does not take it.
 pub type PerRow<'a> = &'a dyn Fn(usize) -> SecureField;
+
+/// The powers of one challenge a fold runs at: `c^0 .. c^{width-1}` across the
+/// cells of a row, and `c^width` as the step from one row to the next.
+///
+/// A Horner fold over a stream cut into rows needs both, and they are the same
+/// fact: where the stream is cut.  A gadget that carried them itself carried
+/// two vectors precomputed by whoever built its AIR, which put the fold's own
+/// arithmetic in the caller; [`Powers::against`] is that arithmetic, and what
+/// an AIR then names is the challenge and the width its rows are cut at.
+///
+/// It is built once, where the AIR is, and not inside `evaluate`: `evaluate`
+/// runs on every row of the evaluation domain, and deriving `width` powers
+/// there would cost as much again as the fold itself.
+#[derive(Clone, Debug)]
+pub struct Powers {
+    /// the challenge these are the powers of
+    pub c: SecureField,
+    /// `c^0 .. c^{width-1}`, one per cell of a row
+    pub cells: Vec<SecureField>,
+    /// `c^width`: what the previous row's fold is multiplied by
+    pub step: SecureField,
+}
+
+impl Powers {
+    /// The powers a row of `width` cells folds `c` at.
+    pub fn against(c: SecureField, width: usize) -> Self {
+        let (cells, step) = crate::relations::powers(c, width);
+        Powers { c, cells, step }
+    }
+
+    /// The carry of a fold that runs down a group at this challenge's row step
+    /// and restarts on each group's first row.
+    pub fn per_group<M>(&self) -> Carry<M> {
+        Carry::PerGroup { step: self.step }
+    }
+
+    /// `sum_p cells[p] * c^p`: a row's own cells folded against these powers,
+    /// which is what most `term`s are.
+    pub fn dot<E: EvalAtRow>(&self, cells: &[E::F]) -> E::EF {
+        dot::<E>(cells, &self.cells)
+    }
+}
 
 /// What the previous row is multiplied by, as a rule about the grouping.
 ///

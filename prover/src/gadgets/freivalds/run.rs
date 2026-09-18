@@ -4,9 +4,11 @@
 //! The component is the composed segment's own: `trace::freivalds_component`
 //! builds the columns committed before the challenges and
 //! `claims::freivalds_interaction` the running sums and the LogUp columns,
-//! exactly as `compose` calls them.  Nothing else is in the proof but the range
-//! table the committed activations are checked against, which is a shared table
-//! and is reported apart.
+//! exactly as `compose` calls them.  The session around them is
+//! `crate::alone::prove_alone`, which every gadget's standalone run shares, so
+//! this file is the witness, the call and the outcome.  Nothing else is in the
+//! proof but the range table the committed activations are checked against,
+//! which is a shared table and is reported apart.
 //!
 //! **Half of the identity is here and half is not.**  What this proves is the
 //! `(rv^T W)(X s)` side: the weights are pinned, the activations are committed
@@ -35,31 +37,27 @@
 
 use std::time::Instant;
 
-use num_traits::Zero;
 use serde_json::{Value, json};
-use stwo::core::air::Component;
-use stwo::core::fields::qm31::SecureField;
-use stwo::prover::ComponentProver;
-use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
-use crate::relations::{RangeRel, RangeTableEval, powers, table_col, tbl_range};
+use crate::alone::{After, Alone, RangeTable, Trees, prove_alone};
 use crate::bf16::Round;
 use crate::columns::{ByteCells, Lookups};
-use crate::common::{Proven, Session, Sums, eval_of, m31_u32, twiddles};
+use crate::fold::Powers;
 use crate::gadgets::freivalds::FreivaldsEval;
-use crate::gadgets::freivalds::claims::{freivalds_interaction, project_product};
+use crate::gadgets::freivalds::claims::{FreivaldsClaims, freivalds_interaction, project_product};
 use crate::gadgets::freivalds::columns::{FreivaldsShape, Known};
 use crate::gadgets::freivalds::layout::FreivaldsLayout;
 use crate::gadgets::freivalds::trace::freivalds_component;
-use crate::layer::{Layer, Tables};
+use crate::gadgets::freivalds::witness::FreivaldsWitness;
+use crate::layer::Tables;
 
 /// The activation width every Freivalds group but the widened attention output's
 /// commits at, and the width of the range table this proof carries.
 const ACT_BITS: u32 = 8;
 
 pub struct Outcome {
-    pub proven: Proven,
-    pub sums: Sums,
+    /// what the standalone session proved, committed and published
+    pub alone: Alone,
     pub lay: FreivaldsLayout,
     pub group: String,
     pub n_mats: usize,
@@ -67,14 +65,6 @@ pub struct Outcome {
     pub n_out: usize,
     pub tokens: usize,
     pub weights: usize,
-    /// the component's own three trees, the shared range table left out
-    pub pre_cells: usize,
-    pub base_cells: usize,
-    pub inter_cells: usize,
-    /// the range table: its preprocessed rows, and its multiplicity column plus
-    /// its own LogUp column
-    pub table_cells_pre: usize,
-    pub table_cells_fresh: usize,
     pub off_table: usize,
     /// The self-check, not a proof: how many of the published claims match
     /// `rv^T C s` recomputed on the host from the witness's exact integer
@@ -83,8 +73,6 @@ pub struct Outcome {
     pub ref_ok: usize,
     pub ref_n: usize,
     pub trace_secs: f64,
-    pub interaction_secs: f64,
-    pub n_columns: [usize; 3],
 }
 
 impl Outcome {
@@ -92,28 +80,24 @@ impl Outcome {
     /// table -- and the host-side self-check agrees, which is *not* a proof of
     /// the other side of the identity.  See this module's comment.
     pub fn accepts(&self) -> bool {
-        self.proven.stark_ok && self.sums.cancels() && self.off_table == 0
+        self.alone.proven.stark_ok && self.alone.sums.cancels() && self.off_table == 0
             && self.ref_ok == self.ref_n
     }
     /// Fresh cells the component commits, the shared table left out.
     pub fn fresh(&self) -> usize {
-        self.base_cells + self.inter_cells
+        self.alone.fresh()
     }
     pub fn json(&self) -> Value {
+        let mut cells = self.alone.cells_json();
+        cells["fresh_per_weight"] = json!(self.fresh() as f64 / self.weights as f64);
+        cells["fresh_per_token"] = json!(self.fresh() as f64 / self.tokens as f64);
         json!({
             "group": self.group, "matmuls": self.n_mats,
             "n_in": self.n_in, "n_out": self.n_out, "tokens": self.tokens,
             "weights": self.weights,
             "layout_x": self.layout_json(),
-            "cells": {"preprocessed": self.pre_cells, "base": self.base_cells,
-                      "interaction": self.inter_cells, "fresh": self.fresh(),
-                      "fresh_per_weight": self.fresh() as f64 / self.weights as f64,
-                      "fresh_per_token": self.fresh() as f64 / self.tokens as f64,
-                      "table_preprocessed": self.table_cells_pre,
-                      "table_fresh": self.table_cells_fresh},
-            "columns": {"preprocessed": self.n_columns[0], "base": self.n_columns[1],
-                        "interaction": self.n_columns[2],
-                        "total": self.n_columns.iter().sum::<usize>()},
+            "cells": cells,
+            "columns": self.alone.columns_json(),
             "off_table": self.off_table,
             // the host-side self-check; see `reference_note`
             "reference_checked": self.ref_n, "reference_ok": self.ref_ok,
@@ -123,10 +107,10 @@ impl Outcome {
 the (rv^T W)(X s) side only, and recomputes rv^T C s on the host from the witness's \
 exact accumulators to compare against it. A composed proof proves both sides and \
 compares them in freivalds::claims::identity_holds.",
-            "trace_secs": self.trace_secs, "interaction_secs": self.interaction_secs,
-            "proof_bytes": self.proven.proof_bytes,
-            "sums": self.sums.json(), "accepts": self.accepts(),
-            "point": self.proven.json(),
+            "trace_secs": self.trace_secs, "interaction_secs": self.alone.interaction_secs,
+            "proof_bytes": self.alone.proven.proof_bytes,
+            "sums": self.alone.sums.json(), "accepts": self.accepts(),
+            "point": self.alone.proven.json(),
         })
     }
     fn layout_json(&self) -> Value {
@@ -138,125 +122,76 @@ compares them in freivalds::claims::identity_holds.",
 }
 
 /// One weight block's check, proved on its own at `p_target` weights a row.
-pub fn run(layer: &Layer, group: &str, mats: &[usize], p_target: usize) -> Outcome {
-    let m0 = &layer.mats[mats[0]];
-    let (n_in, tokens) = (m0.n_in, m0.tokens);
-    let n_out = mats.iter().map(|i| layer.mats[*i].n_out).max().unwrap();
-
+pub fn run(w: &FreivaldsWitness, p_target: usize) -> Outcome {
     let t0 = Instant::now();
     // The shared table registry.  This proof looks values up in exactly one of its
     // tables -- the activations' 8-bit range -- and the rest are sized to nothing.
     let mut tables = Tables::new(vec![0u32; 16], 4, 0, Round::Even, 4, vec![ACT_BITS], 0, 0);
-    let r = freivalds_component(layer, group, mats, p_target, ACT_BITS, &mut tables, None, None);
-    let lay = r.lay;
+    let r = freivalds_component(w, p_target, ACT_BITS, &mut tables, None, None);
     let trace_secs = t0.elapsed().as_secs_f64();
+    let lay = r.lay;
+    let sh = FreivaldsShape::new(w.name, &lay, w.mats.len(), false);
 
-    let ridx = tables.ridx(ACT_BITS);
-    let tbl = eval_of(ACT_BITS, (0..1u32 << ACT_BITS).map(m31_u32).collect());
-    let mult = eval_of(ACT_BITS, tables.m_r[ridx].iter().map(|v| m31_u32(*v)).collect());
-
-    let tw = twiddles(lay.g.log_rows.max(ACT_BITS));
-    let mut sess = Session::new(&tw);
-    let mut pre = r.pre.clone();
-    pre.push(tbl.clone());
-    let n_pre = pre.len();
-    sess.commit(pre);
-    // A gadget on its own has no model column, but the tree layout is the
-    // same for every proof this crate makes: the empty model tree keeps the
-    // base trace at the index every component's mask names.
-    sess.commit_model_empty();
-    let mut base = r.base.clone();
-    base.push(mult.clone());
-    let n_base = base.len();
-    sess.commit(base);
-    let rel_act = sess.draw_relation(RangeRel::draw);
-    let ch = sess.draw_felts(2);
-    let (rv, s_ch) = (ch[0], ch[1]);
-
-    let (rv_pow, rv_step) = powers(rv, lay.pk);
-    let (s_pow, s_step) = powers(s_ch, lay.pq);
-    let air = |claimed: Vec<SecureField>| FreivaldsEval {
-        tag: group.to_string(),
-        g: lay.g,
-        pk: lay.pk,
-        pq: lay.pq,
-        n_mats: mats.len(),
-        rv_pow: rv_pow.clone(),
-        rv_step,
-        s_pow: s_pow.clone(),
-        s_step,
-        claimed,
-        // the committed activations, as bytes of this proof's own range table
-        acts: ByteCells { bits: ACT_BITS, off: 1 << (ACT_BITS - 1), rel: rel_act.clone(),
-                          by: Lookups::Own },
-        // the activation claim binds a group to whichever component produced its
-        // input; a weight block on its own has no producer and publishes none,
-        // which is what a composed segment without the residual stream also does
-        qx: None,
-    };
-
-    let t1 = Instant::now();
-    let it = freivalds_interaction(layer, &r, rv, s_ch,
-                                   &air(vec![SecureField::zero(); mats.len()]));
-    let interaction_secs = t1.elapsed().as_secs_f64();
-    let inter_cells: usize = it.cols.iter().map(|c| c.size()).sum();
-    let n_inter_cols = it.cols.len();
-    let (tcols, tsum) = table_col(ACT_BITS, &rel_act, &[&tbl], &mult);
-    let table_cells_fresh =
-        mult.domain.size() + tcols.iter().map(|e| e.domain.size()).sum::<usize>();
-    let n_tcols = tcols.len();
-    let mut icols = it.cols;
-    icols.extend(crate::device::host_cols(tcols));
-    sess.commit_any(icols);
-
-    // The claimed accumulators are public input; bind them to the transcript before
-    // the components fix them, or a prover picks them adaptively.
-    sess.mix(&it.claimed);
-
-    // the committed order is the row declaration's, not this file's
-    let mut ids = Known::committed_ids(&FreivaldsShape::new(group, &lay, mats.len(), false));
-    ids.push(tbl_range(ACT_BITS));
-    let alloc = &mut TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let fr = FrameworkComponent::<FreivaldsEval>::new(alloc, air(it.claimed.clone()), it.use_sum);
-    let tb = FrameworkComponent::<RangeTableEval>::new(
-        alloc, RangeTableEval { bits: ACT_BITS, rel: rel_act }, tsum);
-    let provers: Vec<&dyn ComponentProver<_>> = vec![&fr, &tb];
-    let components: Vec<&dyn Component> = vec![&fr, &tb];
-    let proven = sess.prove(&provers, &components);
+    // the two challenges, kept for the self-check below: they are drawn from
+    // the session inside, because that is where the transcript is
+    let mut drawn = None;
+    let alone = prove_alone(
+        Trees {
+            // the committed order is the row declaration's, not this file's
+            ids: Known::committed_ids(&sh),
+            pre: r.pre.clone(),
+            base: r.base.clone(),
+            pre_cells: r.pre_cells(),
+            base_cells: r.base_cells(),
+        },
+        &[RangeTable::of(ACT_BITS, &tables)],
+        |sess, rels| {
+            let ch = sess.draw_felts(2);
+            drawn = Some((ch[0], ch[1]));
+            let (rv, s) = (Powers::against(ch[0], lay.pk), Powers::against(ch[1], lay.pq));
+            let air = |claims| FreivaldsEval {
+                shape: sh.clone(),
+                rv: rv.clone(),
+                s: s.clone(),
+                claims,
+                // the committed activations, as bytes of this proof's own range table
+                acts: ByteCells { bits: ACT_BITS, off: 1 << (ACT_BITS - 1),
+                                  rel: rels[0].clone(), by: Lookups::Own },
+                // the activation claim binds a group to whichever component produced its
+                // input; a weight block on its own has no producer and publishes none,
+                // which is what a composed segment without the residual stream also does
+                qx: None,
+            };
+            let it = freivalds_interaction(w, &r, &air(FreivaldsClaims::open(w.mats.len(), false)));
+            After { air: air(it.claims.clone()), cols: it.cols, use_sum: it.use_sum,
+                    claims: it.claims.product }
+        });
 
     // The other side of the identity, recomputed on the host: `rv^T C s` over
     // the exact integer accumulators the witness carries.  In a composed proof
     // this value is the dequant component's published claim and *is* proved; here
     // nothing proves it, so this is a self-check and `accepts()` says so.
-    let (mut ref_ok, ref_n) = (0usize, mats.len());
-    for (mi, claimed) in mats.iter().zip(&it.claimed) {
-        let m = &layer.mats[*mi];
-        if project_product(&m.acc, m.tokens, m.n_out, rv, s_ch) == *claimed {
+    let (rv, s) = drawn.expect("the standalone run draws its two challenges");
+    let (mut ref_ok, ref_n) = (0usize, w.mats.len());
+    for (m, claimed) in w.mats.iter().zip(&alone.claims) {
+        if project_product(m.c, w.tokens, m.n_out, rv, s) == *claimed {
             ref_ok += 1;
         }
     }
 
     Outcome {
-        sums: Sums { uses: it.use_sum, tables: tsum },
-        proven,
+        alone,
         lay,
-        group: group.to_string(),
-        n_mats: mats.len(),
-        n_in,
-        n_out,
-        tokens,
-        weights: r.n_weights,
-        pre_cells: r.pre_cells(),
-        base_cells: r.base_cells(),
-        inter_cells,
-        table_cells_pre: tbl.domain.size(),
-        table_cells_fresh,
+        group: w.name.to_string(),
+        n_mats: w.mats.len(),
+        n_in: w.n_in,
+        n_out: w.n_out_max(),
+        tokens: w.tokens,
+        weights: w.n_weights(),
         off_table: tables.off_table,
         ref_ok,
         ref_n,
         trace_secs,
-        interaction_secs,
-        n_columns: [n_pre, n_base, n_inter_cols + n_tcols],
     }
 }
 
@@ -273,15 +208,15 @@ pub fn marginal(small: &Outcome, large: &Outcome) -> Value {
                small.lay.pk, large.lay.pk);
     assert!(large.weights > small.weights,
             "the second build has to carry more weights than the first");
-    assert_eq!(small.base_cells, large.base_cells,
+    assert_eq!(small.alone.base_cells, large.alone.base_cells,
                "the two builds commit {} and {} activation cells: the difference is \
                 then not the weights' alone, which needs an exact token tiling \
                 (`tokens` a multiple of the row-chunk count at both widths)",
-               small.base_cells, large.base_cells);
+               small.alone.base_cells, large.alone.base_cells);
     let dw = (large.weights - small.weights) as f64;
     let fresh = (large.fresh() - small.fresh()) as f64;
-    let pre = (large.pre_cells - small.pre_cells) as f64;
-    let inter = (large.inter_cells - small.inter_cells) as f64;
+    let pre = (large.alone.pre_cells - small.alone.pre_cells) as f64;
+    let inter = (large.alone.inter_cells - small.alone.inter_cells) as f64;
     json!({
         "weights_per_row": large.lay.pk,
         "shape": format!("{} n_in={} n_out={},{} tokens={}", large.group, large.n_in,
@@ -308,13 +243,13 @@ pub fn marginal(small: &Outcome, large: &Outcome) -> Value {
         "difference": {
             "weights": large.weights - small.weights,
             "rows": large.lay.g.rows - small.lay.g.rows,
-            "preprocessed": large.pre_cells - small.pre_cells,
-            "base": large.base_cells - small.base_cells,
-            "interaction": large.inter_cells - small.inter_cells,
+            "preprocessed": large.alone.pre_cells - small.alone.pre_cells,
+            "base": large.alone.base_cells - small.alone.base_cells,
+            "interaction": large.alone.inter_cells - small.alone.inter_cells,
             "fresh": large.fresh() - small.fresh(),
         },
-        "proof_bytes": large.proven.proof_bytes,
-        "prove_secs": large.proven.prove_secs,
+        "proof_bytes": large.alone.proven.proof_bytes,
+        "prove_secs": large.alone.proven.prove_secs,
         "accepts": small.accepts() && large.accepts(),
         "off_table": small.off_table + large.off_table,
         "reference_checked": small.ref_n + large.ref_n,

@@ -317,17 +317,20 @@ fn freivalds_cmd(args: &[String]) {
     let mats: Vec<usize> = l1.mats.iter().enumerate()
         .filter(|(_, m)| names.contains(&m.name.as_str())).map(|(i, _)| i).collect();
     assert!(!mats.is_empty(), "the layer has no matmul of the {group} group");
+    // the gadget is proved over its own witness, which is a view of the layer
+    let (w1, w2) = (freivalds::witness::FreivaldsWitness::of_layer(&l1, &group, &mats),
+                    freivalds::witness::FreivaldsWitness::of_layer(&l2, &group, &mats));
     let mut points = vec![];
     for p in arg_list(args, "--widths", &[8usize, 16, 32, 64]) {
         eprintln!("freivalds {group} weights_per_row={p}");
-        let small = freivalds::run::run(&l1, &group, &mats, p);
-        let large = freivalds::run::run(&l2, &group, &mats, p);
+        let small = freivalds::run::run(&w1, p);
+        let large = freivalds::run::run(&w2, p);
         for (o, n) in [(&small, n_out), (&large, 2 * n_out)] {
             assert!(o.accepts(),
                     "honest Freivalds proof rejected at p={p}, n_out={n}: stark={} sums={} \
                      off_table={} reference_mismatch={} err={:?}",
-                    o.proven.stark_ok, o.sums.cancels(), o.off_table, o.ref_n - o.ref_ok,
-                    o.proven.prove_error);
+                    o.alone.proven.stark_ok, o.alone.sums.cancels(), o.off_table,
+                    o.ref_n - o.ref_ok, o.alone.proven.prove_error);
         }
         points.push(freivalds::run::marginal(&small, &large));
     }

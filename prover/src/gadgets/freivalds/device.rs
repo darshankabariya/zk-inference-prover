@@ -15,7 +15,8 @@ use crate::dev_attention_freivalds_witness_gen::{FGrid, FMult, Fam, add_into, ch
                                                  witness_gen_mut, zeroes};
 use crate::gadgets::freivalds::columns::FreivaldsShape;
 use crate::gadgets::freivalds::layout::FreivaldsLayout;
-use crate::layer::{Layer, Tables};
+use crate::gadgets::freivalds::witness::FreivaldsWitness;
+use crate::layer::Tables;
 
 /// Which witness generation runs: 0 the host's, 1 the device's alone, 2 both
 /// with every cell asserted equal before either is used.
@@ -56,12 +57,13 @@ impl Mirror {
     }
 
     /// Build the same two trees on the card and assert them against the host's.
-    pub fn check(self, name: &str, layer: &Layer, mat_idx: &[usize], lay: &FreivaldsLayout,
-                 tables: &mut Tables, base: &[Eval], pre: &[Eval]) {
+    pub fn check(self, w: &FreivaldsWitness, lay: &FreivaldsLayout, tables: &mut Tables,
+                 base: &[Eval], pre: &[Eval]) {
+        let name = w.name;
         // the check with teeth, before any column has changed hands
         let r8 = tables.ridx(8);
         let after = (tables.m_r[r8].clone(), tables.off_table);
-        let dev = freivalds_component_dev(layer, mat_idx, lay, tables);
+        let dev = freivalds_component_dev(w, lay, tables);
         check_cols(&format!("freivalds {name} base"), base, &dev.base);
         check_cols(&format!("freivalds {name} pre"), pre, &dev.pre);
         check_delta(&format!("freivalds {name} m_r8"), &self.m_r8, &after.0,
@@ -120,12 +122,10 @@ pub struct DevFreivalds {
 /// arithmetic the host's serial bumps do and in an order that cannot matter,
 /// because counting is commutative.
 pub fn freivalds_component_dev(
-    layer: &Layer,
-    mat_idx: &[usize],
+    w: &FreivaldsWitness,
     lay: &FreivaldsLayout,
     tables: &mut Tables,
 ) -> DevFreivalds {
-    let m0 = &layer.mats[mat_idx[0]];
     let rows = 1usize << lay.g.log_rows;
     let t_up = std::time::Instant::now();
 
@@ -133,28 +133,27 @@ pub fn freivalds_component_dev(
     // their pack is a four-to-a-word narrowing -- the case the pinned pool is
     // for.
     let d_qx = timed_up_into("gen/witness_gen_freivalds_pack", "gen/witness_gen_freivalds_h2d", "freivalds/qx",
-                             m0.qx.len().div_ceil(4),
-                             |d| pack_i8_into(d, &m0.qx, "freivalds qx"),
-                             || pack_i8(&m0.qx, "freivalds qx"));
-    let d_qw: Vec<Uint32Vec> = mat_idx
+                             w.x.len().div_ceil(4),
+                             |d| pack_i8_into(d, w.x, "freivalds qx"),
+                             || pack_i8(w.x, "freivalds qx"));
+    let d_qw: Vec<Uint32Vec> = w.mats
         .iter()
-        .map(|i| {
-            let qw = &layer.mats[*i].qw;
+        .map(|m| {
             timed_up_into("gen/witness_gen_freivalds_pack", "gen/witness_gen_freivalds_h2d", "freivalds/qw",
-                          qw.len().div_ceil(4),
-                          |d| pack_i8_into(d, qw, "freivalds qw"),
-                          || pack_i8(qw, "freivalds qw"))
+                          m.w.len().div_ceil(4),
+                          |d| pack_i8_into(d, m.w, "freivalds qw"),
+                          || pack_i8(m.w, "freivalds qw"))
         })
         .collect();
     let qw_ptrs: Vec<*const i8> = d_qw.iter().map(|d| d.device_ptr as *const i8).collect();
-    let n_out: Vec<u32> = mat_idx.iter().map(|i| layer.mats[*i].n_out as u32).collect();
+    let n_out: Vec<u32> = w.mats.iter().map(|m| m.n_out as u32).collect();
     crate::util::add_phase("gen/witness_gen_freivalds_up", t_up.elapsed().as_secs_f64());
 
     let t_alloc = std::time::Instant::now();
     // The kernel keeps its own internal column order and writes the grouping's
     // four columns itself, in CUDA; the trees it fills are sized from the row
     // declaration, which is the only thing Rust can hold it to here.
-    let sh = FreivaldsShape::new("", lay, mat_idx.len(), false);
+    let sh = FreivaldsShape::new("", lay, w.mats.len(), false);
     let base = uninit(sh.n_base(), rows);
     let pre = uninit(sh.n_pre(), rows);
     let base_p = ptrs(&base);
@@ -168,9 +167,9 @@ pub fn freivalds_component_dev(
         g: FGrid::of(&lay.g),
         pq: lay.pq as u32,
         pk: lay.pk as u32,
-        n_in: m0.n_in as u32,
-        tokens: m0.tokens as u32,
-        n_mats: mat_idx.len() as u32,
+        n_in: w.n_in as u32,
+        tokens: w.tokens as u32,
+        n_mats: w.mats.len() as u32,
         mutate: witness_gen_mut(Fam::Freivalds),
     };
 

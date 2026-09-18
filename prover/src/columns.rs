@@ -29,9 +29,12 @@
 //!
 //! - [`Bytes`], below: committed cells that are values of a range table.  The
 //!   reader takes the masks *and* the row owes the lookups; the writer builds
-//!   the columns *and* bumps the table's multiplicities; and [`ByteCells`] holds
-//!   the one decision the gadget has no opinion about -- whether the lookups are
-//!   proved by this component's own LogUp columns or by the batched backend.
+//!   the columns *and* bumps the table's multiplicities; the offset a signed
+//!   value carries to land inside an unsigned table is taken back off by
+//!   [`ByteCells::fold_signed`], so a gadget folds its cells and never names it;
+//!   and [`ByteCells`] holds the one decision the gadget has no opinion about --
+//!   whether the lookups are proved by this component's own LogUp columns or by
+//!   the batched backend.
 //! - `fold::Run`, in `crate::fold`: one running column at the `[-1, 0]` mask its
 //!   two constraint rows come from.  `crate::fold::Fold` is what a gadget
 //!   declares over it, and it owns the recurrence on both sides and the column's
@@ -71,8 +74,8 @@
 //!     cells F;                       // which of the evaluator's two field types
 //!     read(ev, sh: &FreivaldsShape); // the bindings the field expressions see
 //!     weights: Vec<Vec<Cell>> = (0..sh.n_mats)
-//!         .map(|m| (0..sh.pk).map(|p| ev.get_preprocessed_column(freivalds_w(sh.tag, m, p)))
-//!                            .collect())
+//!         .map(|m| (0..sh.lay.pk).map(|p| ev.get_preprocessed_column(sh.weight_id(m, p)))
+//!                                .collect())
 //!         .collect();
 //! }
 //! ```
@@ -220,6 +223,40 @@ impl ByteCells {
     /// derived from: every byte look has the literal one as its numerator.
     pub fn units(&self, n: usize) -> Vec<bool> {
         vec![true; n]
+    }
+
+    /// `sum_p w[p] (cell[p] - off)`: the row's cells folded against `w` as the
+    /// *signed* values they stand for, with the whole offset taken off once at
+    /// the end.
+    ///
+    /// A committed byte carries [`ByteCells::off`] on top of the value it
+    /// stands for, so that a signed value lands inside an unsigned table.  Only
+    /// the cell kind knows that, so only the cell kind should be writing the
+    /// subtraction; a gadget folds its cells and says nothing about the offset.
+    ///
+    /// This spelling weights every cell and subtracts `off * sum(w)`, a
+    /// constant, from the result.  [`ByteCells::fold_signed_per_cell`] takes the
+    /// offset off each cell instead.  The two are equal as field elements and
+    /// are *not* the same expression tree, and the lowering fingerprints the
+    /// tree -- which is why both are here rather than one of them.
+    pub fn fold_signed<E: EvalAtRow>(&self, bytes: &Bytes<E::F>, w: &[SecureField]) -> E::EF {
+        let off_sum: SecureField = w.iter().fold(SecureField::zero(), |a, b| a + *b)
+            * SecureField::from_u32_unchecked(self.off, 0, 0, 0);
+        crate::fold::dot::<E>(&bytes.cells, w) - off_sum
+    }
+
+    /// The same value, with the offset taken off each cell before it is
+    /// weighted: `sum_p (cell[p] - off) w[p]`.
+    ///
+    /// See [`ByteCells::fold_signed`] for why there are two.
+    pub fn fold_signed_per_cell<E: EvalAtRow>(&self, bytes: &Bytes<E::F>,
+                                              w: &[SecureField]) -> E::EF {
+        let off = E::F::from(M31::from_u32_unchecked(self.off));
+        let mut f = E::EF::zero();
+        for (p, a) in bytes.cells.iter().enumerate() {
+            f += (E::EF::from(a.clone()) - E::EF::from(off.clone())) * w[p];
+        }
+        f
     }
 
     /// The lookups the cells owe, where the AIR's constraints end.
