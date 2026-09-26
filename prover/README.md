@@ -65,6 +65,15 @@ on both backends before it merges. A change that alters the proof records the
 new digests here, in the same pull request, and says why. The digest is
 `result.point.proof_sha256` in the JSON the binary prints on stdout.
 
+The scripts that run this are in `tools/gate/`: one ships a tree to a GPU box,
+one runs the gate there, one prepares a fresh box. The gate builds both
+backends, generates and installs the kernels for the synthetic shapes in
+between, checks that the vendored library was really built for the card it is
+about to use, and runs the test suite on each backend. Any CUDA card runs it;
+24 GB is enough. The 8B reference proof is the exception -- it needs an 80 GB
+card, so it runs at the points the refactor's tracking issue (#211) lists and
+not per pull request. `tools/gate/README.md` says how to run both and when.
+
 ## Soundness switches
 
 Every binding gadget is on by default wherever the witness lets it be stated:
