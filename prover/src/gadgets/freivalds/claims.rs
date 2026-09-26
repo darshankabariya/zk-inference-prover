@@ -11,7 +11,7 @@
 //! exist and what holds between them -- and it reads the published half only
 //! for the rows its folds close on; a verifier parses these values, and
 //! [`identity_holds`] is the whole of what it then does with this gadget.
-//! [`project`] is the one written definition of the projection `rv^T C s` the
+//! [`project`] is the one written definition of the projection `s^T C rv` the
 //! two sides are compared at.
 //!
 //! The four running columns are four `crate::fold::Fold`s, and
@@ -43,14 +43,14 @@ use crate::gadgets::freivalds::witness::FreivaldsWitness;
 /// are what tie each of them to a committed column.
 #[derive(Clone, Debug, Default)]
 pub struct FreivaldsClaims {
-    /// **Published**, one per matmul in the group's order: `(rv^T W_m)(X s)`,
+    /// **Published**, one per matmul in the group's order: `(s^T X)(W_m rv)`,
     /// what the product fold is pinned to on the table's last row.
     pub product: Vec<SecureField>,
     /// **Published**: the projection of this component's own committed
     /// activations, so whichever component produced them can be bound to the
     /// same values.  `None` on a segment with no producer to bind to.
     pub x_claim: Option<SecureField>,
-    /// **Consumed**, one per matmul: `rv^T C s`, the projection of the product.
+    /// **Consumed**, one per matmul: `s^T C rv`, the projection of the product.
     /// This component never commits `C`; the dequant component does, and
     /// publishes this through [`project`].  Nothing constrains it here -- the
     /// comparison is [`identity_holds`].
@@ -91,7 +91,7 @@ pub fn identity_holds(groups: &[FreivaldsClaims]) -> Vec<bool> {
         .collect()
 }
 
-/// `rv^T C s`: the product matrix projected down to one field element, which is
+/// `s^T C rv`: the product matrix projected down to one field element, which is
 /// the value both sides of the Freivalds identity are compared at.
 ///
 /// The caller hands the rows of `C` already folded against `rv` -- one value per
@@ -129,7 +129,7 @@ pub fn project_product(c: &[i64], tokens: usize, n_out: usize, rv: SecureField,
 
 pub struct FreivaldsInteraction {
     pub cols: Vec<crate::device::AnyCol<'static>>,
-    /// what the component published: one `(rv^T W_m)(X s)` per matmul, and the
+    /// what the component published: one `(s^T X)(W_m rv)` per matmul, and the
     /// claim over its own activations where the AIR carries one.  `consumed` is
     /// empty -- the other side of the identity is not this builder's to know.
     pub claims: FreivaldsClaims,

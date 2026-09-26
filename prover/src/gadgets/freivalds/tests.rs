@@ -60,7 +60,7 @@ struct Built {
     off_table: usize,
     /// the layer's matmul indices this group is over
     mats: Vec<usize>,
-    /// what the component published: one `(rv^T W_m)(X s)` per matmul
+    /// what the component published: one `(s^T X)(W_m rv)` per matmul
     claims: FreivaldsClaims,
     /// the two challenges the claims were built against
     rv: SecureField,

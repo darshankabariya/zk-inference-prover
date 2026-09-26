@@ -9,7 +9,7 @@
 //! after both sides are fixed, and check
 //!
 //! ```text
-//!     rv^T C s  ==  (rv^T W)(X s)
+//!     s^T C rv  ==  (s^T X)(W rv)
 //! ```
 //!
 //! With `rv` weighting output channels `i` and `s` weighting tokens `t`, and the
@@ -25,7 +25,14 @@
 //! polynomial identity of degree `n_out - 1` in `rv` and `tokens - 1` in `s`,
 //! and a wrong `C` passes with probability at most `(n_out + tokens)/|F|` over
 //! the draw, `F` being the degree-4 extension the challenges are drawn in.  This
-//! component proves the right-hand side.  Its four parts:
+//! component proves the right-hand side.
+//!
+//! The equality is a field one, so it holds only mod `p`: it certifies the
+//! integer matmul just while every accumulated magnitude stays inside one
+//! residue window.  That is the dequant gadget's `Spec::sound()`, which requires
+//! `max_abs() <= p` so the integer reading is injective mod `p` (B4 §1), and
+//! `Spec::max_k()` turns it into the longest int8 dot product that still fits,
+//! `K <= 66,572` for a `2^30` window.  Its four parts:
 //!
 //! - **M, the weights `W`.** Preprocessed: the verifier holds them itself, so
 //!   there is nothing to commit and nothing a prover could swap.  They enter as
@@ -37,7 +44,7 @@
 //!   same values.  A segment with no producer publishes none.
 //! - **C, the product.** Not committed here at all.  The dequant gadget commits
 //!   it -- it is the accumulator dequant rounds -- and publishes the projection
-//!   `rv^T C s` as its claim `claimed_h`, computed through
+//!   `s^T C rv` as its claim `claimed_h`, computed through
 //!   `gadgets::freivalds::claims::project`.  This component consumes that claim.
 //! - **r = (rv, s), the challenges.** Drawn from the transcript *after* every
 //!   commitment, so neither side can be chosen against them.  `rv` weights
@@ -59,12 +66,12 @@
 //! the component folds
 //!
 //! ```text
-//!     x_fold    = sum_t s^t  X[k, t]          (shared by every matmul)
-//!     w_fold_m  = sum_i rv^i W_m[i, k]        (one per matmul)
+//!     x_fold    = sum_t s^t  X[t, k]          (shared by every matmul)
+//!     w_fold_m  = sum_i rv^i W_m[k, i]        (one per matmul)
 //! ```
 //!
 //! and on the input channel's last row adds `w_fold_m * x_fold` into `product_m`,
-//! which is `(rv^T W_m)(X s)` once every input channel has been walked.  Matmuls that
+//! which is `(s^T X)(W_m rv)` once every input channel has been walked.  Matmuls that
 //! read one committed input share a group -- q/k/v, and gate/up -- so `X` is
 //! committed once for all of them.
 //!
@@ -169,15 +176,15 @@
 //!
 //! | field | holds | tree | pinned id |
 //! |---|---|---|---|
-//! | `known.weights[m][p]` | `W_m[i, k]` | pre | `zk_freivalds{tag}_w{m}_{p:04}` |
+//! | `known.weights[m][p]` | `W_m[k, i]` | pre | `zk_freivalds{tag}_w{m}_{p:04}` |
 //! | the grouping's, `fold::Groups` | 1 after an input channel's first row | pre | `zk_freivalds{tag}_nofirst` |
 //! | the grouping's, `fold::Groups` | 1 on an input channel's last row | pre | `zk_freivalds{tag}_last` |
 //! | the grouping's, `fold::Groups` | 1 on every row but row 0 | pre | `zk_freivalds{tag}_notzero` |
 //! | the grouping's, `fold::Groups` | 1 on the table's last row | pre | `zk_freivalds{tag}_end` |
-//! | `acts.x.cells[p]` | `X[k, t] + acts.off` | base | -- |
-//! | `sums.x_fold` | `X s` so far | inter | -- |
-//! | `sums.mats[m].w_fold` | `rv^T W_m` so far | inter | -- |
-//! | `sums.mats[m].product` | `(rv^T W_m)(X s)` so far | inter | -- |
+//! | `acts.x.cells[p]` | `X[t, k] + acts.off` | base | -- |
+//! | `sums.x_fold` | `s^T X` so far | inter | -- |
+//! | `sums.mats[m].w_fold` | `W_m rv` so far | inter | -- |
+//! | `sums.mats[m].product` | `(s^T X)(W_m rv)` so far | inter | -- |
 //! | `sums.x_claim` | the published projection of `X` | inter | -- |
 //!
 //! `pre` is the preprocessed tree (the verifier holds it: `pk` weights a matmul
@@ -272,7 +279,7 @@ pub struct FreivaldsQx {
 
 // ------------------------------------------ the check's AIR, one component --
 
-/// One Freivalds group's constraints: the `(rv^T W)(X s)` side of the identity
+/// One Freivalds group's constraints: the `(s^T X)(W rv)` side of the identity
 /// at the top of this file.
 #[derive(Clone)]
 pub struct FreivaldsEval {

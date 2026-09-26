@@ -11,13 +11,13 @@
 //! which is a shared table and is reported apart.
 //!
 //! **Half of the identity is here and half is not.**  What this proves is the
-//! `(rv^T W)(X s)` side: the weights are pinned, the activations are committed
+//! `(s^T X)(W rv)` side: the weights are pinned, the activations are committed
 //! and range-checked, and the running product closes on the claim.  The other
-//! side, `rv^T C s`, is the dequant component's, and that component is not built
+//! side, `s^T C rv`, is the dequant component's, and that component is not built
 //! here -- a standalone dequant proof would need its own norm, fraction,
 //! multiplication and pair tables, which is a second harness this file does not
 //! have.  So `ref_ok`/`ref_n` below, and `reference_ok` in the JSON, are a
-//! **self-check and not part of the proof**: they recompute `rv^T C s` on the
+//! **self-check and not part of the proof**: they recompute `s^T C rv` on the
 //! host with `claims::project_product`, straight out of the witness's exact
 //! accumulators, and compare.  A composed proof is where the two sides are both
 //! proved and compared, by `claims::identity_holds`.
@@ -67,7 +67,7 @@ pub struct Outcome {
     pub weights: usize,
     pub off_table: usize,
     /// The self-check, not a proof: how many of the published claims match
-    /// `rv^T C s` recomputed on the host from the witness's exact integer
+    /// `s^T C rv` recomputed on the host from the witness's exact integer
     /// accumulators.  A composed proof compares the same two values with both
     /// sides proved; this run proves only one of them.
     pub ref_ok: usize,
@@ -104,7 +104,7 @@ impl Outcome {
             "reference_mismatch": self.ref_n - self.ref_ok,
             "reference_is_proved": false,
             "reference_note": "self-check, not part of the proof: this run proves \
-the (rv^T W)(X s) side only, and recomputes rv^T C s on the host from the witness's \
+the (s^T X)(W rv) side only, and recomputes s^T C rv on the host from the witness's \
 exact accumulators to compare against it. A composed proof proves both sides and \
 compares them in freivalds::claims::identity_holds.",
             "trace_secs": self.trace_secs, "interaction_secs": self.alone.interaction_secs,
@@ -167,7 +167,7 @@ pub fn run(w: &FreivaldsWitness, p_target: usize) -> Outcome {
                     claims: it.claims.product }
         });
 
-    // The other side of the identity, recomputed on the host: `rv^T C s` over
+    // The other side of the identity, recomputed on the host: `s^T C rv` over
     // the exact integer accumulators the witness carries.  In a composed proof
     // this value is the dequant component's published claim and *is* proved; here
     // nothing proves it, so this is a self-check and `accepts()` says so.

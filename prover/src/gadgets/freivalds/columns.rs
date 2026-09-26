@@ -165,10 +165,10 @@ impl<Cell> Activations<Cell> {
 
 /// One matmul's two running sums.
 pub struct Matmul<Cell> {
-    /// `rv^T W_m` for this input channel: the weights of the input channel's rows
+    /// `W_m rv` for this input channel: the weights of the input channel's rows
     /// folded against the powers of `rv`, restarted at each input channel.
     pub w_fold: Cell,
-    /// `(rv^T W_m)(X s)` so far: one input channel's two folds multiplied and added
+    /// `(s^T X)(W_m rv)` so far: one input channel's two folds multiplied and added
     /// in on the input channel's last row, carried across the whole table.
     pub product: Cell,
 }
@@ -177,7 +177,7 @@ pub struct Matmul<Cell> {
 /// then each matmul's pair, then the published claim over the activations.  The
 /// LogUp columns follow these and are the relation's, not the row's.
 pub struct RunningSums<Cell> {
-    /// `X s` for this input channel: the committed activations of the input channel's
+    /// `s^T X` for this input channel: the committed activations of the input channel's
     /// rows folded against the powers of `s`.  It is shared by every matmul of
     /// the group, because a group is the matmuls that read one committed input.
     pub x_fold: Cell,
