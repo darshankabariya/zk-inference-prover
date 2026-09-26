@@ -31,7 +31,7 @@ use std::sync::{Mutex, OnceLock};
 use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
 
 use crate::common::{Eval, eval_of, log_rows_for, m31_u32};
-use crate::residual_stream::{ResidualStreamTables, ResidualStreamWitness, Kind, Prog, Src, UnKind};
+use crate::gadgets::residual_stream::{ResidualStreamTables, ResidualStreamWitness, Kind, Prog, Src, UnKind};
 
 // ---------------------------------------------------------------- the FFI shapes --
 
@@ -222,7 +222,7 @@ fn dev_gtables(t: &ResidualStreamTables) -> std::sync::Arc<DevGTables> {
     for r in &t.smul {
         // the sign is resolved here, so the kernel reads a plain `i32` and
         // never has to know the field encoding
-        smul3.push(crate::residual_stream::sgn_of(r[2]) as i32 as u32);
+        smul3.push(crate::gadgets::residual_stream::sgn_of(r[2]) as i32 as u32);
         smul3.push(r[3].0);
         smul3.push(r[4].0);
     }
@@ -236,7 +236,7 @@ fn dev_gtables(t: &ResidualStreamTables) -> std::sync::Arc<DevGTables> {
         .map(|tab| {
             let mut v: Vec<u32> = Vec::with_capacity(tab.len() * 2);
             for r in tab {
-                v.push(crate::residual_stream::sgn_of(r[2]) as i32 as u32);
+                v.push(crate::gadgets::residual_stream::sgn_of(r[2]) as i32 as u32);
                 v.push(r[3].0);
             }
             up_u32(v)

@@ -29,12 +29,12 @@ use stwo::core::fields::qm31::SecureField;
 use stwo::prover::ComponentProver;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
-use crate::attn_air::{RangeRel, RangeTableEval, powers, tbl_range};
-use crate::attn_trace::{m31_of, table_col};
+use crate::gadgets::attention::air::{RangeRel, RangeTableEval, powers, tbl_range};
+use crate::gadgets::attention::trace::{m31_of, table_col};
 use crate::bf16::Round;
 use crate::common::{Proven, Session, Sums, eval_of, m31_u32, twiddles};
 use crate::compose::Rels;
-use crate::freivalds::{FREIVALDS_SEL, FreivaldsEval, freivalds_sel, freivalds_w};
+use crate::gadgets::freivalds::{FREIVALDS_SEL, FreivaldsEval, freivalds_sel, freivalds_w};
 use crate::layer::{FreivaldsLayout, Layer, Tables, freivalds_component, freivalds_interaction};
 
 /// The activation width every Freivalds group but the widened attention output's

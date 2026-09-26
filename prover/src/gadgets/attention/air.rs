@@ -55,8 +55,8 @@ use stwo_constraint_framework::{
     EvalAtRow, FrameworkEval, INTERACTION_TRACE_IDX, RelationEntry, relation,
 };
 
-use crate::layout::{LayoutChan, LayoutKey, LayoutOut, Shape};
-use crate::attn_witness::Variant;
+use crate::gadgets::attention::layout::{LayoutChan, LayoutKey, LayoutOut, Shape};
+use crate::gadgets::attention::witness::Variant;
 
 relation!(ExpRel, 2);
 relation!(RangeRel, 1);
@@ -322,7 +322,7 @@ impl KeyTileTie {
         for j in 0..rows {
             let mut f = SecureField::zero();
             for k in 0..per_row {
-                let v = SecureField::from(crate::attn_trace::m31_of(vals[j * per_row + k])) - off;
+                let v = SecureField::from(crate::gadgets::attention::trace::m31_of(vals[j * per_row + k])) - off;
                 f += v * self.w[k];
             }
             h = h * step(j) + f;

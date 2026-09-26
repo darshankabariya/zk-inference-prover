@@ -77,7 +77,7 @@ import sys
 # ---- the attention output's no-wrap bound (issues #111, #118) ---------------
 # The rounding identity the attention-output fold proves multiplies `2 mag num`,
 # and it is an identity over the integers only while that product stays under
-# the field's `2^31 - 1`.  `prover/src/main.rs`'s `params_of` sizes the two
+# the field's `2^31 - 1`.  `prover/src/cli.rs`'s `params_of` sizes the two
 # accumulator limbs, picks each form off the numbers it is given, and
 # `Plan::new` (`prover/src/compose.rs`) refuses a statement whose window does
 # not fit -- at proving time, hours after the extraction and the plan that

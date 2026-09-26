@@ -45,8 +45,8 @@ use rayon::prelude::*;
 use stwo::core::fields::m31::M31;
 use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
 
-use crate::attn_trace::{Cfg, Layouts};
-use crate::attn_witness::{Attn, Variant};
+use crate::gadgets::attention::trace::{Cfg, Layouts};
+use crate::gadgets::attention::witness::{Attn, Variant};
 use crate::common::Eval;
 use crate::layer::{AoLayout, AttnOut, FreivaldsLayout, Layer, Tables};
 
@@ -65,7 +65,7 @@ pub struct FGrid {
 }
 
 impl FGrid {
-    fn of(g: &crate::layout::Grid) -> Self {
+    fn of(g: &crate::gadgets::attention::layout::Grid) -> Self {
         Self {
             log_rows: g.log_rows,
             rows: g.rows as u32,

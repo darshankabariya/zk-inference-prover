@@ -21,7 +21,7 @@ one extra loop and no new argument *kind*:
 reads `D/shapes_B<b>.json` and writes `--witness D/witness_B<b>_L<k>
 --ser-tag B<b>L<k>`.  What a prompt block's line carries that a decode line
 does not is **nothing new** -- the prefix length is `Params.c`, which
-`params_of` reads off the witness's own manifest (`main.rs:567`,
+`params_of` reads off the witness's own manifest (`cli.rs`'s `params_of`,
 `c: b0.shape.c`), so a block is a directory and a table size and that is all.
 No `Params` field is added, which matters because `boundary.rs:253-257`'s
 `shape_ok` compares `params.s`, `params.residual_stream`, the blowup and the two boundary

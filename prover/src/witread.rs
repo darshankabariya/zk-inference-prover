@@ -119,7 +119,7 @@ pub enum Site {
     ZzTotal,
     /// Stream W: `--tight-table`'s two passes over every key tile's shifts -- the
     /// largest exp-table key the layer looks up, and then the count of keys the
-    /// shrunk table can no longer hold. Both run in `main.rs`'s `tighten_of`,
+    /// shrunk table can no longer hold. Both run in `cli.rs`'s `tighten_of`,
     /// after `Layer::load` has returned and inside the same `build_secs`, which
     /// is why stream P's split could not see them.
     Tighten,

@@ -67,12 +67,12 @@ use stwo::core::fields::qm31::SecureField;
 use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
 use stwo::stwo_cuda::secure_field_vec::SecureFieldVec;
 
-use crate::attn_air::Powers;
-use crate::attn_trace::m31_of;
-use crate::attn_witness::{Attn, Variant};
+use crate::gadgets::attention::air::Powers;
+use crate::gadgets::attention::trace::m31_of;
+use crate::gadgets::attention::witness::{Attn, Variant};
 use crate::common::Eval;
 use crate::device::AnyCol;
-use crate::layout::{Grid, LayoutChan, LayoutKey};
+use crate::gadgets::attention::layout::{Grid, LayoutChan, LayoutKey};
 
 // ---------------------------------------------------------------- the FFI shapes --
 
@@ -668,8 +668,8 @@ pub fn freivalds(dev: &crate::dev_attention_freivalds_witness_gen::DevFreivalds,
     let mutate = accmut(Comp::Freivalds);
     assert_eq!(dev.base.len(), lay.pq, "the Freivalds component's committed column count");
     assert_eq!(dev.pre.len(), n_mats * lay.pk + 4, "the Freivalds component's weight columns");
-    let (rv_pow, rv_step) = crate::attn_air::powers(rv, lay.pk);
-    let (s_pow, s_step) = crate::attn_air::powers(s_ch, lay.pq);
+    let (rv_pow, rv_step) = crate::gadgets::attention::air::powers(rv, lay.pk);
+    let (s_pow, s_step) = crate::gadgets::attention::air::powers(s_ch, lay.pq);
     let base = ptrs(&dev.base);
     let pre = ptrs(&dev.pre[..n_mats * lay.pk]);
     let acc = Acc::new(lay.g.log_rows, 1 + 2 * n_mats);
@@ -716,11 +716,11 @@ pub fn freivalds(dev: &crate::dev_attention_freivalds_witness_gen::DevFreivalds,
 /// `z` and `h`: the matmul component's Freivalds claimed side, over the same
 /// committed accumulator columns 20's dequant witness generation wrote.
 pub fn deq(dev: &crate::dev_dequant_witness_gen::DevDequantWitnessGen, lay: &crate::layer::MatLayout,
-           map: &crate::dequant::Map, f_acc: usize, rv: SecureField,
+           map: &crate::gadgets::dequant::Map, f_acc: usize, rv: SecureField,
            s_ch: SecureField) -> DevAccCols {
     let t = std::time::Instant::now();
     let mutate = accmut(Comp::Deq);
-    let (rv_pow, rv_step) = crate::attn_air::powers(rv, lay.per_row);
+    let (rv_pow, rv_step) = crate::gadgets::attention::air::powers(rv, lay.per_row);
     let cols: Vec<*const u32> =
         (0..lay.per_row).map(|s| dev.base[map.at(s, f_acc)].device_ptr).collect();
     let acc = Acc::new(lay.log_rows, 2);
@@ -769,7 +769,7 @@ pub fn ao(dev: &crate::dev_attention_freivalds_witness_gen::DevAo, lay: &crate::
     // but it never reaches here -- `ao_component` fills it on the host on both
     // backends, so `dev` is `None` and this fold is the host's.
     assert_eq!(dev.base.len(), 2 + 9 * pr, "the attnout component's column count");
-    let (rv_pow, rv_step) = crate::attn_air::powers(rv, pr);
+    let (rv_pow, rv_step) = crate::gadgets::attention::air::powers(rv, pr);
     let cols: Vec<*const u32> =
         (0..pr).map(|k| dev.base[2 + 9 * k].device_ptr).collect();
     let acc = Acc::new(lay.log_rows, 4);

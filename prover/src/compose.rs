@@ -40,18 +40,18 @@ use stwo::core::verifier::verify;
 use stwo::core::vcs::blake2_merkle::Blake2sM31MerkleChannel;
 use stwo::prover::ComponentProver;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
+use stwo_constraint_framework::{FrameworkComponent, FrameworkEval, TraceLocationAllocator};
 
-use crate::attn_air::{
+use crate::gadgets::attention::air::{
     ChanEval, ExpRel, ExpTableEval, KeyEval, Offsets, Powers, RangeRel, RowEval, key_tile_id, id,
     msk_id, powers, tbl_range, CHAN_SEL, DIAGONAL_BLOCK_SEL, KEY_SEL, ROW_SEL, TBL_EXP_X, TBL_EXP_Y,
 };
-use crate::attn_trace::{self, Cfg, Committed, Layouts, table_col};
-use crate::attn_witness::Variant as AttnVariant;
+use crate::gadgets::attention::trace::{self as attn_trace, Cfg, Committed, Layouts, table_col};
+use crate::gadgets::attention::witness::Variant as AttnVariant;
 use crate::bf16::Round;
 use crate::common::{Eval, Proof, RawStats, Session, eval_of, m31_u32, twiddles};
 use crate::util::pcs_config;
-use crate::dequant::{
+use crate::gadgets::dequant::{
     DEQ_SEL, DequantEval, FRAC_COLS, FracRel, MUL_COLS, MulRel, NORM_COLS, NormRel, PairRel,
     QNZ_COLS, Spec, TableEval, TableKind, Variant as DeqVariant, YSide, chan_col, deq_sel,
     range_widths,
@@ -60,11 +60,11 @@ use crate::layer::{
     AoLayout, FREIVALDS_GROUPS, FreivaldsLayout, Layer, MatLayout, Tables, ao_interaction,
     ao_component, freivalds_interaction, freivalds_component, mat_interaction, mat_component,
 };
-use crate::residual_stream::{self, Binding, BindingKind, GKind, GTableEval, Kind, Prog,
+use crate::gadgets::residual_stream::{self, Binding, BindingKind, GKind, GTableEval, Kind, Prog,
                   ResidualStreamEval, ResidualStreamRels, ResidualStreamTables, TieSpec, Tiling,
                   UnKind};
-use crate::layout::Shape;
-use crate::freivalds::{AO_SEL, AttnOutEval, EPOW_COLS, FREIVALDS_SEL, FreivaldsEval, ao_chan,
+use crate::gadgets::attention::layout::Shape;
+use crate::gadgets::freivalds::{AO_SEL, AttnOutEval, EPOW_COLS, FREIVALDS_SEL, FreivaldsEval, ao_chan,
                        ao_sel, freivalds_sel, freivalds_w};
 
 // ---------------------------------------------------------------- relations ----
@@ -89,7 +89,7 @@ pub struct Rels {
     /// Stream BB: the embedding relation, drawn **last** so that a proof
     /// without the gadget draws exactly what it always drew.  Its arity is the
     /// channel block's width plus two, which is why it is not a `relation!`.
-    pub emb: Option<crate::embed::EmbRel>,
+    pub emb: Option<crate::gadgets::embed::EmbRel>,
     /// Stream II: the requantize seams' own relations, drawn after everything
     /// else so a proof without them draws exactly what it always drew.  All
     /// five are drawn whenever any seam exists, whichever variants are in use --
@@ -128,7 +128,7 @@ impl Rels {
     /// embedding relation's arity, or `None` when the gadget is off; `rq` says
     /// whether the chunk carries requantize seams.
     pub fn draw(ch: &mut Blake2sM31Channel, widths: &[u32],
-                uns: Option<&[crate::residual_stream::UnKind]>, emb: Option<usize>, rq: bool,
+                uns: Option<&[crate::gadgets::residual_stream::UnKind]>, emb: Option<usize>, rq: bool,
                 qtabs: usize) -> Self {
         let exp = ExpRel::draw(ch);
         let norm = NormRel::draw(ch);
@@ -142,13 +142,13 @@ impl Rels {
         let residual_stream = uns.map(|ks| ResidualStreamRels {
             norm: norm.clone(),
             frac: frac.clone(),
-            pow: crate::residual_stream::PowRel::draw(ch),
-            smul: crate::residual_stream::SMulRel::draw(ch),
-            val: crate::residual_stream::ValRel::draw(ch),
-            un: ks.iter().map(|_| crate::residual_stream::UnRel::draw(ch)).collect(),
+            pow: crate::gadgets::residual_stream::PowRel::draw(ch),
+            smul: crate::gadgets::residual_stream::SMulRel::draw(ch),
+            val: crate::gadgets::residual_stream::ValRel::draw(ch),
+            un: ks.iter().map(|_| crate::gadgets::residual_stream::UnRel::draw(ch)).collect(),
             uns: ks.to_vec(),
         });
-        let emb = emb.map(|n| crate::embed::EmbRel::draw(ch, n));
+        let emb = emb.map(|n| crate::gadgets::embed::EmbRel::draw(ch, n));
         let rq = rq.then(|| RqRels {
             rqv: FracRel::draw(ch),
             rq3: FracRel::draw(ch),
@@ -240,7 +240,7 @@ pub struct Params {
     /// `1 + lo + hi + max(e_hi, 0) <= 31` window admits one more bit of
     /// exponent.  It costs one committed column per slot and no lookup.
     ///
-    /// It is **off unless the offset form does not fit** (`main.rs`'s
+    /// It is **off unless the offset form does not fit** (`cli.rs`'s
     /// `params_of`), so every chunk that composed before this field existed
     /// keeps the offset form, its columns, its proof and its digest; the field
     /// is skipped in the serialization then, so the statement bytes do not move
@@ -398,7 +398,7 @@ impl RopeParams {
     /// `needs: Params, varies: Block` -- a verifier never reads them off a dump.
     pub fn inv(&self, hd: usize) -> Vec<f64> {
         let sc: Vec<f64> = self.rope_scale.iter().map(|b| f64::from_bits(*b)).collect();
-        crate::rope::inv_freq_of(hd, f64::from_bits(self.theta), &self.rope_type, &sc)
+        crate::gadgets::rope::inv_freq_of(hd, f64::from_bits(self.theta), &self.rope_type, &sc)
     }
 }
 
@@ -719,10 +719,10 @@ impl Claims {
 /// stream weight the producing component's `Out(0)` binding already carries.
 fn rq_binding_w(w: SecureField, lam: SecureField, rp: &RqPlan,
             claimed_in: SecureField, claimed_out: SecureField,
-            claimed_sc: SecureField) -> crate::requant::RqTie {
+            claimed_sc: SecureField) -> crate::gadgets::requant::RqTie {
     let n = (rp.tokens * rp.n) as i128;
     let (tok, pr, nn) = (rp.tokens as i128, rp.lay.per_row as i128, rp.n as i128);
-    crate::requant::RqTie {
+    crate::gadgets::requant::RqTie {
         w: (0..rp.lay.per_row).map(|sl| wpow(w, n - 1 - sl as i128 * tok)).collect(),
         k_in: wpow(w, -(pr * tok)),
         k_bd: wpow(w, (nn - pr) * tok - 1),
@@ -739,13 +739,13 @@ fn rq_binding_w(w: SecureField, lam: SecureField, rp: &RqPlan,
 
 /// Stream NN: one quantize component's two Horner weight sets.
 fn q_binding_w(w: SecureField, lam: SecureField, qp: &QuantPlan, nh: usize,
-           claimed_in: SecureField, claimed_out: SecureField) -> crate::rope::QTie {
+           claimed_in: SecureField, claimed_out: SecureField) -> crate::gadgets::rope::QTie {
     let m_in = (qp.tokens * qp.n) as i128;
     let n_out = (qp.tokens * nh * qp.hd) as i128;
     let (pr, hd, rep) = (qp.lay.per_row as i128, qp.hd as i128, qp.rep as i128);
     // the `rep` query heads one kv head is replicated into, as one weight
     let r_sum = (0..rep).fold(SecureField::zero(), |a, k| a + wpow(w, -(k * hd)));
-    crate::rope::QTie {
+    crate::gadgets::rope::QTie {
         w_in: (0..qp.lay.per_row).map(|sl| wpow(w, m_in - 1 - sl as i128)).collect(),
         step_in: wpow(w, -pr),
         w_out: (0..qp.lay.per_row)
@@ -791,8 +791,8 @@ fn nn_key_tile_cols(plan: &Plan, layer: &Layer) -> (Vec<i64>, Vec<i64>, Vec<i64>
 /// position on the **query-head** grid, which is the grid the key tiles hold and
 /// which the quantize component's `w_out` reaches through its replication sum.
 fn nn_key_tile_bindings(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
-                -> Option<(crate::attn_air::KeyTileTie, crate::attn_air::KeyTileTie,
-                           crate::attn_air::KeyTileTie)> {
+                -> Option<(crate::gadgets::attention::air::KeyTileTie, crate::gadgets::attention::air::KeyTileTie,
+                           crate::gadgets::attention::air::KeyTileTie)> {
     let k = plan.nn_key_tiles.iter().position(|x| *x == b)?;
     let p = &plan.p;
     let l = &plan.lays[b];
@@ -811,7 +811,7 @@ fn nn_key_tile_bindings(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
     let (cc, kc) = (l.chan.g.chunks as i128, l.key.g.chunks as i128);
     // the channel component's group index is `inst hd + ch`, which is affine in the
     // position, so one boundary constant serves
-    let kt = crate::attn_air::KeyTileTie {
+    let kt = crate::gadgets::attention::air::KeyTileTie {
         w: (0..l.chan.pk).map(|q| wpow(w, base - q as i128 * nh * hd)).collect(),
         s_in: wpow(w, -(pk * nh * hd)),
         s_bd: wpow(w, (cc - 1) * pk * nh * hd - 1),
@@ -819,7 +819,7 @@ fn nn_key_tile_bindings(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
         off: off.k,
         claimed: cl(0),
     };
-    let qt = crate::attn_air::KeyTileTie {
+    let qt = crate::gadgets::attention::air::KeyTileTie {
         w: (0..l.chan.pq).map(|q| wpow(w, base - q as i128 * nh * hd)).collect(),
         s_in: wpow(w, -(pq * nh * hd)),
         s_bd: wpow(w, (cc - 1) * pq * nh * hd - 1),
@@ -829,7 +829,7 @@ fn nn_key_tile_bindings(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
     };
     // the key component's group index is `inst C + key`, which is not: crossing an
     // instance moves the head by one and the key by a whole context
-    let vt = crate::attn_air::KeyTileTie {
+    let vt = crate::gadgets::attention::air::KeyTileTie {
         w: (0..l.key.pv).map(|q| wpow(w, base - q as i128)).collect(),
         s_in: wpow(w, -pv),
         s_bd: wpow(w, (kc - 1) * pv - nh * hd),
@@ -851,7 +851,7 @@ fn nn_key_tile_bindings(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
 /// with no positional assumption beyond the one the diagonal block's own binding already
 /// makes.
 fn nn_key_tile_qtie(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
-                -> Option<crate::attn_air::KeyTileTie> {
+                -> Option<crate::gadgets::attention::air::KeyTileTie> {
     let k = plan.nn_q_key_tiles.iter().position(|x| *x == b)?;
     let p = &plan.p;
     let l = &plan.lays[b];
@@ -861,7 +861,7 @@ fn nn_key_tile_qtie(plan: &Plan, b: usize, w: SecureField, claims: &Claims)
     let base = n - 1 - plan.head_offsets[b] as i128 * hd;
     let pq = l.chan.pq as i128;
     let cc = l.chan.g.chunks as i128;
-    Some(crate::attn_air::KeyTileTie {
+    Some(crate::gadgets::attention::air::KeyTileTie {
         w: (0..l.chan.pq).map(|q| wpow(w, base - q as i128 * nh * hd)).collect(),
         s_in: wpow(w, -(pq * nh * hd)),
         s_bd: wpow(w, (cc - 1) * pq * nh * hd - 1),
@@ -883,7 +883,7 @@ fn wpow(w: SecureField, e: i128) -> SecureField {
 /// `w^(N - 1 - (c tokens + t))`; that splits into a per-slot weight and a row
 /// step of two constants, derived in `dequant::OutputClaim`.
 fn output_claim_w(w: SecureField, lam: SecureField, tokens: usize, n_out: usize,
-           per_row: usize, kind: crate::dequant::OKind) -> crate::layer::OutputClaimW {
+           per_row: usize, kind: crate::gadgets::dequant::OKind) -> crate::layer::OutputClaimW {
     let n = (tokens * n_out) as i128;
     let (tok, pr, no) = (tokens as i128, per_row as i128, n_out as i128);
     crate::layer::OutputClaimW {
@@ -923,7 +923,7 @@ fn output_claim_w_key_tile(w: SecureField, lam: SecureField, tokens: usize, nh: 
         lam,
         k_in: wpow(w, -pr),
         k_bd: wpow(w, -pr - (repi - 1) * hdi),
-        kind: crate::dequant::OKind::Int,
+        kind: crate::gadgets::dequant::OKind::Int,
         head: Some(hd / per_row),
     }
 }
@@ -939,7 +939,7 @@ fn output_claim_w_key_tile(w: SecureField, lam: SecureField, tokens: usize, nh: 
 /// positions and a scattered set of channel-major ones.  `o`, `gate`, `up`,
 /// `down` and `lm_head` keep `output_claim_w`.
 fn output_claim_w_tok(w: SecureField, lam: SecureField, tokens: usize, n_out: usize,
-               per_row: usize, kind: crate::dequant::OKind) -> crate::layer::OutputClaimW {
+               per_row: usize, kind: crate::gadgets::dequant::OKind) -> crate::layer::OutputClaimW {
     let n = (tokens * n_out) as i128;
     let step = wpow(w, -(per_row as i128));
     crate::layer::OutputClaimW {
@@ -999,7 +999,7 @@ pub struct RqPlan {
     pub n: usize,
     pub tokens: usize,
     pub lay: crate::layer::MatLayout,
-    pub v: crate::requant::SVariant,
+    pub v: crate::gadgets::requant::SVariant,
 }
 
 pub struct FreivaldsPlan {
@@ -1630,7 +1630,7 @@ pub struct Plan {
     pub rqs: Vec<RqPlan>,
     /// the scale variants those seams use, deduplicated and in a fixed order --
     /// one division table and one scale table per variant
-    pub rq_vars: Vec<crate::requant::SVariant>,
+    pub rq_vars: Vec<crate::gadgets::requant::SVariant>,
     /// Stream NN: the three quantize components -- `q`, `k`, `v` -- in that order.
     /// Empty on a chunk without `Params::rope`.
     pub quants: Vec<QuantPlan>,
@@ -1687,7 +1687,7 @@ pub struct Plan {
     /// `None`.  Both sides derive it from `Params` alone, so the use component, the
     /// table component, the preprocessed id list and the verifier cannot disagree
     /// about the gadget's shape.
-    pub emb: Option<crate::embed::EmbLayout>,
+    pub emb: Option<crate::gadgets::embed::EmbLayout>,
 }
 
 /// Issue #19: the attention output's no-wrap window, as two numbers rather than
@@ -1971,7 +1971,7 @@ impl Plan {
         // -- the E11 set (`--z-hi-bits 7`, `k_bits = ao_q_bits = 11`) included.
         if p.mats.iter().any(|m| m.variant == "fold") {
             assert!(p.fold_rem_bits > 0, "a fold matmul needs --fold-rem-bits");
-            widths.extend([crate::dequant::FOLD_LIMB, 16, p.fold_rem_bits, 7, p.ao_q_bits]);
+            widths.extend([crate::gadgets::dequant::FOLD_LIMB, 16, p.fold_rem_bits, 7, p.ao_q_bits]);
         }
         if p.ao_q_bits > 7 {
             widths.push(p.ao_q_bits + 1);
@@ -2035,7 +2035,7 @@ impl Plan {
         // never counted by hand; the layout is the dequant's own `MatLayout`
         // map, which is what makes `output_claim_w`'s weights apply unchanged.
         let mut rqs = vec![];
-        let mut rq_vars: Vec<crate::requant::SVariant> = vec![];
+        let mut rq_vars: Vec<crate::gadgets::requant::SVariant> = vec![];
         if let Some(g) = residual_stream.as_ref() {
             // stream II: on the head chunk the only producer is the final
             // norm's scale and the only consumer is the head's own Freivalds check, so the
@@ -2056,9 +2056,9 @@ impl Plan {
                 let m0 = &p.mats[freivalds[wi].mats[0]];
                 assert_eq!(m0.n_in, n, "the {name} Freivalds check's input width is not its producer's");
                 let v = if m0.variant == "pow2" {
-                    crate::requant::SVariant::Pow2
+                    crate::gadgets::requant::SVariant::Pow2
                 } else {
-                    crate::requant::SVariant::Bf16
+                    crate::gadgets::requant::SVariant::Bf16
                 };
                 if !rq_vars.contains(&v) {
                     rq_vars.push(v);
@@ -2073,7 +2073,7 @@ impl Plan {
                     v,
                 });
             }
-            rq_vars.sort_by_key(|v| *v == crate::requant::SVariant::Bf16);
+            rq_vars.sort_by_key(|v| *v == crate::gadgets::requant::SVariant::Bf16);
         }
         // ---- stream NN: the three quantize components ---------------------------
         //
@@ -2091,7 +2091,7 @@ impl Plan {
             assert_eq!(rp.inv(p.hd).len(), p.hd / 2, "inv_freq must be hd/2 long");
             for (i, (name, heads, bits)) in
                 [("q", p.nh, p.q_bits), ("k", rp.nkv, p.k_bits),
-                 ("v", rp.nkv, crate::rope::V_BITS)]
+                 ("v", rp.nkv, crate::gadgets::rope::V_BITS)]
                     .into_iter().enumerate()
             {
                 let mi = p.mats.iter().position(|m| m.name == name)
@@ -2117,7 +2117,7 @@ impl Plan {
                     rep: p.nh / heads,
                     n: m.n_out,
                     tokens: m.tokens,
-                    lay: crate::rope::q_layout(m.n_out, p.hd, m.tokens, p.deq_target),
+                    lay: crate::gadgets::rope::q_layout(m.n_out, p.hd, m.tokens, p.deq_target),
                     bits,
                     // q and k read a rotation's output; v reads its own dequant
                     producer: (i < 2).then(|| (g.ropes[i].add, 1)),
@@ -2157,7 +2157,7 @@ impl Plan {
             let g = residual_stream.as_ref()
                 .expect("`--embed` bindings to the wiring family's stream input; it needs the residual stream");
             assert!(p.embed_per_row > 0, "`--embed` needs a channel-block target");
-            crate::embed::EmbLayout::choose(g.t.d, p.s, p.embed_vocab, p.embed_per_row)
+            crate::gadgets::embed::EmbLayout::choose(g.t.d, p.s, p.embed_vocab, p.embed_per_row)
         });
         // stream NN: the diagonal block key tiles publish the K/Q/V claims
         let nn_key_tiles: Vec<usize> = if quants.is_empty() {
@@ -2351,14 +2351,14 @@ impl Plan {
             .is_some_and(|g| g.output_bindings.iter().any(|t| t.name == name && t.key_tile))
     }
 
-    pub fn output_claim_kind(&self, name: &str) -> crate::dequant::OKind {
+    pub fn output_claim_kind(&self, name: &str) -> crate::gadgets::dequant::OKind {
         if name == "lm_head" {
-            crate::dequant::OKind::Key
+            crate::gadgets::dequant::OKind::Key
         } else if self.is_fold(name) {
             // stream SS: the fold has no bf16 output to publish
-            crate::dequant::OKind::Int
+            crate::gadgets::dequant::OKind::Int
         } else {
-            crate::dequant::OKind::Pair
+            crate::gadgets::dequant::OKind::Pair
         }
     }
 
@@ -2423,7 +2423,7 @@ impl Plan {
                     put(key_tile_id(b, n), fam, lk.g.log_rows, needs, PreVaries::Block);
                 }
             }
-            if let Some(a) = crate::attn_air::act_id(b, self.diagonal_block[b], lk.g.lead) {
+            if let Some(a) = crate::gadgets::attention::air::act_id(b, self.diagonal_block[b], lk.g.lead) {
                 put(a, "key_tile/sel", lk.g.log_rows, PreNeeds::Params, PreVaries::Block);
             }
             if self.rows_key_tile[b] {
@@ -2459,7 +2459,7 @@ impl Plan {
                     PreVaries::Layer);
             }
             if self.has_output_claim(&m.name) {
-                for n in crate::dequant::DEQ_OSEL {
+                for n in crate::gadgets::dequant::DEQ_OSEL {
                     put(deq_sel(&m.name, n), "dequant/sel", lay.log_rows,
                         PreNeeds::Params, PreVaries::Layer);
                 }
@@ -2487,9 +2487,9 @@ impl Plan {
             let rope_mul: std::collections::BTreeSet<usize> =
                 g.ropes.iter().map(|r| r.mul).collect();
             for (ri, r) in g.components.iter().enumerate() {
-                put(crate::residual_stream::residual_stream_sel(&r.tag, "nofirst"),
+                put(crate::gadgets::residual_stream::residual_stream_sel(&r.tag, "nofirst"),
                     "residual_stream/sel", r.log_rows, PreNeeds::Params, PreVaries::Layer);
-                put(crate::residual_stream::residual_stream_sel(&r.tag, "end"),
+                put(crate::gadgets::residual_stream::residual_stream_sel(&r.tag, "end"),
                     "residual_stream/sel", r.log_rows, PreNeeds::Params, PreVaries::Layer);
                 let (fam, needs, varies) = if rope_mul.contains(&ri) {
                     ("rope/angle", PreNeeds::Params, PreVaries::Block)
@@ -2498,7 +2498,7 @@ impl Plan {
                 };
                 for i in 0..r.prog.n_pre {
                     for k in 0..2 {
-                        put(crate::residual_stream::residual_stream_pre_col(&r.tag, i, k), fam,
+                        put(crate::gadgets::residual_stream::residual_stream_pre_col(&r.tag, i, k), fam,
                             r.log_rows, needs, varies);
                     }
                 }
@@ -2539,18 +2539,18 @@ impl Plan {
             // the tables here cost a `2^(kmax+1)`-row `frac` on every call and
             // asserted `kmax >= DMAX + 1`, which a plan that carries a
             // residual-stream gadget it never proves need not satisfy.
-            let t = crate::residual_stream::ResidualStreamTables::log_sizes(self.round);
-            let mut logs: Vec<u32> = vec![t.pow; crate::residual_stream::POW_COLS.len()];
-            logs.extend(vec![t.smul; crate::residual_stream::SMUL_COLS.len()]);
-            logs.extend(vec![t.val; crate::residual_stream::VAL_COLS.len()]);
+            let t = crate::gadgets::residual_stream::ResidualStreamTables::log_sizes(self.round);
+            let mut logs: Vec<u32> = vec![t.pow; crate::gadgets::residual_stream::POW_COLS.len()];
+            logs.extend(vec![t.smul; crate::gadgets::residual_stream::SMUL_COLS.len()]);
+            logs.extend(vec![t.val; crate::gadgets::residual_stream::VAL_COLS.len()]);
             logs.extend(vec![t.un; 4 * g.uns.len()]);
-            for (gid, ls) in crate::residual_stream::residual_stream_table_ids(&g.uns).into_iter().zip(logs) {
+            for (gid, ls) in crate::gadgets::residual_stream::residual_stream_table_ids(&g.uns).into_iter().zip(logs) {
                 put(gid, "table/residual_stream", ls, PreNeeds::Params, PreVaries::Layer);
             }
         }
         for r in &self.rqs {
-            for n in crate::requant::RQ_SEL {
-                put(crate::requant::rq_sel(&r.name, n), "requant/sel", r.lay.log_rows,
+            for n in crate::gadgets::requant::RQ_SEL {
+                put(crate::gadgets::requant::rq_sel(&r.name, n), "requant/sel", r.lay.log_rows,
                     PreNeeds::Params, PreVaries::Layer);
             }
         }
@@ -2559,27 +2559,27 @@ impl Plan {
         // exponents are B1's own `s_q`/`s_k`/`s_v`, model constants of exactly
         // the kind the attention output's `jv` already was.
         for q in &self.quants {
-            for n in crate::rope::Q_SEL {
-                put(crate::rope::q_sel(q.name, n), "quant/sel", q.lay.log_rows,
+            for n in crate::gadgets::rope::Q_SEL {
+                put(crate::gadgets::rope::q_sel(q.name, n), "quant/sel", q.lay.log_rows,
                     PreNeeds::Params, PreVaries::Layer);
             }
             for sl in 0..q.lay.per_row {
-                put(crate::rope::q_scale_col(q.name, sl), "quant/scale", q.lay.log_rows,
+                put(crate::gadgets::rope::q_scale_col(q.name, sl), "quant/scale", q.lay.log_rows,
                     PreNeeds::Model, PreVaries::Layer);
             }
         }
         for sv in &self.rq_vars {
-            for k in 0..crate::requant::rq_tab_width(*sv) {
-                put(crate::requant::rq_tab_col(*sv, k), "table/requant",
-                    crate::requant::rq_log_rows(*sv), PreNeeds::Params, PreVaries::Layer);
+            for k in 0..crate::gadgets::requant::rq_tab_width(*sv) {
+                put(crate::gadgets::requant::rq_tab_col(*sv, k), "table/requant",
+                    crate::gadgets::requant::rq_log_rows(*sv), PreNeeds::Params, PreVaries::Layer);
             }
-            for k in 0..crate::requant::scl_tab_width(*sv) {
-                put(crate::requant::scl_tab_col(*sv, k), "table/requant", 15,
+            for k in 0..crate::gadgets::requant::scl_tab_width(*sv) {
+                put(crate::gadgets::requant::scl_tab_col(*sv, k), "table/requant", 15,
                     PreNeeds::Params, PreVaries::Layer);
             }
         }
         if self.needs_rq_rels() {
-            for c in crate::requant::RQV_COLS {
+            for c in crate::gadgets::requant::RQV_COLS {
                 put(id(c), "table/requant", 9, PreNeeds::Params, PreVaries::Layer);
             }
         }
@@ -2587,37 +2587,37 @@ impl Plan {
         // form of the side's width -- `Params::q_bits` and `Params::k_bits` --
         // so they need the statement's parameters and no model data at all.
         for w in &self.q_tabs {
-            for k in 0..crate::rope::QDIV_COLS {
-                put(crate::rope::qdiv_col(*w, k), "table/quant",
-                    crate::rope::qdiv_log_rows(*w), PreNeeds::Params, PreVaries::Layer);
+            for k in 0..crate::gadgets::rope::QDIV_COLS {
+                put(crate::gadgets::rope::qdiv_col(*w, k), "table/quant",
+                    crate::gadgets::rope::qdiv_log_rows(*w), PreNeeds::Params, PreVaries::Layer);
             }
         }
         if !self.quants.is_empty() {
             for k in 0..2 {
-                put(crate::rope::qnz_col(self.q_nz_bits, k), "table/quant",
-                    crate::rope::qnz_log_rows(self.q_nz_bits), PreNeeds::Params,
+                put(crate::gadgets::rope::qnz_col(self.q_nz_bits, k), "table/quant",
+                    crate::gadgets::rope::qnz_log_rows(self.q_nz_bits), PreNeeds::Params,
                     PreVaries::Layer);
             }
         }
         if let Some(mi) = self.argmax_mat() {
-            for n in crate::argmax::AM_SEL {
-                put(crate::argmax::id(n), "argmax/sel", self.mat_lays[mi].log_rows,
+            for n in crate::gadgets::argmax::AM_SEL {
+                put(crate::gadgets::argmax::id(n), "argmax/sel", self.mat_lays[mi].log_rows,
                     PreNeeds::Params, PreVaries::Layer);
             }
         }
         if let Some(l) = &self.emb {
-            for n in crate::embed::EMB_SEL {
-                put(crate::embed::id(n), "embed/sel", l.log_use, PreNeeds::Params,
+            for n in crate::gadgets::embed::EMB_SEL {
+                put(crate::gadgets::embed::id(n), "embed/sel", l.log_use, PreNeeds::Params,
                     PreVaries::Layer);
             }
-            put(crate::embed::cb_id(), "embed/sel", l.log_use, PreNeeds::Params,
+            put(crate::gadgets::embed::cb_id(), "embed/sel", l.log_use, PreNeeds::Params,
                 PreVaries::Layer);
-            put(crate::embed::tab_v_id(), "embed/table", l.log_tab, PreNeeds::Params,
+            put(crate::gadgets::embed::tab_v_id(), "embed/table", l.log_tab, PreNeeds::Params,
                 PreVaries::Layer);
-            put(crate::embed::tab_cb_id(), "embed/table", l.log_tab, PreNeeds::Params,
+            put(crate::gadgets::embed::tab_cb_id(), "embed/table", l.log_tab, PreNeeds::Params,
                 PreVaries::Layer);
             for k in 0..l.pe {
-                put(crate::embed::tab_e_id(k), "embed/table", l.log_tab, PreNeeds::Model,
+                put(crate::gadgets::embed::tab_e_id(k), "embed/table", l.log_tab, PreNeeds::Model,
                     PreVaries::Layer);
             }
         }
@@ -2763,7 +2763,7 @@ impl Plan {
             }
             // Stream CC (E11): the inert-lead-row selector closes the grid's
             // block, and exists only when the grid leaves such rows.
-            ids.extend(crate::attn_air::act_id(b, self.diagonal_block[b],
+            ids.extend(crate::gadgets::attention::air::act_id(b, self.diagonal_block[b],
                                                self.lays[b].key.g.lead));
             // Stream AA: the predicate is "does this key tile carry the per-token
             // component", not "is it a prefix key tile".  With `--kv-boundary` off the two
@@ -2796,7 +2796,7 @@ impl Plan {
             }
             ids.extend(DEQ_SEL.iter().map(|n| deq_sel(&m.name, n)));
             if self.has_output_claim(&m.name) {
-                ids.extend(crate::dequant::DEQ_OSEL.iter().map(|n| deq_sel(&m.name, n)));
+                ids.extend(crate::gadgets::dequant::DEQ_OSEL.iter().map(|n| deq_sel(&m.name, n)));
             }
         }
         for w in &self.freivalds {
@@ -2809,13 +2809,13 @@ impl Plan {
         }
         if let Some(g) = &self.residual_stream {
             for r in &g.components {
-                ids.push(crate::residual_stream::residual_stream_sel(&r.tag, "nofirst"));
-                ids.push(crate::residual_stream::residual_stream_sel(&r.tag, "end"));
+                ids.push(crate::gadgets::residual_stream::residual_stream_sel(&r.tag, "nofirst"));
+                ids.push(crate::gadgets::residual_stream::residual_stream_sel(&r.tag, "end"));
                 // stream II: then the component's own preprocessed values, in the
                 // order `residual_stream_component` appends their columns
                 for i in 0..r.prog.n_pre {
-                    ids.push(crate::residual_stream::residual_stream_pre_col(&r.tag, i, 0));
-                    ids.push(crate::residual_stream::residual_stream_pre_col(&r.tag, i, 1));
+                    ids.push(crate::gadgets::residual_stream::residual_stream_pre_col(&r.tag, i, 0));
+                    ids.push(crate::gadgets::residual_stream::residual_stream_pre_col(&r.tag, i, 1));
                 }
             }
         }
@@ -2830,55 +2830,55 @@ impl Plan {
         // that no table before it moves an index.
         ids.extend(EPOW_COLS.iter().map(|c| id(*c)));
         if let Some(g) = &self.residual_stream {
-            ids.extend(crate::residual_stream::residual_stream_table_ids(&g.uns));
+            ids.extend(crate::gadgets::residual_stream::residual_stream_table_ids(&g.uns));
         }
         // stream II: the requantize seams register before the two ends -- four selectors per
         // seam, then one division and one scale table per variant, then the
         // 257-row sign table.  Strictly last, so no family that exists today
         // moves an index.
         for r in &self.rqs {
-            ids.extend(crate::requant::RQ_SEL.iter()
-                       .map(|n| crate::requant::rq_sel(&r.name, n)));
+            ids.extend(crate::gadgets::requant::RQ_SEL.iter()
+                       .map(|n| crate::gadgets::requant::rq_sel(&r.name, n)));
         }
         // stream NN: and the quantize components -- three selectors, then one
         // preprocessed scale exponent per slot, in `rope::q_component`'s own order
         for q in &self.quants {
-            ids.extend(crate::rope::Q_SEL.iter().map(|n| crate::rope::q_sel(q.name, n)));
-            ids.extend((0..q.lay.per_row).map(|sl| crate::rope::q_scale_col(q.name, sl)));
+            ids.extend(crate::gadgets::rope::Q_SEL.iter().map(|n| crate::gadgets::rope::q_sel(q.name, n)));
+            ids.extend((0..q.lay.per_row).map(|sl| crate::gadgets::rope::q_scale_col(q.name, sl)));
         }
         for v in &self.rq_vars {
-            ids.extend((0..crate::requant::rq_tab_width(*v))
-                       .map(|k| crate::requant::rq_tab_col(*v, k)));
-            ids.extend((0..crate::requant::scl_tab_width(*v))
-                       .map(|k| crate::requant::scl_tab_col(*v, k)));
+            ids.extend((0..crate::gadgets::requant::rq_tab_width(*v))
+                       .map(|k| crate::gadgets::requant::rq_tab_col(*v, k)));
+            ids.extend((0..crate::gadgets::requant::scl_tab_width(*v))
+                       .map(|k| crate::gadgets::requant::scl_tab_col(*v, k)));
         }
         if self.needs_rq_rels() {
-            ids.extend(crate::requant::RQV_COLS.iter().map(|c| id(*c)));
+            ids.extend(crate::gadgets::requant::RQV_COLS.iter().map(|c| id(*c)));
         }
         // stream NN-3: the quantize family's own tables, after the seams' and
         // the sign table -- one division table per side width, then the shared
         // `(q, nz)` pair table
         for w in &self.q_tabs {
-            ids.extend((0..crate::rope::QDIV_COLS).map(|k| crate::rope::qdiv_col(*w, k)));
+            ids.extend((0..crate::gadgets::rope::QDIV_COLS).map(|k| crate::gadgets::rope::qdiv_col(*w, k)));
         }
         if !self.quants.is_empty() {
-            ids.extend((0..2).map(|k| crate::rope::qnz_col(self.q_nz_bits, k)));
+            ids.extend((0..2).map(|k| crate::gadgets::rope::qnz_col(self.q_nz_bits, k)));
         }
         // stream E: the argmax component's own three selectors, last, so that no
         // family before it moves an index
         if self.argmax_mat().is_some() {
-            ids.extend(crate::argmax::AM_SEL.iter().map(|n| crate::argmax::id(n)));
+            ids.extend(crate::gadgets::argmax::AM_SEL.iter().map(|n| crate::gadgets::argmax::id(n)));
         }
         // stream BB: the embedding gadget's own columns -- the use component's four
         // selectors and its block index, then the table's index pair and its
         // `pe` value columns.  After the argmax and before the GKR backend's, so no
         // family that exists today moves an index.
         if let Some(l) = &self.emb {
-            ids.extend(crate::embed::EMB_SEL.iter().map(|n| crate::embed::id(n)));
-            ids.push(crate::embed::cb_id());
-            ids.push(crate::embed::tab_v_id());
-            ids.push(crate::embed::tab_cb_id());
-            ids.extend((0..l.pe).map(crate::embed::tab_e_id));
+            ids.extend(crate::gadgets::embed::EMB_SEL.iter().map(|n| crate::gadgets::embed::id(n)));
+            ids.push(crate::gadgets::embed::cb_id());
+            ids.push(crate::gadgets::embed::tab_v_id());
+            ids.push(crate::gadgets::embed::tab_cb_id());
+            ids.extend((0..l.pe).map(crate::gadgets::embed::tab_e_id));
         }
         // B11 stream S, lever 3: the link heights' boundary selectors, after
         // everything -- they exist only on the GKR backend, so the flag-off tree
@@ -2994,15 +2994,15 @@ pub struct BuiltComponents {
     pub tables: Vec<FrameworkComponent<TableEval>>,
     pub gtables: Vec<FrameworkComponent<GTableEval>>,
     /// stream E: the argmax component, last of all, so adding it moves nothing
-    pub argmax: Option<FrameworkComponent<crate::argmax::ArgmaxEval>>,
+    pub argmax: Option<FrameworkComponent<crate::gadgets::argmax::ArgmaxEval>>,
     /// stream BB: the embedding gadget's two components, after the argmax and
     /// after everything else, in this order -- the use side then the table side
-    pub embed: Option<FrameworkComponent<crate::embed::EmbedEval>>,
-    pub emb_tab: Option<FrameworkComponent<crate::embed::EmbTableEval>>,
+    pub embed: Option<FrameworkComponent<crate::gadgets::embed::EmbedEval>>,
+    pub emb_tab: Option<FrameworkComponent<crate::gadgets::embed::EmbTableEval>>,
     /// stream II: the requantize seams and their tables, after everything else
-    pub rqs: Vec<FrameworkComponent<crate::requant::RequantEval>>,
+    pub rqs: Vec<FrameworkComponent<crate::gadgets::requant::RequantEval>>,
     /// stream NN: the q/k/v quantize components, in `Plan::quants` order
-    pub quants: Vec<FrameworkComponent<crate::rope::QuantEval>>,
+    pub quants: Vec<FrameworkComponent<crate::gadgets::rope::QuantEval>>,
     pub rq_tabs: Vec<FrameworkComponent<TableEval>>,
     pub pows: Vec<Powers>,
     /// per key tile, in `chans`/`keys` order: does it have a per-token component?  A
@@ -3011,117 +3011,57 @@ pub struct BuiltComponents {
     pub has_rows: Vec<bool>,
 }
 
+/// One pass over a chunk's components, in commit order.
+///
+/// A trait and not an iterator because what a caller wants from a component is
+/// not always the component: two of the three want the *evaluator*, and the
+/// generated kernel a chunk dispatches is looked up by that evaluator's own
+/// type, which an iterator would have had to erase.
+pub trait Visit<'a> {
+    /// One component of `family`, with its evaluator still typed.
+    fn at<E: FrameworkEval + Sync>(&mut self, family: &'static str,
+                                   c: &'a FrameworkComponent<E>);
+    /// The GKR link binding: a component that carries no evaluator of its own,
+    /// so it has no generated kernel and the callers that want one skip it.
+    fn tie(&mut self, _family: &'static str, _t: &'a crate::gkrlink::LinkTie) {}
+}
+
 impl BuiltComponents {
     /// B7a milestone 3: lower every component's constraints to its kernel
     /// parameter blob once, in parallel, before proving. The fork calls
     /// `cuda_eval_blob()` from its sequential component loop, which put the
     /// whole lowering on one thread with the device idle (16.5's 85 ms).
-    /// One list of closures over the *evals*, then one `par_iter`.
+    ///
+    /// The list has to be *every* dispatched component, which is why it is
+    /// `walk`'s list and no longer a copy of it. `cudagen`'s blob cache is keyed
+    /// by the evaluator's address, and the pipelined loop proves 32 chunks in
+    /// one process, so a chunk's components are dropped and the next chunk's are
+    /// allocated over the same addresses: a component that *is* prewarmed
+    /// overwrites the stale entry before anything dispatches it, and one that is
+    /// not can only read what another family left there. That is a correctness
+    /// matter and not a speed one, and stream X measured it -- while five of
+    /// thirteen families were missing from the copy this kept, two runs in nine
+    /// stopped at one of the generated dispatch's own checks. Fail-stop, so no
+    /// digest was ever reached from it, which is why every completed run has
+    /// reproduced stream O's references.
     ///
     /// Not `par_iter` over the components: `FrameworkComponent` holds an
     /// `InfoEvaluator`, whose `ArithmeticCounter` is an `Rc<RefCell<..>>`
     /// (`constraint-framework/src/info.rs:166`), so a component is `!Sync` and
-    /// cannot cross a thread boundary. The evals themselves are plain data.
+    /// cannot cross a thread boundary. The evaluators themselves are plain data.
     pub fn prewarm_blobs(&self) {
         use rayon::prelude::*;
-        let mut tasks: Vec<Box<dyn Fn() + Send + Sync + '_>> = Vec::new();
-        for c in &self.chans {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
+        struct Tasks<'a>(Vec<Box<dyn Fn() + Send + Sync + 'a>>);
+        impl<'a> Visit<'a> for Tasks<'a> {
+            fn at<E: FrameworkEval + Sync>(&mut self, _f: &'static str,
+                                           c: &'a FrameworkComponent<E>) {
+                let e = &c.eval;
+                self.0.push(Box::new(move || crate::cudagen::prewarm(e)));
+            }
         }
-        for c in &self.keys {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.rows {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.mats {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.freivalds {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.tables {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        let ao = &self.ao.eval;
-        tasks.push(Box::new(move || crate::cudagen::prewarm(ao)));
-        let exp_t = &self.exp_t.eval;
-        tasks.push(Box::new(move || crate::cudagen::prewarm(exp_t)));
-        // B11 stream X: the list has to be *every* dispatched component, and
-        // until here it was eight of thirteen -- the residual stream, the residual stream's tables,
-        // the links and the argmax were dispatched but never prewarmed.
-        //
-        // That is a correctness matter and not a speed one. `cudagen`'s blob
-        // cache is keyed by the evaluator's address, on the stated assumption
-        // that an address is "stable for as long as its `FrameworkComponent`
-        // lives -- i.e. for the whole proof". The pipelined loop proves 32
-        // chunks in one process, so a chunk's components are dropped and the
-        // next chunk's are allocated over the same addresses. A component that
-        // *is* prewarmed overwrites the stale entry at its address before
-        // anything dispatches it, so it is safe by construction; a component
-        // that is dispatched but never prewarmed can only ever *read* an entry
-        // some other family wrote in an earlier chunk. Measured at C=4096 over
-        // the 32-chunk pipelined loop, that happened twice in nine runs, and
-        // both times in exactly one of the five families missing here:
-        // `evaluate_zk_residual_stream_eval: scalar count` and
-        // `evaluate_zk_residual_stream_table_eval: shape id out of range`. Both are the
-        // generated dispatch's own checks, so the failure is fail-stop and
-        // cannot reach a digest -- which is why every completed run has always
-        // reproduced stream O's references. Completing the list restores the
-        // invariant the cache's comment already claims.
-        for c in &self.residual_stream {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.gtables {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.links {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        if let Some(c) = &self.argmax {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        // B11 stream BB: and the embedding gadget's two, in the commit that
-        // adds them. The list has to be every dispatched component: a
-        // component that is dispatched but never prewarmed can only read the
-        // blob some other family left at its address, and the pipelined loop
-        // reuses addresses across chunks. Stream X measured that failing twice
-        // in nine runs on the five families that were missing then.
-        if let Some(c) = &self.embed {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        // stream II: and the requantize seams'.  Every dispatched component has
-        // to be here: the blob cache is keyed by the evaluator's address and the
-        // pipelined loop reuses addresses across chunks, so a component that is
-        // dispatched but never prewarmed can only read what another family left.
-        for c in &self.rqs {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.quants {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        for c in &self.rq_tabs {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        if let Some(c) = &self.emb_tab {
-            let e = &c.eval;
-            tasks.push(Box::new(move || crate::cudagen::prewarm(e)));
-        }
-        tasks.par_iter().for_each(|t| t());
+        let mut t = Tasks(vec![]);
+        self.walk(&mut t);
+        t.0.par_iter().for_each(|f| f());
     }
 
     /// Stream EE (open item 21): the fingerprint every dispatched component
@@ -3179,124 +3119,134 @@ impl BuiltComponents {
         if let Some(c) = &self.emb_tab {
             v.push(crate::cudagen::fp_row(&c.eval, "emb_table"));
         }
+        // The order above is `cudaemit`'s and not `walk`'s, but the *list* is
+        // the same one: a family added to `walk` and forgotten here would be a
+        // row `cudaemit` printed and this did not.
+        assert_eq!(v.len(), self.n_evals(),
+                   "the fingerprint report covers {} of this chunk's {} components \
+                    that carry an evaluator",
+                   v.len(), self.n_evals());
         v
     }
 
-    pub fn provers(&self) -> Vec<&dyn ComponentProver<crate::common::PcsB>> {
-        let mut v: Vec<&dyn ComponentProver<_>> = vec![];
+    /// Every component of this chunk, in commit order.
+    ///
+    /// That order is the one `build_components` handed the trace location
+    /// allocator, so it is the order the proof is over and therefore the order
+    /// the digest is of: a family inserted anywhere but the end moves every
+    /// digest after it.
+    ///
+    /// It is written here once because it was written four times. `provers`,
+    /// `components` and `prewarm_blobs` each carried a copy, and stream X
+    /// measured what one missing family in one copy costs -- five of thirteen
+    /// were missing from `prewarm_blobs`, and two runs in nine stopped at
+    /// `evaluate_zk_residual_stream_eval: scalar count` off a blob another chunk
+    /// had left at the same address. `fp_rows` keeps an order of its own,
+    /// because `cudaemit`'s report is compared against it line for line, but it
+    /// checks its length against this list rather than trusting it.
+    pub fn walk<'a, V: Visit<'a>>(&'a self, v: &mut V) {
         let mut ri = 0usize;
         for b in 0..self.chans.len() {
-            v.push(&self.chans[b]);
-            v.push(&self.keys[b]);
+            v.at("chan", &self.chans[b]);
+            v.at("key", &self.keys[b]);
+            // stream AA: a key tile without the group's per-token component rides
+            // on the group's first, so `rows` is shorter than `chans`
             if self.has_rows[b] {
-                v.push(&self.rows[ri]);
+                v.at("row", &self.rows[ri]);
                 ri += 1;
             }
         }
-        for l in &self.links {
-            v.push(l);
+        for c in &self.links {
+            v.at("link", c);
         }
         if let Some(t) = &self.link_binding {
-            v.push(t);
+            v.tie("link_binding", t);
         }
-        v.push(&self.ao);
-        for m in &self.mats {
-            v.push(m);
+        v.at("attnout", &self.ao);
+        for c in &self.mats {
+            v.at("dequant", c);
         }
-        for w in &self.freivalds {
-            v.push(w);
+        for c in &self.freivalds {
+            v.at("freivalds", c);
         }
-        for g in &self.residual_stream {
-            v.push(g);
+        for c in &self.residual_stream {
+            v.at("residual_stream", c);
         }
-        v.push(&self.exp_t);
-        for t in &self.tables {
-            v.push(t);
+        v.at("exp_table", &self.exp_t);
+        for c in &self.tables {
+            v.at("table", c);
         }
-        for t in &self.gtables {
-            v.push(t);
+        for c in &self.gtables {
+            v.at("gtable", c);
         }
         // stream II: the requantize seams and their tables, before the two ends,
-        // as `Plan::pre_ids` has them
-        for r in &self.rqs {
-            v.push(r);
+        // as `Plan::pre_ids` has them; stream NN puts the quantize components
+        // between the seams and the shared tables, where their selectors are too
+        for c in &self.rqs {
+            v.at("requant", c);
         }
-        // stream NN: the quantize components sit between the seams and their shared
-        // tables, which is where `Plan::pre_ids` puts their selectors too
-        for r in &self.quants {
-            v.push(r);
+        for c in &self.quants {
+            v.at("quant", c);
         }
-        for t in &self.rq_tabs {
-            v.push(t);
+        for c in &self.rq_tabs {
+            v.at("rqtable", c);
         }
-        if let Some(a) = &self.argmax {
-            v.push(a);
+        if let Some(c) = &self.argmax {
+            v.at("argmax", c);
         }
-        if let Some(e) = &self.embed {
-            v.push(e);
+        if let Some(c) = &self.embed {
+            v.at("embed", c);
         }
-        if let Some(e) = &self.emb_tab {
-            v.push(e);
+        if let Some(c) = &self.emb_tab {
+            v.at("emb_table", c);
         }
-        v
     }
-    pub fn components(&self) -> Vec<&dyn Component> {
-        let mut v: Vec<&dyn Component> = vec![];
-        let mut ri = 0usize;
-        for b in 0..self.chans.len() {
-            v.push(&self.chans[b]);
-            v.push(&self.keys[b]);
-            if self.has_rows[b] {
-                v.push(&self.rows[ri]);
-                ri += 1;
+
+    /// How many of `walk`'s components carry an evaluator: all of them but the
+    /// link binding.
+    pub fn n_evals(&self) -> usize {
+        struct Count(usize);
+        impl<'a> Visit<'a> for Count {
+            fn at<E: FrameworkEval + Sync>(&mut self, _f: &'static str,
+                                           _c: &'a FrameworkComponent<E>) {
+                self.0 += 1;
             }
         }
-        for l in &self.links {
-            v.push(l);
+        let mut c = Count(0);
+        self.walk(&mut c);
+        c.0
+    }
+
+    pub fn provers(&self) -> Vec<&dyn ComponentProver<crate::common::PcsB>> {
+        struct Take<'a>(Vec<&'a dyn ComponentProver<crate::common::PcsB>>);
+        impl<'a> Visit<'a> for Take<'a> {
+            fn at<E: FrameworkEval + Sync>(&mut self, _f: &'static str,
+                                           c: &'a FrameworkComponent<E>) {
+                self.0.push(c);
+            }
+            fn tie(&mut self, _f: &'static str, t: &'a crate::gkrlink::LinkTie) {
+                self.0.push(t);
+            }
         }
-        if let Some(t) = &self.link_binding {
-            v.push(t);
+        let mut t = Take(vec![]);
+        self.walk(&mut t);
+        t.0
+    }
+
+    pub fn components(&self) -> Vec<&dyn Component> {
+        struct Take<'a>(Vec<&'a dyn Component>);
+        impl<'a> Visit<'a> for Take<'a> {
+            fn at<E: FrameworkEval + Sync>(&mut self, _f: &'static str,
+                                           c: &'a FrameworkComponent<E>) {
+                self.0.push(c);
+            }
+            fn tie(&mut self, _f: &'static str, t: &'a crate::gkrlink::LinkTie) {
+                self.0.push(t);
+            }
         }
-        v.push(&self.ao);
-        for m in &self.mats {
-            v.push(m);
-        }
-        for w in &self.freivalds {
-            v.push(w);
-        }
-        for g in &self.residual_stream {
-            v.push(g);
-        }
-        v.push(&self.exp_t);
-        for t in &self.tables {
-            v.push(t);
-        }
-        for t in &self.gtables {
-            v.push(t);
-        }
-        // stream II: the requantize seams and their tables, before the two ends,
-        // as `Plan::pre_ids` has them
-        for r in &self.rqs {
-            v.push(r);
-        }
-        // stream NN: the quantize components sit between the seams and their shared
-        // tables, which is where `Plan::pre_ids` puts their selectors too
-        for r in &self.quants {
-            v.push(r);
-        }
-        for t in &self.rq_tabs {
-            v.push(t);
-        }
-        if let Some(a) = &self.argmax {
-            v.push(a);
-        }
-        if let Some(e) = &self.embed {
-            v.push(e);
-        }
-        if let Some(e) = &self.emb_tab {
-            v.push(e);
-        }
-        v
+        let mut t = Take(vec![]);
+        self.walk(&mut t);
+        t.0
     }
 }
 
@@ -3521,7 +3471,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                             .position(|t| t.name == m.name)
                             .and_then(|k| claims.deq_out.get(k).copied())
                     };
-                    crate::dequant::OutputClaim {
+                    crate::gadgets::dequant::OutputClaim {
                         w: ow.w,
                         lam: ow.lam,
                         k_in: ow.k_in,
@@ -3544,7 +3494,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 sside: (plan.rqs.iter()
                         .any(|rp| plan.freivalds[rp.freivalds].mats.contains(&mi))
                         && plan.specs[mi].variant != DeqVariant::Fold)
-                    .then(|| crate::dequant::SSide {
+                    .then(|| crate::gadgets::dequant::SSide {
                         mu: w_residual_stream,
                         lam: lam_residual_stream,
                         claimed: claim_at(claims.deq_sc.get(mi).copied(), "deq_sc"),
@@ -3607,14 +3557,14 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                     // the `chunks - 1` in-channel steps of that channel undone.
                     if w.name == "o" {
                         let (spow, sstep) = powers(s, w.lay.pq);
-                        return crate::freivalds::FreivaldsQx {
+                        return crate::gadgets::freivalds::FreivaldsQx {
                             w: spow,
                             m_in: sstep,
                             m_bd: rv * sstep.inverse().pow(w.lay.g.chunks as u128 - 1),
                             claimed,
                         };
                     }
-                    crate::freivalds::FreivaldsQx {
+                    crate::gadgets::freivalds::FreivaldsQx {
                         w: (0..w.lay.pq).map(|pp| wpow(w_residual_stream, nn - 1 - pp as i128)).collect(),
                         m_in: wpow(w_residual_stream, -(w.lay.pq as i128)),
                         m_bd: wpow(w_residual_stream, (w.lay.pq as i128) * (w.lay.g.chunks as i128 - 1)
@@ -3725,7 +3675,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                                 let tag = &plan.residual_stream.as_ref()
                                     .expect("a residual-stream column with no residual-stream plan")
                                     .components[*g].tag;
-                                let want = crate::residual_stream::residual_stream_pre_col(tag, *i, *k).id;
+                                let want = crate::gadgets::residual_stream::residual_stream_pre_col(tag, *i, *k).id;
                                 let gi = pre_ids_all.iter().position(|x| x.id == want)
                                     .expect("a residual-stream preprocessed column missing \
                                             from the preprocessed trees");
@@ -3774,7 +3724,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                                  span_of(mats[*m].trace_locations(), crate::common::BASE_TREE) + i),
                             RCol::DeqPre(sl) => {
                                 let want =
-                                    crate::dequant::chan_col(&p.mats[*m].name, "m", *sl).id;
+                                    crate::gadgets::dequant::chan_col(&p.mats[*m].name, "m", *sl).id;
                                 let g = pre_ids_all.iter().position(|x| x.id == want)
                                     .expect("a dequant weight-scale column missing \
                                              from the preprocessed trees");
@@ -3796,7 +3746,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                         (crate::common::BASE_TREE,
                          span_of(rows[row_of[key_tile]].trace_locations(), crate::common::BASE_TREE) + i),
                     RCol::Msk(i) => {
-                        let want = crate::attn_air::msk_id(key_tile, *i).id;
+                        let want = crate::gadgets::attention::air::msk_id(key_tile, *i).id;
                         let g = pre_ids_all.iter().position(|x| x.id == want)
                             .expect("a diagonal block mask the preprocessed trees do not carry");
                         pre_idx.push(g);
@@ -3861,7 +3811,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     if let (Some(gp), Some(gr)) = (&plan.residual_stream, &rels.residual_stream) {
         let base = 6 + plan.widths.len();
         for (t, (lr, cols, kind)) in
-            crate::residual_stream::residual_stream_table_kinds(&gp.uns, gr).into_iter().enumerate()
+            crate::gadgets::residual_stream::residual_stream_table_kinds(&gp.uns, gr).into_iter().enumerate()
         {
             gtables.push(FrameworkComponent::<GTableEval>::new(
                 alloc,
@@ -3884,9 +3834,9 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                                        claim_at(claims.rq_in.get(k).copied(), "rq_in"),
                                        claim_at(claims.rq_out.get(k).copied(), "rq_out"),
                                        claim_at(claims.rq_sc.get(k).copied(), "rq_sc"));
-            rq_comps.push(FrameworkComponent::<crate::requant::RequantEval>::new(
+            rq_comps.push(FrameworkComponent::<crate::gadgets::requant::RequantEval>::new(
                 alloc,
-                crate::requant::RequantEval {
+                crate::gadgets::requant::RequantEval {
                     tag: rp.name.clone(),
                     log_rows: rp.lay.log_rows,
                     per_row: rp.lay.per_row,
@@ -3914,9 +3864,9 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             // stream NN-3: this side's own division table, and the family's own
             // `(q, nz)` table rather than the attention output's
             let qr = rels.qq.as_ref().expect("the quantize components draw their own tables");
-            quant_comps.push(FrameworkComponent::<crate::rope::QuantEval>::new(
+            quant_comps.push(FrameworkComponent::<crate::gadgets::rope::QuantEval>::new(
                 alloc,
-                crate::rope::QuantEval {
+                crate::gadgets::rope::QuantEval {
                     tag: qp.name.to_string(),
                     log_rows: qp.lay.log_rows,
                     per_row: qp.lay.per_row,
@@ -3937,10 +3887,10 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             rq_tabs.push(FrameworkComponent::<TableEval>::new(
                 alloc,
                 TableEval {
-                    log_rows: crate::requant::rq_log_rows(*v),
-                    cols: (0..crate::requant::rq_tab_width(*v))
-                        .map(|k| crate::requant::rq_tab_col(*v, k)).collect(),
-                    kind: if *v == crate::requant::SVariant::Pow2 {
+                    log_rows: crate::gadgets::requant::rq_log_rows(*v),
+                    cols: (0..crate::gadgets::requant::rq_tab_width(*v))
+                        .map(|k| crate::gadgets::requant::rq_tab_col(*v, k)).collect(),
+                    kind: if *v == crate::gadgets::requant::SVariant::Pow2 {
                         TableKind::Frac(rr.rq3.clone())
                     } else {
                         TableKind::Mul(rr.rq4.clone())
@@ -3953,9 +3903,9 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
                 alloc,
                 TableEval {
                     log_rows: 15,
-                    cols: (0..crate::requant::scl_tab_width(*v))
-                        .map(|k| crate::requant::scl_tab_col(*v, k)).collect(),
-                    kind: if *v == crate::requant::SVariant::Pow2 {
+                    cols: (0..crate::gadgets::requant::scl_tab_width(*v))
+                        .map(|k| crate::gadgets::requant::scl_tab_col(*v, k)).collect(),
+                    kind: if *v == crate::gadgets::requant::SVariant::Pow2 {
                         TableKind::Pair(rr.scl2.clone())
                     } else {
                         TableKind::Frac(rr.scl3.clone())
@@ -3968,7 +3918,7 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
         rq_tabs.push(FrameworkComponent::<TableEval>::new(
             alloc,
             TableEval { log_rows: 9,
-                        cols: crate::requant::RQV_COLS.iter().map(|c| id(*c)).collect(),
+                        cols: crate::gadgets::requant::RQV_COLS.iter().map(|c| id(*c)).collect(),
                         kind: TableKind::Frac(rr.rqv.clone()) },
             unqm(claims.table_sums[base + t]),
         ));
@@ -3979,9 +3929,9 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             for (i, w) in plan.q_tabs.iter().enumerate() {
                 rq_tabs.push(FrameworkComponent::<TableEval>::new(
                     alloc,
-                    TableEval { log_rows: crate::rope::qdiv_log_rows(*w),
-                                cols: (0..crate::rope::QDIV_COLS)
-                                    .map(|k| crate::rope::qdiv_col(*w, k)).collect(),
+                    TableEval { log_rows: crate::gadgets::rope::qdiv_log_rows(*w),
+                                cols: (0..crate::gadgets::rope::QDIV_COLS)
+                                    .map(|k| crate::gadgets::rope::qdiv_col(*w, k)).collect(),
                                 kind: TableKind::Frac(qr.div[i].clone()) },
                     unqm(claims.table_sums[base + t]),
                 ));
@@ -3989,8 +3939,8 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
             }
             rq_tabs.push(FrameworkComponent::<TableEval>::new(
                 alloc,
-                TableEval { log_rows: crate::rope::qnz_log_rows(plan.q_nz_bits),
-                            cols: (0..2).map(|k| crate::rope::qnz_col(plan.q_nz_bits, k))
+                TableEval { log_rows: crate::gadgets::rope::qnz_log_rows(plan.q_nz_bits),
+                            cols: (0..2).map(|k| crate::gadgets::rope::qnz_col(plan.q_nz_bits, k))
                                 .collect(),
                             kind: TableKind::Pair(qr.qnz.clone()) },
                 unqm(claims.table_sums[base + t]),
@@ -4004,19 +3954,19 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     let argmax = plan.argmax_mat().map(|mi| {
         let lay = plan.mat_lays[mi];
         let m = &plan.p.mats[mi];
-        let binding = crate::argmax::ArgmaxBinding {
+        let binding = crate::gadgets::argmax::ArgmaxBinding {
             claimed: claim_at(claims.am_key.first().copied(), "am_key"),
             claimed_tok: claim_at(claims.head_tok.first().copied(), "head_tok"),
             tag: m.name.clone(),
             ..argmax_binding_w(w_residual_stream, m.tokens, m.n_out, lay.per_row)
         };
-        FrameworkComponent::<crate::argmax::ArgmaxEval>::new(
+        FrameworkComponent::<crate::gadgets::argmax::ArgmaxEval>::new(
             alloc,
-            crate::argmax::ArgmaxEval {
+            crate::gadgets::argmax::ArgmaxEval {
                 log_rows: lay.log_rows,
                 per_row: lay.per_row,
                 lax: plan.p.prove_argmax_lax,
-                rk: rels.range(crate::argmax::KEY_BITS).clone(),
+                rk: rels.range(crate::gadgets::argmax::KEY_BITS).clone(),
                 binding: Some(binding),
             },
             next_use(claims),
@@ -4031,23 +3981,23 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
     let (embed, emb_tab) = match (&plan.emb, &rels.emb) {
         (Some(l), Some(er)) => {
             let g = plan.residual_stream.as_ref().expect("the embedding gadget needs the wiring family");
-            let mut binding = crate::embed::binding_w(w_residual_stream, lam_residual_stream, g.t.d, p.s, l);
+            let mut binding = crate::gadgets::embed::binding_w(w_residual_stream, lam_residual_stream, g.t.d, p.s, l);
             binding.claimed = claim_at(claims.embed_out.first().copied(), "embed_out");
             binding.claimed_tok = claim_at(claims.embed_tok.first().copied(), "embed_tok");
-            let em = FrameworkComponent::<crate::embed::EmbedEval>::new(
+            let em = FrameworkComponent::<crate::gadgets::embed::EmbedEval>::new(
                 alloc,
-                crate::embed::EmbedEval {
+                crate::gadgets::embed::EmbedEval {
                     log_rows: l.log_use,
                     per_row: l.pe,
                     rel: er.clone(),
-                    rel_ef: rels.range(crate::embed::EF_BITS).clone(),
+                    rel_ef: rels.range(crate::gadgets::embed::EF_BITS).clone(),
                     binding,
                 },
                 next_use(claims),
             );
-            let et = FrameworkComponent::<crate::embed::EmbTableEval>::new(
+            let et = FrameworkComponent::<crate::gadgets::embed::EmbTableEval>::new(
                 alloc,
-                crate::embed::EmbTableEval { log_rows: l.log_tab, per_row: l.pe,
+                crate::gadgets::embed::EmbTableEval { log_rows: l.log_tab, per_row: l.pe,
                                              rel: er.clone() },
                 unqm(claims.table_sums[plan.emb_table_at()]),
             );
@@ -4100,10 +4050,10 @@ pub fn build_components_linked(plan: &Plan, rels: &Rels, r: SecureField, s: Secu
 /// where the dequant's descends, so the ordinary row step is the *inverse* of the
 /// output side's and the boundary step differs in the token term's sign.
 fn argmax_binding_w(w: SecureField, tokens: usize, vocab: usize, per_row: usize)
-                -> crate::argmax::ArgmaxBinding {
+                -> crate::gadgets::argmax::ArgmaxBinding {
     let n = (tokens * vocab) as i128;
     let (tok, pr, v) = (tokens as i128, per_row as i128, vocab as i128);
-    crate::argmax::ArgmaxBinding {
+    crate::gadgets::argmax::ArgmaxBinding {
         w: (0..per_row)
             .map(|sl| wpow(w, n - 1 - (v - pr) * tok - sl as i128 * tok))
             .collect(),
@@ -4160,7 +4110,7 @@ pub struct ProverTamper {
     /// the component stays consistent, so what has to reject is the binding.
     pub residual_stream_copy: Option<(usize, usize)>,
     /// a tamper inside one residual-stream component's arithmetic, by component index
-    pub residual_stream: Option<(usize, crate::residual_stream::Tamper)>,
+    pub residual_stream: Option<(usize, crate::gadgets::residual_stream::Tamper)>,
     /// Stream H: corrupt one cell of *one* boundary tree, leaving the component it
     /// is bound to alone -- `(which side, which cell)`, side 0 being the input
     /// and side 1 the output.  Nothing else in the chunk changes, so what has to
@@ -4181,7 +4131,7 @@ pub struct ProverTamper {
     /// Stream II: a probe inside one requantize seam -- `(seam index, what)`.
     /// Each leaves the component internally consistent and aims at one of its two
     /// bindings, or at the scale lookup.
-    pub rq: Option<(usize, crate::requant::RqTamper)>,
+    pub rq: Option<(usize, crate::gadgets::requant::RqTamper)>,
     /// Stream II, control 3: bend one cell of a norm scale's *preprocessed*
     /// weight block.  The component recomputes `h` from the bent weight, so every
     /// constraint holds and a committed root is what moves -- and the weight is
@@ -4198,19 +4148,19 @@ pub struct ProverTamper {
     /// Stream NN: a probe inside one quantize component -- `(component index, what)`.
     /// Each leaves the component internally consistent and aims at one of its two
     /// bindings, at the division table, or at `pre_root`.
-    pub quant: Option<(usize, crate::rope::QTamper)>,
+    pub quant: Option<(usize, crate::gadgets::rope::QTamper)>,
     /// Stream NN: bend one cell of a **key tile's** own committed K, Q or V and
     /// rebuild the key tile around it, so the attention it proves is honest and the
     /// only thing that can see it is the key tile's new claim against the quantize
     /// component's output.  `(which of K/Q/V, which cell)`.
     pub key_tile_qkv: Option<(usize, usize)>,
     /// Stream E: a tamper inside the composed argmax component
-    pub argmax: Option<crate::argmax::Tamper>,
+    pub argmax: Option<crate::gadgets::argmax::Tamper>,
     /// Stream BB: a tamper inside the composed embedding component.  `TokRow` is
     /// the aimed one -- the id moved to another valid entry with the committed
     /// row recomputed to match, so every constraint inside the component holds and
     /// only the binding to the layer's `bin` rejects.
-    pub embed: Option<crate::embed::Tamper>,
+    pub embed: Option<crate::gadgets::embed::Tamper>,
     /// Stream Z, the four wired-site bends.  Each bends exactly one committed
     /// cell after the honest value is derived, so the constraint that pins the
     /// cell is the one that has to reject.  `fold_qm` bends a fold slot's
@@ -4281,18 +4231,18 @@ pub struct Gen {
     pub freivalds_components: Vec<crate::layer::FreivaldsComponent>,
     // The residual-stream family, which postdates the split: its components, the owned
     // columns of its shared tables, and its against-B1 summary.
-    pub residual_stream_components: Vec<crate::residual_stream::ResidualStreamComponent>,
+    pub residual_stream_components: Vec<crate::gadgets::residual_stream::ResidualStreamComponent>,
     pub residual_stream_tcols: Vec<Eval>,
     pub residual_stream_mcols: Vec<Eval>,
     pub residual_stream_b1: Value,
     /// stream E: the argmax component, when it is composed
-    pub am_component: Option<crate::argmax::AComponent>,
+    pub am_component: Option<crate::gadgets::argmax::AComponent>,
     /// stream BB: the embedding gadget's two components, when it is composed
-    pub emb_component: Option<crate::embed::EComponent>,
+    pub emb_component: Option<crate::gadgets::embed::EComponent>,
     /// stream II: the requantize seams, in `Plan::rqs` order
-    pub rq_components: Vec<crate::requant::RqComponent>,
+    pub rq_components: Vec<crate::gadgets::requant::RqComponent>,
     /// stream NN: the quantize components, in `Plan::quants` order
-    pub q_components: Vec<crate::rope::QComponent>,
+    pub q_components: Vec<crate::gadgets::rope::QComponent>,
     pub n_deq_base: usize,
     pub pre_tables: Vec<Option<Eval>>,
     pub base_mults: Vec<Option<Eval>>,
@@ -4570,13 +4520,13 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         let m = &plan.p.mats[mi];
         let keys = layer.head_keys.as_ref().expect("the argmax needs key_head.u16");
         let tok = layer.head_tok.as_ref().expect("the argmax needs tok_head.i32");
-        let w = crate::argmax::AWitness::from_cols(
+        let w = crate::gadgets::argmax::AWitness::from_cols(
             m.tokens, m.n_out, keys.iter().map(|k| u32::from(*k)).collect(), tok.clone())
             .expect("the head dump's argmax columns");
-        let ri = tables.widths.iter().position(|w| *w == crate::argmax::KEY_BITS)
+        let ri = tables.widths.iter().position(|w| *w == crate::gadgets::argmax::KEY_BITS)
             .expect("the argmax needs the layer's 16-bit range table (--z-lo-bits 16)");
         let mut m_rk = std::mem::take(&mut tables.m_r[ri]);
-        let r = crate::argmax::component(&w, plan.p.prove_argmax_lax, plan.mat_lays[mi],
+        let r = crate::gadgets::argmax::component(&w, plan.p.prove_argmax_lax, plan.mat_lays[mi],
                                       &mut m_rk, tamper.argmax);
         tables.m_r[ri] = m_rk;
         tables.off_table += r.off_table;
@@ -4597,13 +4547,13 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
         let tab = layer.embed_tab.as_ref()
             .expect("`--embed` needs `embed.u16` in the dump");
         let tok = layer.tok_in.as_ref().expect("`--embed` needs `tok_in.i32` in the dump");
-        let w = crate::embed::EWitness::from_cols(
+        let w = crate::gadgets::embed::EWitness::from_cols(
             p.s, gc.d, p.embed_vocab, tab.clone(), tok.clone(), gc.xin.clone())
             .expect("the dump's embedding columns");
-        let ri = tables.widths.iter().position(|w| *w == crate::embed::EF_BITS)
+        let ri = tables.widths.iter().position(|w| *w == crate::gadgets::embed::EF_BITS)
             .expect("the embedding gadget needs the layer's 8-bit range table");
         let mut m_ef = std::mem::take(&mut tables.m_r[ri]);
-        let r = crate::embed::component(&w, l, &mut m_ef, tamper.embed);
+        let r = crate::gadgets::embed::component(&w, l, &mut m_ef, tamper.embed);
         tables.m_r[ri] = m_ef;
         tables.off_table += r.off_table;
         r
@@ -4625,7 +4575,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
     // vectors and moved back, so the two families' lookups land in one column
     // apiece -- which is the real integration test: the shared tables' sums only
     // cancel if both families agree on every row they read.
-    let mut residual_stream_components: Vec<crate::residual_stream::ResidualStreamComponent> = vec![];
+    let mut residual_stream_components: Vec<crate::gadgets::residual_stream::ResidualStreamComponent> = vec![];
     let mut gtables: Option<ResidualStreamTables> = None;
     let mut residual_stream_b1: Value = json!(null);
     if let Some(gp) = &plan.residual_stream {
@@ -4689,12 +4639,12 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             } else {
                 vec![stream.clone(), addv]
             };
-            let w1 = crate::residual_stream::ResidualStreamWitness::new(
+            let w1 = crate::gadgets::residual_stream::ResidualStreamWitness::new(
                 rows1, leaves, &prog1, plan.round,
                 format!("B1 residual stream [{} x {}]", t.tokens, t.d));
             let tam1 = tamper.residual_stream.filter(|(ri, _)| *ri == i1).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
-            let r1 = crate::residual_stream::residual_stream_component(&w1, &prog1, plan.round, &tag1, &mut gt, tam1);
+            let r1 = crate::gadgets::residual_stream::residual_stream_component(&w1, &prog1, plan.round, &tag1, &mut gt, tam1);
             crate::util::add_phase("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
             // what the component computed is what the next one reads: that is what
             // the binding says, and it is checked against B1's own column here.
@@ -4706,7 +4656,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // (`null`) rather than as zero mismatches.
             if !gp.head_norm && want.len() >= t.tokens * t.d {
                 let bad = (0..t.tokens * t.d)
-                    .filter(|i| crate::residual_stream::canon(got[*i]) != crate::residual_stream::canon(want[*i]))
+                    .filter(|i| crate::gadgets::residual_stream::canon(got[*i]) != crate::gadgets::residual_stream::canon(want[*i]))
                     .count();
                 mismatch.push(json!({"column": wname, "values": t.tokens * t.d,
                                      "mismatch": bad}));
@@ -4716,14 +4666,14 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                                      "note": "the dump does not carry this column"}));
             }
             let l2 = t.roots_to_l2(&r1.outs[0]);
-            let w2 = crate::residual_stream::ResidualStreamWitness::new(
+            let w2 = crate::gadgets::residual_stream::ResidualStreamWitness::new(
                 t.tokens, vec![l2], &prog2, plan.round,
                 format!("the level-1 roots [{} x {}]", t.tokens, t.a));
             // stream II: the norm scale reads this norm's own sum of squares, one per
             // token -- `r` is its `UnKind::NormR` image and nothing else
             let tam2 = tamper.residual_stream.filter(|(ri, _)| *ri == i1 + 1).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
-            let r2 = crate::residual_stream::residual_stream_component(&w2, &prog2, plan.round, &tag2, &mut gt, tam2);
+            let r2 = crate::gadgets::residual_stream::residual_stream_component(&w2, &prog2, plan.round, &tag2, &mut gt, tam2);
             crate::util::add_phase("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
             ms_out.push(r2.outs[0][..t.tokens].to_vec());
             if !gp.head_norm {
@@ -4741,7 +4691,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             } else {
                 (&gc.r2, &gc.w2, &gc.h2, "x_gate", "n2_out")
             };
-            let un_r = crate::residual_stream::UnKind::NormR { inv_d: gc.inv_d, eps: gc.eps };
+            let un_r = crate::gadgets::residual_stream::UnKind::NormR { inv_d: gc.inv_d, eps: gc.eps };
             let prog = gp.components[i].prog.clone();
             let tag = gp.components[i].tag.clone();
             // stream II: a row is one `(residue, token)` pair, so its single
@@ -4750,7 +4700,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // constant down the tokens, so the row reads channels `res + j a`;
             // it is preprocessed now, so it is `pre` and not a group.
             let msblk: Vec<u16> =
-                (0..rows1).map(|m| crate::residual_stream::canon(ms_out[k][m % t.tokens])).collect();
+                (0..rows1).map(|m| crate::gadgets::residual_stream::canon(ms_out[k][m % t.tokens])).collect();
             // B11 stream L, anatomy: the same shape of serial gather as the
             // SwiGLU's below -- `rows1 * nreal` canonicalisations, one row
             // independent of the next.
@@ -4759,7 +4709,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             wblk.par_chunks_mut(t.nreal).enumerate().for_each(|(m, row)| {
                 let res = m / t.tokens;
                 for j in 0..t.nreal {
-                    row[j] = crate::residual_stream::canon(wcol[res + j * t.a]);
+                    row[j] = crate::gadgets::residual_stream::canon(wcol[res + j * t.a]);
                 }
             });
             // stream II's control 3: one norm-weight cell bent on the prover
@@ -4773,12 +4723,12 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 eprintln!("compose: norm weight cell {at} of {tag} bent (a rejection is the pass)");
             }
             crate::util::add_phase("gen/residual_stream_wblk", t_wb.elapsed().as_secs_f64());
-            let w = crate::residual_stream::ResidualStreamWitness::with_pre(
+            let w = crate::gadgets::residual_stream::ResidualStreamWitness::with_pre(
                 rows1, vec![norm_scale_in[k].clone(), msblk], wblk, &prog, plan.round,
                 format!("B1 norm{} scale [{} x {}]", k + 1, t.tokens, t.d));
             let tam = tamper.residual_stream.filter(|(ri, _)| *ri == i).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
-            let r = crate::residual_stream::residual_stream_component(&w, &prog, plan.round, &tag, &mut gt, tam);
+            let r = crate::gadgets::residual_stream::residual_stream_component(&w, &prog, plan.round, &tag, &mut gt, tam);
             crate::util::add_phase("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
             // the norm scale's output is the q/k/v (resp. gate/up) matmuls' own bf16
             // input column, so B1 has already written down what it must be
@@ -4787,7 +4737,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 let got = t.unlay(&r.outs[0]);
                 let bad = (0..t.tokens * t.d)
                     .into_par_iter()
-                    .filter(|i| crate::residual_stream::canon(got[*i]) != crate::residual_stream::canon(wv[*i]))
+                    .filter(|i| crate::gadgets::residual_stream::canon(got[*i]) != crate::gadgets::residual_stream::canon(wv[*i]))
                     .count();
                 mismatch.push(json!({"column": wname, "values": t.tokens * t.d,
                                      "mismatch": bad}));
@@ -4805,9 +4755,9 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             if rcol.len() >= t.tokens {
                 let rbad = (0..t.tokens)
                     .filter(|tt| {
-                        let got = crate::residual_stream::un_image(
-                            un_r, crate::residual_stream::canon(ms_out[k][*tt]));
-                        crate::residual_stream::canon(got) != crate::residual_stream::canon(rcol[*tt])
+                        let got = crate::gadgets::residual_stream::un_image(
+                            un_r, crate::gadgets::residual_stream::canon(ms_out[k][*tt]));
+                        crate::gadgets::residual_stream::canon(got) != crate::gadgets::residual_stream::canon(rcol[*tt])
                     })
                     .count();
                 mismatch.push(json!({"column": rname, "values": t.tokens, "mismatch": rbad}));
@@ -4866,18 +4816,18 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             }
             let prog = gp.components[i].prog.clone();
             let tag = gp.components[i].tag.clone();
-            let w = crate::residual_stream::ResidualStreamWitness::new(
+            let w = crate::gadgets::residual_stream::ResidualStreamWitness::new(
                 tf.rows1(), vec![tf.lay(&gate_out), tf.lay(&up_out)], &prog, plan.round,
                 format!("the gate and up dequant outputs [{} x {}]", tf.tokens, tf.d));
             let tam = tamper.residual_stream.filter(|(ri, _)| *ri == i).map(|(_, x)| x);
             let t_gr = std::time::Instant::now();
-            let r = crate::residual_stream::residual_stream_component(&w, &prog, plan.round, &tag, &mut gt, tam);
+            let r = crate::gadgets::residual_stream::residual_stream_component(&w, &prog, plan.round, &tag, &mut gt, tam);
             crate::util::add_phase("gen/residual_stream_component", t_gr.elapsed().as_secs_f64());
             let n = tf.tokens * tf.d;
             let cmp = |got: &[u16], want: &[u16]| -> usize {
                 (0..n)
                     .into_par_iter()
-                    .filter(|q| crate::residual_stream::canon(got[*q]) != crate::residual_stream::canon(want[*q]))
+                    .filter(|q| crate::gadgets::residual_stream::canon(got[*q]) != crate::gadgets::residual_stream::canon(want[*q]))
                     .count()
             };
             // three columns B1 wrote for this gadget: the gate's dequantized
@@ -4894,7 +4844,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             }
             if let Some(v) = &gc.silu_out {
                 let img: Vec<u16> = gate_out.iter()
-                    .map(|p| crate::residual_stream::un_image(UnKind::Silu, *p)).collect();
+                    .map(|p| crate::gadgets::residual_stream::un_image(UnKind::Silu, *p)).collect();
                 mismatch.push(json!({"column": "silu_out", "values": n,
                                      "mismatch": cmp(&img, v)}));
             }
@@ -4942,8 +4892,8 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                     .into_par_iter()
                     .map(|t| {
                         let pos = rp.pos0 + t;
-                        let a = crate::rope::pre_row(&inv, hd, pos);
-                        let b = crate::rope::pre_row(refv, hd, pos);
+                        let a = crate::gadgets::rope::pre_row(&inv, hd, pos);
+                        let b = crate::gadgets::rope::pre_row(refv, hd, pos);
                         a.iter().zip(&b).filter(|(x, y)| x != y).count()
                     })
                     .sum();
@@ -4987,7 +4937,7 @@ different rotation", inv.len(), 2 * hd * p.s);
                 }
                 let mut pre = vec![0u16; rr.tokens * rr.heads * 2 * hd];
                 pre.par_chunks_mut(2 * hd).enumerate().for_each(|(j, row)| {
-                    row.copy_from_slice(&crate::rope::pre_row(&inv, hd, rp.pos0 + j / rr.heads));
+                    row.copy_from_slice(&crate::gadgets::rope::pre_row(&inv, hd, rp.pos0 + j / rr.heads));
                 });
                 // stream NN's control 3: one preprocessed angle bent.  The
                 // component stays satisfiable with the products recomputed around
@@ -4998,8 +4948,8 @@ different rotation", inv.len(), 2 * hd * p.s);
                 if let Some(x) = tamper.rope_w.filter(|_| rr.name == "q") {
                     let at = x % pre.len();
                     let was = pre[at];
-                    pre[at] = crate::rope::bend_pat(was);
-                    assert_ne!(crate::residual_stream::split(pre[at]), crate::residual_stream::split(was),
+                    pre[at] = crate::gadgets::rope::bend_pat(was);
+                    assert_ne!(crate::gadgets::residual_stream::split(pre[at]), crate::gadgets::residual_stream::split(was),
                                "the rope angle probe did not fire at cell {at}");
                     eprintln!("compose: rope angle cell {at} of rp{}m bent {was:#06x} -> \
 {:#06x} (a rejection is the pass)", rr.name, pre[at]);
@@ -5016,19 +4966,19 @@ different rotation", inv.len(), 2 * hd * p.s);
                 }
                 let mprog = gp.components[rr.mul].prog.clone();
                 let mtag = gp.components[rr.mul].tag.clone();
-                let wm = crate::residual_stream::ResidualStreamWitness::with_pre(
+                let wm = crate::gadgets::residual_stream::ResidualStreamWitness::with_pre(
                     rows, vec![deq], pre, &mprog, plan.round,
                     format!("the {} dequant output [{} x {}]", rr.name, rr.tokens, n_out));
                 let tam = tamper.residual_stream.filter(|(ri, _)| *ri == rr.mul).map(|(_, x)| x);
-                let rm = crate::residual_stream::residual_stream_component(
+                let rm = crate::gadgets::residual_stream::residual_stream_component(
                     &wm, &mprog, plan.round, &mtag, &mut gt, tam);
                 let aprog = gp.components[rr.add].prog.clone();
                 let atag = gp.components[rr.add].tag.clone();
-                let wa = crate::residual_stream::ResidualStreamWitness::new(
+                let wa = crate::gadgets::residual_stream::ResidualStreamWitness::new(
                     rows, vec![rm.outs[0].clone()], &aprog, plan.round,
                     format!("the {} rotation's products [{} x {}]", rr.name, rows, 2 * hd));
                 let tam = tamper.residual_stream.filter(|(ri, _)| *ri == rr.add).map(|(_, x)| x);
-                let ra = crate::residual_stream::residual_stream_component(
+                let ra = crate::gadgets::residual_stream::residual_stream_component(
                     &wa, &aprog, plan.round, &atag, &mut gt, tam);
                 residual_stream_components.push(rm);
                 residual_stream_components.push(ra);
@@ -5056,7 +5006,7 @@ different rotation", inv.len(), 2 * hd * p.s);
     // the matmul's dequant component commits, which is what leaves the remaining
     // scale seam a one-constraint job.
     let phase_t = std::time::Instant::now();
-    let mut rq_components: Vec<crate::requant::RqComponent> = vec![];
+    let mut rq_components: Vec<crate::gadgets::requant::RqComponent> = vec![];
     for (k, rp) in plan.rqs.iter().enumerate() {
         let g = plan.residual_stream.as_ref().expect("a requantize seam needs the wiring family");
         let reg = &residual_stream_components[rp.producer.0];
@@ -5066,7 +5016,7 @@ different rotation", inv.len(), 2 * hd * p.s);
             g.t.unlay(&reg.outs[0])
         };
         let m0 = &layer.mats[plan.freivalds[rp.freivalds].mats[0]];
-        let r = crate::requant::rq_component(
+        let r = crate::gadgets::requant::rq_component(
             &rp.name, &x, &m0.qx, &m0.jx.iter().map(|v| *v as i64).collect::<Vec<_>>(),
             &m0.sx, rp.tokens, rp.n, rp.v, rp.lay, &mut tables,
             tamper.rq.filter(|(i, _)| *i == k).map(|(_, t)| t));
@@ -5082,7 +5032,7 @@ different rotation", inv.len(), 2 * hd * p.s);
     // `want` is the key tiles' own committed integers, gathered onto the query-head
     // grid -- a reference count and nothing the AIR reads.
     let phase_t = std::time::Instant::now();
-    let mut q_components: Vec<crate::rope::QComponent> = vec![];
+    let mut q_components: Vec<crate::gadgets::rope::QComponent> = vec![];
     let nn_cols = (!plan.quants.is_empty()).then(|| nn_key_tile_cols(&plan, layer));
     for (k, qp) in plan.quants.iter().enumerate() {
         let mi = layer.mats.iter().position(|m| m.name == qp.name)
@@ -5121,7 +5071,7 @@ different rotation", inv.len(), 2 * hd * p.s);
                 })
                 .collect()
         }).unwrap_or_default();
-        let r = crate::rope::q_component(
+        let r = crate::gadgets::rope::q_component(
             qp.name, &x, &jj, Some(&want), qp.tokens, qp.n, qp.hd, qp.bits, plan.q_nz_bits,
             qp.lay, &mut tables,
             tamper.quant.filter(|(i, _)| *i == k).map(|(_, t)| t));
@@ -5151,9 +5101,9 @@ matmul output before the rotation and the quantize and which the dequant compone
     // below references them last (the order the by-value witness generation used), and the
     // table-sides block reads them again.
     let residual_stream_tcols: Vec<Eval> =
-        gtables.as_ref().map(crate::residual_stream::residual_stream_table_cols).unwrap_or_default();
+        gtables.as_ref().map(crate::gadgets::residual_stream::residual_stream_table_cols).unwrap_or_default();
     let residual_stream_mcols: Vec<Eval> =
-        gtables.as_ref().map(crate::residual_stream::residual_stream_mult_cols).unwrap_or_default();
+        gtables.as_ref().map(crate::gadgets::residual_stream::residual_stream_mult_cols).unwrap_or_default();
     let tbl_rows = 1usize << p.log_table;
     // B7a milestone 4 (section 3 row 1): the 31 columns 23.1 called "data, not
     // closed forms". Measured column by column that is wrong twice over: the
@@ -5375,7 +5325,7 @@ matmul output before the rotation and the quantize and which the dequant compone
                 pre_counters[ri(a.q_bits)].push(&d.m_q);
                 pre_counters[r8].push(&d.m_v);
             }
-            if let crate::attn_witness::Variant::IntSplit(k) = a.variant {
+            if let crate::gadgets::attention::witness::Variant::IntSplit(k) = a.variant {
                 pre_counters[ri(k)].push(d.m_aux.as_ref().unwrap());
             }
             pre_counters[ri(plan.cfg.z_lo_bits)].push(&d.m_lo);
@@ -5576,22 +5526,22 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
     // follow in tree 1, in the same order, matching the component list.
     let rq_tab_pre: Vec<Eval> = plan.rq_vars.iter()
         .flat_map(|v| {
-            let mut c = crate::requant::rq_tab_cols(*v);
-            c.extend(crate::requant::scl_tab_cols(*v));
+            let mut c = crate::gadgets::requant::rq_tab_cols(*v);
+            c.extend(crate::gadgets::requant::scl_tab_cols(*v));
             c
         })
         .chain(if rq_components.is_empty() && q_components.is_empty() { vec![] }
-               else { crate::requant::rqv_tab_cols() })
+               else { crate::gadgets::requant::rqv_tab_cols() })
         // stream NN-3: and the quantize family's own two, last
-        .chain(plan.q_tabs.iter().flat_map(|w| crate::rope::qdiv_tab_cols(*w)))
+        .chain(plan.q_tabs.iter().flat_map(|w| crate::gadgets::rope::qdiv_tab_cols(*w)))
         .chain(if plan.quants.is_empty() { vec![] }
-               else { crate::rope::qnz_tab_cols(plan.q_nz_bits) })
+               else { crate::gadgets::rope::qnz_tab_cols(plan.q_nz_bits) })
         .collect();
     // one multiplicity vector per table, merged across the seams that share it
     let rq_tab_mult: Vec<Eval> = {
         let mut out = vec![];
         for v in &plan.rq_vars {
-            let lr = crate::requant::rq_log_rows(*v);
+            let lr = crate::gadgets::requant::rq_log_rows(*v);
             let mut m = vec![0u32; 1usize << lr];
             let mut ms = vec![0u32; 1usize << 15];
             for r in rq_components.iter().filter(|r| r.v == *v) {
@@ -5623,7 +5573,7 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
         // A division table is shared by every side of its width; the `(q, nz)`
         // table by all three components.
         for w in &plan.q_tabs {
-            let lr = crate::rope::qdiv_log_rows(*w);
+            let lr = crate::gadgets::rope::qdiv_log_rows(*w);
             let mut m = vec![0u32; 1usize << lr];
             for r in q_components.iter().filter(|r| r.bits == *w) {
                 for (a, b) in m.iter_mut().zip(&r.m_rq) {
@@ -5633,7 +5583,7 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
             out.push(crate::common::eval_of(lr, m.iter().map(|x| m31_u32(*x)).collect()));
         }
         if !plan.quants.is_empty() {
-            let lr = crate::rope::qnz_log_rows(plan.q_nz_bits);
+            let lr = crate::gadgets::rope::qnz_log_rows(plan.q_nz_bits);
             let mut m = vec![0u32; 1usize << lr];
             for r in &q_components {
                 for (a, b) in m.iter_mut().zip(&r.m_qnz) {
@@ -5838,16 +5788,16 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
         let residual_stream = plan.residual_stream.as_ref().map(|g| ResidualStreamRels {
             norm: norm.clone(),
             frac: frac.clone(),
-            pow: sess.draw_relation(crate::residual_stream::PowRel::draw),
-            smul: sess.draw_relation(crate::residual_stream::SMulRel::draw),
-            val: sess.draw_relation(crate::residual_stream::ValRel::draw),
-            un: g.uns.iter().map(|_| sess.draw_relation(crate::residual_stream::UnRel::draw)).collect(),
+            pow: sess.draw_relation(crate::gadgets::residual_stream::PowRel::draw),
+            smul: sess.draw_relation(crate::gadgets::residual_stream::SMulRel::draw),
+            val: sess.draw_relation(crate::gadgets::residual_stream::ValRel::draw),
+            un: g.uns.iter().map(|_| sess.draw_relation(crate::gadgets::residual_stream::UnRel::draw)).collect(),
             uns: g.uns.clone(),
         });
         // stream BB: last, so that the flag-off draw order is the one every
         // recorded digest was taken under
         let emb = plan.emb.map(|l| {
-            sess.draw_relation(|ch| crate::embed::EmbRel::draw(ch, l.arity()))
+            sess.draw_relation(|ch| crate::gadgets::embed::EmbRel::draw(ch, l.arity()))
         });
         // stream II: last, after the embedding's, so the flag-off draw order is
         // the one every recorded digest was taken under
@@ -6179,7 +6129,7 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
         let alpha = sess.draw_felts(1)[0];
         let mut hl = crate::gkrlink::link_params(&plan, &rels, &pr.insts, &pr.artifact, alpha)
             .expect("the prover's own GKR artifact fails the link derivation");
-        let msk0 = crate::attn_air::CHAN_SEL.len() + crate::attn_air::DIAGONAL_BLOCK_SEL.len();
+        let msk0 = crate::gadgets::attention::air::CHAN_SEL.len() + crate::gadgets::attention::air::DIAGONAL_BLOCK_SEL.len();
         // B11 stream T: a key tile whose witness generation left its columns on the device has no
         // host mirror to fold, so the fold reaches them where they are. The
         // causal-mask columns are preprocessed and always host-built, and a
@@ -6408,7 +6358,7 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
         {
             let (m, lay) = (&layer.mats[mi], plan.mat_lays[mi]);
             let ow = output_claim_w(w_residual_stream, lam_residual_stream, m.tokens, m.n_out, lay.per_row,
-                                    crate::dequant::OKind::Key);
+                                    crate::gadgets::dequant::OKind::Key);
             let rows = 1usize << lay.log_rows;
             let mut u = SecureField::zero();
             for j in 0..rows {
@@ -6467,7 +6417,7 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
         let specs = gp.bindings(w_residual_stream, lam_residual_stream, &blank);
         for (i, reg) in residual_stream_components.iter().enumerate() {
             let t_ig = std::time::Instant::now();
-            let it = crate::residual_stream::residual_stream_interaction(
+            let it = crate::gadgets::residual_stream::residual_stream_interaction(
                 reg, gr, Some(&specs[i]), &components.residual_stream[i].eval,
                 p.gkr_residual_stream);
             crate::util::add_phase("int/residual_stream_build", t_ig.elapsed().as_secs_f64());
@@ -6599,9 +6549,9 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
         // their sides keep the hand-written builder, reading the owned residual stream
         // vectors directly.
         if let (Some(gp), Some(gr)) = (&plan.residual_stream, &rels.residual_stream) {
-            let gcols = crate::residual_stream::residual_stream_table_ids(&gp.uns);
+            let gcols = crate::gadgets::residual_stream::residual_stream_table_ids(&gp.uns);
             for (t, (lr, cols, kind)) in
-                crate::residual_stream::residual_stream_table_kinds(&gp.uns, gr).into_iter().enumerate()
+                crate::gadgets::residual_stream::residual_stream_table_kinds(&gp.uns, gr).into_iter().enumerate()
             {
                 let refs: Vec<&Eval> = cols
                     .iter()
@@ -6610,7 +6560,7 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
                         &residual_stream_tcols[k]
                     })
                     .collect();
-                let (c, sum) = crate::residual_stream::table_side(lr, &kind, &refs, &residual_stream_mcols[t]);
+                let (c, sum) = crate::gadgets::residual_stream::table_side(lr, &kind, &refs, &residual_stream_mcols[t]);
                 inter_all.extend(crate::device::host_cols(c));
                 inter_mark(&format!("table/residual_stream{t}"), &inter_all, &mut inter_seen,
                            &mut inter_split);
@@ -6633,7 +6583,7 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
             let binding = rq_binding_w(w_residual_stream, lam_residual_stream, &plan.rqs[k],
                                        SecureField::zero(), SecureField::zero(),
                                        SecureField::zero());
-            let (cols, use_sum, cin, cout, csc) = crate::requant::rq_interaction(
+            let (cols, use_sum, cin, cout, csc) = crate::gadgets::requant::rq_interaction(
                 reg, &binding, &rels.qnz, &rr.rq3, &rr.rq4, &rr.scl2, &rr.scl3,
                 rels.range(15), &rr.rqv);
             inter_all.extend(crate::device::host_cols(cols));
@@ -6651,7 +6601,7 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
             let binding = q_binding_w(w_residual_stream, lam_residual_stream, qp, p.nh,
                                       SecureField::zero(), SecureField::zero());
             let qr = rels.qq.as_ref().expect("the quantize components draw their own tables");
-            let (cols, use_sum, cin, cout) = crate::rope::q_interaction(
+            let (cols, use_sum, cin, cout) = crate::gadgets::rope::q_interaction(
                 reg, &binding, qp.hd, &qr.qnz, &qr.div[plan.q_tab_at(qp.bits)],
                 rels.range(15), &rr.rqv);
             inter_all.extend(crate::device::host_cols(cols));
@@ -6680,9 +6630,9 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
             })
         };
         for v in &plan.rq_vars {
-            let is_p2 = *v == crate::requant::SVariant::Pow2;
-            let lr = crate::requant::rq_log_rows(*v);
-            let w = crate::requant::rq_tab_width(*v);
+            let is_p2 = *v == crate::gadgets::requant::SVariant::Pow2;
+            let lr = crate::gadgets::requant::rq_log_rows(*v);
+            let w = crate::gadgets::requant::rq_tab_width(*v);
             let (c, sum) = if is_p2 {
                 side(lr, w, pi, mi, &|x| rr.rq3.combine(x))
             } else {
@@ -6692,7 +6642,7 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
             claims.table_sums.push(qm(sum));
             pi += w;
             mi += 1;
-            let ws = crate::requant::scl_tab_width(*v);
+            let ws = crate::gadgets::requant::scl_tab_width(*v);
             let (c, sum) = if is_p2 {
                 side(15, ws, pi, mi, &|x| rr.scl2.combine(x))
             } else {
@@ -6711,15 +6661,15 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
         // stream NN-3: and the quantize family's own, in `Plan::pre_ids`' order
         if let Some(qr) = rels.qq.as_ref() {
             for (i, w) in plan.q_tabs.iter().enumerate() {
-                let lr = crate::rope::qdiv_log_rows(*w);
+                let lr = crate::gadgets::rope::qdiv_log_rows(*w);
                 let (c, sum) =
-                    side(lr, crate::rope::QDIV_COLS, pi, mi, &|x| qr.div[i].combine(x));
+                    side(lr, crate::gadgets::rope::QDIV_COLS, pi, mi, &|x| qr.div[i].combine(x));
                 inter_all.extend(crate::device::host_cols(c));
                 claims.table_sums.push(qm(sum));
-                pi += crate::rope::QDIV_COLS;
+                pi += crate::gadgets::rope::QDIV_COLS;
                 mi += 1;
             }
-            let (c, sum) = side(crate::rope::qnz_log_rows(plan.q_nz_bits), 2, pi, mi,
+            let (c, sum) = side(crate::gadgets::rope::qnz_log_rows(plan.q_nz_bits), 2, pi, mi,
                                 &|x| qr.qnz.combine(x));
             inter_all.extend(crate::device::host_cols(c));
             claims.table_sums.push(qm(sum));
@@ -6739,19 +6689,19 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
     let phase_t = std::time::Instant::now();
     if let (Some(r), Some(mi)) = (am_component.as_ref(), plan.argmax_mat()) {
         let m = &plan.p.mats[mi];
-        let binding = crate::argmax::ArgmaxBinding {
+        let binding = crate::gadgets::argmax::ArgmaxBinding {
             claimed: SecureField::zero(),
             claimed_tok: SecureField::zero(),
             tag: m.name.clone(),
             ..argmax_binding_w(w_residual_stream, m.tokens, m.n_out, plan.mat_lays[mi].per_row)
         };
-        let (tcols, claimed, claimed_tok) = crate::argmax::binding_col(r, m.tokens, &binding);
+        let (tcols, claimed, claimed_tok) = crate::gadgets::argmax::binding_col(r, m.tokens, &binding);
         inter_all.extend(crate::device::host_cols(tcols));
         claims.am_key.push(qm(claimed));
         claims.head_tok.push(qm(claimed_tok));
         let (lcols, use_sum) =
-            crate::argmax::logup(r, plan.p.prove_argmax_lax,
-                                 rels.range(crate::argmax::KEY_BITS));
+            crate::gadgets::argmax::logup(r, plan.p.prove_argmax_lax,
+                                 rels.range(crate::gadgets::argmax::KEY_BITS));
         inter_all.extend(crate::device::host_cols(lcols));
         claims.use_sums.push(qm(use_sum));
         inter_mark("argmax", &inter_all, &mut inter_seen, &mut inter_split);
@@ -6765,18 +6715,18 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
     // component's single column follows, matching the component order.
     let phase_t = std::time::Instant::now();
     if let (Some(r), Some(er)) = (emb_component.as_ref(), rels.emb.as_ref()) {
-        let mut binding = crate::embed::binding_w(w_residual_stream, lam_residual_stream, r.d, r.tokens, &r.lay);
-        let (tcols, hc, gc) = crate::embed::binding_cols(r, &binding);
+        let mut binding = crate::gadgets::embed::binding_w(w_residual_stream, lam_residual_stream, r.d, r.tokens, &r.lay);
+        let (tcols, hc, gc) = crate::gadgets::embed::binding_cols(r, &binding);
         binding.claimed = hc;
         binding.claimed_tok = gc;
         inter_all.extend(crate::device::host_cols(tcols));
         claims.embed_out.push(qm(hc));
         claims.embed_tok.push(qm(gc));
         let (lcols, use_sum) =
-            crate::embed::logup(r, er, rels.range(crate::embed::EF_BITS));
+            crate::gadgets::embed::logup(r, er, rels.range(crate::gadgets::embed::EF_BITS));
         inter_all.extend(crate::device::host_cols(lcols));
         claims.use_sums.push(qm(use_sum));
-        let (tbcols, tab_sum) = crate::embed::table_side(r, er);
+        let (tbcols, tab_sum) = crate::gadgets::embed::table_side(r, er);
         inter_all.extend(crate::device::host_cols(tbcols));
         claims.table_sums.push(qm(tab_sum));
         inter_mark("embed", &inter_all, &mut inter_seen, &mut inter_split);
@@ -6845,8 +6795,8 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
                 let cells: usize = (0..p.s)
                     .into_par_iter()
                     .map(|t| {
-                        let a = crate::rope::pre_row(&inv, p.hd, rp.pos0 + t);
-                        let b = crate::rope::pre_row(refv, p.hd, rp.pos0 + t);
+                        let a = crate::gadgets::rope::pre_row(&inv, p.hd, rp.pos0 + t);
+                        let b = crate::gadgets::rope::pre_row(refv, p.hd, rp.pos0 + t);
                         a.iter().zip(&b).filter(|(x, y)| x != y).count()
                     })
                     .sum();
@@ -6917,8 +6867,8 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
         // narrower than the model" as well.
         "quant": q_components.iter().zip(&plan.quants).map(|(r, qp)| json!({
             "component": r.tag,
-            "bits": r.bits, "qmax": crate::rope::qmax_of(r.bits),
-            "div_rows": crate::rope::qdiv_table(r.bits).len(),
+            "bits": r.bits, "qmax": crate::gadgets::rope::qmax_of(r.bits),
+            "div_rows": crate::gadgets::rope::qdiv_table(r.bits).len(),
             "heads": qp.heads, "rep": qp.rep, "n": qp.n, "tokens": qp.tokens,
             "layout": {"per_row": r.lay.per_row, "chunks": r.lay.chunks,
                        "log_rows": r.lay.log_rows, "lead": r.lay.lead},
@@ -7165,11 +7115,11 @@ pub fn prove_gen_to(layer: &Layer, params: &Params, g: Gen, shape_root_only: boo
                 use std::sync::atomic::Ordering::Relaxed;
                 eprintln!("off_table {} by table: {:?}", tables.off_table, tables.off_kinds);
                 eprintln!("exp table: {} rows, max key {}, off {} in [{}, {}]",
-                          crate::attn_trace::EXP_ROWS.load(Relaxed),
-                          crate::attn_trace::EXP_KEY_MAX.load(Relaxed),
-                          crate::attn_trace::EXP_OFF_N.load(Relaxed),
-                          crate::attn_trace::EXP_OFF_MIN.load(Relaxed),
-                          crate::attn_trace::EXP_OFF_MAX.load(Relaxed));
+                          crate::gadgets::attention::trace::EXP_ROWS.load(Relaxed),
+                          crate::gadgets::attention::trace::EXP_KEY_MAX.load(Relaxed),
+                          crate::gadgets::attention::trace::EXP_OFF_N.load(Relaxed),
+                          crate::gadgets::attention::trace::EXP_OFF_MIN.load(Relaxed),
+                          crate::gadgets::attention::trace::EXP_OFF_MAX.load(Relaxed));
             }
             tables.off_table
         },
@@ -8289,7 +8239,7 @@ impl Plan {
         if self.argmax_mat().is_some() && p.prove_argmax_lax {
             // the lax form is a weaker statement, not the same one proved
             // cheaply, so the edge it states is not the edge this table means by
-            // bound: see `crate::ARGMAX_LAX`
+            // bound: see `crate::cli::ARGMAX_LAX`
             put(16, Unbound, Some("the argmax is proved in its lax form \
                                    (--unsound-argmax-lax): it binds the emitted token to a \
                                    maximum of the logits and not to the lowest-indexed \
@@ -8440,8 +8390,8 @@ mod tests {
 
     /// The binding table, on the synthetic shapes the digest gate pins.
     fn params_of(args: &[String]) -> Params {
-        let (l, vname) = crate::layer_of(args);
-        crate::params_of(&l, args, &vname)
+        let (l, vname) = crate::cli::layer_of(args);
+        crate::cli::params_of(&l, args, &vname)
     }
 
     fn plan_of(args: Vec<String>) -> Plan {

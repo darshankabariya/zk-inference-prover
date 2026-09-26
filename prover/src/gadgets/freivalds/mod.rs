@@ -24,6 +24,8 @@
 //! range-checked in its own right (`ao_rem_bits`), which is what makes the
 //! error identity an *integer* identity -- see the note beside the lookup.
 
+pub mod run;
+
 use num_traits::{One, Zero};
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::FieldExpOps;
@@ -32,9 +34,9 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, INTERACTION_TRACE_IDX,
                                 ORIGINAL_TRACE_IDX, RelationEntry};
 
-use crate::attn_air::RangeRel;
-use crate::dequant::{FracRel, PairRel};
-use crate::layout::Grid;
+use crate::gadgets::attention::air::RangeRel;
+use crate::gadgets::dequant::{FracRel, PairRel};
+use crate::gadgets::attention::layout::Grid;
 
 pub fn id(s: impl Into<String>) -> PreProcessedColumnId {
     PreProcessedColumnId { id: s.into() }
@@ -473,5 +475,34 @@ impl FrameworkEval for AttnOutEval {
             eval.finalize_logup_in_pairs();
         }
         eval
+    }
+}
+
+/// The `r^T W` check: that a matmul's committed input times the pinned weights
+/// is its committed accumulator.
+pub struct Freivalds;
+
+/// Which of the layer's matmul groups the check is over.
+pub struct Cfg {
+    pub group: String,
+    /// the group's matmuls, as indices into the layer's own list
+    pub mats: Vec<usize>,
+    pub p_target: usize,
+}
+
+impl crate::gadgets::Gadget for Freivalds {
+    type Witness = crate::layer::Layer;
+    type Cfg = Cfg;
+    /// What a Freivalds control corrupts is a weight or an activation of the
+    /// layer it is handed, not a value beside it.
+    type Tamper = ();
+    type Outcome = run::Outcome;
+
+    fn run(l: &crate::layer::Layer, cfg: &Cfg, _bad: Option<()>) -> run::Outcome {
+        run::run(l, &cfg.group, &cfg.mats, cfg.p_target)
+    }
+
+    fn accepts(o: &run::Outcome) -> bool {
+        o.accepts()
     }
 }

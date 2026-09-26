@@ -66,7 +66,7 @@ CHUNKS = HERE / "layer_chunks.json"
 #     carries the per-token component.
 #
 # `--kv-boundary` is on whenever the diagonal block is and the segment is not the
-# output head (`main.rs`: `kv_boundary = diagonal_block && !head`), which is every
+# output head (`cli.rs`: `kv_boundary = diagonal_block && !head`), which is every
 # layer segment this prover generation records.  Against the untiled form the
 # difference is exactly `nh*hd*(C - S)` of base cells per layer segment: a third
 # `nh*hd` column set per key block on the channel side, less the one the untiled
@@ -186,7 +186,7 @@ def key_tile_family(nh, hd, s, c, diagonal_block=True, kv_boundary=None, **kw):
     With `kv_boundary` the prefix is tiled into `c // s` key tiles of `s` keys each
     (stream AA); without it the prefix is one key tile over `c` keys.  It defaults to
     the diagonal block's own setting, which is what the prover derives it from
-    (`main.rs`: `kv_boundary = diagonal_block && !head`).  The group's one
+    (`cli.rs`: `kv_boundary = diagonal_block && !head`).  The group's one
     per-token component rides on the first key tile of the family."""
     if kv_boundary is None:
         kv_boundary = diagonal_block

@@ -108,7 +108,7 @@ use stwo_constraint_framework::{
 
 use crate::bf16::{self, EXP_BIAS, Round};
 use crate::common::{Eval, Proven, Session, Sums, eval_of, log_rows_for, m31_u32, twiddles};
-use crate::dequant::{FracRel, NormRel, id};
+use crate::gadgets::dequant::{FracRel, NormRel, id};
 
 relation!(PowRel, 2);
 relation!(SMulRel, 5);
@@ -168,7 +168,7 @@ pub const DMAX: u32 = 12;
 pub const UMIN: i64 = 260;
 
 pub fn m31_of(v: i64) -> M31 {
-    crate::attn_trace::m31_of(v)
+    crate::gadgets::attention::trace::m31_of(v)
 }
 
 // ------------------------------------------------------------------ values ----
@@ -2055,7 +2055,7 @@ pub fn residual_stream_interaction(r: &ResidualStreamComponent, rels: &ResidualS
                     h[j] = if j == 0 { f } else { h[j - 1] * spec.step + f };
                 }
                 host_claims.push(h[rows - 1]);
-                host_cols.extend(crate::attn_trace::secure_cols_pub(r.log_rows, &h));
+                host_cols.extend(crate::gadgets::attention::trace::secure_cols_pub(r.log_rows, &h));
             }
         }
         match bind_dev {
@@ -2548,12 +2548,12 @@ pub fn run(w: &ResidualStreamWitness, prog: &Prog, round: Round, kmax: u32,
         let get: [fn(&bf16::NormRow) -> u32; 6] =
             [|r| r.m2, |r| r.ph, |r| r.st, |r| r.m7, |r| r.expfield, |r| r.nz];
         for (t, g) in get.into_iter().enumerate() {
-            ids.push(id(crate::dequant::NORM_COLS[t]));
+            ids.push(id(crate::gadgets::dequant::NORM_COLS[t]));
             pre.push(eval_of(tables.log_norm, (0..pad(tables.log_norm))
                 .map(|i| m31_u32(tables.norm.get(i).map(g).unwrap_or(0))).collect()));
         }
         for t in 0..3 {
-            ids.push(id(crate::dequant::FRAC_COLS[t]));
+            ids.push(id(crate::gadgets::dequant::FRAC_COLS[t]));
             pre.push(eval_of(tables.log_frac, (0..pad(tables.log_frac))
                 .map(|i| {
                     let x = tables.frac.get(i).copied().unwrap_or((0, 0, 0));
@@ -2636,9 +2636,9 @@ pub fn run(w: &ResidualStreamWitness, prog: &Prog, round: Round, kmax: u32,
 
     // the tables' own sides
     let mut kinds = residual_stream_table_kinds(&tables.uns, &rels);
-    kinds.push((tables.log_norm, crate::dequant::NORM_COLS.iter().map(|c| id(*c)).collect(),
+    kinds.push((tables.log_norm, crate::gadgets::dequant::NORM_COLS.iter().map(|c| id(*c)).collect(),
                 GKind::Norm(rels.norm.clone())));
-    kinds.push((tables.log_frac, crate::dequant::FRAC_COLS.iter().map(|c| id(*c)).collect(),
+    kinds.push((tables.log_frac, crate::gadgets::dequant::FRAC_COLS.iter().map(|c| id(*c)).collect(),
                 GKind::Frac(rels.frac.clone())));
     let mults: Vec<&Eval> = base[mult_start..].iter().collect();
     let mut tsums: Vec<SecureField> = vec![];
@@ -2911,6 +2911,34 @@ pub fn norm_drift(dir: &str, d: usize, tokens_cap: usize, round: Round, which: &
 // Open question 7.5: the multiplicity past a table's real rows.  The tables are
 // a function of `round` and `kmax` alone, so the check `residual_stream_mult_cols`
 // makes can be exercised without a witness, a plan or a proof.
+
+
+/// The wiring family: the two norms, the two residual adds and the SwiGLU, which
+/// is what threads the residual stream through a layer.
+pub struct ResidualStream;
+
+/// Everything about a wiring run that is not the witness.
+pub struct Cfg {
+    /// what every row computes
+    pub prog: Prog,
+    pub round: Round,
+    pub kmax: u32,
+}
+
+impl crate::gadgets::Gadget for ResidualStream {
+    type Witness = ResidualStreamWitness;
+    type Cfg = Cfg;
+    type Tamper = Tamper;
+    type Outcome = Outcome;
+
+    fn run(w: &ResidualStreamWitness, cfg: &Cfg, bad: Option<Tamper>) -> Outcome {
+        run(w, &cfg.prog, cfg.round, cfg.kmax, bad)
+    }
+
+    fn accepts(o: &Outcome) -> bool {
+        o.accepts()
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -26,15 +26,15 @@ use stwo::core::fields::qm31::SecureField;
 use stwo::prover::ComponentProver;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
-use crate::attn_air::{
+use crate::gadgets::attention::air::{
     ChanEval, ExpRel, ExpTableEval, KeyEval, Offsets, OutEval, Powers, RangeRel, RangeTableEval,
     RowEval, key_tile_id, id, msk_id, tbl_range, CHAN_SEL, DIAGONAL_BLOCK_SEL, KEY_SEL, OUT_SEL, ROW_SEL,
     TBL_EXP_X, TBL_EXP_Y,
 };
 use crate::common::{Proven, Session, Sums, twiddles};
-use crate::layout::Cells;
-use crate::attn_trace::{self, Cfg, Layouts};
-use crate::attn_witness::{Attn, Variant};
+use crate::gadgets::attention::layout::Cells;
+use crate::gadgets::attention::trace::{self as attn_trace, Cfg, Layouts};
+use crate::gadgets::attention::witness::{Attn, Variant};
 
 pub struct Outcome {
     pub proven: Proven,
@@ -199,7 +199,7 @@ pub fn run(a: &Attn, cfg: &Cfg) -> Outcome {
         ids.extend(KEY_SEL.iter().map(|n| key_tile_id(0, n)));
     }
     // Stream CC (E11): the inert-lead-row selector, in `commit_pre`'s order.
-    ids.extend(crate::attn_air::act_id(0, a.diagonal_block, l.key.g.lead));
+    ids.extend(crate::gadgets::attention::air::act_id(0, a.diagonal_block, l.key.g.lead));
     ids.extend(OUT_SEL.iter().map(|n| key_tile_id(0, n)));
     ids.extend(ROW_SEL.iter().map(|n| key_tile_id(0, n)));
     ids.push(id(TBL_EXP_X));

@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
 
-use crate::dequant::{Map, Spec, Variant as DeqVariant};
+use crate::gadgets::dequant::{Map, Spec, Variant as DeqVariant};
 use crate::layer::{Mat, MatLayout, Tables};
 
 /// Mirrors `ZkDequantWitnessGenCfg` in `zk_dequant_witness_gen.cuh`, field for field and in order.

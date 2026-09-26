@@ -936,7 +936,7 @@ for _n, _v in sorted(COMPOSED.items()):
 
 # The five batched GKR reductions the prover can be asked for.  Each one proves
 # the LogUp running sums of the family it names instead of committing them, and
-# moves what it does commit into the `gkrlink` family (`main.rs`'s `--gkr-*`
+# moves what it does commit into the `gkrlink` family (`cli.rs`'s `--gkr-*`
 # flags).  `cells_per_token(gkr=...)` names the ones a statement has on, exactly
 # as `key_tile_cells(gkr=...)` does for its own family, so that a caller prices
 # the statement it means rather than the prover's defaults.

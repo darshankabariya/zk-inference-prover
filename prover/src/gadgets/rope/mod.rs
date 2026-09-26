@@ -34,15 +34,15 @@ use stwo_constraint_framework::{
     EvalAtRow, FrameworkEval, INTERACTION_TRACE_IDX, Relation, RelationEntry,
 };
 
-use crate::attn_air::RangeRel;
+use crate::gadgets::attention::air::RangeRel;
 use crate::bf16;
 use crate::common::{Eval, eval_of, m31_u32};
-use crate::dequant::{FracRel, PairRel, id};
+use crate::gadgets::dequant::{FracRel, PairRel, id};
 use crate::layer::MatLayout;
-use crate::requant::{TT_POW2, TT_RANGE, rqv_at};
+use crate::gadgets::requant::{TT_POW2, TT_RANGE, rqv_at};
 
 pub fn m31_of(v: i64) -> M31 {
-    crate::attn_trace::m31_of(v)
+    crate::gadgets::attention::trace::m31_of(v)
 }
 
 // ------------------------------------------------------------------- angles ---
@@ -58,8 +58,8 @@ pub fn rope_at(inv: &[f64], hd: usize, pos: usize) -> (Vec<u16>, Vec<u16>) {
     let mut sin = vec![0u16; hd];
     for j in 0..hd {
         let ang = pos as f64 * inv[j % h];
-        cos[j] = crate::residual_stream::canon(bf16::from_f32(ang.cos() as f32));
-        sin[j] = crate::residual_stream::canon(bf16::from_f32(ang.sin() as f32));
+        cos[j] = crate::gadgets::residual_stream::canon(bf16::from_f32(ang.cos() as f32));
+        sin[j] = crate::gadgets::residual_stream::canon(bf16::from_f32(ang.sin() as f32));
     }
     (cos, sin)
 }
@@ -73,8 +73,8 @@ pub fn sgn_sin(sin: &[u16], hd: usize) -> Vec<u16> {
     let h = hd / 2;
     (0..hd)
         .map(|j| {
-            if j < h { crate::residual_stream::canon(sin[j] ^ 0x8000) }
-            else { crate::residual_stream::canon(sin[j]) }
+            if j < h { crate::gadgets::residual_stream::canon(sin[j] ^ 0x8000) }
+            else { crate::gadgets::residual_stream::canon(sin[j]) }
         })
         .collect()
 }
@@ -89,13 +89,13 @@ pub fn sgn_sin(sin: &[u16], hd: usize) -> Vec<u16> {
 /// rows measured nothing -- which is the shape `drop-big` had at layer 0 and the
 /// reason this exists rather than a bare `^ 1`.
 pub fn bend_pat(p: u16) -> u16 {
-    let p = crate::residual_stream::canon(p);
-    let q = crate::residual_stream::canon(p ^ 1);
-    if crate::residual_stream::split(q) != crate::residual_stream::split(p) {
+    let p = crate::gadgets::residual_stream::canon(p);
+    let q = crate::gadgets::residual_stream::canon(p ^ 1);
+    if crate::gadgets::residual_stream::split(q) != crate::gadgets::residual_stream::split(p) {
         q
     } else {
         // 1.0, which no zero and no subnormal can be mistaken for
-        crate::residual_stream::join(128, 127)
+        crate::gadgets::residual_stream::join(128, 127)
     }
 }
 
@@ -592,7 +592,7 @@ pub fn q_component(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, token
     // same quotient; this scans forward from the asked-for site for one that
     // does, and says so rather than silently taking a coupled site.
     let quot = |pat: u16, j: i64| -> Option<u32> {
-        let (sm, ef) = crate::residual_stream::split(crate::residual_stream::canon(pat));
+        let (sm, ef) = crate::gadgets::residual_stream::split(crate::gadgets::residual_stream::canon(pat));
         let m7 = if sm == 0 { 0 } else { sm.unsigned_abs() as u32 - 128 };
         let path = (j + 126) * 128;
         if (ef as i64 * 128 + m7 as i64) < path {
@@ -605,7 +605,7 @@ pub fn q_component(tag: &str, x: &[u16], jj: &[i64], want: Option<&[i64]>, token
             let n_all = tokens * n;
             let start = t % n_all;
             let hit = (0..n_all).map(|d| (start + d) % n_all).find(|i| {
-                let (p, c) = (crate::residual_stream::canon(x[*i]), *i % n);
+                let (p, c) = (crate::gadgets::residual_stream::canon(x[*i]), *i % n);
                 let b = bend_pat(p);
                 b != p && quot(b, je[c]).is_some() && quot(b, je[c]) == quot(p, je[c])
             });
@@ -618,7 +618,7 @@ the probe would move the output too");
         _ => None,
     };
     let bend = |i: usize| -> u16 {
-        let p = crate::residual_stream::canon(x[i]);
+        let p = crate::gadgets::residual_stream::canon(x[i]);
         if bend_at == Some(i) { bend_pat(p) } else { p }
     };
 
@@ -643,7 +643,7 @@ the probe would move the output too");
             let c = b * pr + sl;
             let gi = t * n + c;
             let (sm, ef) =
-                if inert { (0i64, 0u32) } else { crate::residual_stream::split(bend(gi)) };
+                if inert { (0i64, 0u32) } else { crate::gadgets::residual_stream::split(bend(gi)) };
             let m7 = if sm == 0 { 0 } else { sm.unsigned_abs() as u32 - 128 };
             let sg = u32::from(sm < 0);
             let pat = ef as i64 * 128 + m7 as i64;
@@ -802,7 +802,7 @@ pub fn q_interaction(r: &QComponent, binding: &QTie, hd: usize, qnz: &PairRel, r
             h[j] = if j == 0 { f } else { h[j - 1] * step + f };
         }
         claims[side] = h[rows - 1];
-        cols.extend(crate::attn_trace::secure_cols_pub(lay.log_rows, &h));
+        cols.extend(crate::gadgets::attention::trace::secure_cols_pub(lay.log_rows, &h));
     }
     let n_looks_slot = 5; // qnz, division, sub-half, clamp, RQV
     let n_looks = pr * n_looks_slot;
@@ -880,7 +880,7 @@ pub fn q_layout(n: usize, hd: usize, tokens: usize, target: usize) -> MatLayout 
 /// it.  Used by the synthetic witness generator to build the key tiles' own columns
 /// and by the desk's B1 check.
 pub fn quant_ref(pat: u16, j: i64, qmax: i64) -> i64 {
-    let (sm, ef) = crate::residual_stream::split(crate::residual_stream::canon(pat));
+    let (sm, ef) = crate::gadgets::residual_stream::split(crate::gadgets::residual_stream::canon(pat));
     if sm == 0 {
         return 0;
     }
@@ -899,7 +899,7 @@ pub fn pow2_scale(col: &[u16], qmax: i64) -> i64 {
     let m = col
         .iter()
         .map(|p| {
-            let (sm, ef) = crate::residual_stream::split(crate::residual_stream::canon(*p));
+            let (sm, ef) = crate::gadgets::residual_stream::split(crate::gadgets::residual_stream::canon(*p));
             if sm == 0 { 0.0 } else { sm.unsigned_abs() as f64 * ((ef as i64 - 134) as f64).exp2() }
         })
         .fold(0.0f64, f64::max);
@@ -926,7 +926,7 @@ mod tests {
     #[test]
     fn qdiv_at_eight_bits_is_the_shared_table() {
         let mine = qdiv_table(8);
-        let theirs = crate::requant::rq_table(crate::requant::SVariant::Pow2);
+        let theirs = crate::gadgets::requant::rq_table(crate::gadgets::requant::SVariant::Pow2);
         assert_eq!(mine.len(), theirs.len());
         for (a, b) in mine.iter().zip(&theirs) {
             assert_eq!((a.0, a.1, a.2), (b.0, b.2, b.3));
