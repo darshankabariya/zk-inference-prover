@@ -9,7 +9,7 @@
 //! after both sides are fixed, and check
 //!
 //! ```text
-//!     rv^T C s  ==  (rv^T W)(X s)
+//!     s^T C rv  ==  (s^T X)(W rv)
 //! ```
 //!
 //! With `rv` weighting output channels `i` and `s` weighting tokens `t`, and the
@@ -25,7 +25,16 @@
 //! polynomial identity of degree `n_out - 1` in `rv` and `tokens - 1` in `s`,
 //! and a wrong `C` passes with probability at most `(n_out + tokens)/|F|` over
 //! the draw, `F` being the degree-4 extension the challenges are drawn in.  This
-//! component proves the right-hand side.  Its four parts:
+//! component proves the right-hand side.
+//!
+//! The equality is a field one, so it holds only mod `p`: it certifies the
+//! integer matmul just while every accumulated magnitude stays inside one
+//! residue window.  That is not assumed here -- it is the dequant gadget's
+//! `Spec::sound()`, which requires `max_abs() <= p` so the integer reading is
+//! injective mod `p` (B4 §1), and `Spec::max_k()` turns it into the longest int8
+//! dot product that still fits, `K <= 66,572` for a `2^30` window.  `dequant::run`
+//! asserts it for real rather than reporting it, so a spec that would read a
+//! window above `p` is refused instead of proved.  Its four parts:
 //!
 //! - **M, the weights `W`.** Preprocessed: the verifier holds them itself, so
 //!   there is nothing to commit and nothing a prover could swap.  They enter as
@@ -37,7 +46,7 @@
 //!   the same values.  A segment with no producer publishes none.
 //! - **C, the product.** Not committed here at all.  The dequant gadget commits
 //!   it -- it is the accumulator dequant rounds -- and publishes the projection
-//!   `rv^T C s` as its claim `claimed_h`, computed through
+//!   `s^T C rv` as its claim `claimed_h`, computed through
 //!   `gadgets::freivalds::claims::project`.  This component consumes that claim.
 //! - **r = (rv, s), the challenges.** Drawn from the transcript *after* every
 //!   commitment, so neither side can be chosen against them.  `rv` weights
@@ -59,12 +68,12 @@
 //! the component folds
 //!
 //! ```text
-//!     x_fold    = sum_t s^t  X[k, t]          (shared by every matmul)
-//!     w_fold_m  = sum_i rv^i W_m[i, k]        (one per matmul)
+//!     x_fold    = sum_t s^t  X[t, k]          (shared by every matmul)
+//!     w_fold_m  = sum_i rv^i W_m[k, i]        (one per matmul)
 //! ```
 //!
 //! and on the input channel's last row adds `w_fold_m * x_fold` into `product_m`,
-//! which is `(rv^T W_m)(X s)` once every input channel has been walked.  Matmuls that
+//! which is `(s^T X)(W_m rv)` once every input channel has been walked.  Matmuls that
 //! read one committed input share a group -- q/k/v, and gate/up -- so `X` is
 //! committed once for all of them.
 //!
@@ -116,15 +125,15 @@
 //!
 //! | field | holds | tree | pinned id |
 //! |---|---|---|---|
-//! | `known.weights[m][p]` | `W_m[i, k]` | pre | `zk_freivalds{tag}_w{m}_{p:04}` |
+//! | `known.weights[m][p]` | `W_m[k, i]` | pre | `zk_freivalds{tag}_w{m}_{p:04}` |
 //! | `known.carry_in_input_channel` | 0 on a first row | pre | `zk_freivalds{tag}_nofirst` |
 //! | `known.input_channel_done` | 1 on a last row | pre | `zk_freivalds{tag}_last` |
 //! | `known.carry_in_table` | 0 on row 0 | pre | `zk_freivalds{tag}_notzero` |
 //! | `known.table_done` | 1 on the last row | pre | `zk_freivalds{tag}_end` |
-//! | `acts.x[p]` | `X[k, t] + act_off` | base | -- |
-//! | `sums.x_fold` | `X s` so far | inter | -- |
-//! | `sums.mats[m].w_fold` | `rv^T W_m` so far | inter | -- |
-//! | `sums.mats[m].product` | `(rv^T W_m)(X s)` so far | inter | -- |
+//! | `acts.x[p]` | `X[t, k] + act_off` | base | -- |
+//! | `sums.x_fold` | `s^T X` so far | inter | -- |
+//! | `sums.mats[m].w_fold` | `W_m rv` so far | inter | -- |
+//! | `sums.mats[m].product` | `(s^T X)(W_m rv)` so far | inter | -- |
 //! | `sums.x_claim` | the published projection of `X` | inter | -- |
 //!
 //! `pre` is the preprocessed tree (the verifier holds it, `pk` weights and four
@@ -215,7 +224,7 @@ pub struct FreivaldsQx {
 
 // ------------------------------------------ the check's AIR, one component --
 
-/// One Freivalds group's constraints: the `(rv^T W)(X s)` side of the identity
+/// One Freivalds group's constraints: the `(s^T X)(W rv)` side of the identity
 /// at the top of this file.
 #[derive(Clone)]
 pub struct FreivaldsEval {
@@ -234,7 +243,7 @@ pub struct FreivaldsEval {
     /// `s^0 .. s^{pq-1}`, and `s^pq` as the step
     pub s_pow: Vec<SecureField>,
     pub s_step: SecureField,
-    /// one claimed `(rv^T W_m)(X s)` per matmul: what the running product is
+    /// one claimed `(s^T X)(W_m rv)` per matmul: what the running product is
     /// pinned to on the table's last row
     pub claimed: Vec<SecureField>,
     /// the range relation the committed activations are looked up in
@@ -432,7 +441,7 @@ mod tests {
         /// the layer's matmul indices this group is over
         mats: Vec<usize>,
         lay: crate::gadgets::freivalds::layout::FreivaldsLayout,
-        /// one `(rv^T W_m)(X s)` per matmul, in `mats` order
+        /// one `(s^T X)(W_m rv)` per matmul, in `mats` order
         claimed: Vec<SecureField>,
         /// the two challenges the claims were built against
         rv: SecureField,
@@ -640,6 +649,62 @@ mod tests {
             let got = identity_holds(&claims(bad), &groups);
             let want: Vec<bool> = (0..honest.len()).map(|i| i != flat).collect();
             assert_eq!(got, want, "changing product {flat} was not seen where it was made");
+        }
+    }
+
+    /// And a changed *product* is caught, at its own matmul and at no other.
+    ///
+    /// The test above moves what a component published, which shows the
+    /// comparison is wired up.  This one moves the accumulator itself -- one
+    /// cell of `C` -- and recomputes the dequant side from it with
+    /// `project_product`, which is what a prover whose matmul came out wrong
+    /// would publish.  Seeing that is the whole promise of Freivalds' check, so
+    /// it is the case worth pinning.
+    #[test]
+    fn a_changed_accumulator_is_caught_at_its_own_matmul() {
+        let l = small_layer();
+        let mut groups: Vec<FreivaldsPlan> = vec![];
+        let mut acc: Vec<Vec<[u32; 4]>> = vec![];
+        let mut mat_h = vec![qm(SecureField::zero()); l.mats.len()];
+        // one entry per matmul, in the flat order `identity_holds` reports:
+        // where it lands, which matmul it is, and the group's two challenges
+        let mut sites: Vec<(usize, usize, SecureField, SecureField)> = vec![];
+        let mut flat = 0usize;
+        for group in ["o", "qkv", "gateup"] {
+            let b = build(group, false, None, None);
+            for mi in &b.mats {
+                let m = &l.mats[*mi];
+                mat_h[*mi] = qm(project_product(&m.acc, m.tokens, m.n_out, b.rv, b.s));
+                sites.push((flat, *mi, b.rv, b.s));
+                flat += 1;
+            }
+            acc.push(b.claimed.iter().map(|v| qm(*v)).collect());
+            groups.push(FreivaldsPlan { name: group.to_string(), mats: b.mats, lay: b.lay,
+                                        act_bits: ACT_BITS });
+        }
+        let claims = |mat_h: Vec<[u32; 4]>| Claims {
+            freivalds_acc: acc.clone(), mat_h, ..Default::default()
+        };
+        assert!(identity_holds(&claims(mat_h.clone()), &groups).iter().all(|x| *x),
+                "an honest run's accumulators do not satisfy the identity");
+
+        for (flat, mi, rv, s) in sites {
+            let m = &l.mats[mi];
+            // only the cells the projection actually reads: `acc` may be padded
+            let n = m.tokens * m.n_out;
+            let mut cells = vec![0usize, n / 2, n - 1];
+            cells.sort_unstable();
+            cells.dedup();
+            for cell in cells {
+                let mut c = m.acc.clone();
+                c[cell] += 1;
+                let mut bad = mat_h.clone();
+                bad[mi] = qm(project_product(&c, m.tokens, m.n_out, rv, s));
+                let got = identity_holds(&claims(bad), &groups);
+                let want: Vec<bool> = (0..got.len()).map(|i| i != flat).collect();
+                assert_eq!(got, want, "cell {cell} of matmul {mi}'s accumulator was moved \
+                                       and the identity did not catch it there alone");
+            }
         }
     }
 }

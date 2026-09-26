@@ -4,7 +4,7 @@
 //! This is the half of the witness that depends on `rv` and `s`, so none of it
 //! can be built before those are drawn from the transcript -- which is after
 //! every commitment `trace.rs` made.  It also holds `project`, the one written
-//! definition of the projection `rv^T C s` that the two sides of the identity
+//! definition of the projection `s^T C rv` that the two sides of the identity
 //! are compared at.
 
 use num_traits::{One, Zero};
@@ -17,7 +17,7 @@ use crate::gadgets::freivalds::columns::{FreivaldsShape, Matmul, RunningSums};
 use crate::gadgets::freivalds::trace::FreivaldsComponent;
 use crate::layer::Layer;
 
-/// `rv^T C s`: the product matrix projected down to one field element, which is
+/// `s^T C rv`: the product matrix projected down to one field element, which is
 /// the value both sides of the Freivalds identity are compared at.
 ///
 /// The caller hands the rows of `C` already folded against `rv` -- one value per
@@ -28,7 +28,7 @@ use crate::layer::Layer;
 /// `C` itself is committed by the dequant gadget and never by this one, so it is
 /// the dequant component that publishes this value, as its claim `claimed_h`,
 /// and this gadget that consumes it: `identity_holds` compares it against the
-/// `(rv^T W)(X s)` the Freivalds component accumulated.
+/// `(s^T X)(W rv)` the Freivalds component accumulated.
 pub fn project(token_folds: impl IntoIterator<Item = SecureField>,
                s: SecureField) -> SecureField {
     token_folds.into_iter().fold(SecureField::zero(), |h, z| h * s + z)
@@ -53,8 +53,8 @@ pub fn project_product(c: &[i64], tokens: usize, n_out: usize, rv: SecureField,
 }
 
 /// The Freivalds identity, once per matmul of every group and in the order the
-/// plan runs them: the dequant component's published `rv^T C s` against the
-/// Freivalds component's published `(rv^T W)(X s)`.
+/// plan runs them: the dequant component's published `s^T C rv` against the
+/// Freivalds component's published `(s^T X)(W rv)`.
 ///
 /// This is the whole of what a verifier does with this gadget's claims, and
 /// `compose::verify_composed` calls it.  Both sides are values the statement
@@ -70,7 +70,7 @@ pub fn identity_holds(claims: &Claims, groups: &[FreivaldsPlan]) -> Vec<bool> {
 
 pub struct FreivaldsInteraction {
     pub cols: Vec<crate::device::AnyCol<'static>>,
-    /// one `(rv^T W_m)(X s)` per matmul: the side of the identity this gadget
+    /// one `(s^T X)(W_m rv)` per matmul: the side of the identity this gadget
     /// publishes
     pub claimed: Vec<SecureField>,
     pub use_sum: SecureField,
