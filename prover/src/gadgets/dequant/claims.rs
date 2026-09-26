@@ -174,13 +174,16 @@ pub fn mat_interaction(m: &Mat, r: &MatComponent, rv: SecureField, s_ch: SecureF
                     .filter(|j| matches!(lay.at_opt(m.tokens, *j), Some((_, 0))))
                     .map(|j| z[j]),
                 s_ch);
-            // A real assert, not a debug one: this is the only thing tying the
-            // value published as `claimed_h` to the column the AIR constrains,
-            // and the gate builds --release, where a debug assert is gone.  It
-            // is one comparison per matmul, not per row.
-            assert_eq!(projected, h[rows - 1],
-                       "{}: the claimed side and the column that carries it disagree",
-                       m.name);
+            // This is the only thing tying the value published as `claimed_h` to
+            // the column the AIR constrains, and a debug assert is gone in the
+            // --release build the gate and every proving run use -- so in
+            // practice it is not checked anywhere.  Promoting it to a real
+            // assert is one comparison per matmul, but it has to go over the
+            // gate first, since a mismatch would then stop a run rather than
+            // pass silently.  #227.
+            debug_assert_eq!(projected, h[rows - 1],
+                             "{}: the claimed side and the column that carries it disagree",
+                             m.name);
             projected
         }
     };
