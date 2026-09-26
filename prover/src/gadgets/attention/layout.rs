@@ -98,54 +98,9 @@ impl Shape {
     }
 }
 
-/// Rows grouped by `groups`, `chunks` rows each, padded up to a power of two with
-/// inert leading rows whose selectors are all zero.
-#[derive(Clone, Copy, Debug)]
-pub struct Grid {
-    pub log_rows: u32,
-    pub rows: usize,
-    pub groups: usize,
-    pub chunks: usize,
-    pub lead: usize,
-    /// group index counts down with the row index (needed when a Horner over
-    /// groups has to assign `x^g` to group `g`)
-    pub descending: bool,
-}
-
-impl Grid {
-    pub fn new(groups: usize, log_rows: u32, cap: usize, descending: bool) -> Option<Self> {
-        let rows = 1usize << log_rows;
-        if rows < groups {
-            return None;
-        }
-        // Open item 1: a `c = 0` key tile (block 0 has no prefix) reaches here with
-        // `groups = c * insts = 0`, slips past the guard above and divides by
-        // zero.  Block 0 is a solo diagonal block and must never build a prefix key tile at
-        // all; this says so rather than panicking in arithmetic.
-        assert!(groups > 0, "a c = 0 key tile has no key grid: block 0 is the solo                              diagonal block and builds no prefix key tile (open item 1)");
-        let chunks = (rows / groups).min(cap.max(1));
-        Some(Self { log_rows, rows, groups, chunks, lead: rows - groups * chunks, descending })
-    }
-
-    /// `(group, chunk)` of a row, or `None` for an inert row.  Chunks always
-    /// count down so a Horner walking the rows in order leaves the group's total
-    /// on its last row.
-    pub fn row(&self, j: usize) -> Option<(usize, usize)> {
-        if j < self.lead {
-            return None;
-        }
-        let idx = j - self.lead;
-        let g = idx / self.chunks;
-        let g = if self.descending { self.groups - 1 - g } else { g };
-        Some((g, self.chunks - 1 - (idx % self.chunks)))
-    }
-
-    pub fn json(&self) -> Value {
-        json!({"log_rows": self.log_rows, "rows": self.rows, "groups": self.groups,
-               "chunks": self.chunks, "lead_rows": self.lead,
-               "row_padding_frac": self.lead as f64 / self.rows as f64})
-    }
-}
+/// The grid every one of these three layouts is built on. It is `crate::layout`'s
+/// since #197, because the Freivalds check and `devacc` read it too.
+pub use crate::layout::Grid;
 
 /// Q.K^T's inner-product component: one row group per channel.
 #[derive(Clone, Copy, Debug)]

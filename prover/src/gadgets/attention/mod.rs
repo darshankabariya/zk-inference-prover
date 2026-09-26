@@ -11,8 +11,10 @@
 //! * `trace` -- the committed columns, per key tile
 //! * `air` -- the constraints over them, one evaluator per row axis
 //! * `run` -- the gadget on its own, without a segment
+//! * `device` -- the same columns born on the card
 
 pub mod air;
+pub mod device;
 pub mod layout;
 pub mod run;
 pub mod trace;

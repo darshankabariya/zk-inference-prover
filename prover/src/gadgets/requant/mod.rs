@@ -47,7 +47,7 @@ use stwo_constraint_framework::{
 use crate::bf16;
 use crate::common::{Eval, Proven, Session, Sums, eval_of, m31_u32, twiddles};
 use crate::encoding::{canon, m31_of, split};
-use crate::layer::MatLayout;
+use crate::layout::MatLayout;
 use crate::relations::{FracRel, MulRel, PairRel, RangeRel, TableEval, TableKind, id};
 
 /// The tables this gadget is stated over.  They are a module of their own because

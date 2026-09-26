@@ -26,6 +26,10 @@
 //! `(q, nz)` pair table are **this family's**, one per side and sized by that
 //! side's `qk_bits` (stream NN-3 -- see "the component's tables" below).
 
+/// The integers the rotation is proved over, and the two rebuilds that produce
+/// them. `Layer::rope_from_mats` and `Layer::rebuild_key_tiles` are there.
+pub mod witness;
+
 use num_traits::{One, Zero};
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
@@ -38,7 +42,7 @@ use crate::bf16;
 use crate::common::{Eval, eval_of, m31_u32};
 use crate::encoding::{canon, join, m31_of, secure_cols_pub, split};
 use crate::gadgets::requant::tables::{TT_POW2, TT_RANGE, rqv_at};
-use crate::layer::MatLayout;
+use crate::layout::MatLayout;
 use crate::relations::{FracRel, PairRel, RangeRel, id};
 
 // ------------------------------------------------------------------- angles ---

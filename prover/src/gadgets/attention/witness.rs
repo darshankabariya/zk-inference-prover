@@ -31,6 +31,7 @@ use rayon::prelude::*;
 
 use crate::bf16;
 use crate::gadgets::attention::layout::Shape;
+use crate::layer::Layer;
 use crate::witread::{self, Site};
 
 /// A raw column, read and widened.  `site` says which decode the widening is,
@@ -1114,5 +1115,124 @@ impl Attn {
             diagonal_block,
             zz_total: None,
         }
+    }
+}
+
+// The layer's key tiles, resized or corrupted: four methods on `Layer` that read
+// and write nothing but `key_tiles` (and the attnout witness rebuilt from them),
+// which is why they are the attention gadget's and not `layer.rs`'s. They stay
+// methods, and stay here, so that no call site and no body changes.
+impl Layer {
+    /// Stream J: size the layer's master exp table by the largest key the key tiles
+    /// actually look up, instead of by the manifest's `d_bits + spread`.
+    ///
+    /// The two differ because the formula maximises the raw shift and the spread
+    /// separately: the key is `d * 2^(F - frac_i)`, so `bits(max_i d_i) + (F -
+    /// min_i frac_i)` is only tight when the largest raw shift comes from the
+    /// lowest-exponent head.  It never does -- `d_i` is itself proportional to
+    /// `2^frac_i`, so the raw maximum sits at a head *near* `F` -- and every layer
+    /// of b10-final measures 1-3 bits below the formula
+    /// (`experiments/b10/out/oversize/`).
+    ///
+    /// This changes no numerator and no committed column: the table is a prefix of
+    /// the same closed form, so the shrink is a truncation.  What it changes is the
+    /// statement's table size, exactly as `--table-bits` does -- and unlike
+    /// `--table-bits` it can differ per layer inside one chunk loop.
+    ///
+    /// Returns `(before, after)` in table bits, and leaves `off_table` on each key tile
+    /// recounted against the new size (zero whenever `bits >= key_bits`).
+    pub fn set_master_table(&mut self, bits: u32) -> (u32, u32) {
+        let _s = witread::scope(Site::Tighten);
+        let before = self.key_tiles.iter().map(|b| b.log_table).max().unwrap_or(0);
+        let after = bits.clamp(1, before);
+        for b in self.key_tiles.iter_mut() {
+            b.retable(after);
+        }
+        (before, after)
+    }
+
+    /// The largest exp-table key any key tile of this layer looks up, in bits.
+    pub fn key_bits(&self) -> u32 {
+        let _s = witread::scope(Site::Tighten);
+        self.key_tiles.iter().map(|b| b.key_bits()).max().unwrap_or(1)
+    }
+
+    /// B10 step 3's probe on the composed proof: one token attends to a key the
+    /// causal mask removes.
+    ///
+    /// The mask is preprocessed, so the only shape the attack can take is to
+    /// *claim* a denominator and an output that count a masked key: the diagonal block
+    /// key tile's numerator gets a legal table output, and `Z`, `A.V` and the attnout
+    /// witness are rebuilt from it.  The AIR reads neither -- its numerator fold
+    /// and its exp lookup drop the slot -- so the diagonal block's `sn` no longer joins
+    /// the prefix's to make the denominator the per-token component claims.
+    pub fn unmask_diagonal_block(&mut self, i: usize) {
+        let n_pre = self.key_tiles.iter().filter(|b| !b.diagonal_block).count();
+        let ci = self.key_tiles.iter().position(|b| b.diagonal_block).expect("no diagonal block key tile");
+        let nmax = self.key_tiles[ci].nmax as i64;
+        let sh = self.key_tiles[ci].shape;
+        let masked: Vec<usize> = (0..sh.insts * sh.s * sh.c)
+            .filter(|g| !self.key_tiles[ci].visible(*g))
+            .collect();
+        assert!(!masked.is_empty(), "the diagonal block key tile has no masked entries");
+        let g = masked[i % masked.len()];
+        self.key_tiles[ci].num[g] = nmax;
+        // rebuild that key tile's denominator and A.V output from the changed numerator
+        let (ni, ns, nc, nhd) = (sh.insts, sh.s, sh.c, sh.hd);
+        let (inst, t, c) = (g / (ns * nc), (g / nc) % ns, g % nc);
+        self.key_tiles[ci].zz[inst * ns + t] += nmax;
+        for j in 0..nhd {
+            let v = self.key_tiles[ci].vv[(inst * nc + c) * nhd + j] as i64;
+            self.key_tiles[ci].out[(inst * ns + t) * nhd + j] += nmax * v;
+        }
+        let _ = ni;
+        // and the total the paired prefix key tile's per-token component commits
+        let pi = ci - n_pre;
+        let add = self.key_tiles[ci].zz[inst * ns + t];
+        let own = self.key_tiles[pi].zz[inst * ns + t];
+        if let Some(tot) = self.key_tiles[pi].zz_total.as_mut() {
+            tot[inst * ns + t] = own + add;
+        }
+        self.rebuild_ao();
+    }
+
+    /// B4 section 3's probe on the composed proof: flip one row of the shared exp
+    /// table and rebuild every key tile's numerators, denominators and outputs to
+    /// match.  Internally consistent everywhere; only the preprocessed root
+    /// differs.
+    pub fn corrupt_exp_table(&mut self, i: usize) {
+        for b in self.key_tiles.iter_mut() {
+            let n = b.table.len();
+            let i = i % n;
+            b.table[i] = if b.table[i] == 0 { 1 } else { b.table[i] - 1 };
+            let sh = b.shape;
+            for g in 0..sh.insts * sh.s * sh.c {
+                let idx = b.table_key(g);
+                b.num[g] = if b.visible(g) && idx >= 0 && (idx as usize) < n {
+                    b.table[idx as usize] as i64
+                } else {
+                    0
+                };
+            }
+            for ti in 0..sh.insts * sh.s {
+                b.zz[ti] = b.num[ti * sh.c..(ti + 1) * sh.c].iter().sum();
+            }
+            let mut out = vec![0i64; sh.insts * sh.s * sh.hd];
+            for inst in 0..sh.insts {
+                for t in 0..sh.s {
+                    for c in 0..sh.c {
+                        let nn = b.num[(inst * sh.s + t) * sh.c + c];
+                        if nn != 0 {
+                            for j in 0..sh.hd {
+                                out[(inst * sh.s + t) * sh.hd + j] +=
+                                    nn * b.vv[(inst * sh.c + c) * sh.hd + j] as i64;
+                            }
+                        }
+                    }
+                }
+            }
+            b.out = out;
+        }
+        self.rebuild_ao();
     }
 }

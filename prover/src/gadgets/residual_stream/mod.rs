@@ -91,6 +91,12 @@
 //! output also pays a `VAL` lookup — the output range check README 3.7 named:
 //! it says the result is a value bf16 can represent.
 
+/// The columns a dump carries for this family, and the synthetic ones.
+pub mod witness;
+
+/// The same columns born on the card.
+pub mod device;
+
 use num_traits::{One, Zero};
 use rayon::prelude::*;
 use serde_json::{Value, json};
@@ -1309,7 +1315,7 @@ pub struct ResidualStreamComponent {
     /// and the boundary sides read them by row, they are a fifth of the
     /// columns' bytes, and bringing them back is what lets the whole binding half
     /// stay exactly where it was.
-    pub dev: Option<crate::dev_residual_stream_witness_gen::DevResidualStream>,
+    pub dev: Option<device::DevResidualStream>,
 }
 
 impl ResidualStreamComponent {
@@ -1423,7 +1429,7 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
     // path rather than running a kernel that has never heard of them. That is
     // announced: a probe that silently proved the untampered witness would read
     // as a gadget that accepts.
-    let witness_gen_mode = crate::dev_residual_stream_witness_gen::mode();
+    let witness_gen_mode = device::mode();
     let witness_gen_mode = if witness_gen_mode != 0 && tamper.is_some() {
         eprintln!("residual_stream_witness_gen-dev: {tag}: a residual-stream tamper is set, \
                   so this component generates its witness on the host");
@@ -1442,12 +1448,12 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
         witness_gen_mode
     };
     if witness_gen_mode == 1 {
-        let dev = crate::dev_residual_stream_witness_gen::residual_stream_component_dev(w, prog, round, tables);
+        let dev = device::residual_stream_component_dev(w, prog, round, tables);
         let (ref_ok, ref_n) = ref_count(w, prog, &dev.outs);
         let bad_exp = dev.bad_exp;
         let (in_nat, out_nat, outs) =
             (dev.in_nat.clone(), dev.out_nat.clone(), dev.outs.clone());
-        crate::dev_residual_stream_witness_gen::merge(tables, &dev);
+        device::merge(tables, &dev);
         return ResidualStreamComponent {
             pre: vec![], base: vec![], log_rows, rows: w.rows,
             n_ops: w.rows * prog.slots.len(),
@@ -1457,7 +1463,7 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
             dev: Some(dev),
         };
     }
-    let snap_before = (witness_gen_mode == 2).then(|| crate::dev_residual_stream_witness_gen::ResidualStreamSnap::of(tables));
+    let snap_before = (witness_gen_mode == 2).then(|| device::ResidualStreamSnap::of(tables));
     let off_before = tables.off_table;
     let n_cols = prog.n_cols(round);
     let sticky = round.needs_sticky();
@@ -1840,14 +1846,14 @@ pub fn residual_stream_component(w: &ResidualStreamWitness, prog: &Prog, round: 
     // any column is used. The device's own bumps are the check's and not the
     // proof's, so the host's tables go back where the host witness generation left them.
     if witness_gen_mode == 2 {
-        let after = crate::dev_residual_stream_witness_gen::ResidualStreamSnap::of(tables);
+        let after = device::ResidualStreamSnap::of(tables);
         let after_off = tables.off_table;
-        let dev = crate::dev_residual_stream_witness_gen::residual_stream_component_dev(w, prog, round, tables);
-        crate::dev_residual_stream_witness_gen::check_residual_stream_dev(tag, &base, &pre, &dev,
+        let dev = device::residual_stream_component_dev(w, prog, round, tables);
+        device::check_residual_stream_dev(tag, &base, &pre, &dev,
                                                                    after_off - off_before, bad_exp,
                                                                    &in_nat, &out_nat, &outs,
                                                                    &snap_before.unwrap(), &after);
-        crate::dev_residual_stream_witness_gen::restore(tables, &after, after_off);
+        device::restore(tables, &after, after_off);
     }
     ResidualStreamComponent {
         pre, base, log_rows, rows: w.rows, n_ops, n_leaves: n_leaf_tot,
