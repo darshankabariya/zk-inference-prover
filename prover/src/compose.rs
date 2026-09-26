@@ -43,17 +43,20 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{FrameworkComponent, FrameworkEval, TraceLocationAllocator};
 
 use crate::gadgets::attention::air::{
-    ChanEval, ExpRel, ExpTableEval, KeyEval, Offsets, Powers, RangeRel, RowEval, key_tile_id, id,
-    msk_id, powers, tbl_range, CHAN_SEL, DIAGONAL_BLOCK_SEL, KEY_SEL, ROW_SEL, TBL_EXP_X, TBL_EXP_Y,
+    ChanEval, ExpRel, ExpTableEval, KeyEval, Offsets, Powers, RowEval, key_tile_id,
+    msk_id, CHAN_SEL, DIAGONAL_BLOCK_SEL, KEY_SEL, ROW_SEL, TBL_EXP_X, TBL_EXP_Y,
 };
-use crate::gadgets::attention::trace::{self as attn_trace, Cfg, Committed, Layouts, table_col};
+use crate::gadgets::attention::trace::{self as attn_trace, Cfg, Committed, Layouts};
+use crate::relations::{
+    FRAC_COLS, FracRel, MUL_COLS, MulRel, NORM_COLS, NormRel, PairRel, RangeRel, TableEval,
+    TableKind, id, powers, table_col, tbl_range,
+};
 use crate::gadgets::attention::witness::Variant as AttnVariant;
 use crate::bf16::Round;
 use crate::common::{Eval, Proof, RawStats, Session, eval_of, m31_u32, twiddles};
 use crate::util::pcs_config;
 use crate::gadgets::dequant::{
-    DEQ_SEL, DequantEval, FRAC_COLS, FracRel, MUL_COLS, MulRel, NORM_COLS, NormRel, PairRel,
-    QNZ_COLS, Spec, TableEval, TableKind, Variant as DeqVariant, YSide, chan_col, deq_sel,
+    DEQ_SEL, DequantEval, QNZ_COLS, Spec, Variant as DeqVariant, YSide, chan_col, deq_sel,
     range_widths,
 };
 use crate::layer::{
@@ -2601,13 +2604,13 @@ impl Plan {
         }
         if let Some(mi) = self.argmax_mat() {
             for n in crate::gadgets::argmax::AM_SEL {
-                put(crate::gadgets::argmax::id(n), "argmax/sel", self.mat_lays[mi].log_rows,
+                put(crate::relations::id(n), "argmax/sel", self.mat_lays[mi].log_rows,
                     PreNeeds::Params, PreVaries::Layer);
             }
         }
         if let Some(l) = &self.emb {
             for n in crate::gadgets::embed::EMB_SEL {
-                put(crate::gadgets::embed::id(n), "embed/sel", l.log_use, PreNeeds::Params,
+                put(crate::relations::id(n), "embed/sel", l.log_use, PreNeeds::Params,
                     PreVaries::Layer);
             }
             put(crate::gadgets::embed::cb_id(), "embed/sel", l.log_use, PreNeeds::Params,
@@ -2867,14 +2870,14 @@ impl Plan {
         // stream E: the argmax component's own three selectors, last, so that no
         // family before it moves an index
         if self.argmax_mat().is_some() {
-            ids.extend(crate::gadgets::argmax::AM_SEL.iter().map(|n| crate::gadgets::argmax::id(n)));
+            ids.extend(crate::gadgets::argmax::AM_SEL.iter().map(|n| crate::relations::id(*n)));
         }
         // stream BB: the embedding gadget's own columns -- the use component's four
         // selectors and its block index, then the table's index pair and its
         // `pe` value columns.  After the argmax and before the GKR backend's, so no
         // family that exists today moves an index.
         if let Some(l) = &self.emb {
-            ids.extend(crate::gadgets::embed::EMB_SEL.iter().map(|n| crate::gadgets::embed::id(n)));
+            ids.extend(crate::gadgets::embed::EMB_SEL.iter().map(|n| crate::relations::id(*n)));
             ids.push(crate::gadgets::embed::cb_id());
             ids.push(crate::gadgets::embed::tab_v_id());
             ids.push(crate::gadgets::embed::tab_cb_id());
@@ -4656,7 +4659,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // (`null`) rather than as zero mismatches.
             if !gp.head_norm && want.len() >= t.tokens * t.d {
                 let bad = (0..t.tokens * t.d)
-                    .filter(|i| crate::gadgets::residual_stream::canon(got[*i]) != crate::gadgets::residual_stream::canon(want[*i]))
+                    .filter(|i| crate::encoding::canon(got[*i]) != crate::encoding::canon(want[*i]))
                     .count();
                 mismatch.push(json!({"column": wname, "values": t.tokens * t.d,
                                      "mismatch": bad}));
@@ -4700,7 +4703,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             // constant down the tokens, so the row reads channels `res + j a`;
             // it is preprocessed now, so it is `pre` and not a group.
             let msblk: Vec<u16> =
-                (0..rows1).map(|m| crate::gadgets::residual_stream::canon(ms_out[k][m % t.tokens])).collect();
+                (0..rows1).map(|m| crate::encoding::canon(ms_out[k][m % t.tokens])).collect();
             // B11 stream L, anatomy: the same shape of serial gather as the
             // SwiGLU's below -- `rows1 * nreal` canonicalisations, one row
             // independent of the next.
@@ -4709,7 +4712,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             wblk.par_chunks_mut(t.nreal).enumerate().for_each(|(m, row)| {
                 let res = m / t.tokens;
                 for j in 0..t.nreal {
-                    row[j] = crate::gadgets::residual_stream::canon(wcol[res + j * t.a]);
+                    row[j] = crate::encoding::canon(wcol[res + j * t.a]);
                 }
             });
             // stream II's control 3: one norm-weight cell bent on the prover
@@ -4737,7 +4740,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 let got = t.unlay(&r.outs[0]);
                 let bad = (0..t.tokens * t.d)
                     .into_par_iter()
-                    .filter(|i| crate::gadgets::residual_stream::canon(got[*i]) != crate::gadgets::residual_stream::canon(wv[*i]))
+                    .filter(|i| crate::encoding::canon(got[*i]) != crate::encoding::canon(wv[*i]))
                     .count();
                 mismatch.push(json!({"column": wname, "values": t.tokens * t.d,
                                      "mismatch": bad}));
@@ -4756,8 +4759,8 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
                 let rbad = (0..t.tokens)
                     .filter(|tt| {
                         let got = crate::gadgets::residual_stream::un_image(
-                            un_r, crate::gadgets::residual_stream::canon(ms_out[k][*tt]));
-                        crate::gadgets::residual_stream::canon(got) != crate::gadgets::residual_stream::canon(rcol[*tt])
+                            un_r, crate::encoding::canon(ms_out[k][*tt]));
+                        crate::encoding::canon(got) != crate::encoding::canon(rcol[*tt])
                     })
                     .count();
                 mismatch.push(json!({"column": rname, "values": t.tokens, "mismatch": rbad}));
@@ -4827,7 +4830,7 @@ pub fn generate(layer: &Layer, params: &Params, tamper: &ProverTamper, pre_key: 
             let cmp = |got: &[u16], want: &[u16]| -> usize {
                 (0..n)
                     .into_par_iter()
-                    .filter(|q| crate::gadgets::residual_stream::canon(got[*q]) != crate::gadgets::residual_stream::canon(want[*q]))
+                    .filter(|q| crate::encoding::canon(got[*q]) != crate::encoding::canon(want[*q]))
                     .count()
             };
             // three columns B1 wrote for this gadget: the gate's dequantized
@@ -4949,7 +4952,7 @@ different rotation", inv.len(), 2 * hd * p.s);
                     let at = x % pre.len();
                     let was = pre[at];
                     pre[at] = crate::gadgets::rope::bend_pat(was);
-                    assert_ne!(crate::gadgets::residual_stream::split(pre[at]), crate::gadgets::residual_stream::split(was),
+                    assert_ne!(crate::encoding::split(pre[at]), crate::encoding::split(was),
                                "the rope angle probe did not fire at cell {at}");
                     eprintln!("compose: rope angle cell {at} of rp{}m bent {was:#06x} -> \
 {:#06x} (a rejection is the pass)", rr.name, pre[at]);

@@ -282,7 +282,7 @@ impl Collect {
         cols: &[crate::common::Eval],
         pre: &[crate::common::Eval],
         exp: &crate::gadgets::attention::air::ExpRel,
-        ranges: &[crate::gadgets::attention::air::RangeRel],
+        ranges: &[crate::relations::RangeRel],
     ) {
         let t0 = Instant::now();
         let site = Site {
@@ -397,7 +397,7 @@ pub fn feed_site(
     cols: &[crate::common::Eval],
     pre: &[crate::common::Eval],
     exp: &crate::gadgets::attention::air::ExpRel,
-    ranges: &[crate::gadgets::attention::air::RangeRel],
+    ranges: &[crate::relations::RangeRel],
 ) {
     let dev = air.and_then(|a| a.dev);
     let Some(d) = dev else {
@@ -1045,7 +1045,7 @@ mod feedimpl {
             cols: &[crate::common::Eval],
             pre: &[crate::common::Eval],
             exp: &crate::gadgets::attention::air::ExpRel,
-            ranges: &[crate::gadgets::attention::air::RangeRel],
+            ranges: &[crate::relations::RangeRel],
         ) {
             use stwo::prover::backend::Column as _;
             use stwo::stwo_cuda::base_field_vec::BaseFieldVec;
@@ -1084,7 +1084,7 @@ mod feedimpl {
             cols: &[crate::common::Eval],
             pre: &[crate::common::Eval],
             exp: &crate::gadgets::attention::air::ExpRel,
-            ranges: &[crate::gadgets::attention::air::RangeRel],
+            ranges: &[crate::relations::RangeRel],
         ) {
             use stwo::prover::backend::Column as _;
             let frac = |look: usize, vr: usize| {
@@ -1747,8 +1747,8 @@ pub fn cmd(args: &[String]) {
     let mut ch = Blake2sM31Channel::default();
     crate::util::pcs_config().mix_into(&mut ch);
     let rel_exp = crate::gadgets::attention::air::ExpRel::draw(&mut ch);
-    let rels: Vec<crate::gadgets::attention::air::RangeRel> =
-        widths.iter().map(|_| crate::gadgets::attention::air::RangeRel::draw(&mut ch)).collect();
+    let rels: Vec<crate::relations::RangeRel> =
+        widths.iter().map(|_| crate::relations::RangeRel::draw(&mut ch)).collect();
     let f = ch.draw_secure_felts(3);
     let pow = crate::gadgets::attention::air::Powers::new(f[0], f[1], f[2], &sh, &l.chan, &l.key, &l.out, l.rw);
 

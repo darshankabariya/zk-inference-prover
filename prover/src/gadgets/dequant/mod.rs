@@ -63,59 +63,22 @@ use stwo::core::air::Component;
 use stwo::core::fields::m31::{M31, P};
 use stwo::core::fields::qm31::SecureField;
 use stwo::prover::ComponentProver;
-use stwo::prover::backend::simd::m31::LOG_N_LANES;
+use stwo::prover::backend::simd::m31::{LOG_N_LANES, PackedM31};
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, INTERACTION_TRACE_IDX,
-    Relation, RelationEntry, TraceLocationAllocator, relation,
+    Relation, RelationEntry, TraceLocationAllocator,
 };
 
 use crate::bf16::{self, EXP_BIAS, KMAX_SOUND, MulRow, NormRow, Round};
 use crate::common::{Eval, Proven, Session, Sums, eval_of, log_rows_for, m31_u32, twiddles};
+use crate::encoding::m31_of;
+use crate::relations::{
+    FRAC_COLS, FracRel, MUL_COLS, MulRel, NORM_COLS, NormRel, PairRel, RangeRel, TableEval,
+    TableKind, id,
+};
 
-relation!(NormRel, 6);
-relation!(FracRel, 3);
-relation!(MulRel, 4);
-relation!(PairRel, 2);
-
-// B11 stream U, lever 3: the drawn elements, for the GKR link's affine weights.
-// `combine(v) = sum alpha_i v_i - z`, so these two are everything the link needs
-// to write a lookup's denominator as an affine form over the columns it reads --
-// the same accessors stream S added to `ExpRel` and `RangeRel`.
-impl NormRel {
-    pub fn parts(&self) -> (SecureField, &[SecureField]) {
-        (self.0.z, &self.0.alpha_powers)
-    }
-}
-impl FracRel {
-    pub fn parts(&self) -> (SecureField, &[SecureField]) {
-        (self.0.z, &self.0.alpha_powers)
-    }
-}
-impl MulRel {
-    pub fn parts(&self) -> (SecureField, &[SecureField]) {
-        (self.0.z, &self.0.alpha_powers)
-    }
-}
-// B11 stream V, lever 4: the attention-output component's `(qm, nz2)` pair check
-// is the first lookup any family's link has needed from this relation.
-impl PairRel {
-    pub fn parts(&self) -> (SecureField, &[SecureField]) {
-        (self.0.z, &self.0.alpha_powers)
-    }
-}
-// one range-relation type across the whole crate, so a composed proof's range
-// tables serve the attention key tiles and the dequant components alike
-pub use crate::gadgets::attention::air::RangeRel;
-
-pub fn id(s: impl Into<String>) -> PreProcessedColumnId {
-    PreProcessedColumnId { id: s.into() }
-}
-pub const NORM_COLS: [&str; 6] =
-    ["b6_norm_m2", "b6_norm_ph", "b6_norm_st", "b6_norm_m7", "b6_norm_ef", "b6_norm_nz"];
-pub const FRAC_COLS: [&str; 3] = ["b6_frac_ph", "b6_frac_r", "b6_frac_st"];
-pub const MUL_COLS: [&str; 4] = ["b6_mul_a", "b6_mul_b", "b6_mul_m7", "b6_mul_c"];
 pub fn range_col(bits: u32) -> PreProcessedColumnId {
     id(format!("b6_range_{bits}"))
 }
@@ -956,74 +919,6 @@ impl FrameworkEval for DequantEval {
     }
 }
 
-// ------------------------------------------------------------------- tables --
-
-/// A preprocessed table with a committed multiplicity column, yielded at `-m`.
-/// One shape serves all four tables; the arity follows the column list.
-#[derive(Clone)]
-pub struct TableEval {
-    pub log_rows: u32,
-    pub cols: Vec<PreProcessedColumnId>,
-    pub kind: TableKind,
-}
-
-#[derive(Clone)]
-pub enum TableKind {
-    Norm(NormRel),
-    Frac(FracRel),
-    Mul(MulRel),
-    Pair(PairRel),
-    Range(RangeRel),
-}
-
-impl TableKind {
-    fn combine(&self, v: &[PackedM31]) -> PackedQM31 {
-        match self {
-            TableKind::Norm(r) => r.combine(v),
-            TableKind::Frac(r) => r.combine(v),
-            TableKind::Mul(r) => r.combine(v),
-            TableKind::Pair(r) => r.combine(v),
-            TableKind::Range(r) => r.combine(v),
-        }
-    }
-}
-
-use stwo::prover::backend::simd::m31::PackedM31;
-
-impl FrameworkEval for TableEval {
-    /// milestone 2b: the flat parameter block for the generated
-    /// constraint kernel (`gpu/m2b/cudagen.rs`).
-    fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
-        crate::cudagen::blob_for(self)
-    }
-
-    /// milestone 2a: no kernel is registered under this name, so the
-    /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "zk_table_eval" }
-
-    fn log_size(&self) -> u32 {
-        self.log_rows
-    }
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_rows + 1
-    }
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let row: Vec<E::F> =
-            self.cols.iter().map(|c| eval.get_preprocessed_column(c.clone())).collect();
-        let m = eval.next_trace_mask();
-        let neg = -E::EF::from(m);
-        match &self.kind {
-            TableKind::Norm(r) => eval.add_to_relation(RelationEntry::new(r, neg, &row)),
-            TableKind::Frac(r) => eval.add_to_relation(RelationEntry::new(r, neg, &row)),
-            TableKind::Mul(r) => eval.add_to_relation(RelationEntry::new(r, neg, &row)),
-            TableKind::Pair(r) => eval.add_to_relation(RelationEntry::new(r, neg, &row)),
-            TableKind::Range(r) => eval.add_to_relation(RelationEntry::new(r, neg, &row)),
-        }
-        eval.finalize_logup();
-        eval
-    }
-}
-
 // ------------------------------------------------------------------ witness --
 
 /// What a dishonest prover changes before committing.
@@ -1166,11 +1061,6 @@ impl Witness {
 }
 
 // ------------------------------------------------------------------ the run --
-
-fn m31_of(v: i64) -> M31 {
-    let p = P as i64;
-    M31::from_u32_unchecked((((v % p) + p) % p) as u32)
-}
 
 /// One lookup, as the AIR adds it: column indices into the generator's `all`, and
 /// the column holding its multiplicity (`None` for 1).

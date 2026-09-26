@@ -68,7 +68,8 @@ use stwo::core::fields::m31::M31;
 use stwo::prover::backend::Column as _;
 use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
 
-use crate::gadgets::attention::trace::{Layouts, m31_of};
+use crate::encoding::m31_of;
+use crate::gadgets::attention::trace::Layouts;
 use crate::gadgets::attention::witness::{Attn, Variant};
 use crate::bf16::{EXP_BIAS, Round};
 use crate::common::Eval;

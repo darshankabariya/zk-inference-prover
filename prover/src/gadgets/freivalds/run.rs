@@ -29,8 +29,8 @@ use stwo::core::fields::qm31::SecureField;
 use stwo::prover::ComponentProver;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
-use crate::gadgets::attention::air::{RangeRel, RangeTableEval, powers, tbl_range};
-use crate::gadgets::attention::trace::{m31_of, table_col};
+use crate::encoding::m31_of;
+use crate::relations::{RangeRel, RangeTableEval, powers, table_col, tbl_range};
 use crate::bf16::Round;
 use crate::common::{Proven, Session, Sums, eval_of, m31_u32, twiddles};
 use crate::compose::Rels;

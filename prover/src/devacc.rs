@@ -68,7 +68,7 @@ use stwo::stwo_cuda::base_field_vec::{BaseFieldVec, Uint32Vec};
 use stwo::stwo_cuda::secure_field_vec::SecureFieldVec;
 
 use crate::gadgets::attention::air::Powers;
-use crate::gadgets::attention::trace::m31_of;
+use crate::encoding::m31_of;
 use crate::gadgets::attention::witness::{Attn, Variant};
 use crate::common::Eval;
 use crate::device::AnyCol;
@@ -668,8 +668,8 @@ pub fn freivalds(dev: &crate::dev_attention_freivalds_witness_gen::DevFreivalds,
     let mutate = accmut(Comp::Freivalds);
     assert_eq!(dev.base.len(), lay.pq, "the Freivalds component's committed column count");
     assert_eq!(dev.pre.len(), n_mats * lay.pk + 4, "the Freivalds component's weight columns");
-    let (rv_pow, rv_step) = crate::gadgets::attention::air::powers(rv, lay.pk);
-    let (s_pow, s_step) = crate::gadgets::attention::air::powers(s_ch, lay.pq);
+    let (rv_pow, rv_step) = crate::relations::powers(rv, lay.pk);
+    let (s_pow, s_step) = crate::relations::powers(s_ch, lay.pq);
     let base = ptrs(&dev.base);
     let pre = ptrs(&dev.pre[..n_mats * lay.pk]);
     let acc = Acc::new(lay.g.log_rows, 1 + 2 * n_mats);
@@ -720,7 +720,7 @@ pub fn deq(dev: &crate::dev_dequant_witness_gen::DevDequantWitnessGen, lay: &cra
            s_ch: SecureField) -> DevAccCols {
     let t = std::time::Instant::now();
     let mutate = accmut(Comp::Deq);
-    let (rv_pow, rv_step) = crate::gadgets::attention::air::powers(rv, lay.per_row);
+    let (rv_pow, rv_step) = crate::relations::powers(rv, lay.per_row);
     let cols: Vec<*const u32> =
         (0..lay.per_row).map(|s| dev.base[map.at(s, f_acc)].device_ptr).collect();
     let acc = Acc::new(lay.log_rows, 2);
@@ -769,7 +769,7 @@ pub fn ao(dev: &crate::dev_attention_freivalds_witness_gen::DevAo, lay: &crate::
     // but it never reaches here -- `ao_component` fills it on the host on both
     // backends, so `dev` is `None` and this fold is the host's.
     assert_eq!(dev.base.len(), 2 + 9 * pr, "the attnout component's column count");
-    let (rv_pow, rv_step) = crate::gadgets::attention::air::powers(rv, pr);
+    let (rv_pow, rv_step) = crate::relations::powers(rv, pr);
     let cols: Vec<*const u32> =
         (0..pr).map(|k| dev.base[2 + 9 * k].device_ptr).collect();
     let acc = Acc::new(lay.log_rows, 4);
@@ -830,7 +830,7 @@ pub fn binding_mode() -> u32 {
 ///
 /// The caller owns the order: `specs` is `Binding::specs` as the AIR reads it, and
 /// the columns come back four per binding in that order, which is exactly what
-/// `attn_trace::secure_cols_pub` produces on the host backend.
+/// `encoding::secure_cols_pub` produces on the host backend.
 pub fn residual_stream_bind(in_nat: *const i32, out_nat: *const i32, log_rows: u32,
                             specs: &[FAccResidualStreamBinding], weights: &[SecureField], lam: SecureField)
             -> DevAccCols {

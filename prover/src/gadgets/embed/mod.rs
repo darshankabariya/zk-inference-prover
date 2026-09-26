@@ -103,8 +103,8 @@ use stwo_constraint_framework::{
     Relation, RelationEFTraitBound, RelationEntry, TraceLocationAllocator,
 };
 
-use crate::gadgets::attention::air::{RangeRel, RangeTableEval, tbl_range};
-use crate::gadgets::attention::trace::m31_of;
+use crate::encoding::{canon, m31_of, secure_cols_pub, split};
+use crate::relations::{RangeRel, RangeTableEval, id, table_col, tbl_range};
 use crate::boundary::PACK;
 use crate::common::{Eval, Proven, Session, Sums, eval_of, log_rows_for, m31_u32, twiddles};
 
@@ -117,9 +117,6 @@ pub const EF_BITS: u32 = 8;
 /// the lookup tuple carries so that two blocks of one token cannot be swapped.
 pub const EMB_SEL: [&str; 4] = ["b11_emb_act", "b11_emb_in", "b11_emb_bd", "b11_emb_end"];
 
-pub fn id(s: &str) -> PreProcessedColumnId {
-    PreProcessedColumnId { id: s.to_string() }
-}
 pub fn cb_id() -> PreProcessedColumnId {
     id("b11_emb_cb")
 }
@@ -310,7 +307,7 @@ impl FrameworkEval for EmbedEval {
         self.log_rows + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let sel: Vec<E::F> = EMB_SEL.iter().map(|n| eval.get_preprocessed_column(id(n))).collect();
+        let sel: Vec<E::F> = EMB_SEL.iter().map(|n| eval.get_preprocessed_column(id(*n))).collect();
         let (act, s_in, s_bd, s_end) =
             (sel[0].clone(), sel[1].clone(), sel[2].clone(), sel[3].clone());
         let cb = eval.get_preprocessed_column(cb_id());
@@ -519,8 +516,8 @@ impl EWitness {
         if xin.len() != tokens * d {
             return Err(format!("stream input: {} values, want {tokens} x {d}", xin.len()));
         }
-        let tab: Vec<u16> = tab.into_iter().map(crate::gadgets::residual_stream::canon).collect();
-        let xin: Vec<u16> = xin.into_iter().map(crate::gadgets::residual_stream::canon).collect();
+        let tab: Vec<u16> = tab.into_iter().map(canon).collect();
+        let xin: Vec<u16> = xin.into_iter().map(canon).collect();
         for t in 0..tokens {
             let v = tok[t] as usize;
             if v >= vocab {
@@ -625,7 +622,7 @@ pub fn component(w: &EWitness, lay: EmbLayout, m_ef: &mut [u32], bad: Option<Tam
         cols[0][j] = m31_u32(tok[t]);
         ids[j] = tok[t];
         for sl in 0..pe {
-            let (sm, ef) = crate::gadgets::residual_stream::split(xin[t * d + cb * pe + sl]);
+            let (sm, ef) = split(xin[t * d + cb * pe + sl]);
             cols[1 + 2 * sl][j] = m31_of(sm);
             cols[2 + 2 * sl][j] = m31_u32(ef);
             vals[j * pe + sl] = (sm, ef as i64);
@@ -665,7 +662,7 @@ pub fn component(w: &EWitness, lay: EmbLayout, m_ef: &mut [u32], bad: Option<Tam
             continue;
         }
         for sl in 0..pe {
-            let (sm, ef) = crate::gadgets::residual_stream::split(tab[v * d + cb * pe + sl]);
+            let (sm, ef) = split(tab[v * d + cb * pe + sl]);
             tcols[2 + sl][n] = m31_of(PACK * sm + ef as i64);
         }
     }
@@ -729,7 +726,7 @@ pub fn logup(r: &EComponent, rel: &EmbRel, rel_ef: &RangeRel) -> (Vec<Eval>, Sec
 /// The table side's one LogUp column and its claimed sum.
 pub fn table_side(r: &EComponent, rel: &EmbRel) -> (Vec<Eval>, SecureField) {
     let refs: Vec<&Eval> = r.tab_pre.iter().collect();
-    crate::gadgets::attention::trace::table_col(r.lay.log_tab, rel, &refs, &r.tab_mult)
+    table_col(r.lay.log_tab, rel, &refs, &r.tab_mult)
 }
 
 /// The two Horner columns and the two claims they close on: the stream binding and
@@ -771,8 +768,8 @@ pub fn binding_cols(r: &EComponent, t: &ETie) -> (Vec<Eval>, SecureField, Secure
         g[j] = prev_g * kmult + add;
     }
     let (hc, gc) = (h[n_use - 1], g[n_use - 1]);
-    let mut cols = crate::gadgets::attention::trace::secure_cols_pub(r.lay.log_use, &h);
-    cols.extend(crate::gadgets::attention::trace::secure_cols_pub(r.lay.log_use, &g));
+    let mut cols = secure_cols_pub(r.lay.log_use, &h);
+    cols.extend(secure_cols_pub(r.lay.log_use, &g));
     (cols, hc, gc)
 }
 
@@ -860,7 +857,7 @@ pub fn run(w: &EWitness, target: usize, bad: Option<Tamper>) -> (Outcome, EmbLay
     let (binding, tcols) = binding;
     let (lcols, use_sum) = logup(&r, &rel, &rel_ef);
     let (tbcols, tab_sum) = table_side(&r, &rel);
-    let (efcols, ef_sum) = crate::gadgets::attention::trace::table_col(EF_BITS, &rel_ef, &[&tbl_ef], &mult_ef);
+    let (efcols, ef_sum) = table_col(EF_BITS, &rel_ef, &[&tbl_ef], &mult_ef);
     let mut icols = tcols;
     icols.extend(lcols);
     icols.extend(tbcols);
@@ -873,7 +870,7 @@ pub fn run(w: &EWitness, target: usize, bad: Option<Tamper>) -> (Outcome, EmbLay
         let mut acc = SecureField::zero();
         for t in 0..w.tokens {
             for c in 0..w.d {
-                let (sm, ef) = crate::gadgets::residual_stream::split(w.xin[t * w.d + c]);
+                let (sm, ef) = split(w.xin[t * w.d + c]);
                 acc += (SecureField::from(m31_of(sm))
                         + SecureField::from(m31_u32(ef)) * binding.lam)
                     * wpow(ch[0], n - 1 - (c as i128 * tok + t as i128));
@@ -883,7 +880,7 @@ pub fn run(w: &EWitness, target: usize, bad: Option<Tamper>) -> (Outcome, EmbLay
     };
     let binding_ok = binding.claimed == want;
 
-    let mut ids: Vec<PreProcessedColumnId> = EMB_SEL.iter().map(|n| id(n)).collect();
+    let mut ids: Vec<PreProcessedColumnId> = EMB_SEL.iter().map(|n| id(*n)).collect();
     ids.push(cb_id());
     ids.push(tab_v_id());
     ids.push(tab_cb_id());
@@ -996,7 +993,7 @@ mod tests {
             let (r, t) = (m / tokens, m % tokens);
             let mut f = SecureField::zero();
             for j in 0..nreal {
-                let (sm, ef) = crate::gadgets::residual_stream::split(xin[t * d + r + j * a]);
+                let (sm, ef) = split(xin[t * d + r + j * a]);
                 f += (SecureField::from(m31_of(sm)) + SecureField::from(m31_u32(ef)) * lam)
                     * wpow(w, (a * tokens * (nreal - 1 - j)) as i128);
             }
@@ -1188,7 +1185,7 @@ mod tests {
         let (a, b) = (off.pre_ids(), on.pre_ids());
         assert_eq!(b.len(), a.len() + 5 + 2 + l.pe, "the id list gained the wrong count");
         assert_eq!(a, b[..a.len()], "an existing preprocessed id moved");
-        let want: Vec<String> = EMB_SEL.iter().map(|n| id(n).id)
+        let want: Vec<String> = EMB_SEL.iter().map(|n| id(*n).id)
             .chain([cb_id().id, tab_v_id().id, tab_cb_id().id])
             .chain((0..l.pe).map(|k| tab_e_id(k).id))
             .collect();

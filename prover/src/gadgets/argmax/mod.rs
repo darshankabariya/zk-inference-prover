@@ -60,24 +60,20 @@ use stwo::core::air::Component;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
 use stwo::prover::ComponentProver;
-use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, INTERACTION_TRACE_IDX, ORIGINAL_TRACE_IDX,
     Relation, RelationEntry, TraceLocationAllocator,
 };
 
-use crate::gadgets::attention::air::{RangeRel, RangeTableEval, tbl_range};
 use crate::common::{Eval, Proven, Session, Sums, eval_of, m31_u32, twiddles};
+use crate::encoding::{m31_of, secure_cols_pub};
 use crate::layer::MatLayout;
+use crate::relations::{RangeRel, RangeTableEval, id, table_col, tbl_range};
 
 /// The order key's width: a bf16 sign-flipped pattern is 16 bits.
 pub const KEY_BITS: u32 = 16;
 
 pub const AM_SEL: [&str; 3] = ["b10_am_nofirst", "b10_am_last", "b10_am_end"];
-
-pub fn id(s: &str) -> PreProcessedColumnId {
-    PreProcessedColumnId { id: s.to_string() }
-}
 
 /// The order key of a signed bf16 pattern: negatives descend, positives ascend,
 /// and every key is 16 bits.
@@ -148,7 +144,7 @@ impl FrameworkEval for ArgmaxEval {
         self.log_rows + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let sel: Vec<E::F> = AM_SEL.iter().map(|n| eval.get_preprocessed_column(id(n))).collect();
+        let sel: Vec<E::F> = AM_SEL.iter().map(|n| eval.get_preprocessed_column(id(*n))).collect();
         let (nofirst, last, end) = (sel[0].clone(), sel[1].clone(), sel[2].clone());
 
         // shared per-token columns: the maximum's order key, and the token id.
@@ -614,7 +610,7 @@ pub fn component(w: &AWitness, lax: bool, lay: MatLayout, m_rk: &mut [u32],
             }
             ss_carry += ind as i64;
         }
-        cols[col_ss][j] = crate::gadgets::attention::trace::m31_of(ss_carry);
+        cols[col_ss][j] = m31_of(ss_carry);
     }
 
     let sel = |f: &dyn Fn(usize) -> bool| {
@@ -686,8 +682,8 @@ pub fn binding_col(r: &AComponent, tokens: usize, t: &ArgmaxBinding) -> (Vec<Eva
         u[j] = if j == 0 { f } else { u[j - 1] * mult + f };
         g[j] = if j == 0 { add } else { g[j - 1] * kmult + add };
     }
-    let mut cols = crate::gadgets::attention::trace::secure_cols_pub(r.lay.log_rows, &u);
-    cols.extend(crate::gadgets::attention::trace::secure_cols_pub(r.lay.log_rows, &g));
+    let mut cols = secure_cols_pub(r.lay.log_rows, &u);
+    cols.extend(secure_cols_pub(r.lay.log_rows, &g));
     (cols, u[rows - 1], g[rows - 1])
 }
 
@@ -732,7 +728,7 @@ pub fn run(w: &AWitness, lax: bool, per_row_target: usize, bad: Option<Tamper>)
         });
         crate::plogup::build(lay.log_rows, n, f)
     };
-    let (tcols, tsum) = crate::gadgets::attention::trace::table_col(KEY_BITS, &rk, &[&tbl], &mult);
+    let (tcols, tsum) = table_col(KEY_BITS, &rk, &[&tbl], &mult);
     let mut icols = inter;
     icols.extend(tcols);
     sess.commit(icols.clone());

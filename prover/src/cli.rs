@@ -753,7 +753,7 @@ fn embed_cmd(args: &[String]) {
             let rk = {
                 let mut ch = stwo::core::channel::Blake2sM31Channel::default();
                 stwo::core::channel::Channel::mix_u64(&mut ch, 0xB65_BB02);
-                attention::air::RangeRel::draw(&mut ch)
+                crate::relations::RangeRel::draw(&mut ch)
             };
             let felt = |a: u32| stwo::core::fields::qm31::SecureField::from_m31_array(
                 [common::m31_u32(a), common::m31_u32(a + 1),
@@ -3688,7 +3688,7 @@ fn residual_stream_cmd(args: &[String]) {
             let got = t.unlay(&r1.outs[1]);
             let wv = rd(want);
             let bad = (0..tokens * dm)
-                .filter(|i| residual_stream::canon(got[*i]) != residual_stream::canon(wv[*i]))
+                .filter(|i| crate::encoding::canon(got[*i]) != crate::encoding::canon(wv[*i]))
                 .count();
             let neg0 = wv[..tokens * dm].iter().filter(|q| **q == 0x8000).count();
             j["b1_values_checked"] = json!(tokens * dm);

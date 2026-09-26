@@ -57,25 +57,15 @@ use stwo_constraint_framework::{
 
 use crate::gadgets::attention::layout::{LayoutChan, LayoutKey, LayoutOut, Shape};
 use crate::gadgets::attention::witness::Variant;
+use crate::relations::{RangeRel, id, powers};
 
 relation!(ExpRel, 2);
-relation!(RangeRel, 1);
 
 impl ExpRel {
     /// the drawn elements, for the GKR link's affine weights (B11 stream S)
     pub fn parts(&self) -> (SecureField, &[SecureField]) {
         (self.0.z, &self.0.alpha_powers)
     }
-}
-impl RangeRel {
-    /// the drawn elements, for the GKR link's affine weights (B11 stream S)
-    pub fn parts(&self) -> (SecureField, &[SecureField]) {
-        (self.0.z, &self.0.alpha_powers)
-    }
-}
-
-pub fn id(s: impl Into<String>) -> PreProcessedColumnId {
-    PreProcessedColumnId { id: s.into() }
 }
 /// A key-tile-local preprocessed column: several key tiles share one proof in B6.5, so
 /// every selector id carries its key tile's tag.
@@ -138,10 +128,6 @@ pub const OUT_SEL: [&str; 5] =
 pub const ROW_SEL: [&str; 3] = ["b6_r_notzero", "b6_r_end", "b6_r_istart"];
 pub const TBL_EXP_X: &str = "b6_exp_x";
 pub const TBL_EXP_Y: &str = "b6_exp_y";
-pub fn tbl_range(bits: u32) -> PreProcessedColumnId {
-    id(format!("b6_range_{bits}"))
-}
-
 /// Challenge powers, precomputed per component width.
 #[derive(Clone, Debug)]
 pub struct Powers {
@@ -185,16 +171,6 @@ pub struct Powers {
     /// key Horner's natural `r'^S` per instance into the prefix's `r^C`.  Unused by
     /// the prefix grid, where the two already agree.
     pub kappa: SecureField,
-}
-
-pub fn powers(base: SecureField, n: usize) -> (Vec<SecureField>, SecureField) {
-    let mut v = Vec::with_capacity(n);
-    let mut cur = SecureField::one();
-    for _ in 0..n {
-        v.push(cur);
-        cur *= base;
-    }
-    (v, cur)
 }
 
 impl Powers {
@@ -322,7 +298,7 @@ impl KeyTileTie {
         for j in 0..rows {
             let mut f = SecureField::zero();
             for k in 0..per_row {
-                let v = SecureField::from(crate::gadgets::attention::trace::m31_of(vals[j * per_row + k])) - off;
+                let v = SecureField::from(crate::encoding::m31_of(vals[j * per_row + k])) - off;
                 f += v * self.w[k];
             }
             h = h * step(j) + f;
@@ -971,40 +947,6 @@ impl FrameworkEval for ExpTableEval {
                    eval.get_preprocessed_column(id(TBL_EXP_Y))];
         let m = eval.next_trace_mask();
         eval.add_to_relation(RelationEntry::new(&self.rel, -E::EF::from(m), &row));
-        eval.finalize_logup();
-        eval
-    }
-}
-
-/// A `0 .. 2^bits` range table.
-#[derive(Clone)]
-pub struct RangeTableEval {
-    pub bits: u32,
-    pub rel: RangeRel,
-}
-
-impl FrameworkEval for RangeTableEval {
-    /// milestone 2b: the flat parameter block for the generated
-    /// constraint kernel (`gpu/m2b/cudagen.rs`).
-    fn cuda_eval_blob(&self) -> Option<Vec<u8>> {
-        crate::cudagen::blob_for(self)
-    }
-
-    /// milestone 2a: no kernel is registered under this name, so the
-    /// fork routes this component to `accumulate_pointwise_cpu`.
-    fn cuda_eval_name(&self) -> &'static str { "zk_range_table_eval" }
-
-    fn log_size(&self) -> u32 {
-        self.bits
-    }
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.bits + 1
-    }
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let v = eval.get_preprocessed_column(tbl_range(self.bits));
-        let m = eval.next_trace_mask();
-        eval.add_to_relation(RelationEntry::new(&self.rel, -E::EF::from(m),
-                                                core::slice::from_ref(&v)));
         eval.finalize_logup();
         eval
     }
