@@ -48,9 +48,7 @@ own, named where it lives.
                        max(jo[t] - min_j jv[h,j], 0)))`, which is   `rem_bits`
                        what `harness/witness/shapes.py` already
                        reads for the chunk loop's pin.  With
-                       `--ao-rem-bits`, that pin itself: a chunk    cli.rs
-                       loop proves every segment at the one pin,    `params_of`
-                       and a pin below the dump's own is refused.
+                       `--ao-rem-bits`, that pin.                   cli.rs
     ao_q_bits          `attn_out_bits - 1`, the fold's target       cli.rs
                        width minus one.                             `params_of`
     ao_jo_min/max      the extremes of `jo.i32`, the attention      manifest
@@ -276,9 +274,7 @@ def fields_of(d, numbits=9, tight=True, table_bits=0, check_derived=False,
     line, because `nmax`, the master table's size and the remainder's width are
     decided there as well as by the witness.  `tight` is `--tight-table` at
     slack 0, which is what every campaign at this context passes.  `ao_rem_bits`
-    is a chunk loop's shared pin, which every segment of the loop is proved at:
-    `params_of` refuses one below the dump's own and otherwise takes it, and so
-    does this.  The quotient form is decided at the width the row states.
+    is a chunk loop's shared pin; one below the dump's own is refused.
     """
     man = _man(d)
     r = shapes.shape_of(d)
@@ -598,12 +594,10 @@ def selftest():
         pinned = fields_of(d, numbits=9, table_bits=21)
         if pinned["log_table"] != 21:
             bad.append("--table-bits does not pin the table")
-        # the remainder: the dump's own width without the flag, a chunk loop's
-        # shared pin with it, and each row says which
+        # --ao-rem-bits pins the remainder, and the row says so
         own = row["ao_rem_bits"]
         if row["ao_rem_bits_from"] != "the dump's own rem_bits":
-            bad.append("a row read with no --ao-rem-bits does not say its width is "
-                       "the dump's own")
+            bad.append("an unpinned row does not say its width is the dump's own")
         at_pin = fields_of(d, numbits=9, ao_rem_bits=own + 3)
         if at_pin["ao_rem_bits"] != own + 3:
             bad.append("--ao-rem-bits does not pin the remainder")
@@ -611,8 +605,7 @@ def selftest():
             bad.append("a pinned row does not say where its width came from")
         try:
             fields_of(d, numbits=9, ao_rem_bits=own - 1)
-            bad.append("a pin below the dump's own was accepted, which `params_of` "
-                       "refuses")
+            bad.append("a pin below the dump's own was accepted")
         except SystemExit:
             pass
         # (3) the rules that are one line of the prover each
@@ -640,9 +633,7 @@ def selftest():
             bad.append("the segment built from this row counts no cells")
         if any(m["variant"] == "fold" for m in p["mats"]):
             bad.append("a `b10-final` row left a matmul on the fold")
-        # counted at the pin, the segment builds the pin's range table where it
-        # built the dump's own, and the count moves by five cells a row of the
-        # two tables' difference, which is the whole of issue #13 on one segment
+        # at the pin, the segment builds the pin's range table, five cells a row
         q = ec.segment_params("layer", d=5120, nh=40, nkv=8, hd=128, dff=13824,
                               vocab=152064, s=512, c=4096,
                               witness=witness_block(at_pin), head_groups=[16, 16, 8])
@@ -650,12 +641,10 @@ def selftest():
         tabs, tabs_pin = ec.table_rows(p), ec.table_rows(q)
         if (f"range{own}" not in tabs or f"range{own}" in tabs_pin
                 or f"range{own + 3}" not in tabs_pin):
-            bad.append("the segment counted at the pin does not build the pin's range "
-                       "table in place of the dump's own")
+            bad.append("the pinned segment does not build the pin's range table")
         if (ec.cells_of(q)["fresh"] - got_cells["fresh"]
                 != 5 * ((1 << (own + 3)) - (1 << own))):
-            bad.append("the pin does not move the count by five cells a row of the two "
-                       "range tables' difference")
+            bad.append("the pin does not move the count by five cells a row")
         # (5) the file, and what reading it back refuses
         doc = build(None, 0, dump=d)
         pinned_doc = build(None, 0, dump=d, ao_rem_bits=own + 3)
@@ -705,9 +694,8 @@ def selftest():
         print("FAIL:", b)
     print(f"witness_fields selftest: {'FAILED' if bad else 'ok'} -- the key max against a "
           f"brute force over every visible entry, the three ways the table size is "
-          f"decided, the remainder at the dump's own width and at a loop's pin, the "
-          f"per-field rules, the file's refusals, and the stated block a synthetic "
-          f"segment is counted at")
+          f"decided, the remainder pin, the per-field rules, the file's refusals, and "
+          f"the stated block a synthetic segment is counted at")
     return 1 if bad else 0
 
 
@@ -726,12 +714,8 @@ def main(argv=None):
     ap.add_argument("--table-bits", type=int, default=0,
                     help="the run's `--table-bits`, which pins the table instead")
     ap.add_argument("--ao-rem-bits", type=int, default=0,
-                    help="the loop's `--ao-rem-bits`: the shared pin a chunk loop "
-                         "proves every segment at, the shape table's worst case over "
-                         "every row. Each row then states the pin and says so; "
-                         "without it a row states the dump's own width, which is "
-                         "what `compose` proves one layer at. A pin below a dump's "
-                         "own is refused, as `params_of` refuses it")
+                    help="the chunk loop's `--ao-rem-bits`, which pins the "
+                         "remainder instead of the dump's own width")
     ap.add_argument("--check-derived", action="store_true",
                     help="compare the recomputed shifts against the dump's own "
                          "`dd.i32`, where it was not written with --slim")
